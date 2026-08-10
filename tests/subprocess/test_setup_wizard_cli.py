@@ -497,11 +497,12 @@ def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
         *,
         provider_choice: str | None = None,
         model: str | None = None,
-        before_credential: Callable[[], Awaitable[bool]] | None = None,
+        before_credential: Callable[[], Awaitable[str | None]] | None = None,
     ) -> tuple[dict[str, object], dict[str, object]]:
         del provider_choice, model
         assert before_credential is not None
-        assert await before_credential() is True
+        # None means the privacy step did not block the credential step.
+        assert await before_credential() is None
         return service, {"binding": "configured", "credential": "stored"}
 
     async def privacy_setup(
@@ -828,11 +829,12 @@ def test_provider_setup_success_reports_layers_without_ready_overclaim(
         *,
         provider_choice: str | None = None,
         model: str | None = None,
-        before_credential: Callable[[], Awaitable[bool]] | None = None,
+        before_credential: Callable[[], Awaitable[str | None]] | None = None,
     ) -> tuple[dict[str, object], dict[str, object]]:
         del provider_choice, model
         assert before_credential is not None
-        assert await before_credential() is True
+        # None means the privacy step did not block the credential step.
+        assert await before_credential() is None
         return service, {"binding": "configured", "credential": "stored"}
 
     async def fake_privacy_setup(**_kwargs: object) -> PrivacySetupReport:
@@ -1453,3 +1455,143 @@ def test_lost_credential_result_recovers_from_recomposed_presence(
     assert report["credential"] == "stored"
     assert report["credential_display"] == "********"
     assert report["credential_reason"] == "stored_result_recovered"
+
+
+def test_human_report_states_why_the_credential_was_not_stored(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The JSON report already carried the cause; the human run showed a blank credential."""
+
+    import yoetz.cli.setup as setup_module
+
+    setup_module._emit_human_report(  # pyright: ignore[reportPrivateUsage]
+        {
+            "registration": {"outcome": "already_registered"},
+            "service": {"reachable": True, "state": "ready"},
+            "provider": {
+                "binding": "configured",
+                "credential": "failed",
+                "credential_reason": "repository_privacy_scope_unavailable",
+            },
+            "privacy": {"outcome": "failed", "profile": "unknown", "reason": "grant_missing"},
+            "integration": {},
+            "next_steps": [],
+        }
+    )
+
+    plain = _plain(capsys.readouterr().out)
+    assert "Credential reason: repository_privacy_scope_unavailable" in plain
+
+
+def test_human_report_omits_a_credential_reason_once_the_credential_is_stored(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    setup_module._emit_human_report(  # pyright: ignore[reportPrivateUsage]
+        {
+            "registration": {"outcome": "already_registered"},
+            "service": {"reachable": True, "state": "ready"},
+            "provider": {
+                "binding": "configured",
+                "credential": "stored",
+                "credential_reason": "stored_result_recovered",
+            },
+            "integration": {},
+            "next_steps": [],
+        }
+    )
+
+    assert "Credential reason:" not in _plain(capsys.readouterr().out)
+
+
+def test_blocked_privacy_step_reports_its_own_reason_for_the_credential(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """privacy_setup_incomplete hid the exact privacy cause the report already knew."""
+
+    import yoetz.cli.provider_binding as binding_module
+    import yoetz.cli.setup as setup_module
+    import yoetz.config.load as config_module
+    import yoetz.config.write as write_module
+
+    def fake_write(_choice: str, *, model: str) -> tuple[Path, object]:
+        del model
+        return tmp_path / "config.toml", object()
+
+    def fake_load_config(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            storage=SimpleNamespace(data_dir=tmp_path),
+            provider=SimpleNamespace(
+                provider_id="fireworks",
+                model="accounts/fireworks/models/minimax-m3",
+                endpoint_profile_id="fireworks-responses",
+                endpoint_profile_version="1.0.0",
+            ),
+        )
+
+    def fake_provider_preset(_provider: str) -> SimpleNamespace:
+        return SimpleNamespace(choice="fireworks", provider_id="fireworks")
+
+    async def fake_restart() -> dict[str, object]:
+        return {"reachable": True, "state": "ready", "vault_mode": "os_keyring"}
+
+    async def blocked() -> str | None:
+        return "privacy_authority_required"
+
+    monkeypatch.setattr(config_module, "load_config", fake_load_config)
+    monkeypatch.setattr(binding_module, "apply_provider_endpoint_choice", fake_write)
+    monkeypatch.setattr(write_module, "provider_preset", fake_provider_preset)
+    monkeypatch.setattr(setup_module, "_restart_service_for_semantic_composition", fake_restart)
+
+    _service, report = asyncio.run(
+        setup_module._interactive_provider_setup(  # pyright: ignore[reportPrivateUsage]
+            {"reachable": True, "state": "ready", "vault_mode": "os_keyring"},
+            provider_choice="fireworks",
+            model="accounts/fireworks/models/minimax-m3",
+            before_credential=blocked,
+        )
+    )
+
+    assert report["credential"] != "stored"
+    assert report["credential_reason"] == "privacy_authority_required"
+
+
+def test_set_reports_the_underlying_privacy_reason_rather_than_a_generic_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.setup as setup_module
+    from yoetz.cli.privacy_setup import PrivacySetupReport
+
+    async def fake_reachability(*, start_if_absent: bool = False) -> dict[str, object]:
+        del start_if_absent
+        return {"reachable": True, "state": "ready"}
+
+    async def fake_interactive(
+        service: dict[str, object],
+        *,
+        provider_choice: str | None = None,
+        model: str | None = None,
+        before_credential: Callable[[], Awaitable[str | None]] | None = None,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        del provider_choice, model
+        assert before_credential is not None
+        reason = await before_credential()
+        return service, {
+            "binding": "configured",
+            "credential": "skipped",
+            "credential_reason": reason,
+        }
+
+    async def fake_privacy_setup(**_kwargs: object) -> PrivacySetupReport:
+        return PrivacySetupReport("failed", "unknown", reason="privacy_setup_grant_missing")
+
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(setup_module, "_service_reachability", fake_reachability)
+    monkeypatch.setattr(setup_module, "_interactive_provider_setup", fake_interactive)
+    monkeypatch.setattr("yoetz.cli.privacy_setup.run_privacy_setup", fake_privacy_setup)
+
+    result = _RUNNER.invoke(cli.app, ["--set", "--fireworks", "--model", "m"], input="Y\n")
+
+    assert result.exit_code == 20
+    assert "Reason: privacy_setup_grant_missing" in _plain(result.output)

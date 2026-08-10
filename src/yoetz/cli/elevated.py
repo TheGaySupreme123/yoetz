@@ -534,34 +534,20 @@ def _target_digest(
     if operation in {"provider_credential_set", "provider_credential_rotate"}:
         if provider_binding is None:
             raise ElevatedBootstrapError("provider_binding_required")
-        from yoetz.service.confidential_protocol import ProviderCredentialTarget
-        from yoetz.service.vault import ProviderCredentialBinding
-
-        action = "set" if operation == "provider_credential_set" else "rotate"
-        repository_commitment = provider_binding.get("repository_privacy_commitment")
-        if repository_commitment is not None:
-            target = ProviderCredentialTarget(
-                action=action,
-                provider_id=provider_binding["provider_id"],
-                model_id=provider_binding["model_id"],
-                endpoint_profile_id=provider_binding["endpoint_profile_id"],
-                endpoint_profile_version=provider_binding["endpoint_profile_version"],
-                purpose=provider_binding["purpose"],
-                scope_digest=provider_binding["scope_digest"],
-                purpose_digest=provider_binding["purpose_digest"],
-                repository_privacy_commitment=repository_commitment,
-            )
-            return target.target_digest()
-        binding = ProviderCredentialBinding(
+        # One digest shape for both bound and legacy unbound bindings, so the digest shown at
+        # review time is the digest the ceremony session will actually bind.
+        target = ProviderCredentialTarget(
+            action="set" if operation == "provider_credential_set" else "rotate",
             provider_id=provider_binding["provider_id"],
             model_id=provider_binding["model_id"],
             endpoint_profile_id=provider_binding["endpoint_profile_id"],
             endpoint_profile_version=provider_binding["endpoint_profile_version"],
             purpose=provider_binding["purpose"],
-            authorization_scope_digest=provider_binding["scope_digest"],
+            scope_digest=provider_binding["scope_digest"],
             purpose_digest=provider_binding["purpose_digest"],
+            repository_privacy_commitment=provider_binding.get("repository_privacy_commitment"),
         )
-        return binding.target_digest(action)
+        return target.target_digest()
     if operation == "repository_privacy_grant":
         if grant_binding is None:
             raise ElevatedBootstrapError("grant_binding_required")

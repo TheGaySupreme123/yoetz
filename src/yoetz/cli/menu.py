@@ -23,7 +23,7 @@ import typer
 from pydantic import BaseModel
 
 from yoetz import __version__
-from yoetz.cli.exits import ceremony_refusal_message
+from yoetz.cli.exits import ceremony_refusal_message, remediation_message
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlError
 from yoetz.protocol.canonical import JsonValue
@@ -110,8 +110,16 @@ def _run_ceremony(operation: Callable[[], Awaitable[object]]) -> None:
             _show(await operation())
         except ControlError as error:
             typer.echo(_control_guidance(error), err=True)
-        except OSError, ValueError:
-            typer.echo("invalid_request: the ceremony input is invalid", err=True)
+        except (OSError, ValueError) as error:
+            # Bounded setup tokens the menu itself raises deserve their next step, not a
+            # generic input complaint the operator cannot act on.
+            remediation = remediation_message(str(error))
+            typer.echo(
+                f"{error}: {remediation}"
+                if remediation is not None
+                else "invalid_request: the ceremony input is invalid",
+                err=True,
+            )
         except HumanCeremonyCliError as error:
             if error.reason in {"cancelled", "interrupted"}:
                 typer.echo("cancelled", err=True)
@@ -120,7 +128,13 @@ def _run_ceremony(operation: Callable[[], Awaitable[object]]) -> None:
                     "internal_error: the confidential ceremony could not be completed", err=True
                 )
             else:
-                typer.echo("invalid_request: the ceremony input is invalid", err=True)
+                remediation = remediation_message(error.reason)
+                typer.echo(
+                    f"{error.reason}: {remediation}"
+                    if remediation is not None
+                    else "invalid_request: the ceremony input is invalid",
+                    err=True,
+                )
         except ConfidentialClientError as error:
             if error.reason == "cancelled":
                 typer.echo("cancelled", err=True)
@@ -311,7 +325,11 @@ def _provider_menu() -> None:
 
     async def run_credential_ceremony() -> object:
         from yoetz.cli.privacy_setup import get_privacy_setup_snapshot
-        from yoetz.cli.unlock import rotate_provider_credential, set_provider_credential
+        from yoetz.cli.unlock import (
+            load_auto_unlock_reauthentication,
+            rotate_provider_credential,
+            set_provider_credential,
+        )
 
         provider = load_config({}, {}, None).provider
         if provider is None:
@@ -338,7 +356,9 @@ def _provider_menu() -> None:
             repository_privacy_commitment=repository_commitment,
         )
         operation = set_provider_credential if action == "set" else rotate_provider_credential
-        return await operation(target)
+        # A Keychain-provisioned vault has a passphrase the human never saw; supply it here so
+        # the ceremony asks only for the provider key.
+        return await operation(target, None, load_auto_unlock_reauthentication())
 
     _run_ceremony(run_credential_ceremony)
 

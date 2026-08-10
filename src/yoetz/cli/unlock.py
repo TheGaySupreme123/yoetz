@@ -8,7 +8,7 @@ from typing import Final, Literal, Protocol, cast
 
 from yoetz.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
 from yoetz.domain.privacy import PrivacyPolicyChange, PrivacyPolicyChangeValue
-from yoetz.protocol.canonical import JsonValue, canonical_digest
+from yoetz.protocol.canonical import canonical_digest
 from yoetz.service.confidential_client import (
     ConfidentialClientError,
     HumanControlClient,
@@ -49,6 +49,7 @@ from yoetz.service.confidential_protocol import (
     VaultInitializePreview,
     VaultStateResult,
     VaultUnlockPreview,
+    human_target_json,
     validate_passphrase_buffer,
     validate_provider_credential_buffer,
 )
@@ -216,49 +217,13 @@ class _SuppliedSecretTerminal:
         raise HumanCeremonyCliError("input_invalid")
 
 
-def _target_json(target: HumanOpenTarget) -> dict[str, JsonValue]:
-    if type(target) is EmptyVaultTarget:
-        return {"expected_mode": target.expected_mode, "kind": target.kind}
-    if type(target) is PortableRecoveryTarget:
-        return {
-            "confirmed_plan_digest": target.confirmed_plan_digest,
-            "kind": target.kind,
-            "operation": target.operation,
-            "request_id": target.request_id,
-        }
-    if type(target) is ProviderCredentialTarget:
-        return {
-            "action": target.action,
-            "endpoint_profile_id": target.endpoint_profile_id,
-            "endpoint_profile_version": target.endpoint_profile_version,
-            "kind": target.kind,
-            "model_id": target.model_id,
-            "provider_id": target.provider_id,
-            "purpose": target.purpose,
-            "purpose_digest": target.purpose_digest,
-            "scope_digest": target.scope_digest,
-        }
-    if type(target) is PrivacyPendingTarget:
-        return {
-            "decision_kind": target.decision_kind,
-            "kind": target.kind,
-            "pending_id": target.pending_id,
-        }
-    if type(target) is IdleRelockPolicyTarget:
-        result: dict[str, JsonValue] = {"kind": target.kind, "operation": target.operation}
-        if target.seconds is not None:
-            result["seconds"] = target.seconds
-        return result
-    raise TypeError("human_target_invalid")
-
-
 def _verify_preview(
     kind: HumanCeremonyKind,
     target: HumanOpenTarget,
     session: HumanControlSession,
 ) -> HumanPreview:
     opened = session.opened
-    if opened.binding.target_digest != canonical_digest(_target_json(target)):
+    if opened.binding.target_digest != canonical_digest(human_target_json(target)):
         raise HumanCeremonyCliError("preview_invalid")
     preview = opened.preview
     valid = False
@@ -977,6 +942,17 @@ def _load_scoped_auto_unlock_passphrase() -> bytearray | None:
         return None
 
 
+def load_auto_unlock_reauthentication() -> bytearray | None:
+    """Load the scoped auto-unlock secret for one provider ceremony, or None when absent.
+
+    A Keychain-provisioned passphrase vault is ready without the human ever learning its
+    generated passphrase. Supplying it as the reauthentication factor keeps the credential
+    ceremony asking only for the provider key.
+    """
+
+    return _load_scoped_auto_unlock_passphrase()
+
+
 async def _service_reports_unusable_auto_unlock() -> bool:
     """True when the daemon already knows the scoped entry cannot unlock this vault."""
 
@@ -1076,10 +1052,17 @@ async def set_provider_credential(
 
 async def rotate_provider_credential(
     target: ProviderCredentialTarget,
+    provider_credential: bytearray | None = None,
+    provider_reauthentication: bytearray | None = None,
 ) -> ProviderCredentialResult:
     if target.action != "rotate":
         raise ValueError("provider_credential_target_invalid")
-    result = await run_human_ceremony(HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE, target)
+    result = await run_human_ceremony(
+        HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE,
+        target,
+        provider_credential,
+        provider_reauthentication=provider_reauthentication,
+    )
     return cast(ProviderCredentialResult, result)
 
 

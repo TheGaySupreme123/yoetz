@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -96,3 +97,50 @@ def test_work_detail_preserves_unknown_open_obligation_count(tmp_path: Path) -> 
 
     assert detail.evidence_count is None
     assert detail.coverage == ("redacted_event",)
+
+
+async def test_store_provider_credential_supplies_the_scoped_reauthentication_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A Keychain-provisioned vault must not ask the TUI user for an unseen passphrase."""
+
+    observed: list[tuple[object, object]] = []
+
+    def configuration(*_args: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            provider=SimpleNamespace(
+                provider_id="fireworks",
+                model="accounts/fireworks/models/minimax-m3",
+                endpoint_profile_id="fireworks-responses",
+                endpoint_profile_version="1.0.0",
+            )
+        )
+
+    async def snapshot() -> SimpleNamespace:
+        return SimpleNamespace(bound_scope={"workspace_ref_commitment": "hmac-sha256:" + "7" * 64})
+
+    async def ceremony(
+        _target: object,
+        credential: bytearray | None = None,
+        reauthentication: bytearray | None = None,
+    ) -> SimpleNamespace:
+        observed.append((credential, reauthentication))
+        return SimpleNamespace(activation_status="stored")
+
+    monkeypatch.setattr("yoetz.config.load.load_config", configuration)
+    monkeypatch.setattr("yoetz.cli.privacy_setup.get_privacy_setup_snapshot", snapshot)
+    monkeypatch.setattr("yoetz.cli.unlock.set_provider_credential", ceremony)
+    monkeypatch.setattr(
+        "yoetz.cli.unlock.load_auto_unlock_reauthentication",
+        lambda: bytearray(b"scoped-reauth"),
+    )
+
+    status = await YoetzRuntime(cwd=tmp_path).store_provider_credential()
+
+    assert status == "stored"
+    assert len(observed) == 1
+    credential, reauthentication = observed[0]
+    assert credential is None
+    assert reauthentication is not None
+    assert bytes(cast(bytearray, reauthentication)) == b"scoped-reauth"

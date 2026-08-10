@@ -137,6 +137,14 @@ current-chat authorization. For that exact pending action:
 4. If the user declines, authorize with deny or stop without mutation. Do not repeat the warning or
    refuse merely because an explicitly authorized provider credential came from chat.
 
+For provider credential setup the working sequence is: prepare and authorize
+`repository_privacy_grant` first, then `yoetz consent prepare provider_credential_set
+--provider-id <id> --model-id <id> --endpoint-profile-id <id> --endpoint-profile-version
+<version>` — the purpose and its digests are derived from that exact profile. Run prepare and
+authorize from the same working directory: the repository commitment binds at prepare time and is
+re-checked at authorize. Only one pending action exists at a time, and each pending expires
+fifteen minutes after prepare.
+
 This is an agent-attested trust model, not host-verified proof: Yoetz cannot independently
 authenticate the chat provenance, and a compromised agent could forge the assertion. Your source
 checks above are therefore load-bearing skill behavior. Target binding, expiry, single-use claim,

@@ -17,7 +17,7 @@ import typer
 from pydantic import BaseModel, ValidationError
 
 from yoetz import __version__
-from yoetz.cli.exits import ceremony_refusal_message, exit_code_for
+from yoetz.cli.exits import ceremony_refusal_message, exit_code_for, remediation_message
 from yoetz.cli.render import (
     render_human_awaiting_human,
     render_human_check,
@@ -280,6 +280,26 @@ def _human_or_json(value: object, *, json_output: bool) -> None:
 
 def _usage_failure() -> int:
     _stderr("invalid_request: the command input is invalid")
+    return 2
+
+
+def _bounded_failure_line(reason: str, *, prefix: str | None = None) -> str:
+    """Render one bounded token with its remediation; the token itself stays first."""
+
+    head = reason if prefix is None else f"{prefix}: {reason}"
+    remediation = remediation_message(reason)
+    return head if remediation is None else f"{head}: {remediation}"
+
+
+def _elevated_failure(error: Exception) -> int:
+    """Report one bounded elevated-bootstrap failure with its exact next step."""
+
+    reason = getattr(error, "reason", "failed")
+    _stderr(
+        _bounded_failure_line(
+            reason if type(reason) is str else "failed", prefix="elevated_bootstrap"
+        )
+    )
     return 2
 
 
@@ -985,6 +1005,11 @@ def _trusted_exception_failure(error: Exception) -> int | None:
         if reason in {"preview_invalid", "result_invalid"}:
             _stderr("internal_error: the confidential ceremony could not be completed")
             return exit_code_for(PublicErrorCode.INTERNAL_ERROR)
+        # A ceremony that could not find a console it owns is not malformed input. Reporting it
+        # as invalid_request sent operators looking for a bad flag they never typed.
+        if remediation_message(reason) is not None:
+            _stderr(_bounded_failure_line(reason))
+            return exit_code_for(PublicErrorCode.INVALID_REQUEST)
         return _usage_failure()
     if isinstance(error, client_error):
         reason = cast(str, getattr(error, "reason"))
@@ -1197,22 +1222,97 @@ def service_idle_relock(
     _finish(run_async(lambda: _trusted_call(lambda: operation(parsed), json_output)))
 
 
+async def _provider_credential_target(
+    action: str,
+    *,
+    provider_id: str | None,
+    model_id: str | None,
+    endpoint_profile_id: str | None,
+    endpoint_profile_version: str | None,
+    purpose: str | None,
+    scope_digest: str | None,
+    purpose_digest: str | None,
+) -> tuple[object | None, str | None]:
+    """Resolve the installed provider identity and privacy binding; explicit flags still win."""
+
+    if (
+        provider_id is None
+        or model_id is None
+        or endpoint_profile_id is None
+        or endpoint_profile_version is None
+    ):
+        config_load = importlib.import_module("yoetz.config.load")
+        provider = cast(Callable[..., Any], config_load.load_config)({}, {}, None).provider
+        if provider is None:
+            return None, "provider_not_configured"
+        provider_id = provider.provider_id if provider_id is None else provider_id
+        model_id = provider.model if model_id is None else model_id
+        endpoint_profile_id = (
+            provider.endpoint_profile_id if endpoint_profile_id is None else endpoint_profile_id
+        )
+        endpoint_profile_version = (
+            provider.endpoint_profile_version
+            if endpoint_profile_version is None
+            else endpoint_profile_version
+        )
+    # The stored-credential purpose and its digests are derived facts of the profile, not caller
+    # input; requiring them forced operators into product internals just to paste a key.
+    if purpose is None or scope_digest is None or purpose_digest is None:
+        vault_module = importlib.import_module("yoetz.service.vault")
+        binding = cast(Callable[..., Any], vault_module.provider_credential_profile_binding)(
+            provider_id, model_id, endpoint_profile_id, endpoint_profile_version
+        )
+        purpose = cast(str, binding.purpose) if purpose is None else purpose
+        scope_digest = (
+            cast(str, binding.authorization_scope_digest) if scope_digest is None else scope_digest
+        )
+        purpose_digest = (
+            cast(str, binding.purpose_digest) if purpose_digest is None else purpose_digest
+        )
+    privacy = importlib.import_module("yoetz.cli.privacy_setup")
+    try:
+        snapshot = await cast(Callable[[], Awaitable[Any]], privacy.get_privacy_setup_snapshot)()
+        commitment = cast(Mapping[str, object], snapshot.bound_scope).get(
+            "workspace_ref_commitment"
+        )
+    except Exception:
+        commitment = None
+    if type(commitment) is not str:
+        return None, "repository_privacy_scope_unavailable"
+    protocol = importlib.import_module("yoetz.service.confidential_protocol")
+    target_type = cast(Callable[..., object], getattr(protocol, "ProviderCredentialTarget"))
+    return (
+        target_type(
+            action=action,
+            provider_id=provider_id,
+            model_id=model_id,
+            endpoint_profile_id=endpoint_profile_id,
+            endpoint_profile_version=endpoint_profile_version,
+            purpose=purpose,
+            scope_digest=scope_digest,
+            purpose_digest=purpose_digest,
+            repository_privacy_commitment=commitment,
+        ),
+        None,
+    )
+
+
 def _provider_credential_command(action: str) -> Callable[..., None]:
     def command(
-        provider_id: Annotated[str, typer.Option("--provider-id")],
-        model_id: Annotated[str, typer.Option("--model-id")],
-        endpoint_profile_id: Annotated[str, typer.Option("--endpoint-profile-id")],
-        endpoint_profile_version: Annotated[str, typer.Option("--endpoint-profile-version")],
-        purpose: Annotated[str, typer.Option("--purpose")],
-        scope_digest: Annotated[str, typer.Option("--scope-digest")],
-        purpose_digest: Annotated[str, typer.Option("--purpose-digest")],
+        provider_id: Annotated[str | None, typer.Option("--provider-id")] = None,
+        model_id: Annotated[str | None, typer.Option("--model-id")] = None,
+        endpoint_profile_id: Annotated[str | None, typer.Option("--endpoint-profile-id")] = None,
+        endpoint_profile_version: Annotated[
+            str | None, typer.Option("--endpoint-profile-version")
+        ] = None,
+        purpose: Annotated[str | None, typer.Option("--purpose")] = None,
+        scope_digest: Annotated[str | None, typer.Option("--scope-digest")] = None,
+        purpose_digest: Annotated[str | None, typer.Option("--purpose-digest")] = None,
         json_output: _JSON = False,
     ) -> None:
-        try:
-            module = importlib.import_module("yoetz.service.confidential_protocol")
-            target_type = cast(Callable[..., object], getattr(module, "ProviderCredentialTarget"))
-            target = target_type(
-                action=action,
+        async def run() -> int:
+            target, reason = await _provider_credential_target(
+                action,
                 provider_id=provider_id,
                 model_id=model_id,
                 endpoint_profile_id=endpoint_profile_id,
@@ -1221,14 +1321,28 @@ def _provider_credential_command(action: str) -> Callable[..., None]:
                 scope_digest=scope_digest,
                 purpose_digest=purpose_digest,
             )
+            if target is None:
+                _stderr(_bounded_failure_line(reason or "provider_credential_invalid"))
+                return exit_code_for(PublicErrorCode.INVALID_REQUEST)
             unlock_module = importlib.import_module("yoetz.cli.unlock")
             function_name = (
                 "set_provider_credential" if action == "set" else "rotate_provider_credential"
             )
             operation = cast(
-                Callable[[object], Awaitable[object]], getattr(unlock_module, function_name)
+                Callable[..., Awaitable[object]], getattr(unlock_module, function_name)
             )
-            _finish(run_async(lambda: _trusted_call(lambda: operation(target), json_output)))
+            # A Keychain-provisioned passphrase vault is ready without the human ever knowing its
+            # generated passphrase; without this the ceremony asks for a secret they never saw.
+            reauthentication = cast(
+                Callable[[], bytearray | None],
+                getattr(unlock_module, "load_auto_unlock_reauthentication"),
+            )()
+            return await _trusted_call(
+                lambda: operation(target, None, reauthentication), json_output
+            )
+
+        try:
+            _finish(run_async(run))
         except ProtocolValueError, ValueError:
             _finish(_usage_failure())
 
@@ -1846,13 +1960,36 @@ def elevated_prepare(
             "model_id": model_id,
             "endpoint_profile_id": endpoint_profile_id,
             "endpoint_profile_version": endpoint_profile_version,
+        }
+        if any(value is None or value == "" for value in required.values()):
+            _finish(_usage_failure())
+        # The stored-credential purpose and its digests are derived facts of the profile, not
+        # caller input; requiring them forced agents into product internals just to prepare.
+        # Explicit values remain accepted so an unusual binding can still be named exactly.
+        if purpose is None or purpose == "" or scope_digest is None or purpose_digest is None:
+            vault_module = importlib.import_module("yoetz.service.vault")
+            profile_binding = cast(
+                Callable[..., object], getattr(vault_module, "provider_credential_profile_binding")
+            )(
+                cast(str, provider_id),
+                cast(str, model_id),
+                cast(str, endpoint_profile_id),
+                cast(str, endpoint_profile_version),
+            )
+            derived_purpose = cast(str, getattr(profile_binding, "purpose"))
+            if purpose is not None and purpose != "" and purpose != derived_purpose:
+                _finish(_usage_failure())
+            purpose = derived_purpose
+            if scope_digest is None:
+                scope_digest = cast(str, getattr(profile_binding, "authorization_scope_digest"))
+            if purpose_digest is None:
+                purpose_digest = cast(str, getattr(profile_binding, "purpose_digest"))
+        binding = {
+            **{key: cast(str, value) for key, value in required.items()},
             "purpose": purpose,
             "scope_digest": scope_digest,
             "purpose_digest": purpose_digest,
         }
-        if any(value is None or value == "" for value in required.values()):
-            _finish(_usage_failure())
-        binding = {key: cast(str, value) for key, value in required.items()}
 
         async def _provider_scope_binding() -> int:
             privacy = importlib.import_module("yoetz.cli.privacy_setup")
@@ -1872,7 +2009,7 @@ def elevated_prepare(
         try:
             code = run_async(_provider_scope_binding)
         except elevated_error as exc:
-            _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
+            _elevated_failure(exc)
             raise SystemExit(2) from None
         if code != 0:
             raise SystemExit(2)
@@ -1904,7 +2041,7 @@ def elevated_prepare(
         try:
             code = run_async(_grant_binding)
         except elevated_error as exc:
-            _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
+            _elevated_failure(exc)
             raise SystemExit(2) from None
         if code != 0 or grant is None:
             raise SystemExit(2)
@@ -1916,7 +2053,7 @@ def elevated_prepare(
             target_digest=target_digest,
         )
     except elevated_error as exc:
-        _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
+        _elevated_failure(exc)
         raise SystemExit(2) from None
     _human_or_json(payload, json_output=json_output)
 
@@ -1936,8 +2073,7 @@ def elevated_review(
         try:
             payload = await review()
         except elevated_error as exc:
-            _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
-            return 2
+            return _elevated_failure(exc)
         _human_or_json(payload, json_output=json_output)
         return 0
 
@@ -2018,7 +2154,11 @@ def elevated_authorize(
                 try:
                     secret = _read_bounded_stdin_secret(8192)
                 except OSError, ValueError:
-                    _stderr("elevated_bootstrap: provider_credential_invalid")
+                    _stderr(
+                        _bounded_failure_line(
+                            "provider_credential_invalid", prefix="elevated_bootstrap"
+                        )
+                    )
                     return 2
             payload = await authorize(
                 {
@@ -2036,8 +2176,7 @@ def elevated_authorize(
                 provider_credential=secret,
             )
         except elevated_error as exc:
-            _stderr(f"elevated_bootstrap: {getattr(exc, 'reason', 'failed')}")
-            return 2
+            return _elevated_failure(exc)
         except Exception:
             _stderr("elevated_bootstrap: authorize_failed")
             return 2

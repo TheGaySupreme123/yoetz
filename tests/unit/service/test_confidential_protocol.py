@@ -8,6 +8,7 @@ from typing import Literal, cast
 import pytest
 
 from yoetz.domain.privacy import PrivacyPolicyChange, PrivacyPolicyChangeValue
+from yoetz.protocol.canonical import canonical_digest
 from yoetz.service.confidential_protocol import (
     CEREMONY_EXPIRY_SECONDS,
     MAX_HUMAN_CONTROL_FRAME_BYTES,
@@ -51,6 +52,7 @@ from yoetz.service.confidential_protocol import (
     decode_secret_header,
     encode_human_frame,
     encode_secret_header,
+    human_target_json,
     monotonic_milliseconds,
     new_binding_expiry_ms,
     validate_passphrase_buffer,
@@ -183,6 +185,23 @@ def test_provider_credential_ceremony_is_bound_to_the_trusted_repository() -> No
     assert bound.target_digest() != unbound.target_digest()
     envelope = ClientOpenEnvelope("0" * 64, HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, bound)
     assert decode_human_frame(encode_human_frame(envelope)) == envelope
+
+
+def test_provider_credential_target_digest_hashes_the_one_wire_shape() -> None:
+    """Issue #169: a second hand-maintained target serialization drifted from this digest.
+
+    The service binds the ceremony session to ``target_digest()`` and the trusted client
+    re-derives it from the shared serializer; both must hash exactly the wire shape, with the
+    repository commitment present in both the bound and unbound forms.
+    """
+
+    unbound = _provider_target("set")
+    bound = replace(unbound, repository_privacy_commitment=_REPOSITORY)
+    for target in (unbound, bound):
+        wire = human_target_json(target)
+        assert "repository_privacy_commitment" in wire
+        assert wire["repository_privacy_commitment"] == target.repository_privacy_commitment
+        assert target.target_digest() == canonical_digest(wire)
 
 
 def test_open_kind_and_target_cannot_be_crossed() -> None:
