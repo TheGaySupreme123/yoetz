@@ -42,6 +42,16 @@ For a finding, choose one recorded response: accept and act; provide additional 
 
 No disposition resolves a finding. `acknowledged`, `rejected`, and `waived` each record what you decided and what evidence you attached; none of them clears the finding for receipt purposes. Every actionable finding recorded in a task keeps the receipt conclusion at `unresolved_findings_remain`, even when later checks return no findings at all. Word the final answer accordingly: the repair is real and the disposition is recorded, but the receipt is not a clean completion receipt and must not be described as one.
 
+## Coverage attribution
+
+A recorded check remains attributable to a later receipt when the only events between them are responses to findings that same check returned. Answering a check's own findings reports on the check; it does not publish untested work. The receipt then folds the check's coverage — including `semantic_model_derived` — and carries the gap `check_current_as_of_earlier_frontier`, naming the subject frontier that was actually tested.
+
+That gap is a limitation, not a clean state: the verdict is current as of the tested frontier, not the receipt's, so the receipt is still coverage-incomplete and must not be described as a clean completion receipt.
+
+Any other material event after the check — published work, a new finding, or a response to a finding the check did not return — requires a re-check before the receipt. The receipt reports `check_not_applicable` and the check contributes nothing until you re-run it at the current frontier.
+
+`status` applies the same rule, so a compact status view and a receipt taken at the same frontier never disagree about what was checked.
+
 ## State examples
 
 - Same state: evidence may remain current when its exact state binding still matches.

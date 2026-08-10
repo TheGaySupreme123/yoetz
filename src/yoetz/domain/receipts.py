@@ -53,6 +53,7 @@ from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.models import ReceiptRedactionProfile
 
 __all__ = [
+    "CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP",
     "COMPLETION_SCOPE_DECLARED_NONE_GAP",
     "COMPLETION_SCOPE_UNDECLARED_GAP",
     "OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP",
@@ -87,6 +88,10 @@ __all__ = [
 # a clean completion verdict.
 COMPLETION_SCOPE_UNDECLARED_GAP: Final = "completion_scope_undeclared"
 COMPLETION_SCOPE_DECLARED_NONE_GAP: Final = "completion_scope_declared_none"
+# The applicable check still contributes its coverage, but only because every material event
+# appended after it answered a finding that same check returned. Its verdict is current as of the
+# frontier it tested, not the receipt's; the gap keeps the receipt from reading as re-checked here.
+CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP: Final = "check_current_as_of_earlier_frontier"
 # Kept local to avoid the events -> receipts import cycle. These values exactly mirror the closed
 # NoObligationsReason enum and are used only as a non-echoing render allowlist.
 _NO_OBLIGATIONS_REASON_VALUES: Final = frozenset(

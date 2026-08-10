@@ -711,7 +711,11 @@ provider identity remain forbidden from this sink like every other.
 
 The check-applicability gap family follows the same material-state rule: `check_not_applicable`
 means material work was appended after the recorded check and superseded its verdict, never that
-the frontier merely advanced.
+the frontier merely advanced. `check_current_as_of_earlier_frontier` is the one qualified
+attribution in that family: every material event after the check answered a finding that same check
+returned, so the check still contributes its coverage while the receipt names the subject frontier
+its verdict is current as of. `kernel/reducers.invalidates_recorded_check` is the single predicate
+deciding between the two, shared by the receipt and by compact status coverage.
 
 ## 9. Kernel (`kernel/`)
 

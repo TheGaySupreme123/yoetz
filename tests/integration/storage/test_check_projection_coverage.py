@@ -26,12 +26,20 @@ from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.domain.events import (
     EventDraft,
     EventPayload,
+    FindingRecordedPayload,
     LedgerRecord,
     RedactionRecordedPayload,
+    ResponseRecordedPayload,
     encode_payload,
 )
-from yoetz.domain.findings import CheckVerdict, RankedFindings
-from yoetz.domain.values import Frontier, event_id, object_id, parse_rfc3339_millis
+from yoetz.domain.findings import CheckVerdict, Finding, RankedFindings
+from yoetz.domain.values import (
+    Frontier,
+    event_id,
+    finding_id,
+    object_id,
+    parse_rfc3339_millis,
+)
 from yoetz.ports.ledger import (
     AppendCommand,
     AppendEntry,
@@ -114,6 +122,7 @@ async def _commit_check(
     suppressed_count: int = 0,
     semantic_status: SemanticStatus = SemanticStatus.NOT_REQUESTED,
     semantic_reason: SemanticReason = SemanticReason.DETERMINISTIC_MODE,
+    findings: tuple[Finding, ...] = (),
 ) -> None:
     check_request = uuid_id("req", request_number)
     digest = "sha256:" + f"{request_number:064d}"[-64:]
@@ -136,7 +145,7 @@ async def _commit_check(
         CheckPhase.LOCAL_READY,
         CheckPhase.READY_TO_FINALIZE,
     )
-    ranked = RankedFindings((), suppressed_count, verdict, coverage)
+    ranked = RankedFindings(findings, suppressed_count, verdict, coverage)
     result = await ledger.commit_check_if_current(
         FrozenCase(frozen.case, lease),
         ranked,
@@ -307,6 +316,173 @@ async def test_ordinary_publish_after_check_does_not_resurrect_none(tmp_path: Pa
     assert _check_types(durable["status_coverage_canonical"]) == ["deterministic"]
     assert _check_types(durable["latest_coverage_canonical"]) == ["deterministic"]
     _assert_check_aggregate_consistent(durable, has_check=True)
+    reopened_db.close()
+
+
+def _returned_finding(command: AppendCommand, subject_frontier: Frontier, number: int) -> Finding:
+    template = next(
+        record.payload
+        for record in replay_records("all-event-families")
+        if type(record.payload) is FindingRecordedPayload
+    )
+    return replace(
+        template,
+        finding_id=finding_id(uuid_id("fnd", number)),
+        subject_frontier=subject_frontier,
+        coverage=command.entries[0].coverage,
+    )
+
+
+@pytest.mark.anyio
+async def test_response_to_returned_finding_keeps_check_coverage(tmp_path: Path) -> None:
+    """Issue #172: answering a finding the applicable check returned must not wipe its coverage.
+
+    ``response_recorded`` is a material family, so the durable mirror used to fall back to the
+    envelope baseline the moment an agent followed the guidance-mandated check -> respond -> receipt
+    sequence. A response about the check's own output reports on that check; it does not supersede
+    it, and status must agree with the receipt on that.
+    """
+
+    seed = replay_records("projection-rebuild")[:1]
+    command, objects = command_from_records(seed)
+    path = tmp_path / "respond-after-check.sqlite3"
+    ledger, db = file_sqlite_for(command, objects, path)
+    accepted = await ledger.append_batch(command)
+    check_coverage = _checked_coverage(
+        command.entries[0].coverage, CheckType.DETERMINISTIC, CheckType.SEMANTIC_MODEL_DERIVED
+    )
+    returned = _returned_finding(command, accepted.result_frontier, 95_000)
+    await _commit_check(
+        ledger,
+        command,
+        objects,
+        accepted.result_frontier,
+        request_number=95_001,
+        coverage=check_coverage,
+        verdict=CheckVerdict.ACTION_REQUIRED,
+        findings=(returned,),
+    )
+    after_check = _projection_row(db)
+    check_event_id = after_check["latest_check_event_id"]
+    assert check_event_id is not None
+    assert _check_types(after_check["status_coverage_canonical"]) == [
+        "deterministic",
+        "semantic_model_derived",
+    ]
+
+    response_template = next(
+        record
+        for record in replay_records("all-event-families")
+        if record.schema.name == "response_recorded"
+    )
+    assert type(response_template.payload) is ResponseRecordedPayload
+    head_row = db.execute(
+        "SELECT frontier_seq, head_digest FROM p1_projection_state WHERE projection_name='work'"
+    ).fetchone()
+    assert head_row is not None
+    response_payload = replace(
+        response_template.payload,
+        finding_id=returned.finding_id,
+        finding_frontier=Frontier(int(head_row[0]), cast(str, head_row[1])),
+    )
+    response_command, objects = _append_follow_on(
+        seed[0],
+        response_template,
+        objects,
+        writer_id=command.writer_id,
+        session_id=command.session_id,
+        task_id=command.task_id,
+        expected_frontier=after_check["frontier_seq"],
+        request_number=95_010,
+        event_number=95_011,
+        object_number=95_012,
+        payload=response_payload,
+    )
+    await ledger.append_batch(response_command)
+
+    row = _projection_row(db)
+    assert row["latest_check_event_id"] == check_event_id
+    assert _check_types(row["status_coverage_canonical"]) == [
+        "deterministic",
+        "semantic_model_derived",
+    ]
+    assert "none" not in _check_types(row["status_coverage_canonical"])
+    _assert_check_aggregate_consistent(row, has_check=True)
+    db.close()
+
+    _reopened, reopened_db = file_sqlite_for(command, objects, path)
+    durable = _projection_row(reopened_db)
+    assert durable["latest_check_event_id"] == check_event_id
+    assert _check_types(durable["status_coverage_canonical"]) == [
+        "deterministic",
+        "semantic_model_derived",
+    ]
+    _assert_check_aggregate_consistent(durable, has_check=True)
+    reopened_db.close()
+
+
+@pytest.mark.anyio
+async def test_response_to_unreturned_finding_resets_status_coverage(tmp_path: Path) -> None:
+    """A response about a finding the applicable check never returned is untested work to it."""
+
+    seed = replay_records("projection-rebuild")[:1]
+    command, objects = command_from_records(seed)
+    path = tmp_path / "respond-other-finding.sqlite3"
+    ledger, db = file_sqlite_for(command, objects, path)
+    accepted = await ledger.append_batch(command)
+    check_coverage = _checked_coverage(command.entries[0].coverage, CheckType.DETERMINISTIC)
+    returned = _returned_finding(command, accepted.result_frontier, 96_000)
+    await _commit_check(
+        ledger,
+        command,
+        objects,
+        accepted.result_frontier,
+        request_number=96_001,
+        coverage=check_coverage,
+        verdict=CheckVerdict.ACTION_REQUIRED,
+        findings=(returned,),
+    )
+    after_check = _projection_row(db)
+    assert _check_types(after_check["status_coverage_canonical"]) == ["deterministic"]
+
+    response_template = next(
+        record
+        for record in replay_records("all-event-families")
+        if record.schema.name == "response_recorded"
+    )
+    assert type(response_template.payload) is ResponseRecordedPayload
+    head_row = db.execute(
+        "SELECT frontier_seq, head_digest FROM p1_projection_state WHERE projection_name='work'"
+    ).fetchone()
+    assert head_row is not None
+    response_payload = replace(
+        response_template.payload,
+        finding_id=finding_id(uuid_id("fnd", 96_100)),
+        finding_frontier=Frontier(int(head_row[0]), cast(str, head_row[1])),
+    )
+    response_command, objects = _append_follow_on(
+        seed[0],
+        response_template,
+        objects,
+        writer_id=command.writer_id,
+        session_id=command.session_id,
+        task_id=command.task_id,
+        expected_frontier=after_check["frontier_seq"],
+        request_number=96_010,
+        event_number=96_011,
+        object_number=96_012,
+        payload=response_payload,
+    )
+    await ledger.append_batch(response_command)
+
+    row = _projection_row(db)
+    assert _check_types(row["status_coverage_canonical"]) == ["none"]
+    _assert_check_aggregate_consistent(row, has_check=True)
+    db.close()
+
+    _reopened, reopened_db = file_sqlite_for(command, objects, path)
+    durable = _projection_row(reopened_db)
+    assert _check_types(durable["status_coverage_canonical"]) == ["none"]
     reopened_db.close()
 
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import cast
+from typing import Literal, cast
 
 import pydantic
 import pytest
@@ -18,10 +18,12 @@ from builders.start_application import (
     start_composition,
     start_request,
 )
+from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.service import Application, VerificationPolicy
 from yoetz.application.start import StartInternalResult
 from yoetz.domain.events import RuntimeProfile
+from yoetz.domain.findings import SemanticDispatchKind, SemanticProvenance
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -42,6 +44,7 @@ from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import CheckCommitResult
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
+from yoetz.ports.semantic import SamplingParams, SemanticJudgment
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.coverage import CheckType
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -51,6 +54,8 @@ from yoetz.protocol.models import (
     PublishWorkRequest,
     ReceiptRequest,
     RespondRequest,
+    SemanticReason,
+    SemanticStatus,
     StatusCompactPageModel,
     StatusEvidencePageModel,
     StatusFindingsPageModel,
@@ -88,6 +93,10 @@ class _WorkflowRuntime(MemoryStartRuntime):
                     RuntimeCapability.WRITE,
                     RuntimeCapability.STRUCTURAL_READ,
                     RuntimeCapability.PAYLOAD_READ,
+                    # Granted unconditionally: a deterministic-only check never reaches the
+                    # capability gate, so this only opens the semantic path for the app built
+                    # with ``semantic="optional"``.
+                    RuntimeCapability.SEMANTIC,
                 }
             ),
             ledger,
@@ -189,6 +198,42 @@ async def _semantic_disabled(frozen: object, findings: object) -> object:
     raise AssertionError("semantic_evaluator_called_in_deterministic_mode")
 
 
+async def _semantic_succeeds(frozen: object, findings: object) -> object:
+    """Reach ``succeeded`` without raising a semantic challenge of its own.
+
+    Semantic delivery is exercised elsewhere; here the only thing that matters is that the check
+    earns ``semantic_model_derived`` coverage, so the receipt has something to lose.
+    """
+
+    del frozen, findings
+    return FinalSemanticEvaluation(
+        SemanticStatus.SUCCEEDED,
+        SemanticReason.SEMANTIC_COMPLETED,
+        judgment=SemanticJudgment("no_material_discrepancy", ()),
+        provenance=SemanticProvenance(
+            provider="fake",
+            endpoint_profile_id="fake",
+            endpoint_profile_version="1.0.0",
+            model="fake/model",
+            sdk_version="1.0.0",
+            prompt_digest=_DIGEST,
+            schema_digest=_DIGEST,
+            policy_digest=_DIGEST,
+            privacy_policy_digest=_DIGEST,
+            sampling_params=SamplingParams(128),
+            latency_ms=1,
+            semantic_attempt_id=protocol_id("att_", 1490),
+            dispatch_kind=SemanticDispatchKind.EXTERNAL,
+            privacy_receipt_id=protocol_id("egr_", 1491),
+            status=SemanticStatus.SUCCEEDED,
+            reason=SemanticReason.SEMANTIC_COMPLETED,
+            provider_request_id="fake-1",
+            egress_authorization_id=protocol_id("aut_", 1492),
+            request_commitment="hmac-sha256:" + "b" * 64,
+        ),
+    )
+
+
 def _actor(actor_type: str = "harness") -> dict[str, JsonValue]:
     return {"actor_id": "harness:test", "actor_type": actor_type}
 
@@ -217,6 +262,7 @@ def _build_app(
     *,
     waiver_authorizer: Callable[[RespondRequest], bool] | None = None,
     seed_offset: int = 0,
+    semantic: Literal["disabled", "optional"] = "disabled",
 ) -> tuple[Application, _WorkflowRuntime, _ProjectionSpy]:
     start_app, start_runtime, clock, catalog = start_composition()
     projection = _ProjectionSpy()
@@ -228,13 +274,13 @@ def _build_app(
         runtime=cast(BundleRuntimePort, runtime),
         clock=clock,
         ids=ids,
-        verification_policy=VerificationPolicy(semantic="disabled", max_findings=3),
+        verification_policy=VerificationPolicy(semantic=semantic, max_findings=3),
         privacy=cast(PrivacyCoordinator, projection),
         status_cursor_key=(b"respond-status-receipt-cursor-key-" + str(seed_offset).encode() * 4)[
             :32
         ],
         waiver_policy_digest=_DIGEST,
-        semantic_evaluator=_semantic_disabled,
+        semantic_evaluator=_semantic_disabled if semantic == "disabled" else _semantic_succeeds,
         disclosure_scope_for=_scope,
         receipt_version_resolver=lambda _: _versions(),
         waiver_authorizer=(lambda _: False) if waiver_authorizer is None else waiver_authorizer,
@@ -243,12 +289,18 @@ def _build_app(
         policy_packs=_POLICY_PACKS,
         version_manifest=start_app.version_manifest,
         enforce_repository_identity=False,
+        connected_provider_ids=() if semantic == "disabled" else ("fake",),
+        provider_credential_connected=semantic != "disabled",
+        semantic_ready=semantic != "disabled",
     )
     return app, runtime, projection
 
 
 async def _bootstrap_finding(
-    app: Application, *, seed: int
+    app: Application,
+    *,
+    seed: int,
+    mode: str = "deterministic_only",
 ) -> tuple[StartInternalResult, CheckCommitResult, str]:
     """Publish one open obligation plus an unsupported completion claim about it, then check.
 
@@ -304,7 +356,7 @@ async def _bootstrap_finding(
         "session_id": started.session_id,
         "writer_id": started.writer_id,
         "expected_frontier": _frontier(published.result_frontier),
-        "mode": "deterministic_only",
+        "mode": mode,
         "max_findings": "3",
     }
     checked = await app.check(CheckRequest.model_validate(check_wire))
@@ -803,12 +855,14 @@ async def test_receipt_build_context_is_complete() -> None:
     versions = cast(Mapping[str, JsonValue], document["versions"])
     assert versions["package_version"] == "0.1.0"
     assert versions["resource_manifest_digest"] == _DIGEST
-    # The response is material work published after the last check, so the frozen case honestly
-    # reports the check as superseded by that material change rather than silently reusing stale
-    # check facts. Frontier arithmetic alone (an immaterial advance) never produces this gap.
-    assert receipt.coverage.known_gaps == ("check_not_applicable",)
+    # The response answers a finding this very check returned, so it reports on the check rather
+    # than publishing untested work: the check stays attributed and its coverage folds in. The
+    # receipt still declares the earlier-frontier gap, so nothing reads as re-checked here.
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
+    assert "check_current_as_of_earlier_frontier" in receipt.coverage.known_gaps
+    assert CheckType.DETERMINISTIC in receipt.coverage.check_types
     gaps = cast(tuple[Mapping[str, JsonValue], ...], document["gaps"])
-    assert any(cast(str, gap["code"]) == "check_not_applicable" for gap in gaps)
+    assert any(cast(str, gap["code"]) == "check_current_as_of_earlier_frontier" for gap in gaps)
 
     # The bare code is honest but not interpretable: the 2026-07-27 dogfood saw
     # `check_not_applicable` immediately after a check that succeeded with external provenance and
@@ -819,10 +873,14 @@ async def test_receipt_build_context_is_complete() -> None:
         for section in sections
         if cast(str, section["key"]) == "limitations_and_coverage"
     )
-    assert "A check is recorded at subject frontier" in limitations
-    assert "material work was published after it" in limitations
-    assert f"no longer covers frontier {receipt.subject_frontier.sequence}" in limitations
-    assert "Re-run check at this frontier to restore coverage." in limitations
+    tested = checked.subject_frontier.sequence
+    assert f"A check is recorded at subject frontier {tested} and still contributes here" in (
+        limitations
+    )
+    assert "only responses to the findings it returned were published after it" in limitations
+    assert f"Its verdict is current as of subject frontier {tested}" in limitations
+    assert f"not frontier {receipt.subject_frontier.sequence}" in limitations
+    assert "Re-run check at this frontier to close the gap." in limitations
 
     text_wire: dict[str, JsonValue] = {
         **receipt_wire,
@@ -959,3 +1017,127 @@ async def test_material_work_after_check_produces_check_not_applicable() -> None
     )
     assert "material work was published after it" in limitations
     assert "Re-run check at this frontier to restore coverage." in limitations
+
+
+async def test_receipt_after_respond_keeps_semantic_check_coverage() -> None:
+    """Issue #172: the guidance-mandated check -> respond -> receipt sequence used to drop the
+    semantic half of a successful check's coverage, leaving the receipt claiming only the
+    ``deterministic`` baseline it would have carried with no check at all."""
+
+    app, _runtime, _ = _build_app(seed_offset=9, semantic="optional")
+    started, checked, _obligation = await _bootstrap_finding(
+        app, seed=1200, mode="semantic_if_configured"
+    )
+    assert CheckType.SEMANTIC_MODEL_DERIVED in checked.coverage.check_types
+    assert checked.findings
+
+    frontier = checked.result_frontier
+    for offset, finding in enumerate(checked.findings):
+        responded = await app.respond(
+            RespondRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", 1210 + offset)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(frontier),
+                    "finding_id": finding.finding_id,
+                    "finding_frontier": _frontier(checked.result_frontier),
+                    "disposition": "acknowledged",
+                }
+            )
+        )
+        frontier = responded.result_frontier
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1220)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+
+    assert CheckType.SEMANTIC_MODEL_DERIVED in receipt.coverage.check_types
+    assert CheckType.DETERMINISTIC in receipt.coverage.check_types
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
+    assert "check_current_as_of_earlier_frontier" in receipt.coverage.known_gaps
+
+    # Status reads the same ledger through the same predicate, so it cannot disagree.
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1221)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    compact = cast(StatusCompactPageModel, status.page)
+    assert CheckType.SEMANTIC_MODEL_DERIVED in compact.items[0].coverage.check_types
+
+
+async def test_response_to_unreturned_finding_produces_check_not_applicable() -> None:
+    """Only responses to the applicable check's own findings preserve it. A response to some
+    other finding is untested work as far as that check is concerned, so the gap still fires."""
+
+    app, _runtime, _ = _build_app(seed_offset=10)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=1300)
+    stale_finding = checked.findings[0]
+
+    # The recheck reports the same durable issue under a fresh finding_id, so the first check's
+    # finding is now one the applicable (second) check never returned.
+    rechecked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1310)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
+    assert rechecked.findings
+    assert stale_finding.finding_id not in tuple(item.finding_id for item in rechecked.findings)
+
+    responded = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1311)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(rechecked.result_frontier),
+                "finding_id": stale_finding.finding_id,
+                "finding_frontier": _frontier(checked.result_frontier),
+                "disposition": "acknowledged",
+            }
+        )
+    )
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1312)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(responded.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+
+    assert "check_not_applicable" in receipt.coverage.known_gaps
+    assert "check_current_as_of_earlier_frontier" not in receipt.coverage.known_gaps
