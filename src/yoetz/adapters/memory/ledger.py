@@ -2453,3 +2453,50 @@ class MemoryLedgerAdapter:
             self._state.operations[key] = (terminal, None)
             self._state.check_results[key] = result
             return result
+
+    async def fail_check_if_current(
+        self, lease: OperationLease, failure: PublicOperationError
+    ) -> None:
+        """Terminalize an admitted check whose application pipeline failed unexpectedly.
+
+        This is the last-resort durability path: it records no check event and advances no
+        frontier, but it closes the exact operation so replay returns a stable terminal error
+        instead of waiting forever on a lease that no worker can resume safely.
+        """
+
+        if failure.retryable:
+            raise TypeError("retryable_check_failure_cannot_terminalize")
+        canonical = canonical_encode(
+            {
+                "code": failure.code.value,
+                "message": str(failure),
+                "retryable": failure.retryable,
+                "safe_details": dict(failure.safe_details),
+            }
+        )
+        key = (lease.writer_id, lease.operation_id)
+        async with self._lock:
+            current = self._state.operations.get(key)
+            if (
+                current is not None
+                and current[0].state is OperationState.COMPLETE
+                and key in self._state.check_errors
+            ):
+                return
+            record = self._require_lease(lease)
+            terminal = replace(
+                record,
+                state=OperationState.COMPLETE,
+                phase=CheckPhase.TERMINAL,
+                owner_generation=None,
+                lease_owner_id=None,
+                lease_generation=None,
+                lease_expires_at=None,
+                resume_object_ref=None,
+                result_canonical=canonical,
+                result_digest=f"sha256:{hashlib.sha256(canonical).hexdigest()}",
+                result_locator=None,
+                terminal_at=_now(self._clock),
+            )
+            self._state.operations[key] = (terminal, None)
+            self._state.check_errors[key] = failure

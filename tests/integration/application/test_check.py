@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -68,7 +69,7 @@ from yoetz.ports.ledger import (
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef
 from yoetz.ports.runtime import BundleRuntimePort, OwnershipFence, RouteCommand, TaskRuntime
 from yoetz.ports.semantic import ReviewerChallenge, SamplingParams, SemanticJudgment
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import CheckRequest, SemanticReason, SemanticStatus
 
@@ -139,6 +140,8 @@ class _Ledger:
         self.replay: CheckCommitResult | None = None
         self.failure: BaseException | None = None
         self.commit_count = 0
+        self.commit_failure: Exception | None = None
+        self.fail_count = 0
         self.phase_transitions: list[tuple[CheckPhase, CheckPhase]] = []
         self.last_ranked: RankedFindings | None = None
         self.last_executions: tuple[CheckPolicyExecution, ...] | None = None
@@ -228,6 +231,8 @@ class _Ledger:
         request_id: str,
     ) -> CheckCommitResult:
         assert frozen == self.frozen
+        if self.commit_failure is not None:
+            raise self.commit_failure
         self.commit_count += 1
         self.last_ranked = ranked
         self.last_executions = executions
@@ -253,6 +258,28 @@ class _Ledger:
                 "0.1.0",
                 ("research-evidence/0.1.0", "work-integrity/0.1.0"),
             ),
+        )
+
+    async def fail_check_if_current(
+        self, lease: OperationLease, failure: PublicOperationError
+    ) -> None:
+        assert lease == self.frozen.lease
+        assert failure.code is PublicErrorCode.INTERNAL_ERROR
+        assert self.operation is not None
+        self.fail_count += 1
+        result_canonical = b'{"code":"INTERNAL_ERROR"}'
+        self.operation = replace(
+            self.operation,
+            state=OperationState.COMPLETE,
+            phase=CheckPhase.TERMINAL,
+            owner_generation=None,
+            lease_owner_id=None,
+            lease_generation=None,
+            lease_expires_at=None,
+            resume_object_ref=None,
+            result_canonical=result_canonical,
+            result_digest=f"sha256:{hashlib.sha256(result_canonical).hexdigest()}",
+            terminal_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
 
 
@@ -364,6 +391,25 @@ async def test_deterministic_check_freezes_ranks_commits_and_releases() -> None:
         (CheckPhase.RESERVED, CheckPhase.LOCAL_READY),
         (CheckPhase.LOCAL_READY, CheckPhase.READY_TO_FINALIZE),
     ]
+    assert cast(_Runtime, app.runtime).release_count == 1
+
+
+@pytest.mark.anyio
+async def test_post_admission_protocol_failure_is_internal_and_terminalizes_operation() -> None:
+    """An internal value failure cannot masquerade as bad input or leave CHECK pending."""
+
+    app = _App()
+    app.ledger.commit_failure = ProtocolValueError("invalid_event_value_type")
+
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_check_commit(app, _request())
+
+    assert caught.value.code is PublicErrorCode.INTERNAL_ERROR
+    assert caught.value.retryable is False
+    assert app.ledger.fail_count == 1
+    assert app.ledger.operation is not None
+    assert app.ledger.operation.state is OperationState.COMPLETE
+    assert app.ledger.operation.phase is CheckPhase.TERMINAL
     assert cast(_Runtime, app.runtime).release_count == 1
 
 
@@ -723,6 +769,33 @@ def _succeeded(judgment: SemanticJudgment) -> FinalSemanticEvaluation:
             request_commitment="hmac-sha256:" + "b" * 64,
         ),
     )
+
+
+@pytest.mark.anyio
+async def test_response_content_invalid_is_a_committed_semantic_outcome() -> None:
+    app = _App(semantic=True)
+    succeeded = _succeeded(SemanticJudgment("no_material_discrepancy", ()))
+    assert succeeded.provenance is not None
+    app.semantic_result = replace(
+        succeeded,
+        status=SemanticStatus.INVALID,
+        reason=SemanticReason.RESPONSE_CONTENT_INVALID,
+        judgment=None,
+        provenance=replace(
+            succeeded.provenance,
+            status=SemanticStatus.INVALID,
+            reason=SemanticReason.RESPONSE_CONTENT_INVALID,
+        ),
+    )
+
+    result = await execute_check_commit(app, _request("semantic_if_configured"))
+
+    assert result.outcome == "committed"
+    assert result.semantic_status is SemanticStatus.INVALID
+    assert result.semantic_reason is SemanticReason.RESPONSE_CONTENT_INVALID
+    assert result.coverage.known_gaps
+    assert app.ledger.commit_count == 1
+    assert app.ledger.fail_count == 0
 
 
 def _reviewer_challenge(ref: str, *, summary: str = "Evidence gap") -> ReviewerChallenge:

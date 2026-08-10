@@ -563,12 +563,16 @@ class SqliteLedger:
                     result_object_id,
                     terminal,
                 ) = operation_row
-                structural = tuple(
-                    item[0]
-                    for item in self._db.execute(
-                        "SELECT event_id FROM events WHERE ingestion_seq BETWEEN ? AND ? "
-                        "ORDER BY event_id",
-                        (first, last),
+                structural = (
+                    ()
+                    if first is None or last is None
+                    else tuple(
+                        item[0]
+                        for item in self._db.execute(
+                            "SELECT event_id FROM events WHERE ingestion_seq BETWEEN ? AND ? "
+                            "ORDER BY event_id",
+                            (first, last),
+                        )
                     )
                 )
                 result_ref = (
@@ -580,7 +584,11 @@ class SqliteLedger:
                         "application/vnd.yoetz.receipt+json",
                     )
                 )
-                locator = OperationResultLocator(first, last, result_ref, structural)
+                locator = (
+                    None
+                    if first is None and last is None and result_ref is None
+                    else OperationResultLocator(first, last, result_ref, structural)
+                )
                 operation = OperationRecord(
                     writer_value,
                     operation_value,
@@ -601,6 +609,7 @@ class SqliteLedger:
                 )
                 append_result = None
                 check_result = None
+                check_error: PublicOperationError | None = None
                 if operation.operation_kind is not OperationKind.CHECK:
                     result_json = strict_json_parse(result_canonical)
                     result_map = cast(Mapping[str, object], result_json)
@@ -627,7 +636,7 @@ class SqliteLedger:
                             for value in cast(list[object], result_map["warnings"])
                         ),
                     )
-                else:
+                elif locator is not None:
                     operation_records = records[cast(int, first) - 1 : cast(int, last)]
                     check_event = next(
                         (
@@ -684,12 +693,51 @@ class SqliteLedger:
                                 ),
                             ),
                         )
+                else:
+                    try:
+                        failure_json = strict_json_parse(cast(bytes, result_canonical))
+                        if not isinstance(failure_json, Mapping):
+                            raise ValueError("check_terminal_error_invalid")
+                        if frozenset(failure_json) == frozenset(
+                            {"code", "message", "retryable", "safe_details"}
+                        ):
+                            retryable = failure_json["retryable"]
+                            if retryable is not False:
+                                raise ValueError("check_terminal_error_retryable")
+                            check_error = PublicOperationError(
+                                PublicErrorCode(cast(str, failure_json["code"])),
+                                cast(str, failure_json["message"]),
+                                retryable,
+                                safe_details=failure_json["safe_details"],
+                            )
+                        elif frozenset(failure_json) == frozenset(
+                            {"code", "reason_code", "sequence", "head_digest"}
+                        ):
+                            if (
+                                failure_json["code"] != PublicErrorCode.FRONTIER_CONFLICT.value
+                                or failure_json["reason_code"] != "frontier_changed"
+                            ):
+                                raise ValueError("check_terminal_error_invalid")
+                            check_error = _public_error(
+                                PublicErrorCode.FRONTIER_CONFLICT,
+                                retryable=True,
+                                reason_code="frontier_changed",
+                                sequence=cast(int, failure_json["sequence"]),
+                                head_digest=cast(str, failure_json["head_digest"]),
+                            )
+                        else:
+                            raise ValueError("check_terminal_error_invalid")
+                    except (TypeError, ValueError) as exc:
+                        raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
                 self._state.operations[(writer_value, operation_value)] = (
                     operation,
                     append_result,
                 )
                 if check_result is not None:
                     self._state.check_results[(writer_value, operation_value)] = check_result
+                if operation.operation_kind is OperationKind.CHECK and locator is None:
+                    assert check_error is not None
+                    self._state.check_errors[(writer_value, operation_value)] = check_error
             # Disclosure waits are durable but the oracle is in-memory, so a restart would
             # otherwise answer "no continuation" for a check that is genuinely still suspended —
             # exactly the unrecoverable state this work exists to remove.
@@ -1289,19 +1337,7 @@ class SqliteLedger:
                 if pending is not None:
                     raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
 
-            clone = MemoryLedgerState(
-                records=self._state.records,
-                operations=dict(self._state.operations),
-                writers=dict(self._state.writers),
-                projection=self._state.projection,
-                frozen_cases=dict(self._state.frozen_cases),
-                check_results=dict(self._state.check_results),
-                check_errors=dict(self._state.check_errors),
-                jobs=dict(self._state.jobs),
-                job_by_case=dict(self._state.job_by_case),
-                attempts=dict(self._state.attempts),
-                object_refs=dict(self._state.object_refs),
-            )
+            clone = self._clone_state()
             shim = _SqliteImportShim()
             shim.reservation = reservation
             oracle = MemoryLedgerAdapter(
@@ -1372,19 +1408,40 @@ class SqliteLedger:
             objects=self._objects,
         )
 
+    def _clone_state(self) -> MemoryLedgerState:
+        """Copy the oracle state so a failed SQLite sync cannot leak an in-memory commit."""
+
+        return MemoryLedgerState(
+            records=self._state.records,
+            operations=dict(self._state.operations),
+            writers=dict(self._state.writers),
+            projection=self._state.projection,
+            frozen_cases=dict(self._state.frozen_cases),
+            check_results=dict(self._state.check_results),
+            check_errors=dict(self._state.check_errors),
+            jobs=dict(self._state.jobs),
+            job_by_case=dict(self._state.job_by_case),
+            attempts=dict(self._state.attempts),
+            disclosure_waits=dict(self._state.disclosure_waits),
+            object_refs=dict(self._state.object_refs),
+        )
+
+    def _sync_after_mutation_locked(self, new_records: tuple[LedgerRecord, ...] = ()) -> None:
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            self._db.execute("PRAGMA defer_foreign_keys=ON")
+            self._verify_owner()
+            self._persist_derived_records(new_records)
+            self._sync_runtime_state()
+            self._db.execute("COMMIT")
+        except BaseException:
+            if self._db.get_autocommit() is False:
+                self._db.execute("ROLLBACK")
+            raise
+
     async def _sync_after_mutation(self, new_records: tuple[LedgerRecord, ...] = ()) -> None:
         async with self._lock:
-            self._db.execute("BEGIN IMMEDIATE")
-            try:
-                self._db.execute("PRAGMA defer_foreign_keys=ON")
-                self._verify_owner()
-                self._persist_derived_records(new_records)
-                self._sync_runtime_state()
-                self._db.execute("COMMIT")
-            except BaseException:
-                if self._db.get_autocommit() is False:
-                    self._db.execute("ROLLBACK")
-                raise
+            self._sync_after_mutation_locked(new_records)
 
     async def load_projection(
         self, session_id: str, view: ProjectionView
@@ -1553,22 +1610,72 @@ class SqliteLedger:
         request_id: str,
     ) -> CheckCommitResult:
         await self._ensure_recovered()
-        before = len(self._state.records)
-        try:
-            result = await self._oracle().commit_check_if_current(
-                frozen,
-                findings,
-                policy_executions,
-                semantic_status,
-                semantic_reason,
-                semantic_provenance,
-                request_id,
+        async with self._lock:
+            prior = self._state
+            clone = self._clone_state()
+            oracle = MemoryLedgerAdapter(
+                task_id=self._task_id,
+                ownership_fence=self._fence,
+                state=clone,
+                import_state=_SqliteImportShim(),
+                transaction_lock=asyncio.Lock(),
+                clock=self._clock,
+                ids=self._ids,
+                objects=self._objects,
             )
-        except PublicOperationError:
-            await self._sync_after_mutation()
-            raise
-        await self._sync_after_mutation(self._state.records[before:])
-        return result
+            try:
+                result = await oracle.commit_check_if_current(
+                    frozen,
+                    findings,
+                    policy_executions,
+                    semantic_status,
+                    semantic_reason,
+                    semantic_provenance,
+                    request_id,
+                )
+            except PublicOperationError:
+                # The memory oracle terminalizes a frontier conflict before raising it. Preserve
+                # that durable error transition just as the pre-clone implementation did.
+                self._state = clone
+                try:
+                    self._sync_after_mutation_locked()
+                except BaseException:
+                    self._state = prior
+                    raise
+                raise
+            new_records = clone.records[len(prior.records) :]
+            self._state = clone
+            try:
+                self._sync_after_mutation_locked(new_records)
+            except BaseException:
+                self._state = prior
+                raise
+            return result
+
+    async def fail_check_if_current(
+        self, lease: OperationLease, failure: PublicOperationError
+    ) -> None:
+        await self._ensure_recovered()
+        async with self._lock:
+            prior = self._state
+            clone = self._clone_state()
+            oracle = MemoryLedgerAdapter(
+                task_id=self._task_id,
+                ownership_fence=self._fence,
+                state=clone,
+                import_state=_SqliteImportShim(),
+                transaction_lock=asyncio.Lock(),
+                clock=self._clock,
+                ids=self._ids,
+                objects=self._objects,
+            )
+            await oracle.fail_check_if_current(lease, failure)
+            self._state = clone
+            try:
+                self._sync_after_mutation_locked()
+            except BaseException:
+                self._state = prior
+                raise
 
     async def run_passive_checkpoint(self, wal_page_threshold: int) -> CheckpointReport:
         await self._ensure_recovered()

@@ -85,7 +85,7 @@ from yoetz.protocol.coverage import (
     coverage_to_json,
     weakest,
 )
-from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import (
     CheckRequest,
@@ -1195,6 +1195,7 @@ async def execute_check_commit(
             frozenset(required_capabilities),
         )
     )
+    frozen: FrozenCase | None = None
     try:
         if runtime.session_id != request.session_id or runtime.writer_id != request.writer_id:
             raise PublicOperationError(
@@ -1409,12 +1410,45 @@ async def execute_check_commit(
             semantic_result.provenance,
             request.request_id,
         )
-    except ProtocolValueError as exc:
-        raise PublicOperationError(
-            PublicErrorCode.INVALID_REQUEST,
-            "The check request is invalid.",
+    except PublicOperationError as exc:
+        if frozen is not None and not exc.retryable:
+            try:
+                await runtime.ledger.fail_check_if_current(frozen.lease, exc)
+            except Exception as terminalize_exc:
+                record_unexpected_exception_without_raising(
+                    terminalize_exc,
+                    component="check",
+                    operation="check_pipeline_terminalization_failed",
+                    request_id=request.request_id,
+                )
+        raise
+    except Exception as exc:
+        # The request is already a validated CheckRequest. Any protocol-value failure raised from
+        # this pipeline is therefore an implementation/storage defect, not malformed caller input.
+        # Close an admitted operation before surfacing the internal error so exact replay and
+        # status never wait forever on work this invocation has abandoned.
+        record_unexpected_exception_without_raising(
+            exc,
+            component="check",
+            operation="check_pipeline_failed",
+            request_id=request.request_id,
+        )
+        failure = PublicOperationError(
+            PublicErrorCode.INTERNAL_ERROR,
+            "The check failed internally.",
             False,
-        ) from exc
+        )
+        if frozen is not None:
+            try:
+                await runtime.ledger.fail_check_if_current(frozen.lease, failure)
+            except Exception as terminalize_exc:
+                record_unexpected_exception_without_raising(
+                    terminalize_exc,
+                    component="check",
+                    operation="check_pipeline_terminalization_failed",
+                    request_id=request.request_id,
+                )
+        raise failure from exc
     finally:
         await app.runtime.release(runtime)
 

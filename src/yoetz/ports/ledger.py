@@ -29,6 +29,7 @@ from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, Determinist
 from yoetz.kernel.projections import ProjectionState
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.protocol.coverage import Coverage, PublicationChannel
+from yoetz.protocol.errors import PublicOperationError
 from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id
 from yoetz.protocol.models import (
     MAX_EVENTS_PER_BATCH,
@@ -1515,6 +1516,10 @@ class LedgerPort(Protocol):
         semantic_provenance: SemanticProvenance | None,
         request_id: str,
     ) -> CheckCommitResult: ...
+
+    async def fail_check_if_current(
+        self, lease: OperationLease, failure: PublicOperationError
+    ) -> None: ...
 
     async def lookup_operation(
         self, writer_id: str, operation_id: str

@@ -20,7 +20,13 @@ from yoetz.adapters.memory.ledger import MemoryLedgerAdapter, MemoryLedgerState
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.domain.events import EventDraft, EventPayload, UnknownEvent
-from yoetz.domain.findings import CheckVerdict, RankedFindings
+from yoetz.domain.findings import (
+    CheckVerdict,
+    RankedFindings,
+    SemanticDispatchKind,
+    SemanticFailureClass,
+    SemanticProvenance,
+)
 from yoetz.domain.values import parse_rfc3339_millis
 from yoetz.ports.ledger import (
     AppendCommand,
@@ -46,6 +52,7 @@ from yoetz.ports.objects import (
     StagedObject,
 )
 from yoetz.ports.runtime import OwnershipFence
+from yoetz.ports.semantic import SamplingParams
 from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
@@ -561,6 +568,264 @@ async def test_commit_check_if_current_contract() -> None:
         assert result.outcome == "committed"
         results.append(result)
     assert results[0] == results[1]
+
+
+@pytest.mark.anyio
+async def test_invalid_semantic_outcome_commits_and_does_not_poison_later_checks() -> None:
+    """A designed provider-invalid outcome must be durable in both ledger adapters."""
+
+    command = ledger_command()
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        frozen = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            "req_00000000-0000-4000-8000-000000000038",
+            "sha256:" + "8" * 64,
+        )
+        assert type(frozen) is FrozenCase
+        lease = await adapter.advance_check_phase(
+            frozen.lease,
+            CheckPhase.RESERVED,
+            CheckPhase.LOCAL_READY,
+            await _local_result_ref(adapter, command),
+        )
+        lease = await adapter.advance_check_phase(
+            lease,
+            CheckPhase.LOCAL_READY,
+            CheckPhase.SEMANTIC_WAIT,
+        )
+        case_ref = await _object_ref(adapter, command, ObjectKind.SEMANTIC_CASE)
+        job = await adapter.enqueue_semantic_job(lease, "sha256:" + "7" * 64, case_ref)
+        handle = await adapter.claim_semantic_job(lease, job.job_id)
+        await adapter.record_attempt_outcome(
+            handle,
+            AttemptOutcome.FAILED,
+            terminal_code=SemanticReason.RESPONSE_CONTENT_INVALID,
+        )
+        lease = await adapter.renew_leases(lease)
+        lease = await adapter.advance_check_phase(
+            lease,
+            CheckPhase.SEMANTIC_WAIT,
+            CheckPhase.READY_TO_FINALIZE,
+        )
+        provenance = SemanticProvenance(
+            provider="fake",
+            endpoint_profile_id="fake",
+            endpoint_profile_version="1.0.0",
+            model="fake/model",
+            sdk_version="1.0.0",
+            prompt_digest="sha256:" + "1" * 64,
+            schema_digest="sha256:" + "2" * 64,
+            policy_digest="sha256:" + "3" * 64,
+            privacy_policy_digest="sha256:" + "4" * 64,
+            sampling_params=SamplingParams(128),
+            latency_ms=1,
+            semantic_attempt_id=handle.attempt_id,
+            dispatch_kind=SemanticDispatchKind.EXTERNAL,
+            privacy_receipt_id="egr_00000000-0000-4000-8000-000000000038",
+            status=SemanticStatus.INVALID,
+            reason=SemanticReason.RESPONSE_CONTENT_INVALID,
+            provider_request_id=handle.provider_request_id,
+            failure_class=SemanticFailureClass.RESPONSE_CONTENT,
+            egress_authorization_id="aut_00000000-0000-4000-8000-000000000038",
+            request_commitment="hmac-sha256:" + "5" * 64,
+        )
+        ranked = RankedFindings(
+            (),
+            0,
+            CheckVerdict.INCOMPLETE_CHECK,
+            command.entries[0].coverage,
+        )
+        result = await adapter.commit_check_if_current(
+            FrozenCase(frozen.case, lease),
+            ranked,
+            (CheckPolicyExecution("research-evidence", "0.1.0", "run", "completed"),),
+            SemanticStatus.INVALID,
+            SemanticReason.RESPONSE_CONTENT_INVALID,
+            provenance,
+            lease.operation_id,
+        )
+        assert result.semantic_status is SemanticStatus.INVALID
+        assert result.semantic_reason is SemanticReason.RESPONSE_CONTENT_INVALID
+        operation = await adapter.lookup_operation(command.writer_id, lease.operation_id)
+        assert operation is not None
+        assert operation.state.value == "complete"
+
+
+@pytest.mark.anyio
+async def test_failed_check_terminalization_replays_and_allows_a_fresh_check() -> None:
+    command = ledger_command()
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        request_id = "req_00000000-0000-4000-8000-000000000058"
+        request_digest = "sha256:" + "8" * 64
+        frozen = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            request_id,
+            request_digest,
+        )
+        assert type(frozen) is FrozenCase
+
+        await adapter.fail_check_if_current(
+            frozen.lease,
+            PublicOperationError(
+                PublicErrorCode.INTERNAL_ERROR,
+                "The check failed internally.",
+                False,
+            ),
+        )
+
+        operation = await adapter.lookup_operation(command.writer_id, request_id)
+        assert operation is not None
+        assert operation.state.value == "complete"
+        assert operation.phase is CheckPhase.TERMINAL
+        with pytest.raises(PublicOperationError) as replayed:
+            await adapter.freeze_case(
+                command.session_id,
+                command.writer_id,
+                1,
+                request_id,
+                request_digest,
+            )
+        assert replayed.value.code is PublicErrorCode.INTERNAL_ERROR
+        fresh = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            "req_00000000-0000-4000-8000-000000000059",
+            "sha256:" + "9" * 64,
+        )
+        assert type(fresh) is FrozenCase
+
+
+@pytest.mark.anyio
+async def test_failed_check_terminalization_survives_sqlite_restart() -> None:
+    command = ledger_command()
+    first = sqlite_ledger(command)
+    await first.append_batch(command)
+    request_id = "req_00000000-0000-4000-8000-000000000068"
+    request_digest = "sha256:" + "8" * 64
+    frozen = await first.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        request_id,
+        request_digest,
+    )
+    assert type(frozen) is FrozenCase
+    await first.fail_check_if_current(
+        frozen.lease,
+        PublicOperationError(
+            PublicErrorCode.INTERNAL_ERROR,
+            "The check failed internally.",
+            False,
+        ),
+    )
+
+    restarted = SqliteLedger(
+        db=first._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=first._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=first._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=first._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    with pytest.raises(PublicOperationError) as replayed:
+        await restarted.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            request_id,
+            request_digest,
+        )
+    assert replayed.value.code is PublicErrorCode.INTERNAL_ERROR
+
+
+@pytest.mark.anyio
+async def test_frontier_conflict_terminalization_survives_sqlite_restart() -> None:
+    command = ledger_command()
+    first = sqlite_ledger(command)
+    await first.append_batch(command)
+
+    async def ready(request_id: str, request_digest: str) -> FrozenCase:
+        frozen = await first.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            request_id,
+            request_digest,
+        )
+        assert type(frozen) is FrozenCase
+        lease = await first.advance_check_phase(
+            frozen.lease,
+            CheckPhase.RESERVED,
+            CheckPhase.LOCAL_READY,
+            await _local_result_ref(first, command),
+        )
+        lease = await first.advance_check_phase(
+            lease,
+            CheckPhase.LOCAL_READY,
+            CheckPhase.READY_TO_FINALIZE,
+        )
+        return FrozenCase(frozen.case, lease)
+
+    winning = await ready(
+        "req_00000000-0000-4000-8000-000000000078",
+        "sha256:" + "7" * 64,
+    )
+    stale = await ready(
+        "req_00000000-0000-4000-8000-000000000079",
+        "sha256:" + "8" * 64,
+    )
+    ranked = RankedFindings(
+        (),
+        0,
+        CheckVerdict.NO_ISSUE_DETECTED,
+        command.entries[0].coverage,
+    )
+    executions = (CheckPolicyExecution("research-evidence", "0.1.0", "run", "completed"),)
+    await first.commit_check_if_current(
+        winning,
+        ranked,
+        executions,
+        SemanticStatus.NOT_REQUESTED,
+        SemanticReason.DETERMINISTIC_MODE,
+        None,
+        winning.lease.operation_id,
+    )
+    with pytest.raises(PublicOperationError) as conflicted:
+        await first.commit_check_if_current(
+            stale,
+            ranked,
+            executions,
+            SemanticStatus.NOT_REQUESTED,
+            SemanticReason.DETERMINISTIC_MODE,
+            None,
+            stale.lease.operation_id,
+        )
+    assert conflicted.value.code is PublicErrorCode.FRONTIER_CONFLICT
+
+    restarted = SqliteLedger(
+        db=first._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=first._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=first._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=first._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    with pytest.raises(PublicOperationError) as replayed:
+        await restarted.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            stale.lease.operation_id,
+            "sha256:" + "8" * 64,
+        )
+    assert replayed.value.code is PublicErrorCode.FRONTIER_CONFLICT
 
 
 @pytest.mark.anyio

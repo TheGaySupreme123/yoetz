@@ -916,9 +916,20 @@ deciding between the two, shared by the receipt and by compact status coverage.
 - `reclaim_operation(writer_id, operation_id, request_digest) -> OperationLease | PendingVerdict`;
 - `commit_check_if_current(frozen, findings, policy_executions, semantic_status, semantic_reason,
   semantic_provenance, request_id) -> CheckCommitResult`;
+- `fail_check_if_current(lease, failure) -> None` (last-resort terminalization for a bounded,
+  non-retryable post-admission failure; records no check event and advances no frontier; retryable
+  failures are rejected and remain pending);
 - `lookup_operation(writer_id, operation_id) -> OperationRecord | None`.
 
 The check orchestration methods are authority-bearing port methods, not SQLite extensions.
+Once `freeze_case` returns an `OperationLease`, an unexpected application/protocol-value failure is
+an internal failure, never caller-side `INVALID_REQUEST`. The application calls
+`fail_check_if_current` before returning `INTERNAL_ERROR`; the exact operation becomes
+`complete/terminal` with a durable bounded error result, same-request replay returns that error,
+and a fresh check identity remains admissible at the unchanged frontier. SQLite commits the
+in-memory oracle state and durable rows atomically: a failed persistence sync restores the prior
+oracle state. `awaiting_human` and retryable ownership conflicts remain pending and never use this
+terminalization path.
 `ports/ledger.py` owns the shared closed enums: `OperationKind` is
 `start|publish_work|check|respond|receipt`; `OperationState` is `pending|complete|quarantined`;
 `CheckPhase` is `reserved|local_ready|semantic_wait|ready_to_finalize|terminal`;
