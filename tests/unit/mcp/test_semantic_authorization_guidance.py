@@ -60,6 +60,32 @@ def test_text_separates_host_authorization_from_a_disclosure_decision(
 
 
 @pytest.mark.parametrize("source", (_skill, _instructions))
+def test_text_handles_host_auto_review_before_yoetz_runs(source: Callable[[], str]) -> None:
+    text = source()
+
+    assert "host auto-review" in text
+    assert "not a yoetz result" in text
+    assert "yoetz did not run" in text
+    assert "exact proposed `check` body" in text
+    assert "host approval authorizes this tool invocation only" in text
+    assert "do not publish a completion claim" in text
+    assert "deterministic_only" in text
+    assert "same proposed `check` body and `request_id`" in text
+
+
+def test_check_descriptor_handles_host_auto_review_before_invocation() -> None:
+    description = descriptor_for("check").description
+
+    assert "pre-invocation approval refusal or hold" in description
+    assert "not a Yoetz result" in description
+    assert "Yoetz did not run" in description
+    assert "exact proposed check body and request_id" in description
+    assert "does not change Yoetz privacy policy" in description
+    assert "Do not publish a completion claim" in description
+    assert "continue without semantic review only after the user explicitly chooses" in description
+
+
+@pytest.mark.parametrize("source", (_skill, _instructions))
 def test_text_gives_the_awaiting_human_procedure(source: Callable[[], str]) -> None:
     text = source()
 

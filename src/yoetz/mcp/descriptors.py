@@ -1260,7 +1260,21 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "authority: an active semantic route was selected by the owner during setup as a bounded "
         "standing policy, and check cannot change its route, workspace, scope, categories, "
         "retention ceiling, or credential authority. Whether a case is dispatched stays enforced "
-        "by the installed route binding and privacy policy. Omit scope for the whole case, "
+        "by the installed route binding and privacy policy. A pre-invocation approval refusal or "
+        "hold is an invocation-authorization event, not a Yoetz result: Yoetz did not run, so "
+        "do not report a semantic status or outbound dispatch. When semantic review was "
+        "explicitly requested or mode is semantic_required, pause and present the manual approval "
+        "request for the exact proposed check body and request_id. Approval authorizes that "
+        "invocation only; it does not change Yoetz privacy policy, repository authority, "
+        "disclosure decisions, credentials, or outbound-admission rules. Do not "
+        "publish a completion claim, request a receipt, create a fresh semantic check, or switch "
+        "to deterministic_only while approval is pending. An unambiguous, still-applicable "
+        "first-party instruction for this exact semantic action may present the manual approval "
+        "request without redundant prose, but never bypasses that approval. After approval, "
+        "invoke the exact same proposed check body and request_id; if Yoetz then returns "
+        "awaiting_human, follow its separate continuation. After denial, cancellation, or expiry, "
+        "continue without semantic review only after the user explicitly chooses that fallback. "
+        "Omit scope for the whole case, "
         "or send both claim_ids and obligation_ids as arrays of unique ids; two empty arrays also "
         "mean the whole case, and sending only one of the two keys is rejected. Call it after "
         "publishing the completion claim and its evidence, and again after any material edit, "
@@ -1382,7 +1396,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:a7ba7d6bbdeb039cf43efb3809b4a754eaa839b5952d26d1ae82abec7983d1e0",
+                "check": "sha256:b4e860ea9f16ecda346546c2ff59a3b1a0562c5f16a636e36d78b9707fd9aa26",
                 "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1392,7 +1406,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:0dd39bc128059a8ac40bcbf2bda3727ba799a2c5e9d39df18ce73a5709e3b1fc",
+                "check": "sha256:a6c1f8d015f8fac98a77c997f31a923432db1e42fe2b45a5097f2d48d9b98ab9",
                 "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1402,8 +1416,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:6154ab34eacf1dee5de8a6b7f851c1b93a783ef38ff69d9318f45b131b2c6653",
-        "strict": "sha256:d4e2e8bb5770d85534a729b332d38fe9333fce66b31262ee1b3f51bc90c5ef2e",
+        "policy": "sha256:085d57fb16a6d08b61a6e4b7acfebd86b88d70c9f90a3aa6a1c483d460423f16",
+        "strict": "sha256:b7e113085a22021b3c3e4bd8227854ba96e0f180a2a451749d8a043824852932",
     }
 )
 

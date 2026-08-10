@@ -37,6 +37,20 @@ That starts the **policy** route. Semantic review can occur only when the durabl
 provider readiness, classification, minimization, and authorization gates all allow it. Its
 `check.openWorldHint` is therefore `true`.
 
+## Host auto-review is a separate gate
+
+An auto-review host can hold or refuse a policy-route `check` before Yoetz receives it. That is
+host tool-call authorization, not a Yoetz semantic result: no semantic status, provider attempt,
+or dispatch can be inferred from it.
+
+For an explicitly requested semantic review or `semantic_required` check, the agent must pause and
+present manual approval for that exact proposed request. Approval permits the host to invoke the
+check only; it cannot alter Yoetz's provider, repository, privacy, disclosure, credential, or
+dispatch authority. Once approved, the agent uses the same body and `request_id`. If the host
+denies or the approval expires, the agent may use a deterministic-only fallback only after the user
+explicitly chooses it after seeing the semantic-review limitation. A later Yoetz
+`awaiting_human` result remains a separate Yoetz decision flow.
+
 ## Codex registration
 
 `yoetz setup run` and `yoetz integrate codex mcp preview` show the exact command, route profile, and
