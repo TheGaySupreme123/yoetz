@@ -73,7 +73,21 @@ def test_posix_empty_line_is_rejected() -> None:
     ):
         with pytest.raises(TrustedConsoleError) as exc:
             adapter.read_line("Secret: ", 64, hidden=False)
-    assert exc.value.reason == "input_invalid"
+    assert exc.value.reason == "empty_input"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+def test_posix_eof_is_distinct_from_empty_input() -> None:
+    adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
+    adapter._fd = 9  # pyright: ignore[reportPrivateUsage]
+
+    with (
+        patch("yoetz.cli.trusted_console._PosixConsoleAdapter.write"),
+        patch("yoetz.cli.trusted_console.os.readv", return_value=0),
+    ):
+        with pytest.raises(TrustedConsoleError) as exc:
+            adapter.read_line("Secret: ", 64, hidden=False)
+    assert exc.value.reason == "eof"
 
 
 class _WindowsApi:
@@ -154,6 +168,36 @@ def test_windows_reads_secrets_without_echo_through_console_api() -> None:
     assert api.hidden_reads == [True]
     assert api.writes == ["Secret: ", "\n"]
     assert api.closed == [202, 101]
+
+
+def test_windows_empty_input_is_distinct_and_bounded() -> None:
+    api = _WindowsApi()
+    api.read_line = lambda *_args, **_kwargs: bytearray()  # type: ignore[method-assign]
+    adapter = trusted_console._WindowsConsoleAdapter(api)  # pyright: ignore[reportPrivateUsage]
+    adapter.open()
+    try:
+        with pytest.raises(TrustedConsoleError) as exc:
+            adapter.read_line("Secret: ", 64, hidden=True)
+    finally:
+        adapter.close()
+    assert exc.value.reason == "empty_input"
+
+
+def test_windows_eof_reason_is_not_collapsed() -> None:
+    api = _WindowsApi()
+
+    def eof(*_args: object, **_kwargs: object) -> bytearray:
+        raise TrustedConsoleError("eof")
+
+    api.read_line = eof  # type: ignore[method-assign]
+    adapter = trusted_console._WindowsConsoleAdapter(api)  # pyright: ignore[reportPrivateUsage]
+    adapter.open()
+    try:
+        with pytest.raises(TrustedConsoleError) as exc:
+            adapter.read_line("Secret: ", 64, hidden=True)
+    finally:
+        adapter.close()
+    assert exc.value.reason == "eof"
 
 
 def test_windows_ambiguous_console_error_is_bounded() -> None:
