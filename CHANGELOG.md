@@ -192,7 +192,8 @@ describes behavior intended for the first release rather than a change from a pr
   (no credential handling outside the warned consent lane, no privacy widening, no foreign-entry
   overwrite). Linked from
   `README.md` and `docs/usage/install-and-first-run.md`; fetchable raw until `yoetz.dev` hosts it.
-  No behavior change.
+  The two surfaces an agent actually lands on now point at it: the non-TTY bare `yoetz` help
+  footer, and a `next_steps` entry in the `yoetz setup run` non-interactive dry-run report.
 - User documentation: `docs/architecture.md` (topology, module map, honesty rules), `docs/usage/`
   (install and first run, the terminal interface, the six operations, privacy and semantic review,
   providers and credentials, receipts and coverage), and `docs/README.md` / `docs/adr/README.md`

@@ -88,6 +88,11 @@ _NEXT_CREDENTIAL: Final = (
     "provider credential through the confidential ceremony"
 )
 _NEXT_RESTART: Final = "restart the Yoetz service so the configured semantic evaluator is composed"
+_NEXT_AGENT_GUIDE: Final = (
+    "coding agent: setup questions appear only on the user's own terminal; follow the "
+    "agent-start guide at "
+    "https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md"
+)
 _PROVIDER_SETUP_DIRECT_REASONS: Final = frozenset(
     {
         "cancelled",
@@ -1914,6 +1919,8 @@ async def run_setup_wizard(
                     semantic_status = None
 
     next_steps: list[JsonValue] = []
+    if not interactive:
+        _append_next_step(next_steps, _NEXT_AGENT_GUIDE)
     if not service.get("reachable"):
         _append_next_step(next_steps, _NEXT_SERVICE)
     if service.get("state") != "ready":
