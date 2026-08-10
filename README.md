@@ -32,7 +32,9 @@ named subcommands, and `yoetz mcp serve` behave exactly as before; a bare `yoetz
 redirected stream still prints help. Set `YOETZ_TUI=0` for the prompt-loop menu instead.
 
 Full walkthrough: [Install and first run](docs/usage/install-and-first-run.md) and
-[The terminal interface](docs/usage/terminal-interface.md).
+[The terminal interface](docs/usage/terminal-interface.md). A coding agent installing Yoetz for
+its user should follow [Agent start](docs/usage/agent-start.md): setup's questions appear only on
+the human's own terminal, and that page says what to run, what to ask, and what to recommend.
 
 ## The six operations
 

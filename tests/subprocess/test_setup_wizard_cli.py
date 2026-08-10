@@ -371,6 +371,8 @@ def test_non_interactive_without_accept_is_a_dry_run(wizard_env: dict[str, objec
     assert "yoetz --privacy" in steps
     assert "yoetz provider credential set" in steps
     assert "yoetz service run" in steps
+    # A non-interactive run is what a coding agent sees; it is pointed at the agent guide.
+    assert "docs/usage/agent-start.md" in steps
 
 
 def test_non_interactive_accept_registers_and_writes_marker(
@@ -1067,6 +1069,7 @@ def test_bare_invocation_without_tty_prints_help() -> None:
     result = _RUNNER.invoke(cli.app, [])
     assert result.exit_code == 0
     assert "Usage" in result.stdout
+    assert "docs/usage/agent-start.md" in result.stdout
 
 
 def test_root_privacy_shortcut_dispatches_guided_privacy_setup(

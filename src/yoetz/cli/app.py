@@ -1862,6 +1862,12 @@ def root(
         _finish(run_menu())
         return
     typer.echo(context.get_help())
+    typer.echo(
+        "Get started: run 'yoetz' in your own terminal to walk setup interactively.\n"
+        "Using an agentic tool? Setup questions appear only on the user's own terminal; "
+        "agents should follow the agent-start guide at "
+        "https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md"
+    )
     raise typer.Exit(0)
 
 

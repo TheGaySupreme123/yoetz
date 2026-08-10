@@ -185,6 +185,15 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Documentation and repository
 
+- Agent-start guide: `docs/usage/agent-start.md` addresses the coding agent installing Yoetz on a
+  user's behalf — why setup's questions never appear in an agent shell (TTY-gated by design), the
+  exact decision list to relay to the human, the post-setup provider-credential recommendation,
+  the scriptable surfaces an agent may use with explicit user instruction, and the prohibitions
+  (no credential handling outside the warned consent lane, no privacy widening, no foreign-entry
+  overwrite). Linked from
+  `README.md` and `docs/usage/install-and-first-run.md`; fetchable raw until `yoetz.dev` hosts it.
+  The two surfaces an agent actually lands on now point at it: the non-TTY bare `yoetz` help
+  footer, and a `next_steps` entry in the `yoetz setup run` non-interactive dry-run report.
 - User documentation: `docs/architecture.md` (topology, module map, honesty rules), `docs/usage/`
   (install and first run, the terminal interface, the six operations, privacy and semantic review,
   providers and credentials, receipts and coverage), and `docs/README.md` / `docs/adr/README.md`
