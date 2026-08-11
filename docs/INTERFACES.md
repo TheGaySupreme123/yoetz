@@ -907,7 +907,12 @@ deciding between the two, shared by the receipt and by compact status coverage.
 - `append_batch(command: AppendCommand) -> AppendResult`;
 - `load_frontier() -> Frontier` (task-ledger truth without requiring a pre-existing session;
   START resumed-event content and append CAS use this value);
-- `load_events(session_id, after=0, through=None) -> AsyncIterator[LedgerRecord]`;
+- `load_events(session_id, after=0, through=None) -> AsyncIterator[LedgerRecord]` (the task-scoped
+  ledger chain in `ingestion_sequence` order, bounded by `after`/`through`; `session_id` is an
+  authorization/membership argument, never a row filter, so a session attached to the task reads
+  the whole task chain and an unknown session reads nothing. The chain is task-global, and replay
+  is genesis-anchored, so a session-filtered row set would be a mid-chain suffix and no longer
+  replayable — the same membership rule that `load_projection` and `query_projection` apply);
 - `load_projection(session_id, view) -> StoredProjection | None` (cache/rebuild use);
 - `load_case_availability(session_id, frontier, projection) -> CaseAvailabilityFacts` (shared bounded
   event/captured-object availability snapshot for case construction);

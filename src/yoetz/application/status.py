@@ -655,7 +655,12 @@ async def _candidate_page(
     )
     from yoetz.kernel.reducers import replay
 
-    projection = replay(records)
+    try:
+        projection = replay(records)
+    except ValueError as exc:
+        # Replay is genesis-anchored; a chain it rejects is a storage fact, not an engine bug, so
+        # it leaves here as a bounded public error rather than an unbounded internal one.
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The task ledger is unreadable.") from exc
     if Frontier(projection.frontier, projection.head_digest) != frontier:
         raise _error(PublicErrorCode.STORAGE_CORRUPT, "The status frontier is inconsistent.")
     availability = await runtime.ledger.load_case_availability(

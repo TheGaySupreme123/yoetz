@@ -190,6 +190,22 @@ def test_session_events_advance_frontier_only() -> None:
     assert state.freshness.value == "current"
 
 
+def test_replay_rejects_a_mid_chain_suffix_as_corrupt() -> None:
+    """Replay is genesis-anchored by contract (issue #200).
+
+    A suffix that starts past the genesis anchor is a corrupt projection, not a partial one, so a
+    caller that reads only part of a task's chain — for example by filtering rows to one session —
+    has to be fixed at the record-loading layer. Loosening this check instead would let a
+    projection be built from an unverified chain.
+    """
+
+    records = _records("all-event-families")
+    with pytest.raises(ValueError, match="projection_corrupt"):
+        replay(records[1:])
+    with pytest.raises(ValueError, match="projection_corrupt"):
+        replay(records[3:5])
+
+
 def test_plan_and_obligation_supersession() -> None:
     records = _records("supersession-redaction")
     state = replay(records)

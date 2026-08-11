@@ -45,17 +45,20 @@ from yoetz.ports.ledger import CheckCommitResult
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.ports.semantic import SamplingParams, SemanticJudgment
-from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.coverage import CheckType
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
     FrontierModel,
+    PublishWorkDryRunModel,
     PublishWorkRequest,
+    PublishWorkResult,
     ReceiptRequest,
     RespondRequest,
     SemanticReason,
     SemanticStatus,
+    StatusCandidateFindingsPageModel,
     StatusCompactPageModel,
     StatusEvidencePageModel,
     StatusFindingsPageModel,
@@ -301,6 +304,7 @@ async def _bootstrap_finding(
     *,
     seed: int,
     mode: str = "deterministic_only",
+    refs: bool = False,
 ) -> tuple[StartInternalResult, CheckCommitResult, str]:
     """Publish one open obligation plus an unsupported completion claim about it, then check.
 
@@ -309,7 +313,9 @@ async def _bootstrap_finding(
     themselves are not re-derived here.
     """
 
-    started = await app.start(start_request(seed, title="Respond/status/receipt exercise"))
+    started = await app.start(
+        start_request(seed, title="Respond/status/receipt exercise", refs=refs)
+    )
     obligation_id = protocol_id("obl_", seed + 1)
     obligation_event_id = protocol_id("evt_", seed + 2)
     publish_wire: dict[str, JsonValue] = {
@@ -1246,3 +1252,248 @@ async def test_check_respond_recheck_reaches_a_fixed_point() -> None:
     # material change, so nothing demands another cycle.
     assert item.unresolved_finding_count == "0"
     assert item.freshness != "stale_after_material_change"
+
+
+def _receipt_wire(
+    request_seed: int,
+    *,
+    task_id: str,
+    session: str,
+    writer: str,
+    frontier: Frontier | FrontierModel,
+) -> dict[str, JsonValue]:
+    return {
+        **_request_base(protocol_id("req_", request_seed)),
+        "task_id": task_id,
+        "session_id": session,
+        "writer_id": writer,
+        "expected_frontier": _frontier(frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+
+
+async def test_receipt_survives_reattach_through_create_or_attach() -> None:
+    """Regression for issue #200.
+
+    ``start mode=create_or_attach`` mints a fresh session for an existing task and appends one
+    ordinary ``session_resumed`` event to the task-global ingestion/digest chain. Reading the
+    ledger back through the attached session must therefore still yield the whole task chain: a
+    session-filtered slice would start mid-chain and replay, which is genesis-anchored, would
+    reject it as a corrupt projection.
+    """
+
+    app, _runtime, _ = _build_app(seed_offset=12)
+    started, checked, obligation = await _bootstrap_finding(app, seed=1900, refs=True)
+
+    before = await app.receipt(
+        ReceiptRequest.model_validate(
+            _receipt_wire(
+                1910,
+                task_id=started.task_id,
+                session=started.session_id,
+                writer=started.writer_id,
+                frontier=checked.result_frontier,
+            )
+        )
+    )
+    assert before.subject_frontier == checked.result_frontier
+    assert before.conclusion == "unresolved_findings_remain"
+
+    attached = await app.start(
+        start_request(1920, title="Respond/status/receipt exercise", refs=True)
+    )
+    assert attached.outcome == "attached"
+    assert attached.task_id == started.task_id
+    assert attached.session_id != started.session_id
+    assert attached.writer_id != started.writer_id
+
+    after = await app.receipt(
+        ReceiptRequest.model_validate(
+            _receipt_wire(
+                1930,
+                task_id=attached.task_id,
+                session=attached.session_id,
+                writer=attached.writer_id,
+                frontier=attached.frontier,
+            )
+        )
+    )
+
+    # The receipt covers the whole task ledger, not the suffix this session authored: its subject
+    # frontier is the attached head, which is strictly beyond the pre-resume receipt's.
+    assert _frontier(after.subject_frontier) == _frontier(attached.frontier)
+    assert after.subject_frontier.sequence > before.subject_frontier.sequence
+    assert after.receipt_id != before.receipt_id
+
+    # It also still reports the work published before the resume: the same unresolved conclusion,
+    # from the same pre-resume check, over the same obligation.
+    assert after.conclusion == before.conclusion
+    assert after.suppressed_finding_count == before.suppressed_finding_count
+    assert after.versions == before.versions
+    document = cast(Mapping[str, JsonValue], after.document)
+    assert obligation in canonical_encode(document).decode()
+
+    # ``status view=candidate_findings`` reads the ledger the same way and was equally broken.
+    candidates = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1940)),
+                "session_id": attached.session_id,
+                "writer_id": attached.writer_id,
+                "view": "candidate_findings",
+                "limit": "10",
+                "at_frontier": str(after.result_frontier.sequence),
+            }
+        )
+    )
+    candidate_page = cast(StatusCandidateFindingsPageModel, candidates.page)
+    assert candidate_page.items
+    assert any(obligation in item.subject_refs for item in candidate_page.items)
+
+    # The ordinary findings view is task-wide from the attached session too: the finding the
+    # pre-resume check returned is still the finding on the record.
+    findings = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1950)),
+                "session_id": attached.session_id,
+                "writer_id": attached.writer_id,
+                "view": "findings",
+                "limit": "10",
+                "at_frontier": str(after.result_frontier.sequence),
+            }
+        )
+    )
+    findings_page = cast(StatusFindingsPageModel, findings.page)
+    assert tuple(item.finding_id for item in findings_page.items) == tuple(
+        item.finding_id for item in checked.findings
+    )
+
+
+async def test_dry_run_publish_survives_reattach_through_create_or_attach() -> None:
+    """The dry-run preflight replays the task ledger too (issue #200).
+
+    ``publish_work dry_run=true`` proves a batch would reduce by replaying the existing records
+    with the provisional ones appended, and it converts any replay ``ValueError`` into
+    ``EVENT_INVALID``. Reading a session-filtered slice therefore turned every dry run on a
+    resumed task into an invalid batch, and made a draft citing a pre-resume event look like a
+    missing causal parent rather than the valid reference it is.
+    """
+
+    app, _runtime, _ = _build_app(seed_offset=14)
+    started, _checked, _obligation = await _bootstrap_finding(app, seed=2100, refs=True)
+    # The obligation event ``_bootstrap_finding`` publishes, named the same way it names it.
+    obligation_event_id = protocol_id("evt_", 2102)
+
+    attached = await app.start(
+        start_request(2120, title="Respond/status/receipt exercise", refs=True)
+    )
+    assert attached.outcome == "attached"
+    assert attached.task_id == started.task_id
+    assert attached.session_id != started.session_id
+
+    action_event_id = protocol_id("evt_", 2131)
+    preview = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2130)),
+                "session_id": attached.session_id,
+                "writer_id": attached.writer_id,
+                "expected_frontier": _frontier(attached.frontier),
+                "dry_run": True,
+                "event_drafts": (
+                    {
+                        "event_id": action_event_id,
+                        "schema": {"name": "action_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:02.000Z",
+                        # Published before the resume, so the attached session can only cite it if
+                        # the preflight reads the whole task chain.
+                        "causal_parents": (obligation_event_id,),
+                        "payload": {
+                            "action_id": protocol_id("act_", 2132),
+                            "action_kind": "other",
+                            "description": "Continue the exercise from the attached session.",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+
+    assert type(preview) is PublishWorkResult, f"unexpected publish result: {type(preview)}"
+    assert preview.ok is True
+    assert preview.outcome == "dry_run"
+    assert preview.subject_frontier.sequence == attached.frontier.sequence
+    assert preview.result_frontier == preview.subject_frontier
+    root = cast(PublishWorkDryRunModel, preview.root)
+    assert root.evidential is False
+    assert len(root.would_accept) == 1
+    assert root.would_accept[0].event_id == action_event_id
+    assert root.would_accept[0].causal_parents == (obligation_event_id,)
+
+    # Duplicate detection stays task-wide as well: re-drafting a pre-resume event id is still an
+    # invalid batch, so widening the read did not turn the preflight into a false positive.
+    with pytest.raises(PublicOperationError) as caught:
+        await app.publish_work(
+            PublishWorkRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", 2140)),
+                    "session_id": attached.session_id,
+                    "writer_id": attached.writer_id,
+                    "expected_frontier": _frontier(attached.frontier),
+                    "dry_run": True,
+                    "event_drafts": (
+                        {
+                            "event_id": obligation_event_id,
+                            "schema": {"name": "action_recorded", "version": "1.0.0"},
+                            "occurred_at": "2026-07-19T12:00:03.000Z",
+                            "causal_parents": (),
+                            "payload": {
+                                "action_id": protocol_id("act_", 2141),
+                                "action_kind": "other",
+                                "description": "Reuse an event id already on the task ledger.",
+                            },
+                            "artifact_refs": (),
+                            "evidence_refs": (),
+                        },
+                    ),
+                }
+            )
+        )
+    assert caught.value.code is PublicErrorCode.EVENT_INVALID
+
+
+async def test_reattach_detaches_the_prior_session_from_the_task_route() -> None:
+    """The prior session stops being routable when a new one attaches (issue #200).
+
+    Membership in the ledger is what ``load_events`` checks; *authority* to act on the task is a
+    route question, and that is what a resumed START moves. This locks the contract that the fix
+    for #200 must not weaken: widening the ledger read does not keep a superseded session
+    routable.
+    """
+
+    app, _runtime, _ = _build_app(seed_offset=13)
+    started, _checked, _obligation = await _bootstrap_finding(app, seed=2000, refs=True)
+
+    assert await app.start_catalog.resolve_route(started.session_id) is not None
+
+    attached = await app.start(
+        start_request(2020, title="Respond/status/receipt exercise", refs=True)
+    )
+    assert attached.outcome == "attached"
+
+    # Bounded, not an internal error: the superseded session no longer resolves to a route, which
+    # is the fact the real bundle runtime turns into SESSION_NOT_FOUND before any ledger read.
+    assert await app.start_catalog.resolve_route(started.session_id) is None
+    resumed_route = await app.start_catalog.resolve_route(attached.session_id)
+    assert resumed_route is not None
+    assert resumed_route.task_id == attached.task_id
+
+    # A session that never touched this task reads nothing from its ledger.
+    ledger, _objects = _runtime.resources[attached.task_id]
+    stranger = protocol_id("ses_", 2099)
+    assert [record async for record in ledger.load_events(stranger)] == []
