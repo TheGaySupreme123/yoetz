@@ -1345,6 +1345,36 @@ async def test_ready_factory_deterministic_check_records_semantic_not_requested_
         assert required.semantic_status.value == "not_configured"
         assert required.semantic_reason.value == "provider_not_configured"
         assert required.verdict.value == "incomplete_check"
+
+        # Issue #185: the stop-rule fallback. An agent whose semantic attempt the environment
+        # refused re-checks with deterministic_only, and that successor replaces
+        # latest_tested_state wholesale. Without the carry-forward the only surviving disclosure
+        # is semantic_review_not_requested, which reads as the agent never having asked.
+        frontier = required.result_frontier
+        fallback = await app.check(
+            CheckRequest.model_validate(
+                {
+                    **common,
+                    "request_id": "req_00000000-0000-4000-8000-000000000206",
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": {
+                        "sequence": str(frontier.sequence),
+                        "head_digest": frontier.head_digest,
+                    },
+                    "mode": "deterministic_only",
+                    "max_findings": "3",
+                    "policy_packs": ["work-integrity/0.1.0"],
+                }
+            )
+        )
+        assert type(fallback) is CheckCommitResult, (
+            f"unexpected nonterminal check: {type(fallback)}"
+        )
+        assert fallback.outcome == "committed"
+        assert fallback.semantic_status.value == "not_requested"
+        assert "semantic_review_not_requested" in fallback.coverage.known_gaps
+        assert "semantic_review_not_configured" in fallback.coverage.known_gaps
     finally:
         if app is not None:
             await app.close()

@@ -335,14 +335,20 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
-- A `correlation_id` on an agent-facing error could not be joined to any diagnostic record, which
-  is the one job it has. Deterministic public failures (`INVALID_REQUEST`, `OPERATION_PENDING`,
-  `VAULT_LOCKED`, and workflow failures framed as `ok:false`) minted an id straight into the wire
-  envelope and wrote nothing to either sink, so a maintainer handed one from a transcript found
-  zero records and had to collate timestamps instead. Every boundary that mints a public id now
-  writes the durable ring record under that same id at mint time, and a boundary already holding
-  an id another sink recorded reuses it, so one failure resolves to exactly one id via
-  `yoetz service diagnostics --correlation-id err_…` (issue #191).
+- A receipt reported `semantic_review_not_requested` for a task whose semantic review had been
+  requested and refused. The stop-rules make a blocked review a coverage gap rather than a retry,
+  so the agent falls back to `deterministic_only` — and that successor check replaced the recorded
+  one wholesale, leaving a label that blamed the agent for never asking. A deterministic-only check
+  now carries the earlier attempt's gap (`optional_semantic_review_blocked_by_policy`,
+  `semantic_review_not_configured`, or `semantic_relevance_review_not_run`) forward alongside it,
+  so the receipt still names the environment as the cause (issue #185).
+- Prose that publishes cleanly could vanish from semantic review without a word. Publish accepts up
+  to 8192 bytes per field while one case item carries 4096, so text in between was silently
+  shortened — or, for a whole event payload, replaced by a bounded-omission marker whose `reason`
+  read `not_selected`, the same token used for material the selection policy declined to send.
+  The marker now says `over_case_item_limit`, and any case that had to shorten or replace admitted
+  text raises `semantic_case_content_over_item_limit` in the check and receipt coverage (issue
+  #177).
 - A provider credential was stored without ever being tried, so a wrong or expired API key looked
   identical to a working one until a check failed much later with a reason that could not name
   authentication. Setting a credential now dispatches one minimal authenticated request — a fixed

@@ -77,7 +77,11 @@ A non-succeeding `semantic_status` is a coverage gap, not a failure to retry awa
 - `unavailable` and `timeout` are the only statuses retried inside a job, and only for a transport-unavailable, provider-timeout, or rate-limited reason. By the time you see one, that job already spent its own attempt budget.
 - `refused`, `invalid`, and `failed` are not retried inside the job at all, so a fresh request is a fresh gamble rather than a continuation.
 
-When a second job in one session again returns no judgment, stop requesting semantic review: run `deterministic_only` and say in the final answer that semantic review was requested and did not run, naming the recorded `semantic_status` and `semantic_reason`. A terminal reason such as `retry_budget_exhausted` describes the retry outcome, not the initiating cause; do not present it as a diagnosis.
+When a second job in one session again returns no judgment, stop requesting semantic review: run `deterministic_only` and say in the final answer that semantic review was requested and did not run, naming the recorded `semantic_status` and `semantic_reason`. A terminal reason such as `retry_budget_exhausted` describes the retry outcome, not the initiating cause; do not present it as a diagnosis. That fallback check carries the earlier attempt's gap forward next to `semantic_review_not_requested`, so the receipt still shows the environment refused rather than that you never asked.
+
+## Prose the reviewer will not see whole
+
+Publish accepts up to 8192 bytes of prose per field, but one semantic case item carries at most 4096 bytes. Between those two bounds text records cleanly and then reaches the reviewer shortened — or, for a whole event payload, replaced by a `yoetz.bounded-content-omission/1` marker carrying only its digest. The check coverage says so with `semantic_case_content_over_item_limit`. Keep any description, summary, or claim you expect a reviewer to actually read under 4096 bytes, and split longer material across records rather than relying on one oversized field.
 
 ## Check scope
 

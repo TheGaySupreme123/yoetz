@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Final, Literal, cast
 
 from yoetz.application.check import (
@@ -40,6 +41,7 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
+from yoetz.domain.receipts import SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
 from yoetz.domain.values import SubjectStateRelation
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
@@ -64,7 +66,7 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
-from yoetz.protocol.coverage import coverage_to_json
+from yoetz.protocol.coverage import LedgerFreshness, coverage_to_json
 from yoetz.protocol.models import (
     MAX_REVIEW_TEXT_BYTES,
     MAX_SEMANTIC_ITEM_BYTES,
@@ -72,6 +74,7 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "OVER_CASE_ITEM_LIMIT_REASON",
     "REVIEW_PACKET_ITEM_ID",
     "SEMANTIC_REVIEW_PURPOSE",
     "assemble_filtered_review_packet",
@@ -82,6 +85,9 @@ __all__ = [
 ]
 
 SEMANTIC_REVIEW_PURPOSE: Final = "semantic-review"
+# Marker reason for content the case admitted and then could not carry whole. Distinct from the
+# `not_selected` omission vocabulary, which means the selection policy declined to carry it.
+OVER_CASE_ITEM_LIMIT_REASON: Final = "over_case_item_limit"
 _PACKET_SCHEMA: Final = "yoetz.review-packet-case/1"
 _PACKET_ID_LIST_KEYS: Final = (
     "goal_item_ids",
@@ -194,12 +200,18 @@ def _content_item(
     linked_subject_refs: tuple[str, ...],
     occurred_order: int,
     text: str,
+    over_limit: set[str] | None = None,
 ) -> SemanticCaseItem:
     # Bound by UTF-8 bytes, not characters — multi-byte prose must not raise.
     limit = min(MAX_REVIEW_TEXT_BYTES, MAX_SEMANTIC_ITEM_BYTES)
     raw = text.encode("utf-8")
     if len(raw) > limit:
+        # Publish-side prose accepts up to MAX_PROSE_CHARS, which is twice what one case item can
+        # carry. Silent truncation here is what made a 5 KB evidence description publish cleanly
+        # and then reach the reviewer as a shortened fragment with nothing saying so (issue #177).
         raw = raw[:limit].decode("utf-8", errors="ignore").encode("utf-8")
+        if over_limit is not None:
+            over_limit.add(item_id)
     if not raw:
         raise ValueError("semantic_case_content_invalid")
     content = _utf8(raw.decode("utf-8"), maximum=limit)
@@ -230,10 +242,13 @@ def _bounded_json(value: Mapping[str, JsonValue]) -> tuple[str, bool]:
     encoded = canonical_encode(cast(JsonValue, dict(value)))
     if len(encoded) <= MAX_REVIEW_TEXT_BYTES:
         return encoded.decode("utf-8"), False
+    # `not_selected` read as a selection-policy choice, indistinguishable from a section the
+    # profile declined to carry. The payload was in fact admitted and then dropped for size, and
+    # the reviewer needs to know which of the two happened (issue #177).
     marker = {
         "content_digest": canonical_digest(cast(JsonValue, dict(value))),
         "original_bytes": len(encoded),
-        "reason": "not_selected",
+        "reason": OVER_CASE_ITEM_LIMIT_REASON,
         "schema": "yoetz.bounded-content-omission/1",
     }
     return _structural_json(marker), True
@@ -338,6 +353,10 @@ def build_semantic_case(
     projection = frozen_case.projection
 
     items: list[SemanticCaseItem] = []
+    # Item ids whose recorded text was admitted by the publish-side prose bound and then could
+    # not be carried whole by the case. Folded into the packet coverage below so the omission is
+    # an author-visible fact rather than a silent shortening (issue #177).
+    over_limit: set[str] = set()
     omissions: list[ReviewOmission] = []
     goal_ids: list[str] = []
     obligation_ids: list[str] = []
@@ -365,10 +384,12 @@ def build_semantic_case(
                 linked_subject_refs=(plan_ref,) if plan_ref in allowed else (),
                 occurred_order=plan.source_frontier,
                 text=text,
+                over_limit=over_limit,
             )
             items.append(item)
             goal_ids.append(item.item_id)
             if content_omitted:
+                over_limit.add(item.item_id)
                 omissions.append(
                     _omit(plan_ref, DataCategory.TASK_DESCRIPTION, "task", "not_selected")
                 )
@@ -427,10 +448,12 @@ def build_semantic_case(
             linked_subject_refs=linked if linked else (source_ref,),
             occurred_order=record.source_frontier,
             text=text,
+            over_limit=over_limit,
         )
         items.append(item)
         obligation_ids.append(item.item_id)
         if content_omitted:
+            over_limit.add(item.item_id)
             omissions.append(
                 _omit(source_ref, DataCategory.OBLIGATION_TEXT, "obligation", "not_selected")
             )
@@ -467,10 +490,12 @@ def build_semantic_case(
             linked_subject_refs=(ref,),
             occurred_order=record.source_frontier,
             text=text,
+            over_limit=over_limit,
         )
         items.append(item)
         claim_ids.append(item.item_id)
         if content_omitted:
+            over_limit.add(item.item_id)
             omissions.append(_omit(ref, DataCategory.CLAIM_TEXT, "claim", "not_selected"))
 
         if "change_observations" in sections and payload.subject_state is not None:
@@ -517,10 +542,12 @@ def build_semantic_case(
             linked_subject_refs=(ref,),
             occurred_order=record.source_frontier,
             text=text,
+            over_limit=over_limit,
         )
         items.append(item)
         decision_ids.append(item.item_id)
         if content_omitted:
+            over_limit.add(item.item_id)
             omissions.append(_omit(ref, DataCategory.DECISION_EXCERPT, "decision", "not_selected"))
 
     # --- Frozen accepted-event history ---
@@ -552,6 +579,7 @@ def build_semantic_case(
                         "reason": "not_selected",
                     }
                 ),
+                over_limit=over_limit,
             )
             items.append(item)
             timeline_ids.append(item.item_id)
@@ -576,6 +604,7 @@ def build_semantic_case(
                 linked_subject_refs=(event_ref,) if event_ref in allowed else (),
                 occurred_order=history_item.ingestion_sequence,
                 text=text,
+                over_limit=over_limit,
             )
             items.append(item)
             timeline_ids.append(item.item_id)
@@ -589,6 +618,8 @@ def build_semantic_case(
                     )
                 )
             elif not detailed_history or content_omitted:
+                if content_omitted:
+                    over_limit.add(item.item_id)
                 omissions.append(_omit(event_ref, content_category, source_kind, "not_selected"))
 
     if (
@@ -761,6 +792,7 @@ def build_semantic_case(
                 linked_subject_refs=linked,
                 occurred_order=order,
                 text=_structural_json(body),
+                over_limit=over_limit,
             )
             items.append(item)
             timeline_ids.append(item.item_id)
@@ -790,6 +822,7 @@ def build_semantic_case(
                             linked_subject_refs=linked,
                             occurred_order=finding.subject_frontier.sequence,
                             text=finding.summary,
+                            over_limit=over_limit,
                         )
                     )
                     items.append(
@@ -802,6 +835,7 @@ def build_semantic_case(
                             linked_subject_refs=linked,
                             occurred_order=finding.subject_frontier.sequence,
                             text=finding.detail,
+                            over_limit=over_limit,
                         )
                     )
             projected = project_review_assessment(
@@ -928,7 +962,8 @@ def build_semantic_case(
                 )
                 continue
             encoded = text.encode("utf-8")
-            if len(encoded) > selection.max_excerpt_bytes:
+            excerpt_truncated = len(encoded) > selection.max_excerpt_bytes
+            if excerpt_truncated:
                 text = encoded[: selection.max_excerpt_bytes].decode("utf-8", errors="ignore")
                 encoded = text.encode("utf-8")
             if excerpt_bytes_used + len(encoded) > selection.max_total_excerpt_bytes:
@@ -960,6 +995,10 @@ def build_semantic_case(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                 )
                 continue
+            # Clipping at the selection policy's excerpt bound is the author's declared choice
+            # (the packet metadata carries max_excerpt_bytes); only _content_item's item bound
+            # records the over-item-limit gap. A custom policy narrower than the item bound
+            # must not read as a size failure.
             item_id = f"excerpt-{ref}"
             item = _content_item(
                 item_id=item_id,
@@ -970,6 +1009,7 @@ def build_semantic_case(
                 linked_subject_refs=linked,
                 occurred_order=record.source_frontier,
                 text=text,
+                over_limit=over_limit,
             )
             items.append(item)
             targeted.append(
@@ -1005,7 +1045,8 @@ def build_semantic_case(
                     )
                     continue
                 encoded = command.encode("utf-8")
-                if len(encoded) > selection.max_excerpt_bytes:
+                command_truncated = len(encoded) > selection.max_excerpt_bytes
+                if command_truncated:
                     command = encoded[: selection.max_excerpt_bytes].decode(
                         "utf-8", errors="ignore"
                     )
@@ -1026,6 +1067,7 @@ def build_semantic_case(
                     linked_subject_refs=linked,
                     occurred_order=record.source_frontier,
                     text=command,
+                    over_limit=over_limit,
                 )
                 items.append(item)
                 targeted.append(
@@ -1060,7 +1102,8 @@ def build_semantic_case(
                     )
                     continue
                 encoded = summary.encode("utf-8")
-                if len(encoded) > selection.max_excerpt_bytes:
+                summary_truncated = len(encoded) > selection.max_excerpt_bytes
+                if summary_truncated:
                     summary = encoded[: selection.max_excerpt_bytes].decode(
                         "utf-8", errors="ignore"
                     )
@@ -1087,6 +1130,7 @@ def build_semantic_case(
                     linked_subject_refs=linked,
                     occurred_order=record.source_frontier,
                     text=summary,
+                    over_limit=over_limit,
                 )
                 items.append(item)
                 targeted.append(
@@ -1198,11 +1242,29 @@ def build_semantic_case(
             linked_subject_refs=(),
             occurred_order=frozen_case.frontier.sequence,
             text=_structural_json(body),
+            over_limit=over_limit,
         )
         items = [item]
         timeline_ids = [item.item_id]
 
     coverage = case_coverage(frozen_case, semantic=True)
+    # Count only overflow on items the caps kept: an item dropped downstream is already disclosed
+    # as an omission, and naming it here would report a shortening the reviewer never saw.
+    if over_limit & {item.item_id for item in items}:
+        coverage = replace(
+            coverage,
+            ledger_freshness=(
+                LedgerFreshness.PARTIAL
+                if coverage.ledger_freshness is LedgerFreshness.CURRENT
+                else coverage.ledger_freshness
+            ),
+            known_gaps=tuple(
+                sorted(
+                    {*coverage.known_gaps, SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP},
+                    key=str.encode,
+                )
+            ),
+        )
     packet = ReviewPacket(
         goal_item_ids=tuple(goal_ids),
         obligation_item_ids=tuple(obligation_ids),
