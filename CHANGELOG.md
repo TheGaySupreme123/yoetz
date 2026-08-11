@@ -335,6 +335,14 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- A `correlation_id` on an agent-facing error could not be joined to any diagnostic record, which
+  is the one job it has. Deterministic public failures (`INVALID_REQUEST`, `OPERATION_PENDING`,
+  `VAULT_LOCKED`, and workflow failures framed as `ok:false`) minted an id straight into the wire
+  envelope and wrote nothing to either sink, so a maintainer handed one from a transcript found
+  zero records and had to collate timestamps instead. Every boundary that mints a public id now
+  writes the durable ring record under that same id at mint time, and a boundary already holding
+  an id another sink recorded reuses it, so one failure resolves to exactly one id via
+  `yoetz service diagnostics --correlation-id err_…` (issue #191).
 - A provider credential was stored without ever being tried, so a wrong or expired API key looked
   identical to a working one until a check failed much later with a reason that could not name
   authentication. Setting a credential now dispatches one minimal authenticated request — a fixed

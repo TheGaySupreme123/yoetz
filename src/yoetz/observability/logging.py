@@ -31,6 +31,7 @@ __all__ = [
     "record_bounded_counts_without_raising",
     "record_bounded_event_without_raising",
     "record_fatal_exception_without_raising",
+    "record_public_error_without_raising",
     "record_unexpected_exception_without_raising",
 ]
 
@@ -478,13 +479,63 @@ def record_bounded_event_without_raising(
     outcome resolvable when harnesses swallow process stderr.
     """
 
+    return _record_bounded_without_raising(
+        component=component,
+        operation=operation,
+        reason=reason,
+        outcome="not_dispatched",
+        request_id=request_id,
+    )
+
+
+def record_public_error_without_raising(
+    *,
+    component: str,
+    operation: str,
+    reason: str,
+    request_id: str | None = None,
+) -> str:
+    """Mint the correlation id a public error will carry, and make that exact id resolvable.
+
+    A correlation id is only worth printing if whoever is handed one can find the failure behind
+    it. Boundaries that minted an id straight into a wire envelope wrote no sink record at all, so
+    every such id resolved to nothing: the 2026-08-10 dogfood surfaced four agent-facing ids that
+    appear zero times in either sink, and the underlying failure was findable only by collating
+    timestamps against ``request_id``.
+
+    This serves the deterministic public failures — invalid request, pending operation, locked
+    vault — that state something true, never raise an unexpected exception, and so never reach
+    ``record_unexpected_exception_without_raising``. A boundary that already holds an id another
+    sink recorded must reuse that id and must not call this: two ids for one failure is the same
+    defect in a different shape.
+    """
+
+    return _record_bounded_without_raising(
+        component=component,
+        operation=operation,
+        reason=reason,
+        outcome="public_error",
+        request_id=request_id,
+    )
+
+
+def _record_bounded_without_raising(
+    *,
+    component: str,
+    operation: str,
+    reason: str,
+    outcome: str,
+    request_id: str | None,
+) -> str:
+    """Mint one correlation id and write it to both sinks. Never raises to callers."""
+
     correlation_id = _new_correlation()
     try:
         get_logger(component).warning(
             operation,
             correlation_id=correlation_id,
             request_id=request_id,
-            outcome="not_dispatched",
+            outcome=outcome,
             reason=reason,
         )
     except BaseException:
