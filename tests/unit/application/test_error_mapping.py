@@ -117,7 +117,7 @@ _MODULE_CODE_INVENTORY: dict[str, frozenset[PublicErrorCode]] = {
     ),
     "check.py": frozenset(
         {
-            PublicErrorCode.INVALID_REQUEST,
+            PublicErrorCode.INTERNAL_ERROR,
             PublicErrorCode.OPERATION_PENDING,
             PublicErrorCode.SESSION_CONFLICT,
             PublicErrorCode.STORAGE_CORRUPT,
@@ -220,11 +220,11 @@ def test_known_failure_families_map_to_expected_public_codes() -> None:
     assert exit_code_for("success") == 0
     assert exit_code_for("cancelled") == 130
 
-    # Each six-operation module raises only codes drawn from validation/frontier/storage; a
-    # provider or cancellation code appearing here would mean a module invented a new mapping
+    # Each six-operation module raises only codes drawn from validation/frontier/storage/fallback;
+    # a provider or cancellation code appearing here would mean a module invented a new mapping
     # instead of degrading gracefully (semantic failure folds into ``incomplete_check`` and never
     # becomes a public error; cancellation propagates as ``asyncio.CancelledError``, not a code).
-    allowed = _VALIDATION_CODES | _FRONTIER_CODES | _STORAGE_CODES
+    allowed = _VALIDATION_CODES | _FRONTIER_CODES | _STORAGE_CODES | _FALLBACK_CODES
     for name, expected_codes in _MODULE_CODE_INVENTORY.items():
         actual_codes = _referenced_codes(_application_source(name))
         assert actual_codes == expected_codes, name

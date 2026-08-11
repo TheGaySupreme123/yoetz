@@ -46,11 +46,17 @@ from yoetz.domain.values import Frontier, session_id
 from yoetz.ports.control import ControlClientKind, ControlMethod
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
-from yoetz.ports.ledger import CheckCommitResult, CheckPhase, OperationLease
+from yoetz.ports.ledger import (
+    CheckCommitResult,
+    CheckPhase,
+    OperationLease,
+    OperationState,
+)
 from yoetz.ports.objects import ObjectKind, ObjectRef
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
     FrontierModel,
@@ -311,9 +317,22 @@ async def test_full_workflow_uses_one_final_client_projection(
         return await advance(lease, expected_phase, next_phase, durable_object_ref)
 
     monkeypatch.setattr(ledger, "advance_check_phase", crash_after_deterministic_result)
-    with pytest.raises(RuntimeError, match="simulated_post_deterministic_publish_crash"):
+    with pytest.raises(PublicOperationError) as first_failure:
         await app.check(check_request)
-    clock.advance(61)
+    assert first_failure.value.code is PublicErrorCode.INTERNAL_ERROR
+    failed_operation = await ledger.lookup_operation(started.writer_id, check_request.request_id)
+    assert failed_operation is not None
+    assert failed_operation.state is OperationState.COMPLETE
+    assert failed_operation.phase is CheckPhase.TERMINAL
+    with pytest.raises(PublicOperationError) as exact_replay:
+        await app.check(check_request)
+    assert exact_replay.value.code is PublicErrorCode.INTERNAL_ERROR
+
+    recovery_wire = {
+        **first_check_wire,
+        "request_id": protocol_id("req_", 822),
+    }
+    recovery_request = CheckRequest.model_validate(recovery_wire)
 
     crash_after_local_ready = True
 
@@ -331,11 +350,14 @@ async def test_full_workflow_uses_one_final_client_projection(
         return replacement
 
     monkeypatch.setattr(ledger, "advance_check_phase", crash_before_finalization)
-    with pytest.raises(RuntimeError, match="simulated_post_local_ready_crash"):
-        await app.check(check_request)
+    with pytest.raises(PublicOperationError) as second_failure:
+        await app.check(recovery_request)
+    assert second_failure.value.code is PublicErrorCode.INTERNAL_ERROR
     deterministic_refs = objects.refs_for_kind(ObjectKind.DETERMINISTIC_RESULT)
     assert len(deterministic_refs) == 2
-    durable_operation = await ledger.lookup_operation(started.writer_id, check_request.request_id)
+    durable_operation = await ledger.lookup_operation(
+        started.writer_id, recovery_request.request_id
+    )
     assert durable_operation is not None
     assert durable_operation.phase is CheckPhase.LOCAL_READY
     assert durable_operation.resume_object_ref == deterministic_refs[-1]
@@ -343,7 +365,7 @@ async def test_full_workflow_uses_one_final_client_projection(
     clock.advance(61)
     monkeypatch.setattr(ledger, "advance_check_phase", advance)
 
-    checked = await app.check(check_request)
+    checked = await app.check(recovery_request)
     assert type(checked) is CheckCommitResult, f"unexpected nonterminal check: {type(checked)}"
     assert checked.findings
     assert len(objects.refs_for_kind(ObjectKind.DETERMINISTIC_RESULT)) == 2
@@ -447,4 +469,4 @@ async def test_full_workflow_uses_one_final_client_projection(
     assert responded.subject_frontier == checked.result_frontier
     assert rechecked.subject_frontier == responded.result_frontier
     assert receipt.subject_frontier == rechecked.result_frontier
-    assert runtime.release_count == 9
+    assert runtime.release_count == 10
