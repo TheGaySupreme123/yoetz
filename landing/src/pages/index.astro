@@ -2,8 +2,22 @@
 import "../styles/tokens.css";
 import "../styles/landing.css";
 
-const GITHUB = "https://github.com/yoetz/yoetz-core";
-const INSTALL_COMMAND = "uvx yoetz";
+const SITE = "https://yoetz.dev";
+const GITHUB = "https://github.com/TheGaySupreme123/yoetz";
+const INSTALL_COMMAND = 'uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"';
+const TITLE = "Yoetz — Honest completion checks for AI coding agents";
+const DESCRIPTION =
+  "Yoetz is a local-first, open-source work ledger that helps AI coding agents record obligations, check completion claims, and produce coverage-bounded receipts.";
+const structuredData = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  name: "Yoetz",
+  description: DESCRIPTION,
+  url: SITE,
+  codeRepository: GITHUB,
+  programmingLanguage: "Python",
+  license: "https://www.apache.org/licenses/LICENSE-2.0",
+};
 
 // Terminal transcript — colors match the design-system terminal palette.
 const faint = "#64748b";
@@ -45,10 +59,10 @@ const termLines: TermLine[] = [
   { d: 140 },
   { pre: "•", preC: faint, rest: "Fair catch — fixing, then re-running.", restC: soft, d: 420 },
   { pre: "⚡", preC: amber, rest: "Restored /limits shape · Ran pytest — 43 passed", restC: dim, d: 550 },
-  { pre: "⚙", preC: teal, op: "yoetz", rest: "respond · check — clean", restC: dim, d: 380 },
+  { pre: "⚙", preC: teal, op: "yoetz", rest: "respond · check — no deterministic issue detected", restC: dim, d: 380 },
   { pre: "⚙", preC: teal, op: "yoetz", rest: "receipt — deterministic · local-only · 0 unresolved", restC: glow, d: 550 },
   { d: 140 },
-  { pre: "▸", preC: teal, rest: "Done — rate limiter refactored, receipt attached.", restC: bright, d: 300 },
+  { pre: "▸", preC: teal, rest: "Done — rate limiter refactored; receipt shows the checked coverage.", restC: bright, d: 300 },
 ];
 
 type HowStep = {
@@ -69,15 +83,15 @@ const howSteps: HowStep[] = [
   { who: "YOETZ", yoetz: true, bad: true, text: "Not yet: those tests ran before your last edit — and /limits was never checked." },
   { who: "YOUR AGENT", glyph: "⚡", text: "Re-runs pytest — 42 passed, 1 failed. The /limits shape did break." },
   { who: "YOUR AGENT", glyph: "⚡", text: "Restores the /limits shape, runs pytest again — 43 passed." },
-  { who: "YOETZ", yoetz: true, text: "Both promises verified against fresh evidence. Clean." },
+  { who: "YOETZ", yoetz: true, text: "No deterministic issue detected in the current record; no obligations remain open." },
   { who: "YOETZ", yoetz: true, text: "Receipt attached — what was promised, done, and checked." },
-  { who: "YOU", glyph: "✓", good: true, text: "Get a “done” you can trust." },
+  { who: "YOU", glyph: "✓", good: true, text: "Get an honest, coverage-bounded account of “done”." },
 ];
 
 const roadmap = [
-  { name: "Codex", img: "https://github.com/openai.png?size=96", badge: "now", badgeClass: "ds-badge-running", nodeClass: "now" },
-  { name: "Claude Code", img: "https://github.com/anthropics.png?size=96", badge: "next", badgeClass: "ds-badge-next", nodeClass: "" },
-  { name: "Cursor", img: "https://github.com/getcursor.png?size=96", badge: "later", badgeClass: "ds-badge-later", nodeClass: "" },
+  { name: "Codex", mark: "CX", badge: "available · untested", badgeClass: "ds-badge-running", nodeClass: "now" },
+  { name: "Claude Code", mark: "CL", badge: "next", badgeClass: "ds-badge-next", nodeClass: "" },
+  { name: "Cursor", mark: "CR", badge: "later", badgeClass: "ds-badge-later", nodeClass: "" },
 ];
 const roadLinks = ["hot", "warm", ""];
 ---
@@ -86,18 +100,22 @@ const roadLinks = ["hot", "warm", ""];
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Yoetz — Make sure agents did what they said</title>
-    <meta
-      name="description"
-      content="A local, open-source ledger your agent works against — and an independent check on every claim of done."
-    />
+    <title>{TITLE}</title>
+    <meta name="description" content={DESCRIPTION} />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <link rel="canonical" href={`${SITE}/`} />
     <link rel="icon" href="/assets/yoetz-icon.svg" type="image/svg+xml" />
-    <meta property="og:title" content="Yoetz — Make sure agents did what they said" />
-    <meta
-      property="og:description"
-      content="A local, open-source ledger your agent works against — and an independent check on every claim of done."
-    />
+    <meta name="theme-color" content="#0f172a" />
+    <meta property="og:title" content={TITLE} />
+    <meta property="og:description" content={DESCRIPTION} />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content={`${SITE}/`} />
+    <meta property="og:site_name" content="Yoetz" />
+    <meta property="og:locale" content="en_US" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content={TITLE} />
+    <meta name="twitter:description" content={DESCRIPTION} />
+    <script type="application/ld+json" set:html={JSON.stringify(structuredData)}></script>
     <noscript>
       <style>
         .how-step { opacity: 1; transform: none; }
@@ -129,7 +147,8 @@ const roadLinks = ["hot", "warm", ""];
           </p>
           <div class="ds-hero-ctas">
             <button class="ds-btn copy-btn" id="copy-install" type="button" data-command={INSTALL_COMMAND}>
-              <span class="prompt">$</span> {INSTALL_COMMAND}
+              <span class="prompt">$</span>
+              <span class="install-command">{INSTALL_COMMAND}</span>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
               <span class="copy-note" id="copy-note"></span>
             </button>
@@ -138,7 +157,7 @@ const roadLinks = ["hot", "warm", ""];
               View on GitHub
             </a>
           </div>
-          <p class="ds-meta-mono" style="margin: 22px 0 0;">Now in Codex · early alpha · no cloud, runs locally</p>
+          <p class="ds-meta-mono" style="margin: 22px 0 0;">Pre-release · Codex integration available but untested · runs locally</p>
         </div>
 
         <!-- Mock terminal -->
@@ -179,14 +198,14 @@ const roadLinks = ["hot", "warm", ""];
       <div class="ds-cta-glow"></div>
       <div class="ds-cta-inner">
         <span class="ds-kicker ds-kicker-on-dark">Quickstart</span>
-        <h2 class="ds-h2 ds-on-dark">Wired into Codex in two minutes</h2>
+        <h2 class="ds-h2 ds-on-dark">Install Yoetz and connect it to Codex</h2>
 
         <div class="qs-steps">
           <div class="qs-step">
             <span class="qs-num">1</span>
             <div class="qs-body">
               <div class="qs-code"><span class="prompt">$</span> {INSTALL_COMMAND}</div>
-              <p class="qs-note">Detects Codex, registers the MCP server, installs the skill. Nothing leaves your machine.</p>
+              <p class="qs-note">The supported Python install path. Run <code>yoetz</code> afterward for guided, approval-based setup.</p>
             </div>
           </div>
 
@@ -197,9 +216,9 @@ const roadLinks = ["hot", "warm", ""];
                 <div class="comment"># ~/.codex/config.toml</div>
                 <div><span class="section">[mcp_servers.yoetz]</span></div>
                 <div>command = <span class="string">"yoetz"</span></div>
-                <div>args = [<span class="string">"mcp"</span>]</div>
+                <div>args = [<span class="string">"mcp"</span>, <span class="string">"serve"</span>]</div>
               </div>
-              <p class="qs-note">The whole integration. Remove the block to uninstall.</p>
+              <p class="qs-note">The MCP connection used by Codex. The setup flow previews the exact change before applying it.</p>
             </div>
           </div>
 
@@ -256,14 +275,14 @@ const roadLinks = ["hot", "warm", ""];
       <div class="ds-section-head">
         <span class="ds-kicker">Harnesses</span>
         <h2 class="ds-h2">An open MCP protocol from day one</h2>
-        <p class="ds-lead">Any MCP host can plug in today — Codex is the first harness with a first-party integration.</p>
+        <p class="ds-lead">Any MCP host can connect through the open protocol. Codex has the first-party integration, with tested-version evidence still pending.</p>
       </div>
       <div class="road">
         {roadmap.map((h, i) => (
           <>
             <div class={`road-node ${h.nodeClass}`}>
               <div class="road-circle">
-                <img src={h.img} alt={h.name} loading="lazy" />
+                <span class="road-monogram" aria-hidden="true">{h.mark}</span>
               </div>
               <div class="road-name">{h.name}</div>
               <span class={`ds-badge ${h.badgeClass}`}>{h.badge}</span>
@@ -282,7 +301,7 @@ const roadLinks = ["hot", "warm", ""];
     <!-- Footer -->
     <footer class="ds-footer">
       <p class="ds-footer-note">
-        v0.1 public alpha. Zero network egress by default; semantic review is opt-in, BYO endpoint.
+        v0.1 pre-release. Zero external LLM egress by default; semantic review is opt-in and policy-controlled.
       </p>
       <div class="ds-footer-inner">
         <div class="ds-footer-brand">

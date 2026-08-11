@@ -68,6 +68,7 @@ img { max-width: 100%; }
 .copy-btn { background: var(--slate-950); color: #f8fafc; font-family: var(--font-mono); font-size: 14px; gap: 12px; }
 .copy-btn:hover { background: var(--slate-800); }
 .copy-btn .prompt { color: #5eead4; }
+.copy-btn .install-command { min-width: 0; overflow-wrap: anywhere; }
 .copy-btn svg { opacity: 0.6; }
 .copy-note { font-family: var(--font-sans); font-size: 12px; color: var(--brand-teal-400); font-weight: 500; min-width: 44px; text-align: left; }
 
@@ -193,7 +194,8 @@ img { max-width: 100%; }
   display: flex; align-items: center; justify-content: center;
 }
 .road-node.now .road-circle { border: 2px solid var(--brand-teal-500); box-shadow: var(--shadow-teal-glow); }
-.road-circle img { width: 38px; height: 38px; border-radius: 50%; }
+.road-monogram { font-family: var(--font-mono); font-size: 14px; font-weight: 700; letter-spacing: 0.08em; color: var(--slate-600); }
+.road-node.now .road-monogram { color: var(--brand-teal-700); }
 .road-circle.open { border: 2px dashed var(--slate-300); color: var(--slate-400); font-size: 24px; box-shadow: none; }
 .road-name { font-size: 15px; font-weight: 600; color: var(--slate-900); }
 .road-node.now .road-name { color: var(--slate-950); }
@@ -231,6 +233,16 @@ img { max-width: 100%; }
   .road-link.hot { border-left-color: var(--brand-teal-400); }
   .road-link.warm { border-left-color: var(--slate-300); }
   .ds-cta-dark, .ds-section, .roadmap { padding: 72px 20px; }
+}
+
+@media (max-width: 520px) {
+  .ds-hero-ctas { flex-direction: column; align-items: stretch; }
+  .copy-btn {
+    width: 100%; height: auto; min-height: 44px; justify-content: flex-start;
+    padding: 12px 14px; font-size: 12px; line-height: 1.45; text-align: left;
+  }
+  .copy-btn .install-command { flex: 1; }
+  .copy-note { min-width: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
