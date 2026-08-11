@@ -9,6 +9,7 @@ from yoetz.application.check import (
     CheckScope,
     FinalSemanticEvaluation,
     allocate_findings,
+    carried_semantic_attempt_gaps,
     case_coverage,
     run_deterministic_policies,
 )
@@ -17,8 +18,14 @@ from yoetz.domain.findings import CheckVerdict
 from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
+    OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+    SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
+    SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
+    SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
+from yoetz.domain.values import EventId
 from yoetz.kernel.deterministic_checks import CaseGap, DeterministicCase
+from yoetz.kernel.projections import LatestTestedState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import SemanticReason, SemanticStatus
@@ -191,3 +198,135 @@ def test_completion_scope_gaps_dominate_an_actionable_finding(
     assert coverage.known_gaps == (gap_code,)
     assert ranked.findings
     assert ranked.verdict is CheckVerdict.INSUFFICIENT_COVERAGE
+
+
+def _case_after_check(*gaps: str) -> DeterministicCase:
+    """A case whose latest recorded check carried ``gaps`` in its own coverage."""
+
+    case = _unsupported_claim_case()
+    tested = LatestTestedState(
+        source_check_event_id=EventId("evt_30000000-0000-4000-8000-000000000001"),
+        subject_frontier=case.frontier,
+        verdict=CheckVerdict.NO_ISSUE_DETECTED,
+        returned_finding_ids=(),
+        suppressed_count=0,
+        coverage=replace(BASE_COVERAGE, known_gaps=tuple(sorted(gaps, key=str.encode))),
+    )
+    return replace(case, projection=replace(case.projection, latest_tested_state=tested))
+
+
+def test_deterministic_fallback_carries_a_blocked_semantic_attempt_forward() -> None:
+    """A blocked review stays disclosed after the stop-rule deterministic re-check (issue #185).
+
+    A host or policy gate that refuses a semantic check is a coverage gap, not a retry problem, so
+    the agent re-checks with ``deterministic_only``. That successor replaces
+    ``latest_tested_state`` wholesale, leaving ``semantic_review_not_requested`` as the receipt's
+    only account — which blames the agent for never asking, when the environment refused.
+    """
+
+    carried = carried_semantic_attempt_gaps(
+        _case_after_check(OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP),
+        SemanticStatus.NOT_REQUESTED,
+    )
+
+    assert carried == {OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP}
+
+
+@pytest.mark.parametrize(
+    "gap",
+    (SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP, SEMANTIC_REVIEW_NOT_CONFIGURED_GAP),
+)
+def test_every_environment_attributed_semantic_gap_carries_forward(gap: str) -> None:
+    assert carried_semantic_attempt_gaps(_case_after_check(gap), SemanticStatus.NOT_REQUESTED) == {
+        gap
+    }
+
+
+def test_a_prior_check_that_also_did_not_request_review_carries_nothing() -> None:
+    """``semantic_review_not_requested`` is the label being disambiguated, never inherited."""
+
+    assert (
+        carried_semantic_attempt_gaps(
+            _case_after_check(SEMANTIC_REVIEW_NOT_REQUESTED_GAP),
+            SemanticStatus.NOT_REQUESTED,
+        )
+        == set()
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    (
+        (SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED),
+        (SemanticStatus.BLOCKED_BY_POLICY, SemanticReason.SCOPE_NOT_AUTHORIZED),
+    ),
+)
+def test_a_check_that_made_its_own_attempt_states_only_its_own_outcome(
+    status: SemanticStatus, reason: SemanticReason
+) -> None:
+    """Inheritance is for checks with nothing of their own to say; ``reason`` fixes the pair."""
+
+    assert reason is not None
+    assert (
+        carried_semantic_attempt_gaps(
+            _case_after_check(OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP), status
+        )
+        == set()
+    )
+
+
+def test_a_task_with_no_recorded_check_carries_nothing() -> None:
+    assert (
+        carried_semantic_attempt_gaps(_unsupported_claim_case(), SemanticStatus.NOT_REQUESTED)
+        == set()
+    )
+
+
+def test_judgment_rejection_preserves_the_truncation_disclosure() -> None:
+    """Restating a rejected judgment must not reset ``case_content_over_item_limit``.
+
+    The rejection restates the *outcome* of the same attempt; the case the reviewer judged
+    stays the case that was truncated, so the disclosure must survive the restatement.
+    """
+
+    from yoetz.application.check import (
+        _judgment_rejected_evaluation,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.domain.findings import SamplingParams, SemanticDispatchKind, SemanticProvenance
+    from yoetz.ports.semantic import SemanticJudgment
+
+    digest = "sha256:" + "a" * 64
+    succeeded = FinalSemanticEvaluation(
+        SemanticStatus.SUCCEEDED,
+        SemanticReason.SEMANTIC_COMPLETED,
+        judgment=SemanticJudgment("no_material_discrepancy", ()),
+        provenance=SemanticProvenance(
+            provider="fake",
+            endpoint_profile_id="fake",
+            endpoint_profile_version="1.0.0",
+            model="fake/model",
+            sdk_version="1.0.0",
+            prompt_digest=digest,
+            schema_digest=digest,
+            policy_digest=digest,
+            privacy_policy_digest=digest,
+            sampling_params=SamplingParams(128),
+            latency_ms=1,
+            semantic_attempt_id="att_20000000-0000-4000-8000-000000000001",
+            dispatch_kind=SemanticDispatchKind.EXTERNAL,
+            privacy_receipt_id="egr_20000000-0000-4000-8000-000000000001",
+            status=SemanticStatus.SUCCEEDED,
+            reason=SemanticReason.SEMANTIC_COMPLETED,
+            provider_request_id="fake-1",
+            egress_authorization_id="aut_20000000-0000-4000-8000-000000000001",
+            request_commitment="hmac-sha256:" + "b" * 64,
+        ),
+        withheld_review_categories=("obligation_text",),
+        case_content_over_item_limit=True,
+    )
+
+    rejected = _judgment_rejected_evaluation(succeeded)
+
+    assert rejected.status is SemanticStatus.INVALID
+    assert rejected.case_content_over_item_limit is True
+    assert rejected.withheld_review_categories == ("obligation_text",)

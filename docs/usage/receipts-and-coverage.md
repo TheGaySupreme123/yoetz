@@ -62,6 +62,17 @@ reads `no_issue_detected`.
 Prefer `semantic_if_configured` for material claims. Reserve `deterministic_only` for genuinely
 structural checks, and disclose the limitation when you use it.
 
+When you fall back to `deterministic_only` because a semantic attempt was blocked or unavailable,
+that earlier gap is carried forward next to `semantic_review_not_requested`, so the receipt records
+that the environment refused rather than that the review was never asked for.
+
+## Prose the reviewer will not see whole
+
+Publish accepts up to 8192 bytes of prose per field. One semantic case item carries at most 4096
+bytes. Text between those bounds records cleanly and then reaches the reviewer shortened — or, for
+a whole event payload, replaced by a marker carrying only its digest. Coverage names this with
+`semantic_case_content_over_item_limit`. Keep prose you expect a reviewer to read under 4096 bytes.
+
 ## Completion scope is declared, not inferred
 
 Yoetz reads completion scope only from the effective plan chain. It never invents obligations from
