@@ -2030,7 +2030,13 @@ def _privacy_gated_semantic_evaluator(
                     provider_binding=provider,
                 )
                 result = await privacy.evaluate_semantic(candidate, deadline)
-                return _map_egress_to_final(result, ids)
+                # The mapper knows only the egress outcome; the truncation happened while
+                # composing the case, so it must be restated here or the probe path presents
+                # a shortened case as complete.
+                return replace(
+                    _map_egress_to_final(result, ids),
+                    case_content_over_item_limit=over_item_limit,
+                )
 
             # Build the packet before anything durable exists. A packet that cannot be built is a
             # property of the case, not a transient fault, so it must not consume a job or an

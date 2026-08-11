@@ -443,6 +443,11 @@ def carried_semantic_attempt_gaps(case: DeterministicCase, status: SemanticStatu
     surviving disclosure is ``semantic_review_not_requested`` -- which attributes the missing
     review to the agent not asking, when the environment refused (issue #185). Carrying the
     earlier gap forward keeps the receipt's account of *why* there is no semantic review.
+
+    The carry is task-level, not scope-bound: ``LatestTestedState`` records no scope, and the
+    successor replaces it wholesale whatever its scope, so a gap from a differently-scoped
+    attempt is inherited too. That errs toward disclosing a refusal the task did experience,
+    never toward claiming coverage.
     """
 
     # Only a check that did not itself request review can inherit; an attempt of its own already
@@ -1221,9 +1226,11 @@ def _judgment_rejected_evaluation(
             status=SemanticStatus.INVALID,
             reason=SemanticReason.SEMANTIC_JUDGMENT_REJECTED,
         ),
-        result.attempt_accounting,
-        result.operation_lease,
-        result.withheld_review_categories,
+        attempt_accounting=result.attempt_accounting,
+        operation_lease=result.operation_lease,
+        withheld_review_categories=result.withheld_review_categories,
+        # The rejection restates the outcome, not the case: a truncated case stays truncated.
+        case_content_over_item_limit=result.case_content_over_item_limit,
     )
 
 

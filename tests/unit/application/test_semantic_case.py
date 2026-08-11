@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import cast
 
 import pytest
@@ -711,6 +712,36 @@ def test_prose_that_publishes_but_cannot_be_carried_whole_is_named_in_coverage()
     excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
     assert excerpt.content_bytes == MAX_REVIEW_TEXT_BYTES
     assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP in semantic.packet.coverage.known_gaps
+
+
+def test_narrow_custom_excerpt_bound_is_selection_not_a_size_gap() -> None:
+    """Clipping at a custom ``max_excerpt_bytes`` below the item bound raises no size gap.
+
+    The excerpt bound is the selection policy's declared choice — the packet metadata carries
+    ``max_excerpt_bytes`` — so a reviewer can already attribute the shortening. Only the
+    per-item case bound (``MAX_REVIEW_TEXT_BYTES``) names a size drop the selection accepted.
+    """
+
+    body = "e" * 1_000
+    narrow = replace(
+        ReviewSelectionPolicy.for_profile(ReviewContextProfile.ASSISTED),
+        max_excerpt_bytes=512,
+    )
+    case = _case_with_long_evidence(body)
+    semantic = build_semantic_case(
+        case_id="cas_10000000-0000-4000-8000-000000000001",
+        frozen_case=case,
+        dependency_digest="sha256:" + "b" * 64,
+        findings=_findings_for(case),
+        review_context_profile=ReviewContextProfile.ASSISTED,
+        review_selection=narrow,
+        policy_id="pvy_10000000-0000-4000-8000-000000000001",
+        policy_version="1",
+    )
+
+    excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
+    assert excerpt.content_bytes == 512
+    assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP not in semantic.packet.coverage.known_gaps
 
 
 def test_prose_within_the_case_item_bound_raises_no_over_limit_gap() -> None:

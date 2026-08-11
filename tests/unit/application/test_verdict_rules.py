@@ -280,3 +280,53 @@ def test_a_task_with_no_recorded_check_carries_nothing() -> None:
         carried_semantic_attempt_gaps(_unsupported_claim_case(), SemanticStatus.NOT_REQUESTED)
         == set()
     )
+
+
+def test_judgment_rejection_preserves_the_truncation_disclosure() -> None:
+    """Restating a rejected judgment must not reset ``case_content_over_item_limit``.
+
+    The rejection restates the *outcome* of the same attempt; the case the reviewer judged
+    stays the case that was truncated, so the disclosure must survive the restatement.
+    """
+
+    from yoetz.application.check import (
+        _judgment_rejected_evaluation,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.domain.findings import SamplingParams, SemanticDispatchKind, SemanticProvenance
+    from yoetz.ports.semantic import SemanticJudgment
+
+    digest = "sha256:" + "a" * 64
+    succeeded = FinalSemanticEvaluation(
+        SemanticStatus.SUCCEEDED,
+        SemanticReason.SEMANTIC_COMPLETED,
+        judgment=SemanticJudgment("no_material_discrepancy", ()),
+        provenance=SemanticProvenance(
+            provider="fake",
+            endpoint_profile_id="fake",
+            endpoint_profile_version="1.0.0",
+            model="fake/model",
+            sdk_version="1.0.0",
+            prompt_digest=digest,
+            schema_digest=digest,
+            policy_digest=digest,
+            privacy_policy_digest=digest,
+            sampling_params=SamplingParams(128),
+            latency_ms=1,
+            semantic_attempt_id="att_20000000-0000-4000-8000-000000000001",
+            dispatch_kind=SemanticDispatchKind.EXTERNAL,
+            privacy_receipt_id="egr_20000000-0000-4000-8000-000000000001",
+            status=SemanticStatus.SUCCEEDED,
+            reason=SemanticReason.SEMANTIC_COMPLETED,
+            provider_request_id="fake-1",
+            egress_authorization_id="aut_20000000-0000-4000-8000-000000000001",
+            request_commitment="hmac-sha256:" + "b" * 64,
+        ),
+        withheld_review_categories=("obligation_text",),
+        case_content_over_item_limit=True,
+    )
+
+    rejected = _judgment_rejected_evaluation(succeeded)
+
+    assert rejected.status is SemanticStatus.INVALID
+    assert rejected.case_content_over_item_limit is True
+    assert rejected.withheld_review_categories == ("obligation_text",)

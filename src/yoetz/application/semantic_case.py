@@ -995,9 +995,11 @@ def build_semantic_case(
                     _omit(ref, DataCategory.EVIDENCE_EXCERPT, excerpt_kind, "not_selected")
                 )
                 continue
+            # Clipping at the selection policy's excerpt bound is the author's declared choice
+            # (the packet metadata carries max_excerpt_bytes); only _content_item's item bound
+            # records the over-item-limit gap. A custom policy narrower than the item bound
+            # must not read as a size failure.
             item_id = f"excerpt-{ref}"
-            if excerpt_truncated:
-                over_limit.add(item_id)
             item = _content_item(
                 item_id=item_id,
                 section="excerpt",
@@ -1056,8 +1058,6 @@ def build_semantic_case(
                 if not linked:
                     continue
                 item_id = f"excerpt-cmd-{ref}"
-                if command_truncated:
-                    over_limit.add(item_id)
                 item = _content_item(
                     item_id=item_id,
                     section="excerpt",
@@ -1121,8 +1121,6 @@ def build_semantic_case(
                 if not linked:
                     continue
                 item_id = f"excerpt-fail-{ref}"
-                if summary_truncated:
-                    over_limit.add(item_id)
                 item = _content_item(
                     item_id=item_id,
                     section="excerpt",

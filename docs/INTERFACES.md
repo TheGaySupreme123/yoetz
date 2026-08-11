@@ -671,7 +671,7 @@ the readable effective current plan declares zero obligations, exactly one appli
 Both force `coverage_incomplete`, `insufficient_coverage`, and an insufficient-coverage receipt.
 The typed declaration records the participant's scope decision but never purchases a clean verdict.
 
-Two further codes describe a review that did run but could not deliver everything it produced:
+Three further codes describe a review that did run but could not deliver everything it produced:
 
 - `semantic_review_context_withheld` — the review ran without categories its own profile selected;
 - `semantic_challenges_rejected` — the reviewer returned challenges and post-validation dropped at
