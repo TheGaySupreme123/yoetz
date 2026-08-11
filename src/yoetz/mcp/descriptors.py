@@ -1284,9 +1284,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Omit scope for the whole case, "
         "or send both claim_ids and obligation_ids as arrays of unique ids; two empty arrays also "
         "mean the whole case, and sending only one of the two keys is rejected. Call it after "
-        "publishing the completion claim and its evidence, and again after any material edit, "
-        "new evidence, or "
-        "finding response; a check with no new events since the last one adds nothing. "
+        "publishing the completion claim and its evidence, and again after any material edit or "
+        "new evidence; a check with no new events since the last one adds nothing. "
         "awaiting_human is the one nonterminal result: its typed continuation identifies standing "
         "repository setup or a one-use decision and carries the exact command to run. Show that "
         "command, do not create a new "
@@ -1313,13 +1312,13 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "respond",
         "Respond to a finding",
         "Records an acknowledgement, rejection, or bounded waiver for one finding at the result "
-        "frontier of the check that returned it. It does not resolve other findings or establish "
-        "that underlying work changed. "
-        "No disposition clears the finding it answers: every actionable finding recorded in a task "
-        "keeps the receipt conclusion at unresolved_findings_remain, so repair the record and word "
-        "the conclusion accordingly rather than calling the finding resolved. Call it once per "
-        "finding; answering a finding that check returned is not material change and needs no "
-        "recheck. Guidance: yoetz://guidance/publication-policy.md.",
+        "frontier of the check that returned it, not its subject_frontier. It does not resolve "
+        "other findings or establish that underlying work changed. "
+        "A readable response removes that finding from the unresolved count without erasing its "
+        "historical record or closing an independent coverage gap. Call it once per finding; a "
+        "readable response identifying a finding that check returned is not material change and "
+        "needs no recheck, while a redacted or unreadable response does. Guidance: "
+        "yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -1405,8 +1404,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:b4e860ea9f16ecda346546c2ff59a3b1a0562c5f16a636e36d78b9707fd9aa26",
-                "respond": "sha256:922cd403cc504b5a91c7daa520a564d19d2bf2186992f19c125c13369e6a392a",
+                "check": "sha256:3a81f3a6d3e0f714680e221e8dc5fa90d0131629386b03d75bc55d21ab618ee1",
+                "respond": "sha256:b71f8e0a70e6740a07fafbf77bf1a94a7f452e2f8ebdfefe95dd23381d31dd17",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
             }
@@ -1415,8 +1414,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
-                "check": "sha256:a6c1f8d015f8fac98a77c997f31a923432db1e42fe2b45a5097f2d48d9b98ab9",
-                "respond": "sha256:922cd403cc504b5a91c7daa520a564d19d2bf2186992f19c125c13369e6a392a",
+                "check": "sha256:91b090140843ef3f50bbdf02a42dc78fc418b1968dca8685018698cf276f4557",
+                "respond": "sha256:b71f8e0a70e6740a07fafbf77bf1a94a7f452e2f8ebdfefe95dd23381d31dd17",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
             }
@@ -1425,8 +1424,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:e0732845b0ddf42c6ba12e4aee412caf8774285cccd8dea2e13a2b70a251cafa",
-        "strict": "sha256:6bd9cf1bdfd1f5db57800c24e06efb7fb4b4fffb7f7823757558e18640c71814",
+        "policy": "sha256:78f76e470e19dc69d5a582b8401e42154bc3f7921e76f13ab21d47e844d647dc",
+        "strict": "sha256:f5a84d4ee61ad992132565cf271d54ea538fc3cfd3028e085f2fc94c95ab57b4",
     }
 )
 

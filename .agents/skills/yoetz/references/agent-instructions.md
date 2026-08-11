@@ -17,7 +17,7 @@ Yoetz is not an enforcement system, observer, authorship proof, transcript recor
 - `start` — once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; do not start a second task and do not send bare `task_id`.
 - `publish_work` — one batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message.
 - `status` — after resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls.
-- `check` — after publishing the completion claim and its evidence, and again after any material edit or new evidence. Responding to a finding that check returned is not material change. A check with no new events since the last one adds nothing.
+- `check` — after publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response identifying a finding that check returned is not material change; a redacted or unreadable response requires a recheck. A check with no new events since the last one adds nothing.
 - `respond` — once per finding, at the result frontier of the check that returned it — not the finding's `subject_frontier`, which precedes the finding's own record.
 - `receipt` — once at the end, and again only if material state changed after the previous receipt.
 
@@ -27,13 +27,13 @@ Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, o
 
 # Before you claim done
 
-Publish the material completion claim and its current evidence, call `check`, disposition any findings, then call `receipt`. Recheck after a material change or new evidence. Responding to a finding the check itself returned is ledger hygiene, not material change, and does not require another check. Treat this as the normal publish → check → receipt loop.
+Publish the material completion claim and its current evidence, call `check`, disposition any findings, then call `receipt`. Recheck after a material change or new evidence. A readable response identifying a finding the check itself returned is ledger hygiene, not material change, and does not require another check; a redacted or unreadable response does. Treat this as the normal publish → check → receipt loop.
 
 For `check` mode: use `semantic_if_configured` for most material implementation/review claims; use `semantic_required` when the completion claim depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; use `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Omitting `mode` resolves via the configured verification policy (default optional → `semantic_if_configured`).
 
 # A recorded finding stays recorded
 
-`respond` records your disposition and links your evidence; it does not clear the finding. Every actionable finding recorded in a task keeps the receipt conclusion at `unresolved_findings_remain`, whichever disposition you record. Publish exactly the first time — an exact `attempted_items` entry for every requested item, evidence for every claim — because a finding cannot be un-fired. Repairing the record is still worth doing: it stops the next check from firing again and it shows the reader what you did.
+`respond` records your disposition and links your evidence; it does not erase the historical finding. A readable response identifying that finding removes it from the unresolved count, but does not close an independent coverage gap. Publish exactly the first time — an exact `attempted_items` entry for every requested item, evidence for every claim — because a finding cannot be un-fired. Repairing the record is still worth doing: it stops the next check from minting a duplicate and shows the reader what you did.
 
 # Semantic review runs on authority the user already gave
 
@@ -106,7 +106,8 @@ expiry, cancellation, stale authority, or an incomplete ceremony remains a no di
 
 A published completion claim is the input to a check, not the output of one. It does not license
 telling the user the work is finished. Publish the claim and its evidence, run `check`, disposition
-findings and recheck, take a `receipt`, and only then answer.
+findings, recheck only after material change or an unreadable response, take a `receipt`, and only
+then answer.
 
 # When to stop retrying
 

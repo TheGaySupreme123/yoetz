@@ -23,6 +23,7 @@ from yoetz.domain.events import (
     AcceptedEvent,
     CheckRecordedPayload,
     EventSchema,
+    FindingRecordedPayload,
     LedgerChain,
     LedgerRecord,
     PayloadRef,
@@ -33,7 +34,7 @@ from yoetz.domain.events import (
     accepted_record_to_json,
     decode_payload,
 )
-from yoetz.domain.findings import Finding, RankedFindings, SemanticProvenance
+from yoetz.domain.findings import RankedFindings, SemanticProvenance
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -645,13 +646,26 @@ class SqliteLedger:
                     )
                     if check_event is not None:
                         check_payload = cast(CheckRecordedPayload, check_event.payload)
-                        finding_payloads = tuple(
-                            item.payload
-                            for item in operation_records
+                        # A converged recheck can return an existing finding ID without emitting a
+                        # duplicate finding_recorded event. Recover those exact payloads from the
+                        # historical prefix ending at this check, never from the latest projection
+                        # where later work could change what a replay returns.
+                        historical_findings = {
+                            cast(FindingRecordedPayload, item.payload).finding_id: cast(
+                                FindingRecordedPayload, item.payload
+                            )
+                            for item in records[: cast(int, last)]
                             if type(item) is AcceptedEvent
                             and item.schema.name == "finding_recorded"
                             and item.payload is not None
-                        )
+                        }
+                        try:
+                            finding_payloads = tuple(
+                                historical_findings[finding]
+                                for finding in check_payload.returned_finding_ids
+                            )
+                        except KeyError as exc:
+                            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
                         executions = tuple(
                             CheckPolicyExecution(
                                 item.policy_id,
@@ -673,7 +687,7 @@ class SqliteLedger:
                                 operation_records[-1].entry_digest,
                             ),
                             check_payload.verdict,
-                            cast(tuple[Finding, ...], finding_payloads),
+                            finding_payloads,
                             check_payload.suppressed_count,
                             executions,
                             check_payload.semantic_status,
