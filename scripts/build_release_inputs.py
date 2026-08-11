@@ -142,7 +142,7 @@ def _artifacts(
             or name in declared
         ):
             raise ReleaseInputError("candidate_checksum_invalid")
-        declared[name] = f"sha256:{digest}"
+        declared[name] = _normalise_digest(digest, detail=name)
     if set(declared) != {path.name for path in found}:
         raise ReleaseInputError("candidate_checksum_invalid")
 

@@ -29,7 +29,7 @@ _GATES: Final = (
 )
 
 
-def _inputs(tmp_path: Path) -> tuple[Path, Path, Path, str]:
+def _inputs(tmp_path: Path, *, prefixed_checksums: bool = False) -> tuple[Path, Path, Path, str]:
     root = tmp_path / "inputs"
     artifacts = root / "candidate-0.1.0"
     artifacts.mkdir(parents=True)
@@ -38,7 +38,8 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path, str]:
     checksum_lines: list[str] = []
     for path in sorted(artifacts.iterdir(), key=lambda item: item.name.encode("utf-8")):
         artifact_digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        checksum_lines.append(f"{artifact_digest}  /build/dist/{path.name}\n")
+        prefix = "sha256:" if prefixed_checksums else ""
+        checksum_lines.append(f"{prefix}{artifact_digest}  /build/dist/{path.name}\n")
     checksum_bytes = "".join(checksum_lines).encode()
     (artifacts / "SHA256SUMS").write_bytes(checksum_bytes)
     digest = hashlib.sha256(checksum_bytes).hexdigest()
@@ -75,9 +76,15 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path, str]:
 
 
 def _run_builder(
-    tmp_path: Path, records: list[dict[str, object]], *, output: Path | None = None
+    tmp_path: Path,
+    records: list[dict[str, object]],
+    *,
+    output: Path | None = None,
+    prefixed_checksums: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    artifacts, matrix, limitations, digest = _inputs(tmp_path)
+    artifacts, matrix, limitations, digest = _inputs(
+        tmp_path, prefixed_checksums=prefixed_checksums
+    )
     manifest = output or tmp_path / "release-inputs.json"
     command = [
         sys.executable,
@@ -145,6 +152,11 @@ def test_builder_output_drives_the_real_evidence_generator(tmp_path: Path) -> No
         check=False,
     )
     assert generated.returncode == 0, generated.stderr
+
+
+def test_builder_accepts_prefixed_checksum_digests(tmp_path: Path) -> None:
+    built = _run_builder(tmp_path, _passing_records(), prefixed_checksums=True)
+    assert built.returncode == 0, built.stderr
 
 
 def test_one_incomplete_gate_causes_the_real_generator_to_fail(tmp_path: Path) -> None:
