@@ -1,6 +1,6 @@
 """Claims conformance: docs/public-claims.json binds every public statement to real evidence.
 
-Grounded entirely in the reviewed ``docs/public-claims.json`` claim map (29 claims, schema
+Grounded entirely in the reviewed ``docs/public-claims.json`` claim map (schema
 ``yoetz.public-claims/1``) plus the real ADR set and spec-tree requirement files it cites. Every
 claim must point to an existing ADR/spec requirement, an existing public surface document, and a
 plausibly typed test or fixture path, with at least one declared evidence kind actually backed by a
@@ -228,6 +228,3 @@ def test_skipped_or_unsupported_claims_are_flagged() -> None:
             # test/fixture paths must exist for real once it claims anything stronger.
             for test_path in cast(list[str], claim["tests"]):
                 assert (_REPO_ROOT / test_path).is_file(), (claim_id, test_path)
-
-    # v0.1 has not shipped a release yet -- today, every claim is honestly flagged unevidenced.
-    assert statuses == {"not_yet_evidenced"}

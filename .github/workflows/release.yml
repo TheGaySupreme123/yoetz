@@ -60,6 +60,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.value }}
       tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
       is-prerelease: ${{ steps.version.outputs.is_prerelease }}
     steps:
       - name: Reject a manual run not in dry_run=true mode
@@ -105,6 +106,7 @@ jobs:
           set -euo pipefail
           tag="${{ github.event.inputs.tag || github.ref_name }}"
           version="${tag#v}"
+          commit=$(git rev-parse HEAD)
           pkg_version=$(uv run --locked python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           if [ "$version" != "$pkg_version" ]; then
             echo "::error::tag version ${version} does not equal pyproject.toml version ${pkg_version}"
@@ -114,6 +116,7 @@ jobs:
           case "$version" in *-*) is_pre=true ;; esac
           echo "value=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
           echo "is_prerelease=${is_pre}" >> "$GITHUB_OUTPUT"
 
       - name: uv sync --locked (verify lockfiles are current)
@@ -232,7 +235,7 @@ jobs:
           json.dump({
               'tag': '${{ needs.validate-release-source.outputs.tag }}',
               'version': '${{ needs.validate-release-source.outputs.version }}',
-              'commit': '${{ github.sha }}',
+              'commit': '${{ needs.validate-release-source.outputs.commit }}',
               'digest': '${digest}',
               'runner': platform.platform(),
               'uv': '0.11.29',
@@ -513,19 +516,27 @@ jobs:
 
       - name: Build the release-inputs manifest for the evidence generator
         run: |
-          uv run --locked python -c "
-          import json
-          json.dump({
-              'tag': '${{ needs.validate-release-source.outputs.tag }}',
-              'version': '${{ needs.validate-release-source.outputs.version }}',
-              'candidate_digest': '${{ needs.build-candidate.outputs.candidate-digest }}',
-              'dry_run': '${{ env.DRY_RUN }}' == 'true',
-              'inputs_root': '${{ runner.temp }}/inputs',
-              'fault_manifest_digest': '${{ needs.fault-release-profile.outputs.manifest-digest }}',
-              'capability_manifest_digest': '${{ needs.capability-release-profile.outputs.manifest-digest }}',
-              'security_manifest_digest': '${{ needs.security-privacy-release.outputs.manifest-digest }}',
-          }, open('${{ runner.temp }}/release-inputs.json', 'w'), indent=2)
-          "
+          uv run --locked python scripts/build_release_inputs.py \
+            --candidate-version "${{ needs.validate-release-source.outputs.version }}" \
+            --candidate-tag "${{ needs.validate-release-source.outputs.tag }}" \
+            --candidate-commit "${{ needs.validate-release-source.outputs.commit }}" \
+            --artifact-root "${{ runner.temp }}/inputs/candidate-${{ needs.validate-release-source.outputs.version }}" \
+            --candidate-digest "sha256:${{ needs.build-candidate.outputs.candidate-digest }}" \
+            --support-matrix "${{ runner.temp }}/inputs/capability-matrix/capability-matrix.json" \
+            --known-limitations release/known-limitations.json \
+            --gate-record '{"name":"clean_source_identity","source_results":["${{ needs.validate-release-source.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}"]}' \
+            --gate-record '{"name":"artifact_checksums","source_results":["${{ needs.build-candidate.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}"]}' \
+            --gate-record '{"name":"resource_manifest_parity","source_results":["${{ needs.validate-release-source.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}"]}' \
+            --gate-record '{"name":"unit_tests","source_results":["${{ needs.security-privacy-release.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}","sha256:${{ needs.security-privacy-release.outputs.manifest-digest }}"]}' \
+            --gate-record '{"name":"property_tests","source_results":["${{ needs.fault-release-profile.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}","sha256:${{ needs.fault-release-profile.outputs.manifest-digest }}"]}' \
+            --gate-record '{"name":"integration_tests","source_results":["${{ needs.verify-linux-x86_64.result }}","${{ needs.verify-macos-arm64.result }}","${{ needs.fault-release-profile.result }}","${{ needs.capability-release-profile.result }}","${{ needs.security-privacy-release.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}","sha256:${{ needs.fault-release-profile.outputs.manifest-digest }}","sha256:${{ needs.capability-release-profile.outputs.manifest-digest }}","sha256:${{ needs.security-privacy-release.outputs.manifest-digest }}"]}' \
+            --gate-record '{"name":"conformance_tests","source_results":["${{ needs.verify-linux-x86_64.result }}","${{ needs.verify-macos-arm64.result }}","${{ needs.capability-release-profile.result }}","${{ needs.security-privacy-release.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}","sha256:${{ needs.capability-release-profile.outputs.manifest-digest }}","sha256:${{ needs.security-privacy-release.outputs.manifest-digest }}"]}' \
+            --gate-record '{"name":"packaging_tests","source_results":["${{ needs.verify-linux-x86_64.result }}","${{ needs.verify-macos-arm64.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}"]}' \
+            --gate-record '{"name":"security_privacy_scan","source_results":["${{ needs.security-privacy-release.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}","sha256:${{ needs.security-privacy-release.outputs.manifest-digest }}"]}' \
+            --gate-record '{"name":"capability_matrix","source_results":["${{ needs.capability-release-profile.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}","sha256:${{ needs.capability-release-profile.outputs.manifest-digest }}"]}' \
+            --gate-record '{"name":"dependency_vulnerability_license","source_results":["${{ needs.security-privacy-release.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}","sha256:${{ needs.security-privacy-release.outputs.manifest-digest }}"]}' \
+            --gate-record '{"name":"clean_install","source_results":["${{ needs.verify-linux-x86_64.result }}","${{ needs.verify-macos-arm64.result }}"],"input_digests":["sha256:${{ needs.build-candidate.outputs.candidate-digest }}"]}' \
+            --output "${{ runner.temp }}/release-inputs.json"
 
       - name: generate_release_evidence.py --write
         run: |
