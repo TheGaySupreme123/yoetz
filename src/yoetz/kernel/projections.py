@@ -80,6 +80,7 @@ __all__ = [
     "projection_digest",
     "projection_from_snapshot",
     "projection_snapshot",
+    "unresolved_finding_count",
 ]
 
 PROJECTION_VERSION: Final = "yoetz/0.1.0"
@@ -662,6 +663,16 @@ def empty_projection_state() -> ProjectionState:
         unknown_event_count=0,
         coverage_gaps=(),
     )
+
+
+def unresolved_finding_count(state: ProjectionState) -> int:
+    """Count findings the ledger still carries no response for.
+
+    Any recorded response resolves the finding for this counter, whatever its stance: a rejection
+    or a waiver answers the finding on the record, and its own quality surfaces as a later finding.
+    """
+
+    return sum(key not in state.responses for key in state.findings)
 
 
 def _record_snapshot(record: _ProjectionRecordLike) -> dict[str, JsonValue]:

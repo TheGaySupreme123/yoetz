@@ -52,7 +52,12 @@ from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts
-from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState, projection_digest
+from yoetz.kernel.projections import (
+    PROJECTION_VERSION,
+    ProjectionState,
+    projection_digest,
+    unresolved_finding_count,
+)
 from yoetz.kernel.reducers import replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
@@ -1114,7 +1119,7 @@ class SqliteLedger:
                 projection.frontier,
                 projection.head_digest,
                 len(projection.obligations),
-                len(projection.findings),
+                unresolved_finding_count(projection),
                 projection.freshness.value,
                 projection.unknown_event_count,
                 records[0].event_id,
@@ -1241,7 +1246,7 @@ class SqliteLedger:
                 projection.frontier,
                 projection.head_digest,
                 len(projection.obligations),
-                len(projection.findings),
+                unresolved_finding_count(projection),
                 projection.freshness.value,
                 projection.unknown_event_count,
                 canonical_encode(

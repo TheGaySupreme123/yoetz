@@ -82,6 +82,7 @@ from yoetz.kernel.projections import (
     ProjectionState,
     empty_projection_state,
     projection_digest,
+    unresolved_finding_count,
 )
 from yoetz.kernel.reducers import invalidates_recorded_check, replay
 from yoetz.ports.clock import ClockPort
@@ -957,12 +958,13 @@ def _projection_items(
             for finding in sorted(
                 (
                     value.payload
-                    for value in projection.findings.values()
-                    if value.payload is not None
+                    for key, value in projection.findings.items()
+                    if value.payload is not None and key not in projection.responses
                 ),
                 key=rank_key,
             )
         )
+        unresolved_count = unresolved_finding_count(projection)
         declared_count = (
             None
             if scope_refs is None
@@ -991,7 +993,7 @@ def _projection_items(
                     else scope.no_obligations_reason.value
                 ),
                 open_obligation_count=None if open_count is None else str(open_count),
-                unresolved_finding_count=str(len(projection.findings)),
+                unresolved_finding_count=str(unresolved_count),
                 open_obligations=open_obligations[:10],
                 unresolved_findings=unresolved_findings[:10],
                 freshness=projection.freshness.value,
@@ -2253,8 +2255,13 @@ class MemoryLedgerAdapter:
             request_digest_value = record.request_digest
 
         assert self._ids is not None and self._objects is not None
+        # A finding that kept a previously recorded ID is already on the ledger; re-emitting it
+        # would grow the record per re-check, so the check only cites it in returned_finding_ids.
         event_payloads: list[tuple[EventId, EventPayload]] = [
-            (event_id(self._ids.new(IdKind.EVENT)), finding) for finding in findings.findings
+            (event_id(self._ids.new(IdKind.EVENT)), finding)
+            for finding in findings.findings
+            if (prior := snapshot_projection.findings.get(finding.finding_id)) is None
+            or prior.payload is None
         ]
         check_payload = CheckRecordedPayload(
             mode=(
