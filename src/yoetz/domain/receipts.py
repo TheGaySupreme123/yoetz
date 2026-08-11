@@ -71,6 +71,7 @@ __all__ = [
     "ReceiptSection",
     "ReceiptSectionKey",
     "ReceiptVersionSlice",
+    "SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP",
     "SEMANTIC_CHALLENGES_REJECTED_GAP",
     "SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP",
     "SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP",
@@ -111,6 +112,11 @@ SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP: Final = "semantic_review_context_withheld"
 # rather than letting the drop look like the reviewer having found nothing there.
 SEMANTIC_CHALLENGES_REJECTED_GAP: Final = "semantic_challenges_rejected"
 SEMANTIC_REVIEW_NOT_REQUESTED_GAP: Final = "semantic_review_not_requested"
+# Publish-side prose accepts twice what one semantic case item can carry, so text that publishes
+# cleanly can still reach the reviewer shortened or replaced by a bounded-omission marker. The
+# gap names that window; without it the drop was reported as an ordinary `not_selected` omission
+# and read as a selection-policy choice the author had already made.
+SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP: Final = "semantic_case_content_over_item_limit"
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
 _SEMANTIC_REVIEW_NOT_RUN_GAPS: Final = frozenset(
     {

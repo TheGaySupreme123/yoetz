@@ -21,6 +21,7 @@ from builders.policy_cases import (
 from builders.replay import replay_records
 from yoetz.application.check import CheckScope, allocate_findings, run_deterministic_policies
 from yoetz.application.semantic_case import (
+    OVER_CASE_ITEM_LIMIT_REASON,
     REVIEW_PACKET_ITEM_ID,
     bounded_case_envelope,
     build_semantic_case,
@@ -29,6 +30,7 @@ from yoetz.application.semantic_case import (
     semantic_case_to_prepared_payload,
 )
 from yoetz.domain.events import (
+    MAX_TEXT_BYTES,
     ClaimKind,
     ClaimRecordedPayload,
     EvidenceContentAvailability,
@@ -49,6 +51,7 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
+from yoetz.domain.receipts import SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
 from yoetz.domain.values import EvidenceId, timestamp_from_string
 from yoetz.kernel.deterministic_checks import (
     CaseAvailabilityFacts,
@@ -61,7 +64,7 @@ from yoetz.ports.semantic import ExcerptDigestProvenance, SemanticCase
 from yoetz.protocol.canonical import JsonValue, strict_json_parse
 from yoetz.protocol.coverage import EvidenceImmutability
 from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import DataCategory
+from yoetz.protocol.models import MAX_REVIEW_TEXT_BYTES, DataCategory
 
 
 class _Ids:
@@ -642,3 +645,110 @@ def test_prepared_payload_names_the_refs_post_validation_will_accept() -> None:
                 item_ids.add(item_id)
     # The two vocabularies are disjoint: an item_id is never a citable ref.
     assert not item_ids & set(citable)
+
+
+def _case_with_long_evidence(description: str) -> DeterministicCase:
+    """The same shape as ``_case_with_material``, with one oversized evidence description."""
+
+    plan = plan_record(PlanPublishedPayload(1, "Ship the review packet", (obl(1),)), 1)
+    obligation = obligation_record(
+        ObligationPublishedPayload(
+            obl(1), "Build the real packet", "tests pass", ObligationStatus.OPEN
+        ),
+        2,
+    )
+    claim = record(
+        ClaimRecordedPayload(
+            clm(1),
+            ClaimKind.COMPLETION,
+            "Work is complete",
+            (evd(1),),
+            obligation_refs=(obl(1),),
+        ),
+        3,
+    )
+    evidence = {
+        evd(1): evidence_record(
+            EvidenceRecordedPayload(
+                evd(1),
+                EvidenceKind.TEST_RESULT,
+                EvidenceImmutability.METADATA_ONLY,
+                timestamp_from_string("2026-07-01T00:00:00.000Z"),
+                description=description,
+            ),
+            4,
+        )
+    }
+    return make_case(
+        plans={1: plan},
+        obligations={obl(1): obligation},
+        claims={clm(1): claim},
+        evidence=evidence,
+        extra_refs=(clm(1), obl(1), evd(1)),
+    )
+
+
+def test_prose_that_publishes_but_cannot_be_carried_whole_is_named_in_coverage() -> None:
+    """The publish-fits-but-case-drops window is disclosed, not silently shortened (issue #177).
+
+    Publish-side prose accepts up to ``MAX_TEXT_BYTES`` (8192), while one case item carries at
+    most ``MAX_REVIEW_TEXT_BYTES`` (4096). A 5 KB description therefore records cleanly and then
+    reaches the reviewer shortened. Nothing said so: the only omission raised was the generic
+    ``not_selected``, which reads as a selection-policy choice rather than a size drop.
+    """
+
+    body = "e" * 5_000
+    assert len(body.encode("utf-8")) <= MAX_TEXT_BYTES
+    assert len(body.encode("utf-8")) > MAX_REVIEW_TEXT_BYTES
+    # The selection would carry it whole; only the per-item case bound stands in the way.
+    assert ReviewSelectionPolicy.for_profile(ReviewContextProfile.ASSISTED).max_excerpt_bytes > len(
+        body.encode("utf-8")
+    )
+
+    case = _case_with_long_evidence(body)
+    semantic = _build(case, ReviewContextProfile.ASSISTED, findings=_findings_for(case))
+
+    excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
+    assert excerpt.content_bytes == MAX_REVIEW_TEXT_BYTES
+    assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP in semantic.packet.coverage.known_gaps
+
+
+def test_prose_within_the_case_item_bound_raises_no_over_limit_gap() -> None:
+    body = "e" * 1_000
+    case = _case_with_long_evidence(body)
+    semantic = _build(case, ReviewContextProfile.ASSISTED, findings=_findings_for(case))
+
+    excerpt = next(item for item in semantic.items if item.item_id == f"excerpt-{evd(1)}")
+    assert excerpt.content == body.encode("utf-8")
+    assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP not in semantic.packet.coverage.known_gaps
+
+
+def test_payload_replaced_by_the_bounded_marker_names_the_size_drop() -> None:
+    """A payload too large to encode is replaced wholesale; the marker says why.
+
+    ``_bounded_json`` swaps the entire event payload for a ``yoetz.bounded-content-omission/1``
+    marker. Its ``reason`` was ``not_selected`` — the same token the packet uses for material the
+    selection policy declined — so a reviewer could not tell an unsent section from one that was
+    admitted and then dropped for size.
+    """
+
+    plan = plan_record(PlanPublishedPayload(1, "s" * 6_000, (obl(1),)), 1)
+    obligation = obligation_record(
+        ObligationPublishedPayload(
+            obl(1), "Build the real packet", "tests pass", ObligationStatus.OPEN
+        ),
+        2,
+    )
+    case = make_case(
+        plans={1: plan},
+        obligations={obl(1): obligation},
+        extra_refs=(obl(1),),
+    )
+    semantic = _build(case, ReviewContextProfile.GOAL_AWARE)
+
+    goal = next(item for item in semantic.items if item.section == "goal")
+    marker = strict_json_parse(goal.content)
+    assert isinstance(marker, dict)
+    assert marker["schema"] == "yoetz.bounded-content-omission/1"
+    assert marker["reason"] == OVER_CASE_ITEM_LIMIT_REASON
+    assert SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP in semantic.packet.coverage.known_gaps

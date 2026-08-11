@@ -22,6 +22,7 @@ from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+    SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
@@ -109,6 +110,7 @@ __all__ = [
     "SemanticJudgmentRejected",
     "SemanticJudgmentReview",
     "allocate_findings",
+    "carried_semantic_attempt_gaps",
     "case_coverage",
     "check_awaiting_human_json",
     "check_internal_json",
@@ -370,6 +372,10 @@ class FinalSemanticEvaluation:
     # Categories the review profile selected that the inference channel did not permit. A review
     # can succeed while structurally unable to answer its own question; coverage must say so.
     withheld_review_categories: tuple[str, ...] = ()
+    # True when composing the case had to shorten or replace recorded text that the publish-side
+    # prose bound had already accepted. The reviewer judged a fragment; coverage must say so
+    # rather than let the shortening pass as material the author chose not to send.
+    case_content_over_item_limit: bool = False
     # Set only on the nonterminal awaiting_human branch: what the caller must do to resume this
     # exact request. Every terminal outcome leaves it None. A one-use disclosure wait keeps its
     # job and attempt open; a missing standing repository grant stops before either exists.
@@ -414,6 +420,39 @@ def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -
     if status is SemanticStatus.NOT_CONFIGURED:
         return SEMANTIC_REVIEW_NOT_CONFIGURED_GAP
     return SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP
+
+
+# Gaps that record a semantic review the task actually attempted and did not get. They are the
+# environment's account of the missing review, never the caller's; `semantic_review_not_requested`
+# is deliberately absent because it is the one this set exists to disambiguate.
+_SEMANTIC_ATTEMPT_GAPS: Final = frozenset(
+    {
+        OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+        SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
+        SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
+    }
+)
+
+
+def carried_semantic_attempt_gaps(case: DeterministicCase, status: SemanticStatus) -> set[str]:
+    """Carry a superseded check's semantic-attempt gap onto a deterministic-only successor.
+
+    A blocked or unavailable semantic review is normally followed by a ``deterministic_only``
+    re-check, which is the stop-rule behaviour: a blocked review is a coverage gap, not a retry
+    problem. That successor replaces ``latest_tested_state`` wholesale, so without this the only
+    surviving disclosure is ``semantic_review_not_requested`` -- which attributes the missing
+    review to the agent not asking, when the environment refused (issue #185). Carrying the
+    earlier gap forward keeps the receipt's account of *why* there is no semantic review.
+    """
+
+    # Only a check that did not itself request review can inherit; an attempt of its own already
+    # states its own outcome, and a succeeded review has closed the gap rather than carried it.
+    if status is not SemanticStatus.NOT_REQUESTED:
+        return set()
+    latest = case.projection.latest_tested_state
+    if latest is None:
+        return set()
+    return set(_SEMANTIC_ATTEMPT_GAPS & set(latest.coverage.known_gaps))
 
 
 class _VerificationPolicy(Protocol):
@@ -1371,6 +1410,7 @@ async def execute_check_commit(
         }
         semantic_gap = semantic_coverage_gap_code(semantic_result.status, semantic_result.reason)
         declared_gaps: set[str] = set() if semantic_gap is None else {semantic_gap}
+        declared_gaps |= carried_semantic_attempt_gaps(frozen.case, semantic_result.status)
         # A review that ran without material its own profile selected is not full coverage, even
         # though it reports succeeded. Saying so here is what stops a hollow review from reading
         # as a clean one in the check result and the receipt derived from it.
@@ -1383,6 +1423,10 @@ async def execute_check_commit(
         # carry. Saying so is what keeps a dropped challenge from reading as one never made.
         if review.challenges_rejected:
             declared_gaps.add(SEMANTIC_CHALLENGES_REJECTED_GAP)
+        # Recorded prose the case could not carry whole. The reviewer answered on a fragment, and
+        # the author has no other signal that the text they published never arrived (issue #177).
+        if semantic_result.case_content_over_item_limit:
+            declared_gaps.add(SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP)
         new_gaps = declared_gaps - set(coverage.known_gaps)
         if new_gaps:
             gaps = set(coverage.known_gaps) | new_gaps

@@ -655,6 +655,11 @@ Shared structural gap codes for optional semantic relevance review (distinct fam
 - `semantic_relevance_review_not_run` — evaluation failed/timed out/unavailable without a clean pass;
 - `semantic_review_not_requested` — deterministic-only check; semantic review was never requested.
 
+A `deterministic_only` check that follows one of the first three carries that earlier code forward
+alongside `semantic_review_not_requested`. The stop-rules make a blocked review a coverage gap
+rather than a retry, so the fallback check is the expected next step; without the carry-forward the
+receipt's only surviving account would read as the agent never having asked.
+
 Completion-scope gaps are a separate deterministic case family. When a completion claim exists and
 the readable effective current plan declares zero obligations, exactly one applies:
 
@@ -670,7 +675,12 @@ Two further codes describe a review that did run but could not deliver everythin
 
 - `semantic_review_context_withheld` — the review ran without categories its own profile selected;
 - `semantic_challenges_rejected` — the reviewer returned challenges and post-validation dropped at
-  least one (a citation outside the frozen case, or an unchanged-claim over a withheld source).
+  least one (a citation outside the frozen case, or an unchanged-claim over a withheld source);
+- `semantic_case_content_over_item_limit` — recorded text the publish-side prose bound accepted
+  (`MAX_TEXT_BYTES`, 8192) exceeded what one case item carries (`MAX_REVIEW_TEXT_BYTES`, 4096), so
+  the case shortened it or replaced the payload with a `yoetz.bounded-content-omission/1` marker.
+  The marker's `reason` is `over_case_item_limit`, distinguishing a size drop from the
+  `not_selected` omission the selection policy raises for material it declined to carry.
 
 Post-validation fences each challenge independently: a rejected challenge costs only itself, the
 challenges beside it still become findings, and the drop is declared through this gap. A judgment

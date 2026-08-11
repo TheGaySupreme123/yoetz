@@ -335,6 +335,20 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- A receipt reported `semantic_review_not_requested` for a task whose semantic review had been
+  requested and refused. The stop-rules make a blocked review a coverage gap rather than a retry,
+  so the agent falls back to `deterministic_only` — and that successor check replaced the recorded
+  one wholesale, leaving a label that blamed the agent for never asking. A deterministic-only check
+  now carries the earlier attempt's gap (`optional_semantic_review_blocked_by_policy`,
+  `semantic_review_not_configured`, or `semantic_relevance_review_not_run`) forward alongside it,
+  so the receipt still names the environment as the cause (issue #185).
+- Prose that publishes cleanly could vanish from semantic review without a word. Publish accepts up
+  to 8192 bytes per field while one case item carries 4096, so text in between was silently
+  shortened — or, for a whole event payload, replaced by a bounded-omission marker whose `reason`
+  read `not_selected`, the same token used for material the selection policy declined to send.
+  The marker now says `over_case_item_limit`, and any case that had to shorten or replace admitted
+  text raises `semantic_case_content_over_item_limit` in the check and receipt coverage (issue
+  #177).
 - A provider credential was stored without ever being tried, so a wrong or expired API key looked
   identical to a working one until a check failed much later with a reason that could not name
   authentication. Setting a credential now dispatches one minimal authenticated request — a fixed

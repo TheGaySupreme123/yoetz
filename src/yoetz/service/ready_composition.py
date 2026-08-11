@@ -100,7 +100,12 @@ from yoetz.domain.privacy import (
     ReviewContextProfile,
     ReviewSelectionPolicy,
 )
-from yoetz.domain.receipts import PolicyVersionEntry, ReceiptVersionSlice, SchemaVersionEntry
+from yoetz.domain.receipts import (
+    SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
+    PolicyVersionEntry,
+    ReceiptVersionSlice,
+    SchemaVersionEntry,
+)
 from yoetz.domain.values import (
     Frontier,
     disclosure_continuation,
@@ -1864,6 +1869,7 @@ def _privacy_gated_semantic_evaluator(
         # Bound here too: the catch-all below can be reached before the policy is resolved, and
         # an unbound name there would turn a reportable failure into a second one.
         withheld: tuple[str, ...] = ()
+        over_item_limit = False
 
         def _on_lease_renewed(renewed: object) -> None:
             assert type(renewed) is _OpLease
@@ -2002,6 +2008,12 @@ def _privacy_gated_semantic_evaluator(
                 policy_id=policy_id,
                 policy_version=policy_version,
             )
+            # The builder folds the gap into the packet coverage the reviewer sees; the check
+            # result is a separate coverage fold, so carry the fact rather than re-deriving it.
+            over_item_limit = (
+                SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
+                in semantic_case.packet.coverage.known_gaps
+            )
             # Total semantic-operation deadline from configured timeout_seconds (not a hard-coded 60).
             deadline = Deadline(
                 clock.now_utc() + timedelta(seconds=total_timeout),
@@ -2043,6 +2055,7 @@ def _privacy_gated_semantic_evaluator(
                     SemanticReason.COORDINATOR_FAILURE,
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
+                    case_content_over_item_limit=over_item_limit,
                 )
 
             # One durable semantic job per check: create/recover after freeze, before dispatch.
@@ -2132,6 +2145,7 @@ def _privacy_gated_semantic_evaluator(
                         attempt_accounting=accounting,
                         operation_lease=current_lease[0],
                         withheld_review_categories=withheld,
+                        case_content_over_item_limit=over_item_limit,
                     )
                 return FinalSemanticEvaluation(
                     status,
@@ -2141,6 +2155,7 @@ def _privacy_gated_semantic_evaluator(
                     attempt_accounting=accounting,
                     operation_lease=current_lease[0],
                     withheld_review_categories=withheld,
+                    case_content_over_item_limit=over_item_limit,
                     continuation=continuation,
                 )
 
@@ -2176,6 +2191,7 @@ def _privacy_gated_semantic_evaluator(
                 SemanticReason.COORDINATOR_FAILURE,
                 operation_lease=current_lease[0],
                 withheld_review_categories=withheld,
+                case_content_over_item_limit=over_item_limit,
             )
 
     return _evaluate
