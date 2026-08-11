@@ -12,7 +12,7 @@ from typing import cast
 
 import pytest
 
-from yoetz.observability.diagnostics import lookup_diagnostic_records
+from yoetz.observability.diagnostics import append_diagnostic_record, lookup_diagnostic_records
 from yoetz.ports.control import ControlCallRequest, ControlMethod
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import CheckRequest, public_model_to_wire
@@ -96,6 +96,15 @@ def test_already_bound_workflow_failure_is_not_re_recorded(diagnostic_root: Path
     """An error that already carries a recorded id keeps it; a second mint would split it."""
 
     bound = "err_ffffffff-ffff-4fff-8fff-ffffffffffff"
+    # The sink that minted the id wrote its record; the daemon boundary must add nothing.
+    append_diagnostic_record(
+        correlation_id=bound,
+        component="workflow",
+        operation="check_public_error",
+        reason="frontier_conflict",
+        request_id=_REQUEST_ID,
+        root=diagnostic_root,
+    )
     wire = _frame(
         PublicOperationError(
             PublicErrorCode.FRONTIER_CONFLICT,
@@ -107,4 +116,6 @@ def test_already_bound_workflow_failure_is_not_re_recorded(diagnostic_root: Path
 
     error = cast(dict[str, object], wire["error"])
     assert error["correlation_id"] == bound
-    assert lookup_diagnostic_records(bound, root=diagnostic_root) == ()
+    found = lookup_diagnostic_records(bound, root=diagnostic_root)
+    assert len(found) == 1
+    assert found[0]["component"] == "workflow"

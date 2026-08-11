@@ -1349,13 +1349,20 @@ service-supplied id rather than minting a second one; only bridge-local failures
 service-side id mint and record under a fresh id. `yoetz service diagnostics --correlation-id
 err_…` reads that ring.
 
-Every published `correlation_id` is resolvable, not only the ones behind an unexpected exception.
-Deterministic public failures — `INVALID_REQUEST`, `OPERATION_PENDING`, `VAULT_LOCKED`, and any
-workflow `PublicOperationError` framed as an `ok:false` body — never raise past a boundary
-recorder, so the boundary that mints their id writes the same ring record for it at mint time
-(`outcome: public_error`, `reason` the lowercased public code, `operation` the failing method).
-Minting and recording are one step in `record_public_error_without_raising`, and a boundary
-holding an id another sink already recorded reuses it instead: one failure resolves to one id.
+Every `correlation_id` minted through a boundary recorder is resolvable, not only the ones behind
+an unexpected exception. Deterministic public failures — `INVALID_REQUEST`, `OPERATION_PENDING`,
+`VAULT_LOCKED`, and any workflow `PublicOperationError` framed as an `ok:false` body — never raise
+past a boundary recorder, so the boundary that mints their id writes the same ring record for it
+at mint time. Minting and recording are one step in `record_public_error_without_raising`: the
+ring record keeps the fixed field set above with `reason` the lowercased public code and
+`operation` a bounded operation-context token derived from the failing method or tool
+(`<method>_public_error`, collapsing to `public_error` when the name is not a bounded token);
+`outcome: public_error` appears on the stderr structural line, which carries no more than the ring
+does. A boundary holding an id another sink already recorded reuses it instead: one failure
+resolves to one id. The one path outside this contract is the constructor-free last-resort
+internal-error fallback (`build_last_resort_internal_error_result` in `mcp/errors.py`), which
+exists for when building a normal public error has itself failed and returns a process-constant id
+that resolves to nothing.
 
 `PublishResponseCatalogPort` is the publish-only durable control-boundary response store. Its key
 is `(task_id, session_id, writer_id, request_id, request_digest, sink)`, where `sink` is exactly
