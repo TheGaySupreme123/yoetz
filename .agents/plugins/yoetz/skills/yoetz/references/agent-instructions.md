@@ -106,8 +106,8 @@ expiry, cancellation, stale authority, or an incomplete ceremony remains a no di
 
 A published completion claim is the input to a check, not the output of one. It does not license
 telling the user the work is finished. Publish the claim and its evidence, run `check`, disposition
-findings, recheck only after material change or an unreadable response, take a `receipt`, and only
-then answer.
+findings, recheck after material change, an unreadable response, or a readable response to a finding
+not returned by the current check, take a `receipt`, and only then answer.
 
 # When to stop retrying
 
