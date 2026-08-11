@@ -922,7 +922,8 @@ deciding between the two, shared by the receipt and by compact status coverage.
 - `lookup_operation(writer_id, operation_id) -> OperationRecord | None`.
 
 The check orchestration methods are authority-bearing port methods, not SQLite extensions.
-Once `freeze_case` returns an `OperationLease`, an unexpected application/protocol-value failure is
+Once `freeze_case` returns a `FrozenCase` whose `lease` field carries the `OperationLease`, an
+unexpected application/protocol-value failure is
 an internal failure, never caller-side `INVALID_REQUEST`. The application calls
 `fail_check_if_current` before returning `INTERNAL_ERROR`; the exact operation becomes
 `complete/terminal` with a durable bounded error result, same-request replay returns that error,
