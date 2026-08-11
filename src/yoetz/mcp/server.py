@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -52,6 +53,7 @@ from yoetz.mcp.summaries import render_safe_compact_summary
 from yoetz.observability.logging import (
     LogMode,
     configure_logging,
+    record_public_error_without_raising,
     record_unexpected_exception_without_raising,
 )
 from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
@@ -288,6 +290,19 @@ def _result_from_wire(wire: Mapping[str, object]) -> types.CallToolResult:
     )
 
 
+# Bridge operation names are repository literals ("check", "publish_work", …); the guard keeps a
+# malformed one from silently voiding the sink record, whose ``operation`` field is required.
+_SINK_OPERATION: Final = re.compile(r"^[a-z][a-z0-9_]{0,47}$", re.ASCII)
+
+
+def _public_error_operation(operation: str | None) -> str:
+    """Return the bounded sink operation token for a bridge-minted public error."""
+
+    if type(operation) is str and _SINK_OPERATION.fullmatch(operation) is not None:
+        return f"{operation}_public_error"
+    return "public_error"
+
+
 def structured_error_result(
     code: PublicErrorCode,
     message: str,
@@ -296,15 +311,33 @@ def structured_error_result(
     request_id: str | None = None,
     safe_details: object | None = None,
     correlation_id: str | None = None,
+    operation: str | None = None,
 ) -> types.CallToolResult:
-    """Build a bounded structured tool error with a prevalidated nested fallback."""
+    """Build a bounded structured tool error with a prevalidated nested fallback.
 
+    ``correlation_id`` is an id some sink already recorded — service-minted, or returned by the
+    exception recorder — and is reused verbatim. When it is absent this mints the id *and* writes
+    the durable diagnostic line under it, because an id minted straight into the envelope resolves
+    to nothing (issue #191). ``operation`` only names the failing tool in that record; it never
+    reaches the wire.
+    """
+
+    resolved_correlation_id = (
+        correlation_id
+        if correlation_id is not None
+        else record_public_error_without_raising(
+            component="mcp.bridge",
+            operation=_public_error_operation(operation),
+            reason=code.value.lower(),
+            request_id=request_id,
+        )
+    )
     try:
         wire = build_public_error_result(
             code,
             message,
             retryable,
-            correlation_id if correlation_id is not None else new_id(IdKind.CORRELATION),
+            resolved_correlation_id,
             request_id=request_id,
             safe_details=safe_details,
         )
@@ -344,6 +377,7 @@ def _control_error_result(
             ),
             request_id=request_id,
             correlation_id=service_correlation_id,
+            operation=operation,
         )
     if error.reason == "request_cancelled":
         return structured_error_result(
@@ -351,6 +385,7 @@ def _control_error_result(
             "The operation was cancelled.",
             request_id=request_id,
             correlation_id=service_correlation_id,
+            operation=operation,
         )
     if error.reason == "privacy_projection_blocked":
         return structured_error_result(
@@ -363,6 +398,7 @@ def _control_error_result(
             retryable=False,
             request_id=request_id,
             correlation_id=service_correlation_id,
+            operation=operation,
             safe_details={
                 "reason_code": "receipt_json_projection_blocked",
                 "operation": "receipt",
@@ -384,6 +420,7 @@ def _control_error_result(
             retryable=True,
             request_id=request_id,
             correlation_id=service_correlation_id,
+            operation=operation,
             safe_details=details,
         )
     if error.reason == "read_projection_failed":
@@ -393,6 +430,7 @@ def _control_error_result(
             retryable=True,
             request_id=request_id,
             correlation_id=service_correlation_id,
+            operation=operation,
             safe_details=dict(_READ_PROJECTION_FAILED_DETAILS),
         )
     if error.reason == "privacy_projection_unavailable":
@@ -402,6 +440,7 @@ def _control_error_result(
             retryable=True,
             request_id=request_id,
             correlation_id=service_correlation_id,
+            operation=operation,
             safe_details={"reason_code": "privacy_projection_unavailable"},
         )
     if error.reason in {"service_unavailable", "service_draining", "request_timeout"}:
@@ -411,6 +450,7 @@ def _control_error_result(
             retryable=True,
             request_id=request_id,
             correlation_id=service_correlation_id,
+            operation=operation,
         )
     if service_correlation_id is not None:
         return structured_error_result(
@@ -478,6 +518,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             invalid_request_message(operation, locations),
             request_id=request_id,
             safe_details=locations if locations else None,
+            operation=operation,
         )
     except Exception as exc:
         # Only non-ValidationError failures reach here, so the validator itself crashed. That is an
@@ -505,7 +546,14 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             bound = (
                 exc
                 if exc.correlation_id is not None
-                else exc.bind_correlation_id(new_id(IdKind.CORRELATION))
+                else exc.bind_correlation_id(
+                    record_public_error_without_raising(
+                        component="mcp.bridge",
+                        operation=_public_error_operation(operation),
+                        reason=exc.code.value.lower(),
+                        request_id=request_id,
+                    )
+                )
             )
             return _result_from_wire(tool_error_envelope(bound, request_id=request_id))
         except Exception as mapping_exc:
@@ -651,6 +699,7 @@ def _publish_recovery_unavailable_result(
         retryable=True,
         request_id=request_id,
         safe_details=details,
+        operation="publish_work_recovery_unavailable",
     )
 
 
@@ -746,6 +795,7 @@ async def _publish_recovery_from_envelope(
                     "The operation is still pending.",
                     retryable=True,
                     request_id=recovery_request_id,
+                    operation="publish_work_recovery",
                 ),
             )
         if state == "quarantined":
@@ -755,6 +805,7 @@ async def _publish_recovery_from_envelope(
                     PublicErrorCode.STORAGE_CORRUPT,
                     "The stored operation is quarantined.",
                     request_id=recovery_request_id,
+                    operation="publish_work_recovery",
                 ),
             )
         if state != "complete":
@@ -781,6 +832,7 @@ async def _publish_recovery_from_envelope(
                 ),
                 request_id=recovery_request_id,
                 safe_details=details,
+                operation="publish_work_recovery",
             ),
         )
     except Exception as exc:
@@ -814,6 +866,7 @@ async def dispatch_publish_work(
             invalid_request_message("publish_work", locations),
             request_id=request_id,
             safe_details=locations if locations else None,
+            operation="publish_work",
         )
     except Exception as exc:
         correlation_id = record_unexpected_exception_without_raising(

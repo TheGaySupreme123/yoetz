@@ -70,6 +70,7 @@ from yoetz.observability.logging import (
     LogMode,
     configure_logging,
     get_logger,
+    record_public_error_without_raising,
     record_unexpected_exception_without_raising,
 )
 from yoetz.ports.control import (
@@ -1288,7 +1289,17 @@ class ServiceDaemon:
             bound = (
                 error
                 if error.correlation_id is not None
-                else error.bind_correlation_id(new_id(IdKind.CORRELATION))
+                else error.bind_correlation_id(
+                    # Mint and record together. A workflow PublicOperationError reaches the wire
+                    # without ever raising past a boundary recorder, so an id minted bare here is
+                    # one the caller can never resolve (issue #191).
+                    record_public_error_without_raising(
+                        component="service.daemon",
+                        operation=f"{request.method.value}_public_error",
+                        reason=error.code.value.lower(),
+                        request_id=_safe_body_request_id(request),
+                    )
+                )
             )
             request_id = getattr(request.body, "request_id", None)
             candidate: dict[str, object] = {
