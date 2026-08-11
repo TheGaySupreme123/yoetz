@@ -212,6 +212,64 @@ async def _commit_one_check(
 
 
 @pytest.mark.anyio
+async def test_sqlite_reopen_replays_reused_finding_payloads(tmp_path: Path) -> None:
+    records = replay_records("all-event-families")[:11]
+    command, objects = command_from_records(records)
+    path = tmp_path / "reused-finding-replay.sqlite3"
+    ledger, db = file_sqlite_for(command, objects, path)
+    appended = await ledger.append_batch(command)
+    finding = cast(Finding, records[9].payload)
+    check_request = uuid_id("req", 70_003)
+    request_digest = "sha256:" + "8" * 64
+    frozen = await ledger.freeze_case(
+        command.session_id,
+        command.writer_id,
+        appended.result_frontier.sequence,
+        check_request,
+        request_digest,
+    )
+    assert type(frozen) is FrozenCase
+    lease = await ledger.advance_check_phase(
+        frozen.lease,
+        CheckPhase.RESERVED,
+        CheckPhase.LOCAL_READY,
+        await _local_result_ref(objects, command),
+    )
+    lease = await ledger.advance_check_phase(
+        lease,
+        CheckPhase.LOCAL_READY,
+        CheckPhase.READY_TO_FINALIZE,
+    )
+    committed = await ledger.commit_check_if_current(
+        FrozenCase(frozen.case, lease),
+        RankedFindings((finding,), 0, CheckVerdict.ACTION_REQUIRED, finding.coverage),
+        (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),),
+        SemanticStatus.NOT_REQUESTED,
+        SemanticReason.DETERMINISTIC_MODE,
+        None,
+        check_request,
+    )
+    assert committed.findings == (finding,)
+    assert committed.result_frontier.sequence == appended.result_frontier.sequence + 1
+    db.close()
+
+    reopened, reopened_db = file_sqlite_for(command, objects, path)
+    try:
+        replayed = await reopened.freeze_case(
+            command.session_id,
+            command.writer_id,
+            appended.result_frontier.sequence,
+            check_request,
+            request_digest,
+        )
+        assert type(replayed) is CheckCommitResult
+        assert replayed == replace(committed, outcome="replayed")
+        assert replayed.findings == (finding,)
+    finally:
+        reopened_db.close()
+
+
+@pytest.mark.anyio
 async def test_public_artifacts_match_across_backends(tmp_path: Path) -> None:
     records = replay_records("all-event-families")
     command, memory_objects = command_from_records(records)

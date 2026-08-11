@@ -725,7 +725,8 @@ async def test_response_and_waiver_never_resolve_finding() -> None:
     assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
 
     # Neither the disposition nor an already-expired waiver resolved the issue: the very same
-    # issue (kind/policy/subject) is still reported, with a fresh finding_id.
+    # issue (kind/policy/subject) is still reported, under the finding_id already answered rather
+    # than a fresh duplicate.
     assert rechecked.findings
     rechecked_issue = (
         rechecked.findings[0].kind,
@@ -734,7 +735,7 @@ async def test_response_and_waiver_never_resolve_finding() -> None:
         rechecked.findings[0].subject_refs,
     )
     assert rechecked_issue == issue
-    assert rechecked.findings[0].finding_id != finding.finding_id
+    assert rechecked.findings[0].finding_id == finding.finding_id
 
 
 async def test_scoped_check_applicability_is_durable() -> None:
@@ -1089,25 +1090,66 @@ async def test_response_to_unreturned_finding_produces_check_not_applicable() ->
     other finding is untested work as far as that check is concerned, so the gap still fires."""
 
     app, _runtime, _ = _build_app(seed_offset=10)
-    started, checked, _obligation = await _bootstrap_finding(app, seed=1300)
+    started, checked, obligation = await _bootstrap_finding(app, seed=1300)
     stale_finding = checked.findings[0]
 
-    # The recheck reports the same durable issue under a fresh finding_id, so the first check's
-    # finding is now one the applicable (second) check never returned.
+    # Resolving the obligation retires the first check's issue, so the recheck no longer returns
+    # that finding: the first check's finding is one the applicable (second) check never returned.
+    evidence_id = protocol_id("evd_", 1314)
+    resolve_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 1313)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "event_drafts": (
+            {
+                "event_id": protocol_id("evt_", 1315),
+                "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                "occurred_at": "2026-07-19T12:00:02.000Z",
+                "causal_parents": (),
+                "payload": {
+                    "evidence_id": evidence_id,
+                    "evidence_kind": "artifact",
+                    "strength": "mutable_reference",
+                    "observed_at": "2026-07-19T12:00:02.000Z",
+                    "reference": "respond-exercise-result",
+                },
+                "artifact_refs": (),
+                "evidence_refs": (),
+            },
+            {
+                "event_id": protocol_id("evt_", 1316),
+                "schema": {"name": "obligation_published", "version": "1.0.0"},
+                "occurred_at": "2026-07-19T12:00:03.000Z",
+                "causal_parents": (),
+                "payload": {
+                    "obligation_id": obligation,
+                    "description": "Publish a result for the respond/status/receipt exercise.",
+                    "acceptance_criteria": "A result is recorded in the task ledger.",
+                    "evidence_expectation": "A linked immutable result record.",
+                    "status": "resolved",
+                    "resolution_evidence_refs": (evidence_id,),
+                },
+                "artifact_refs": (),
+                "evidence_refs": (),
+            },
+        ),
+    }
+    resolved = await app.publish_work(PublishWorkRequest.model_validate(resolve_wire))
+
     rechecked = await app.check(
         CheckRequest.model_validate(
             {
                 **_request_base(protocol_id("req_", 1310)),
                 "session_id": started.session_id,
                 "writer_id": started.writer_id,
-                "expected_frontier": _frontier(checked.result_frontier),
+                "expected_frontier": _frontier(resolved.result_frontier),
                 "mode": "deterministic_only",
                 "max_findings": "3",
             }
         )
     )
     assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
-    assert rechecked.findings
     assert stale_finding.finding_id not in tuple(item.finding_id for item in rechecked.findings)
 
     responded = await app.respond(
@@ -1141,3 +1183,66 @@ async def test_response_to_unreturned_finding_produces_check_not_applicable() ->
 
     assert "check_not_applicable" in receipt.coverage.known_gaps
     assert "check_current_as_of_earlier_frontier" not in receipt.coverage.known_gaps
+
+
+async def test_check_respond_recheck_reaches_a_fixed_point() -> None:
+    """The documented cadence has a fixed point: acknowledging a finding and rechecking with no
+    other new events converges on the already-answered record instead of minting a duplicate,
+    flagging its own bookkeeping as staleness, and demanding yet another check."""
+
+    app, _runtime, _ = _build_app(seed_offset=11)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=1400)
+
+    frontier = checked.result_frontier
+    for offset, finding in enumerate(checked.findings):
+        acked = await app.respond(
+            RespondRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", 1410 + offset)),
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(frontier),
+                    "finding_id": finding.finding_id,
+                    "finding_frontier": _frontier(checked.result_frontier),
+                    "disposition": "acknowledged",
+                }
+            )
+        )
+        frontier = acked.result_frontier
+
+    rechecked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1420)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
+
+    # The unanswered issues are still reported, under the ids already acknowledged.
+    assert tuple(item.finding_id for item in rechecked.findings) == tuple(
+        item.finding_id for item in checked.findings
+    )
+
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1412)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    compact = cast(StatusCompactPageModel, status.page)
+    item = compact.items[0]
+    # The acknowledged finding is answered on the record and the recheck's own bookkeeping is not
+    # material change, so nothing demands another cycle.
+    assert item.unresolved_finding_count == "0"
+    assert item.freshness != "stale_after_material_change"

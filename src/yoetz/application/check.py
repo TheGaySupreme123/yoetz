@@ -30,7 +30,11 @@ from yoetz.domain.receipts import (
 )
 from yoetz.domain.values import (
     REPOSITORY_GRANT_CONTINUATION_KIND,
+    ClaimId,
+    EventId,
+    FindingId,
     Frontier,
+    ObligationId,
     SemanticContinuation,
     claim_id,
     event_id,
@@ -47,7 +51,7 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
-from yoetz.kernel.projections import PROJECTION_VERSION
+from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
 from yoetz.observability.logging import (
     record_bounded_counts_without_raising,
@@ -111,6 +115,7 @@ __all__ = [
     "execute_check",
     "execute_check_commit",
     "normalize_check_scope",
+    "prior_finding_ids",
     "run_deterministic_policies",
     "semantic_coverage_gap_code",
     "validate_semantic_judgment",
@@ -712,16 +717,43 @@ def run_deterministic_policies(
     return assessments, tuple(executions)
 
 
-def allocate_findings(ids: IdPort, candidates: tuple[CandidateFinding, ...]) -> tuple[Finding, ...]:
-    """Allocate stable IDs in deterministic candidate order."""
+FindingIdentity = tuple[FindingKind, str, tuple[EventId | ObligationId | ClaimId, ...]]
+
+
+def prior_finding_ids(projection: ProjectionState) -> dict[FindingIdentity, FindingId]:
+    """Index the live recorded findings by the identity a policy re-derives them under."""
+
+    prior: dict[FindingIdentity, FindingId] = {}
+    for key, record in projection.findings.items():
+        if record.payload is None:
+            continue
+        prior[(record.payload.kind, record.payload.policy_id, record.payload.subject_refs)] = key
+    return prior
+
+
+def allocate_findings(
+    ids: IdPort,
+    candidates: tuple[CandidateFinding, ...],
+    prior: Mapping[FindingIdentity, FindingId] | None = None,
+) -> tuple[Finding, ...]:
+    """Allocate stable IDs in deterministic candidate order.
+
+    A candidate that re-derives a live recorded finding keeps that finding's ID, so a re-check
+    converges on the record already answered instead of minting an unresolvable duplicate.
+    """
 
     output: list[Finding] = []
     for candidate in candidates:
         if type(candidate) is not CandidateFinding:
             raise _invalid("finding_candidate_invalid")
+        existing = (
+            None
+            if prior is None
+            else prior.get((candidate.kind, candidate.policy_id, candidate.subject_refs))
+        )
         output.append(
             Finding(
-                finding_id(ids.new(IdKind.FINDING)),
+                existing if existing is not None else finding_id(ids.new(IdKind.FINDING)),
                 candidate.kind,
                 candidate.origin,
                 candidate.priority,
@@ -1218,6 +1250,7 @@ async def execute_check_commit(
             deterministic = allocate_findings(
                 app.ids,
                 tuple(item.candidate for item in assessments),
+                prior_finding_ids(frozen.case.projection),
             )
             frozen = await _publish_deterministic_result(
                 app,

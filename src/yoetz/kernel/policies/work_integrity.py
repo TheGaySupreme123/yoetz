@@ -570,10 +570,10 @@ def _response_findings(case: DeterministicCase) -> list[DeterministicAssessment]
         ):
             continue
         finding = finding_record.payload
-        stale = (
-            response.finding_frontier.sequence != finding.subject_frontier.sequence
-            or response.finding_frontier.head_digest != finding.subject_frontier.head_digest
-        )
+        # A response answers the finding at the frontier that carries the finding's own record,
+        # which necessarily follows the subject the check tested. Only a response aimed at a state
+        # older than that subject answers something the finding was never about.
+        stale = response.finding_frontier.sequence < finding.subject_frontier.sequence
         insufficient = not _response_support_admissible(case, response.evidence_refs)
         if not stale and not insufficient:
             continue

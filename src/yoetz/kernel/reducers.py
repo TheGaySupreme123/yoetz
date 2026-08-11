@@ -74,6 +74,7 @@ __all__ = [
     "invalidates_recorded_check",
     "is_material_event_family",
     "reduce_event",
+    "supersedes_recorded_check",
     "replay",
 ]
 
@@ -100,29 +101,38 @@ def is_material_event_family(name: str) -> bool:
     return name in _MATERIAL_FAMILIES
 
 
+def supersedes_recorded_check(
+    name: str,
+    payload: object,
+    returned_finding_ids: tuple[FindingId, ...],
+) -> bool:
+    """True when a record of *name* carrying *payload* supersedes a check returning those findings.
+
+    Answering a finding the check itself returned reports on that check's own output rather than
+    publishing untested work, so such a response leaves the check attributable to a later receipt.
+    Every other material-family record supersedes the check, including a response to a finding the
+    check did not return and a response whose payload is unreadable.
+    """
+
+    if not is_material_event_family(name):
+        return False
+    if name != "response_recorded":
+        return True
+    if type(payload) is not ResponseRecordedPayload:
+        return True
+    return payload.finding_id not in returned_finding_ids
+
+
 def invalidates_recorded_check(
     record: LedgerRecord,
     check_sequence: int,
     returned_finding_ids: tuple[FindingId, ...],
 ) -> bool:
-    """True when *record* supersedes the check recorded at *check_sequence*.
-
-    Answering a finding the check itself returned reports on that check's own output rather than
-    publishing untested work, so such a response leaves the check attributable to a later receipt.
-    Every other material-family record appended after the check supersedes it, including a
-    response to a finding the check did not return and a response whose payload is unreadable.
-    """
+    """True when *record* supersedes the check recorded at *check_sequence*."""
 
     if record.ledger.ingestion_sequence <= check_sequence:
         return False
-    if not is_material_event_family(record.schema.name):
-        return False
-    if record.schema.name != "response_recorded":
-        return True
-    payload = record.payload
-    if type(payload) is not ResponseRecordedPayload:
-        return True
-    return payload.finding_id not in returned_finding_ids
+    return supersedes_recorded_check(record.schema.name, record.payload, returned_finding_ids)
 
 
 def _corrupt() -> ValueError:
@@ -755,7 +765,9 @@ def reduce_event(
         accepted = cast(AcceptedEvent, event)
         family = accepted.schema.name
         payload = accepted.payload
-        if family in _MATERIAL_FAMILIES and latest is not None:
+        if latest is not None and supersedes_recorded_check(
+            family, payload, latest.returned_finding_ids
+        ):
             stale = True
 
         if family in {"session_opened", "session_resumed", "receipt_recorded"}:

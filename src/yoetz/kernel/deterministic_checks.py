@@ -85,6 +85,7 @@ from yoetz.protocol.coverage import (
 
 __all__ = [
     "DETERMINISTIC_FINDING_TEMPLATES",
+    "EVIDENCE_PROVENANCE_GAPS",
     "CaseAvailabilityFacts",
     "CaseGap",
     "DeterministicAssessment",
@@ -436,11 +437,21 @@ if frozenset(DETERMINISTIC_FINDING_TEMPLATES) != frozenset(FindingKind):
     raise _invalid_policy()
 
 
+EVIDENCE_PROVENANCE_GAPS: Final[frozenset[str]] = frozenset(
+    {
+        "evidence_content_digest_only",
+        "evidence_content_withheld",
+        "evidence_digest_subject_legacy_unknown",
+    }
+)
+
+
 def render_deterministic_finding_text(
     kind: FindingKind,
     subject_refs: tuple[PublicSubjectRef, ...],
+    gap_codes: tuple[str, ...] = (),
 ) -> tuple[str, str]:
-    if type(kind) is not FindingKind:
+    if type(kind) is not FindingKind or type(gap_codes) is not tuple:
         raise _invalid_policy()
     refs = cast(
         tuple[PublicSubjectRef, ...],
@@ -448,6 +459,16 @@ def render_deterministic_finding_text(
     )
     template = DETERMINISTIC_FINDING_TEMPLATES[kind]
     detail = f"Subjects: {', '.join(refs)}. Main agent: {template.next_action}"
+    if kind is FindingKind.LEDGER_STALE_OR_INCOMPLETE and gap_codes:
+        detail = (
+            f"Subjects: {', '.join(refs)}. Gaps: {', '.join(gap_codes)}."
+            f" Main agent: {template.next_action}"
+        )
+        if EVIDENCE_PROVENANCE_GAPS & set(gap_codes):
+            detail = (
+                f"{detail} An evidence-provenance gap is not resolved by a finding response:"
+                " record content-bearing evidence or accept the gap in the receipt."
+            )
     return template.summary, detail
 
 
@@ -469,6 +490,7 @@ class DeterministicAssessment:
         summary, detail = render_deterministic_finding_text(
             candidate.kind,
             candidate.subject_refs,
+            self.basis.coverage_gaps,
         )
         if candidate.summary != summary or candidate.detail != detail:
             raise _invalid_policy()
@@ -1643,7 +1665,7 @@ def build_policy_assessment(
         coverage_gaps=coverage.known_gaps,
         supporting_refs=supporting_refs,
     )
-    summary, detail = render_deterministic_finding_text(kind, public_refs)
+    summary, detail = render_deterministic_finding_text(kind, public_refs, basis.coverage_gaps)
     priority, _ = FINDING_KIND_TRAITS[kind]
     candidate = CandidateFinding(
         kind=kind,

@@ -397,8 +397,10 @@ If `scope` is present, send both arrays. Either may be empty; two empty arrays m
 
 ## `respond`
 
-Use the finding's recorded frontier, not merely the latest task frontier. A response records a
-disposition; it never erases the finding.
+Use `finding_frontier` = the result frontier of the `check` that returned the finding, which is the
+frontier that carries the finding's own record. The finding's `subject_frontier` names the state the
+check tested and precedes that record, so it is rejected. A response records a disposition; it never
+erases the finding.
 
 ```json
 {
@@ -407,9 +409,9 @@ disposition; it never erases the finding.
   "request_id": "req_00000000-0000-4000-8000-000000000013",
   "session_id": "ses_00000000-0000-4000-8000-000000000001",
   "writer_id": "wri_00000000-0000-4000-8000-000000000001",
-  "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+  "expected_frontier": {"sequence": "11", "head_digest": "sha256:0b77cea7992de93fe83a6748fbd6b4557b53d965e3fe0d2d8a1f47023d5edb72"},
   "finding_id": "fnd_00000000-0000-4000-8000-000000000001",
-  "finding_frontier": {"sequence": "0", "head_digest": "genesis"},
+  "finding_frontier": {"sequence": "11", "head_digest": "sha256:0b77cea7992de93fe83a6748fbd6b4557b53d965e3fe0d2d8a1f47023d5edb72"},
   "disposition": "acknowledged",
   "reason": "Replace with the bounded disposition reason",
   "actor": {"actor_id": "harness:mcp-template", "actor_type": "harness"},

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from builders.policy_cases import (
     BASE_COVERAGE,
     FRONTIER,
@@ -326,6 +328,30 @@ def test_ledger_stale_or_incomplete_requires_a_nonrootless_gap() -> None:
     assert FindingKind.LEDGER_STALE_OR_INCOMPLETE not in _kinds(make_case(gaps=(rootless,)))
 
 
+def test_ledger_stale_or_incomplete_names_the_gap_and_its_resolution_path() -> None:
+    gap = CaseGap(
+        f"evidence_content_digest_only:{evt(9)}",
+        "evidence_content_digest_only",
+        (evt(9),),
+    )
+    digest_only = replace(BASE_COVERAGE, known_gaps=("evidence_content_digest_only",))
+    trigger = make_case(
+        gaps=(gap,),
+        extra_refs=(evt(9),),
+        coverage_overrides={evt(9): digest_only},
+    )
+    result = run_deterministic_policies(trigger, WORK_INTEGRITY_POLICY_PACK)
+    finding = next(
+        item
+        for item in result.assessments
+        if item.candidate.kind is FindingKind.LEDGER_STALE_OR_INCOMPLETE
+    )
+    # The detail names the concrete gap and says a response cannot resolve it, so an agent is
+    # never steered into acknowledging its way out of a coverage gap (issue #186).
+    assert "evidence_content_digest_only" in finding.candidate.detail
+    assert "not resolved by a finding response" in finding.candidate.detail
+
+
 def _recorded_finding() -> Finding:
     return Finding(
         finding_id=fnd(1),
@@ -372,6 +398,39 @@ def test_weak_or_stale_response_and_supported_rejection_nontrigger() -> None:
         extra_refs=(evt(99),),
     )
     assert FindingKind.WEAK_OR_STALE_RESPONSE not in _kinds(near)
+
+
+def test_supported_rejection_at_the_findings_own_frontier_is_not_stale() -> None:
+    """respond requires a frontier that already carries the finding_recorded event, so the
+    frontier that validates necessarily follows the subject the check tested. Only a response
+    aimed at an older state is stale (issue #192)."""
+
+    finding = _recorded_finding()
+    evidence = _evidence(1)
+    recorded_frontier = replace(FRONTIER, sequence=FRONTIER.sequence + 2)
+    supported = ResponseRecordedPayload(
+        finding_id=fnd(1),
+        finding_frontier=recorded_frontier,
+        disposition=ResponseDisposition.REJECTED,
+        reason="Rejected",
+        evidence_refs=(evd(1),),
+    )
+    near = make_case(
+        evidence={evd(1): evidence_record(evidence, 1)},
+        findings={fnd(1): record(finding, 2)},
+        responses={fnd(1): record(supported, 3)},
+        extra_refs=(evt(99),),
+    )
+    assert FindingKind.WEAK_OR_STALE_RESPONSE not in _kinds(near)
+
+    older = replace(supported, finding_frontier=replace(FRONTIER, sequence=FRONTIER.sequence - 1))
+    trigger = make_case(
+        evidence={evd(1): evidence_record(evidence, 1)},
+        findings={fnd(1): record(finding, 2)},
+        responses={fnd(1): record(older, 3)},
+        extra_refs=(evt(99),),
+    )
+    assert FindingKind.WEAK_OR_STALE_RESPONSE in _kinds(trigger)
 
 
 def test_finding_coverage_adds_only_engine_and_deterministic_dimensions() -> None:

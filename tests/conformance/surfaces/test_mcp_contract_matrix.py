@@ -220,8 +220,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:085d57fb16a6d08b61a6e4b7acfebd86b88d70c9f90a3aa6a1c483d460423f16",
-        "strict": "sha256:b7e113085a22021b3c3e4bd8227854ba96e0f180a2a451749d8a043824852932",
+        "policy": "sha256:78f76e470e19dc69d5a582b8401e42154bc3f7921e76f13ab21d47e844d647dc",
+        "strict": "sha256:f5a84d4ee61ad992132565cf271d54ea538fc3cfd3028e085f2fc94c95ab57b4",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -235,6 +235,9 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         check_description
     )
     assert "Omitting mode resolves through the configured verification policy" in check_description
+    respond_description = descriptor_for("respond").description
+    assert "result frontier of the check that returned it" in respond_description
+    assert "not its subject_frontier" in respond_description
     assert descriptor_for("start").description.startswith(
         "Call for material multi-step, delegated, resumable, or verification-heavy work"
     )

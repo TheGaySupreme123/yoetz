@@ -725,6 +725,9 @@ deciding between the two, shared by the receipt and by compact status coverage.
   `latest_tested_state` is exactly the source check event ID, subject frontier, verdict,
   `returned_finding_ids`, `suppressed_count`, and recorded coverage. Suppression is durable
   structural uncertainty: it is never reconstructed from visible finding IDs.
+  `freshness` folds staleness under the same supersession rule as
+  `kernel/reducers.invalidates_recorded_check`: a readable `response_recorded` answering a finding
+  in `latest_tested_state.returned_finding_ids` never by itself marks the ledger stale.
   `CurrentPlanScope` and `current_plan_scope`, owned by `kernel/plan_scope.py`, are the one shared
   readable-plan-chain derivation consumed by status, check, and receipt: effective obligation refs,
   their declared count, and the current `no_obligations_reason`. A revision applies its obligation
@@ -839,7 +842,9 @@ deciding between the two, shared by the receipt and by compact status coverage.
   material state or `None`. A check applies when no event appended after the check's own record
   supersedes it under `kernel/reducers.invalidates_recorded_check`: the check's atomic result
   events — the `finding_recorded` records it returned and its `check_recorded` — land with it and
-  never revoke it; an immaterial advance — `receipt_recorded`, `session_opened`,
+  never revoke it (a deterministic candidate that re-derives a live recorded finding with the same
+  kind, policy, and subject refs keeps that finding's ID and is cited in `returned_finding_ids`
+  without a duplicate `finding_recorded` event); an immaterial advance — `receipt_recorded`, `session_opened`,
   `session_resumed` — never revokes it; and a readable `response_recorded` answering a finding the
   check itself returned never revokes it, though the context then carries the
   `check_current_as_of_earlier_frontier` gap. Every other material-family event revokes it,
@@ -2504,7 +2509,9 @@ per operation: `start`, `publish_work`, `check`, `respond`, `status`, `receipt`,
 
 Every `status` success carries `closure_readiness(open_obligation_count,
 unresolved_finding_count, declared_obligation_count, no_obligations_reason,
-blocking_conditions)` beside `import_status`, on every view. The compact singleton carries the same
+blocking_conditions)` beside `import_status`, on every view. `unresolved_finding_count` counts
+recorded findings with no recorded response, whatever the response's disposition; a rejection or
+waiver answers the finding on the record and its own quality surfaces as a later finding. The compact singleton carries the same
 two completion-scope fields beside its current plan locator and counters. Its
 `blocking_conditions` are exactly
 `obligations_open|findings_unresolved|no_plan_published|no_obligations_declared|projection_stale|
