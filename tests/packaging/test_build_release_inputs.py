@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -34,7 +35,13 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path, str]:
     artifacts.mkdir(parents=True)
     (artifacts / "yoetz-0.1.0.whl").write_bytes(b"wheel")
     (artifacts / "yoetz-0.1.0.tar.gz").write_bytes(b"sdist")
-    digest = "a" * 64
+    checksum_lines: list[str] = []
+    for path in sorted(artifacts.iterdir(), key=lambda item: item.name.encode("utf-8")):
+        artifact_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        checksum_lines.append(f"{artifact_digest}  /build/dist/{path.name}\n")
+    checksum_bytes = "".join(checksum_lines).encode()
+    (artifacts / "SHA256SUMS").write_bytes(checksum_bytes)
+    digest = hashlib.sha256(checksum_bytes).hexdigest()
     matrix = root / "capability-matrix.json"
     matrix.write_text(
         json.dumps(
@@ -182,3 +189,41 @@ def test_builder_rejects_missing_duplicate_and_unknown_gate_records(tmp_path: Pa
     unknown = _run_builder(tmp_path / "unknown", unknown_records)
     assert unknown.returncode == 1
     assert "gate_record_unknown" in unknown.stderr
+
+
+def test_builder_rejects_unbound_gate_and_substituted_candidate_artifact(tmp_path: Path) -> None:
+    unbound_records = _passing_records()
+    unbound_records[0]["input_digests"] = []
+    unbound = _run_builder(tmp_path / "unbound", unbound_records)
+    assert unbound.returncode == 1
+    assert "gate_record_digest_invalid" in unbound.stderr
+
+    artifact_root, matrix, limitations, digest = _inputs(tmp_path / "substituted")
+    (artifact_root / "yoetz-0.1.0.whl").write_bytes(b"substituted-wheel")
+    output = tmp_path / "substituted" / "release-inputs.json"
+    command = [
+        sys.executable,
+        str(_BUILDER),
+        "--candidate-version",
+        "0.1.0",
+        "--candidate-tag",
+        "v0.1.0",
+        "--candidate-commit",
+        "0" * 40,
+        "--artifact-root",
+        str(artifact_root),
+        "--candidate-digest",
+        digest,
+        "--support-matrix",
+        str(matrix),
+        "--known-limitations",
+        str(limitations),
+    ]
+    for record in _passing_records():
+        command.extend(("--gate-record", json.dumps(record)))
+    command.extend(("--output", str(output)))
+    substituted = subprocess.run(
+        command, cwd=_ROOT, text=True, capture_output=True, check=False
+    )
+    assert substituted.returncode == 1
+    assert "candidate_artifact_digest_mismatch" in substituted.stderr

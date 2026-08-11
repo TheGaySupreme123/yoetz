@@ -17,7 +17,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 
 _REQUIRED_GATES: tuple[str, ...] = (
@@ -107,7 +107,9 @@ def _hash(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _artifacts(artifact_root: Path, output_parent: Path) -> list[dict[str, str]]:
+def _artifacts(
+    artifact_root: Path, output_parent: Path, candidate_digest: str
+) -> list[dict[str, str]]:
     if artifact_root.is_symlink() or not artifact_root.is_dir():
         raise ReleaseInputError("artifact_root_missing", detail=str(artifact_root))
     if not _path_within(artifact_root, output_parent):
@@ -120,14 +122,41 @@ def _artifacts(artifact_root: Path, output_parent: Path) -> list[dict[str, str]]
     if not found:
         raise ReleaseInputError("artifact_missing", detail=str(artifact_root))
 
+    checksum_path = artifact_root / "SHA256SUMS"
+    if checksum_path.is_symlink() or not checksum_path.is_file():
+        raise ReleaseInputError("candidate_checksum_missing")
+    if _hash(checksum_path) != candidate_digest:
+        raise ReleaseInputError("candidate_artifact_digest_mismatch")
+    try:
+        checksum_lines = checksum_path.read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ReleaseInputError("candidate_checksum_invalid") from exc
+    declared: dict[str, str] = {}
+    for line in checksum_lines:
+        digest, separator, source_path = line.partition("  ")
+        name = PurePosixPath(source_path).name
+        if (
+            separator != "  "
+            or not _SHA256.fullmatch(digest)
+            or not name.endswith((".whl", ".tar.gz"))
+            or name in declared
+        ):
+            raise ReleaseInputError("candidate_checksum_invalid")
+        declared[name] = f"sha256:{digest}"
+    if set(declared) != {path.name for path in found}:
+        raise ReleaseInputError("candidate_checksum_invalid")
+
     entries: list[dict[str, str]] = []
     for path in found:
         if path.is_symlink() or not path.is_file() or not _path_within(path, artifact_root):
             raise ReleaseInputError("artifact_invalid", detail=path.name)
+        artifact_digest = _hash(path)
+        if artifact_digest != declared[path.name]:
+            raise ReleaseInputError("candidate_artifact_digest_mismatch")
         entries.append(
             {
                 "path": path.resolve().relative_to(output_parent.resolve()).as_posix(),
-                "sha256": _hash(path),
+                "sha256": artifact_digest,
             }
         )
     return entries
@@ -155,7 +184,7 @@ def _gate_record(raw: str) -> GateRecord:
         if not isinstance(result, str) or result not in _WORKFLOW_RESULTS:
             raise ReleaseInputError("gate_record_result_invalid", detail=name)
         results.append(result)
-    if not isinstance(input_digests, list):
+    if not isinstance(input_digests, list) or not input_digests:
         raise ReleaseInputError("gate_record_digest_invalid", detail=name)
     digests: list[str] = []
     for digest in cast(list[object], input_digests):
@@ -251,7 +280,9 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
         "candidate_version": version,
         "candidate_tag": tag,
         "candidate_commit": commit,
-        "artifacts": _artifacts(cast(Path, args.artifact_root), output_parent),
+        "artifacts": _artifacts(
+            cast(Path, args.artifact_root), output_parent, candidate_digest
+        ),
         "gates": _gates(cast(list[str], args.gate_record)),
         "support_matrix_cells": _support_cells(cast(Path, args.support_matrix), candidate_digest),
         "known_limitations": _limitations(cast(Path, args.known_limitations)),
