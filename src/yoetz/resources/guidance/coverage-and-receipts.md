@@ -38,7 +38,7 @@ Evidence bound to an older material state is stale. Hidden, redacted, or unknown
 
 ## Findings and responses
 
-For a finding, choose one recorded response: accept and act; provide additional evidence; revise the claim; dispute with evidence; or state an unresolved limitation. Then recheck after material change. A response never deletes the original challenge.
+For a finding, choose one recorded response: accept and act; provide additional evidence; revise the claim; dispute with evidence; or state an unresolved limitation. Then recheck after material change — responding to a finding the check itself returned is not material change and demands no recheck. A response never deletes the original challenge, and a response never closes a coverage gap: a `ledger_stale_or_incomplete` finding rooted in an evidence-provenance gap such as `evidence_content_digest_only` is resolved only by recording content-bearing evidence or accepting the gap in the receipt.
 
 No disposition resolves a finding. `acknowledged`, `rejected`, and `waived` each record what you decided and what evidence you attached; none of them clears the finding for receipt purposes. Every actionable finding recorded in a task keeps the receipt conclusion at `unresolved_findings_remain`, even when later checks return no findings at all. Word the final answer accordingly: the repair is real and the disposition is recorded, but the receipt is not a clean completion receipt and must not be described as one.
 

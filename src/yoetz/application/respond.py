@@ -130,8 +130,15 @@ def _error(
     message: str,
     *,
     retryable: bool = False,
+    reason_code: str | None = None,
+    field: str | None = None,
 ) -> PublicOperationError:
-    return PublicOperationError(code, message, retryable)
+    details: dict[str, str] = {}
+    if reason_code is not None:
+        details["reason_code"] = reason_code
+    if field is not None:
+        details["field"] = field
+    return PublicOperationError(code, message, retryable, safe_details=details or None)
 
 
 def _mapping(value: JsonValue) -> Mapping[str, JsonValue]:
@@ -373,7 +380,14 @@ async def execute_respond(app: Application, request: RespondRequest) -> RespondI
             if finding_record is None or finding_record.payload is None:
                 raise _error(
                     PublicErrorCode.INVALID_REQUEST,
-                    "The finding is unavailable at the supplied frontier.",
+                    (
+                        "The finding is unavailable at the supplied frontier. finding_frontier is "
+                        "the frontier at which the finding is on the ledger — the result frontier "
+                        "of the check that returned it — not the finding's subject_frontier, "
+                        "which precedes its own record."
+                    ),
+                    reason_code="finding_not_in_prefix",
+                    field="finding_frontier",
                 )
             current = Frontier(
                 int(request.expected_frontier.sequence), request.expected_frontier.head_digest

@@ -397,8 +397,10 @@ If `scope` is present, send both arrays. Either may be empty; two empty arrays m
 
 ## `respond`
 
-Use the finding's recorded frontier, not merely the latest task frontier. A response records a
-disposition; it never erases the finding.
+Use `finding_frontier` = the result frontier of the `check` that returned the finding, which is the
+frontier that carries the finding's own record. The finding's `subject_frontier` names the state the
+check tested and precedes that record, so it is rejected. A response records a disposition; it never
+erases the finding.
 
 ```json
 {

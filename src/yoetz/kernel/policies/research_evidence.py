@@ -302,10 +302,10 @@ def _rejection_findings(case: DeterministicCase) -> list[DeterministicAssessment
         ):
             continue
         finding = finding_record.payload
-        if (
-            response.finding_frontier.sequence != finding.subject_frontier.sequence
-            or response.finding_frontier.head_digest != finding.subject_frontier.head_digest
-            or any(ref not in case.allowed_ids for ref in finding.subject_refs)
+        # The response must answer the finding at or after the subject the check tested; a response
+        # aimed at an older state is a different, weaker claim that work integrity reports instead.
+        if response.finding_frontier.sequence < finding.subject_frontier.sequence or any(
+            ref not in case.allowed_ids for ref in finding.subject_refs
         ):
             continue
         response_event = response_record.source_event_id

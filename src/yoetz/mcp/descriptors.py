@@ -916,6 +916,13 @@ def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> No
                 "Acknowledged accepts no waiver fields. Rejected requires reason and accepts no "
                 "waiver fields. Waived requires reason and waiver_scope."
             )
+        finding_frontier = properties.get("finding_frontier")
+        if isinstance(finding_frontier, dict):
+            finding_frontier["description"] = (
+                "The frontier that carries the finding's own record: the result frontier of the "
+                "check that returned it. Not the finding's subject_frontier, which names the "
+                "state that check tested and precedes the finding's record."
+            )
     elif name == "status-request":
         filter_property = properties.get("filter")
         if isinstance(filter_property, dict):
@@ -1305,12 +1312,14 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "respond",
         "Respond to a finding",
-        "Records an acknowledgement, rejection, or bounded waiver for one finding at its recorded "
-        "frontier. It does not resolve other findings or establish that underlying work changed. "
+        "Records an acknowledgement, rejection, or bounded waiver for one finding at the result "
+        "frontier of the check that returned it. It does not resolve other findings or establish "
+        "that underlying work changed. "
         "No disposition clears the finding it answers: every actionable finding recorded in a task "
         "keeps the receipt conclusion at unresolved_findings_remain, so repair the record and word "
         "the conclusion accordingly rather than calling the finding resolved. Call it once per "
-        "finding, then recheck. Guidance: yoetz://guidance/publication-policy.md.",
+        "finding; answering a finding that check returned is not material change and needs no "
+        "recheck. Guidance: yoetz://guidance/publication-policy.md.",
         read_only=False,
         idempotent=True,
     ),
@@ -1397,7 +1406,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
                 "check": "sha256:b4e860ea9f16ecda346546c2ff59a3b1a0562c5f16a636e36d78b9707fd9aa26",
-                "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
+                "respond": "sha256:922cd403cc504b5a91c7daa520a564d19d2bf2186992f19c125c13369e6a392a",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
             }
@@ -1407,7 +1416,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
                 "check": "sha256:a6c1f8d015f8fac98a77c997f31a923432db1e42fe2b45a5097f2d48d9b98ab9",
-                "respond": "sha256:7af2775e5204a902a116eefb24e4588eb66645df39f6748f22975ba44a7896e6",
+                "respond": "sha256:922cd403cc504b5a91c7daa520a564d19d2bf2186992f19c125c13369e6a392a",
                 "status": "sha256:f50314514f180a19f912662e191fec7880e2e41a6fc8dd475a063c2263eafa61",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
             }
@@ -1416,8 +1425,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:085d57fb16a6d08b61a6e4b7acfebd86b88d70c9f90a3aa6a1c483d460423f16",
-        "strict": "sha256:b7e113085a22021b3c3e4bd8227854ba96e0f180a2a451749d8a043824852932",
+        "policy": "sha256:e0732845b0ddf42c6ba12e4aee412caf8774285cccd8dea2e13a2b70a251cafa",
+        "strict": "sha256:6bd9cf1bdfd1f5db57800c24e06efb7fb4b4fffb7f7823757558e18640c71814",
     }
 )
 

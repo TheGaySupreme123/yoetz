@@ -17,8 +17,8 @@ Use Yoetz for material multi-step work, multiple requested outcomes, delegation,
 | `start` | Once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; attach selectors are `session_id` or the ref pair, never bare `task_id`. |
 | `publish_work` | One batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
-| `check` | After publishing the completion claim and its evidence, and again after any material edit, new evidence, or finding response. A check with no new events since the last one adds nothing. |
-| `respond` | Once per finding, at that finding's recorded frontier. |
+| `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. Responding to a finding that check returned is not material change. A check with no new events since the last one adds nothing. |
+| `respond` | Once per finding, at the result frontier of the check that returned it — not the finding's `subject_frontier`, which precedes the finding's own record. |
 | `receipt` | Once at the end, and again only if material state changed after the previous receipt. |
 
 Under-publishing hides the work; over-publishing buries it. The test is whether an independent reader reviewing only the ledger would reach a different conclusion without the fact.
