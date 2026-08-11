@@ -280,9 +280,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
         "candidate_version": version,
         "candidate_tag": tag,
         "candidate_commit": commit,
-        "artifacts": _artifacts(
-            cast(Path, args.artifact_root), output_parent, candidate_digest
-        ),
+        "artifacts": _artifacts(cast(Path, args.artifact_root), output_parent, candidate_digest),
         "gates": _gates(cast(list[str], args.gate_record)),
         "support_matrix_cells": _support_cells(cast(Path, args.support_matrix), candidate_digest),
         "known_limitations": _limitations(cast(Path, args.known_limitations)),

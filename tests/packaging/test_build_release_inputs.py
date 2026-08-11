@@ -222,8 +222,6 @@ def test_builder_rejects_unbound_gate_and_substituted_candidate_artifact(tmp_pat
     for record in _passing_records():
         command.extend(("--gate-record", json.dumps(record)))
     command.extend(("--output", str(output)))
-    substituted = subprocess.run(
-        command, cwd=_ROOT, text=True, capture_output=True, check=False
-    )
+    substituted = subprocess.run(command, cwd=_ROOT, text=True, capture_output=True, check=False)
     assert substituted.returncode == 1
     assert "candidate_artifact_digest_mismatch" in substituted.stderr
