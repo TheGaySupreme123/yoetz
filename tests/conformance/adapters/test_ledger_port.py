@@ -146,10 +146,20 @@ def _fence() -> OwnershipFence:
     )
 
 
-def ledger_command(*, request_suffix: str = "1", unknown: bool = False) -> AppendCommand:
+def ledger_command(
+    *,
+    request_suffix: str = "1",
+    unknown: bool = False,
+    index: int = 0,
+    session_id: str | None = None,
+    writer_id: str | None = None,
+    expected_frontier: int = 0,
+) -> AppendCommand:
     vector = "unknown-schema" if unknown else "projection-rebuild"
     records = replay_records(vector)
-    record = next(row for row in records if type(row) is UnknownEvent) if unknown else records[0]
+    record = (
+        next(row for row in records if type(row) is UnknownEvent) if unknown else records[index]
+    )
     assert record.payload is not None
     operation_id = f"req_00000000-0000-4000-8000-00000000000{request_suffix}"
     draft = EventDraft(
@@ -189,12 +199,12 @@ def ledger_command(*, request_suffix: str = "1", unknown: bool = False) -> Appen
     )
     return AppendCommand(
         record.task_id,
-        record.session_id,
-        record.writer.writer_id,
+        record.session_id if session_id is None else session_id,
+        record.writer.writer_id if writer_id is None else writer_id,
         operation_id,
         OperationKind.PUBLISH_WORK,
         "sha256:" + "2" * 64,
-        0,
+        expected_frontier,
         (entry,),
     )
 
@@ -260,6 +270,46 @@ async def test_load_and_freeze_contract() -> None:
     for adapter in adapters:
         await adapter.append_batch(command)
         loaded.append(tuple([row async for row in adapter.load_events(command.session_id)]))
+    assert loaded[0] == loaded[1]
+
+
+@pytest.mark.anyio
+async def test_load_events_gives_every_attached_session_the_whole_task_chain() -> None:
+    """``session_id`` scopes membership, not rows (issue #200).
+
+    A task's ingestion sequence and digest chain are task-global: a second session appending to
+    the same task continues one chain rather than starting its own. Both adapters therefore hand
+    either session the full chain, and hand a session that never appended here nothing at all.
+    """
+
+    first = ledger_command()
+    second = ledger_command(
+        request_suffix="3",
+        index=1,
+        session_id="ses_20000007-0000-4000-8000-000000000012",
+        writer_id="wri_20000007-0000-4000-8000-000000000013",
+        expected_frontier=1,
+    )
+    stranger = "ses_20000007-0000-4000-8000-000000000099"
+    loaded: list[tuple[object, ...]] = []
+    for adapter in (memory_ledger(first), sqlite_ledger(first)):
+        await adapter.append_batch(first)
+        await adapter.append_batch(second)
+        resumed = tuple([row async for row in adapter.load_events(second.session_id)])
+        assert tuple(row.ledger.ingestion_sequence for row in resumed) == (1, 2)
+        assert tuple(str(row.session_id) for row in resumed) == (
+            first.session_id,
+            second.session_id,
+        )
+        original = tuple([row async for row in adapter.load_events(first.session_id)])
+        assert original == resumed
+        # ``after``/``through`` still bound the window, and they count task ingestion sequence.
+        windowed = tuple(
+            [row async for row in adapter.load_events(second.session_id, after=1, through=2)]
+        )
+        assert windowed == resumed[1:]
+        assert [row async for row in adapter.load_events(stranger)] == []
+        loaded.append(resumed)
     assert loaded[0] == loaded[1]
 
 

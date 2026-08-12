@@ -1340,12 +1340,21 @@ class MemoryLedgerAdapter:
         ):
             raise _error(PublicErrorCode.INVALID_REQUEST)
         async with self._lock:
-            rows = tuple(
-                record
-                for record in self._state.records
-                if record.session_id == session_id
-                and record.ledger.ingestion_sequence > after
-                and (through is None or record.ledger.ingestion_sequence <= through)
+            records = self._state.records
+            # ``session_id`` is a membership check, not a row filter. The ingestion sequence and
+            # the digest chain are task-global, so every session attached to this task reads the
+            # whole task chain, exactly as ``load_projection`` and ``query_projection`` do.
+            # Filtering rows by session would hand replay — which is genesis-anchored — a
+            # mid-chain suffix as soon as a resumed session appended its own event.
+            rows = (
+                tuple(
+                    record
+                    for record in records
+                    if record.ledger.ingestion_sequence > after
+                    and (through is None or record.ledger.ingestion_sequence <= through)
+                )
+                if any(record.session_id == session_id for record in records)
+                else ()
             )
         for record in rows:
             yield record

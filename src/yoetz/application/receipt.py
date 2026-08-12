@@ -257,7 +257,12 @@ async def _records_through(runtime: TaskRuntime, frontier: Frontier) -> tuple[Le
             )
         ]
     )
-    projection = replay(records)
+    try:
+        projection = replay(records)
+    except ValueError as exc:
+        # Replay is genesis-anchored; a chain it rejects is a storage fact, not an engine bug, so
+        # it leaves here as a bounded public error rather than an unbounded internal one.
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The task ledger is unreadable.") from exc
     if Frontier(projection.frontier, projection.head_digest) != frontier:
         raise _error(PublicErrorCode.FRONTIER_CONFLICT, "The receipt frontier is not current.")
     return records
