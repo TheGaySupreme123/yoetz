@@ -67,7 +67,7 @@ from yoetz.domain.events import (
     encode_payload,
     media_type_for,
 )
-from yoetz.domain.findings import Finding, FindingKind, FindingOrigin
+from yoetz.domain.findings import FINDING_KIND_TRAITS, Finding, FindingKind, FindingOrigin
 from yoetz.domain.observation import (
     ObservationContentChunk,
     ObservationContentKind,
@@ -93,6 +93,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
     timestamp_from_string,
 )
+from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.observability.privacy import redact_sensitive_content
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
@@ -167,9 +168,12 @@ class ObservationCoordinator:
         default_factory=ObservationAdviceContextBuilder
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
+    observation_enabled: bool = True
 
     def __post_init__(self) -> None:
         self._lock = asyncio.Lock()
+        if type(self.observation_enabled) is not bool:
+            raise TypeError("observation_enabled_invalid")
         if self.verification_supervisor is None:
             # Tests and non-ready compositions still drain inline when no supervisor
             # is attached; production ready composition always injects one.
@@ -253,6 +257,8 @@ class ObservationCoordinator:
     async def ingest_request(self, request: ObservationIngestRequest) -> ObservationIngestResult:
         """Coordinator ingest path used by ordinary-control ``observation_ingest``."""
 
+        if not self.observation_enabled:
+            return _reject("observation_disabled")
         if type(request) is not ObservationIngestRequest:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
         try:
@@ -286,6 +292,7 @@ class ObservationCoordinator:
 
         async with self._lock:
             runtime: TaskRuntime | None = None
+            stage = "runtime_route"
             try:
                 runtime = await self.runtime.route(
                     RouteCommand(
@@ -301,6 +308,7 @@ class ObservationCoordinator:
                         ),
                     )
                 )
+                stage = "store_prepare"
                 store = self._observation_store(runtime)
                 store.grant_consent(workspace, consent.granted_at)
                 store.bind_session(workspace, request.envelope.session_commitment)
@@ -324,6 +332,7 @@ class ObservationCoordinator:
                     ),
                     gap_codes=tuple(sorted(gaps, key=str.encode)),
                 )
+                stage = "store_ingest"
                 result = await store.ingest(envelope)
                 if result.disposition is ObservationIngestDisposition.REJECTED:
                     return result
@@ -336,6 +345,7 @@ class ObservationCoordinator:
                 # retryable rejection so the outbox keeps the entry pending.
                 batch = materialize_observation_envelope(envelope, task_id=runtime.task_id)
                 if batch.skip_reason is None and batch.drafts:
+                    stage = "ledger_append"
                     claim = await self._append_materialized(runtime, envelope, batch)
                     if claim is not None:
                         operation_id, materialization_digest = claim
@@ -349,10 +359,17 @@ class ObservationCoordinator:
                             materialized_at=timestamp_from_datetime(self.clock.now_utc()),
                         )
 
+                stage = "verification"
                 await self._enqueue_verification(runtime, workspace, store, envelope)
+                stage = "advice"
                 await self._run_advice(workspace, runtime, store)
                 return result
             except PublicOperationError as exc:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="application.observation_coordinator",
+                    operation=(f"observation_ingest_{stage}_{exc.code.value.lower()}"),
+                )
                 if exc.code is PublicErrorCode.VAULT_LOCKED:
                     return _reject(ObservationGapCode.VAULT_LOCKED.value)
                 if exc.code in {
@@ -364,7 +381,12 @@ class ObservationCoordinator:
                 if exc.code is PublicErrorCode.SESSION_CONFLICT:
                     return _reject(ObservationGapCode.MAPPING_MISSING.value)
                 return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
-            except Exception:
+            except Exception as exc:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="application.observation_coordinator",
+                    operation=f"observation_ingest_{stage}_failed",
+                )
                 return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
             finally:
                 if runtime is not None:
@@ -1257,6 +1279,12 @@ class ObservationCoordinator:
             workspace, store, yoetz_session_id=session_id if type(session_id) is str else None
         )
         if snapshot is not None:
+            # Materialize before publishing the snapshot to either durable cache.
+            # Snapshot identity participates in deterministic suppression, so
+            # advancing it first could make a failed ledger append disappear on
+            # retry and let the outbox ACK without the finding ever landing.
+            if isinstance(runtime, TaskRuntime):
+                await self._materialize_advice_findings(runtime, envelopes, snapshot)
             now = timestamp_from_datetime(self.clock.now_utc())
             store.set_advice_snapshot(workspace, snapshot, now)
             session_id = runtime.session_id if isinstance(runtime, TaskRuntime) else None
@@ -1298,8 +1326,6 @@ class ObservationCoordinator:
                 self.local.set_session_advice_snapshot(
                     workspace, yoetz_session_id=session_id, snapshot=snapshot
                 )
-            if isinstance(runtime, TaskRuntime):
-                await self._materialize_advice_findings(runtime, envelopes, snapshot)
         if self.advice_hook is not None:
             result = self.advice_hook(
                 workspace_commitment=workspace,
@@ -1365,6 +1391,7 @@ class ObservationCoordinator:
             return
         entries: list[AppendEntry] = []
         object_refs: list[ObjectRef] = []
+        envelope_coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
         subject_refs = tuple(event_id(ref) for ref in sorted(refs, key=str.encode)[-64:])
         for item in items:
             kind = kind_by_rule[item.rule_code]
@@ -1383,7 +1410,7 @@ class ObservationCoordinator:
                 item.finding_id,
                 kind,
                 FindingOrigin.DETERMINISTIC,
-                item.priority,
+                FINDING_KIND_TRAITS[kind][0],
                 item.summary,
                 item.detail,
                 subject_refs,
@@ -1393,7 +1420,7 @@ class ObservationCoordinator:
                 item.coverage,
                 None,
             )
-            schema = EventSchema("finding-recorded", "1.0.0")
+            schema = EventSchema("finding_recorded", "1.0.0")
             draft = EventDraft(
                 event_id(
                     stable_observation_id(
@@ -1432,7 +1459,7 @@ class ObservationCoordinator:
                     metadata.media_type,
                     ref.plaintext_size,
                     PublicationChannel.ENGINE_DERIVED,
-                    item.coverage,
+                    envelope_coverage,
                     "projected",
                 )
             )

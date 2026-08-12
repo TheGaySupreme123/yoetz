@@ -16,6 +16,7 @@ import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
 import yoetz.service.ready_composition as ready_composition_module
 from builders.privacy_policies import minimal_external_policy
+from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.sqlite.connection import open_catalog_writer
@@ -114,6 +115,10 @@ class _Paths:
     @property
     def bundle(self) -> Path:
         return self._bundle
+
+    @property
+    def state(self) -> Path:
+        return self._bundle / "state"
 
 
 class _Diagnostics:
@@ -345,6 +350,33 @@ async def test_open_ready_catalog_seeds_generation_property(tmp_path: Path) -> N
         assert row == (_INSTALLATION_ID,)
     finally:
         catalog._db.close(force=True)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_ready_factory_synchronizes_observation_gate_from_loaded_config(tmp_path: Path) -> None:
+    paths = _Paths(tmp_path)
+    disabled = YoetzConfig().model_copy(
+        update={"observation": YoetzConfig().observation.model_copy(update={"enabled": False})}
+    )
+    build_ready_application_factory(
+        lifecycle=object(),  # type: ignore[arg-type]
+        vault=object(),  # type: ignore[arg-type]
+        config=disabled,
+        paths=paths,
+        clock=object(),  # type: ignore[arg-type]
+        secret_memory=object(),
+    )
+    store = LocalObservationStore(_state=paths.state)
+    assert store.runtime_enabled() is False
+
+    build_ready_application_factory(
+        lifecycle=object(),  # type: ignore[arg-type]
+        vault=object(),  # type: ignore[arg-type]
+        config=YoetzConfig(),
+        paths=paths,
+        clock=object(),  # type: ignore[arg-type]
+        secret_memory=object(),
+    )
+    assert store.runtime_enabled() is True
 
 
 @pytest.mark.anyio

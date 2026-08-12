@@ -55,9 +55,11 @@ from yoetz.application.observation_advice import (
 )
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
+from yoetz.application.observation_drain import ObservationOutboxSweeper
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.privacy_control import build_privacy_support_handlers
 from yoetz.application.privacy_policy import PrivacyPolicyApplication
+from yoetz.application.recommendations import evaluate_recommendation_context, refresh_pending
 from yoetz.application.semantic_attempts import (
     SemanticAttemptAccounting,
     run_durable_semantic_attempts,
@@ -217,6 +219,9 @@ class _Vault(Protocol):
 class _Paths(Protocol):
     @property
     def bundle(self) -> Path: ...
+
+    @property
+    def state(self) -> Path: ...
 
 
 class _SqliteSupportPolicyFactory(Protocol):
@@ -2501,9 +2506,14 @@ async def provide_service_ready_context(
     verification_supervisor = ObservationVerificationSupervisor(
         service_generation=service_generation
     )
+    local_observation = LocalObservationStore(_state=paths.state)
+    # Hooks deliberately avoid loading the full service config.  Publish the exact
+    # config snapshot owned by this fresh READY generation before it can receive
+    # observation RPCs; malformed/unsafe markers fail closed in hook processes.
+    local_observation.set_runtime_enabled(config.observation.enabled)
     observation_coordinator = ObservationCoordinator(
         runtime=runtime,
-        local=LocalObservationStore(),
+        local=local_observation,
         clock=clock,
         ids=ids,
         advice_context_builder=ObservationAdviceContextBuilder(
@@ -2516,7 +2526,23 @@ async def provide_service_ready_context(
             semantic_review=_semantic_review if semantic_configured else None,
         ),
         verification_supervisor=verification_supervisor,
+        observation_enabled=config.observation.enabled,
     )
+    observation_sweeper = ObservationOutboxSweeper(local_observation, observation_coordinator)
+
+    async def refresh_ready_recommendations() -> object:
+        # READY has no exact selected-Codex-home identity.  Never infer the
+        # normal ambient home while an isolated host may own this daemon.
+        activation_state: str | None = None
+        context = await evaluate_recommendation_context(
+            observation_enabled=config.observation.enabled,
+            codex_activation_state=activation_state,
+            policy=policy,
+            allow_network=True,
+            cache_root=paths.state,
+        )
+        return await refresh_pending(context=context, root=paths.state)
+
     observation_handlers = build_observation_support_handlers(observation_coordinator)
     support_handlers = dict(observation_handlers)
     privacy_app = cast(PrivacyCoordinator, privacy).policy_application
@@ -2553,6 +2579,8 @@ async def provide_service_ready_context(
         connected_provider_ids=connected_provider_ids,
         provider_credential_connected=provider_credential_connected,
         semantic_ready=semantic_ready,
+        observation_sweep=observation_sweeper.sweep,
+        ready_recommendation_refresh=refresh_ready_recommendations,
     )
 
 
@@ -2566,6 +2594,10 @@ def build_ready_application_factory(
     secret_memory: object,
     diagnostics: DiagnosticsPort | None = None,
 ) -> ReadyApplicationFactory:
+    # Publish the loaded config gate before unlock/READY construction begins;
+    # hooks then stop capture during a disabled service generation as well as
+    # after it reaches READY.
+    LocalObservationStore(_state=paths.state).set_runtime_enabled(config.observation.enabled)
     return ReadyApplicationFactory(
         context_provider=lambda service_generation, vault_generation: provide_service_ready_context(
             service_generation,

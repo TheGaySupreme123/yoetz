@@ -54,6 +54,7 @@ def test_user_prompt_submit_emits_intake_cue_without_service(
         stdin_bytes=b'{"session_id":"s1","hook_event_name":"UserPromptSubmit"}',
         stdout=stdout,
         resource_root=tmp_path,
+        _state=tmp_path,
     )
     assert code == 0
     assert connects == []

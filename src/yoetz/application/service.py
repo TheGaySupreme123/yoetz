@@ -602,6 +602,12 @@ class Application:
     connected_provider_ids: tuple[str, ...] = ()
     provider_credential_connected: bool = False
     semantic_ready: bool = False
+    observation_sweep: Callable[[], Awaitable[object]] | None = field(
+        default=None, repr=False, compare=False
+    )
+    ready_recommendation_refresh: Callable[[], Awaitable[object]] | None = field(
+        default=None, repr=False, compare=False
+    )
     enforce_repository_identity: bool = True
     _close_lock: asyncio.Lock = field(init=False, repr=False, compare=False)
     _close_task: asyncio.Task[None] | None = field(
@@ -618,6 +624,12 @@ class Application:
             raise TypeError("provider_credential_connected_invalid")
         if type(self.semantic_ready) is not bool:
             raise TypeError("semantic_ready_invalid")
+        if self.observation_sweep is not None and not callable(self.observation_sweep):
+            raise TypeError("observation_sweep_invalid")
+        if self.ready_recommendation_refresh is not None and not callable(
+            self.ready_recommendation_refresh
+        ):
+            raise TypeError("ready_recommendation_refresh_invalid")
         if type(self.enforce_repository_identity) is not bool:
             raise TypeError("repository_identity_enforcement_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
@@ -1242,6 +1254,12 @@ class ServiceReadyContext:
     connected_provider_ids: tuple[str, ...] = ()
     provider_credential_connected: bool = False
     semantic_ready: bool = False
+    observation_sweep: Callable[[], Awaitable[object]] | None = field(
+        default=None, repr=False, compare=False
+    )
+    ready_recommendation_refresh: Callable[[], Awaitable[object]] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -1259,6 +1277,12 @@ class ServiceReadyContext:
             raise TypeError("provider_credential_connected_invalid")
         if type(self.semantic_ready) is not bool:
             raise TypeError("semantic_ready_invalid")
+        if self.observation_sweep is not None and not callable(self.observation_sweep):
+            raise TypeError("observation_sweep_invalid")
+        if self.ready_recommendation_refresh is not None and not callable(
+            self.ready_recommendation_refresh
+        ):
+            raise TypeError("ready_recommendation_refresh_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
         # configured one leaves dispatch on the credential-unavailable path, so a readiness flag
         # set without it would report ready while every check reports unavailable.
@@ -1316,6 +1340,8 @@ class ReadyApplicationFactory:
                 connected_provider_ids=context.connected_provider_ids,
                 provider_credential_connected=context.provider_credential_connected,
                 semantic_ready=context.semantic_ready,
+                observation_sweep=context.observation_sweep,
+                ready_recommendation_refresh=context.ready_recommendation_refresh,
                 enforce_repository_identity=True,
             )
             if context.verification_supervisor is not None:

@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+import time
 import uuid
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
@@ -25,7 +31,8 @@ from yoetz.domain.observation import (
     observation_ingest_request_from_json,
     observation_ingest_request_to_json,
 )
-from yoetz.domain.values import JsonObject, Timestamp
+from yoetz.domain.values import JsonObject, Timestamp, finding_id
+from yoetz.ports.runtime import TaskRuntime
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 
@@ -132,6 +139,156 @@ def test_local_outbox_enqueue_ack_and_overflow(tmp_path: Path) -> None:
     assert store.pending_outbox_count(workspace) == 1
     assert store.acknowledge_outbox(workspace, "sess-outbox", envelope.source_identity) is True
     assert store.pending_outbox_count(workspace) == 0
+
+
+def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path, _wall=lambda: 1_767_225_600.0)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-v1-row")
+    envelope = _envelope(session=session, identity="hook:v1-row")
+    store.enqueue_outbox(workspace, "sess-v1-row", envelope)
+
+    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    raw["schema"] = "yoetz.observation-local/1"
+    for row in raw["pending_outbox"]:
+        row.pop("attempts")
+        row.pop("last_reason")
+        row.pop("last_attempt_at")
+    state_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    reopened = LocalObservationStore(_state=tmp_path, _wall=lambda: 1_767_225_600.0)
+    legacy = reopened.list_pending_outbox_rows(workspace)
+    assert len(legacy) == 1
+    assert legacy[0].attempts == 0
+    assert legacy[0].last_reason is None
+    assert legacy[0].last_attempt_at is None
+    assert reopened.list_pending_outbox(workspace) == (("sess-v1-row", envelope),)
+
+    attempted_at = Timestamp("2026-01-01T00:00:00.000Z")
+    updated = reopened.bump_outbox_row_attempt(
+        workspace,
+        legacy[0],
+        reason=ObservationGapCode.MAPPING_MISSING.value,
+        attempted_at=attempted_at,
+    )
+    assert updated is not None
+    durable = LocalObservationStore(_state=tmp_path).list_pending_outbox_rows(workspace)[0]
+    assert durable.attempts == 1
+    assert durable.last_reason == ObservationGapCode.MAPPING_MISSING.value
+    assert durable.last_attempt_at == attempted_at
+    assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
+        "yoetz.observation-local/2"
+    )
+
+
+def test_local_store_lock_serializes_a_separate_process(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    code = (
+        "from pathlib import Path; "
+        "from yoetz.adapters.integrations.observation_local import LocalObservationStore; "
+        f"print(LocalObservationStore(_state=Path({str(tmp_path)!r}))"
+        f".pending_outbox_count({workspace!r}), flush=True)"
+    )
+    with store._lock:  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        process = subprocess.Popen(
+            [sys.executable, "-c", code],
+            cwd=tmp_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(0.1)
+        assert process.poll() is None
+    stdout, stderr = process.communicate(timeout=5)
+    assert process.returncode == 0, stderr
+    assert stdout.strip() == "0"
+
+
+def test_first_key_creation_is_identical_across_processes(tmp_path: Path) -> None:
+    code = (
+        "from pathlib import Path; "
+        "from yoetz.adapters.integrations.observation_local import LocalObservationStore; "
+        f"print(LocalObservationStore(_state=Path({str(tmp_path)!r}))"
+        f".workspace_commitment({str(tmp_path.resolve())!r}), flush=True)"
+    )
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", code],
+            cwd=tmp_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    outputs = [process.communicate(timeout=5) for process in processes]
+    for process, (_, stderr) in zip(processes, outputs, strict=True):
+        assert process.returncode == 0, stderr
+    commitments = [stdout.strip() for stdout, _ in outputs]
+    assert commitments[0] == commitments[1]
+    assert len((tmp_path / "observation" / "key-material.bin").read_bytes()) == 32
+
+
+def test_enqueue_refuses_projected_oversize_without_losing_consent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yoetz.adapters.integrations.observation_local as local_mod
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-sized")
+    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    maximum = state_path.stat().st_size + 256
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", maximum)
+    envelope = _envelope(session=session, identity="hook:sized")
+
+    assert store.enqueue_outbox(workspace, "sess-sized", envelope) == (
+        ObservationGapCode.OUTBOX_OVERFLOW.value
+    )
+    reopened = LocalObservationStore(_state=tmp_path)
+    assert reopened.consent_for(workspace) is not None
+    assert reopened.pending_outbox_count(workspace) == 0
+    assert state_path.stat().st_size <= maximum
+    assert (
+        ObservationGapCode.OUTBOX_OVERFLOW.value
+        in reopened.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+def test_size_compaction_accounts_for_distinct_same_source_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yoetz.adapters.integrations.observation_local as local_mod
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-compact")
+    for ordinal in (1, 2):
+        store.enqueue_outbox(
+            workspace,
+            "sess-compact",
+            _envelope(session=session, identity="hook:same", ordinal=ordinal),
+        )
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 2_100)
+
+    store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
+
+    reopened = LocalObservationStore(_state=tmp_path)
+    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    accounted = (
+        reopened.pending_outbox_count(workspace)
+        + reopened.quarantined_count(workspace)
+        + int(persisted["quarantine_evicted_count"])
+    )
+    assert accounted == 2
+    assert state_path.stat().st_size <= 2_100
 
 
 def test_monotonic_samples_fenced_across_simulated_reboot(tmp_path: Path) -> None:
@@ -357,6 +514,45 @@ async def test_coordinator_rejects_without_mapping(tmp_path: Path) -> None:
     assert result.reason == ObservationGapCode.MAPPING_MISSING.value
 
 
+@pytest.mark.anyio
+async def test_coordinator_rejects_disabled_before_mapping_or_runtime(tmp_path: Path) -> None:
+    class _NoRuntime:
+        async def route(self, command: object) -> object:
+            raise AssertionError("disabled observation must not route")
+
+        async def release(self, runtime: object) -> None:
+            return None
+
+    local = LocalObservationStore(_state=tmp_path)
+    workspace = local.workspace_commitment(str(tmp_path.resolve()))
+    local.grant_consent(workspace)
+    session = local.bind_codex_session(workspace, "disabled-sess")
+
+    def mapping_loader(
+        codex_session_id: str, *, _state: Path | None = None
+    ) -> LifecycleMapping | None:
+        del codex_session_id, _state
+        raise AssertionError("disabled observation must not load mapping")
+
+    coordinator = ObservationCoordinator(
+        runtime=_NoRuntime(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=mapping_loader,
+        observation_enabled=False,
+    )
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id="disabled-sess",
+            envelope=_envelope(session=session),
+        )
+    )
+    assert result.disposition is ObservationIngestDisposition.REJECTED
+    assert result.reason == "observation_disabled"
+
+
 def _obs(
     *, source: ObservationSource, identity: str, corr: str | None, session: str, kind: str
 ) -> ObservationEnvelope:
@@ -503,6 +699,283 @@ async def test_run_advice_persists_snapshot_with_real_datetime_clock(tmp_path: P
     persisted = store.load_advice_snapshot(workspace)
     assert persisted is not None
     assert persisted.ranked_finding_ids
+
+
+@pytest.mark.anyio
+async def test_advice_finding_materialization_uses_canonical_schema_and_envelope_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Advice detail may retain mixed coverage; its append envelope may not.
+
+    The ledger validates the publication-channel coverage on every append entry.
+    This regression also locks the canonical underscore spelling of the event
+    schema so a post-ingest advice failure cannot strand an otherwise durable
+    observation in the local outbox.
+    """
+
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from yoetz.application import observation_coordinator as coordinator_module
+    from yoetz.application.unit_of_work import PreparedMutation
+    from yoetz.domain.observation import AdviceItem, AdviceSnapshot
+    from yoetz.ports.ledger import ProjectionView
+    from yoetz.ports.objects import ObjectRef
+    from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel, weakest
+
+    task_id = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
+    session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    writer_id = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
+    item_coverage = weakest(
+        coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+        coverage_for_channel(PublicationChannel.ENGINE_DERIVED),
+    )
+    item = AdviceItem(
+        finding_id=finding_id(PREFIX_BY_KIND[IdKind.FINDING] + str(uuid.uuid4())),
+        rule_code="failed_command_unresolved",
+        priority=10,
+        summary="A failed command remains unresolved.",
+        detail="Resolve the failed command and rerun the check.",
+        recommended_next_action="rerun_check",
+        evidence_refs=(),
+        coverage=item_coverage,
+        freshness_frontier="frontier-1",
+    )
+    snapshot = AdviceSnapshot(
+        ranked_finding_ids=(item.finding_id,),
+        evidence_basis_digest="sha256:" + "a" * 64,
+        confidence_coverage=item_coverage,
+        recommended_next_action="rerun_check",
+        freshness_frontier="frontier-1",
+        suppression_identity="advice-materialization-1",
+        ranked_items=(item,),
+    )
+
+    class _Ledger:
+        async def load_projection(self, loaded_session_id: str, view: ProjectionView):
+            assert loaded_session_id == session_id
+            assert view is ProjectionView.COMPACT
+            return None
+
+        async def lookup_operation(self, loaded_writer_id: str, operation_id: str):
+            assert loaded_writer_id == writer_id
+            assert operation_id.startswith(PREFIX_BY_KIND[IdKind.REQUEST])
+            return None
+
+    class _Objects:
+        async def stage(self, source: object, metadata: object):
+            return source, metadata
+
+        async def finalize(self, staged: tuple[object, object]) -> ObjectRef:
+            source, metadata = staged
+            data = source.data  # type: ignore[attr-defined]
+            assert isinstance(data, bytes)
+            return ObjectRef(
+                PREFIX_BY_KIND[IdKind.OBJECT] + str(uuid.uuid4()),
+                len(data),
+                "hmac-sha256:" + "b" * 64,
+                "sha256:" + "c" * 64,
+                "yoetz-object/1",
+                "test-key-1",
+                metadata,  # type: ignore[arg-type]
+            )
+
+    captured: list[PreparedMutation] = []
+
+    async def _capture_append(ledger: object, prepared: PreparedMutation):
+        assert ledger is runtime.ledger
+        captured.append(prepared)
+        return None
+
+    monkeypatch.setattr(coordinator_module, "run_prepared_append", _capture_append)
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Ids:
+        def new(self, kind: IdKind) -> str:
+            return PREFIX_BY_KIND[kind] + str(uuid.uuid4())
+
+    class _UnusedRuntimePort:
+        async def route(self, command: object) -> object:
+            raise AssertionError("route must not be called")
+
+        async def release(self, runtime: object) -> None:
+            return None
+
+    runtime = SimpleNamespace(
+        task_id=task_id,
+        session_id=session_id,
+        writer_id=writer_id,
+        ledger=_Ledger(),
+        objects=_Objects(),
+    )
+    coordinator = ObservationCoordinator(
+        runtime=_UnusedRuntimePort(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=_Ids(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+    )
+    envelope = _envelope(
+        session=f"hmac-sha256:{'d' * 64}",
+        kind="PostToolUse",
+        identity="hook:advice-materialization",
+        exit_status=2,
+    )
+
+    await coordinator._materialize_advice_findings(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        cast(TaskRuntime, runtime),
+        (envelope,),
+        snapshot,  # type: ignore[arg-type]
+    )
+
+    assert len(captured) == 1
+    entries = captured[0].command.entries
+    assert len(entries) == 1
+    assert entries[0].draft.schema.name == "finding_recorded"
+    assert entries[0].draft.payload.coverage == item_coverage  # type: ignore[union-attr]
+    assert entries[0].publication_channel is PublicationChannel.ENGINE_DERIVED
+    assert entries[0].coverage == coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
+
+
+@pytest.mark.anyio
+async def test_advice_materialization_failure_does_not_advance_suppression_snapshot(
+    tmp_path: Path,
+) -> None:
+    """A failed finding append must remain retryable with the same snapshot."""
+
+    from datetime import UTC, datetime
+
+    from yoetz.domain.observation import AdviceItem, AdviceSnapshot
+    from yoetz.ports.runtime import OwnershipFence, RuntimeCapability, TaskRuntime
+    from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
+
+    task_id = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
+    session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    writer_id = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
+    workspace = f"hmac-sha256:{'e' * 64}"
+    coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
+    item = AdviceItem(
+        finding_id=finding_id(PREFIX_BY_KIND[IdKind.FINDING] + str(uuid.uuid4())),
+        rule_code="failed_command_unresolved",
+        priority=1,
+        summary="A failed command remains unresolved.",
+        detail="Resolve the failed command and rerun the check.",
+        recommended_next_action="rerun_check",
+        evidence_refs=(),
+        coverage=coverage,
+        freshness_frontier="frontier-retry",
+    )
+    snapshot = AdviceSnapshot(
+        ranked_finding_ids=(item.finding_id,),
+        evidence_basis_digest="sha256:" + "f" * 64,
+        confidence_coverage=coverage,
+        recommended_next_action="rerun_check",
+        freshness_frontier="frontier-retry",
+        suppression_identity="advice-retry-1",
+        ranked_items=(item,),
+    )
+    envelope = _envelope(
+        session=f"hmac-sha256:{'1' * 64}",
+        kind="PostToolUse",
+        identity="hook:advice-retry",
+        exit_status=2,
+    )
+
+    class _Store:
+        published: list[AdviceSnapshot] = []
+
+        def list_envelopes(self, loaded_workspace: str):
+            assert loaded_workspace == workspace
+            return (envelope,)
+
+        def set_advice_snapshot(
+            self, loaded_workspace: str, published: AdviceSnapshot, updated_at: Timestamp
+        ) -> None:
+            assert loaded_workspace == workspace
+            assert type(updated_at) is Timestamp
+            self.published.append(published)
+
+        def set_session_advice_snapshot(self, **kwargs: object) -> None:
+            assert kwargs["workspace"] == workspace
+
+        def record_advice_history(self, **kwargs: object) -> None:
+            assert kwargs["workspace"] == workspace
+
+    class _Builder:
+        async def build(self, *args: object, **kwargs: object) -> AdviceSnapshot:
+            return snapshot
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Ids:
+        def new(self, kind: IdKind) -> str:
+            return PREFIX_BY_KIND[kind] + str(uuid.uuid4())
+
+    attempts = 0
+
+    class _RetryCoordinator(ObservationCoordinator):
+        async def _materialize_advice_findings(  # type: ignore[override]
+            self, runtime: TaskRuntime, envelopes: tuple[ObservationEnvelope, ...], value: object
+        ) -> None:
+            nonlocal attempts
+            attempts += 1
+            assert envelopes == (envelope,)
+            assert value is snapshot
+            if attempts == 1:
+                raise RuntimeError("synthetic_append_failure")
+
+    runtime = TaskRuntime(
+        task_id,
+        session_id,
+        writer_id,
+        frozenset({RuntimeCapability.WRITE}),
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        "0.1.0",
+        "0.1.0",
+        "0.1",
+        "1.0.0",
+        OwnershipFence(
+            PREFIX_BY_KIND[IdKind.SERVICE_INSTANCE] + str(uuid.uuid4()),
+            1,
+            1,
+            "retry_test_nonce",
+        ),
+    )
+    local = LocalObservationStore(_state=tmp_path)
+    store = _Store()
+    coordinator = _RetryCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=local,
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=_Ids(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        advice_context_builder=_Builder(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic_append_failure"):
+        await coordinator._run_advice(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            workspace,
+            runtime,
+            store,  # type: ignore[arg-type]
+        )
+    assert store.published == []
+    assert local.advice_snapshot_for(workspace) is None
+
+    await coordinator._run_advice(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        workspace,
+        runtime,
+        store,  # type: ignore[arg-type]
+    )
+    assert attempts == 2
+    assert store.published == [snapshot]
+    assert local.advice_snapshot_for(workspace) == snapshot
 
 
 @pytest.mark.anyio

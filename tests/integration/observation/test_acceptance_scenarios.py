@@ -41,9 +41,12 @@ from yoetz.domain.observation import (
     ObservationCursor,
     ObservationEnvelope,
     ObservationGapCode,
+    ObservationIngestDisposition,
+    ObservationIngestResult,
     ObservationLifecycle,
     ObservationSource,
     ObservationStatusQuery,
+    observation_ingest_result_to_json,
 )
 from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.kernel.policies.observation_advice import (
@@ -169,35 +172,30 @@ def test_zero_cooperative_publications_deterministic_advice(tmp_path: Path) -> N
 
 
 def test_vault_outage_nonblocking_degraded_no_plaintext_spool(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
-    # Lifecycle mapping required for the service-ingest soft-fail path.
-    from yoetz.adapters.integrations.codex_lifecycle import mapping_from_start_ids, store_mapping
-    from yoetz.cli import observe_hooks as observe_hooks_module
-    from yoetz.protocol.ids import IdKind, new_id
 
-    store_mapping(
-        mapping_from_start_ids(
-            codex_session_id="outage-1",
-            yoetz_task_id=new_id(IdKind.TASK),
-            yoetz_session_id=new_id(IdKind.SESSION),
-            yoetz_writer_id=new_id(IdKind.WRITER),
-            last_frontier=None,
-        ),
-        _state=tmp_path,
-    )
+    # Drain no longer waits for a lifecycle mapping. The coordinator's typed
+    # rejection keeps the exact row pending for a later READY-generation sweep.
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.VAULT_LOCKED.value,
+                    None,
+                )
+            )
 
-    async def _vault_locked_ingest(
-        _session_id: str, _envelope: object
-    ) -> tuple[str | None, str | None]:
-        # Simulate a vault-locked service so the outbox drain records the gap
-        # while keeping the entry pending (retryable).
-        return ObservationGapCode.VAULT_LOCKED.value, None
+        async def close(self) -> None:
+            return None
 
-    monkeypatch.setattr(observe_hooks_module, "_try_service_ingest", _vault_locked_ingest)
+    async def connect(_kind: object):
+        return Client()
 
     code = handle_observe(
         event_name="PostToolUse",
@@ -213,6 +211,7 @@ def test_vault_outage_nonblocking_degraded_no_plaintext_spool(
         stdout=io.BytesIO(),
         workspace=str(tmp_path),
         _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
         skip_service=False,
     )
     assert code == 0

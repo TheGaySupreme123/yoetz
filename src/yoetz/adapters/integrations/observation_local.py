@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import os
+import re
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -42,10 +43,16 @@ from yoetz.domain.values import JsonObject, JsonValue, Timestamp, timestamp_from
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the Yoetz service is hosted on POSIX
+    fcntl = None  # type: ignore[assignment]
+
 __all__ = [
     "HOOK_MAPPING_VERSION",
     "LocalObservationConsent",
     "LocalObservationStore",
+    "ObservationOutboxRow",
     "STREAM_MAPPING_VERSION",
     "YOETZ_TOOL_NAMES",
     "observation_dir",
@@ -57,15 +64,21 @@ HOOK_MAPPING_VERSION: Final = "codex-obs-hook/1.0.0"
 STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.0.0"
 _KEY_BYTES: Final = 32
 _MAX_STATE_BYTES: Final = 1_048_576
+_MAX_LEGACY_STATE_BYTES: Final = 36 * 1_048_576
 _MAX_ENVELOPES: Final = 256
 _MAX_DEDUP: Final = 4_096
 _MAX_OPEN_PRE: Final = 256
 _MAX_OUTBOX: Final = 512
 _MAX_QUARANTINE: Final = 512
 _MAX_HOOK_SEQUENCES: Final = 256
+_MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 # Wall/monotonic drift tolerated before persisted monotonic samples are treated
 # as belonging to a different boot epoch (and therefore fenced off).
 _EPOCH_TOLERANCE_SECONDS: Final = 2.0
+_OUTBOX_REASON_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
+_RUNTIME_GATE_SCHEMA: Final = "yoetz.observation-runtime-gate/1"
+_RUNTIME_GATE_NAME: Final = "runtime-gate.json"
+_MAX_RUNTIME_GATE_BYTES: Final = 256
 
 YOETZ_TOOL_NAMES: Final = frozenset(
     {
@@ -85,6 +98,67 @@ YOETZ_TOOL_NAMES: Final = frozenset(
 )
 
 _SESSION_DOMAIN: Final = b"yoetz/observation-session/v1\x00"
+
+
+class _StoreLockState:
+    def __init__(self) -> None:
+        self.thread_lock = threading.RLock()
+        self.depth = 0
+        self.descriptor: int | None = None
+
+
+_STORE_LOCK_REGISTRY_GUARD = threading.Lock()
+_STORE_LOCK_REGISTRY: dict[str, _StoreLockState] = {}
+
+
+class _InterprocessStoreLock:
+    """Reentrant process-local lock plus POSIX serialization across hook/daemon."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        key = str(path.absolute())
+        with _STORE_LOCK_REGISTRY_GUARD:
+            self._state = _STORE_LOCK_REGISTRY.setdefault(key, _StoreLockState())
+
+    def __enter__(self) -> _InterprocessStoreLock:
+        state = self._state
+        state.thread_lock.acquire()
+        if state.depth == 0:
+            flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor: int | None = None
+            try:
+                descriptor = os.open(self._path, flags, 0o600)
+                os.fchmod(descriptor, 0o600)
+                if fcntl is not None:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+            except BaseException:
+                if descriptor is not None:
+                    os.close(descriptor)
+                state.thread_lock.release()
+                raise
+            assert descriptor is not None
+            state.descriptor = descriptor
+        state.depth += 1
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        del exc_type, exc, traceback
+        state = self._state
+        try:
+            state.depth -= 1
+            if state.depth == 0:
+                descriptor = state.descriptor
+                state.descriptor = None
+                if descriptor is not None:
+                    try:
+                        if fcntl is not None:
+                            fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    finally:
+                        os.close(descriptor)
+        finally:
+            state.thread_lock.release()
 
 
 def _error(code: PublicErrorCode, message: str, *, retryable: bool) -> PublicOperationError:
@@ -170,6 +244,47 @@ class LocalObservationConsent:
         return self.revoked_at is None and not self.paused
 
 
+@dataclass(frozen=True, slots=True)
+class ObservationOutboxRow:
+    """One bounded structural-delivery row; never contains plaintext content."""
+
+    codex_session_id: str
+    envelope: ObservationEnvelope
+    attempts: int = 0
+    last_reason: str | None = None
+    last_attempt_at: Timestamp | None = None
+
+    @property
+    def row_identity(self) -> str:
+        return canonical_digest(
+            JsonObject(
+                {
+                    "codex_session_id": self.codex_session_id,
+                    "envelope": observation_envelope_to_json(self.envelope),
+                }
+            )
+        )
+
+    def __post_init__(self) -> None:
+        if type(self.codex_session_id) is not str or not self.codex_session_id:
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(self.envelope) is not ObservationEnvelope:
+            raise ProtocolValueError("invalid_event_value_type")
+        if (
+            type(self.attempts) is not int
+            or isinstance(self.attempts, bool)
+            or not 0 <= self.attempts <= _MAX_SAFE_INTEGER
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.last_reason is not None and (
+            type(self.last_reason) is not str
+            or _OUTBOX_REASON_RE.fullmatch(self.last_reason) is None
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.last_attempt_at is not None and type(self.last_attempt_at) is not Timestamp:
+            raise ProtocolValueError("invalid_timestamp")
+
+
 @dataclass
 class _WorkspaceState:
     consent: LocalObservationConsent | None = None
@@ -196,7 +311,7 @@ class _WorkspaceState:
     # to. Samples are only comparable to a live clock within the same epoch;
     # after a restart or reboot they are fenced off (see `_epoch_matches`).
     monotonic_epoch: float | None = None
-    pending_outbox: list[tuple[str, ObservationEnvelope]] | None = None
+    pending_outbox: list[ObservationOutboxRow] | None = None
     quarantine: list[tuple[str, ObservationEnvelope, str]] | None = None
     codex_session_bindings: dict[str, str] | None = None
     ended_sessions: set[str] | None = None
@@ -294,7 +409,7 @@ class LocalObservationStore:
         _wall: Callable[[], float] | None = None,
     ) -> None:
         self._root = observation_dir(_state=_state)
-        self._lock = threading.RLock()
+        self._lock = _InterprocessStoreLock(self._root / ".store.lock")
         self._monotonic = _monotonic
         self._wall = _wall
 
@@ -307,6 +422,11 @@ class LocalObservationStore:
         import time
 
         return time.time() if self._wall is None else self._wall()
+
+    def _wall_timestamp(self) -> Timestamp:
+        current = datetime.fromtimestamp(self._wall_now(), UTC)
+        stamp = current.replace(microsecond=(current.microsecond // 1000) * 1000)
+        return timestamp_from_datetime(stamp)
 
     def _boot_epoch(self) -> float:
         """Approximate wall time at monotonic zero: stable within a boot session.
@@ -321,13 +441,81 @@ class LocalObservationStore:
         return epoch is not None and abs(self._boot_epoch() - epoch) <= _EPOCH_TOLERANCE_SECONDS
 
     def key_material(self) -> bytes:
-        path = self._root / "key-material.bin"
-        existing = _read_bytes(path, maximum=_KEY_BYTES)
-        if existing is not None and len(existing) == _KEY_BYTES:
-            return existing
-        material = os.urandom(_KEY_BYTES)
-        _atomic_write(path, material)
-        return material
+        with self._lock:
+            path = self._root / "key-material.bin"
+            existing = _read_bytes(path, maximum=_KEY_BYTES)
+            if existing is not None and len(existing) == _KEY_BYTES:
+                return existing
+            material = os.urandom(_KEY_BYTES)
+            _atomic_write(path, material)
+            return material
+
+    def set_runtime_enabled(self, enabled: bool) -> None:
+        """Publish the service-loaded observation gate for config-free hook reads.
+
+        The marker is synchronized when a fresh READY composition is built.  A
+        missing marker preserves the typed configuration default (enabled);
+        malformed or unsafe markers fail closed in :meth:`runtime_enabled`.
+        """
+
+        if type(enabled) is not bool:
+            raise TypeError("observation_runtime_gate_invalid")
+        payload = (
+            canonical_encode(JsonObject({"schema": _RUNTIME_GATE_SCHEMA, "enabled": enabled}))
+            + b"\n"
+        )
+        with self._lock:
+            _atomic_write(self._root / _RUNTIME_GATE_NAME, payload)
+
+    def runtime_enabled(self) -> bool:
+        """Return the current service-synchronized capture gate, failing closed."""
+
+        path = self._root / _RUNTIME_GATE_NAME
+        with self._lock:
+            try:
+                facts = path.lstat()
+            except FileNotFoundError:
+                return True
+            except OSError as exc:
+                raise _error(
+                    PublicErrorCode.STORAGE_UNSAFE,
+                    "Observation runtime gate is unavailable.",
+                    retryable=False,
+                ) from exc
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or facts.st_uid != os.geteuid()
+                or facts.st_mode & 0o077
+                or facts.st_size <= 0
+                or facts.st_size > _MAX_RUNTIME_GATE_BYTES
+            ):
+                raise _error(
+                    PublicErrorCode.STORAGE_UNSAFE,
+                    "Observation runtime gate is unsafe.",
+                    retryable=False,
+                )
+            try:
+                raw = path.read_bytes()
+                parsed = strict_json_parse(raw)
+            except (OSError, ProtocolValueError) as exc:
+                raise _error(
+                    PublicErrorCode.STORAGE_UNSAFE,
+                    "Observation runtime gate is invalid.",
+                    retryable=False,
+                ) from exc
+            if (
+                not isinstance(parsed, Mapping)
+                or set(parsed) != {"schema", "enabled"}
+                or parsed.get("schema") != _RUNTIME_GATE_SCHEMA
+                or type(parsed.get("enabled")) is not bool
+            ):
+                raise _error(
+                    PublicErrorCode.STORAGE_UNSAFE,
+                    "Observation runtime gate is invalid.",
+                    retryable=False,
+                )
+            return cast(bool, parsed["enabled"])
 
     def workspace_commitment(self, path: str) -> str:
         return workspace_commitment_from_path(self.key_material(), path)
@@ -707,33 +895,108 @@ class LocalObservationStore:
                 self._save(workspace, state)
                 return ObservationGapCode.OUTBOX_OVERFLOW.value
             # Dedup identical source identities already pending for this session.
-            for pending_session, pending_envelope in state.pending_outbox:
+            for row in state.pending_outbox:
                 if (
-                    pending_session == codex_session_id
-                    and pending_envelope.source_identity == envelope.source_identity
-                    and pending_envelope.event_kind == envelope.event_kind
-                    and pending_envelope.cursor.event_position == envelope.cursor.event_position
+                    row.codex_session_id == codex_session_id
+                    and row.envelope.source_identity == envelope.source_identity
+                    and row.envelope.event_kind == envelope.event_kind
+                    and row.envelope.cursor.event_position == envelope.cursor.event_position
                 ):
                     return None
-            state.pending_outbox.append((codex_session_id, envelope))
+            state.pending_outbox.append(
+                ObservationOutboxRow(codex_session_id=codex_session_id, envelope=envelope)
+            )
+            projected = canonical_encode(self._state_to_json(workspace, state)) + b"\n"
+            if len(projected) > _MAX_STATE_BYTES:
+                state.pending_outbox.pop()
+                state.gaps.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
+                self._save(workspace, state)
+                return ObservationGapCode.OUTBOX_OVERFLOW.value
             self._save(workspace, state)
             return None
 
     def list_pending_outbox(
         self, workspace: str, *, codex_session_id: str | None = None
     ) -> tuple[tuple[str, ObservationEnvelope], ...]:
+        """Return the legacy two-field view used by existing hook/setup callers."""
+
+        rows = self.list_pending_outbox_rows(workspace, codex_session_id=codex_session_id)
+        return tuple((row.codex_session_id, row.envelope) for row in rows)
+
+    def list_pending_outbox_rows(
+        self, workspace: str, *, codex_session_id: str | None = None
+    ) -> tuple[ObservationOutboxRow, ...]:
+        """Return immutable pending rows including bounded delivery-attempt metadata."""
+
         with self._lock:
             state = self._load(workspace)
             assert state.pending_outbox is not None
             if codex_session_id is None:
                 return tuple(state.pending_outbox)
-            return tuple(item for item in state.pending_outbox if item[0] == codex_session_id)
+            return tuple(
+                row for row in state.pending_outbox if row.codex_session_id == codex_session_id
+            )
+
+    def pending_workspaces(self) -> tuple[str, ...]:
+        """Return only opaque commitments for workspaces with undelivered rows."""
+
+        with self._lock:
+            pending: list[str] = []
+            for workspace, state in self._iter_workspaces():
+                assert state.pending_outbox is not None
+                if state.pending_outbox:
+                    pending.append(workspace)
+            return tuple(sorted(pending, key=str.encode))
+
+    def bump_outbox_row_attempt(
+        self,
+        workspace: str,
+        expected: ObservationOutboxRow,
+        *,
+        reason: str | None,
+        attempted_at: Timestamp | None = None,
+    ) -> ObservationOutboxRow | None:
+        """Persist one exact delivery attempt and return its new durable value."""
+
+        if reason is not None and (
+            type(reason) is not str or _OUTBOX_REASON_RE.fullmatch(reason) is None
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        stamp = self._wall_timestamp() if attempted_at is None else attempted_at
+        if type(stamp) is not Timestamp:
+            raise ProtocolValueError("invalid_timestamp")
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            for index, row in enumerate(state.pending_outbox):
+                if row.row_identity == expected.row_identity and row.attempts == expected.attempts:
+                    updated = ObservationOutboxRow(
+                        codex_session_id=row.codex_session_id,
+                        envelope=row.envelope,
+                        attempts=min(row.attempts + 1, _MAX_SAFE_INTEGER),
+                        last_reason=reason,
+                        last_attempt_at=stamp,
+                    )
+                    state.pending_outbox[index] = updated
+                    self._save(workspace, state)
+                    return updated
+            return None
 
     def pending_outbox_count(self, workspace: str) -> int:
         with self._lock:
             state = self._load(workspace)
             assert state.pending_outbox is not None
             return len(state.pending_outbox)
+
+    def last_successful_drain_mono(self, workspace: str) -> float | None:
+        """Return the current-boot monotonic drain sample, if one is comparable."""
+
+        with self._lock:
+            state = self._load(workspace)
+            if not self._epoch_matches(state.monotonic_epoch):
+                return None
+            value = state.last_successful_drain_mono_ms
+            return None if value is None else value / 1000.0
 
     def acknowledge_outbox(
         self, workspace: str, codex_session_id: str, source_identity: str
@@ -743,8 +1006,26 @@ class LocalObservationStore:
         with self._lock:
             state = self._load(workspace)
             assert state.pending_outbox is not None
-            for index, (session, envelope) in enumerate(state.pending_outbox):
-                if session == codex_session_id and envelope.source_identity == source_identity:
+            for index, row in enumerate(state.pending_outbox):
+                if (
+                    row.codex_session_id == codex_session_id
+                    and row.envelope.source_identity == source_identity
+                ):
+                    del state.pending_outbox[index]
+                    state.last_successful_drain_mono_ms = int(self._now_mono() * 1000)
+                    state.monotonic_epoch = self._boot_epoch()
+                    self._save(workspace, state)
+                    return True
+            return False
+
+    def acknowledge_outbox_row(self, workspace: str, expected: ObservationOutboxRow) -> bool:
+        """Acknowledge only an exact attempted row, never a same-source successor."""
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            for index, row in enumerate(state.pending_outbox):
+                if row.row_identity == expected.row_identity and row.attempts == expected.attempts:
                     del state.pending_outbox[index]
                     state.last_successful_drain_mono_ms = int(self._now_mono() * 1000)
                     state.monotonic_epoch = self._boot_epoch()
@@ -768,9 +1049,12 @@ class LocalObservationStore:
             assert state.quarantine is not None
             assert state.gaps is not None
             moved: ObservationEnvelope | None = None
-            for index, (session, envelope) in enumerate(state.pending_outbox):
-                if session == codex_session_id and envelope.source_identity == source_identity:
-                    moved = envelope
+            for index, row in enumerate(state.pending_outbox):
+                if (
+                    row.codex_session_id == codex_session_id
+                    and row.envelope.source_identity == source_identity
+                ):
+                    moved = row.envelope
                     del state.pending_outbox[index]
                     break
             if moved is None:
@@ -784,25 +1068,44 @@ class LocalObservationStore:
                 # Bounded detail with permanent aggregate evidence for evictions.
                 while len(state.quarantine) > _MAX_QUARANTINE:
                     evicted_session, evicted_envelope, evicted_reason = state.quarantine.pop(0)
-                    material = JsonObject(
-                        {
-                            "prior": state.quarantine_evicted_commitment,
-                            "session_commitment": evicted_envelope.session_commitment,
-                            "source_identity": evicted_envelope.source_identity,
-                            "source_commitment": evicted_envelope.cursor.last_source_commitment,
-                            "reason": evicted_reason,
-                            "codex_session_commitment": session_commitment_from_codex_id(
-                                self.key_material(), evicted_session
-                            ),
-                        }
+                    self._record_quarantine_eviction(
+                        state, evicted_session, evicted_envelope, evicted_reason
                     )
-                    state.quarantine_evicted_commitment = canonical_digest(material)
-                    state.quarantine_evicted_count += 1
-                    receipt = evicted_envelope.receipt_time
-                    if state.quarantine_evicted_first is None:
-                        state.quarantine_evicted_first = receipt
-                    state.quarantine_evicted_last = receipt
-                    state.gaps.add(ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value)
+            state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
+            self._save(workspace, state)
+            return True
+
+    def quarantine_outbox_row(
+        self, workspace: str, expected: ObservationOutboxRow, reason: str
+    ) -> bool:
+        """Quarantine only the exact attempted row selected by a drain actor."""
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            assert state.quarantine is not None
+            assert state.gaps is not None
+            moved: ObservationEnvelope | None = None
+            for index, row in enumerate(state.pending_outbox):
+                if row.row_identity == expected.row_identity and row.attempts == expected.attempts:
+                    moved = row.envelope
+                    del state.pending_outbox[index]
+                    break
+            if moved is None:
+                return False
+            already = any(
+                session == expected.codex_session_id
+                and envelope.source_identity == moved.source_identity
+                and observation_envelope_to_json(envelope) == observation_envelope_to_json(moved)
+                for session, envelope, _ in state.quarantine
+            )
+            if not already:
+                state.quarantine.append((expected.codex_session_id, moved, reason))
+                while len(state.quarantine) > _MAX_QUARANTINE:
+                    evicted_session, evicted_envelope, evicted_reason = state.quarantine.pop(0)
+                    self._record_quarantine_eviction(
+                        state, evicted_session, evicted_envelope, evicted_reason
+                    )
             state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
             self._save(workspace, state)
             return True
@@ -1070,7 +1373,7 @@ class LocalObservationStore:
 
     def _load(self, workspace_commitment: str) -> _WorkspaceState:
         path = self._workspace_path(workspace_commitment)
-        raw = _read_bytes(path, maximum=_MAX_STATE_BYTES)
+        raw = _read_bytes(path, maximum=_MAX_LEGACY_STATE_BYTES)
         if raw is None:
             return _WorkspaceState()
         try:
@@ -1087,12 +1390,70 @@ class LocalObservationStore:
         path = self._workspace_path(workspace_commitment)
         payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
         if len(payload) > _MAX_STATE_BYTES:
-            # Drop oldest envelopes to stay bounded.
+            # Retain authority state and make every observation-detail loss explicit.
             assert state.envelopes is not None
             while state.envelopes and len(payload) > _MAX_STATE_BYTES:
                 del state.envelopes[0]
+                assert state.gaps is not None
+                state.gaps.add(ObservationGapCode.TRUNCATED_PAYLOAD.value)
                 payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+        assert state.pending_outbox is not None
+        assert state.quarantine is not None
+        assert state.gaps is not None
+        while state.pending_outbox and len(payload) > _MAX_STATE_BYTES:
+            row = state.pending_outbox.pop(0)
+            already = any(
+                session == row.codex_session_id
+                and observation_envelope_to_json(envelope)
+                == observation_envelope_to_json(row.envelope)
+                for session, envelope, _ in state.quarantine
+            )
+            if not already:
+                state.quarantine.append(
+                    (row.codex_session_id, row.envelope, ObservationGapCode.OUTBOX_OVERFLOW.value)
+                )
+            state.gaps.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
+            state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
+            payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+        while state.quarantine and len(payload) > _MAX_STATE_BYTES:
+            session, envelope, reason = state.quarantine.pop(0)
+            self._record_quarantine_eviction(state, session, envelope, reason)
+            payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+        if len(payload) > _MAX_STATE_BYTES:
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation state exceeds its safe local bound.",
+                retryable=False,
+            )
         _atomic_write(path, payload)
+
+    def _record_quarantine_eviction(
+        self,
+        state: _WorkspaceState,
+        codex_session_id: str,
+        envelope: ObservationEnvelope,
+        reason: str,
+    ) -> None:
+        assert state.gaps is not None
+        material = JsonObject(
+            {
+                "prior": state.quarantine_evicted_commitment,
+                "session_commitment": envelope.session_commitment,
+                "source_identity": envelope.source_identity,
+                "source_commitment": envelope.cursor.last_source_commitment,
+                "reason": reason,
+                "codex_session_commitment": session_commitment_from_codex_id(
+                    self.key_material(), codex_session_id
+                ),
+            }
+        )
+        state.quarantine_evicted_commitment = canonical_digest(material)
+        state.quarantine_evicted_count += 1
+        receipt = envelope.receipt_time
+        if state.quarantine_evicted_first is None:
+            state.quarantine_evicted_first = receipt
+        state.quarantine_evicted_last = receipt
+        state.gaps.add(ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value)
 
     def _workspace_for_envelope(self, envelope: ObservationEnvelope) -> str:
         for workspace, state in self._iter_workspaces():
@@ -1174,7 +1535,10 @@ class LocalObservationStore:
             mapping_available=mapping_available,
             source_coverage=coverage,
             pending_outbox_count=pending,
-            lag_events=pending,
+            # Delivery backlog is reported independently as pending_outbox_count.
+            # No source-frontier lag estimator is available at this local seam,
+            # so never relabel undelivered rows as observed event lag.
+            lag_events=0,
             gaps=tuple(sorted(state.gaps, key=str.encode)),
             unsupported_events=tuple(sorted(state.unsupported_events, key=str.encode)),
             advice_frontier=state.advice_frontier,
@@ -1193,7 +1557,7 @@ class LocalObservationStore:
             workspace_commitment=workspace_commitment,
             source_coverage=coverage,
             last_observation_receipt_time=state.last_receipt,
-            lag_events=pending,
+            lag_events=0,
             gaps=tuple(sorted(state.gaps, key=str.encode)),
             unsupported_events=tuple(sorted(state.unsupported_events, key=str.encode)),
             advice_frontier=state.advice_frontier,
@@ -1221,7 +1585,7 @@ class LocalObservationStore:
                 }
             )
         return {
-            "schema": "yoetz.observation-local/1",
+            "schema": "yoetz.observation-local/2",
             "workspace_commitment": workspace,
             "consent": consent_json,
             "session_workspaces": JsonObject(
@@ -1314,11 +1678,16 @@ class LocalObservationStore:
             "pending_outbox": tuple(
                 JsonObject(
                     {
-                        "codex_session_id": session,
-                        "envelope": observation_envelope_to_json(envelope),
+                        "codex_session_id": row.codex_session_id,
+                        "envelope": observation_envelope_to_json(row.envelope),
+                        "attempts": row.attempts,
+                        "last_reason": row.last_reason,
+                        "last_attempt_at": (
+                            None if row.last_attempt_at is None else row.last_attempt_at.wire
+                        ),
                     }
                 )
-                for session, envelope in (state.pending_outbox or ())
+                for row in (state.pending_outbox or ())
             ),
             "quarantine": tuple(
                 JsonObject(
@@ -1466,7 +1835,7 @@ class LocalObservationStore:
                 )
             else:
                 advice_snapshot = advice_snapshot_from_json(advice_raw)
-        pending_outbox: list[tuple[str, ObservationEnvelope]] = []
+        pending_outbox: list[ObservationOutboxRow] = []
         for item in cast(tuple[JsonValue, ...] | list[JsonValue], raw.get("pending_outbox") or ()):
             if not isinstance(item, Mapping):
                 continue
@@ -1475,13 +1844,38 @@ class LocalObservationStore:
             envelope_raw = row.get("envelope")
             if type(session) is not str or not isinstance(envelope_raw, Mapping):
                 continue
+            attempts_raw = row.get("attempts", 0)
+            attempts = (
+                attempts_raw
+                if type(attempts_raw) is int
+                and not isinstance(attempts_raw, bool)
+                and 0 <= attempts_raw <= _MAX_SAFE_INTEGER
+                else 0
+            )
+            last_reason_raw = row.get("last_reason")
+            last_reason = (
+                last_reason_raw
+                if type(last_reason_raw) is str
+                and _OUTBOX_REASON_RE.fullmatch(last_reason_raw) is not None
+                else None
+            )
+            last_attempt_raw = row.get("last_attempt_at")
+            try:
+                last_attempt_at = (
+                    None if last_attempt_raw is None else Timestamp(str(last_attempt_raw))
+                )
+            except ProtocolValueError, TypeError, ValueError:
+                last_attempt_at = None
             try:
                 pending_outbox.append(
-                    (
-                        session,
-                        observation_envelope_from_json(
+                    ObservationOutboxRow(
+                        codex_session_id=session,
+                        envelope=observation_envelope_from_json(
                             JsonObject(cast(Mapping[str, JsonValue], envelope_raw))
                         ),
+                        attempts=attempts,
+                        last_reason=last_reason,
+                        last_attempt_at=last_attempt_at,
                     )
                 )
             except ProtocolValueError, TypeError, ValueError:

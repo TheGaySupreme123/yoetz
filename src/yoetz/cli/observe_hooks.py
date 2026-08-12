@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, Final, cast
+from typing import BinaryIO, Final, Protocol, cast
 
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
@@ -21,8 +23,12 @@ from yoetz.adapters.integrations.observation_local import (
     HOOK_MAPPING_VERSION,
     YOETZ_TOOL_NAMES,
     LocalObservationStore,
+    ObservationOutboxRow,
 )
+from yoetz.application.observation_drain import ObservationDrainAction, route_observation_ingest
+from yoetz.application.recommendations import cached_pending_recommendations
 from yoetz.cli import hooks as hooks_cli
+from yoetz.cli.hook_diagnostics import record_hook_diagnostic
 from yoetz.domain.observation import (
     AdviceSnapshot,
     ObservationContentChunk,
@@ -32,12 +38,20 @@ from yoetz.domain.observation import (
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestRequest,
+    ObservationIngestResult,
     ObservationSource,
     hook_source_commitment,
     observation_ingest_request_to_json,
     observation_ingest_result_from_json,
 )
-from yoetz.domain.values import JsonObject, Timestamp, timestamp_from_datetime
+from yoetz.domain.values import (
+    JsonObject,
+    Timestamp,
+    timestamp_from_datetime,
+)
+from yoetz.domain.values import (
+    JsonValue as DomainJsonValue,
+)
 from yoetz.observability.privacy import redact_sensitive_content
 from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
@@ -74,14 +88,8 @@ _MAX_CONTENT_CHUNK: Final = 256 * 1024
 # Ingest rejections that are recoverable: keep the outbox entry pending for a
 # later drain. Anything else is permanently invalid and gets quarantined so it
 # is never silently dropped as if committed.
-_RETRYABLE_INGEST_REJECTIONS: Final = frozenset(
-    {
-        ObservationGapCode.SERVICE_UNAVAILABLE.value,
-        ObservationGapCode.VAULT_LOCKED.value,
-        ObservationGapCode.MAPPING_MISSING.value,
-        "paused",
-    }
-)
+_HOOK_DRAIN_BUDGET_SECONDS: Final = 1.75
+_HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 0.35
 _STRUCTURAL_ALLOW: Final = frozenset(
     {
         "tool_name",
@@ -115,6 +123,17 @@ _TOKEN_CHARS: Final = frozenset(
 
 type AsyncRunner = Callable[[Callable[[], Awaitable[object]]], object]
 type ServiceConnector = hooks_cli.ServiceConnector
+
+
+class _HookDrainClient(Protocol):
+    async def observation_ingest(
+        self, body: DomainJsonValue, *, deadline_ms: int | None = None
+    ) -> DomainJsonValue: ...
+
+    async def close(self) -> None: ...
+
+
+type HookDrainConnector = Callable[[ControlClientKind], Awaitable[_HookDrainClient]]
 
 
 def _now() -> Timestamp:
@@ -422,22 +441,29 @@ def _advice_context(snapshot: AdviceSnapshot) -> str:
     return hook_advice_context(snapshot)[:_MAX_ADVICE_CONTEXT]
 
 
+def _cached_recommendation_context(*, _state: Path | None) -> str:
+    pending = cached_pending_recommendations(root=_state, limit=1)
+    if not pending:
+        return ""
+    item = pending[0]
+    return (
+        f"Yoetz recommends: {item.title}. {item.summary} Explain this to the user and ask "
+        f"for approval; if approved run 'yoetz recommend accept {item.id}', "
+        f"otherwise 'yoetz recommend decline {item.id}'."
+    )[:_MAX_ADVICE_CONTEXT]
+
+
 async def _try_service_ingest(
+    client: _HookDrainClient,
     codex_session_id: str,
     envelope: ObservationEnvelope,
     *,
     content_chunks: tuple[ObservationContentChunk, ...] = (),
-) -> tuple[str | None, str | None]:
-    """Attempt service ingest.
+    deadline_ms: int,
+) -> ObservationIngestResult:
+    """Attempt one typed ingest through an already-open preflight client."""
 
-    Returns ``(soft_fail_gap, rejected_reason)``. Soft-fail gaps are transport/vault
-    problems. Rejected reasons come from a successful RPC that returned ``rejected``.
-    Both ``accepted`` and ``duplicate`` clear the outbox (idempotent success).
-    """
-
-    client = None
     try:
-        client = await connect_service(ControlClientKind.CLI)
         body = observation_ingest_request_to_json(
             ObservationIngestRequest(
                 codex_session_id=codex_session_id,
@@ -445,25 +471,28 @@ async def _try_service_ingest(
                 content_chunks=content_chunks,
             )
         )
-        raw = await client.observation_ingest(body, deadline_ms=3_000)
+        raw = await client.observation_ingest(body, deadline_ms=deadline_ms)
         try:
-            result = observation_ingest_result_from_json(raw)
+            return observation_ingest_result_from_json(raw)
         except ProtocolValueError, TypeError, ValueError:
-            return ObservationGapCode.SERVICE_UNAVAILABLE.value, None
-        if result.disposition is ObservationIngestDisposition.REJECTED:
-            reason = result.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value
-            return None, reason
-        return None, None
+            return ObservationIngestResult(
+                ObservationIngestDisposition.REJECTED,
+                ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                None,
+            )
     except ControlError as error:
-        if error.reason == "vault_locked":
-            return ObservationGapCode.VAULT_LOCKED.value, None
-        return ObservationGapCode.SERVICE_UNAVAILABLE.value, None
+        reason = (
+            ObservationGapCode.VAULT_LOCKED.value
+            if error.reason == "vault_locked"
+            else ObservationGapCode.SERVICE_UNAVAILABLE.value
+        )
+        return ObservationIngestResult(ObservationIngestDisposition.REJECTED, reason, None)
     except Exception:
-        return ObservationGapCode.SERVICE_UNAVAILABLE.value, None
-    finally:
-        if client is not None:
-            with contextlib.suppress(Exception):
-                await client.close()
+        return ObservationIngestResult(
+            ObservationIngestDisposition.REJECTED,
+            ObservationGapCode.SERVICE_UNAVAILABLE.value,
+            None,
+        )
 
 
 async def _drain_outbox(
@@ -472,6 +501,11 @@ async def _drain_outbox(
     workspace_commitment: str,
     codex_session_id: str,
     content_by_source_identity: Mapping[str, tuple[ObservationContentChunk, ...]] | None = None,
+    connect: HookDrainConnector | None = None,
+    event_name: str = "drain",
+    _state: Path | None = None,
+    budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     """Drain all mapped-session work fairly; ack only after service commit.
 
@@ -481,62 +515,89 @@ async def _drain_outbox(
     session in the same workspace.
     """
 
-    all_pending = store.list_pending_outbox(workspace_commitment)
-    grouped: dict[str, list[ObservationEnvelope]] = {}
-    for session_id, envelope in all_pending:
-        grouped.setdefault(session_id, []).append(envelope)
+    connector = cast(HookDrainConnector, connect_service) if connect is None else connect
+    started = monotonic()
+    client: _HookDrainClient
+    try:
+        client = await asyncio.wait_for(
+            connector(ControlClientKind.CLI), timeout=_HOOK_CONNECT_PREFLIGHT_SECONDS
+        )
+    except Exception:
+        record_hook_diagnostic("drain_preflight_failed", event_name, _state=_state)
+        return
+
+    all_pending = store.list_pending_outbox_rows(workspace_commitment)
+    grouped: dict[str, list[ObservationOutboxRow]] = {}
+    for row in all_pending:
+        grouped.setdefault(row.codex_session_id, []).append(row)
     session_order = sorted(grouped, key=str.encode)
     if codex_session_id in grouped:
         session_order.remove(codex_session_id)
         session_order.insert(0, codex_session_id)
-    pending: list[tuple[str, ObservationEnvelope]] = []
+    pending: list[ObservationOutboxRow] = []
     while grouped and len(pending) < 64:
         for session_id in tuple(session_order):
             queue = grouped.get(session_id)
             if not queue:
                 grouped.pop(session_id, None)
                 continue
-            pending.append((session_id, queue.pop(0)))
+            pending.append(queue.pop(0))
             if not queue:
                 grouped.pop(session_id, None)
             if len(pending) >= 64:
                 break
-    for session_id, envelope in pending:
-        chunks = (
-            ()
-            if content_by_source_identity is None
-            else content_by_source_identity.get(envelope.source_identity, ())
-        )
-        if chunks:
-            soft_fail, rejected = await _try_service_ingest(
-                session_id, envelope, content_chunks=chunks
+    try:
+        for row in pending:
+            remaining = budget_seconds - (monotonic() - started)
+            if remaining <= 0:
+                record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
+                break
+            chunks = (
+                ()
+                if content_by_source_identity is None
+                else content_by_source_identity.get(row.envelope.source_identity, ())
             )
-        else:
-            soft_fail, rejected = await _try_service_ingest(session_id, envelope)
-        if soft_fail is not None:
-            # Transport/vault problem: retryable, keep the entry pending.
-            store.note_coverage_gap(workspace_commitment, soft_fail)
-            if chunks:
-                # Plaintext chunks are intentionally not spooled. Structural
-                # replay remains pending and the omission is explicit.
+            try:
+                result = await asyncio.wait_for(
+                    _try_service_ingest(
+                        client,
+                        row.codex_session_id,
+                        row.envelope,
+                        content_chunks=chunks,
+                        deadline_ms=max(1, int(remaining * 1_000)),
+                    ),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
+                break
+            decision = route_observation_ingest(result)
+            attempted = store.bump_outbox_row_attempt(
+                workspace_commitment, row, reason=decision.reason
+            )
+            if attempted is None:
+                continue
+            if decision.reason is not None:
+                store.note_coverage_gap(workspace_commitment, decision.reason)
+                record_hook_diagnostic(decision.reason, event_name, _state=_state)
+            if chunks and decision.action is not ObservationDrainAction.ACKNOWLEDGE:
                 store.note_coverage_gap(
                     workspace_commitment,
                     ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
                 )
-            continue
-        if rejected is not None:
-            store.note_coverage_gap(workspace_commitment, rejected)
-            if rejected in _RETRYABLE_INGEST_REJECTIONS:
-                # Recoverable (service, vault, mapping, paused): keep pending.
+            if decision.action is ObservationDrainAction.RETRY:
                 continue
-            # Permanently invalid: move to a bounded, visible quarantine.
-            # Never acknowledge as committed — that would silently drop the row.
-            store.quarantine_outbox(
-                workspace_commitment, session_id, envelope.source_identity, rejected
-            )
-            continue
-        # accepted / duplicate: coordinator reconciled the durable ledger.
-        store.acknowledge_outbox(workspace_commitment, session_id, envelope.source_identity)
+            if decision.action is ObservationDrainAction.QUARANTINE:
+                store.quarantine_outbox_row(
+                    workspace_commitment,
+                    attempted,
+                    decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                )
+                continue
+            store.acknowledge_outbox_row(workspace_commitment, attempted)
+    finally:
+        with contextlib.suppress(Exception):
+            await client.close()
 
 
 async def _try_auto_start(
@@ -639,11 +700,31 @@ def handle_observe(
             _stdout_json({}, stdout)
             return 0
         resolved_event = raw_event
+        try:
+            capture_enabled = store.runtime_enabled()
+        except Exception:
+            record_hook_diagnostic("runtime_gate_unsafe", resolved_event, _state=_state)
+            _stdout_json({}, stdout)
+            return 0
+        if not capture_enabled:
+            # The READY generation synchronized an explicit disabled config.
+            # Stop before session binding, ordinals, capture, or outbox enqueue.
+            if resolved_event == "SessionStart":
+                additional = ""
+                with contextlib.suppress(Exception):
+                    additional = _cached_recommendation_context(_state=_state)
+                _stdout_json(
+                    _context_output(resolved_event, additional) if additional else {}, stdout
+                )
+            else:
+                _stdout_json({}, stdout)
+            return 0
         session_raw = payload.get("session_id")
         try:
             codex_session_id = validate_codex_session_id(session_raw)
         except ProtocolValueError:
             _stderr_line("hook_observe_degraded: invalid_session")
+            record_hook_diagnostic("invalid_session", resolved_event, _state=_state)
             _stdout_json({}, stdout)
             return 0
 
@@ -744,6 +825,7 @@ def handle_observe(
                         ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
                     )
                 _stderr_line(f"hook_observe_degraded: {overflow}")
+                record_hook_diagnostic("outbox_overflow", resolved_event, _state=_state)
 
         # Persist session end so lifecycle can report STOPPED once every bound
         # session has ended.
@@ -835,7 +917,7 @@ def handle_observe(
                                     "Yoetz service is unavailable for this mapped session; "
                                     "no live receipt can be promised."
                                 )
-                        if mapping is not None and not skip_service:
+                        if not skip_service:
 
                             async def _drain() -> None:
                                 await _drain_outbox(
@@ -843,6 +925,9 @@ def handle_observe(
                                     workspace_commitment=workspace_commitment,
                                     codex_session_id=codex_session_id,
                                     content_by_source_identity=content_map,
+                                    connect=cast(HookDrainConnector | None, connect),
+                                    event_name=resolved_event,
+                                    _state=_state,
                                 )
 
                             with contextlib.suppress(Exception):
@@ -854,20 +939,21 @@ def handle_observe(
             # entries all reconcile. Retryable rejections stay pending and
             # permanently-invalid ones are quarantined (never dropped) by the
             # shared drain routing. Unmapped events remain pending until mapped.
-            if mapping is not None:
+            async def _drain_all() -> None:
+                await _drain_outbox(
+                    store,
+                    workspace_commitment=workspace_commitment,
+                    codex_session_id=codex_session_id,
+                    content_by_source_identity=content_map,
+                    connect=cast(HookDrainConnector | None, connect),
+                    event_name=resolved_event,
+                    _state=_state,
+                )
 
-                async def _drain_all() -> None:
-                    await _drain_outbox(
-                        store,
-                        workspace_commitment=workspace_commitment,
-                        codex_session_id=codex_session_id,
-                        content_by_source_identity=content_map,
-                    )
+            with contextlib.suppress(Exception):
+                runner(_drain_all)
 
-                with contextlib.suppress(Exception):
-                    runner(_drain_all)
-
-        if content_chunks and (skip_service or mapping is None):
+        if content_chunks and skip_service:
             # Content is intentionally ephemeral. Without a ready mapped
             # service there is no encrypted destination, so retain only the
             # structural envelope plus an explicit omission gap.
@@ -885,6 +971,12 @@ def handle_observe(
             if snapshot is not None:
                 additional = _advice_context(snapshot)
 
+        # Release recommendations are read from one bounded local cache only.
+        # Existing task/receipt advice always wins this shared context channel.
+        if not additional and resolved_event == "SessionStart" and not skip_advice_loop:
+            with contextlib.suppress(Exception):
+                additional = _cached_recommendation_context(_state=_state)
+
         if additional:
             _stdout_json(_context_output(resolved_event, additional), stdout)
         else:
@@ -892,6 +984,7 @@ def handle_observe(
         return 0
     except Exception:
         _stderr_line("hook_observe_degraded: observe")
+        record_hook_diagnostic("observe", "observe", _state=_state)
         try:
             _stdout_json({}, stdout)
         except Exception:
