@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,14 @@ from yoetz.domain.observation import (
     ObservationLifecycle,
     observation_ingest_result_to_json,
 )
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _terminal_compact(text: str) -> str:
+    """Normalize Rich styling and soft wraps before asserting CLI contract text."""
+
+    return "".join(_ANSI_ESCAPE.sub("", text).split())
 
 
 def test_grant_pause_resume_revoke_roundtrip(tmp_path: Path, capsys: object) -> None:
@@ -127,10 +136,11 @@ def test_status_help_exposes_exact_activation_target_options() -> None:
     result = CliRunner().invoke(app, ["observe", "status", "--help"])
 
     assert result.exit_code == 0
-    assert "--codex-path" in result.stdout
-    assert "Exact Codex executable" in result.stdout
-    assert "--codex-home" in result.stdout
-    assert "Expected Codex home/cache" in result.stdout
+    output = _terminal_compact(result.stdout)
+    assert "--codex-path" in output
+    assert "ExactCodexexecutable" in output
+    assert "--codex-home" in output
+    assert "ExpectedCodexhome/cache" in output
 
 
 @pytest.mark.parametrize(
@@ -144,7 +154,7 @@ def test_status_command_rejects_partial_activation_target(arguments: tuple[str, 
     result = CliRunner().invoke(app, ["observe", "status", *arguments])
 
     assert result.exit_code == 2
-    assert "--codex-path and --codex-home must be provided together" in result.stderr
+    assert "--codex-pathand--codex-homemustbeprovidedtogether" in _terminal_compact(result.stderr)
 
 
 def test_status_command_forwards_the_exact_activation_target(
