@@ -651,7 +651,7 @@ class YoetzTui(App[int]):
             if await self.ask(entry) is None:
                 return None
             raw = entry.value.strip()
-            candidate = Path(raw)
+            candidate = Path(raw).expanduser()
             if (
                 raw
                 and candidate.is_absolute()

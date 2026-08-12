@@ -387,7 +387,7 @@ class YoetzRuntime:
             project_skill_preview,
         )
         from yoetz.ports.harness_mcp import McpRegistrationError, McpRegistrationState
-        from yoetz.ports.integrations import IntegrationScope, IntegrationTarget
+        from yoetz.ports.integrations import IntegrationError, IntegrationScope, IntegrationTarget
 
         binary = self._binary_for(option)
         root = self.project_root()
@@ -401,7 +401,10 @@ class YoetzRuntime:
         target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root))
         plugin_preview = CodexPluginService().preview(target)
         skill_preview = await project_skill_preview(root)
-        activation_preview = codex_activation_preview(binary, codex_home, root)
+        try:
+            activation_preview = codex_activation_preview(binary, codex_home, root)
+        except IntegrationError as error:
+            raise RuntimeError_(error.reason.value, "the Codex activation could not be previewed")
         policy = check_policy_preview(root)
         digest = policy.get("policy_digest")
         checks = policy.get("check_ids")

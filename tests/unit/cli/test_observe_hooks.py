@@ -572,6 +572,29 @@ async def test_drain_preflight_failure_skips_rows_and_records_diagnostic(tmp_pat
 
 
 @pytest.mark.anyio
+async def test_drain_empty_outbox_never_connects_or_records_diagnostics(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "idle")
+    connects: list[object] = []
+
+    async def recording_connect(kind: object):
+        connects.append(kind)
+        raise RuntimeError("offline")
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="idle",
+        connect=recording_connect,
+        _state=tmp_path,
+    )
+    assert connects == []
+    assert not (tmp_path / "observation/hook-diagnostics.jsonl").exists()
+
+
+@pytest.mark.anyio
 async def test_drain_budget_stops_without_advancing_unfinished_row(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))

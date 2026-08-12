@@ -192,6 +192,39 @@ async def test_exact_codex_home_is_entered_separately_and_bound_to_the_plan(
         assert runtime.applied_codex_homes == [codex_home]
 
 
+async def test_a_tilde_codex_home_is_expanded_before_validation(
+    make_app: MakeApp,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    codex_home = tmp_path / "tilde-codex-home"
+    codex_home.mkdir()
+    runtime = FakeRuntime(harnesses=(CLI,))
+    app = make_app(first_run=True, runtime=runtime, prompt_codex_home=True)
+
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect using the sole discovered executable
+        await pilot.pause()
+
+        view = app.open_view
+        assert view is not None
+        assert view.view_name == "codex-home-path"
+        view.query_one("#view-entry", Input).value = "~/tilde-codex-home"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        # The default-home spelling is accepted, not rejected as non-absolute.
+        assert app.open_view is not None
+        assert app.open_view.view_name == "trust"
+        await pilot.press("enter")
+        await pilot.pause()
+        await answer_review(pilot)
+
+        assert runtime.planned_codex_homes == [codex_home]
+
+
 async def test_an_empty_manual_executable_path_is_rejected_in_place(
     make_app: MakeApp,
 ) -> None:

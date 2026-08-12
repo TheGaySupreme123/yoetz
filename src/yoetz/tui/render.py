@@ -335,9 +335,11 @@ def render_integration_technical_details(plan: IntegrationPlan, width: int) -> t
         exact(label, repr((plan.executable_path, *command)))
     lines.append("")
     lines.append("Exact activation bytes")
-    lines.extend(_indent(tuple(plan.activation_marketplace_text.splitlines()), width=2))
+    # ``split("\n")`` rather than ``splitlines()``: these lines mirror the exact
+    # digest-bound bytes, so a trailing newline must stay visible as a blank line.
+    lines.extend(_indent(tuple(plan.activation_marketplace_text.split("\n")), width=2))
     if plan.activation_config_block:
-        lines.extend(_indent(tuple(plan.activation_config_block.splitlines()), width=2))
+        lines.extend(_indent(tuple(plan.activation_config_block.split("\n")), width=2))
     else:
         lines.extend(_indent(("(config already active; no byte change)",), width=2))
     lines.extend(

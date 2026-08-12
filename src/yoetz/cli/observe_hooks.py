@@ -25,7 +25,11 @@ from yoetz.adapters.integrations.observation_local import (
     LocalObservationStore,
     ObservationOutboxRow,
 )
-from yoetz.application.observation_drain import ObservationDrainAction, route_observation_ingest
+from yoetz.application.observation_drain import (
+    DEFAULT_OBSERVATION_SWEEP_LIMIT,
+    ObservationDrainAction,
+    route_observation_ingest,
+)
 from yoetz.application.recommendations import cached_pending_recommendations
 from yoetz.cli import hooks as hooks_cli
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic
@@ -515,6 +519,10 @@ async def _drain_outbox(
     session in the same workspace.
     """
 
+    all_pending = store.list_pending_outbox_rows(workspace_commitment)
+    if not all_pending:
+        return
+
     connector = cast(HookDrainConnector, connect_service) if connect is None else connect
     started = monotonic()
     client: _HookDrainClient
@@ -526,7 +534,6 @@ async def _drain_outbox(
         record_hook_diagnostic("drain_preflight_failed", event_name, _state=_state)
         return
 
-    all_pending = store.list_pending_outbox_rows(workspace_commitment)
     grouped: dict[str, list[ObservationOutboxRow]] = {}
     for row in all_pending:
         grouped.setdefault(row.codex_session_id, []).append(row)
@@ -535,7 +542,7 @@ async def _drain_outbox(
         session_order.remove(codex_session_id)
         session_order.insert(0, codex_session_id)
     pending: list[ObservationOutboxRow] = []
-    while grouped and len(pending) < 64:
+    while grouped and len(pending) < DEFAULT_OBSERVATION_SWEEP_LIMIT:
         for session_id in tuple(session_order):
             queue = grouped.get(session_id)
             if not queue:
@@ -544,7 +551,7 @@ async def _drain_outbox(
             pending.append(queue.pop(0))
             if not queue:
                 grouped.pop(session_id, None)
-            if len(pending) >= 64:
+            if len(pending) >= DEFAULT_OBSERVATION_SWEEP_LIMIT:
                 break
     try:
         for row in pending:

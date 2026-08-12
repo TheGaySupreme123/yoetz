@@ -218,6 +218,11 @@ def test_vault_outage_nonblocking_degraded_no_plaintext_spool(
     status = store.status(ObservationStatusQuery(workspace))
     assert ObservationGapCode.VAULT_LOCKED.value in status.gaps
     assert status.source_coverage[ObservationSource.CODEX_HOOK] is True
+    # The typed vault_locked rejection is retryable: the exact row must remain
+    # pending in the outbox (never dropped, never quarantined).
+    assert store.pending_outbox_count(workspace) == 1
+    assert store.quarantined_count(workspace) == 0
+    pending_envelope = store.list_pending_outbox(workspace)[0][1]
     # No plaintext spool of secrets under observation state.
     root = tmp_path / "observation"
     if root.is_dir():
@@ -227,10 +232,38 @@ def test_vault_outage_nonblocking_degraded_no_plaintext_spool(
                 assert _SECRET.encode() not in raw
                 assert b"hunter2" not in raw
                 assert b"password=" not in raw
-    # Recovery: pause/resume then ingest continues.
+    # Recovery: pause/resume, then a real drain against a recovered (accepting)
+    # service acknowledges the spooled row and the new event.
     store.pause(ObservationControlCommand(workspace))
     store.resume(ObservationControlCommand(workspace))
-    handle_observe(
+    ingested: list[str] = []
+
+    class RecoveredClient:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del deadline_ms
+            envelope = body["envelope"]  # type: ignore[index]
+            ingested.append(str(envelope["source_identity"]))  # type: ignore[index]
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(
+                    ObservationIngestDisposition.ACCEPTED,
+                    None,
+                    ObservationCursor(
+                        source_generation=1,
+                        byte_position=0,
+                        event_position=len(ingested),
+                        last_source_commitment=workspace,
+                        mapping_version="v1",
+                    ),
+                )
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect_recovered(_kind: object):
+        return RecoveredClient()
+
+    code = handle_observe(
         event_name="PostToolUse",
         stdin_bytes=json.dumps(
             {
@@ -243,8 +276,16 @@ def test_vault_outage_nonblocking_degraded_no_plaintext_spool(
         stdout=io.BytesIO(),
         workspace=str(tmp_path),
         _state=tmp_path,
-        skip_service=True,
+        connect=connect_recovered,  # type: ignore[arg-type]
+        skip_service=False,
     )
+    assert code == 0
+    # The previously-rejected envelope was re-driven through the service and
+    # acknowledged, alongside the new event; nothing pending or quarantined.
+    assert pending_envelope.source_identity in ingested
+    assert len(ingested) == 2
+    assert store.pending_outbox_count(workspace) == 0
+    assert store.quarantined_count(workspace) == 0
     assert store.status(ObservationStatusQuery(workspace)).lifecycle in {
         ObservationLifecycle.ACTIVE,
         ObservationLifecycle.DEGRADED,

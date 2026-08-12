@@ -46,8 +46,6 @@
         "docs/runbooks/codex-integration.md"
       ],
       "tests": [
-        "tests/capability/test_codex_integration_matrix.py",
-        "tests/capability/test_codex_trigger_hook_profiles.py",
         "tests/unit/adapters/test_codex_marketplace.py"
       ],
       "evidence_kinds": [

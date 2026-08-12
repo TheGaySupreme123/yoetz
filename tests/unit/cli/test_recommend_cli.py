@@ -14,6 +14,7 @@ from yoetz.application.package_update import (
 from yoetz.application.recommendations import (
     RecommendationContext,
     RecommendationState,
+    RecommendationStoreError,
     load_recommendation_state,
     refresh_pending,
     store_recommendation_state,
@@ -70,6 +71,37 @@ def test_accept_observation_writes_config_and_records_decision(
     }
     state = load_recommendation_state(root=tmp_path)
     assert state.decisions["observation-enabled"].decision == "accepted"
+
+
+def test_accept_reports_applied_change_when_decision_record_fails(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """The applied mutation must stay visible even when recording the decision fails."""
+
+    _patch_state_root(monkeypatch, tmp_path)
+    _patch_pending_context(monkeypatch, "observation-enabled")
+    config_path = tmp_path / "config.toml"
+    write_config_toml(YoetzConfig(observation=ObservationConfig(enabled=False)), path=config_path)
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "yoetz.cli.recommend.config_file_path", lambda: config_path
+    )
+
+    def failing_record(*_args: object, **_kwargs: object) -> None:
+        raise RecommendationStoreError("recommendation_store_write_failed")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "yoetz.cli.recommend.record_recommendation_decision", failing_record
+    )
+
+    result = _RUNNER.invoke(app, ["recommend", "accept", "observation-enabled"])
+
+    assert result.exit_code == 2
+    assert "applied observation-enabled:" in result.stdout
+    assert "recommendation_error: recommendation_store_write_failed" in result.output
+    assert "the decision could not be recorded" in result.output
+    assert tomllib.loads(config_path.read_text(encoding="utf-8"))["observation"] == {
+        "enabled": True
+    }
 
 
 def test_decline_is_durable_and_removes_cached_pending(tmp_path: Path, monkeypatch: object) -> None:
@@ -157,6 +189,8 @@ def test_activation_accept_repreviews_and_applies_exact_digest(
 
     _patch_pending_context(monkeypatch, "codex-plugin-activation")
 
+    expected_home = codex_home.resolve()
+
     def apply(
         target: IntegrationTarget,
         *,
@@ -165,14 +199,14 @@ def test_activation_accept_repreviews_and_applies_exact_digest(
         codex_home: Path,
     ) -> None:
         assert executable_path == str(executable)
-        del codex_home
+        assert Path(codex_home).resolve() == expected_home
         applied.append((target, approved_digest))
 
     def make_preview(
         _target: IntegrationTarget, *, executable_path: str, codex_home: Path
     ) -> object:
         assert executable_path == str(executable)
-        del codex_home
+        assert Path(codex_home).resolve() == expected_home
         return preview
 
     def import_adapter(_name: str) -> object:
@@ -310,11 +344,13 @@ def test_activation_preview_requires_explicit_post_preview_confirmation(
         inspection=SimpleNamespace(inventory_verified=False),
     )
 
+    expected_home = codex_home.resolve()
+
     def make_preview(
         _target: IntegrationTarget, *, executable_path: str, codex_home: Path
     ) -> object:
         assert executable_path == str(executable)
-        del codex_home
+        assert Path(codex_home).resolve() == expected_home
         return preview
 
     def apply(
@@ -325,7 +361,7 @@ def test_activation_preview_requires_explicit_post_preview_confirmation(
         codex_home: Path,
     ) -> None:
         assert executable_path == str(executable)
-        del codex_home
+        assert Path(codex_home).resolve() == expected_home
         applied.append(approved_digest)
 
     adapter = SimpleNamespace(preview_activation=make_preview, apply_activation=apply)

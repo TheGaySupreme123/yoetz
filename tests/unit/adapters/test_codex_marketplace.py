@@ -653,3 +653,21 @@ def test_idempotent_reapply_keeps_exact_bytes(tmp_path: Path) -> None:
     apply_activation(target, codex_home=home, approved_digest=second.preview_digest)
     assert (marketplace.read_bytes(), config.read_bytes()) == before
     assert os.stat(config).st_mode & 0o777 == 0o600
+
+
+def test_unreadable_cache_member_normalizes_to_integration_error(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations.codex_marketplace import (
+        _installed_cache_digest,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o700)
+    member = cache / "plugin.json"
+    member.write_bytes(b"{}")
+    member.chmod(0o000)
+    try:
+        with pytest.raises(IntegrationError) as caught:
+            _installed_cache_digest(cache, {"plugin.json": b"{}"})
+    finally:
+        member.chmod(0o600)
+    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE

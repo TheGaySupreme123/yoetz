@@ -171,6 +171,30 @@ def test_activation_approval_discloses_every_digest_command_and_cache_effect() -
     assert "Plugin cache mutation planned\n  yes" in technical
 
 
+def test_activation_bytes_render_preserves_trailing_newline_as_blank_line() -> None:
+    plan = build.plan(
+        activation_marketplace_text='{"name":"yoetz"}\n',
+        activation_config_block='[plugins."yoetz@yoetz"]\nenabled = true\n',
+    )
+    lines = render_integration_technical_details(plan, 240)
+    tail = lines[lines.index("Exact activation bytes") + 1 :]
+    assert tail[0] == '  {"name":"yoetz"}'
+    assert tail[1] == "  "
+    assert tail[2] == '  [plugins."yoetz@yoetz"]'
+    assert tail[3] == "  enabled = true"
+    assert tail[4] == "  "
+
+
+def test_activation_bytes_render_preserves_final_blank_line() -> None:
+    plan = build.plan(activation_config_block='[plugins."yoetz@yoetz"]\nenabled = true\n\n')
+    lines = render_integration_technical_details(plan, 240)
+    tail = lines[lines.index("Exact activation bytes") + 1 :]
+    config_start = tail.index('  [plugins."yoetz@yoetz"]')
+    assert tail[config_start + 1] == "  enabled = true"
+    assert tail[config_start + 2] == "  "
+    assert tail[config_start + 3] == "  "
+
+
 def test_a_foreign_entry_is_a_block_that_reports_nothing_was_changed() -> None:
     lines = render_foreign_entry("", WIDE)
     joined = "\n".join(lines)

@@ -502,20 +502,23 @@ def _installed_cache_digest(path: Path, expected_members: Mapping[str, bytes]) -
     _owned_not_writable(path, directory=True)
     expected_paths = frozenset(expected_members)
     actual_paths: set[str] = set()
-    for candidate in path.rglob("*"):
-        if candidate.is_symlink():
-            raise _error(IntegrationReason.TARGET_UNSAFE)
-        relative = candidate.relative_to(path).as_posix()
-        if candidate.is_file():
-            _owned_not_writable(candidate, directory=False)
-            actual_paths.add(relative)
-        elif candidate.is_dir():
-            _owned_not_writable(candidate, directory=True)
-        else:
-            raise _error(IntegrationReason.TARGET_UNSAFE)
-    if actual_paths != set(expected_paths):
-        raise _error(IntegrationReason.DESTINATION_CONFLICT)
-    actual = {relative: (path / relative).read_bytes() for relative in sorted(actual_paths)}
+    try:
+        for candidate in path.rglob("*"):
+            if candidate.is_symlink():
+                raise _error(IntegrationReason.TARGET_UNSAFE)
+            relative = candidate.relative_to(path).as_posix()
+            if candidate.is_file():
+                _owned_not_writable(candidate, directory=False)
+                actual_paths.add(relative)
+            elif candidate.is_dir():
+                _owned_not_writable(candidate, directory=True)
+            else:
+                raise _error(IntegrationReason.TARGET_UNSAFE)
+        if actual_paths != set(expected_paths):
+            raise _error(IntegrationReason.DESTINATION_CONFLICT)
+        actual = {relative: (path / relative).read_bytes() for relative in sorted(actual_paths)}
+    except OSError as exc:
+        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
     if any(actual[name] != payload for name, payload in expected_members.items()):
         raise _error(IntegrationReason.DESTINATION_CONFLICT)
     return _members_digest(actual)
@@ -1089,12 +1092,12 @@ def apply_activation(
             # Preserve already-approved partial state for an honest retry. Pathname
             # verify-then-rollback cannot exclude a non-cooperating concurrent replacement.
             raise
-    inspection = inspect_activation(
-        target,
-        executable_path=executable_path,
-        codex_home=binary.codex_home,
-        _run=_run,
-    )
-    if inspection.state is not ActivationState.ACTIVE:
-        raise _error(IntegrationReason.WRITE_FAILED)
+        inspection = inspect_activation(
+            target,
+            executable_path=executable_path,
+            codex_home=binary.codex_home,
+            _run=_run,
+        )
+        if inspection.state is not ActivationState.ACTIVE:
+            raise _error(IntegrationReason.WRITE_FAILED)
     return inspection

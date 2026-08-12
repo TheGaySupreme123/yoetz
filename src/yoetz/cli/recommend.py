@@ -182,7 +182,10 @@ def recommend_list(
         Path | None,
         typer.Option(
             "--codex-path",
-            help="Exact Codex executable to inspect; activation status stays unknown without it.",
+            help=(
+                "Exact Codex executable to inspect. Activation status stays unknown unless "
+                "--codex-home is also passed (or CODEX_HOME/CODEX_TESTING_HOME is set)."
+            ),
         ),
     ] = None,
     codex_home: Annotated[
@@ -456,7 +459,18 @@ def recommend_accept(
         outcome = _apply_recommendation(
             recommendation_id, codex_path=codex_path, codex_home=codex_home
         )
-        record_recommendation_decision(recommendation_id, "accepted")
+        # The change is applied at this point; a decision-store failure below must not be
+        # reported as if nothing happened.
+        try:
+            record_recommendation_decision(recommendation_id, "accepted")
+        except RecommendationStoreError as exc:
+            typer.echo(f"applied {recommendation_id}: {outcome}")
+            typer.echo(
+                f"recommendation_error: {exc.reason_code} "
+                "(the change above was applied, but the decision could not be recorded)",
+                err=True,
+            )
+            raise typer.Exit(2) from exc
     except RecommendationStoreError as exc:
         typer.echo(f"recommendation_error: {exc.reason_code}", err=True)
         raise typer.Exit(2) from exc
