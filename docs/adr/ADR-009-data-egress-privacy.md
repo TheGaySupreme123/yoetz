@@ -66,10 +66,15 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    `network_egress_permitted=true` solely because that channel is on, while `llm_inference` and the
    other three non-LLM channels stay off and profile remains `local_only`. Config.toml generation-1
    bootstrap remains fail-safe all-denied and is not continuing disclosure authority. Operators may
-   opt out in privacy custom section 5. The remaining three non-LLM channels stay unsupported: setup
-   marks them read-only off, proposed enablement returns `channel_unavailable` without persistence
-   or I/O, and forced enabled state yields a pre-dispatch `channel_unavailable` decision receipt
-   with no DNS/socket I/O. Absence of a channel is not silently replaced by a generic HTTP client.
+   opt out in first-run setup or privacy custom section 5. **Amended 2026-08-12:** the first-run
+   setup answer may replace only the `update_checks` value in its recommended or named privacy
+   recipe before the exact candidate is rendered. `None` preserves the recipe default, and Custom
+   continues to ask section 5 itself. The answer is not authority: the resulting candidate still
+   requires the existing exact confirmation and service proposal/decision ceremony. The remaining
+   three non-LLM channels stay unsupported: setup marks them read-only off, proposed enablement
+   returns `channel_unavailable` without persistence or I/O, and forced enabled state yields a
+   pre-dispatch `channel_unavailable` decision receipt with no DNS/socket I/O. Absence of a channel
+   is not silently replaced by a generic HTTP client.
 3. **Local disclosure sinks:** `local_model`, `agent_context`, `local_human_view`, and
    `trusted_human_control` are not network-egress channels. They receive only policy-approved
    minimized content and are covered by the never-send fence. The trusted human surface may render an

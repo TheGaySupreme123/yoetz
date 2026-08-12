@@ -57,6 +57,7 @@ def detection(**overrides: Any) -> Detection:
 _PLAN = IntegrationPlan(
     harness_label="Codex Desktop",
     executable_path="/Applications/Codex.app/Contents/MacOS/codex",
+    codex_home="/tmp/codex",
     reported_version="0.44",
     project_root="/srv/yoetz",
     route_profile="policy",
@@ -74,6 +75,25 @@ _PLAN = IntegrationPlan(
     foreign_entry=False,
     preview_digest="sha256:abc123",
     skill_preview_digest="sha256:def456",
+    activation_preview_digest="sha256:activation",
+    activation_marketplace_path="/srv/yoetz/.agents/plugins/marketplace.json",
+    activation_config_path="/tmp/codex/config.toml",
+    activation_marketplace_text='{"name":"yoetz"}\n',
+    activation_config_block='[plugins."yoetz@yoetz"]\nenabled = true\n',
+    activation_plugin_source_digest="sha256:plugin-tree",
+    activation_inventory_verified=False,
+    activation_plugin_install_path="/tmp/codex/plugins/cache/yoetz/yoetz/0.1.0",
+    activation_plugin_install_digest="sha256:installed-plugin-tree",
+    activation_executable_digest="sha256:codex-executable",
+    activation_codex_version="0.148.0-alpha.6",
+    activation_probe_command=("--version",),
+    activation_inventory_command=("plugin", "list", "--marketplace", "yoetz", "--json"),
+    activation_install_command=("plugin", "add", "yoetz@yoetz", "--json"),
+    activation_probe_environment="temporary_owner_private_home",
+    activation_environment=(("CODEX_HOME", "/tmp/codex"), ("CODEX_TESTING_HOME", "/tmp/codex")),
+    activation_marketplace_preimage_digest="sha256:marketplace-before",
+    activation_config_preimage_digest="sha256:config-before",
+    activation_cache_mutation_planned=True,
 )
 
 

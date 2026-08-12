@@ -4,14 +4,17 @@
   "claims": [
     {
       "claim_id": "integration.codex_exact_version_support",
-      "statement": "Yoetz records Codex integration and JSONL import support as an exact tested executable set (target/maximum-tested 0.144.5); a version newer than maximum-tested is reported untested, never supported, and the exact release cell separately records whether a trigger compaction-recovery hook and/or an observation arm is present. A trigger is a recovery ergonomic carrying no observation or coverage claim; an observation arm, when supported by capability evidence and consented, is the only path that may earn hook_observed from real observation evidence.",
+      "statement": "Yoetz records Codex integration and JSONL import support as an exact tested executable set (target/maximum-tested 0.144.5); a version newer than maximum-tested is reported untested, never supported, and the exact release cell separately records whether a trigger compaction-recovery hook and/or an observation arm is present. Consent-based plugin activation binds the exact selected executable path and SHA-256, its version from a network-free probe isolated in a removed owner-private temporary home, an explicitly supplied existing absolute non-symlink target home, marketplace/config preimages and proposals, managed plugin source, versioned cache preimage and intended bytes, forced activation environment, and exact post-consent scoped inventory/add commands. No target-home inventory command runs before consent. After consent, each write is CAS-fenced; a later failure preserves approved partial state for retry rather than risking a concurrent change through pathname rollback. Active requires Codex inventory to report the expected repository plugin installed and enabled and the installed-version cache to match the managed source; marketplace/config presence alone is installed_not_activated. Neither active inventory nor a trigger proves a hook ran: a trigger is a recovery ergonomic carrying no observation or coverage claim, and an observation arm, when supported by capability evidence and consented, is the only path that may earn hook_observed from real observation evidence.",
       "scope": {
         "operations": [
           "import_codex_jsonl",
           "integration_preview",
           "integration_install",
           "integration_status",
-          "integration_remove"
+          "integration_remove",
+          "plugin_activation_apply",
+          "plugin_activation_preview",
+          "plugin_activation_status"
         ],
         "platforms": [
           "macosx_11_0_arm64",
@@ -23,9 +26,13 @@
       },
       "limitations": [
         "capability_evidence_required_per_release",
+        "configuration_and_inventory_not_session_hook_evidence",
+        "no_selected_home_inventory_before_consent",
         "no_intermediate_version_inference",
+        "partial_approved_state_preserved_for_retry",
         "trigger_hook_optional_and_non_observational",
-        "observation_arm_requires_capability_and_consent_evidence"
+        "observation_arm_requires_capability_and_consent_evidence",
+        "selected_executable_and_cache_exactness_required"
       ],
       "surfaces": [
         "README.md",
@@ -35,15 +42,16 @@
       "requirements": [
         "ADR-005",
         "ADR-010",
+        "ADR-012",
         "docs/runbooks/codex-integration.md"
       ],
       "tests": [
-        "tests/capability/test_codex_integration_matrix.py",
-        "tests/capability/test_codex_trigger_hook_profiles.py"
+        "tests/unit/adapters/test_codex_marketplace.py"
       ],
       "evidence_kinds": [
         "capability_run",
-        "conformance_test"
+        "conformance_test",
+        "unit_test"
       ],
       "release_status": "not_yet_evidenced"
     },
@@ -628,8 +636,8 @@
       "release_status": "not_yet_evidenced"
     },
     {
-      "claim_id": "privacy.v01_non_llm_channels_unavailable",
-      "statement": "v0.1 owns no production telemetry, crash-upload, update-check, or capability-test transport; setup rejects proposed enablement and stores no dormant consent, a forced or imported enabled row yields a pre-dispatch channel_unavailable decision with no authorization consumption, dispatch fields, request commitment, or network I/O, and later transport support requires a fresh local-human confirmation rather than silently activating an old draft or answer.",
+      "claim_id": "privacy.v01_update_checks_only_non_llm_transport",
+      "statement": "Among the four non-LLM channels, v0.1 owns a production transport only for update_checks: an independently policy-gated, bounded allowlisted PyPI request carrying only the yoetz package identity and consuming only the latest version; it never carries task or user content and never auto-upgrades. On a fresh unconfigured installation, pre-policy advisory paths disable network use until first-run setup commits a policy; rerunning setup leaves an existing standing policy effective until a replacement commits. Product telemetry, crash upload, and capability testing have no production transport: setup rejects proposed enablement and stores no dormant consent, a forced or imported enabled row yields a pre-dispatch channel_unavailable decision with no authorization consumption, dispatch fields, request commitment, or network I/O, and later transport support requires a fresh local-human confirmation rather than silently activating an old draft or answer.",
       "scope": {
         "channels": [
           "product_telemetry",
@@ -639,9 +647,12 @@
         ]
       },
       "limitations": [
-        "policy_vocabulary_without_transport_in_v01"
+        "package_identity_network_request_when_enabled",
+        "remaining_non_llm_channels_unavailable_in_v01",
+        "update_advisory_never_auto_upgrades"
       ],
       "surfaces": [
+        "PRIVACY.md",
         "docs/protocol/data-egress-and-privacy.md",
         "docs/protocol/privacy-setup-wizard.md"
       ],
@@ -650,6 +661,7 @@
       ],
       "tests": [
         "tests/conformance/privacy/test_never_send_scope_and_channels.py",
+        "tests/unit/application/test_package_update.py",
         "tests/unit/privacy/test_policy_and_contracts.py"
       ],
       "evidence_kinds": [

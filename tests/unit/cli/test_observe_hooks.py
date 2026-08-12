@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.application.recommendations import RecommendationState, store_recommendation_state
 from yoetz.cli import observe_hooks as observe_hooks_module
 from yoetz.cli.observe_hooks import (
     SUPPORTED_HOOK_EVENTS,
@@ -16,10 +18,12 @@ from yoetz.cli.observe_hooks import (
     map_hook_payload_to_envelope,
 )
 from yoetz.domain.observation import (
-    ObservationEnvelope,
     ObservationGapCode,
+    ObservationIngestDisposition,
+    ObservationIngestResult,
     ObservationSource,
     ObservationStatusQuery,
+    observation_ingest_result_to_json,
 )
 
 _KEY = b"k" * 32
@@ -157,6 +161,53 @@ def test_observe_without_consent_exits_zero_no_spool(tmp_path: Path) -> None:
     )
     assert code == 0
     assert json.loads(stdout.getvalue().decode()) == {}
+
+
+def test_runtime_disabled_skips_capture_but_session_start_surfaces_cached_recommendation(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    store.set_runtime_enabled(False)
+    store_recommendation_state(
+        RecommendationState(last_evaluated_version="0.1.0", pending=("observation-enabled",)),
+        root=tmp_path,
+    )
+    stdout = io.BytesIO()
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps({"session_id": "disabled-session"}).encode(),
+        stdout=stdout,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+    )
+    assert code == 0
+    payload = json.loads(stdout.getvalue())
+    context = payload["hookSpecificOutput"]["additionalContext"]
+    assert "Enable local observation" in context
+    assert "workspace consent remains required" in context
+    assert "yoetz recommend accept observation-enabled" in context
+    assert store.pending_workspaces() == ()
+    workspace_state = tmp_path / "observation/workspaces"
+    assert not workspace_state.exists() or not list(workspace_state.glob("*.json"))
+
+
+def test_unsafe_runtime_gate_fails_closed_with_distinct_diagnostic(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    store.set_runtime_enabled(True)
+    gate = tmp_path / "observation/runtime-gate.json"
+    gate.write_text("not-json", encoding="utf-8")
+    stdout = io.BytesIO()
+    handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps({"session_id": "unsafe-gate", "tool_name": "shell"}).encode(),
+        stdout=stdout,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+    )
+    assert json.loads(stdout.getvalue()) == {}
+    diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"runtime_gate_unsafe"' in diagnostics
+    assert store.pending_workspaces() == ()
 
 
 def test_service_unavailable_never_spools_visible_plaintext(tmp_path: Path) -> None:
@@ -306,6 +357,73 @@ def test_yoetz_tool_still_ingests_but_skips_advice_loop(tmp_path: Path) -> None:
     assert json.loads(out.getvalue().decode()) == {}
 
 
+def test_skip_service_session_start_never_opens_service_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        mapping_from_start_ids,
+        store_mapping,
+    )
+    from yoetz.protocol.ids import IdKind, new_id
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    service_touches: list[str] = []
+
+    async def forbidden_connect(*_args: object, **_kwargs: object) -> object:
+        service_touches.append("connect_service")
+        raise AssertionError("skip_service must never open a service connection")
+
+    async def forbidden_auto_start(*_args: object, **_kwargs: object) -> object:
+        service_touches.append("_try_auto_start")
+        raise AssertionError("skip_service must never auto-attach a ledger task")
+
+    monkeypatch.setattr(observe_hooks_module, "connect_service", forbidden_connect)
+    monkeypatch.setattr(observe_hooks_module, "_try_auto_start", forbidden_auto_start)
+
+    # Unmapped session: the auto-attach branch must be gated by skip_service.
+    unmapped = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "probe-unmapped", "hook_event_name": "SessionStart", "cwd": "."}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert unmapped == 0
+
+    # Mapped session: the status-read branch must be gated as well.
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id="probe-mapped",
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    mapped = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "probe-mapped", "hook_event_name": "SessionStart", "cwd": "."}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert mapped == 0
+    assert service_touches == []
+    # Local capture still ran: sessions bound and envelopes queued in the outbox.
+    assert store.find_workspace_for_codex_session("probe-unmapped") == workspace
+    assert store.find_workspace_for_codex_session("probe-mapped") == workspace
+    assert store.list_pending_outbox(workspace)
+
+
 def test_malformed_stdin_exits_zero(tmp_path: Path) -> None:
     code = handle_observe(
         event_name="Stop",
@@ -338,7 +456,7 @@ def _drain_envelope(store: LocalObservationStore, session: str, identity: str, o
 
 @pytest.mark.anyio
 async def test_drain_quarantines_permanent_and_keeps_retryable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -350,17 +468,35 @@ async def test_drain_quarantines_permanent_and_keeps_retryable(
     store.enqueue_outbox(workspace, "sess-drain", retry)
     assert store.pending_outbox_count(workspace) == 2
 
-    async def _fake_ingest(session_id: str, envelope: ObservationEnvelope):
-        if envelope.source_identity == perm.source_identity:
-            # Permanently invalid rejection.
-            return None, ObservationGapCode.CONSENT_REVOKED.value
-        # Retryable rejection.
-        return None, ObservationGapCode.SERVICE_UNAVAILABLE.value
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del deadline_ms
+            envelope = body["envelope"]  # type: ignore[index]
+            if envelope["source_identity"] == perm.source_identity:
+                result = ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.CONSENT_REVOKED.value,
+                    None,
+                )
+            else:
+                result = ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                    None,
+                )
+            return observation_ingest_result_to_json(result)
 
-    monkeypatch.setattr(observe_hooks_module, "_try_service_ingest", _fake_ingest)
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
 
     await observe_hooks_module._drain_outbox(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-        store, workspace_commitment=workspace, codex_session_id="sess-drain"
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="sess-drain",
+        connect=connect,  # type: ignore[arg-type]
     )
 
     # Permanent -> quarantined (never dropped); retryable -> still pending.
@@ -373,7 +509,7 @@ async def test_drain_quarantines_permanent_and_keeps_retryable(
 
 @pytest.mark.anyio
 async def test_drain_is_round_robin_across_all_workspace_sessions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -388,16 +524,103 @@ async def test_drain_is_round_robin_across_all_workspace_sessions(
             )
     calls: list[str] = []
 
-    async def _accept(session_id: str, envelope: ObservationEnvelope):
-        del envelope
-        calls.append(session_id)
-        return None, None
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del deadline_ms
+            calls.append(body["codex_session_id"])  # type: ignore[index]
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
 
-    monkeypatch.setattr(observe_hooks_module, "_try_service_ingest", _accept)
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
     await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
         store,
         workspace_commitment=workspace,
         codex_session_id="current",
+        connect=connect,  # type: ignore[arg-type]
     )
     assert calls == ["current", "recovered", "current", "recovered"]
     assert store.pending_outbox_count(workspace) == 0
+
+
+@pytest.mark.anyio
+async def test_drain_preflight_failure_skips_rows_and_records_diagnostic(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "preflight")
+    store.enqueue_outbox(workspace, "preflight", _drain_envelope(store, "preflight", "x", 1))
+
+    async def unavailable(_kind: object):
+        raise RuntimeError("offline")
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="preflight",
+        connect=unavailable,
+        _state=tmp_path,
+    )
+    assert store.list_pending_outbox_rows(workspace)[0].attempts == 0
+    diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"drain_preflight_failed"' in diagnostics
+
+
+@pytest.mark.anyio
+async def test_drain_empty_outbox_never_connects_or_records_diagnostics(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "idle")
+    connects: list[object] = []
+
+    async def recording_connect(kind: object):
+        connects.append(kind)
+        raise RuntimeError("offline")
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="idle",
+        connect=recording_connect,
+        _state=tmp_path,
+    )
+    assert connects == []
+    assert not (tmp_path / "observation/hook-diagnostics.jsonl").exists()
+
+
+@pytest.mark.anyio
+async def test_drain_budget_stops_without_advancing_unfinished_row(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "budget")
+    store.enqueue_outbox(workspace, "budget", _drain_envelope(store, "budget", "x", 1))
+
+    class SlowClient:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            await asyncio.sleep(1)
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return SlowClient()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="budget",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+        budget_seconds=0.01,
+    )
+    assert store.list_pending_outbox_rows(workspace)[0].attempts == 0
+    diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"drain_budget_exhausted"' in diagnostics

@@ -261,17 +261,96 @@ def render_integration_technical_details(plan: IntegrationPlan, width: int) -> t
 
     rows = [
         ("Codex executable", plan.executable_path),
-        ("Codex version", plan.reported_version or "unknown"),
+        ("Explicit Codex home", plan.codex_home),
+        ("Discovered Codex version", plan.reported_version or "unknown"),
+        ("Probed activation version", plan.activation_codex_version),
         ("Project root", plan.project_root),
         ("MCP server name", plan.mcp_server_name),
         ("MCP command", plan.mcp_command),
         ("MCP preview digest", plan.preview_digest),
         ("Skill preview digest", plan.skill_preview_digest),
+        ("Activation preview digest", plan.activation_preview_digest),
+        ("Plugin source-tree digest", plan.activation_plugin_source_digest),
+        ("Marketplace target", plan.activation_marketplace_path),
+        ("Selected Codex config", plan.activation_config_path),
         ("Policy digest", plan.policy_digest or "no project policy file"),
         ("Planned files", str(plan.planned_file_count)),
         ("Registration state", plan.state_before),
     ]
-    lines = list(_labelled(rows, width, gap=2, paths=("Codex executable", "Project root")))
+    lines = list(
+        _labelled(
+            rows,
+            width,
+            gap=2,
+            paths=(
+                "Codex executable",
+                "Explicit Codex home",
+                "Project root",
+                "Marketplace target",
+                "Selected Codex config",
+            ),
+        )
+    )
+    lines.append("")
+    lines.append("Exact activation approval facts")
+
+    def exact(label: str, value: str) -> None:
+        lines.append(label)
+        lines.extend(_indent(wrap(value, max(width - 2, 4)), width=2))
+
+    for label, value in (
+        ("Codex executable", plan.executable_path),
+        ("Codex home", plan.codex_home),
+        ("Marketplace", plan.activation_marketplace_path),
+        ("Codex config", plan.activation_config_path),
+        ("Plugin cache/install target", plan.activation_plugin_install_path),
+        ("Probed Codex version", plan.activation_codex_version),
+        ("Executable digest", plan.activation_executable_digest),
+        ("Plugin source-tree digest", plan.activation_plugin_source_digest),
+        ("Plugin install-tree digest", plan.activation_plugin_install_digest),
+        ("Marketplace preimage digest", plan.activation_marketplace_preimage_digest),
+        ("Config preimage digest", plan.activation_config_preimage_digest),
+        (
+            "Canonical installed inventory verified before approval",
+            "yes" if plan.activation_inventory_verified else "no",
+        ),
+        (
+            "Plugin cache mutation planned",
+            "yes" if plan.activation_cache_mutation_planned else "no",
+        ),
+        ("Version probe environment", plan.activation_probe_environment),
+    ):
+        # Unlike the compact summary above, these approval-relevant identities are wrapped
+        # without ellipsis: every character remains visible even on a narrow terminal.
+        exact(label, value)
+    lines.append("Forced activation environment")
+    for name, value in plan.activation_environment:
+        exact(name, value)
+    lines.append("Exact activation command argv")
+    for label, command in (
+        ("Version probe", plan.activation_probe_command),
+        ("Inventory", plan.activation_inventory_command),
+        ("Install", plan.activation_install_command),
+    ):
+        exact(label, repr((plan.executable_path, *command)))
+    lines.append("")
+    lines.append("Exact activation bytes")
+    # ``split("\n")`` rather than ``splitlines()``: these lines mirror the exact
+    # digest-bound bytes, so a trailing newline must stay visible as a blank line.
+    lines.extend(_indent(tuple(plan.activation_marketplace_text.split("\n")), width=2))
+    if plan.activation_config_block:
+        lines.extend(_indent(tuple(plan.activation_config_block.split("\n")), width=2))
+    else:
+        lines.extend(_indent(("(config already active; no byte change)",), width=2))
+    lines.extend(
+        _indent(
+            (
+                "Standing trust: this plugin remains enabled for future sessions using this "
+                "Codex home until you disable or remove it.",
+            ),
+            width=2,
+        )
+    )
     if plan.planned_check_ids:
         lines.append("")
         lines.append("Proposed approved checks")

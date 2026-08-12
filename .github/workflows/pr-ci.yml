@@ -124,6 +124,9 @@ jobs:
       - name: Verify CHECK continuation schemas are exact
         run: uv run --locked python scripts/sync_check_continuation_schemas.py --check
 
+      - name: Verify repository-authority control schemas are exact
+        run: uv run --locked python scripts/sync_repository_authority_schemas.py --check
+
       - name: Verify packaged resource manifest and byte parity
         run: uv run --locked python scripts/verify_resource_manifest.py --check
 

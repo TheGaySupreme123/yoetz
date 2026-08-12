@@ -246,7 +246,11 @@ def _run_wizard() -> None:
 
     run_async(
         lambda: run_setup_wizard(
-            non_interactive=False, codex_path=None, accept=False, json_output=False
+            non_interactive=False,
+            codex_path=None,
+            codex_home=None,
+            accept=False,
+            json_output=False,
         )
     )
 

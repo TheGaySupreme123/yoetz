@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
+import stat
 import tempfile
 import tomllib
 from collections.abc import Mapping
@@ -37,6 +39,7 @@ __all__ = [
     "vercel_ai_gateway_provider",
     "xai_provider",
     "write_config_toml",
+    "write_config_toml_if_unchanged",
     "write_provider_binding",
 ]
 
@@ -48,6 +51,7 @@ _GEMINI_CAPABILITY: Final = "google-gemini-openai-chat-completions-1"
 _OPENROUTER_CAPABILITY: Final = "openrouter-openai-chat-completions-1"
 _XAI_CAPABILITY: Final = "xai-openai-chat-completions-1"
 _VERCEL_AI_GATEWAY_CAPABILITY: Final = "vercel-ai-gateway-openai-responses-1"
+_CONFIG_LOCK_SUFFIX: Final = ".lock"
 _PROVIDER_CHOICE_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
     {
         "openai": "official_openai",
@@ -448,6 +452,7 @@ def render_config_toml(config: YoetzConfig) -> str:
             "max_findings": config.verification.max_findings,
         },
     )
+    _emit_table(lines, "observation", {"enabled": config.observation.enabled})
     _emit_table(
         lines,
         "logging",
@@ -502,9 +507,7 @@ def render_config_toml(config: YoetzConfig) -> str:
     return text
 
 
-def write_config_toml(config: YoetzConfig, path: Path | None = None) -> Path:
-    """Atomically write validated nonsecret config to the service-owned path."""
-
+def _config_target(path: Path | None) -> Path:
     using_default = path is None
     target = config_file_path() if using_default else path
     assert target is not None
@@ -515,9 +518,55 @@ def write_config_toml(config: YoetzConfig, path: Path | None = None) -> Path:
             raise ConfigError("config_value_invalid", safe_name=exc.reason_code) from exc
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
-    payload = render_config_toml(config).encode("utf-8")
-    directory = target.parent
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".yoetz-config-", dir=directory)
+    return target
+
+
+class _ConfigWriteLock:
+    """Persistent owner-only advisory lock shared by every config writer."""
+
+    def __init__(self, target: Path) -> None:
+        self._path = target.with_name(f".{target.name}{_CONFIG_LOCK_SUFFIX}")
+        self._descriptor: int | None = None
+
+    def __enter__(self) -> None:
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(self._path, flags, 0o600)
+            facts = os.fstat(descriptor)
+            effective_uid = os.geteuid() if hasattr(os, "geteuid") else os.getuid()
+            if not stat.S_ISREG(facts.st_mode) or (
+                hasattr(facts, "st_uid") and facts.st_uid != effective_uid
+            ):
+                raise OSError("config_lock_unsafe")
+            os.fchmod(descriptor, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except OSError as exc:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise ConfigError("config_value_invalid") from exc
+        self._descriptor = descriptor
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        del exc_type, exc, traceback
+        descriptor = self._descriptor
+        self._descriptor = None
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _current_config_bytes(target: Path) -> bytes | None:
+    try:
+        return target.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ConfigError("config_value_invalid") from exc
+
+
+def _atomic_write_config(target: Path, payload: bytes) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".yoetz-config-", dir=target.parent)
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "wb") as handle:
@@ -529,6 +578,39 @@ def write_config_toml(config: YoetzConfig, path: Path | None = None) -> Path:
     except OSError as exc:
         temporary.unlink(missing_ok=True)
         raise ConfigError("config_value_invalid") from exc
+
+
+def write_config_toml(config: YoetzConfig, path: Path | None = None) -> Path:
+    """Atomically write validated nonsecret config to the service-owned path."""
+
+    target = _config_target(path)
+    payload = render_config_toml(config).encode("utf-8")
+    with _ConfigWriteLock(target):
+        _atomic_write_config(target, payload)
+    return target
+
+
+def write_config_toml_if_unchanged(
+    config: YoetzConfig,
+    *,
+    expected_bytes: bytes | None,
+    path: Path | None = None,
+) -> Path:
+    """Write only when the locked config preimage exactly matches ``expected_bytes``.
+
+    ``None`` means the caller previewed an absent file. Every in-process config writer uses the
+    same persistent interprocess lock, so the comparison and atomic replacement form one
+    serialized operation across cooperating Yoetz processes.
+    """
+
+    if expected_bytes is not None and type(expected_bytes) is not bytes:
+        raise TypeError("config_expected_bytes_wrong_type")
+    target = _config_target(path)
+    payload = render_config_toml(config).encode("utf-8")
+    with _ConfigWriteLock(target):
+        if _current_config_bytes(target) != expected_bytes:
+            raise ConfigError("config_preimage_mismatch")
+        _atomic_write_config(target, payload)
     return target
 
 

@@ -15,6 +15,11 @@ import pytest
 from typer.testing import CliRunner
 
 import yoetz.cli.app as cli
+from yoetz.adapters.integrations.codex_marketplace import (
+    ActivationInspection,
+    ActivationPreview,
+    ActivationState,
+)
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter, CommandOutput
 from yoetz.application.harness_mcp import HarnessMcpService
 from yoetz.ports.control import ControlClientKind, ControlError
@@ -84,8 +89,11 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
         "binaries": (_binary(),),
         "outputs": [CommandOutput(1, b"")],
         "calls": [],
+        "activation_apply_calls": 0,
     }
     marker = tmp_path / "setup-wizard.json"
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
 
     def fake_discover(*, _probe: object = None) -> tuple[HarnessBinary, ...]:
         return cast(tuple[HarnessBinary, ...], state["binaries"])
@@ -162,6 +170,7 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
                 ("codex_hook_trust_not_observable_from_installation_state",),
             )
 
+    import yoetz.cli.privacy_setup as privacy_setup_module
     import yoetz.cli.setup as setup_module
     import yoetz.service.client as service_client_module
 
@@ -169,6 +178,64 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
     monkeypatch.setattr(setup_module, "CodexMcpAdapter", fake_adapter)
     monkeypatch.setattr(setup_module, "_configured_mcp_route_profile", lambda: "strict")
     monkeypatch.setattr(setup_module, "CodexPluginService", _FakePluginService)
+
+    async def fake_privacy_setup(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            outcome="configured",
+            profile="local_only",
+            proposal_id="pvp_test",
+            grant_state="granted",
+            migration_state="not_applicable",
+            reason=None,
+        )
+
+    monkeypatch.setattr(privacy_setup_module, "run_privacy_setup", fake_privacy_setup)
+
+    def resolve_codex_home(_path: str, *, codex_home: Path | None = None) -> Path:
+        assert codex_home is not None
+        return codex_home
+
+    monkeypatch.setattr(setup_module, "resolve_codex_home_for_binary", resolve_codex_home)
+
+    activation_digest = "sha256:" + "d" * 64
+
+    def fake_activation_preview(
+        _target: object, *, executable_path: str, codex_home: Path
+    ) -> ActivationPreview:
+        return ActivationPreview(
+            b'{"name":"yoetz","plugins":[]}\n',
+            '[plugins."yoetz@yoetz"]\nenabled = true\n',
+            activation_digest,
+            ActivationInspection(False, False, ActivationState.INSTALLED_NOT_ACTIVATED),
+            "sha256:" + "e" * 64,
+            codex_home,
+            codex_home / "plugins/cache/yoetz/yoetz/0.1.0",
+            "sha256:" + "f" * 64,
+            Path(executable_path),
+            "sha256:" + "a" * 64,
+            "0.148.0-alpha.6",
+            ("--version",),
+            ("plugin", "list", "--marketplace", "yoetz", "--json"),
+            ("plugin", "add", "yoetz@yoetz", "--json"),
+            "temporary_owner_private_home",
+            (("CODEX_HOME", str(codex_home)), ("CODEX_TESTING_HOME", str(codex_home))),
+            "sha256:" + "b" * 64,
+            "sha256:" + "c" * 64,
+            True,
+        )
+
+    monkeypatch.setattr(setup_module, "preview_activation", fake_activation_preview)
+
+    def fake_apply_activation(_target: object, **_kwargs: object) -> ActivationInspection:
+        state["activation_apply_calls"] = cast(int, state["activation_apply_calls"]) + 1
+        return ActivationInspection(True, True, ActivationState.ACTIVE)
+
+    monkeypatch.setattr(setup_module, "apply_activation", fake_apply_activation)
+
+    def fake_inspect_activation(_target: object, **_kwargs: object) -> ActivationInspection:
+        return ActivationInspection(True, True, ActivationState.ACTIVE)
+
+    monkeypatch.setattr(setup_module, "inspect_activation", fake_inspect_activation)
 
     def absent_skill_destination(
         _target: IntegrationTarget, _source: SkillSource
@@ -215,6 +282,8 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
         unreachable_on_demand,
     )
     state["marker"] = marker
+    state["codex_home"] = codex_home
+    state["activation_digest"] = activation_digest
     return state
 
 
@@ -280,9 +349,15 @@ def _wire_composed_provider_setup(
         recipe_hint: str | None = None,
         offer_recommended: bool = False,
         credential_probe_authorized: bool = False,
+        update_checks_override: bool | None = None,
     ) -> SimpleNamespace:
-        cast(list[tuple[str | None, bool, bool]], state["privacy_calls"]).append(
-            (recipe_hint, offer_recommended, credential_probe_authorized)
+        cast(list[tuple[str | None, bool, bool, bool | None]], state["privacy_calls"]).append(
+            (
+                recipe_hint,
+                offer_recommended,
+                credential_probe_authorized,
+                update_checks_override,
+            )
         )
         return SimpleNamespace(
             outcome="configured",
@@ -360,7 +435,7 @@ def _wire_composed_provider_setup(
 
 def test_non_interactive_without_accept_is_a_dry_run(wizard_env: dict[str, object]) -> None:
     result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--json"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, (result.output, result.exception)
     report = json.loads(result.stdout)
     assert report["schema"] == "yoetz.setup-wizard-report/1"
     assert report["registration"]["outcome"] == "declined"
@@ -375,6 +450,72 @@ def test_non_interactive_without_accept_is_a_dry_run(wizard_env: dict[str, objec
     assert "docs/usage/agent-start.md" in steps
 
 
+@pytest.mark.parametrize(
+    ("choice", "privacy_outcome", "expected_network"),
+    [
+        (False, "configured", False),
+        (False, "cancelled", False),
+        (False, "failed", False),
+        (True, "cancelled", False),
+        (True, "failed", False),
+        (True, "configured", True),
+    ],
+)
+def test_setup_update_network_requires_yes_and_successful_trusted_commit(
+    wizard_env: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    choice: bool,
+    privacy_outcome: str,
+    expected_network: bool,
+) -> None:
+    """An older enabled policy cannot override this run's NO or failed ceremony."""
+
+    import yoetz.cli.privacy_setup as privacy_setup_module
+    import yoetz.cli.setup as setup_module
+
+    wizard_env["binaries"] = ()
+    network_calls: list[bool] = []
+    recommendation_calls: list[bool] = []
+
+    async def privacy_setup(**kwargs: object) -> SimpleNamespace:
+        assert kwargs["update_checks_override"] is choice
+        return SimpleNamespace(
+            outcome=privacy_outcome,
+            profile="local_only",
+            proposal_id=None,
+            grant_state="granted" if privacy_outcome == "configured" else "missing",
+            migration_state="not_applicable",
+            reason=None if privacy_outcome == "configured" else "privacy_decision_not_approved",
+        )
+
+    async def package_update(*, interactive: bool) -> dict[str, JsonValue]:
+        network_calls.append(interactive)
+        return {
+            "installed_version": "0.1.0",
+            "is_newer": False,
+            "latest_version": None,
+            "outcome": "skipped_policy",
+            "source": "none",
+            "upgrade_command": "uv tool upgrade yoetz",
+        }
+
+    async def recommendations(**kwargs: object) -> dict[str, JsonValue]:
+        recommendation_calls.append(cast(bool, kwargs["allow_network"]))
+        return {"outcome": "refreshed", "pending": []}
+
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(privacy_setup_module, "run_privacy_setup", privacy_setup)
+    monkeypatch.setattr(setup_module, "_resolve_setup_package_update", package_update)
+    monkeypatch.setattr(setup_module, "_refresh_setup_recommendations", recommendations)
+    answer = "Y" if choice else "N"
+
+    result = _RUNNER.invoke(cli.app, ["setup", "run"], input=f"2\n{answer}\n")
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert network_calls == [expected_network]
+    assert recommendation_calls == [expected_network]
+
+
 def test_non_interactive_accept_registers_and_writes_marker(
     wizard_env: dict[str, object],
 ) -> None:
@@ -385,7 +526,7 @@ def test_non_interactive_accept_registers_and_writes_marker(
         _yoetz_entry(),  # verify get
     ]
     result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--accept", "--json"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, (result.output, result.exception)
     assert result.stderr == ""
     report = json.loads(result.stdout)
     assert report["registration"]["outcome"] == "registered"
@@ -398,6 +539,9 @@ def test_non_interactive_accept_registers_and_writes_marker(
     assert report["registration"]["plugin"]["presence"] == "installed"
     assert report["registration"]["skill"]["outcome"] == "installed"
     assert report["registration"]["skill"]["presence"] == "installed_exact"
+    assert report["registration"]["plugin_activation"]["outcome"] == "skipped"
+    assert report["registration"]["plugin_activation"]["reason"] == "codex_home_required"
+    assert wizard_env["activation_apply_calls"] == 0
     assert report["readiness"]["observation_ready"] is False  # service unreachable
     assert report["readiness"]["consent"] == "granted"
     assert report["service"]["reachable"] is False
@@ -405,6 +549,30 @@ def test_non_interactive_accept_registers_and_writes_marker(
     marker = json.loads(cast(Path, wizard_env["marker"]).read_text())
     assert marker["schema"] == "yoetz.setup-wizard-marker/1"
     assert marker["outcome"] == "registered"
+
+
+def test_interactive_generic_accept_does_not_authorize_unshown_activation(
+    wizard_env: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wizard_env["outputs"] = [
+        CommandOutput(1, b""),
+        CommandOutput(1, b""),
+        CommandOutput(0, b""),
+        _yoetz_entry(),
+    ]
+    import yoetz.cli.setup as setup_module
+
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    result = _RUNNER.invoke(
+        cli.app,
+        ["setup", "run", "--accept"],
+        input=f"1\n{wizard_env['codex_home']}\n2\nY\n",
+    )
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert "Exact marketplace.json bytes:" not in result.stdout
+    assert "Codex plugin activation: installed_not_activated" in result.stdout
+    assert wizard_env["activation_apply_calls"] == 0
 
 
 def test_already_registered_mcp_still_installs_plugin_and_grants_consent(
@@ -415,7 +583,7 @@ def test_already_registered_mcp_still_installs_plugin_and_grants_consent(
         _yoetz_entry(),  # status verify after plugin install
     ]
     result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--accept", "--json"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, (result.output, result.exception)
     report = json.loads(result.stdout)
     assert report["registration"]["outcome"] == "already_registered"
     assert report["registration"]["plugin"]["outcome"] == "installed"
@@ -428,7 +596,7 @@ def test_foreign_entry_is_preserved_and_reported(wizard_env: dict[str, object]) 
     foreign = CommandOutput(0, json.dumps({"command": "other"}).encode())
     wizard_env["outputs"] = [foreign]
     result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--accept", "--json"])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, (result.output, result.exception)
     report = json.loads(result.stdout)
     assert report["registration"]["outcome"] == "skipped"
     assert report["registration"]["reason"] == "foreign_entry_present"
@@ -458,6 +626,8 @@ async def test_tui_apply_refuses_a_skill_preview_digest_not_shown_to_the_user(
         workspace=workspace,
         approved_preview_digest=mcp_preview.preview_digest,
         approved_skill_preview_digest="sha256:" + "0" * 64,
+        approved_activation_digest=cast(str, wizard_env["activation_digest"]),
+        codex_home=cast(Path, wizard_env["codex_home"]),
     )
 
     assert report["outcome"] == "failed"
@@ -498,6 +668,8 @@ async def test_a_preview_and_apply_that_disagree_on_the_route_refuse_as_stale(
         workspace=workspace,
         approved_preview_digest=mcp_preview.preview_digest,
         approved_skill_preview_digest=skill_preview.preview_digest,
+        approved_activation_digest=cast(str, wizard_env["activation_digest"]),
+        codex_home=cast(Path, wizard_env["codex_home"]),
     )
 
     assert report["outcome"] == "failed"
@@ -537,6 +709,8 @@ async def test_a_preview_and_apply_on_the_same_route_register(
         workspace=workspace,
         approved_preview_digest=mcp_preview.preview_digest,
         approved_skill_preview_digest=skill_preview.preview_digest,
+        approved_activation_digest=cast(str, wizard_env["activation_digest"]),
+        codex_home=cast(Path, wizard_env["codex_home"]),
     )
 
     assert report["reason"] is None
@@ -572,8 +746,12 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
         provider_binding, "prompt_provider_endpoint_binding", _skip_provider_binding
     )
 
-    # harness 1, installation 2, review mode 2 (local only), a rejected y/n, then confirm.
-    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n2\n2\nmaybe\nY\n")
+    # Harness 1, installation 2, local-only, update checks yes, then strict setup confirmation.
+    result = _RUNNER.invoke(
+        cli.app,
+        ["setup", "run"],
+        input=f"1\n2\n{wizard_env['codex_home']}\n2\nY\nmaybe\nY\n",
+    )
 
     assert result.exit_code == 0
     assert "Automatically detected harnesses:" in result.stdout
@@ -581,6 +759,7 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Select a harness to connect to Yoetz" in result.stdout
     assert "Detected Codex installations:" in result.stdout
     assert "Select the Codex installation to configure" in result.stdout
+    assert "Exact existing Codex home paired with /b/codex" in result.stdout
     assert "Choose how Yoetz should review work:" in result.stdout
     assert "complete Yoetz Codex project integration" in result.stdout
     assert "MCP server name: yoetz" in result.stdout
@@ -589,7 +768,11 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Confirm Codex project setup? [Y/N]" in result.stdout
     assert "Observation consent for this workspace" in result.stdout
     assert "Please enter Y or N." in result.stdout
-    assert "MCP registration: registered; automatic activation not tested" in result.stdout
+    assert "MCP registration: registered" in result.stdout
+    assert "Codex plugin activation: active" in result.stdout
+    assert "Selected Codex config target:" in result.stdout
+    assert "Standing-trust warning:" in result.stdout
+    assert wizard_env["activation_apply_calls"] == 1
     assert "Skill support: no tested capability profile; automatic activation not tested" in (
         result.stdout
     )
@@ -611,9 +794,13 @@ def test_interactive_registration_n_declines_without_mutation(
         provider_binding, "prompt_provider_endpoint_binding", _skip_provider_binding
     )
 
-    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n1\nN\n")
+    result = _RUNNER.invoke(
+        cli.app,
+        ["setup", "run"],
+        input=f"1\n{wizard_env['codex_home']}\n1\nY\nN\n",
+    )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, (result.output, result.exception)
     assert "Confirm Codex project setup? [Y/N]" in result.stdout
     assert "MCP registration: declined" in result.stdout
     assert "Skill support: no tested capability profile; automatic activation not tested" in (
@@ -637,7 +824,7 @@ def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
         CommandOutput(0, b""),  # add
         _yoetz_entry("policy"),  # verify get
     ]
-    privacy_calls: list[tuple[str | None, bool, bool]] = []
+    privacy_calls: list[tuple[str | None, bool, bool, bool | None]] = []
 
     async def ready(*, start_if_absent: bool = False) -> dict[str, object]:
         del start_if_absent
@@ -661,8 +848,16 @@ def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
         recipe_hint: str | None = None,
         offer_recommended: bool = False,
         credential_probe_authorized: bool = False,
+        update_checks_override: bool | None = None,
     ) -> SimpleNamespace:
-        privacy_calls.append((recipe_hint, offer_recommended, credential_probe_authorized))
+        privacy_calls.append(
+            (
+                recipe_hint,
+                offer_recommended,
+                credential_probe_authorized,
+                update_checks_override,
+            )
+        )
         return SimpleNamespace(
             outcome="configured",
             profile="confirm_every_request",
@@ -681,10 +876,14 @@ def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
     monkeypatch.setattr(provider_status_module, "provider_status_report", provider_status)
 
     # Harness 1, semantic review, registration confirmation, then credential-probe consent.
-    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n1\nY\nY\n")
+    result = _RUNNER.invoke(
+        cli.app,
+        ["setup", "run"],
+        input=f"1\n{wizard_env['codex_home']}\n1\nY\nY\nY\n",
+    )
 
-    assert result.exit_code == 0
-    assert privacy_calls == [("assisted_review", True, True)]
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert privacy_calls == [("assisted_review", True, True, True)]
     assert "Privacy: configured (confirm_every_request)" in result.stdout
 
 
@@ -790,10 +989,10 @@ def test_composed_wizard_preserves_privacy_when_hidden_credential_input_is_empty
     result = _RUNNER.invoke(
         cli.app,
         ["setup", "run"],
-        input="1\n1\nY\n",
+        input=f"1\n{wizard_env['codex_home']}\n1\nY\nY\n",
     )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, (result.output, result.exception)
     reports = cast(list[dict[str, object]], state["reports"])
     assert len(reports) == 1
     report = reports[0]
@@ -821,7 +1020,7 @@ def test_composed_wizard_preserves_privacy_when_hidden_credential_input_is_empty
     assert semantic_status["repository_grant_state"] == "granted"
     assert report["marker_written"] is False
     assert state["binding_embedded_flags"] == [False]
-    assert state["privacy_calls"] == [("assisted_review", True, True)]
+    assert state["privacy_calls"] == [("assisted_review", True, True, True)]
     assert state["status_reads"] == 2
     assert state["restart_calls"] == 1
     assert state["stored"] is False
@@ -863,9 +1062,13 @@ def test_composed_wizard_reaches_semantic_readiness_after_hidden_credential_stor
         credential_outcome="stored",
     )
 
-    result = _RUNNER.invoke(cli.app, ["setup", "run"], input="1\n1\nY\nY\n")
+    result = _RUNNER.invoke(
+        cli.app,
+        ["setup", "run"],
+        input=f"1\n{wizard_env['codex_home']}\n1\nY\nY\nY\n",
+    )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, (result.output, result.exception)
     reports = cast(list[dict[str, object]], state["reports"])
     assert len(reports) == 1
     report = reports[0]
@@ -886,7 +1089,7 @@ def test_composed_wizard_reaches_semantic_readiness_after_hidden_credential_stor
     assert report["next_steps"] == []
     assert report["marker_written"] is True
     assert state["binding_embedded_flags"] == [False]
-    assert state["privacy_calls"] == [("assisted_review", True, True)]
+    assert state["privacy_calls"] == [("assisted_review", True, True, True)]
     assert state["status_reads"] == 2
     assert state["restart_calls"] == 2
     assert state["stored"] is True

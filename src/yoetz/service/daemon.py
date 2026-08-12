@@ -185,6 +185,9 @@ _CONTROL_HANDSHAKE_DEADLINE_SECONDS: Final = 5.0
 # After handshake, a session with no active calls may stay silent for at most this long
 # before the stream is closed and the listener admission slot is released.
 _CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS: Final = 300.0
+_OBSERVATION_SWEEP_INTERVAL_SECONDS: Final = 60.0
+_OBSERVATION_SWEEP_DEADLINE_SECONDS: Final = 2.0
+_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS: Final = 10.0
 # Soft locks may re-apply the same scoped auto-unlock / keyring load the service already uses at
 # restart. Explicit human lock and hard unlock failures stay locked until a trusted ceremony.
 #
@@ -224,6 +227,10 @@ _STRUCTURAL_METHODS = frozenset(
     }
 )
 _PROJECTION_EXEMPT_METHODS = _STRUCTURAL_METHODS | {
+    # Observation ingest returns only disposition, a bounded reason token, and a structural
+    # cursor. Running it through result disclosure projection both adds no privacy protection and
+    # breaks the exact direct response schema used by hook/outbox clients.
+    ControlMethod.OBSERVATION_INGEST,
     ControlMethod.PRIVACY_PENDING_LIST,
     ControlMethod.PRIVACY_RECEIPTS_LIST,
     ControlMethod.PRIVACY_RECEIPTS_GET,
@@ -540,6 +547,7 @@ class ServiceDaemon:
         self._activation_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._connection_tasks: set[asyncio.Task[None]] = set()
+        self._ready_maintenance_task: asyncio.Task[None] | None = None
 
     @property
     def composition(self) -> ServiceComposition:
@@ -585,6 +593,12 @@ class ServiceDaemon:
                         await lifecycle.transition(
                             ServiceState.READY,
                             vault_generation=self._composition.vault.generation,
+                        )
+                    if self._ready_maintenance_task is None:
+                        self._start_ready_maintenance(
+                            self._application,
+                            lifecycle.instance.generation,
+                            self._composition.vault.generation,
                         )
                     self._state_reason = "none"
                 else:
@@ -643,6 +657,7 @@ class ServiceDaemon:
                 ServiceState.READY,
                 vault_generation=vault_generation,
             )
+            self._start_ready_maintenance(partial, service_generation, vault_generation)
             self._state_reason = "none"
             self._auto_unlock_reason = "none"
         except BaseException:
@@ -1361,10 +1376,107 @@ class ServiceDaemon:
         if self._application is not None and self._state_reason == "none":
             self._state_reason = "idle_relock"
         application, self._application = self._application, None
+        await self._cancel_ready_maintenance()
         if application is not None:
             await application.close()
         if self._composition.vault.ready:
             await self._composition.vault.lock()
+
+    def _start_ready_maintenance(
+        self,
+        application: _ReadyApplication,
+        service_generation: int,
+        vault_generation: int,
+    ) -> None:
+        """Start one nonblocking maintenance loop owned by this READY generation."""
+
+        if self._ready_maintenance_task is not None:
+            raise RuntimeError("ready_maintenance_already_started")
+        recommendation_refresh = cast(
+            Callable[[], Awaitable[object]] | None,
+            getattr(application, "ready_recommendation_refresh", None),
+        )
+        observation_sweep = cast(
+            Callable[[], Awaitable[object]] | None,
+            getattr(application, "observation_sweep", None),
+        )
+        if not callable(recommendation_refresh) and not callable(observation_sweep):
+            return
+        self._ready_maintenance_task = asyncio.create_task(
+            self._run_ready_maintenance(
+                application,
+                service_generation,
+                vault_generation,
+                recommendation_refresh if callable(recommendation_refresh) else None,
+                observation_sweep if callable(observation_sweep) else None,
+            )
+        )
+
+    async def _run_ready_maintenance(
+        self,
+        application: _ReadyApplication,
+        service_generation: int,
+        vault_generation: int,
+        recommendation_refresh: Callable[[], Awaitable[object]] | None,
+        observation_sweep: Callable[[], Awaitable[object]] | None,
+    ) -> None:
+        """Run bounded maintenance only while the exact generation remains published."""
+
+        try:
+            if observation_sweep is not None:
+                try:
+                    await asyncio.wait_for(
+                        observation_sweep(),
+                        timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS,
+                    )
+                except Exception:
+                    pass
+            if recommendation_refresh is not None:
+                try:
+                    await asyncio.wait_for(
+                        recommendation_refresh(),
+                        timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
+                    )
+                except Exception:
+                    # Recommendations are advisory and must never unpublish READY.
+                    pass
+            while self._ready_generation_is_current(
+                application, service_generation, vault_generation
+            ):
+                await asyncio.sleep(_OBSERVATION_SWEEP_INTERVAL_SECONDS)
+                if observation_sweep is not None:
+                    try:
+                        await asyncio.wait_for(
+                            observation_sweep(),
+                            timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS,
+                        )
+                    except Exception:
+                        # The next bounded pass retries; delivery state remains durable.
+                        pass
+        except asyncio.CancelledError:
+            raise
+
+    def _ready_generation_is_current(
+        self,
+        application: _ReadyApplication,
+        service_generation: int,
+        vault_generation: int,
+    ) -> bool:
+        lifecycle = self._composition.lifecycle
+        return (
+            self._application is application
+            and lifecycle.state is ServiceState.READY
+            and lifecycle.instance.generation == service_generation
+            and self._composition.vault.ready
+            and self._composition.vault.generation == vault_generation
+        )
+
+    async def _cancel_ready_maintenance(self) -> None:
+        task, self._ready_maintenance_task = self._ready_maintenance_task, None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     async def _try_soft_lock_auto_ready(self) -> bool:
         """Re-apply scoped auto-unlock after idle/session soft lock; never after explicit lock."""
@@ -1602,6 +1714,7 @@ class _ProductionPaths:
     generation: Path
     throttle: Path
     singleton_lock: Path
+    state: Path
 
     @classmethod
     def canonical(cls, config: YoetzConfig) -> _ProductionPaths:
@@ -1613,7 +1726,7 @@ class _ProductionPaths:
         metadata_root = state_dir()
         ensure_owner_only_dir(metadata_root)
         verify_private_local_bundle(metadata_root)
-        return cls(root, generation, throttle, metadata_root / "service.lock")
+        return cls(root, generation, throttle, metadata_root / "service.lock", metadata_root)
 
 
 @dataclass(frozen=True, slots=True)

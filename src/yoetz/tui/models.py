@@ -119,6 +119,7 @@ class IntegrationPlan:
 
     harness_label: str
     executable_path: str
+    codex_home: str
     reported_version: str | None
     project_root: str
     # The route this plan was previewed on. It is inside ``preview_digest``, so applying on any
@@ -135,6 +136,25 @@ class IntegrationPlan:
     foreign_entry: bool
     preview_digest: str
     skill_preview_digest: str
+    activation_preview_digest: str
+    activation_marketplace_path: str
+    activation_config_path: str
+    activation_marketplace_text: str
+    activation_config_block: str
+    activation_plugin_source_digest: str
+    activation_inventory_verified: bool
+    activation_plugin_install_path: str
+    activation_plugin_install_digest: str
+    activation_executable_digest: str
+    activation_codex_version: str
+    activation_probe_command: tuple[str, ...]
+    activation_inventory_command: tuple[str, ...]
+    activation_install_command: tuple[str, ...]
+    activation_probe_environment: str
+    activation_environment: tuple[tuple[str, str], ...]
+    activation_marketplace_preimage_digest: str
+    activation_config_preimage_digest: str
+    activation_cache_mutation_planned: bool
 
     @property
     def changes(self) -> tuple[str, ...]:

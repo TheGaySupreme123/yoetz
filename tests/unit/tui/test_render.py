@@ -120,6 +120,8 @@ def test_integration_preview_hides_paths_and_digests_behind_technical_details() 
 
     technical_lines = render_integration_technical_details(plan, 120)
     technical = "\n".join(technical_lines)
+    assert plan.codex_home not in friendly
+    assert plan.codex_home in technical
     assert plan.executable_path in technical
     assert plan.preview_digest in technical
     assert plan.skill_preview_digest in technical
@@ -128,6 +130,69 @@ def test_integration_preview_hides_paths_and_digests_behind_technical_details() 
         line.startswith("Planned files") and line.endswith(str(plan.planned_file_count))
         for line in technical_lines
     )
+
+
+def test_long_activation_targets_are_wrapped_without_omitting_any_bytes() -> None:
+    plan = build.plan(
+        codex_home="/a/very/long/explicit/codex/home/selected/by/the/operator",
+        activation_config_path=(
+            "/a/very/long/explicit/codex/home/selected/by/the/operator/config.toml"
+        ),
+    )
+    lines = render_integration_technical_details(plan, 32)
+    compact = "".join(line.strip() for line in lines)
+
+    assert plan.codex_home in compact
+    assert plan.activation_config_path in compact
+
+
+def test_activation_approval_discloses_every_digest_command_and_cache_effect() -> None:
+    plan = build.plan()
+    technical = "\n".join(render_integration_technical_details(plan, 240))
+
+    for expected in (
+        plan.activation_codex_version,
+        plan.activation_executable_digest,
+        plan.activation_plugin_source_digest,
+        plan.activation_plugin_install_path,
+        plan.activation_plugin_install_digest,
+        plan.activation_marketplace_preimage_digest,
+        plan.activation_config_preimage_digest,
+        plan.activation_probe_environment,
+        repr((plan.executable_path, *plan.activation_probe_command)),
+        repr((plan.executable_path, *plan.activation_inventory_command)),
+        repr((plan.executable_path, *plan.activation_install_command)),
+    ):
+        assert expected in technical
+    for name, value in plan.activation_environment:
+        assert name in technical
+        assert value in technical
+    assert "Canonical installed inventory verified before approval\n  no" in technical
+    assert "Plugin cache mutation planned\n  yes" in technical
+
+
+def test_activation_bytes_render_preserves_trailing_newline_as_blank_line() -> None:
+    plan = build.plan(
+        activation_marketplace_text='{"name":"yoetz"}\n',
+        activation_config_block='[plugins."yoetz@yoetz"]\nenabled = true\n',
+    )
+    lines = render_integration_technical_details(plan, 240)
+    tail = lines[lines.index("Exact activation bytes") + 1 :]
+    assert tail[0] == '  {"name":"yoetz"}'
+    assert tail[1] == "  "
+    assert tail[2] == '  [plugins."yoetz@yoetz"]'
+    assert tail[3] == "  enabled = true"
+    assert tail[4] == "  "
+
+
+def test_activation_bytes_render_preserves_final_blank_line() -> None:
+    plan = build.plan(activation_config_block='[plugins."yoetz@yoetz"]\nenabled = true\n\n')
+    lines = render_integration_technical_details(plan, 240)
+    tail = lines[lines.index("Exact activation bytes") + 1 :]
+    config_start = tail.index('  [plugins."yoetz@yoetz"]')
+    assert tail[config_start + 1] == "  enabled = true"
+    assert tail[config_start + 2] == "  "
+    assert tail[config_start + 3] == "  "
 
 
 def test_a_foreign_entry_is_a_block_that_reports_nothing_was_changed() -> None:

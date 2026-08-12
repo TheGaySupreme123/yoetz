@@ -22,8 +22,19 @@ from yoetz.application.service import (
     resolve_client_disclosure_sink,
 )
 from yoetz.config.models import LoggingConfig, YoetzConfig
+from yoetz.domain.observation import (
+    ObservationCursor,
+    ObservationEnvelope,
+    ObservationIngestDisposition,
+    ObservationIngestRequest,
+    ObservationIngestResult,
+    ObservationSource,
+    observation_ingest_request_to_json,
+    observation_ingest_result_from_json,
+    observation_ingest_result_to_json,
+)
 from yoetz.domain.privacy import LocalDisclosureSink
-from yoetz.domain.values import Frontier, JsonObject
+from yoetz.domain.values import Frontier, JsonObject, Timestamp
 from yoetz.observability.diagnostics import lookup_diagnostic_records
 from yoetz.observability.logging import LogMode
 from yoetz.ports.control import (
@@ -51,6 +62,7 @@ from yoetz.protocol.models import (
     StartResult,
     StatusRequest,
 )
+from yoetz.service.client import _connected_client  # pyright: ignore[reportPrivateUsage]
 from yoetz.service.confidential_protocol import (
     ClientOpenEnvelope,
     EmptyVaultTarget,
@@ -200,6 +212,7 @@ class _Application:
         self.cached_publish_response: PublishWorkResult | None = None
         self.publish_response_store_error: PublicOperationError | None = None
         self.privacy_setup_contexts: list[RepositoryPrivacyContext | None] = []
+        self.observation_requests: list[JsonObject] = []
 
     async def start(
         self,
@@ -301,6 +314,13 @@ class _Application:
         assert isinstance(request, JsonObject)
         return JsonObject({"accepted": True})
 
+    async def observation_ingest(self, request: object) -> JsonObject:
+        assert type(request) is JsonObject
+        self.observation_requests.append(request)
+        return observation_ingest_result_to_json(
+            ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+        )
+
     async def privacy_get_setup(
         self,
         request: object,
@@ -335,6 +355,7 @@ class _Application:
             ControlMethod.CHECK,
             ControlMethod.STATUS,
             ControlMethod.PRIVACY_GET_SETUP,
+            ControlMethod.OBSERVATION_INGEST,
         }
         self.projections.append(context)
         self.projection_bindings.append(binding)
@@ -1233,6 +1254,55 @@ async def test_connected_control_session_carries_trusted_presentation_to_daemon_
 
 
 @pytest.mark.anyio
+async def test_connected_client_observation_ingest_uses_current_domain_wire() -> None:
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    client_stream, server_stream = _connected_control_pair()
+    server_task = asyncio.create_task(daemon._serve_control_connection(server_stream))  # pyright: ignore[reportPrivateUsage]
+    service_client = None
+    try:
+        session = await client_handshake(client_stream, ControlClientKind.CLI, "0.1.0")
+        service_client = _connected_client(  # pyright: ignore[reportPrivateUsage]
+            client_stream,  # pyright: ignore[reportArgumentType]
+            session,
+            ControlClientKind.CLI,
+        )
+        envelope = ObservationEnvelope(
+            session_commitment="hmac-sha256:" + "1" * 64,
+            event_kind="PostToolUse",
+            source_identity="hook:real-client-boundary",
+            source=ObservationSource.CODEX_HOOK,
+            cursor=ObservationCursor(
+                1,
+                0,
+                1,
+                "hmac-sha256:" + "2" * 64,
+                "codex-obs-hook/1.0.0",
+            ),
+            receipt_time=Timestamp("2026-08-12T12:00:00.000Z"),
+            structural_payload=JsonObject({"tool_name": "shell"}),
+            content_object_refs=(),
+            gap_codes=(),
+        )
+        body = observation_ingest_request_to_json(
+            ObservationIngestRequest("019ff5c8-real-client", envelope)
+        )
+
+        raw = await service_client.observation_ingest(body, deadline_ms=3_000)
+
+        result = observation_ingest_result_from_json(raw)
+        assert result.disposition is ObservationIngestDisposition.DUPLICATE
+        assert application.observation_requests == [body]
+        assert application.projections == []
+    finally:
+        if service_client is not None:
+            await service_client.close()
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_client_kind_and_state_admission_fail_closed() -> None:
     daemon, application, vault, _listener = _daemon()
     await daemon.start()
@@ -1533,6 +1603,86 @@ async def test_unlock_activation_constructs_exact_generation_once(tmp_path: Path
 
 
 @pytest.mark.anyio
+async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    two_sweeps = asyncio.Event()
+
+    class Application(_Application):
+        ready_recommendation_refresh: object
+        observation_sweep: object
+
+        async def close(self) -> None:
+            events.append("application_close")
+            await super().close()
+
+    class Vault(_Vault):
+        async def lock(self) -> None:
+            events.append("vault_lock")
+            await super().lock()
+
+    application = Application()
+
+    async def refresh() -> object:
+        events.append("recommendation_refresh")
+        return object()
+
+    async def sweep() -> object:
+        events.append("sweep")
+        if events.count("sweep") >= 2:
+            two_sweeps.set()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            events.append("sweep_cancelled")
+            raise
+        return object()
+
+    application.ready_recommendation_refresh = refresh
+    application.observation_sweep = sweep
+    vault = Vault()
+    vault.ready = False
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+    )
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+        )
+    )
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INTERVAL_SECONDS", 0.01)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    await daemon.activate_ready_application(7, 3)
+
+    await asyncio.wait_for(two_sweeps.wait(), timeout=1)
+    assert events[:3] == ["sweep", "recommendation_refresh", "sweep"]
+    await daemon.lock()
+    count_after_lock = events.count("sweep")
+    await asyncio.sleep(0.03)
+    assert events.count("sweep") == count_after_lock
+    assert events.index("application_close") < events.index("vault_lock")
+    await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_preunlocked_vault_activates_ready_application_on_daemon_start(
     tmp_path: Path,
 ) -> None:
@@ -1637,6 +1787,7 @@ async def test_production_composition_starts_locked_before_ready_only_state(
         metadata / "service-generation.json",
         metadata / "unlock-throttle.json",
         metadata / "service.lock",
+        metadata,
     )
     bound: list[str] = []
 

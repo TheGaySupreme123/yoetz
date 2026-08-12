@@ -262,6 +262,8 @@ def test_setup_run_loads_from_a_clean_installed_artifact(
             "--non-interactive",
             "--codex-path",
             str(tmp_path / "missing-codex"),
+            "--codex-home",
+            str(home),
             "--json",
         ],
         capture_output=True,

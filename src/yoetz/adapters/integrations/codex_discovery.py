@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,14 +45,20 @@ class CodexProbe(Protocol):
 
 def _default_version_runner(executable: str) -> str | None:
     try:
-        completed = subprocess.run(
-            (executable, "--version"),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=_VERSION_TIMEOUT_SECONDS,
-            check=False,
-            shell=False,
-        )
+        with tempfile.TemporaryDirectory(prefix="yoetz-codex-discovery-") as temporary:
+            Path(temporary).chmod(0o700)
+            environment = dict(os.environ)
+            environment["CODEX_HOME"] = temporary
+            environment["CODEX_TESTING_HOME"] = temporary
+            completed = subprocess.run(
+                (executable, "--version"),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=_VERSION_TIMEOUT_SECONDS,
+                check=False,
+                shell=False,
+                env=environment,
+            )
     except OSError, subprocess.SubprocessError:
         return None
     if completed.returncode != 0:

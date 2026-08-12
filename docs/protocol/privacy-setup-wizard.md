@@ -66,6 +66,17 @@ identity only, no task/user content. Product telemetry, crash diagnostics, and c
 remain **read-only unsupported/off** — no transport ships for them, and `propose` still rejects a
 `true` value for those three with `channel_unavailable`.
 
+The enclosing first-run setup may ask that update-check question before selecting a recommended or
+named recipe. Its explicit boolean replaces only the recipe's `update_checks` answer before the
+exact candidate is rendered; `None` preserves the recipe default, and `custom` continues to own its
+section-5 question. This is input to the existing preview/proposal/decision path, never authority or
+a way to bypass confirmation.
+
+The pre-policy zero-egress statement is limited to a fresh, unconfigured installation before its
+first policy commit. Rerunning setup does not suspend, narrow, or revoke the currently committed
+policy; ordinary service activity continues under that authority until the trusted decision
+ceremony commits a replacement.
+
 ## Recipes are transparent drafts, never consent
 
 The five convenience labels — Private, Metadata only, Assisted review, Expanded review, and Custom

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -765,6 +766,149 @@ async def test_a_named_recipe_hint_skips_both_the_list_and_the_custom_sections(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("override", "expected_enabled"),
+    ((True, True), (False, False), (None, True)),
+)
+async def test_named_private_recipe_applies_explicit_update_choice_before_proposal(
+    monkeypatch: pytest.MonkeyPatch,
+    override: bool | None,
+    expected_enabled: bool,
+) -> None:
+    import yoetz.cli.privacy_setup as module
+
+    prompts: list[str] = []
+    proposed: list[PrivacyPolicy] = []
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=prompts,
+        external=None,
+    )
+
+    async def capture_proposal(
+        candidate: PrivacyPolicy,
+        _digest: str,
+        *,
+        workspace_locator: object = None,
+    ) -> str:
+        del workspace_locator
+        proposed.append(candidate)
+        return "pvp_1"
+
+    monkeypatch.setattr(module, "_propose", capture_proposal)
+
+    report = await module.run_privacy_setup(
+        recipe_hint="private",
+        update_checks_override=override,
+    )
+
+    assert report.outcome == "configured"
+    assert prompts == ["Create this exact privacy proposal (Private)?"]
+    assert len(proposed) == 1
+    candidate = proposed[0]
+    updates = next(
+        row for row in candidate.channel_policies if row.channel is EgressChannel.UPDATE_CHECKS
+    )
+    assert updates.enabled is expected_enabled
+    assert candidate.network_egress_permitted is expected_enabled
+    assert candidate.profile.value == "local_only"
+    assert all(
+        not row.enabled
+        for row in candidate.channel_policies
+        if row.channel is not EgressChannel.UPDATE_CHECKS
+    )
+
+
+@pytest.mark.anyio
+async def test_recommended_recipe_applies_update_override_without_changing_review_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.privacy_setup as module
+
+    prompts: list[str] = []
+    proposed: list[PrivacyPolicy] = []
+    external = _answers().external_provider
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=prompts,
+        external=external,
+    )
+
+    def recommend(_external: ProviderBinding | None = None) -> PrivacyRecipe:
+        return "assisted_review"
+
+    monkeypatch.setattr(module, "recommended_privacy_recipe", recommend)
+
+    async def capture_proposal(
+        candidate: PrivacyPolicy,
+        _digest: str,
+        *,
+        workspace_locator: object = None,
+    ) -> str:
+        del workspace_locator
+        proposed.append(candidate)
+        return "pvp_1"
+
+    monkeypatch.setattr(module, "_propose", capture_proposal)
+
+    report = await module.run_privacy_setup(
+        offer_recommended=True,
+        update_checks_override=False,
+    )
+
+    assert report.outcome == "configured"
+    assert prompts == ["Use this recommended privacy policy?"]
+    candidate = proposed[0]
+    expected = module.build_candidate_policy(
+        local_only_policy(),
+        replace(
+            module.recipe_answers("assisted_review", local_only_policy(), external), updates=False
+        ),
+        now=candidate.created_at,
+    )
+    assert candidate.profile is expected.profile
+    assert candidate.review_context_profile is expected.review_context_profile
+    assert candidate.review_selection == expected.review_selection
+    assert candidate.require_current_provider_data_use_evidence is (
+        expected.require_current_provider_data_use_evidence
+    )
+    assert candidate.channel_policies == expected.channel_policies
+
+
+@pytest.mark.anyio
+async def test_update_override_never_bypasses_exact_candidate_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.privacy_setup as module
+
+    prompts: list[str] = []
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((False,)),
+        prompts=prompts,
+        external=None,
+    )
+
+    async def forbidden_propose(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("declined update override must not reach the trusted proposal")
+
+    monkeypatch.setattr(module, "_propose", forbidden_propose)
+
+    report = await module.run_privacy_setup(
+        recipe_hint="private",
+        update_checks_override=False,
+    )
+
+    assert report.outcome == "cancelled"
+    assert prompts == ["Create this exact privacy proposal (Private)?"]
+
+
+@pytest.mark.anyio
 async def test_custom_is_the_only_path_into_field_level_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -832,8 +976,10 @@ def test_custom_configuration_announces_all_five_sections(
 
     import yoetz.cli.privacy_setup as module
 
-    def confirm(_prompt: str, *, default: bool = False) -> bool:
-        del default
+    confirmations: list[tuple[str, bool]] = []
+
+    def confirm(prompt: str, *, default: bool = False) -> bool:
+        confirmations.append((prompt, default))
         return False
 
     def prompt(_label: str, *, default: str = "") -> str:
@@ -858,6 +1004,10 @@ def test_custom_configuration_announces_all_five_sections(
     # Section 5 asks about package updates; the other three remain unsupported/off.
     assert "cannot be turned on here" in output
     assert "package update" in output.casefold()
+    assert (
+        "Check PyPI for Yoetz updates (package name and version only)?",
+        True,
+    ) in confirmations
     # Mock confirm returns False for every prompt, so updates is explicitly declined.
     assert (
         answers.telemetry,

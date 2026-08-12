@@ -15,6 +15,7 @@ import importlib.util
 import io
 import os
 import sys
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,14 @@ import anyio
 import typer
 
 from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
+from yoetz.adapters.integrations.codex_marketplace import (
+    ActivationPreview,
+    ActivationState,
+    apply_activation,
+    inspect_activation,
+    preview_activation,
+    resolve_codex_home_for_binary,
+)
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
 from yoetz.adapters.integrations.codex_plugin import PluginHookPresence, inspect_plugin
 from yoetz.adapters.integrations.codex_skill import (
@@ -59,6 +68,7 @@ from yoetz.protocol.ids import IdKind, new_id
 
 __all__ = [
     "SETUP_MARKER_SCHEMA",
+    "codex_activation_preview",
     "apply_codex_integration",
     "check_policy_preview",
     "configured_mcp_route_profile",
@@ -455,7 +465,10 @@ def _choose_review_mode() -> Literal["local_only", "semantic"]:
     typer.echo("")
     typer.echo("Choose how Yoetz should review work:")
     typer.echo("  1. Semantic review (recommended) — configure a provider, API key, and policy")
-    typer.echo("  2. Local only — deterministic checks; nothing leaves this computer")
+    typer.echo(
+        "  2. Local only — deterministic checks; task content stays on this computer "
+        "(the next prompt separately decides PyPI update checks)"
+    )
     while True:
         raw = typer.prompt("Review mode", default="1").strip()
         if raw == "1":
@@ -570,12 +583,16 @@ def _confirm_registration() -> bool:
         typer.echo("Please enter Y or N.")
 
 
-def _confirm_project_setup(*, include_observation: bool, policy_digest: str | None) -> bool:
+def _confirm_project_setup(
+    *, include_observation: bool, include_activation: bool, policy_digest: str | None
+) -> bool:
     """One confirmed operation covering MCP/plugin/guidance/hooks/observation consent."""
 
     typer.echo("This confirmation covers:")
     typer.echo("  - Project skill plus plugin / hook source installation in this trusted project")
     typer.echo("  - MCP registration")
+    if include_activation:
+        typer.echo("  - Enable the exact activation bytes shown above in the selected Codex home")
     if include_observation:
         typer.echo(
             "  - Observation consent for this workspace "
@@ -661,6 +678,8 @@ def _emit_registration_preview(
     mcp_preview: object,
     policy_preview: dict[str, JsonValue] | None = None,
     skill_preview: IntegrationPreview | None = None,
+    activation_preview: ActivationPreview | None = None,
+    activation_target: Path | None = None,
 ) -> None:
     typer.echo("Proposed change: complete Yoetz Codex project integration:")
     typer.echo("  1. Install discoverable guidance under .agents/skills/yoetz")
@@ -676,6 +695,57 @@ def _emit_registration_preview(
         typer.echo(f"  Project skill state: {skill_preview.state_before.value}")
         typer.echo(f"  Project skill compatibility: {skill_preview.compatibility}")
         typer.echo(f"  Project skill preview digest: {skill_preview.preview_digest}")
+    if activation_preview is not None:
+        project = (Path.cwd() if activation_target is None else activation_target).resolve()
+        marketplace_path = project / ".agents" / "plugins" / "marketplace.json"
+        config_path = activation_preview.codex_home / "config.toml"
+        typer.echo(f"  Codex activation state: {activation_preview.inspection.state.value}")
+        typer.echo(
+            "  Canonical installed inventory verified before approval: "
+            f"{'yes' if activation_preview.inspection.inventory_verified else 'no'}"
+        )
+        typer.echo(f"  Repository marketplace target: {marketplace_path}")
+        typer.echo(f"  Selected Codex home: {activation_preview.codex_home}")
+        typer.echo(f"  Selected Codex config target: {config_path}")
+        typer.echo("  Exact marketplace.json bytes:")
+        for line in activation_preview.marketplace_bytes.decode("utf-8").splitlines():
+            typer.echo(f"    {line}")
+        typer.echo("  Exact config.toml block:")
+        if activation_preview.config_toml_block:
+            for line in activation_preview.config_toml_block.splitlines():
+                typer.echo(f"    {line}")
+        else:
+            typer.echo("    (no byte change; already active)")
+        typer.echo(f"  Plugin source-tree digest: {activation_preview.plugin_source_digest}")
+        typer.echo(f"  Selected activation executable: {activation_preview.executable_path}")
+        typer.echo(f"  Activation executable digest: {activation_preview.executable_digest}")
+        typer.echo(f"  Activation Codex version: {activation_preview.codex_version}")
+        typer.echo(f"  Exact plugin install target: {activation_preview.plugin_install_path}")
+        typer.echo(f"  Plugin install-tree digest: {activation_preview.plugin_install_digest}")
+        typer.echo(
+            f"  Marketplace preimage digest: {activation_preview.marketplace_preimage_digest}"
+        )
+        typer.echo(f"  Config preimage digest: {activation_preview.config_preimage_digest}")
+        typer.echo(
+            "  Plugin cache mutation planned: "
+            f"{'yes' if activation_preview.cache_mutation_planned else 'no'}"
+        )
+        typer.echo("  Exact activation commands:")
+        typer.echo(f"    version probe environment: {activation_preview.probe_environment}")
+        typer.echo("    inventory/install environment:")
+        for name, value in activation_preview.activation_environment:
+            typer.echo(f"      {name}={value}")
+        for command in (
+            activation_preview.probe_command,
+            activation_preview.inventory_command,
+            activation_preview.install_command,
+        ):
+            typer.echo(f"    {activation_preview.executable_path} {' '.join(command)}")
+        typer.echo(f"  Activation preview digest: {activation_preview.preview_digest}")
+        typer.echo(
+            "  Standing-trust warning: this enables the repository plugin for future Codex "
+            "sessions using this exact Codex home until you disable or remove it."
+        )
     digest = None if policy_preview is None else policy_preview.get("policy_digest")
     if type(digest) is str:
         typer.echo(f"  Approved-check policy digest: {digest}")
@@ -765,6 +835,25 @@ async def project_skill_preview(workspace: Path | None = None) -> IntegrationPre
     return (await _preview_project_skill(target)).preview
 
 
+def _integration_target(workspace: Path | None = None) -> IntegrationTarget:
+    root = (workspace if workspace is not None else Path.cwd()).resolve()
+    return IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root))
+
+
+def codex_activation_preview(
+    binary: HarnessBinary,
+    codex_home: Path,
+    workspace: Path | None = None,
+) -> ActivationPreview:
+    """Preview activation against the exact home loaded by the selected Codex binary."""
+
+    return preview_activation(
+        _integration_target(workspace),
+        executable_path=binary.executable_path,
+        codex_home=codex_home,
+    )
+
+
 def _configured_mcp_route_profile() -> Literal["policy", "strict"]:
     """Choose the registration-time route posture from structural local configuration."""
 
@@ -809,12 +898,11 @@ def _installed_hooks_declare_workspace_binding(workspace: Path | None = None) ->
 
 
 def _observation_hook_probe(*, workspace: Path | None = None) -> dict[str, JsonValue]:
-    """Prove project binding + durable envelope enqueue via the installed observe path.
+    """Prove project binding + envelope enqueue without polluting the real store.
 
-    Runs a synthetic SessionStart through ``handle_observe`` with ``--workspace .``
-    semantics and ``skip_service=True`` so the probe stays local. Success requires an
-    active consent commitment, a Codex-session→workspace bind, and a durable outbox
-    entry (or acknowledged drain) for that session. Never logs or returns plaintext paths.
+    The real store is read only to require existing workspace consent. The synthetic
+    SessionStart, consent copy, lifecycle mapping, and outbox row all live in a fresh
+    owner-private temporary state directory and are destroyed before returning.
     """
 
     from yoetz.adapters.integrations.observation_local import LocalObservationStore
@@ -829,33 +917,39 @@ def _observation_hook_probe(*, workspace: Path | None = None) -> dict[str, JsonV
     consent = store.consent_for(commitment)
     if consent is None or not consent.active:
         return {"ok": False, "reason": "consent_inactive"}
-    probe_session = "yoetz-setup-probe-session"
-    payload = canonical_encode(
-        {
-            "session_id": probe_session,
-            "hook_event_name": "SessionStart",
-            "cwd": ".",
-        }
-    )
-    with contextlib.redirect_stderr(io.StringIO()):
-        code = handle_observe(
-            event_name="SessionStart",
-            stdin_bytes=payload,
-            stdout=io.BytesIO(),
-            workspace=".",
-            skip_service=True,
+    with tempfile.TemporaryDirectory(
+        prefix=".yoetz-setup-observation-probe-", dir=root.parent
+    ) as temporary:
+        probe_state = Path(temporary)
+        probe_store = LocalObservationStore(_state=probe_state)
+        probe_commitment = probe_store.workspace_commitment(str(root))
+        probe_store.grant_consent(probe_commitment)
+        probe_session = "yoetz-setup-probe-session"
+        payload = canonical_encode(
+            {
+                "session_id": probe_session,
+                "hook_event_name": "SessionStart",
+                "cwd": ".",
+            }
         )
-    if code != 0:
-        return {"ok": False, "reason": "observe_exit_nonzero"}
-    bound = store.find_workspace_for_codex_session(probe_session)
-    if bound != commitment:
-        return {"ok": False, "reason": "binding_missing"}
-    pending = store.list_pending_outbox(commitment)
-    if not pending:
-        # SessionStart may have been drained/acked in a prior probe; binding alone
-        # plus hooks workspace declaration still proves project routing.
-        return {"ok": True, "reason": "bound_without_pending"}
-    return {"ok": True, "reason": "envelope_enqueued"}
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = handle_observe(
+                event_name="SessionStart",
+                stdin_bytes=payload,
+                stdout=io.BytesIO(),
+                workspace=str(root),
+                skip_service=True,
+                _state=probe_state,
+            )
+        if code != 0:
+            return {"ok": False, "reason": "observe_exit_nonzero"}
+        bound = probe_store.find_workspace_for_codex_session(probe_session)
+        if bound != probe_commitment:
+            return {"ok": False, "reason": "binding_missing"}
+        pending = probe_store.list_pending_outbox(probe_commitment)
+        if not pending:
+            return {"ok": True, "reason": "bound_without_pending"}
+        return {"ok": True, "reason": "envelope_enqueued"}
 
 
 def _readiness_layers(
@@ -868,17 +962,47 @@ def _readiness_layers(
     consent_outcome: str | None,
     service: dict[str, JsonValue],
     workspace: Path | None = None,
+    codex_home: Path | None = None,
 ) -> dict[str, JsonValue]:
     consent_active = consent_outcome == "granted"
     service_routing = bool(service.get("reachable"))
+    activation: dict[str, JsonValue] = {
+        "codex_home": None,
+        "config_path": None,
+        "marketplace_registered": False,
+        "plugin_enabled": False,
+        "state": "unknown",
+    }
+    if binary is not None and codex_home is not None:
+        try:
+            inspected = inspect_activation(
+                _integration_target(workspace),
+                executable_path=binary.executable_path,
+                codex_home=codex_home,
+            )
+            activation = {
+                "codex_home": str(codex_home),
+                "config_path": str(codex_home / "config.toml"),
+                "marketplace_registered": inspected.marketplace_registered,
+                "plugin_enabled": inspected.plugin_enabled,
+                "state": inspected.state.value,
+            }
+        except IntegrationError as error:
+            activation["reason"] = error.reason.value
+        except (OSError, TypeError, ValueError) as error:
+            activation["reason"] = type(error).__name__
+    elif binary is not None:
+        activation["reason"] = "codex_home_required"
+    activation_active = activation.get("state") == ActivationState.ACTIVE.value
     probe: dict[str, JsonValue] = {"ok": False, "reason": "not_attempted"}
-    if _plugin_verified(plugin_presence) and consent_active:
+    if _plugin_verified(plugin_presence) and activation_active and consent_active:
         try:
             probe = _observation_hook_probe(workspace=workspace)
         except Exception as error:
             probe = {"ok": False, "reason": type(error).__name__}
     observation_ready = (
         _plugin_verified(plugin_presence)
+        and activation_active
         and consent_active
         and service_routing
         and bool(probe.get("ok"))
@@ -892,6 +1016,7 @@ def _readiness_layers(
         },
         "mcp_registration": mcp_state,
         "plugin_installation": plugin_presence,
+        "plugin_activation": activation,
         "project_skill_installation": skill_presence,
         "hooks": hooks,
         "consent": consent_outcome or "absent",
@@ -915,23 +1040,77 @@ async def _codex_integration_step(
     workspace: Path | None = None,
     approved_preview_digest: str | None = None,
     approved_skill_preview_digest: str | None = None,
+    approved_activation_digest: str | None = None,
     approved_policy_digest: str | None = None,
+    codex_home: Path | None = None,
 ) -> dict[str, JsonValue]:
     """Preview and apply one Codex integration: skill + plugin sources + MCP + consent.
 
-    ``approved_preview_digest``/``approved_skill_preview_digest``/``approved_policy_digest``
-    let a caller that has already shown a human the exact previews echo all digests back. They are a
-    *stricter* gate than ``accept``, not a softer one: the step re-previews and
-    refuses as stale if either digest has moved since the approval was shown,
+    The three integration preview digests let a caller that has already shown a human the exact
+    previews echo them back. They are a *stricter* gate than ``accept``, not a softer one: the
+    step re-previews and refuses as stale if any digest moved since approval was shown,
     and only an explicitly echoed policy digest activates the policy trust.
     """
 
     mcp_service = HarnessMcpService(_mcp_adapter(route_profile))
     plugin_service = CodexPluginService()
-    project = IntegrationTarget(
-        IntegrationScope.TRUSTED_PROJECT,
-        str((workspace if workspace is not None else Path.cwd()).resolve()),
+    project = _integration_target(workspace)
+    selected_codex_home: Path | None = None
+    activation_plan: ActivationPreview | None = None
+    activation_unavailable_reason = "codex_home_required"
+    if codex_home is not None:
+        try:
+            selected_codex_home = resolve_codex_home_for_binary(
+                binary.executable_path, codex_home=codex_home
+            )
+            activation_plan = preview_activation(
+                project,
+                executable_path=binary.executable_path,
+                codex_home=selected_codex_home,
+            )
+        except IntegrationError as error:
+            activation_unavailable_reason = error.reason.value
+            # A caller echoing an activation digest explicitly requested that exact mutation.
+            # Without a usable explicit home, fail closed instead of silently applying only the
+            # other integration surfaces.
+            if approved_activation_digest is not None:
+                return {
+                    "outcome": "failed",
+                    "reason": "activation_preview_failed",
+                    "state": None,
+                    "plugin": {"outcome": "skipped", "presence": None},
+                    "plugin_activation": {
+                        "outcome": "failed",
+                        "reason": activation_unavailable_reason,
+                        "state": "unknown",
+                    },
+                    "skill": {"outcome": "skipped", "presence": None},
+                    "observation_consent": {
+                        "outcome": "absent",
+                        "workspace_commitment": None,
+                    },
+                }
+    activation_state_before = (
+        activation_plan.inspection.state.value if activation_plan is not None else "unknown"
     )
+    activation_unavailable: dict[str, JsonValue] = {
+        "outcome": "skipped",
+        "reason": activation_unavailable_reason,
+        "state": activation_state_before,
+    }
+    if activation_plan is None and approved_activation_digest is not None:
+        return {
+            "outcome": "failed",
+            "reason": "activation_preview_failed",
+            "state": None,
+            "plugin": {"outcome": "skipped", "presence": None},
+            "plugin_activation": {
+                **activation_unavailable,
+                "outcome": "failed",
+            },
+            "skill": {"outcome": "skipped", "presence": None},
+            "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+        }
     try:
         mcp_preview = await mcp_service.preview(binary)
     except McpRegistrationError as error:
@@ -940,6 +1119,7 @@ async def _codex_integration_step(
             "reason": error.reason.value,
             "state": None,
             "plugin": {"outcome": "skipped", "presence": None},
+            "plugin_activation": {"outcome": "skipped", "state": "unknown"},
             "skill": {"outcome": "skipped", "presence": None},
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
@@ -960,6 +1140,10 @@ async def _codex_integration_step(
                 "presence": inspection.presence.value,
                 "reason": "mcp_foreign_entry",
             },
+            "plugin_activation": {
+                "outcome": "skipped",
+                "state": activation_state_before,
+            },
             "skill": {"outcome": "skipped", "presence": None},
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
@@ -972,6 +1156,10 @@ async def _codex_integration_step(
             "reason": "skill_preview_failed",
             "state": mcp_preview.state_before.value,
             "plugin": {"outcome": "skipped", "presence": plugin_preview.presence_before.value},
+            "plugin_activation": {
+                "outcome": "skipped",
+                "state": activation_state_before,
+            },
             "skill": {
                 "outcome": "failed",
                 "presence": None,
@@ -981,17 +1169,31 @@ async def _codex_integration_step(
         }
 
     external_approval = (
-        approved_preview_digest is not None or approved_skill_preview_digest is not None
+        approved_preview_digest is not None
+        or approved_skill_preview_digest is not None
+        or approved_activation_digest is not None
     )
     if external_approval and (
         approved_preview_digest != mcp_preview.preview_digest
         or approved_skill_preview_digest != skill_plan.preview.preview_digest
+        or (
+            approved_activation_digest is not None
+            and (
+                activation_plan is None
+                or approved_activation_digest != activation_plan.preview_digest
+            )
+        )
     ):
         return {
             "outcome": "failed",
             "reason": "preview_stale",
             "state": mcp_preview.state_before.value,
             "plugin": {"outcome": "skipped", "presence": plugin_preview.presence_before.value},
+            "plugin_activation": {
+                "outcome": "skipped",
+                "reason": "preview_stale",
+                "state": activation_state_before,
+            },
             "skill": {
                 "outcome": "skipped",
                 "presence": skill_plan.preview.state_before.value,
@@ -1001,10 +1203,15 @@ async def _codex_integration_step(
         }
 
     accepted = accept
+    activation_approved = False
     policy_digest_confirmed = False
     if external_approval:
         # The caller displayed both exact previews and collected an explicit yes.
         accepted = True
+        activation_approved = (
+            activation_plan is not None
+            and approved_activation_digest == activation_plan.preview_digest
+        )
         shown = check_policy.get("policy_digest")
         policy_digest_confirmed = (
             approved_policy_digest is not None
@@ -1012,7 +1219,14 @@ async def _codex_integration_step(
             and approved_policy_digest == shown
         )
     if interactive and not accepted:
-        _emit_registration_preview(binary, mcp_preview, check_policy, skill_plan.preview)
+        _emit_registration_preview(
+            binary,
+            mcp_preview,
+            check_policy,
+            skill_plan.preview,
+            activation_plan,
+            Path(project.project_root),
+        )
         typer.echo(
             f"  Plugin presence before apply: {plugin_preview.presence_before.value} "
             f"({plugin_preview.planned_file_count} managed files)"
@@ -1021,8 +1235,10 @@ async def _codex_integration_step(
             typer.echo("  MCP is already registered; setup will still install/verify the plugin.")
         accepted = _confirm_project_setup(
             include_observation=True,
+            include_activation=activation_plan is not None,
             policy_digest=cast(str | None, check_policy.get("policy_digest")),
         )
+        activation_approved = accepted and activation_plan is not None
         policy_digest_confirmed = accepted and type(check_policy.get("policy_digest")) is str
     if not accepted:
         return {
@@ -1032,6 +1248,10 @@ async def _codex_integration_step(
             "plugin": {
                 "outcome": "declined",
                 "presence": plugin_preview.presence_before.value,
+            },
+            "plugin_activation": {
+                "outcome": "declined",
+                "state": activation_state_before,
             },
             "skill": {
                 "outcome": "declined",
@@ -1053,6 +1273,10 @@ async def _codex_integration_step(
             "reason": "skill_install_failed",
             "state": mcp_preview.state_before.value,
             "plugin": {"outcome": "skipped", "presence": plugin_preview.presence_before.value},
+            "plugin_activation": {
+                "outcome": "skipped",
+                "state": activation_state_before,
+            },
             "skill": skill_report,
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
@@ -1078,6 +1302,10 @@ async def _codex_integration_step(
             "reason": "plugin_install_failed",
             "state": mcp_preview.state_before.value,
             "plugin": plugin_report,
+            "plugin_activation": {
+                "outcome": "skipped",
+                "state": activation_state_before,
+            },
             "skill": skill_report,
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
@@ -1090,11 +1318,66 @@ async def _codex_integration_step(
             "reason": "plugin_verification_failed",
             "state": mcp_preview.state_before.value,
             "plugin": plugin_report,
+            "plugin_activation": {
+                "outcome": "skipped",
+                "state": activation_state_before,
+            },
             "skill": skill_report,
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
-    # 3) Register and verify MCP (noop when already yoetz-owned).
+    # 3) Activation has its own preview-bound approval. Generic ``--accept`` never stands in
+    # for bytes the owner was not shown; legacy setup actions may continue, but hooks stay inert.
+    if activation_approved and activation_plan is not None and selected_codex_home is not None:
+        try:
+            activated = apply_activation(
+                project,
+                codex_home=selected_codex_home,
+                executable_path=binary.executable_path,
+                approved_digest=activation_plan.preview_digest,
+            )
+        except IntegrationError as error:
+            return {
+                "outcome": "failed",
+                "reason": "plugin_activation_failed",
+                "state": mcp_preview.state_before.value,
+                "plugin": plugin_report,
+                "plugin_activation": {
+                    "codex_home": str(selected_codex_home),
+                    "config_path": str(selected_codex_home / "config.toml"),
+                    "outcome": "failed",
+                    "reason": error.reason.value,
+                    "state": activation_plan.inspection.state.value,
+                },
+                "skill": skill_report,
+                "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+            }
+        activation_report: dict[str, JsonValue] = {
+            "codex_home": str(selected_codex_home),
+            "config_path": str(selected_codex_home / "config.toml"),
+            "marketplace_registered": activated.marketplace_registered,
+            "outcome": "active",
+            "plugin_enabled": activated.plugin_enabled,
+            "preview_digest": activation_plan.preview_digest,
+            "plugin_source_digest": activation_plan.plugin_source_digest,
+            "state": activated.state.value,
+        }
+    elif activation_plan is not None and selected_codex_home is not None:
+        activation_report = {
+            "codex_home": str(selected_codex_home),
+            "config_path": str(selected_codex_home / "config.toml"),
+            "marketplace_registered": activation_plan.inspection.marketplace_registered,
+            "outcome": "skipped",
+            "plugin_enabled": activation_plan.inspection.plugin_enabled,
+            "reason": "activation_confirmation_required",
+            "preview_digest": activation_plan.preview_digest,
+            "plugin_source_digest": activation_plan.plugin_source_digest,
+            "state": activation_plan.inspection.state.value,
+        }
+    else:
+        activation_report = activation_unavailable
+
+    # 4) Register and verify MCP (noop when already yoetz-owned).
     mcp_outcome = (
         "already_registered"
         if already_registered
@@ -1121,6 +1404,7 @@ async def _codex_integration_step(
                 "reason": error.reason.value,
                 "state": mcp_preview.state_before.value,
                 "plugin": plugin_report,
+                "plugin_activation": activation_report,
                 "skill": skill_report,
                 "observation_consent": {"outcome": "absent", "workspace_commitment": None},
             }
@@ -1137,6 +1421,7 @@ async def _codex_integration_step(
                 "reason": error.reason.value,
                 "state": mcp_preview.state_before.value,
                 "plugin": plugin_report,
+                "plugin_activation": activation_report,
                 "skill": skill_report,
                 "observation_consent": {"outcome": "absent", "workspace_commitment": None},
             }
@@ -1148,11 +1433,14 @@ async def _codex_integration_step(
             "reason": "mcp_verification_failed",
             "state": mcp_state.value,
             "plugin": plugin_report,
+            "plugin_activation": activation_report,
             "skill": skill_report,
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
-    # 4) Consent only after skill sources, plugin sources, and MCP are verified.
+    # 5) Consent is independent local authority after skill/plugin sources and MCP verification.
+    # Observation readiness still requires activation to be active; a missing explicit Codex
+    # home therefore leaves hooks inert without blocking these separately approved steps.
     observation = _grant_observation_consent(workspace)
     check_policy = _activate_check_policy_trust(
         workspace,
@@ -1166,6 +1454,7 @@ async def _codex_integration_step(
         "serve_command": list(mcp_preview.serve_command),
         "state": mcp_state.value,
         "plugin": plugin_report,
+        "plugin_activation": activation_report,
         "skill": skill_report,
         "observation_consent": observation,
         "check_policy": check_policy,
@@ -1178,6 +1467,7 @@ async def _register_step(
     interactive: bool,
     accept: bool,
     route_profile: Literal["policy", "strict"] | None = None,
+    codex_home: Path | None = None,
 ) -> dict[str, JsonValue]:
     """Backward-compatible name for the complete Codex integration step."""
 
@@ -1186,6 +1476,7 @@ async def _register_step(
         interactive=interactive,
         accept=accept,
         route_profile=route_profile,
+        codex_home=codex_home,
     )
 
 
@@ -1196,7 +1487,9 @@ async def apply_codex_integration(
     workspace: Path | None = None,
     approved_preview_digest: str,
     approved_skill_preview_digest: str,
+    approved_activation_digest: str,
     approved_policy_digest: str | None = None,
+    codex_home: Path,
 ) -> dict[str, JsonValue]:
     """Apply the exact integration a caller already previewed and got approved.
 
@@ -1221,7 +1514,9 @@ async def apply_codex_integration(
         workspace=workspace,
         approved_preview_digest=approved_preview_digest,
         approved_skill_preview_digest=approved_skill_preview_digest,
+        approved_activation_digest=approved_activation_digest,
         approved_policy_digest=approved_policy_digest,
+        codex_home=codex_home,
     )
 
 
@@ -1723,8 +2018,19 @@ async def _resolve_setup_package_update(
         resolve_package_update_advisory,
     )
 
-    # Noninteractive setup never opens the network for surprise side effects when the
-    # service/policy is not already available; interactive may check when policy allows.
+    network, enabled = await _effective_update_policy_bits()
+    advisory = await resolve_package_update_advisory(
+        network_egress_permitted=network,
+        update_checks_enabled=enabled,
+        allow_network=interactive,
+    )
+    fields = dict(package_update_report_fields(advisory))
+    return cast(dict[str, JsonValue], fields)
+
+
+async def _effective_update_policy_bits() -> tuple[bool | None, bool]:
+    """Read only the two durable policy facts that authorize the PyPI channel."""
+
     try:
         from yoetz.cli.app import build_service_client
         from yoetz.cli.provider_status import machine_scope_request
@@ -1737,76 +2043,71 @@ async def _resolve_setup_package_update(
         raw_map = cast(Mapping[str, object], raw)
         policy_obj = raw_map.get("policy")
         if not isinstance(policy_obj, Mapping):
-            advisory = await resolve_package_update_advisory(policy=None, allow_network=False)
-        else:
-            # Prefer structural bits over full re-decode when wire shape is partial.
-            policy_map = cast(Mapping[str, object], policy_obj)
-            network = policy_map.get("network_egress_permitted")
-            enabled = False
-            channels = policy_map.get("channel_policies")
-            if isinstance(channels, (list, tuple)):
-                for entry_obj in cast(tuple[object, ...] | list[object], channels):
-                    if not isinstance(entry_obj, Mapping):
-                        continue
-                    row = cast(Mapping[str, object], entry_obj)
-                    if row.get("channel") == "update_checks" and row.get("enabled") is True:
-                        enabled = True
-                        break
-            advisory = await resolve_package_update_advisory(
-                network_egress_permitted=network if type(network) is bool else None,
-                update_checks_enabled=enabled,
-                allow_network=interactive,
-            )
+            return None, False
+        policy_map = cast(Mapping[str, object], policy_obj)
+        network = policy_map.get("network_egress_permitted")
+        enabled = False
+        channels = policy_map.get("channel_policies")
+        if isinstance(channels, (list, tuple)):
+            for entry_obj in cast(tuple[object, ...] | list[object], channels):
+                if not isinstance(entry_obj, Mapping):
+                    continue
+                row = cast(Mapping[str, object], entry_obj)
+                if row.get("channel") == "update_checks" and row.get("enabled") is True:
+                    enabled = True
+                    break
+        return network if type(network) is bool else None, enabled
     except Exception:
-        advisory = await resolve_package_update_advisory(policy=None, allow_network=False)
-    fields = dict(package_update_report_fields(advisory))
-    return cast(dict[str, JsonValue], fields)
+        return None, False
 
 
-async def _offer_interactive_package_upgrade(package_update: Mapping[str, JsonValue]) -> bool:
-    """Offer upgrade-over-reinstall when a newer package is known. Returns False to stop setup."""
+async def _refresh_setup_recommendations(
+    *,
+    binary: HarnessBinary | None,
+    codex_home: Path | None,
+    allow_network: bool,
+) -> dict[str, JsonValue]:
+    """Refresh cached recommendations from current local and durable policy facts."""
 
-    if package_update.get("is_newer") is not True:
-        return True
-    installed = package_update.get("installed_version")
-    latest = package_update.get("latest_version")
-    command = package_update.get("upgrade_command")
-    if type(installed) is not str or type(latest) is not str or type(command) is not str:
-        return True
-    typer.echo("")
-    typer.echo(f"A newer Yoetz package is available ({installed} → {latest}).")
-    typer.echo(f"Upgrade command: {command}")
-    upgrade = typer.confirm(
-        "Upgrade the package first (exit and re-run yoetz after upgrade)?",
-        default=False,
-    )
-    if upgrade:
-        typer.echo("Exit this process, run the upgrade command, then re-run yoetz setup.")
-        return False
-    typer.echo("Continuing with this package version; harness add/repair does not reinstall it.")
-    return True
+    try:
+        from yoetz.application.recommendations import (
+            evaluate_recommendation_context,
+            refresh_pending,
+        )
+
+        config = load_config({}, os.environ, None)
+        activation_state: str | None = None
+        if binary is not None and codex_home is not None:
+            activation_state = inspect_activation(
+                _integration_target(),
+                executable_path=binary.executable_path,
+                codex_home=codex_home,
+            ).state.value
+        network, updates = await _effective_update_policy_bits()
+        context = await evaluate_recommendation_context(
+            observation_enabled=config.observation.enabled,
+            codex_activation_state=activation_state,
+            network_egress_permitted=network,
+            update_checks_enabled=updates,
+            allow_network=allow_network,
+        )
+        state = await refresh_pending(context=context, force=True)
+        return {"outcome": "refreshed", "pending": list(state.pending)}
+    except Exception as error:
+        return {"outcome": "failed", "reason": type(error).__name__, "pending": []}
 
 
 async def run_setup_wizard(
     *,
     non_interactive: bool,
     codex_path: str | None,
+    codex_home: Path | None,
     accept: bool,
     json_output: bool,
 ) -> int:
     """Run the guided first-run setup and report each step honestly."""
 
     interactive = not non_interactive and _is_interactive_terminal()
-    package_update = await _resolve_setup_package_update(interactive=interactive)
-    if interactive and not await _offer_interactive_package_upgrade(package_update):
-        report: dict[str, JsonValue] = {
-            "package_update": package_update,
-            "schema": _REPORT_SCHEMA,
-            "outcome": "cancelled",
-            "reason": "package_upgrade_deferred",
-        }
-        _emit(report, json_output=json_output)
-        return 0
 
     binaries = discover_codex_binaries()
     try:
@@ -1823,8 +2124,23 @@ async def run_setup_wizard(
     except _UsageExit as failure:
         return failure.code
 
+    if chosen is not None and codex_home is None and interactive:
+        codex_home = Path(
+            typer.prompt(
+                f"Exact existing Codex home paired with {chosen.executable_path}",
+            )
+        ).expanduser()
+
     review_mode: Literal["local_only", "semantic", "deferred"] = (
         _choose_review_mode() if interactive else "deferred"
+    )
+    update_checks_choice = (
+        typer.confirm(
+            "Check PyPI for Yoetz updates (package name and version only)?",
+            default=True,
+        )
+        if interactive
+        else None
     )
     if chosen is None:
         registration = _registration_report(None, outcome="skipped", reason="codex_not_found")
@@ -1834,6 +2150,7 @@ async def run_setup_wizard(
             interactive=interactive,
             accept=accept,
             route_profile="policy" if review_mode == "semantic" else "strict",
+            codex_home=codex_home,
         )
 
     service = await _service_reachability(start_if_absent=interactive)
@@ -1865,6 +2182,7 @@ async def run_setup_wizard(
                     recipe_hint="assisted_review",
                     offer_recommended=True,
                     credential_probe_authorized=credential_probe_authorized,
+                    update_checks_override=update_checks_choice,
                 )
             except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
                 reason = getattr(error, "reason", None)
@@ -1914,6 +2232,39 @@ async def run_setup_wizard(
                     semantic_status = await provider_status_report()
                 except ControlError, OSError, ValueError:
                     semantic_status = None
+    elif interactive and review_mode == "local_only":
+        from yoetz.cli.privacy_setup import run_privacy_setup
+        from yoetz.cli.unlock import HumanCeremonyCliError
+        from yoetz.ports.control import ControlError
+
+        try:
+            privacy_result = await run_privacy_setup(
+                recipe_hint="private",
+                update_checks_override=update_checks_choice,
+            )
+            privacy = {
+                "outcome": privacy_result.outcome,
+                "profile": privacy_result.profile,
+                "proposal_id": privacy_result.proposal_id,
+                "grant_state": getattr(privacy_result, "grant_state", None),
+                "migration_state": getattr(privacy_result, "migration_state", None),
+                "reason": privacy_result.reason,
+            }
+        except (ControlError, HumanCeremonyCliError, OSError, ValueError) as error:
+            privacy = {
+                "outcome": "failed",
+                "profile": "unknown",
+                "grant_state": None,
+                "migration_state": None,
+                "reason": _privacy_block_reason(getattr(error, "reason", None)),
+            }
+
+    # A package check can happen only after the interactive user explicitly answered the
+    # update-check question and the trusted privacy ceremony had a chance to commit it.
+    update_choice_committed = privacy.get("outcome") in {"configured", "unchanged"}
+    package_update = await _resolve_setup_package_update(
+        interactive=interactive and update_checks_choice is True and update_choice_committed
+    )
 
     next_steps: list[JsonValue] = []
     if not interactive:
@@ -1965,7 +2316,7 @@ async def run_setup_wizard(
     mutating_run = interactive or accept
     setup_complete = (
         not interactive
-        or review_mode == "local_only"
+        or (review_mode == "local_only" and privacy.get("outcome") in {"configured", "unchanged"})
         or (semantic_status is not None and semantic_status.get("semantic_ready") is True)
     )
     marker_written = (
@@ -2001,6 +2352,12 @@ async def run_setup_wizard(
             skill_presence = raw_presence if type(raw_presence) is str else None
     hooks_raw = integration.get("hooks")
     hooks = hooks_raw if isinstance(hooks_raw, dict) else {}
+    activation_block = registration.get("plugin_activation")
+    selected_codex_home: Path | None = None
+    if isinstance(activation_block, Mapping):
+        raw_codex_home = activation_block.get("codex_home")
+        if type(raw_codex_home) is str:
+            selected_codex_home = Path(raw_codex_home)
     readiness = _readiness_layers(
         binary=chosen,
         mcp_state=cast(str | None, registration.get("state")),
@@ -2010,6 +2367,7 @@ async def run_setup_wizard(
         consent_outcome=consent,
         service=service,
         workspace=Path.cwd(),
+        codex_home=selected_codex_home,
     )
     if semantic_status is not None:
         semantic_ready = semantic_status.get("semantic_ready") is True
@@ -2019,6 +2377,11 @@ async def run_setup_wizard(
             if semantic_ready
             else "semantic_configuration_incomplete"
         )
+    recommendations = await _refresh_setup_recommendations(
+        binary=chosen,
+        codex_home=selected_codex_home,
+        allow_network=interactive and update_checks_choice is True and update_choice_committed,
+    )
 
     report: dict[str, JsonValue] = {
         "discovered": [_binary_row(binary) for binary in binaries],
@@ -2029,6 +2392,7 @@ async def run_setup_wizard(
         "privacy": privacy,
         "provider": provider,
         "readiness": readiness,
+        "recommendations": recommendations,
         "registration": registration,
         "schema": _REPORT_SCHEMA,
         "selected": None if chosen is None else _binary_row(chosen),
@@ -2054,9 +2418,9 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
     if isinstance(registration, dict):
         outcome = registration.get("outcome")
         reason = registration.get("reason")
-        # MCP registration alone is not product readiness or automatic activation.
+        # MCP registration alone is not product readiness or plugin activation.
         if outcome in {"registered", "reregistered", "already_registered"}:
-            line = f"  MCP registration: {outcome}; automatic activation not tested"
+            line = f"  MCP registration: {outcome}"
         else:
             line = f"  MCP registration: {outcome}"
         if reason:
@@ -2067,9 +2431,18 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
             typer.echo(
                 "  Plugin source files: "
                 f"{plugin.get('outcome') or 'unknown'} "
-                f"(presence={plugin.get('presence') or 'absent'}; "
-                "Codex discovery remains unverified)"
+                f"(presence={plugin.get('presence') or 'absent'})"
             )
+        activation = registration.get("plugin_activation")
+        if isinstance(activation, dict):
+            typer.echo(
+                "  Codex plugin activation: "
+                f"{activation.get('state') or 'unknown'} "
+                f"(outcome={activation.get('outcome') or 'observed'})"
+            )
+            config_path = activation.get("config_path")
+            if type(config_path) is str:
+                typer.echo(f"  Activated Codex config: {config_path}")
         skill = registration.get("skill")
         if isinstance(skill, dict):
             typer.echo(
@@ -2172,6 +2545,12 @@ async def setup_status(*, json_output: bool) -> int:
     rows: list[JsonValue] = []
     for binary in binaries:
         row = _binary_row(binary)
+        # This legacy status surface has no paired home input. It reports that omission rather
+        # than guessing from the executable or ambient process state.
+        row["plugin_activation"] = {
+            "reason": "codex_home_required",
+            "state": "unknown",
+        }
         try:
             observation = await HarnessMcpService(service_port).observe(binary)
             row["registration_state"] = observation.state.value

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -34,8 +35,15 @@ def make_app(monkeypatch: pytest.MonkeyPatch) -> Callable[..., YoetzTui]:
         first_run: bool = False,
         runtime: FakeRuntime | None = None,
         suspendable: bool = True,
+        prompt_codex_home: bool = False,
     ) -> YoetzTui:
         app = YoetzTui(cast(Any, runtime or FakeRuntime()), first_run=first_run)
+        if not prompt_codex_home:
+
+            async def selected_codex_home(_option: object) -> Path:
+                return Path("/tmp/codex-explicit-test-home")
+
+            monkeypatch.setattr(app, "_choose_codex_home", selected_codex_home)
         app.markers_written = written  # type: ignore[attr-defined]
         if suspendable:
             # A headless test driver cannot suspend a real terminal. Substituting

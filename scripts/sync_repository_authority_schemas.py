@@ -67,6 +67,92 @@ def _hello() -> dict[str, Any]:
 def _request() -> dict[str, Any]:
     generated = _with_v2_id("control-request", _load("control-request"))
     definitions = generated["$defs"]
+    # Domain source identities are structural tokens and the hook mapper deliberately prefixes
+    # them with ``hook:``. The legacy schema token omitted the admitted colon.
+    definitions["observation_envelope"]["properties"]["source_identity"]["pattern"] = (
+        "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$"
+    )
+    definitions["observation_content_chunk"] = {
+        "additionalProperties": False,
+        "properties": {
+            "content_kind": {
+                "enum": [
+                    "visible_user_message",
+                    "visible_assistant_message",
+                    "visible_subagent_message",
+                    "tool_input",
+                    "tool_output",
+                    "changed_file",
+                    "workspace_diff",
+                    "approved_check_output",
+                    "unsupported_visible_payload",
+                    "workspace_locator",
+                ],
+                "type": "string",
+            },
+            "correlation_identity": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
+                "type": "string",
+            },
+            "source_commitment": {
+                "maxLength": 76,
+                "minLength": 76,
+                "pattern": "^hmac-sha256:[0-9a-f]{64}$",
+                "type": "string",
+            },
+            "media_type": {
+                "maxLength": 128,
+                "minLength": 3,
+                "pattern": "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$",
+                "type": "string",
+            },
+            "part_index": {"maximum": 15, "minimum": 0, "type": "integer"},
+            "part_count": {"maximum": 16, "minimum": 1, "type": "integer"},
+            "content_b64": {
+                "maxLength": 699052,
+                "minLength": 4,
+                "pattern": (
+                    "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/][AQgw]==|"
+                    "[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$"
+                ),
+                "type": "string",
+            },
+            "redacted": {"type": "boolean"},
+        },
+        "required": [
+            "content_kind",
+            "correlation_identity",
+            "source_commitment",
+            "media_type",
+            "part_index",
+            "part_count",
+            "content_b64",
+            "redacted",
+        ],
+        "type": "object",
+    }
+    definitions["observation_ingest_body"] = {
+        "additionalProperties": False,
+        "properties": {
+            "codex_session_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[^/\\\\\\u0000]+$",
+                "type": "string",
+            },
+            "content_chunks": {
+                "items": {"$ref": "#/$defs/observation_content_chunk"},
+                "maxItems": 16,
+                "minItems": 1,
+                "type": "array",
+            },
+            "envelope": {"$ref": "#/$defs/observation_envelope"},
+        },
+        "required": ["codex_session_id", "envelope"],
+        "type": "object",
+    }
     legacy_setup = definitions["privacy_get_setup_body"]
     definitions["privacy_get_setup_body"] = {
         "oneOf": [
@@ -224,6 +310,9 @@ def _setup_result() -> dict[str, Any]:
 def _result() -> dict[str, Any]:
     generated = _with_v2_id("control-result", _load("control-result"))
     definitions = generated["$defs"]
+    # The ready observation handler returns the bounded domain result directly. The legacy
+    # request/status wrapper was replaced when routing ownership moved to the service coordinator.
+    definitions["observation_ingest_body"] = copy.deepcopy(definitions["observation_ingest_result"])
     definitions["privacy_get_setup_body"] = {
         "oneOf": [definitions["privacy_get_setup_body"], _setup_result()]
     }

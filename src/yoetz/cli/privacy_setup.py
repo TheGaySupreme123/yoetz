@@ -744,7 +744,7 @@ def _ask_custom_answers(
 
     _section(5, "Package updates and unsupported channels")
     updates = typer.confirm(
-        "Permit structural package update checks against PyPI (package name and version only)?",
+        "Check PyPI for Yoetz updates (package name and version only)?",
         default=True,
     )
     typer.echo(
@@ -1091,6 +1091,7 @@ def _choose_candidate(
     recipe_hint: PrivacyRecipe | None,
     offer_recommended: bool,
     credential_probe_authorized: bool,
+    update_checks_override: bool | None,
 ) -> PrivacyPolicy | None:
     """Select the exact candidate policy, or ``None`` when the user declined outright.
 
@@ -1107,12 +1108,15 @@ def _choose_candidate(
         why, tradeoff = _RECOMMENDATION_TRADEOFF[recommended]
         typer.echo(f"Why: {why}")
         typer.echo(tradeoff)
+        answers = replace(
+            _recipe_answers(recommended, current, external),
+            credential_probe=credential_probe_authorized,
+        )
+        if update_checks_override is not None:
+            answers = replace(answers, updates=update_checks_override)
         candidate = _confirmed_candidate(
             current,
-            replace(
-                _recipe_answers(recommended, current, external),
-                credential_probe=credential_probe_authorized,
-            ),
+            answers,
             "Use this recommended privacy policy?",
             default=True,
         )
@@ -1135,12 +1139,15 @@ def _choose_candidate(
             "Use this exact custom privacy policy?",
             default=False,
         )
+    answers = replace(
+        _recipe_answers(recipe, current, external),
+        credential_probe=credential_probe_authorized,
+    )
+    if update_checks_override is not None:
+        answers = replace(answers, updates=update_checks_override)
     return _confirmed_candidate(
         current,
-        replace(
-            _recipe_answers(recipe, current, external),
-            credential_probe=credential_probe_authorized,
-        ),
+        answers,
         f"Create this exact privacy proposal ({_RECIPE_LABELS[recipe]})?",
         default=False,
     )
@@ -1151,9 +1158,18 @@ async def run_privacy_setup(
     recipe_hint: PrivacyRecipe | None = None,
     offer_recommended: bool = False,
     credential_probe_authorized: bool = False,
+    update_checks_override: bool | None = None,
     workspace_locator: Path | None = None,
 ) -> PrivacySetupReport:
-    """Run the trusted questionnaire and apply only an explicitly approved draft."""
+    """Run the trusted questionnaire and apply only an explicitly approved draft.
+
+    ``update_checks_override`` carries a setup answer into a recommended or named recipe before
+    its exact review. ``None`` preserves the recipe default. Custom still owns its section-5
+    question. The override never skips candidate confirmation or the service decision ceremony.
+    """
+
+    if update_checks_override is not None and type(update_checks_override) is not bool:
+        raise TypeError("privacy_setup_update_checks_override_invalid")
 
     if not _interactive_terminal():
         return PrivacySetupReport(
@@ -1174,6 +1190,7 @@ async def run_privacy_setup(
             recipe_hint=recipe_hint,
             offer_recommended=offer_recommended,
             credential_probe_authorized=credential_probe_authorized,
+            update_checks_override=update_checks_override,
         )
     except ValueError as error:
         return PrivacySetupReport(

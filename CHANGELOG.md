@@ -11,6 +11,34 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- Consent-based Codex observation activation and durable delivery repair (issues #204 and #205,
+  ADR-012 amendment): setup now distinguishes installed hook sources from an active plugin, previews
+  the exact selected Codex executable and explicitly selected existing home, repository marketplace,
+  append-only plugin-enable change, post-consent scoped inventory/add commands, and versioned
+  byte-exact cache transition, and applies them only after digest-bound approval. Its pre-consent
+  version probe runs in a disposable owner-private home; selected-home inventory and scratch effects
+  begin only after approval with both Codex home variables forced to the approved target. `active`
+  requires installed managed sources, exact
+  marketplace/config state, Codex's installed-and-enabled inventory row for this repository, and a
+  cache identical to the managed plugin tree; marketplace/config bytes alone remain
+  `installed_not_activated`. A post-write failure preserves approved partial state for an honest
+  retry; it never risks deleting or overwriting concurrent state through pathname rollback. Setup
+  probes use isolated state instead of polluting the live outbox.
+  Observation delivery no longer depends on an already-existing lifecycle mapping: READY and
+  periodic service sweeps recover pending envelopes, retry metadata and bounded hook diagnostics
+  explain failures, and `yoetz observe status|drain` reports and repairs undelivered work without
+  silently deleting it. `[observation].enabled` is a typed local configuration gate that defaults
+  on; per-workspace observation consent remains independently required.
+
+- A reusable recommended-defaults advisory surface (ADR-021): releases register reviewed
+  recommendations, heavy control points cache pending items, and SessionStart may ask the agent to
+  explain at most one item and request user approval. `yoetz recommend list|accept|decline` is the
+  only application/decision path; declines are remembered and never re-nagged, and upgrades never
+  flip configuration or Codex activation silently. Initial consumers cover observation enablement,
+  Codex plugin activation, and the existing policy-gated PyPI update advisory. The durable
+  `update_checks` channel remains the only update-check flag, accepts only bounded package identity,
+  and never auto-upgrades; Yoetz has no npm update check because it ships only on PyPI.
+
 - Typed evidence digest provenance (`evidence_recorded/1.1.0`) records the exact closed byte
   subject, availability, byte count, and authority that established each new digest. Kind/subject
   contradictions fail closed; approved checks publish bounded service-owned receipts; legacy,
@@ -326,8 +354,10 @@ carried them; they are listed because each one describes the behavior that now s
 - Independent security review of the vault, key hierarchy, and privacy gateway is a release gate
   that has not yet completed — see `docs/public-claims.json` for exactly which claims currently have
   evidence.
-- v0.1 ships no production transport for the four non-LLM egress channels (telemetry, crash
-  diagnostics, update checks, capability testing); they exist only as denied policy vocabulary.
+- v0.1 ships no production transport for telemetry, crash diagnostics, or capability testing;
+  they exist only as denied policy vocabulary. Structural package update checks are the sole
+  non-LLM exception: when independently enabled, they use the bounded allowlisted PyPI transport
+  and never carry task/user content or upgrade the package automatically.
 - Native `launchd`/`systemd-user` service installation and headless passphrase unlock are not
   included; see [`docs/protocol/local-service-security.md`](docs/protocol/local-service-security.md).
 - The advertised platform matrix is macOS 11.0+ arm64 and glibc 2.28+ x86-64 only; other platforms

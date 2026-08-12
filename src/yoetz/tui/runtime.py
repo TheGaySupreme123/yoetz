@@ -367,6 +367,7 @@ class YoetzRuntime:
     async def integration_plan(
         self,
         option: HarnessOption,
+        codex_home: Path,
         route_profile: Literal["policy", "strict"] | None = None,
     ) -> IntegrationPlan:
         """Build the exact proposed change, previewing through the owning services.
@@ -381,11 +382,12 @@ class YoetzRuntime:
         from yoetz.application.harness_mcp import HarnessMcpService
         from yoetz.cli.setup import (
             check_policy_preview,
+            codex_activation_preview,
             configured_mcp_route_profile,
             project_skill_preview,
         )
         from yoetz.ports.harness_mcp import McpRegistrationError, McpRegistrationState
-        from yoetz.ports.integrations import IntegrationScope, IntegrationTarget
+        from yoetz.ports.integrations import IntegrationError, IntegrationScope, IntegrationTarget
 
         binary = self._binary_for(option)
         root = self.project_root()
@@ -399,12 +401,17 @@ class YoetzRuntime:
         target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root))
         plugin_preview = CodexPluginService().preview(target)
         skill_preview = await project_skill_preview(root)
+        try:
+            activation_preview = codex_activation_preview(binary, codex_home, root)
+        except IntegrationError as error:
+            raise RuntimeError_(error.reason.value, "the Codex activation could not be previewed")
         policy = check_policy_preview(root)
         digest = policy.get("policy_digest")
         checks = policy.get("check_ids")
         return IntegrationPlan(
             harness_label=option.label,
             executable_path=option.executable_path,
+            codex_home=str(activation_preview.codex_home),
             reported_version=option.reported_version,
             project_root=str(root),
             route_profile=route,
@@ -427,6 +434,25 @@ class YoetzRuntime:
             foreign_entry=mcp_preview.state_before is McpRegistrationState.FOREIGN_PRESENT,
             preview_digest=str(mcp_preview.preview_digest),
             skill_preview_digest=skill_preview.preview_digest,
+            activation_preview_digest=activation_preview.preview_digest,
+            activation_marketplace_path=str(root / ".agents" / "plugins" / "marketplace.json"),
+            activation_config_path=str(activation_preview.codex_home / "config.toml"),
+            activation_marketplace_text=activation_preview.marketplace_bytes.decode("utf-8"),
+            activation_config_block=activation_preview.config_toml_block,
+            activation_plugin_source_digest=activation_preview.plugin_source_digest,
+            activation_inventory_verified=activation_preview.inspection.inventory_verified,
+            activation_plugin_install_path=str(activation_preview.plugin_install_path),
+            activation_plugin_install_digest=activation_preview.plugin_install_digest,
+            activation_executable_digest=activation_preview.executable_digest,
+            activation_codex_version=activation_preview.codex_version,
+            activation_probe_command=activation_preview.probe_command,
+            activation_inventory_command=activation_preview.inventory_command,
+            activation_install_command=activation_preview.install_command,
+            activation_probe_environment=activation_preview.probe_environment,
+            activation_environment=activation_preview.activation_environment,
+            activation_marketplace_preimage_digest=(activation_preview.marketplace_preimage_digest),
+            activation_config_preimage_digest=activation_preview.config_preimage_digest,
+            activation_cache_mutation_planned=activation_preview.cache_mutation_planned,
         )
 
     async def apply_integration(
@@ -451,7 +477,9 @@ class YoetzRuntime:
             workspace=self.project_root(),
             approved_preview_digest=plan.preview_digest,
             approved_skill_preview_digest=plan.skill_preview_digest,
+            approved_activation_digest=plan.activation_preview_digest,
             approved_policy_digest=plan.policy_digest,
+            codex_home=Path(plan.codex_home),
         )
         return self._integration_outcome(report)
 

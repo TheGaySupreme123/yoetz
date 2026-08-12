@@ -333,6 +333,126 @@ async def test_approved_check_materialization_is_service_owned_and_idempotent(
     assert evidence.payload.digest_binding.approved_check_result_digest == result.result_digest
 
 
+@pytest.mark.anyio
+async def test_advice_finding_materialization_passes_real_ledger_validation(tmp_path: Path) -> None:
+    """The advice append must survive the adapter's full event preimage validation."""
+
+    from typing import cast
+
+    from builders.ledger_adapters import (
+        FixedClock,
+        FixedIds,
+        MemoryObjects,
+        append_command,
+        memory_adapter,
+        ownership_fence,
+    )
+    from yoetz.application.observation_coordinator import ObservationCoordinator
+    from yoetz.domain.events import AcceptedEvent
+    from yoetz.domain.findings import Finding
+    from yoetz.domain.observation import (
+        AdviceItem,
+        AdviceSnapshot,
+        ObservationCursor,
+        ObservationEnvelope,
+        ObservationSource,
+    )
+    from yoetz.domain.values import JsonObject, finding_id
+    from yoetz.ports.diagnostics import RuntimeCapability
+    from yoetz.ports.importer import ImporterPort
+    from yoetz.ports.objects import ObjectStorePort
+    from yoetz.ports.runtime import BundleRuntimePort, TaskRuntime
+    from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel, weakest
+    from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
+
+    seed = append_command()
+    ledger = memory_adapter(seed)
+    objects = cast(MemoryObjects, ledger._objects)  # pyright: ignore[reportPrivateUsage]
+    runtime = TaskRuntime(
+        seed.task_id,
+        seed.session_id,
+        seed.writer_id,
+        frozenset({RuntimeCapability.WRITE}),
+        ledger,
+        cast(ObjectStorePort, objects),
+        cast(ImporterPort, object()),
+        "0.1.0",
+        "0.1.0",
+        "0.1",
+        "1.0.0",
+        ownership_fence(),
+    )
+    coordinator = ObservationCoordinator(
+        runtime=cast(BundleRuntimePort, object()),
+        local=LocalObservationStore(_state=tmp_path),
+        clock=FixedClock(),
+        ids=FixedIds(),
+        state_root=tmp_path,
+    )
+    mixed_coverage = weakest(
+        coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+        coverage_for_channel(PublicationChannel.ENGINE_DERIVED),
+    )
+    item = AdviceItem(
+        finding_id(PREFIX_BY_KIND[IdKind.FINDING] + "00000000-0000-4000-8000-000000000010"),
+        "failed_command_unresolved",
+        1,
+        "A failed command remains unresolved.",
+        "Resolve the failure and rerun the check.",
+        "rerun_check",
+        (),
+        mixed_coverage,
+        "frontier-ledger-validation",
+    )
+    snapshot = AdviceSnapshot(
+        (item.finding_id,),
+        "sha256:" + "a" * 64,
+        mixed_coverage,
+        "rerun_check",
+        "frontier-ledger-validation",
+        "advice-ledger-validation-1",
+        (item,),
+    )
+    envelope = ObservationEnvelope(
+        session_commitment="hmac-sha256:" + "b" * 64,
+        event_kind="PostToolUse",
+        source_identity="hook:advice-ledger-validation",
+        source=ObservationSource.CODEX_HOOK,
+        cursor=ObservationCursor(
+            1,
+            0,
+            1,
+            "hmac-sha256:" + "c" * 64,
+            "codex-obs-hook/1.0.0",
+        ),
+        receipt_time=Timestamp("2026-08-12T00:00:00.000Z"),
+        structural_payload=JsonObject(
+            {
+                "tool_name": "shell",
+                "tool_call_id": "advice-ledger-validation",
+                "correlation_id": "advice-ledger-validation",
+                "exit_status": 2,
+            }
+        ),
+        content_object_refs=(),
+        gap_codes=(),
+    )
+
+    await coordinator._materialize_advice_findings(  # pyright: ignore[reportPrivateUsage]
+        runtime, (envelope,), snapshot
+    )
+
+    records = [row async for row in ledger.load_events(seed.session_id)]
+    assert len(records) == 1
+    accepted = records[0]
+    assert type(accepted) is AcceptedEvent
+    assert accepted.schema.name == "finding_recorded"
+    assert accepted.publication_channel is PublicationChannel.ENGINE_DERIVED
+    assert accepted.coverage == coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
+    assert type(accepted.payload) is Finding
+    assert accepted.payload.coverage == mixed_coverage
+
+
 def test_untrusted_workspace_dot_does_not_bind_without_consent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -6,7 +6,8 @@ carry; nothing here manufactures platform or capability evidence.
 **Implemented by:** `src/yoetz/ports/harness_mcp.py`,
 `src/yoetz/application/harness_mcp.py`,
 `src/yoetz/adapters/integrations/codex_discovery.py`,
-`src/yoetz/adapters/integrations/codex_mcp.py`, `src/yoetz/cli/setup.py`,
+`src/yoetz/adapters/integrations/codex_mcp.py`,
+`src/yoetz/adapters/integrations/codex_marketplace.py`, `src/yoetz/cli/setup.py`,
 `support/npm-launcher/package.json`, `support/npm-launcher/bin/yoetz.js`,
 `support/npm-launcher/README.md`, plus the amended `src/yoetz/cli/app.py`,
 `src/yoetz/config/paths.py`, and `docs/runbooks/codex-integration.md`.
@@ -65,7 +66,12 @@ exactly those contracts and connects the steps without weakening any existing tr
    the trusted CLI/TUI remains recommended and always available. The setup update advisory's version
    parser is a declared, exactly pinned core dependency; a clean installed-artifact gate imports
    and enters `setup run` so development-only transitive packages cannot hide a missing runtime
-   dependency.
+   dependency. **Amendment (issues #204 and #205, 2026-08-12):** first-run setup asks whether the
+   proposed privacy policy should enable the structural PyPI update check (default yes). It carries
+   that boolean into the recommended or named recipe before rendering the exact candidate; it
+   changes no other recipe field, creates no authority itself, and never bypasses candidate
+   confirmation or the existing trusted service decision ceremony. Declining produces the genuine
+   zero-network `private` candidate rather than silently restoring the recipe default.
 
    Repository scope comes only from the service's trusted locator path. CLI and TUI supply their
    actual working directory; MCP supplies its configured/session working directory. The service
@@ -108,6 +114,46 @@ exactly those contracts and connects the steps without weakening any existing tr
    byte-exact reviewed skill after the enclosing digest-bound project approval, but reports
    compatibility as `unsupported` and automatic activation as untested. The standalone
    `integrate skill install` command retains its exact capability gate.
+
+   **Amended 2026-08-12 — consent-based Codex plugin activation (issues #204 and #205).** Setup
+   may now offer the additional Codex activation needed for installed hook sources to run, but the
+   live-smoke correction is load-bearing: repository marketplace bytes plus a plugin-enable TOML
+   block do **not** prove activation. Codex also requires the plugin in the canonical inventory and
+   loads hooks from its versioned plugin cache.
+
+   Activation is bound to the exact executable selected during discovery and an existing absolute,
+   non-symlink Codex home explicitly supplied by the owner end to end. It never derives that home
+   from a basename, wrapper behavior, ambient environment, or pre-consent diagnostic. Before
+   consent, preview runs only that executable's `--version`, forcing both `CODEX_HOME` and
+   `CODEX_TESTING_HOME` to a fresh owner-private temporary home. Codex may create scratch even for
+   its version command, so setup removes that temporary home afterward. It performs no canonical
+   inventory read against the selected home before approval, preserving first-run zero-egress and
+   no-selected-home-mutation truth.
+
+   The preview digest binds the selected executable path and SHA-256, parsed version, explicit home,
+   exact repository marketplace before/after bytes, exact config presence/preimage and append-only
+   after bytes, managed source-tree digest, versioned cache target and preimage, intended cache
+   digest, temporary-private-home probe environment, forced selected-home activation environment,
+   and the exact post-consent `plugin list --marketplace yoetz --json` and
+   `plugin add yoetz@yoetz --json` commands. Setup displays the bounded targets, environments,
+   commands, digests, resulting blocks, possible scratch/cache/config/marketplace effects, and
+   standing-trust warning before asking for explicit approval.
+
+   After consent, apply forces both home variables to the approved home, takes an owner-only
+   activation lock, re-probes the exact executable and bound preimages, refuses stale or foreign
+   state, preserves unrelated marketplace entries and config text, CAS-fences each write, and runs
+   the scoped inventory/add commands through that selected executable. A failure after a write or
+   add preserves already-approved marketplace/config/cache partial state and reports failure for an
+   honest retry. It performs no pathname rollback: a verify-then-delete or overwrite could race a
+   concurrent replacement. Post-apply inspection calls the canonical inventory and reports
+   `active` only when the managed source is installed, repository marketplace and selected-home
+   configuration are exact, inventory says `yoetz@yoetz` is installed and enabled from this
+   repository, and the inventory's versioned cache is byte-identical to the managed plugin tree.
+   Otherwise the closed state is
+   `installed_not_activated`, `not_installed`, or `foreign`; installed bytes, configuration, cache,
+   and inventory remain separately reported facts. Declining changes none of them. This ceremony
+   authorizes a standing Codex trust change for future sessions in that exact Codex home; it does
+   not prove that a later session loaded a hook or delivered an observation.
 
 The short `yoetz --set --fireworks --model MODEL` and `yoetz --set --grok --model MODEL` paths are
 provider-only entries into the same setup ceremonies. They derive internal provider bindings and

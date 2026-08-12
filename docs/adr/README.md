@@ -25,6 +25,7 @@ ADR wins; when an ADR and the code disagree, that is a bug in one of them and wo
 | [018](ADR-018-host-declared-mcp-route-egress-ceiling.md) | Host-declared MCP route egress ceiling |
 | [019](ADR-019-declared-completion-scope.md) | Declared completion scope |
 | [020](ADR-020-typed-evidence-digest-provenance.md) | Typed evidence digest provenance |
+| [021](ADR-021-recommended-defaults-advisories-and-update-check-surfacing.md) | Recommended-defaults advisories and update-check surfacing |
 
 Unresolved gates are centralized in [`docs/OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md), not scattered
 through individual ADRs.
