@@ -51,6 +51,7 @@ CLI = HarnessOption(
 PLAN = IntegrationPlan(
     harness_label="Codex Desktop",
     executable_path=DESKTOP.executable_path,
+    codex_home="/tmp/codex",
     reported_version="0.44",
     project_root="/tmp/project",
     route_profile="policy",
@@ -68,6 +69,25 @@ PLAN = IntegrationPlan(
     foreign_entry=False,
     preview_digest="sha256:abc123",
     skill_preview_digest="sha256:def456",
+    activation_preview_digest="sha256:activation",
+    activation_marketplace_path="/tmp/project/.agents/plugins/marketplace.json",
+    activation_config_path="/tmp/codex/config.toml",
+    activation_marketplace_text='{"name":"yoetz"}\n',
+    activation_config_block='[plugins."yoetz@yoetz"]\nenabled = true\n',
+    activation_plugin_source_digest="sha256:plugin-tree",
+    activation_inventory_verified=False,
+    activation_plugin_install_path="/tmp/codex/plugins/cache/yoetz/yoetz/0.1.0",
+    activation_plugin_install_digest="sha256:installed-plugin-tree",
+    activation_executable_digest="sha256:codex-executable",
+    activation_codex_version="0.148.0-alpha.6",
+    activation_probe_command=("--version",),
+    activation_inventory_command=("plugin", "list", "--marketplace", "yoetz", "--json"),
+    activation_install_command=("plugin", "add", "yoetz@yoetz", "--json"),
+    activation_probe_environment="temporary_owner_private_home",
+    activation_environment=(("CODEX_HOME", "/tmp/codex"), ("CODEX_TESTING_HOME", "/tmp/codex")),
+    activation_marketplace_preimage_digest="sha256:marketplace-before",
+    activation_config_preimage_digest="sha256:config-before",
+    activation_cache_mutation_planned=True,
 )
 
 LOCAL_ONLY = PrivacyPosture(profile="local_only", llm_inference_enabled=False, readable=True)
@@ -122,7 +142,9 @@ class FakeRuntime:
     applied: list[tuple[str, str | None]] = field(default_factory=lambda: [])
     # Which route each half of the integration asked for, so a test can assert they agree.
     planned_routes: list[str | None] = field(default_factory=lambda: [])
+    planned_codex_homes: list[Path] = field(default_factory=lambda: [])
     applied_routes: list[str] = field(default_factory=lambda: [])
+    applied_codex_homes: list[Path] = field(default_factory=lambda: [])
     ceremonies: list[str] = field(default_factory=lambda: [])
     bindings: list[tuple[str, str]] = field(default_factory=lambda: [])
     checks: list[tuple[str, CheckMode]] = field(default_factory=lambda: [])
@@ -197,6 +219,7 @@ class FakeRuntime:
     async def integration_plan(
         self,
         option: HarnessOption,
+        codex_home: Path,
         route_profile: Literal["policy", "strict"] | None = None,
     ) -> IntegrationPlan:
         if self.plan_error is not None:
@@ -205,11 +228,19 @@ class FakeRuntime:
         # the preview digest, so a fake that ignored it would let the ordering defect this
         # signature exists to prevent pass unnoticed.
         self.planned_routes.append(route_profile)
+        self.planned_codex_homes.append(codex_home)
         route = self.plan.route_profile if route_profile is None else route_profile
         return replace(
             self.plan,
             harness_label=option.label,
             executable_path=option.executable_path,
+            codex_home=str(codex_home),
+            activation_config_path=str(codex_home / "config.toml"),
+            activation_plugin_install_path=str(codex_home / "plugins/cache/yoetz/yoetz/0.1.0"),
+            activation_environment=(
+                ("CODEX_HOME", str(codex_home)),
+                ("CODEX_TESTING_HOME", str(codex_home)),
+            ),
             reported_version=option.reported_version,
             route_profile=route,
             mcp_command=(
@@ -222,6 +253,7 @@ class FakeRuntime:
     ) -> IntegrationOutcome:
         self.applied.append((plan.preview_digest, plan.policy_digest))
         self.applied_routes.append(plan.route_profile)
+        self.applied_codex_homes.append(Path(plan.codex_home))
         if self.apply_result is not None:
             return self.apply_result
         return IntegrationOutcome(

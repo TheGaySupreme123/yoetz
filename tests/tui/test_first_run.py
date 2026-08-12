@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
-from textual.widgets import Input
+from textual.widgets import Input, Static
 
 from builders.tui_runtime import CLI, DESKTOP, FakeRuntime
 from yoetz.tui.app import YoetzTui
@@ -135,6 +136,60 @@ async def test_multiple_installations_ask_which_one_before_previewing(
         technical = "\n".join(view.technical_details)
         assert CLI.executable_path in technical
         assert DESKTOP.executable_path not in technical
+
+
+async def test_exact_codex_home_is_entered_separately_and_bound_to_the_plan(
+    make_app: MakeApp,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "selected-codex-home"
+    codex_home.mkdir()
+    runtime = FakeRuntime(harnesses=(CLI,))
+    app = make_app(first_run=True, runtime=runtime, prompt_codex_home=True)
+
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")  # connect using the sole discovered executable
+        await pilot.pause()
+
+        view = app.open_view
+        assert view is not None
+        assert view.view_name == "codex-home-path"
+        label = view.query_one(".entry-label", Static).render()
+        assert CLI.executable_path in str(label)
+        view.query_one("#view-entry", Input).value = str(codex_home)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.open_view is not None
+        assert app.open_view.view_name == "trust"
+        await pilot.press("enter")
+        await pilot.pause()
+        await answer_review(pilot)
+
+        preview = app.open_view
+        assert preview is not None
+        assert preview.view_name == "integration"
+        technical = "\n".join(preview.technical_details)
+        assert CLI.executable_path in technical
+        assert "Explicit Codex home" in technical
+        assert str(codex_home) in "".join(line.strip() for line in preview.technical_details)
+        for disclosed_effect in (
+            "Probed activation version",
+            "Executable digest",
+            "Plugin cache/install target",
+            "Marketplace preimage digest",
+            "Config preimage digest",
+            "Forced activation environment",
+            "Exact activation command argv",
+            "Plugin cache mutation planned",
+        ):
+            assert disclosed_effect in technical
+        assert runtime.planned_codex_homes == [codex_home]
+
+        await pilot.press("enter")  # approve the exact paired plan
+        await pilot.pause()
+        assert runtime.applied_codex_homes == [codex_home]
 
 
 async def test_an_empty_manual_executable_path_is_rejected_in_place(

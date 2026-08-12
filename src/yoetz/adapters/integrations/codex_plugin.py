@@ -39,6 +39,7 @@ __all__ = [
     "PluginInspection",
     "inspect_plugin",
     "install_plugin",
+    "render_plugin_install_tree",
     "render_plugin_tree",
 ]
 
@@ -265,6 +266,15 @@ def render_plugin_tree(*, resource_source: SkillResourceSource | None = None) ->
     for relative_path, data in skill_members.items():
         members[f"skills/yoetz/{relative_path}"] = data
     return members
+
+
+def render_plugin_install_tree(
+    *, resource_source: SkillResourceSource | None = None
+) -> dict[str, bytes]:
+    """Render the complete installed tree, including the deterministic ownership marker."""
+
+    members = render_plugin_tree(resource_source=resource_source)
+    return {**members, _MARKER_NAME: _build_marker(members)}
 
 
 def _validated_project(target: IntegrationTarget) -> Path:

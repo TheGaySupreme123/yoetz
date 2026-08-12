@@ -425,23 +425,32 @@ class YoetzTui(App[int]):
         # walked as a cursor rather than a straight line. Only the questions run in this loop;
         # once `_connect` applies a change there is nothing to step back to, and the loop ends.
         option: HarnessOption | None = None
+        codex_home: Path | None = None
         review: str | None = None
         step = 0
-        while step < 3:
+        while step < 4:
             if step == 0:
                 option = await self._choose_harness(detection.harnesses)
                 if option is None:
                     self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
                     return
+                codex_home = None
                 step = 1
             elif step == 1:
+                assert option is not None
+                codex_home = await self._choose_codex_home(option)
+                if codex_home is None:
+                    self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
+                    return
+                step = 2
+            elif step == 2:
                 trust = await self._confirm_project_trust(detection, allow_back=True)
                 if trust is BACK:
                     step = 0
                     continue
                 if not trust:
                     return
-                step = 2
+                step = 3
             else:
                 # The review answer decides which MCP command is registered, so it is asked
                 # before the registration -- and before the approval screen that shows that
@@ -449,18 +458,21 @@ class YoetzTui(App[int]):
                 # up on the strict route.
                 review = await self._ask_review_mode(allow_back=True)
                 if review == BACK:
-                    step = 1
+                    step = 2
                     continue
                 if review is None:
                     self.say(Level.OPTIONAL, "Setup stopped. Nothing was changed.")
                     return
-                step = 3
+                step = 4
 
         assert option is not None
-        if not await self._connect(option, "policy" if review == "semantic" else "strict"):
+        assert codex_home is not None
+        if not await self._connect(
+            option, codex_home, "policy" if review == "semantic" else "strict"
+        ):
             return
         await self._choose_storage(detection)
-        await self._run_initial_review(review, connected=True, option=option)
+        await self._run_initial_review(review, connected=True, option=option, codex_home=codex_home)
 
     async def _ask_review_mode(self, *, allow_back: bool = False) -> str | None:
         """Ask the posture question only; applying the answer belongs to the caller.
@@ -499,6 +511,7 @@ class YoetzTui(App[int]):
         *,
         connected: bool,
         option: HarnessOption | None = None,
+        codex_home: Path | None = None,
     ) -> None:
         # Only an explicit local answer finishes as local-only. Dismiss (None) is handled by
         # the first-run callers before storage or registration, so it must not fall through here.
@@ -519,12 +532,16 @@ class YoetzTui(App[int]):
                 "Semantic setup is not complete",
                 ("A provider binding, privacy policy, and stored credential are required.",),
             )
-            await self._offer_local_only_finish(option, connected=connected)
+            await self._offer_local_only_finish(option, connected=connected, codex_home=codex_home)
             return
         await self._finish_setup(connected=connected)
 
     async def _offer_local_only_finish(
-        self, option: HarnessOption | None, *, connected: bool
+        self,
+        option: HarnessOption | None,
+        *,
+        connected: bool,
+        codex_home: Path | None = None,
     ) -> None:
         """Leave a coherent installation when semantic setup does not complete.
 
@@ -565,7 +582,12 @@ class YoetzTui(App[int]):
             return
         # Re-registering the other route is a change to the project, so it goes through the
         # same preview and approval as the first registration -- never a silent mutation.
-        if connected and option is not None and not await self._connect(option, "strict"):
+        if (
+            connected
+            and option is not None
+            and codex_home is not None
+            and not await self._connect(option, codex_home, "strict")
+        ):
             return
         await self._finish_setup(connected=connected)
 
@@ -615,6 +637,37 @@ class YoetzTui(App[int]):
                 )
         return options[int(chosen)]
 
+    async def _choose_codex_home(self, option: HarnessOption) -> Path | None:
+        """Collect the exact home paired with one selected executable; never infer it."""
+
+        while True:
+            entry = TextEntryView(
+                name="codex-home-path",
+                title="Pair this Codex executable with its exact home",
+                label=f"Codex home used by {option.executable_path}",
+                placeholder="/absolute/path/to/.codex",
+                empty_is_cancel=False,
+            )
+            if await self.ask(entry) is None:
+                return None
+            raw = entry.value.strip()
+            candidate = Path(raw)
+            if (
+                raw
+                and candidate.is_absolute()
+                and candidate.is_dir()
+                and not candidate.is_symlink()
+            ):
+                return candidate
+            self.say(
+                Level.BLOCKED,
+                "That Codex home is not an existing absolute directory",
+                (
+                    "Nothing was changed. Enter the exact home for the selected executable "
+                    "or press Esc to cancel.",
+                ),
+            )
+
     async def _confirm_project_trust(
         self, detection: Detection, *, allow_back: bool = False
     ) -> bool | str:
@@ -643,10 +696,11 @@ class YoetzTui(App[int]):
     async def _connect(
         self,
         option: HarnessOption,
+        codex_home: Path,
         route_profile: Literal["policy", "strict"] | None = None,
     ) -> bool:
         try:
-            plan = await self.runtime.integration_plan(option, route_profile)
+            plan = await self.runtime.integration_plan(option, codex_home, route_profile)
         except RuntimeError_ as error:
             self._report(error)
             return False
@@ -1042,8 +1096,12 @@ class YoetzTui(App[int]):
                 (f"Registration: {state}", f"Executable: {option.executable_path}"),
             )
             return
+        codex_home = await self._choose_codex_home(option)
+        if codex_home is None:
+            self.say(Level.OPTIONAL, "Connection was left unchanged.")
+            return
         if choice == "technical":
-            plan = await self.runtime.integration_plan(option)
+            plan = await self.runtime.integration_plan(option, codex_home)
             await self.ask(
                 DetailsView(
                     name="connect-technical",
@@ -1052,7 +1110,7 @@ class YoetzTui(App[int]):
                 )
             )
             return
-        await self._connect(option)
+        await self._connect(option, codex_home)
         await self._refresh_header()
 
     async def _offer_package_upgrade_if_newer(self) -> bool:

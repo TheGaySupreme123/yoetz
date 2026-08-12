@@ -139,7 +139,11 @@ observe_checks_app = typer.Typer(
     help="Preview and manage exact-digest approved workspace checks.",
     no_args_is_help=True,
 )
+recommend_app = typer.Typer(
+    help="Review and explicitly decide recommended defaults.", no_args_is_help=True
+)
 
+app.add_typer(recommend_app, name="recommend")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(state_app, name="state")
 app.add_typer(integrate_app, name="integrate")
@@ -160,6 +164,85 @@ app.add_typer(elevated_app, name="consent")
 app.add_typer(hooks_app, name="hooks")
 app.add_typer(observe_app, name="observe")
 observe_app.add_typer(observe_checks_app, name="checks")
+
+
+def _recommend_operation(name: str) -> Callable[..., None]:
+    module = importlib.import_module("yoetz.cli.recommend")
+    return cast(Callable[..., None], getattr(module, name))
+
+
+@recommend_app.command("list")
+def recommend_list_cmd(
+    json_output: _JSON = False,
+    codex_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--codex-path",
+            help="Exact Codex executable to inspect; activation status stays unknown without it.",
+        ),
+    ] = None,
+    codex_home: Annotated[
+        Path | None,
+        typer.Option("--codex-home", help="Exact Codex home expected from that executable."),
+    ] = None,
+) -> None:
+    """Refresh at this heavy touchpoint and list cached pending recommendations."""
+
+    _recommend_operation("recommend_list")(
+        json_output=json_output,
+        codex_path=codex_path,
+        codex_home=codex_home,
+    )
+
+
+@recommend_app.command("accept")
+def recommend_accept_cmd(
+    recommendation_id: Annotated[str, typer.Argument(help="Exact recommendation id.")],
+    codex_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--codex-path",
+            help="Exact Codex executable whose activation is being approved.",
+        ),
+    ] = None,
+    codex_home: Annotated[
+        Path | None,
+        typer.Option("--codex-home", help="Exact Codex home to preview and update."),
+    ] = None,
+) -> None:
+    """Explicitly approve and apply one currently recommended action."""
+
+    _recommend_operation("recommend_accept")(
+        recommendation_id,
+        codex_path=codex_path,
+        codex_home=codex_home,
+    )
+
+
+@recommend_app.command("decline")
+def recommend_decline_cmd(
+    recommendation_id: Annotated[str, typer.Argument(help="Exact recommendation id.")],
+    codex_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--codex-path",
+            help="Exact Codex executable used to refresh activation advice.",
+        ),
+    ] = None,
+    codex_home: Annotated[
+        Path | None,
+        typer.Option(
+            "--codex-home", help="Exact Codex home used when refreshing activation advice."
+        ),
+    ] = None,
+) -> None:
+    """Remember an explicit decline; this recommendation will not be shown again."""
+
+    _recommend_operation("recommend_decline")(
+        recommendation_id,
+        codex_path=codex_path,
+        codex_home=codex_home,
+    )
 
 
 def run_async(operation: Callable[[], Awaitable[int]]) -> int:
@@ -439,11 +522,50 @@ def observe_status_cmd(
     workspace: Annotated[
         str | None, typer.Option("--workspace", help="Workspace path (commitment only stored).")
     ] = None,
+    codex_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--codex-path",
+            help="Exact Codex executable to inspect; requires --codex-home.",
+        ),
+    ] = None,
+    codex_home: Annotated[
+        Path | None,
+        typer.Option(
+            "--codex-home",
+            help="Expected Codex home/cache; requires --codex-path.",
+        ),
+    ] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Show observation consent and lifecycle status for a workspace."""
 
-    _finish(_observe_operation("observe_status")(workspace=workspace, json_output=json_output))
+    if (codex_path is None) != (codex_home is None):
+        raise typer.BadParameter("--codex-path and --codex-home must be provided together")
+    _finish(
+        _observe_operation("observe_status")(
+            workspace=workspace,
+            codex_path=codex_path,
+            codex_home=codex_home,
+            json_output=json_output,
+        )
+    )
+
+
+@observe_app.command("drain")
+def observe_drain_cmd(
+    workspace: Annotated[
+        str | None,
+        typer.Option(
+            "--workspace",
+            help="Restrict delivery to one workspace; default drains all pending commitments.",
+        ),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Deliver pending structural observations and summarize exact routing outcomes."""
+
+    _finish(_observe_operation("drain_observation")(workspace=workspace, json_output=json_output))
 
 
 @observe_app.command("grant")
@@ -952,10 +1074,17 @@ def setup_run(
         typer.Option("--non-interactive", help="Never prompt; report without mutating."),
     ] = False,
     codex_path: _CODEX_PATH = None,
+    codex_home: Annotated[
+        Path | None,
+        typer.Option("--codex-home", help="Exact Codex home to bind activation to."),
+    ] = None,
     accept: _ACCEPT = False,
     json_output: _JSON = False,
 ) -> None:
     """Run the guided first-run setup wizard."""
+
+    if (codex_path is None) != (codex_home is None):
+        raise typer.BadParameter("--codex-path and --codex-home must be provided together")
 
     operation = _setup_operation("run_setup_wizard")
     _finish(
@@ -963,6 +1092,7 @@ def setup_run(
             lambda: operation(
                 non_interactive=non_interactive,
                 codex_path=codex_path,
+                codex_home=codex_home,
                 accept=accept,
                 json_output=json_output,
             )
