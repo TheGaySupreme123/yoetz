@@ -37,6 +37,21 @@ def test_observation_probe_reads_real_consent_but_writes_only_ephemeral_state(
         return True
 
     monkeypatch.setattr(setup, "_installed_hooks_declare_workspace_binding", hooks_installed)
+
+    import yoetz.cli.observe_hooks as observe_hooks
+
+    service_touches: list[str] = []
+
+    async def forbidden_connect(*_args: object, **_kwargs: object) -> object:
+        service_touches.append("connect_service")
+        raise AssertionError("the readiness probe must never open a service connection")
+
+    async def forbidden_auto_start(*_args: object, **_kwargs: object) -> object:
+        service_touches.append("_try_auto_start")
+        raise AssertionError("the readiness probe must never auto-attach a ledger task")
+
+    monkeypatch.setattr(observe_hooks, "connect_service", forbidden_connect)
+    monkeypatch.setattr(observe_hooks, "_try_auto_start", forbidden_auto_start)
     store = LocalObservationStore()
     commitment = store.workspace_commitment(str(workspace.resolve()))
     store.grant_consent(commitment)
@@ -45,6 +60,7 @@ def test_observation_probe_reads_real_consent_but_writes_only_ephemeral_state(
     result = setup._observation_hook_probe(workspace=workspace)  # pyright: ignore[reportPrivateUsage]
 
     assert result == {"ok": True, "reason": "envelope_enqueued"}
+    assert service_touches == []
     assert _tree(live_state) == before
     assert store.codex_sessions_for_workspace(commitment) == ()
     assert store.list_pending_outbox(commitment) == ()

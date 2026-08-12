@@ -4,12 +4,19 @@ import tomllib
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
+import anyio
 from typer.testing import CliRunner
 
+from yoetz.application.package_update import (
+    build_package_update_advisory,
+    installed_package_version,
+)
 from yoetz.application.recommendations import (
     RecommendationContext,
     RecommendationState,
     load_recommendation_state,
+    refresh_pending,
+    store_recommendation_state,
 )
 from yoetz.cli.app import app
 from yoetz.config.models import ConfigError, ObservationConfig, YoetzConfig
@@ -31,8 +38,6 @@ def _patch_pending_context(monkeypatch: object, recommendation_id: str) -> None:
             return RecommendationContext(observation_enabled=False)
         if recommendation_id == "codex-plugin-activation":
             return RecommendationContext(codex_activation_state="installed_not_activated")
-        from yoetz.application.package_update import build_package_update_advisory
-
         return RecommendationContext(
             package_update=build_package_update_advisory(
                 installed_version="0.1.0", latest_version="0.2.0", source="cache"
@@ -75,8 +80,6 @@ def test_decline_is_durable_and_removes_cached_pending(tmp_path: Path, monkeypat
         decisions=MappingProxyType({}),
         pending=("observation-enabled",),
     )
-    from yoetz.application.recommendations import store_recommendation_state
-
     store_recommendation_state(refresh, root=tmp_path)
 
     result = _RUNNER.invoke(app, ["recommend", "decline", "observation-enabled"])
@@ -389,3 +392,110 @@ def test_activation_accept_requires_exact_codex_home(tmp_path: Path, monkeypatch
 
     assert result.exit_code == 2
     assert "activation_codex_home_required" in result.output
+
+
+def _seed_package_update_pending(tmp_path: Path) -> None:
+    """Daemon-style refresh: a real performed advisory establishes package-update pending."""
+
+    advisory = build_package_update_advisory(
+        installed_version=installed_package_version(),
+        latest_version="9999.0.0",
+        source="network",
+    )
+    state = anyio.run(
+        lambda: refresh_pending(
+            context=RecommendationContext(package_update=advisory), root=tmp_path
+        )
+    )
+    assert "package-update" in state.pending
+
+
+def _patch_config_path(monkeypatch: object, tmp_path: Path) -> None:
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "yoetz.cli.recommend.config_file_path", lambda: tmp_path / "config.toml"
+    )
+
+
+def test_package_update_pending_survives_policyless_list_and_accepts(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """Regression: the real policy-less CLI context must not erase daemon-set pending advice."""
+
+    _patch_state_root(monkeypatch, tmp_path)
+    _patch_config_path(monkeypatch, tmp_path)
+    _seed_package_update_pending(tmp_path)
+
+    listed = _RUNNER.invoke(app, ["recommend", "list"])
+
+    assert listed.exit_code == 0, listed.output
+    assert "package-update" in listed.stdout
+    assert "package-update" in load_recommendation_state(root=tmp_path).pending
+
+    accepted = _RUNNER.invoke(app, ["recommend", "accept", "package-update"])
+
+    assert accepted.exit_code == 0, accepted.output
+    assert "recommendation_not_pending" not in accepted.output
+    assert "uv tool upgrade yoetz" in accepted.stdout
+    state = load_recommendation_state(root=tmp_path)
+    assert state.decisions["package-update"].decision == "accepted"
+    assert "package-update" not in state.pending
+
+
+def test_package_update_decline_succeeds_after_policyless_list(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    _patch_state_root(monkeypatch, tmp_path)
+    _patch_config_path(monkeypatch, tmp_path)
+    _seed_package_update_pending(tmp_path)
+
+    listed = _RUNNER.invoke(app, ["recommend", "list"])
+    assert listed.exit_code == 0, listed.output
+
+    declined = _RUNNER.invoke(app, ["recommend", "decline", "package-update"])
+
+    assert declined.exit_code == 0, declined.output
+    assert "will not be shown again" in declined.stdout
+    state = load_recommendation_state(root=tmp_path)
+    assert "package-update" not in state.pending
+    assert state.decisions["package-update"].decision == "declined"
+
+
+def test_activation_decline_needs_no_codex_authority_and_is_durable(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    _patch_state_root(monkeypatch, tmp_path)
+    store_recommendation_state(
+        RecommendationState(
+            last_evaluated_version=installed_package_version(),
+            pending=("codex-plugin-activation",),
+        ),
+        root=tmp_path,
+    )
+
+    result = _RUNNER.invoke(app, ["recommend", "decline", "codex-plugin-activation"])
+
+    assert result.exit_code == 0, result.output
+    assert "will not be shown again" in result.stdout
+    state = load_recommendation_state(root=tmp_path)
+    assert state.pending == ()
+    assert state.decisions["codex-plugin-activation"].decision == "declined"
+
+    refreshed = anyio.run(
+        lambda: refresh_pending(
+            context=RecommendationContext(codex_activation_state="installed_not_activated"),
+            root=tmp_path,
+            force=True,
+        )
+    )
+
+    assert "codex-plugin-activation" not in refreshed.pending
+    assert refreshed.decisions["codex-plugin-activation"].decision == "declined"
+
+
+def test_decline_requires_cached_pending(tmp_path: Path, monkeypatch: object) -> None:
+    _patch_state_root(monkeypatch, tmp_path)
+
+    result = _RUNNER.invoke(app, ["recommend", "decline", "codex-plugin-activation"])
+
+    assert result.exit_code == 2
+    assert "recommendation_not_pending" in result.output

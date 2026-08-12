@@ -357,6 +357,73 @@ def test_yoetz_tool_still_ingests_but_skips_advice_loop(tmp_path: Path) -> None:
     assert json.loads(out.getvalue().decode()) == {}
 
 
+def test_skip_service_session_start_never_opens_service_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        mapping_from_start_ids,
+        store_mapping,
+    )
+    from yoetz.protocol.ids import IdKind, new_id
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    service_touches: list[str] = []
+
+    async def forbidden_connect(*_args: object, **_kwargs: object) -> object:
+        service_touches.append("connect_service")
+        raise AssertionError("skip_service must never open a service connection")
+
+    async def forbidden_auto_start(*_args: object, **_kwargs: object) -> object:
+        service_touches.append("_try_auto_start")
+        raise AssertionError("skip_service must never auto-attach a ledger task")
+
+    monkeypatch.setattr(observe_hooks_module, "connect_service", forbidden_connect)
+    monkeypatch.setattr(observe_hooks_module, "_try_auto_start", forbidden_auto_start)
+
+    # Unmapped session: the auto-attach branch must be gated by skip_service.
+    unmapped = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "probe-unmapped", "hook_event_name": "SessionStart", "cwd": "."}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert unmapped == 0
+
+    # Mapped session: the status-read branch must be gated as well.
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id="probe-mapped",
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    mapped = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "probe-mapped", "hook_event_name": "SessionStart", "cwd": "."}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert mapped == 0
+    assert service_touches == []
+    # Local capture still ran: sessions bound and envelopes queued in the outbox.
+    assert store.find_workspace_for_codex_session("probe-unmapped") == workspace
+    assert store.find_workspace_for_codex_session("probe-mapped") == workspace
+    assert store.list_pending_outbox(workspace)
+
+
 def test_malformed_stdin_exits_zero(tmp_path: Path) -> None:
     code = handle_observe(
         event_name="Stop",

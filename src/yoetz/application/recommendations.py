@@ -37,6 +37,7 @@ __all__ = [
     "RecommendationStoreError",
     "RecommendedDefault",
     "cached_pending_recommendations",
+    "decline_cached_recommendation",
     "evaluate_recommendation_context",
     "load_recommendation_state",
     "recommendation_by_id",
@@ -411,7 +412,12 @@ def _fact_is_known(item: RecommendedDefault, context: RecommendationContext) -> 
     if item.id == "codex-plugin-activation":
         return context.codex_activation_state is not None
     if item.id == "package-update":
-        return context.package_update is not None
+        # A "skipped_*" advisory records that no version comparison was actually performed
+        # (no policy/network authority, no cached or network answer, unparsable versions).
+        # That is the absence of a fact, not a satisfied fact: a policy-less touchpoint such
+        # as the plain CLI must retain daemon-established pending advice, never erase it.
+        advisory = context.package_update
+        return advisory is not None and advisory.outcome in {"newer_available", "up_to_date"}
     return False
 
 
@@ -487,6 +493,44 @@ def record_recommendation_decision(
         decisions = dict(current.decisions)
         decisions[recommendation_id] = RecommendationDecision(
             decision=decision,
+            decided_at=now if now is not None else datetime.now(tz=UTC),
+            version=current_version,
+        )
+        updated = RecommendationState(
+            last_evaluated_version=current.last_evaluated_version or current_version,
+            decisions=MappingProxyType(decisions),
+            pending=tuple(item for item in current.pending if item != recommendation_id),
+        )
+        store_recommendation_state(updated, root=root)
+        return updated
+
+
+def decline_cached_recommendation(
+    recommendation_id: str,
+    *,
+    root: Path | None = None,
+    version: str | None = None,
+    now: datetime | None = None,
+) -> RecommendationState:
+    """Durably decline one cached pending recommendation without re-evaluating any facts.
+
+    Decline grants nothing, so it needs no per-kind authority (no selected Codex home, no
+    network posture) and must never route through context evaluation: verification against
+    the cached pending set and the durable write happen as one transition under the lock.
+    """
+
+    if recommendation_id not in _BY_ID:
+        raise ValueError("recommendation_unknown")
+    current_version = installed_package_version() if version is None else version
+    if type(current_version) is not str or not current_version:
+        raise ValueError("recommendation_version_invalid")
+    with _state_lock(root):
+        current = load_recommendation_state(root=root)
+        if recommendation_id not in current.pending:
+            raise ValueError("recommendation_not_pending")
+        decisions = dict(current.decisions)
+        decisions[recommendation_id] = RecommendationDecision(
+            decision="declined",
             decided_at=now if now is not None else datetime.now(tz=UTC),
             version=current_version,
         )

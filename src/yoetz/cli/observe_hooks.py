@@ -681,7 +681,12 @@ def handle_observe(
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
 ) -> int:
-    """Bounded observation ingress for Codex lifecycle hooks. Always exits 0."""
+    """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
+
+    ``skip_service`` keeps the hook fully local: capture, binding, and outbox
+    enqueue still run, but no service connection is ever opened (auto-attach,
+    mapped-session status, and outbox drains are all skipped).
+    """
 
     import anyio
 
@@ -869,6 +874,9 @@ def handle_observe(
             store.refresh_advice(workspace_commitment)
 
         # SessionStart: auto-start/attach first, persist mapping, then drain outbox.
+        # Every branch below that opens a service connection is gated on
+        # skip_service so local-only callers (e.g. the setup readiness probe)
+        # never create or attach real ledger tasks.
         additional = ""
         mapping: LifecycleMapping | None = load_mapping(codex_session_id, _state=_state)
         if resolved_event == "SessionStart":
@@ -877,7 +885,7 @@ def handle_observe(
                 with acquire_session_lock(codex_session_id, _state=_state) as owned:
                     if owned:
                         mapping = load_mapping(codex_session_id, _state=_state)
-                        if mapping is None and not skip_advice_loop:
+                        if mapping is None and not skip_advice_loop and not skip_service:
 
                             async def _attach() -> LifecycleMapping | None:
                                 return await _try_auto_start(codex_session_id, _state=_state)
@@ -891,7 +899,7 @@ def handle_observe(
                                 )
                             else:
                                 additional = _active_context(mapping, mapping.last_frontier)
-                        elif mapping is not None:
+                        elif mapping is not None and not skip_service:
                             active_mapping = mapping
 
                             async def _status() -> object:

@@ -14,6 +14,7 @@ from yoetz.application.recommendations import (
     RecommendationContext,
     RecommendationStoreError,
     cached_pending_recommendations,
+    decline_cached_recommendation,
     evaluate_recommendation_context,
     load_recommendation_state,
     record_recommendation_decision,
@@ -199,6 +200,90 @@ def test_store_rejects_world_readable_or_symlink_leaf(tmp_path: Path) -> None:
     os.symlink(target, store)
     with pytest.raises(RecommendationStoreError, match="recommendation_store_unsafe"):
         load_recommendation_state(root=tmp_path)
+
+
+def _skipped_policy() -> PackageUpdateAdvisory:
+    return build_package_update_advisory(
+        installed_version="0.1.0",
+        latest_version=None,
+        source="none",
+        outcome="skipped_policy",
+    )
+
+
+@pytest.mark.anyio
+async def test_policy_skipped_advisory_is_unknown_and_retains_pending(tmp_path: Path) -> None:
+    established = await refresh_pending(
+        context=RecommendationContext(package_update=_newer()),
+        root=tmp_path,
+        version="0.1.0",
+    )
+    assert "package-update" in established.pending
+
+    retained = await refresh_pending(
+        context=RecommendationContext(package_update=_skipped_policy()),
+        root=tmp_path,
+        version="0.1.0",
+        force=True,
+    )
+
+    assert "package-update" in retained.pending
+
+
+@pytest.mark.anyio
+async def test_policy_skipped_advisory_never_creates_pending(tmp_path: Path) -> None:
+    state = await refresh_pending(
+        context=RecommendationContext(package_update=_skipped_policy()),
+        root=tmp_path,
+        version="0.1.0",
+    )
+
+    assert "package-update" not in state.pending
+
+
+@pytest.mark.anyio
+async def test_performed_up_to_date_advisory_clears_pending(tmp_path: Path) -> None:
+    await refresh_pending(
+        context=RecommendationContext(package_update=_newer()),
+        root=tmp_path,
+        version="0.1.0",
+    )
+
+    up_to_date = build_package_update_advisory(
+        installed_version="0.1.0", latest_version="0.1.0", source="network"
+    )
+    cleared = await refresh_pending(
+        context=RecommendationContext(package_update=up_to_date),
+        root=tmp_path,
+        version="0.1.0",
+    )
+
+    assert up_to_date.outcome == "up_to_date"
+    assert "package-update" not in cleared.pending
+
+
+@pytest.mark.anyio
+async def test_decline_cached_declines_pending_without_context(tmp_path: Path) -> None:
+    await refresh_pending(
+        context=RecommendationContext(package_update=_newer()),
+        root=tmp_path,
+        version="0.1.0",
+    )
+
+    declined = decline_cached_recommendation(
+        "package-update", root=tmp_path, version="0.1.0", now=_NOW
+    )
+
+    assert "package-update" not in declined.pending
+    assert declined.decisions["package-update"].decision == "declined"
+
+
+def test_decline_cached_requires_cached_pending(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="recommendation_not_pending"):
+        decline_cached_recommendation("package-update", root=tmp_path, version="0.1.0", now=_NOW)
+
+    with pytest.raises(ValueError, match="recommendation_unknown"):
+        decline_cached_recommendation("not-real", root=tmp_path, version="0.1.0", now=_NOW)
 
 
 @pytest.mark.anyio

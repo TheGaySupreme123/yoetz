@@ -18,6 +18,7 @@ from yoetz.application.recommendations import (
     RecommendationContext,
     RecommendationState,
     RecommendationStoreError,
+    decline_cached_recommendation,
     evaluate_recommendation_context,
     recommendation_by_id,
     record_recommendation_decision,
@@ -474,47 +475,36 @@ def recommend_decline(
     codex_path: Annotated[
         Path | None,
         typer.Option(
-            "--codex-path", help="Exact Codex executable used to refresh activation advice."
+            "--codex-path",
+            help="Accepted for compatibility; decline never inspects a Codex executable.",
         ),
     ] = None,
     codex_home: Annotated[
         Path | None,
         typer.Option(
             "--codex-home",
-            help="Exact Codex home used when refreshing activation advice.",
+            help="Accepted for compatibility; decline never touches a Codex home.",
         ),
     ] = None,
 ) -> None:
     """Remember an explicit decline; this recommendation will not be shown again."""
 
+    # Decline consumes no Codex authority, so these selectors are deliberately inert; the
+    # wrapper command in cli/app.py still forwards them for invocation compatibility.
+    del codex_path, codex_home
     if recommendation_by_id(recommendation_id) is None:
         typer.echo("invalid_request: recommendation_unknown", err=True)
         raise typer.Exit(2)
-    if recommendation_id == "codex-plugin-activation" and codex_path is None:
-        typer.echo("recommendation_error: activation_codex_path_required", err=True)
-        raise typer.Exit(2)
-    if recommendation_id == "codex-plugin-activation" and codex_home is None:
-        typer.echo("recommendation_error: activation_codex_home_required", err=True)
-        raise typer.Exit(2)
+    # Decline is a pure durable memory write against the already-cached pending advice.
+    # It must never require per-kind authority (an exact Codex path/home, network posture)
+    # or force a fresh evaluation: the hook-advertised `yoetz recommend decline <id>` line
+    # has to be honorable exactly as printed.
     try:
-
-        async def refresh_exact() -> RecommendationState:
-            async def context() -> RecommendationContext:
-                return await _current_context(codex_path=codex_path, codex_home=codex_home)
-
-            return await refresh_pending(context_factory=context, force=True)
-
-        current = anyio.run(refresh_exact)
-        if recommendation_id not in current.pending:
-            raise _RecommendationCliError("recommendation_not_pending")
-        record_recommendation_decision(recommendation_id, "declined")
+        decline_cached_recommendation(recommendation_id)
     except RecommendationStoreError as exc:
         typer.echo(f"recommendation_error: {exc.reason_code}", err=True)
         raise typer.Exit(2) from exc
-    except ConfigError as exc:
-        typer.echo(f"invalid_request: {exc.reason_code}", err=True)
-        raise typer.Exit(2) from exc
-    except _RecommendationCliError as exc:
-        typer.echo(f"recommendation_error: {exc.reason_code}", err=True)
+    except ValueError as exc:
+        typer.echo(f"recommendation_error: {exc}", err=True)
         raise typer.Exit(2) from exc
     typer.echo(f"declined {recommendation_id}; this recommendation will not be shown again")

@@ -591,6 +591,56 @@ def test_unrelated_personal_marketplace_is_not_foreign(tmp_path: Path) -> None:
     )
 
 
+def test_owner_inline_tables_refuse_at_preview_without_writing(tmp_path: Path) -> None:
+    target, project, home = _target(tmp_path)
+    _install(target)
+    config = home / "config.toml"
+    for owner_toml in (
+        "marketplaces = {}\n",
+        "plugins = {}\n",
+        "marketplaces = {}\nplugins = {}\n",
+    ):
+        config.write_text(owner_toml, encoding="utf-8")
+        before = config.read_bytes()
+        with pytest.raises(IntegrationError) as caught:
+            preview_activation(target, codex_home=home)
+        assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
+        with pytest.raises(IntegrationError) as caught:
+            apply_activation(target, codex_home=home, approved_digest="sha256:" + "0" * 64)
+        assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
+        assert config.read_bytes() == before
+        assert not (project / ".agents/plugins/marketplace.json").exists()
+
+
+def test_non_bmp_project_path_activates_with_parseable_config(tmp_path: Path) -> None:
+    project = tmp_path / "project-🦊"
+    project.mkdir(mode=0o700)
+    home = tmp_path / "codex"
+    home.mkdir(mode=0o700)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(project))
+    _install(target)
+    preview = preview_activation(target, codex_home=home)
+    assert "🦊" in preview.config_toml_block
+    result = apply_activation(target, codex_home=home, approved_digest=preview.preview_digest)
+    assert result.state is ActivationState.ACTIVE
+    config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
+    assert config["marketplaces"]["yoetz"]["source"] == str(project)
+    assert config["plugins"]["yoetz@yoetz"]["enabled"] is True
+    document = json.loads((project / ".agents/plugins/marketplace.json").read_bytes())
+    assert document["name"] == "yoetz"
+
+
+def test_applied_config_parses_as_toml(tmp_path: Path) -> None:
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    (home / "config.toml").write_text('model = "gpt-5"\n', encoding="utf-8")
+    preview = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=preview.preview_digest)
+    parsed = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
+    assert parsed["model"] == "gpt-5"
+    assert parsed["plugins"]["yoetz@yoetz"]["enabled"] is True
+
+
 def test_idempotent_reapply_keeps_exact_bytes(tmp_path: Path) -> None:
     target, project, home = _target(tmp_path)
     _install(target)

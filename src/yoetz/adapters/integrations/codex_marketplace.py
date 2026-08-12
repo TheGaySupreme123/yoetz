@@ -701,7 +701,11 @@ def _merged_marketplace_bytes(existing: Mapping[str, object] | None) -> bytes:
 
 
 def _toml_string(value: str) -> str:
-    return json.dumps(value, ensure_ascii=True)
+    # ``ensure_ascii=False`` keeps non-BMP characters literal (valid in TOML basic
+    # strings) instead of surrogate-pair ``\uXXXX`` escapes (invalid TOML), while
+    # JSON still escapes quote, backslash, and C0 controls as TOML-valid escapes.
+    # DEL is the one TOML-forbidden literal JSON leaves unescaped.
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def _activation_block(project: Path, config: Mapping[str, object]) -> str:
@@ -1008,7 +1012,15 @@ def _activated_config_bytes(raw: bytes, config: Mapping[str, object], project: P
         raise _error(IntegrationReason.DESTINATION_CONFLICT)
     if configured and enabled:
         return raw
-    return _append_config_block(raw, _activation_block(project, config))
+    merged = _append_config_block(raw, _activation_block(project, config))
+    try:
+        tomllib.loads(merged.decode("utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        # Legal owner TOML such as inline ``marketplaces = {}`` makes the appended
+        # table headers re-declarations; refuse at plan time instead of writing a
+        # config Codex itself can no longer parse.
+        raise _error(IntegrationReason.DESTINATION_CONFLICT) from exc
+    return merged
 
 
 def apply_activation(
