@@ -167,7 +167,9 @@ observe_app.add_typer(observe_checks_app, name="checks")
 
 
 def _recommend_operation(name: str) -> Callable[..., None]:
-    module = importlib.import_module("yoetz.cli.recommend")
+    # Keep recommendation composition outside the ordinary CLI import graph. Use the builtin
+    # importer here so tests may independently fence the adapter import performed by recommend.py.
+    module = __import__("yoetz.cli.recommend", fromlist=[name])
     return cast(Callable[..., None], getattr(module, name))
 
 
