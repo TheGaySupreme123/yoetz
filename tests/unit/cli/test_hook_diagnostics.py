@@ -22,11 +22,11 @@ def test_record_is_structural_and_owner_only(tmp_path: Path) -> None:
 
 
 def test_invalid_plaintext_is_not_persisted(tmp_path: Path) -> None:
-    record_hook_diagnostic("/Users/person/private repo", "payload\ntext", _state=tmp_path)
+    record_hook_diagnostic("customer private repository", "payload\ntext", _state=tmp_path)
     row = json.loads((tmp_path / "observation/hook-diagnostics.jsonl").read_text(encoding="utf-8"))
     assert row["event"] == "unknown_event"
     assert row["reason"] == "unknown_reason"
-    assert "person" not in json.dumps(row)
+    assert "customer" not in json.dumps(row)
 
 
 def test_sensitive_looking_legal_tokens_are_not_persisted(tmp_path: Path) -> None:
