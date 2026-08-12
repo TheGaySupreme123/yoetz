@@ -31,6 +31,13 @@ def _skill_text() -> str:
     return _PACKAGED_SKILL.read_text(encoding="utf-8")
 
 
+def _cadence_row(text: str, operation: str) -> str:
+    prefix = f"| `{operation}` | "
+    matches = [line for line in text.splitlines() if line.startswith(prefix)]
+    assert len(matches) == 1, f"expected one cadence row for {operation}, found {len(matches)}"
+    return matches[0].removeprefix(prefix).removesuffix(" |")
+
+
 def test_the_skill_is_packaged_at_all() -> None:
     assert _PACKAGED_SKILL.is_file(), "the installed skill is missing from the packaged resources"
     assert _skill_text().strip(), "the installed skill is empty"
@@ -88,6 +95,32 @@ def test_the_skill_states_how_often_to_call_each_operation() -> None:
         "never one per file, tool call, or message",
     ):
         assert cadence_marker in text, f"the skill states no cadence for: {cadence_marker!r}"
+
+
+def test_check_cadence_nudge_is_mirrored_from_workflow() -> None:
+    skill = _skill_text()
+    workflow = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
+    cadence = _cadence_row(workflow, "check")
+
+    assert _cadence_row(skill, "check") == cadence
+    for marker in (
+        "Also consider a check when you move between subtasks or phases",
+        "`deterministic_only` is local and fast",
+        "reserve semantic review for the claim unless the transition itself warrants it",
+        "A check with no new events since the last one adds nothing",
+    ):
+        assert marker in cadence
+    assert (
+        "- [ ] after a material subtask or phase transition, consider a deliberate-mode check"
+        in skill
+    )
+
+
+def test_respond_cadence_is_mirrored_from_workflow() -> None:
+    skill = _skill_text()
+    workflow = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
+
+    assert _cadence_row(skill, "respond") == _cadence_row(workflow, "respond")
 
 
 def test_the_skill_does_not_promise_that_responding_clears_a_finding() -> None:

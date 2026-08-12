@@ -44,8 +44,8 @@ Tell the user briefly that you are using Yoetz as a local work ledger and verifi
 | `start` | Once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` (project remote URL or absolute root) + `external_ref` (branch/issue/plan slug) pair and no `session_id`. Sibling work: same workspace, different external_ref. Attach selectors are `session_id` or the ref pair — never bare `task_id`. |
 | `publish_work` | One batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message. Set `dry_run: true` first for an unfamiliar batch shape. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
-| `check` | After publishing the completion claim and its evidence, and again after any material edit, new evidence, or finding response. A check with no new events since the last one adds nothing. |
-| `respond` | Once per finding, at that finding's recorded frontier. |
+| `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response identifying a finding that check returned is not material change; a redacted or unreadable response requires a recheck. Also consider a check when you move between subtasks or phases — after publishing that transition's batch — not only at the completion claim. Choose the mode deliberately: `deterministic_only` is local and fast and catches record-hygiene gaps (stale ledger, digest-only evidence, open obligations) early; reserve semantic review for the claim unless the transition itself warrants it. A check with no new events since the last one adds nothing. |
+| `respond` | Once per finding, at the result frontier of the check that returned it — not the finding's `subject_frontier`, which precedes the finding's own record. |
 | `receipt` | Once at the end, and again only if material state changed after the previous receipt. |
 
 Not publishable: reading, searching, formatting, regenerating derived files, repeating a status read, or republishing unchanged state.
@@ -59,6 +59,7 @@ Copy this and check items off as you go:
 - [ ] start (stable request identity; create_or_attach with workspace_ref + external_ref, or attach via session_id)
 - [ ] publish the plan, requested outcomes, acceptance evidence, assignments
 - [ ] publish each material transition as it happens
+- [ ] after a material subtask or phase transition, consider a deliberate-mode check before continuing
 - [ ] status before closing: read closure_readiness for open obligations and gaps
 - [ ] publish the completion claim and its evidence (an assertion, not a conclusion)
 - [ ] check (choose mode deliberately)
