@@ -15,6 +15,7 @@ from yoetz.config.models import (
     LocalModelProfileConfig,
     LoggingConfig,
     NetworkPolicy,
+    ObservationConfig,
     ProviderProfileConfig,
     SemanticPolicy,
     StorageConfig,
@@ -136,6 +137,7 @@ def test_defaults_are_frozen_and_all_disclosure_is_denied() -> None:
     assert config.profile == "strict-local"
     assert config.storage == StorageConfig(data_dir=None, durability="full")
     assert config.verification == VerificationConfig(semantic="optional", max_findings=3)
+    assert config.observation == ObservationConfig(enabled=True)
     assert config.logging == LoggingConfig(level="info", payloads=False)
     assert config.privacy == safe_privacy_bootstrap()
     assert not config.privacy.network_egress_permitted
@@ -165,6 +167,12 @@ def test_profile_capability_matrix_is_closed() -> None:
         ),
         (lambda: VerificationConfig(max_findings=0), "max_findings_out_of_range"),
         (lambda: VerificationConfig(max_findings=11), "max_findings_out_of_range"),
+        (
+            lambda: ObservationConfig.model_validate(
+                {"enabled": True, "interval_seconds": 60}, strict=True
+            ),
+            "unknown_config_key",
+        ),
         (lambda: LoggingConfig(payloads=True), "payload_logging_forbidden"),
         (
             lambda: YoetzConfig(profile="strict-local", provider=_provider()),
@@ -242,6 +250,8 @@ def test_direct_strict_models_do_not_coerce_string_scalars() -> None:
         VerificationConfig(max_findings="3")  # type: ignore[arg-type]
     with pytest.raises(ConfigError):
         StorageConfig(data_dir="/tmp/not-a-path-object")  # type: ignore[arg-type]
+    with pytest.raises(ConfigError):
+        ObservationConfig(enabled="false")  # type: ignore[arg-type]
     assert StorageConfig(data_dir=Path("/safe")).data_dir == Path("/safe")
 
 

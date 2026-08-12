@@ -36,6 +36,8 @@ durability = "full"
 [verification]
 semantic = "optional"
 max_findings = 4
+[observation]
+enabled = false
 [logging]
 level = "warning"
 payloads = false
@@ -55,6 +57,7 @@ payloads = false
     )
     assert config.profile == "test-fake"
     assert config.verification.max_findings == 6
+    assert config.observation.enabled is False
     assert config.logging.level == "debug"
     assert config.logging.payloads is False
     assert config.storage.data_dir == Path("/env/data")
@@ -92,6 +95,18 @@ def test_unknown_and_secret_service_override_names_fail_closed() -> None:
         load_config({"provider.api_key": "never"}, {}, None)
     assert secret.value.reason_code == "secret_config_override_forbidden"
     assert "never" not in repr(secret.value)
+
+
+def test_observation_has_no_environment_or_service_override_surface() -> None:
+    with pytest.raises(ConfigError) as environment:
+        load_config({}, {"YOETZ_OBSERVATION_ENABLED": "false"}, None)
+    assert environment.value.reason_code == "unknown_config_env_var"
+    assert environment.value.safe_name == "YOETZ_OBSERVATION_ENABLED"
+
+    with pytest.raises(ConfigError) as service_override:
+        load_config({"observation.enabled": "false"}, {}, None)
+    assert service_override.value.reason_code == "unknown_config_override"
+    assert service_override.value.safe_name == "observation.enabled"
 
 
 def test_toml_parser_size_and_release_probe_rules(tmp_path: Path) -> None:

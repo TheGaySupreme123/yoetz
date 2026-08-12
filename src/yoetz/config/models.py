@@ -25,6 +25,7 @@ __all__ = [
     "LocalModelProfileConfig",
     "LoggingConfig",
     "NetworkPolicy",
+    "ObservationConfig",
     "OwnerDeclaredEndpointConfig",
     "PrivacyBootstrapConfig",
     "ProfileCapabilities",
@@ -305,6 +306,16 @@ class VerificationConfig(StrictConfigModel):
         return value
 
 
+class ObservationConfig(StrictConfigModel):
+    enabled: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_raw(cls, value: object) -> object:
+        _reject_unknown(value, frozenset({"enabled"}))
+        return value
+
+
 class LoggingConfig(StrictConfigModel):
     level: Literal["debug", "info", "warning", "error"] = "info"
     payloads: bool = False
@@ -472,6 +483,7 @@ class YoetzConfig(StrictConfigModel):
     profile: Literal["strict-local", "local-openai", "test-fake", "release-probe"] = "strict-local"
     storage: StorageConfig = Field(default_factory=StorageConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
+    observation: ObservationConfig = Field(default_factory=ObservationConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     privacy: PrivacyBootstrapConfig = Field(default_factory=PrivacyBootstrapConfig)
     provider: ProviderProfileConfig | None = None
@@ -486,6 +498,7 @@ class YoetzConfig(StrictConfigModel):
                 "profile",
                 "storage",
                 "verification",
+                "observation",
                 "logging",
                 "privacy",
                 "provider",
