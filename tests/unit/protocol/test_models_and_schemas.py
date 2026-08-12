@@ -2776,7 +2776,20 @@ def test_schema_manifest_failure_reason_matrix(
         "common/actor-assertion-1.0.0.schema.json",
         break_metaschema,
     )
-    _load_tree_with_reason(invalid_schema, monkeypatch, "schema_bytes_invalid")
+    # Meta-validity moved from runtime load to a build-time invariant (#210):
+    # a digest-verified member is trusted at load, so the catalog accepts this
+    # tree (its manifest digest matches its bytes) — but the strict public
+    # rechecker still meta-validates and must reject the document.
+    monkeypatch.setattr(schemas_module, "_schema_root", lambda: invalid_schema)
+    schemas_module._load_catalog_state.cache_clear()  # pyright: ignore[reportPrivateUsage]
+    try:
+        loaded = schemas_module.load_schema_catalog()
+        broken = loaded.by_path["common/actor-assertion-1.0.0.schema.json"]
+        with pytest.raises(ProtocolValueError) as strict_exc:
+            schemas_module.validate_schema_document(broken)
+        _assert_reason(strict_exc, "schema_bytes_invalid")
+    finally:
+        schemas_module._load_catalog_state.cache_clear()  # pyright: ignore[reportPrivateUsage]
 
     unresolved = _schema_tree(tmp_path, "unresolved")
 
