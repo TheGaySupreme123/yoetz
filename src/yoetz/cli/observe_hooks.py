@@ -93,6 +93,11 @@ _MAX_CONTENT_CHUNK: Final = 256 * 1024
 # later drain. Anything else is permanently invalid and gets quarantined so it
 # is never silently dropped as if committed.
 _HOOK_DRAIN_BUDGET_SECONDS: Final = 1.75
+# Codex hard-clamps SessionEnd hooks to 3 seconds. The default drain budget
+# plus ingest/encode overhead measured within ~0.5s of that ceiling on a
+# realistic store, so SessionEnd drains under a tighter budget: an undrained
+# row is retried on the next session's hooks, a SIGKILLed hook drains nothing.
+_SESSION_END_DRAIN_BUDGET_SECONDS: Final = 0.75
 # Cold-connect preflight. A hook is always a fresh process, so this budget
 # must clear a *cold* handshake, not a warm one: post-#210 a cold connect
 # measures tens of milliseconds (it was ~1.0s when the handshake built the
@@ -558,8 +563,25 @@ async def _drain_outbox(
                 grouped.pop(session_id, None)
             if len(pending) >= DEFAULT_OBSERVATION_SWEEP_LIMIT:
                 break
+    # Rejection reasons that cannot heal mid-pass. A missing session→task
+    # mapping fails every row of that session identically, and the service
+    # rejecting globally (unavailable/locked/disabled/paused) fails everything;
+    # re-attempting each row anyway burned the whole drain budget per hook
+    # against a permanently-undeliverable backlog — the recurrence tax of #211.
+    session_scoped_stop = ObservationGapCode.MAPPING_MISSING.value
+    global_stop = frozenset(
+        {
+            ObservationGapCode.SERVICE_UNAVAILABLE.value,
+            ObservationGapCode.VAULT_LOCKED.value,
+            "observation_disabled",
+            "paused",
+        }
+    )
+    skipped_sessions: set[str] = set()
     try:
         for row in pending:
+            if row.codex_session_id in skipped_sessions:
+                continue
             remaining = budget_seconds - (monotonic() - started)
             if remaining <= 0:
                 record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
@@ -598,6 +620,10 @@ async def _drain_outbox(
                     ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
                 )
             if decision.action is ObservationDrainAction.RETRY:
+                if decision.reason == session_scoped_stop:
+                    skipped_sessions.add(row.codex_session_id)
+                elif decision.reason in global_stop:
+                    break
                 continue
             if decision.action is ObservationDrainAction.QUARANTINE:
                 store.quarantine_outbox_row(
@@ -968,6 +994,11 @@ def handle_observe(
                     connect=cast(HookDrainConnector | None, connect),
                     event_name=resolved_event,
                     _state=_state,
+                    budget_seconds=(
+                        _SESSION_END_DRAIN_BUDGET_SECONDS
+                        if resolved_event == "SessionEnd"
+                        else _HOOK_DRAIN_BUDGET_SECONDS
+                    ),
                 )
 
             with contextlib.suppress(Exception):

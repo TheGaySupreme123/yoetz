@@ -626,6 +626,64 @@ async def test_drain_budget_stops_without_advancing_unfinished_row(tmp_path: Pat
     assert '"reason":"drain_budget_exhausted"' in diagnostics
 
 
+@pytest.mark.anyio
+async def test_drain_probes_a_mapping_missing_session_once_per_pass(tmp_path: Path) -> None:
+    """#211's recurrence tax: a dead-session backlog must not eat the drain budget.
+
+    mapping_missing is session-scoped and cannot heal mid-pass, so one
+    rejection retires the whole session for the rest of the pass while other
+    sessions still deliver.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    for session, count in (("dead", 5), ("healthy", 2)):
+        store.bind_codex_session(workspace, session)
+        for ordinal in range(1, count + 1):
+            store.enqueue_outbox(
+                workspace, session, _drain_envelope(store, session, f"hook:{session}", ordinal)
+            )
+
+    attempts: list[str] = []
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del deadline_ms
+            session = str(body["codex_session_id"])  # type: ignore[index]
+            attempts.append(session)
+            if session == "dead":
+                return observation_ingest_result_to_json(
+                    ObservationIngestResult(
+                        ObservationIngestDisposition.REJECTED,
+                        ObservationGapCode.MAPPING_MISSING.value,
+                        None,
+                    )
+                )
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="dead",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+    assert attempts.count("dead") == 1, "a mapping_missing session must be probed once per pass"
+    assert attempts.count("healthy") == 2, "healthy sessions must still deliver in the same pass"
+    remaining = store.list_pending_outbox_rows(workspace)
+    assert {row.codex_session_id for row in remaining} == {"dead"}
+    assert len(remaining) == 5
+
+
 def _populate_realistic_store(
     store: LocalObservationStore,
     workspace: str,
@@ -667,8 +725,9 @@ def _populate_realistic_store(
 class _InstantAckClient:
     async def observation_ingest(self, body: object, *, deadline_ms: int):
         del body, deadline_ms
+        # DUPLICATE routes to ACKNOWLEDGE without needing a service cursor.
         return observation_ingest_result_to_json(
-            ObservationIngestResult(ObservationIngestDisposition.ACCEPTED, None, None)
+            ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
         )
 
     async def close(self) -> None:
