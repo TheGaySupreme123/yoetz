@@ -86,22 +86,35 @@ def _sha(data: bytes) -> str:
 
 
 def _hooks_json() -> bytes:
-    def _command(event: str, *, command: str, timeout: int, status: str) -> dict[str, JsonValue]:
-        return {
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": command,
-                    "timeout": timeout,
-                    "statusMessage": status,
-                }
-            ]
+    def _command(
+        event: str, *, command: str, timeout: int, status: str, run_async: bool = False
+    ) -> dict[str, JsonValue]:
+        handler: dict[str, JsonValue] = {
+            "type": "command",
+            "command": command,
+            "timeout": timeout,
+            "statusMessage": status,
         }
+        if run_async:
+            # Codex ignores unknown handler fields, so older hosts that predate
+            # "async" parse this unchanged and simply run the handler sync.
+            handler["async"] = True
+        return {"hooks": [handler]}
 
     # Project-scoped observe binds cwd ('.') via local resolve + consent commitment.
-    # Timeout stays inside the three-second hook RPC budget (ingest/encrypt/enqueue only).
+    #
+    # Execution-mode split (#209): handlers that only ingest and always emit {}
+    # run "async": true so they never sit in a tool call's critical path — an
+    # async Codex hook cannot block or return a decision, which these never do.
+    # Handlers that return additionalContext (SessionStart advice/attach,
+    # PostToolUse/Stop advice) stay synchronous with a timeout the handler can
+    # actually meet; Codex's own default would be 600s, so 10s here is still a
+    # deliberate bound, not a relaxation. SessionEnd is host-clamped to 3s max
+    # and is downgraded to sync (with a per-session warning) if declared async,
+    # so it keeps its own explicit 3.
     observe = "yoetz hooks observe --workspace . --event"
-    observe_timeout = 3
+    observe_timeout = 10
+    session_end_timeout = 3
     body: dict[str, JsonValue] = {
         "description": (
             "Yoetz Codex lifecycle hooks: observation ingress, activation cue, "
@@ -131,7 +144,7 @@ def _hooks_json() -> bytes:
                 _command(
                     "SessionEnd",
                     command=f"{observe} SessionEnd",
-                    timeout=observe_timeout,
+                    timeout=session_end_timeout,
                     status="Yoetz observe SessionEnd",
                 )
             ],
@@ -161,6 +174,7 @@ def _hooks_json() -> bytes:
                     command=f"{observe} PreToolUse",
                     timeout=observe_timeout,
                     status="Yoetz observe PreToolUse",
+                    run_async=True,
                 )
             ],
             "PostToolUse": [
@@ -188,6 +202,7 @@ def _hooks_json() -> bytes:
                     command=f"{observe} PermissionRequest",
                     timeout=observe_timeout,
                     status="Yoetz observe PermissionRequest",
+                    run_async=True,
                 )
             ],
             "PreCompact": [
@@ -196,6 +211,7 @@ def _hooks_json() -> bytes:
                     command=f"{observe} PreCompact",
                     timeout=observe_timeout,
                     status="Yoetz observe PreCompact",
+                    run_async=True,
                 )
             ],
             "PostCompact": [
@@ -204,6 +220,7 @@ def _hooks_json() -> bytes:
                     command=f"{observe} PostCompact",
                     timeout=observe_timeout,
                     status="Yoetz observe PostCompact",
+                    run_async=True,
                 )
             ],
             "SubagentStart": [
@@ -212,6 +229,7 @@ def _hooks_json() -> bytes:
                     command=f"{observe} SubagentStart",
                     timeout=observe_timeout,
                     status="Yoetz observe SubagentStart",
+                    run_async=True,
                 )
             ],
             "SubagentStop": [
@@ -220,6 +238,7 @@ def _hooks_json() -> bytes:
                     command=f"{observe} SubagentStop",
                     timeout=observe_timeout,
                     status="Yoetz observe SubagentStop",
+                    run_async=True,
                 )
             ],
         },

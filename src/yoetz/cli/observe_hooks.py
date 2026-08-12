@@ -93,7 +93,12 @@ _MAX_CONTENT_CHUNK: Final = 256 * 1024
 # later drain. Anything else is permanently invalid and gets quarantined so it
 # is never silently dropped as if committed.
 _HOOK_DRAIN_BUDGET_SECONDS: Final = 1.75
-_HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 0.35
+# Cold-connect preflight. A hook is always a fresh process, so this budget
+# must clear a *cold* handshake, not a warm one: post-#210 a cold connect
+# measures tens of milliseconds (it was ~1.0s when the handshake built the
+# 69-schema catalog), and 1.0s leaves margin for daemon contention without
+# letting a dead daemon consume the whole drain budget.
+_HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
 _STRUCTURAL_ALLOW: Final = frozenset(
     {
         "tool_name",

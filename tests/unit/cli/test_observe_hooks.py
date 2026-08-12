@@ -624,3 +624,167 @@ async def test_drain_budget_stops_without_advancing_unfinished_row(tmp_path: Pat
     assert store.list_pending_outbox_rows(workspace)[0].attempts == 0
     diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
     assert '"reason":"drain_budget_exhausted"' in diagnostics
+
+
+def _populate_realistic_store(
+    store: LocalObservationStore,
+    workspace: str,
+    session: str,
+    *,
+    envelopes: int = 250,
+    pending: int = 60,
+    quarantined: int = 199,
+) -> None:
+    """Grow one workspace state to the shape the 2026-08-12 regression ran at.
+
+    Hook cost is store-size-dependent, so latency guards against a small
+    fixture pass trivially (#209). The live store that measured 3.06-4.89s
+    held 256 envelopes, 73 pending rows, and 199 quarantine entries in a
+    ~384KB file; this builds the same order of magnitude in one save.
+    """
+
+    state = store._load(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert state.envelopes is not None
+    assert state.pending_outbox is not None
+    assert state.quarantine is not None
+    assert state.dedup is not None
+    from yoetz.adapters.integrations.observation_local import ObservationOutboxRow
+
+    for ordinal in range(1, envelopes + pending + quarantined + 1):
+        envelope = _drain_envelope(store, session, f"hook:bulk:{ordinal}", ordinal)
+        if ordinal <= envelopes:
+            state.envelopes.append(envelope)
+            state.dedup.add(envelope.source_identity)
+        elif ordinal <= envelopes + pending:
+            state.pending_outbox.append(
+                ObservationOutboxRow(codex_session_id=session, envelope=envelope)
+            )
+        else:
+            state.quarantine.append((session, envelope, "service_unavailable"))
+    store._save(workspace, state)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+
+class _InstantAckClient:
+    async def observation_ingest(self, body: object, *, deadline_ms: int):
+        del body, deadline_ms
+        return observation_ingest_result_to_json(
+            ObservationIngestResult(ObservationIngestDisposition.ACCEPTED, None, None)
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+def test_hook_invocation_parses_the_state_file_once_not_seventeen_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#209: one hook process loads the store once and reuses the parse.
+
+    Before the stat-validated parse cache, every store method re-read and
+    re-parsed the whole workspace state file — 17 times per hook invocation
+    against the live 384KB store.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "parse-count")
+    _populate_realistic_store(store, workspace, "parse-count", pending=8, quarantined=40)
+
+    parses = 0
+    original = LocalObservationStore._state_from_json  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    def counting(self: LocalObservationStore, raw: object):
+        nonlocal parses
+        parses += 1
+        return original(self, raw)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(LocalObservationStore, "_state_from_json", counting)
+
+    async def connect(_kind: object):
+        return _InstantAckClient()
+
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "parse-count",
+                "tool_name": "shell",
+                "correlation_id": "pc-1",
+                "exit_status": 0,
+            }
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+    assert code == 0
+    assert parses <= 2, (
+        f"one hook invocation parsed the workspace state {parses} times; "
+        "the per-instance parse cache is not being hit"
+    )
+
+
+def test_hook_wall_clock_meets_the_declared_timeout_on_a_realistic_store(
+    tmp_path: Path,
+) -> None:
+    """#209's guard: hook wall time vs the timeout hooks.json declares.
+
+    The 2026-08-12 regression measured 3.06-4.89s per hook at exactly this
+    store shape against a declared 3s, and nothing went red because no test
+    asserted wall clock at a realistic store size. The bound here is the
+    historical 3s declaration — comfortably above the fixed cost (~0.3-0.6s)
+    and comfortably below the pre-fix cost — not the new 10s declaration,
+    which would have passed even while the bug was live.
+    """
+
+    import time as time_module
+
+    from yoetz.adapters.integrations.codex_plugin import parse_hooks_json, render_plugin_tree
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "latency")
+    _populate_realistic_store(store, workspace, "latency")
+    state_file = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    assert state_file.stat().st_size >= 250_000, (
+        "latency guard must run against a realistically-sized store; "
+        f"got {state_file.stat().st_size} bytes"
+    )
+
+    async def connect(_kind: object):
+        return _InstantAckClient()
+
+    started = time_module.monotonic()
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "latency",
+                "tool_name": "shell",
+                "correlation_id": "lat-1",
+                "exit_status": 0,
+            }
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+    elapsed = time_module.monotonic() - started
+    assert code == 0
+    assert elapsed < 3.0, (
+        f"hook invocation took {elapsed:.2f}s against a realistic store; "
+        "the 2026-08-12 regression shape is back"
+    )
+    hooks = parse_hooks_json(render_plugin_tree()["hooks/hooks.json"])
+    events = hooks["hooks"]
+    declared = None
+    for group in events["PostToolUse"]:  # type: ignore[index, call-overload]
+        for handler in group["hooks"]:  # type: ignore[index, call-overload]
+            if "observe" in str(handler["command"]):  # type: ignore[index]
+                declared = handler["timeout"]  # type: ignore[index]
+    assert isinstance(declared, int)
+    assert elapsed < declared, "hook exceeded its own declared hooks.json timeout"

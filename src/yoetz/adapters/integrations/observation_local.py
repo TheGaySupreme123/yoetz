@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import os
 import re
 import threading
@@ -383,6 +384,37 @@ def _load_session_advice(raw: object) -> dict[str, AdviceSnapshot]:
     return result
 
 
+def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
+    """Independent copy of one workspace state for the parse cache.
+
+    Containers are copied; contained values (envelopes, rows, cursors,
+    snapshots, timestamps) are frozen dataclasses or immutable builtins, so a
+    shallow container copy fully isolates callers from the cached instance.
+    """
+
+    return dataclasses.replace(
+        state,
+        session_workspaces=dict(state.session_workspaces or {}),
+        cursors=dict(state.cursors or {}),
+        dedup=set(state.dedup or ()),
+        envelopes=list(state.envelopes or ()),
+        gaps=set(state.gaps or ()),
+        unsupported_events=set(state.unsupported_events or ()),
+        session_advice=dict(state.session_advice or {}),
+        session_advice_suppression=dict(state.session_advice_suppression or {}),
+        open_pre=dict(state.open_pre or {}),
+        stream_cursors=dict(state.stream_cursors or {}),
+        stream_partials=dict(state.stream_partials or {}),
+        hook_sequences=dict(state.hook_sequences or {}),
+        pending_outbox=list(state.pending_outbox or ()),
+        quarantine=list(state.quarantine or ()),
+        codex_session_bindings=dict(state.codex_session_bindings or {}),
+        ended_sessions=set(state.ended_sessions or ()),
+        session_generations=dict(state.session_generations or {}),
+        ended_session_generations=dict(state.ended_session_generations or {}),
+    )
+
+
 def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
     return canonical_digest(
         JsonObject(
@@ -412,6 +444,13 @@ class LocalObservationStore:
         self._lock = _InterprocessStoreLock(self._root / ".store.lock")
         self._monotonic = _monotonic
         self._wall = _wall
+        # Parse cache keyed by workspace commitment, validated by the state
+        # file's (inode, size, mtime_ns). Hooks are one-shot processes that
+        # call many store methods against the same file; re-reading and
+        # re-parsing a ~400KB state on every method call dominated hook wall
+        # time (#209). _atomic_write replaces the inode, so a stat match means
+        # the cached parse is byte-current even across processes.
+        self._state_cache: dict[str, tuple[tuple[int, int, int], _WorkspaceState]] = {}
 
     def _now_mono(self) -> float:
         import time
@@ -1371,8 +1410,21 @@ class LocalObservationStore:
             result.append((workspace, self._load(workspace)))
         return result
 
+    def _stat_key(self, path: Path) -> tuple[int, int, int] | None:
+        try:
+            if path.is_symlink():
+                return None
+            facts = path.stat()
+        except OSError:
+            return None
+        return (facts.st_ino, facts.st_size, facts.st_mtime_ns)
+
     def _load(self, workspace_commitment: str) -> _WorkspaceState:
         path = self._workspace_path(workspace_commitment)
+        before = self._stat_key(path)
+        cached = self._state_cache.get(workspace_commitment)
+        if cached is not None and before is not None and cached[0] == before:
+            return _copy_state(cached[1])
         raw = _read_bytes(path, maximum=_MAX_LEGACY_STATE_BYTES)
         if raw is None:
             return _WorkspaceState()
@@ -1382,7 +1434,11 @@ class LocalObservationStore:
             return _WorkspaceState()
         if not isinstance(parsed, Mapping):
             return _WorkspaceState()
-        return self._state_from_json(cast(Mapping[str, JsonValue], parsed))
+        state = self._state_from_json(cast(Mapping[str, JsonValue], parsed))
+        # Cache only when the file provably did not change while it was read.
+        if before is not None and before == self._stat_key(path):
+            self._state_cache[workspace_commitment] = (before, _copy_state(state))
+        return state
 
     def _save(self, workspace_commitment: str, state: _WorkspaceState) -> None:
         directory = self._root / "workspaces"
@@ -1426,6 +1482,11 @@ class LocalObservationStore:
                 retryable=False,
             )
         _atomic_write(path, payload)
+        key = self._stat_key(path)
+        if key is None:
+            self._state_cache.pop(workspace_commitment, None)
+        else:
+            self._state_cache[workspace_commitment] = (key, _copy_state(state))
 
     def _record_quarantine_eviction(
         self,
