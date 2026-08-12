@@ -15,7 +15,7 @@ import re
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final, cast
 
@@ -71,6 +71,10 @@ _MAX_DEDUP: Final = 4_096
 _MAX_OPEN_PRE: Final = 256
 _MAX_OUTBOX: Final = 512
 _MAX_QUARANTINE: Final = 512
+# Quarantined detail is a diagnostic aid, not the durable record; entries this
+# stale are pure per-hook parse/encode tax (#211). Age-expired detail folds
+# into the same aggregate eviction evidence as count/byte-cap evictions.
+_MAX_QUARANTINE_AGE_DAYS: Final = 14
 _MAX_HOOK_SEQUENCES: Final = 256
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 # Wall/monotonic drift tolerated before persisted monotonic samples are treated
@@ -1155,6 +1159,35 @@ class LocalObservationStore:
             assert state.quarantine is not None
             return len(state.quarantine)
 
+    def quarantine_facts(self, workspace: str) -> tuple[int, int]:
+        """Return (current quarantine depth, total detail evictions to date)."""
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.quarantine is not None
+            return len(state.quarantine), state.quarantine_evicted_count
+
+    def reclaim_quarantine(self, workspace: str) -> int:
+        """Operator-initiated drop of all quarantined observation detail.
+
+        Reclaimed entries fold into the same aggregate eviction evidence as
+        cap/age evictions (count, commitment chain, first/last receipt), so a
+        recovered install can shed the per-hook tax without the destruction
+        becoming silent. Returns how many entries were reclaimed.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.quarantine is not None
+            reclaimed = len(state.quarantine)
+            if reclaimed == 0:
+                return 0
+            for session, envelope, reason in state.quarantine:
+                self._record_quarantine_eviction(state, session, envelope, reason)
+            state.quarantine.clear()
+            self._save(workspace, state)
+            return reclaimed
+
     def list_quarantine(self, workspace: str) -> tuple[tuple[str, ObservationEnvelope, str], ...]:
         with self._lock:
             state = self._load(workspace)
@@ -1440,10 +1473,27 @@ class LocalObservationStore:
             self._state_cache[workspace_commitment] = (before, _copy_state(state))
         return state
 
+    def _prune_expired_quarantine(self, state: _WorkspaceState) -> None:
+        assert state.quarantine is not None
+        if not state.quarantine:
+            return
+        horizon = datetime.fromtimestamp(self._wall_now(), UTC) - timedelta(
+            days=_MAX_QUARANTINE_AGE_DAYS
+        )
+        kept: list[tuple[str, ObservationEnvelope, str]] = []
+        for session, envelope, reason in state.quarantine:
+            if envelope.receipt_time.as_datetime() < horizon:
+                self._record_quarantine_eviction(state, session, envelope, reason)
+            else:
+                kept.append((session, envelope, reason))
+        if len(kept) != len(state.quarantine):
+            state.quarantine[:] = kept
+
     def _save(self, workspace_commitment: str, state: _WorkspaceState) -> None:
         directory = self._root / "workspaces"
         _ensure_dir(directory)
         path = self._workspace_path(workspace_commitment)
+        self._prune_expired_quarantine(state)
         payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
         if len(payload) > _MAX_STATE_BYTES:
             # Retain authority state and make every observation-detail loss explicit.

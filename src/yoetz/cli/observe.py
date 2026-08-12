@@ -157,6 +157,7 @@ def observe_status(
     undelivered, delivery_causes, last_drain, mapping_present = _delivery_facts(
         store, commitment, state_root=_state
     )
+    quarantine_depth, quarantine_evicted = store.quarantine_facts(commitment)
     plugin_activation = _activation_state(
         root,
         codex_path=codex_path,
@@ -196,6 +197,8 @@ def observe_status(
                 "undelivered_count": undelivered,
                 "delivery_causes": delivery_causes,
                 "last_successful_drain": last_drain,
+                "quarantine_count": quarantine_depth,
+                "quarantine_evicted_count": quarantine_evicted,
                 "mapping_present": mapping_present,
                 "hook_diagnostics": diagnostics,
                 "plugin_activation": plugin_activation,
@@ -212,6 +215,12 @@ def observe_status(
             f"{undelivered} (cause: "
             f"{','.join(f'{key}={value}' for key, value in delivery_causes.items()) or 'none'}; "
             f"last successful drain: {last_drain})"
+        ),
+        "quarantine": (
+            f"{quarantine_depth} (destroyed: {quarantine_evicted}; "
+            "reclaim with 'yoetz observe reclaim')"
+            if quarantine_depth or quarantine_evicted
+            else "0"
         ),
         "mapping_present": str(mapping_present),
         "plugin_activation": plugin_activation,
@@ -359,6 +368,36 @@ def drain_observation(
             "reasons: " + (", ".join(f"{key}={value}" for key, value in reasons.items()) or "none")
         )
     return code
+
+
+def reclaim_observation(
+    *, workspace: str | None, json_output: bool, _state: Path | None = None
+) -> int:
+    """Operator-initiated drop of quarantined observation detail (#211).
+
+    Quarantine detail is a diagnostic aid whose only ongoing effect is
+    per-hook parse/encode tax; once the underlying delivery failure is fixed,
+    this is how a recovered install sheds it. The drop is recorded in the
+    aggregate eviction evidence, never silent.
+    """
+
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
+    reclaimed = store.reclaim_quarantine(commitment)
+    depth, evicted = store.quarantine_facts(commitment)
+    if json_output:
+        _emit(
+            {
+                "workspace_commitment": commitment,
+                "reclaimed": reclaimed,
+                "quarantine_count": depth,
+                "quarantine_evicted_count": evicted,
+            },
+            json_output=True,
+        )
+        return 0
+    typer.echo(f"observation_quarantine_reclaimed:{reclaimed} (evicted total: {evicted})")
+    return 0
 
 
 def grant_observation(*, workspace: str, _state: Path | None = None) -> int:

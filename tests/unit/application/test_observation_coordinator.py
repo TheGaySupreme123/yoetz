@@ -373,7 +373,9 @@ def test_new_session_generation_resumes_and_stale_end_remains_fenced(tmp_path: P
 
 
 def test_local_outbox_quarantine_is_visible_and_durable(tmp_path: Path) -> None:
-    store = LocalObservationStore(_state=tmp_path)
+    # Wall clock pinned near the fixture receipt_time (2026-01-01) so the #211
+    # quarantine age bound does not see these entries as expired detail.
+    store = LocalObservationStore(_state=tmp_path, _wall=lambda: 1767312000.0)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
     session = store.bind_codex_session(workspace, "sess-quar")
@@ -410,7 +412,9 @@ def test_quarantine_eviction_retains_aggregate_loss_evidence(
     import yoetz.adapters.integrations.observation_local as local_mod
 
     monkeypatch.setattr(local_mod, "_MAX_QUARANTINE", 2)
-    store = LocalObservationStore(_state=tmp_path)
+    # Wall clock pinned near the fixture receipt_time (2026-01-01) so only the
+    # count bound under test — not the #211 age bound — causes evictions.
+    store = LocalObservationStore(_state=tmp_path, _wall=lambda: 1767312000.0)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
     session = store.bind_codex_session(workspace, "sess-quarantine-eviction")
@@ -436,6 +440,63 @@ def test_quarantine_eviction_retains_aggregate_loss_evidence(
     assert b'"quarantine_evicted_commitment":"sha256:' in state_bytes
     assert b'"quarantine_evicted_first":' in state_bytes
     assert b'"quarantine_evicted_last":' in state_bytes
+
+
+def test_quarantine_detail_expires_by_age_into_aggregate_evidence(tmp_path: Path) -> None:
+    """#211: quarantine is bounded by age, not only by count and byte cap."""
+
+    quarantine_day = 1767312000.0  # 2026-01-02, one day after the fixture receipt_time
+    store = LocalObservationStore(_state=tmp_path, _wall=lambda: quarantine_day)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-quarantine-age")
+    envelope = _envelope(session=session, identity="hook:quarantine-age")
+    store.ingest(envelope)
+    store.enqueue_outbox(workspace, "sess-quarantine-age", envelope)
+    assert store.quarantine_outbox(
+        workspace,
+        "sess-quarantine-age",
+        envelope.source_identity,
+        ObservationGapCode.CONSENT_REVOKED.value,
+    )
+    assert store.quarantine_facts(workspace) == (1, 0)
+
+    fifteen_days_later = quarantine_day + 15 * 86_400
+    aged = LocalObservationStore(_state=tmp_path, _wall=lambda: fifteen_days_later)
+    # Any mutation-driven save prunes expired detail; a consent re-grant is the
+    # cheapest one that touches no other quarantine machinery.
+    aged.grant_consent(workspace, granted_at=Timestamp("2026-01-17T00:00:00.000Z"))
+    assert aged.quarantine_facts(workspace) == (0, 1)
+    status = aged.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value in status.gaps
+
+
+def test_reclaim_quarantine_empties_detail_and_records_the_drop(tmp_path: Path) -> None:
+    """#211: a recovered install sheds the quarantine tax loudly, not silently."""
+
+    store = LocalObservationStore(_state=tmp_path, _wall=lambda: 1767312000.0)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-reclaim")
+    for index in range(3):
+        envelope = _envelope(session=session, identity=f"hook:reclaim:{index}", ordinal=index + 1)
+        store.ingest(envelope)
+        store.enqueue_outbox(workspace, "sess-reclaim", envelope)
+        assert store.quarantine_outbox(
+            workspace,
+            "sess-reclaim",
+            envelope.source_identity,
+            ObservationGapCode.CONSENT_REVOKED.value,
+        )
+    assert store.quarantine_facts(workspace) == (3, 0)
+    assert store.reclaim_quarantine(workspace) == 3
+    assert store.quarantine_facts(workspace) == (0, 3)
+    assert store.reclaim_quarantine(workspace) == 0
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value in status.gaps
+    state_bytes = b"".join(path.read_bytes() for path in tmp_path.rglob("*.json") if path.is_file())
+    assert b'"quarantine_evicted_count":3' in state_bytes
+    assert b'"quarantine_evicted_commitment":"sha256:' in state_bytes
 
 
 def test_local_outbox_overflow_records_gap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

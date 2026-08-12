@@ -286,7 +286,7 @@ def test_every_packaged_member_is_a_valid_draft_2020_12_schema() -> None:
         assert hashlib.sha256(data).hexdigest() == member["sha256"].removeprefix("sha256:")
         parsed = strict_json_parse(data)
         assert canonical_encode(parsed) == data, f"not canonical: {member['path']}"
-        Draft202012Validator.check_schema(parsed)
+        Draft202012Validator.check_schema(cast(dict[str, Any], parsed))
 
 
 def test_manifest_digest_is_available_without_building_the_catalog() -> None:

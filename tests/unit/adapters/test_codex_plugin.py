@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -181,7 +182,7 @@ def test_render_plugin_tree_wires_observation_and_compat_hooks() -> None:
     assert "resume|compact" in hooks
 
 
-def _observe_handler(parsed: dict[str, object], event: str) -> dict[str, object]:
+def _observe_handler(parsed: Mapping[str, object], event: str) -> dict[str, object]:
     groups = parsed["hooks"][event]  # type: ignore[index, call-overload]
     for group in groups:  # type: ignore[union-attr]
         for handler in group["hooks"]:  # type: ignore[index, call-overload]
@@ -201,8 +202,9 @@ def test_observe_hook_execution_modes_never_block_tool_calls() -> None:
     the host's hard 3s clamp so it never draws a per-session warning.
     """
 
-    parsed = dict(parse_hooks_json(render_plugin_tree(resource_source=_resources())
-                                   ["hooks/hooks.json"]))
+    parsed = dict(
+        parse_hooks_json(render_plugin_tree(resource_source=_resources())["hooks/hooks.json"])
+    )
     pure_ingress = (
         "PreToolUse",
         "PermissionRequest",
