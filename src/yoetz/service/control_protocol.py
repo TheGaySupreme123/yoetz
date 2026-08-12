@@ -47,8 +47,8 @@ from yoetz.protocol.models import (
     StatusResult,
 )
 from yoetz.protocol.schemas import (
-    load_schema_catalog,
     schema_document_for,
+    schema_manifest_digest,
     validate_schema_instance,
 )
 
@@ -691,7 +691,8 @@ def _allowed_for(kind: ControlClientKind) -> tuple[ControlMethod, ...]:
 
 
 def _manifest_digest() -> str:
-    return load_schema_catalog().manifest_digest
+    # sha256(manifest.json) only — never build the catalog to hash it (#210).
+    return schema_manifest_digest()
 
 
 async def _close_after_failure(stream: ControlStream, error: BaseException) -> Never:

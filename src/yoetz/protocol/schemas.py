@@ -43,6 +43,7 @@ __all__ = [
     "load_schema_catalog",
     "request_result_schema_versions",
     "schema_document_for",
+    "schema_manifest_digest",
     "schema_path_for",
     "schema_uri",
     "validate_schema_document",
@@ -517,7 +518,7 @@ def _validate_references(
                 raise ProtocolValueError("schema_reference_unresolved") from None
 
 
-def _plain_schema(data: bytes) -> dict[str, JsonValue]:
+def _plain_schema(data: bytes, *, digest_verified: bool = False) -> dict[str, JsonValue]:
     try:
         parsed = strict_json_parse(data)
         if canonical_encode(parsed) != data:
@@ -530,10 +531,15 @@ def _plain_schema(data: bytes) -> dict[str, JsonValue]:
     dialect = schema.get("$schema")
     if dialect != _DRAFT_2020_12:
         _protocol_error("schema_draft_unsupported")
-    try:
-        Draft202012Validator.check_schema(schema)
-    except SchemaError:
-        raise ProtocolValueError("schema_bytes_invalid") from None
+    if not digest_verified:
+        # Draft meta-validation dominates catalog load cost (~81% measured, #210).
+        # Members whose bytes already matched the packaged manifest digest carry
+        # the same trust as the code itself; their meta-validity is a build-time
+        # invariant enforced by tests/conformance over the packaged catalog.
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError:
+            raise ProtocolValueError("schema_bytes_invalid") from None
     return schema
 
 
@@ -559,7 +565,7 @@ def _load_catalog_state() -> _CatalogState:
         digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
         if digest != member.sha256:
             _protocol_error("schema_digest_mismatch")
-        plain = _plain_schema(data)
+        plain = _plain_schema(data, digest_verified=True)
         name, version = _derive_identity(member.path, member.schema_version)
         expected_id = SCHEMA_NAMESPACE + member.path
         document_id = plain.get("$id")
@@ -655,6 +661,23 @@ def load_schema_catalog() -> SchemaCatalog:
     """Load and validate the immutable packaged schema catalog."""
 
     return _load_catalog_state().catalog
+
+
+@lru_cache(maxsize=1)
+def schema_manifest_digest() -> str:
+    """Digest of the packaged schema manifest, without building the catalog.
+
+    Byte-identical to ``load_schema_catalog().manifest_digest`` — the digest
+    depends only on ``manifest.json`` — but skips reading and meta-validating
+    every catalog member. Handshake-style compatibility checks that only
+    compare digests must use this; catalog construction stays lazy for
+    callers that actually validate instances (#210).
+    """
+
+    manifest_bytes = _read_resource(
+        _schema_root().joinpath("manifest.json"), "schema_manifest_missing"
+    )
+    return f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
 
 
 def _validate_lookup_identity(name: object, version: object) -> tuple[str, str]:
