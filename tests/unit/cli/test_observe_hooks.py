@@ -682,6 +682,99 @@ async def test_drain_probes_a_mapping_missing_session_once_per_pass(tmp_path: Pa
     remaining = store.list_pending_outbox_rows(workspace)
     assert {row.codex_session_id for row in remaining} == {"dead"}
     assert len(remaining) == 5
+    # Retired siblings carry the shared cause so `observe status` reports
+    # mapping_missing=5, never a misleading not_attempted.
+    assert all(row.last_reason == ObservationGapCode.MAPPING_MISSING.value for row in remaining)
+
+
+@pytest.mark.anyio
+async def test_drain_treats_service_unavailable_as_row_scoped_with_a_cap(tmp_path: Path) -> None:
+    """One poisoned row must not wedge the workspace drain forever.
+
+    service_unavailable is the catch-all for row-scoped failures (bundle
+    contention, one malformed envelope), so healthy rows behind it still
+    deliver; only a consecutive run of them yields the pass.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "mixed")
+    for ordinal in range(1, 6):
+        store.enqueue_outbox(
+            workspace, "mixed", _drain_envelope(store, "mixed", "hook:mixed", ordinal)
+        )
+    poisoned = store.list_pending_outbox_rows(workspace)[0].envelope.source_identity
+
+    attempts: list[str] = []
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del deadline_ms
+            identity = str(body["envelope"]["source_identity"])  # type: ignore[index]
+            attempts.append(identity)
+            if identity == poisoned:
+                return observation_ingest_result_to_json(
+                    ObservationIngestResult(
+                        ObservationIngestDisposition.REJECTED,
+                        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                        None,
+                    )
+                )
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="mixed",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+    assert len(attempts) == 5, "rows behind a service_unavailable row must still be attempted"
+    remaining = store.list_pending_outbox_rows(workspace)
+    assert [row.envelope.source_identity for row in remaining] == [poisoned]
+
+
+@pytest.mark.anyio
+async def test_drain_lease_prevents_concurrent_hooks_from_double_draining(
+    tmp_path: Path,
+) -> None:
+    """#209 made hooks genuinely concurrent; only one may drain at a time."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "leased")
+    store.enqueue_outbox(workspace, "leased", _drain_envelope(store, "leased", "x", 1))
+
+    connects: list[object] = []
+
+    async def recording_connect(kind: object):
+        connects.append(kind)
+        raise RuntimeError("offline")
+
+    with store.drain_lease(workspace) as owned:
+        assert owned is True
+        # A second store instance (another hook process) must lose the lease
+        # and skip the drain entirely — no connect, no diagnostics.
+        other = LocalObservationStore(_state=tmp_path)
+        await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+            other,
+            workspace_commitment=workspace,
+            codex_session_id="leased",
+            connect=recording_connect,
+            _state=tmp_path,
+        )
+    assert connects == []
+    assert not (tmp_path / "observation/hook-diagnostics.jsonl").exists()
 
 
 def _populate_realistic_store(
@@ -706,19 +799,26 @@ def _populate_realistic_store(
     assert state.pending_outbox is not None
     assert state.quarantine is not None
     assert state.dedup is not None
-    from yoetz.adapters.integrations.observation_local import ObservationOutboxRow
+    from datetime import UTC, datetime
 
+    from yoetz.adapters.integrations.observation_local import (
+        ObservationOutboxRow,
+        _dedup_key,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.domain.values import timestamp_from_datetime
+
+    quarantined_at = timestamp_from_datetime(datetime.now(UTC).replace(microsecond=0))
     for ordinal in range(1, envelopes + pending + quarantined + 1):
         envelope = _drain_envelope(store, session, f"hook:bulk:{ordinal}", ordinal)
         if ordinal <= envelopes:
             state.envelopes.append(envelope)
-            state.dedup.add(envelope.source_identity)
+            state.dedup.add(_dedup_key(workspace, envelope))
         elif ordinal <= envelopes + pending:
             state.pending_outbox.append(
                 ObservationOutboxRow(codex_session_id=session, envelope=envelope)
             )
         else:
-            state.quarantine.append((session, envelope, "service_unavailable"))
+            state.quarantine.append((session, envelope, "service_unavailable", quarantined_at))
     store._save(workspace, state)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
 
@@ -779,9 +879,10 @@ def test_hook_invocation_parses_the_state_file_once_not_seventeen_times(
         connect=connect,  # type: ignore[arg-type]
     )
     assert code == 0
-    assert parses <= 2, (
+    assert parses == 1, (
         f"one hook invocation parsed the workspace state {parses} times; "
-        "the per-instance parse cache is not being hit"
+        "the per-instance parse cache is not being hit (33 parses measured "
+        "with the cache neutered at this fixture shape)"
     )
 
 

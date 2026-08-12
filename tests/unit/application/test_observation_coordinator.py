@@ -179,7 +179,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_reason == ObservationGapCode.MAPPING_MISSING.value
     assert durable.last_attempt_at == attempted_at
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/2"
+        "yoetz.observation-local/3"
     )
 
 
@@ -443,10 +443,18 @@ def test_quarantine_eviction_retains_aggregate_loss_evidence(
 
 
 def test_quarantine_detail_expires_by_age_into_aggregate_evidence(tmp_path: Path) -> None:
-    """#211: quarantine is bounded by age, not only by count and byte cap."""
+    """#211: quarantine is bounded by age, not only by count and byte cap.
+
+    Age is measured from the store-authored quarantined_at (never the possibly
+    far older envelope receipt_time), and the destructive prune is fenced on a
+    trusted clock epoch, so both stores here pin wall AND monotonic clocks to
+    keep the persisted epoch comparable across the simulated 15 days.
+    """
 
     quarantine_day = 1767312000.0  # 2026-01-02, one day after the fixture receipt_time
-    store = LocalObservationStore(_state=tmp_path, _wall=lambda: quarantine_day)
+    store = LocalObservationStore(
+        _state=tmp_path, _wall=lambda: quarantine_day, _monotonic=lambda: 100.0
+    )
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
     session = store.bind_codex_session(workspace, "sess-quarantine-age")
@@ -459,16 +467,41 @@ def test_quarantine_detail_expires_by_age_into_aggregate_evidence(tmp_path: Path
         envelope.source_identity,
         ObservationGapCode.CONSENT_REVOKED.value,
     )
-    assert store.quarantine_facts(workspace) == (1, 0)
+    store.note_stream_reconcile(workspace, mono=100.0)  # persists the clock epoch
+    assert store.quarantine_facts(workspace) == (1, 0, 0)
 
-    fifteen_days_later = quarantine_day + 15 * 86_400
-    aged = LocalObservationStore(_state=tmp_path, _wall=lambda: fifteen_days_later)
+    day = 86_400.0
+    aged = LocalObservationStore(
+        _state=tmp_path,
+        _wall=lambda: quarantine_day + 15 * day,
+        _monotonic=lambda: 100.0 + 15 * day,
+    )
     # Any mutation-driven save prunes expired detail; a consent re-grant is the
     # cheapest one that touches no other quarantine machinery.
     aged.grant_consent(workspace, granted_at=Timestamp("2026-01-17T00:00:00.000Z"))
-    assert aged.quarantine_facts(workspace) == (0, 1)
+    assert aged.quarantine_facts(workspace) == (0, 1, 0)
     status = aged.status(ObservationStatusQuery(workspace))
     assert ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value in status.gaps
+
+    # A wall-clock jump with an unchanged monotonic clock (snapshot restore,
+    # NTP correction) must NOT destroy detail: the epoch no longer matches.
+    jumped = LocalObservationStore(
+        _state=tmp_path,
+        _wall=lambda: quarantine_day + 4 * 365 * day,
+        _monotonic=lambda: 100.0 + 15 * day,
+    )
+    second = _envelope(session=session, identity="hook:quarantine-age-2", ordinal=2)
+    jumped.ingest(second)
+    jumped.enqueue_outbox(workspace, "sess-quarantine-age", second)
+    assert jumped.quarantine_outbox(
+        workspace,
+        "sess-quarantine-age",
+        second.source_identity,
+        ObservationGapCode.CONSENT_REVOKED.value,
+    )
+    assert jumped.quarantine_facts(workspace) == (1, 1, 0), (
+        "a clock jump must pause the age bound, not trigger it"
+    )
 
 
 def test_reclaim_quarantine_empties_detail_and_records_the_drop(tmp_path: Path) -> None:
@@ -488,14 +521,17 @@ def test_reclaim_quarantine_empties_detail_and_records_the_drop(tmp_path: Path) 
             envelope.source_identity,
             ObservationGapCode.CONSENT_REVOKED.value,
         )
-    assert store.quarantine_facts(workspace) == (3, 0)
+    assert store.quarantine_facts(workspace) == (3, 0, 0)
     assert store.reclaim_quarantine(workspace) == 3
-    assert store.quarantine_facts(workspace) == (0, 3)
+    # Operator reclaims are counted separately from involuntary evictions so a
+    # deliberate cleanup never reads as data loss.
+    assert store.quarantine_facts(workspace) == (0, 0, 3)
     assert store.reclaim_quarantine(workspace) == 0
     status = store.status(ObservationStatusQuery(workspace))
     assert ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value in status.gaps
     state_bytes = b"".join(path.read_bytes() for path in tmp_path.rglob("*.json") if path.is_file())
-    assert b'"quarantine_evicted_count":3' in state_bytes
+    assert b'"quarantine_reclaimed_count":3' in state_bytes
+    assert b'"quarantine_evicted_count":0' in state_bytes
     assert b'"quarantine_evicted_commitment":"sha256:' in state_bytes
 
 

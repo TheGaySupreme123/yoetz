@@ -143,7 +143,9 @@ def test_status_surfaces_quarantine_depth_and_reclaim_empties_it(
     reclaim_payload = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
     assert reclaim_payload["reclaimed"] == 2
     assert reclaim_payload["quarantine_count"] == 0
-    assert reclaim_payload["quarantine_evicted_count"] == 2
+    # A voluntary reclaim is never reported as involuntary eviction.
+    assert reclaim_payload["quarantine_evicted_count"] == 0
+    assert reclaim_payload["quarantine_reclaimed_count"] == 2
     assert str(tmp_path) not in json.dumps(reclaim_payload)
 
     assert (
@@ -151,7 +153,8 @@ def test_status_surfaces_quarantine_depth_and_reclaim_empties_it(
     )
     after = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
     assert after["quarantine_count"] == 0
-    assert after["quarantine_evicted_count"] == 2
+    assert after["quarantine_evicted_count"] == 0
+    assert after["quarantine_reclaimed_count"] == 2
 
 
 def test_status_inspects_only_the_explicit_codex_target(

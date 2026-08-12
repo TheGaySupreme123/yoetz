@@ -202,6 +202,8 @@ def test_observe_hook_execution_modes_never_block_tool_calls() -> None:
     the host's hard 3s clamp so it never draws a per-session warning.
     """
 
+    from yoetz.cli.observe_hooks import ADVICE_SAFE_EVENTS, SUPPORTED_HOOK_EVENTS
+
     parsed = dict(
         parse_hooks_json(render_plugin_tree(resource_source=_resources())["hooks/hooks.json"])
     )
@@ -213,6 +215,12 @@ def test_observe_hook_execution_modes_never_block_tool_calls() -> None:
         "SubagentStart",
         "SubagentStop",
     )
+    # The async split's real invariant: async iff the handler never returns
+    # additionalContext, i.e. iff the event is outside ADVICE_SAFE_EVENTS and
+    # outside the cue-only UserPromptSubmit. If someone adds an event to
+    # ADVICE_SAFE_EVENTS while it is still declared async here, Codex would
+    # silently defer its advice to the next turn boundary.
+    assert set(pure_ingress) == SUPPORTED_HOOK_EVENTS - ADVICE_SAFE_EVENTS - {"UserPromptSubmit"}
     for event in pure_ingress:
         handler = _observe_handler(parsed, event)
         assert handler.get("async") is True, f"{event} observe must not block the session"

@@ -155,8 +155,10 @@ logical-identity claim merges source coverage and prevents duplicate action/resu
 allowing later encrypted content references. Cursor advancement is coupled to durable outbox
 insertion; overflow leaves later stream input replayable. Unsupported visible future events retain
 an opaque envelope, encrypted visible payload when available, and an explicit gap. Session stop is
-source-generation fenced, pending work drains fairly across mapped sessions, and bounded quarantine
-eviction retains aggregate commitment/count/time range plus a loss gap.
+source-generation fenced, pending work drains fairly across mapped sessions, and quarantine is bounded by
+count, byte budget, and a clock-fenced 14-day age with an explicit operator reclaim; every drop
+retains aggregate commitment/count/time range plus a loss gap, with involuntary evictions and
+operator reclaims counted separately.
 
 After every completed tool action, ready-service composition captures a descriptor-safe structural
 workspace digest. Real state change enqueues exact-policy verification; unchanged state does not.

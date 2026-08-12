@@ -98,6 +98,10 @@ _HOOK_DRAIN_BUDGET_SECONDS: Final = 1.75
 # realistic store, so SessionEnd drains under a tighter budget: an undrained
 # row is retried on the next session's hooks, a SIGKILLed hook drains nothing.
 _SESSION_END_DRAIN_BUDGET_SECONDS: Final = 0.75
+# A run of consecutive service_unavailable rejections means the service is
+# struggling now; yield the pass and let a later hook retry rather than
+# spending the rest of the budget collecting identical failures.
+_DRAIN_MAX_CONSECUTIVE_UNAVAILABLE: Final = 3
 # Cold-connect preflight. A hook is always a fresh process, so this budget
 # must clear a *cold* handshake, not a warm one: post-#210 a cold connect
 # measures tens of milliseconds (it was ~1.0s when the handshake built the
@@ -521,6 +525,42 @@ async def _drain_outbox(
     budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
+    """Drain the workspace outbox under a nonblocking per-workspace lease.
+
+    Codex runs async hooks concurrently; without the lease every concurrent
+    hook re-ingests the identical backlog for zero extra delivery. Losing the
+    lease means another live hook process is already draining — not a failure,
+    so nothing is recorded.
+    """
+
+    with store.drain_lease(workspace_commitment) as owned:
+        if not owned:
+            return
+        await _drain_outbox_leased(
+            store,
+            workspace_commitment=workspace_commitment,
+            codex_session_id=codex_session_id,
+            content_by_source_identity=content_by_source_identity,
+            connect=connect,
+            event_name=event_name,
+            _state=_state,
+            budget_seconds=budget_seconds,
+            monotonic=monotonic,
+        )
+
+
+async def _drain_outbox_leased(
+    store: LocalObservationStore,
+    *,
+    workspace_commitment: str,
+    codex_session_id: str,
+    content_by_source_identity: Mapping[str, tuple[ObservationContentChunk, ...]] | None = None,
+    connect: HookDrainConnector | None = None,
+    event_name: str = "drain",
+    _state: Path | None = None,
+    budget_seconds: float = _HOOK_DRAIN_BUDGET_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
     """Drain all mapped-session work fairly; ack only after service commit.
 
     The current session receives the first slot for low-latency hook feedback,
@@ -534,7 +574,6 @@ async def _drain_outbox(
         return
 
     connector = cast(HookDrainConnector, connect_service) if connect is None else connect
-    started = monotonic()
     client: _HookDrainClient
     try:
         client = await asyncio.wait_for(
@@ -543,6 +582,11 @@ async def _drain_outbox(
     except Exception:
         record_hook_diagnostic("drain_preflight_failed", event_name, _state=_state)
         return
+    # The budget clock starts after the connect: the preflight bounds connect
+    # time on its own, and charging a slow-but-successful connect against the
+    # drain budget could exhaust the whole budget before the first row (the
+    # SessionEnd budget is smaller than the preflight by design).
+    started = monotonic()
 
     grouped: dict[str, list[ObservationOutboxRow]] = {}
     for row in all_pending:
@@ -563,21 +607,28 @@ async def _drain_outbox(
                 grouped.pop(session_id, None)
             if len(pending) >= DEFAULT_OBSERVATION_SWEEP_LIMIT:
                 break
-    # Rejection reasons that cannot heal mid-pass. A missing session→task
-    # mapping fails every row of that session identically, and the service
-    # rejecting globally (unavailable/locked/disabled/paused) fails everything;
-    # re-attempting each row anyway burned the whole drain budget per hook
-    # against a permanently-undeliverable backlog — the recurrence tax of #211.
+    # Retryable rejections split three ways by scope (the reason vocabulary is
+    # RETRYABLE_OBSERVATION_REJECTIONS in application/observation_drain.py):
+    # - mapping_missing is session-scoped and cannot heal mid-pass, so one
+    #   rejection retires the rest of that session for this pass;
+    # - vault_locked / observation_disabled / paused are workspace-global and
+    #   cannot heal mid-pass, so they end the pass;
+    # - service_unavailable is the catch-all for row-scoped and transient
+    #   failures (bundle contention, one malformed envelope, a dropped reply),
+    #   so it must NOT poison other rows — but a run of them in a row means
+    #   the service is genuinely struggling, so the pass yields after a few.
+    # Re-attempting every row of a permanently-undeliverable backlog burned
+    # the whole drain budget per hook forever — the recurrence tax of #211.
     session_scoped_stop = ObservationGapCode.MAPPING_MISSING.value
     global_stop = frozenset(
         {
-            ObservationGapCode.SERVICE_UNAVAILABLE.value,
             ObservationGapCode.VAULT_LOCKED.value,
             "observation_disabled",
             "paused",
         }
     )
     skipped_sessions: set[str] = set()
+    consecutive_unavailable = 0
     try:
         for row in pending:
             if row.codex_session_id in skipped_sessions:
@@ -620,11 +671,26 @@ async def _drain_outbox(
                     ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
                 )
             if decision.action is ObservationDrainAction.RETRY:
+                if decision.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value:
+                    consecutive_unavailable += 1
+                    if consecutive_unavailable >= _DRAIN_MAX_CONSECUTIVE_UNAVAILABLE:
+                        break
+                    continue
+                consecutive_unavailable = 0
                 if decision.reason == session_scoped_stop:
                     skipped_sessions.add(row.codex_session_id)
+                    # Stamp the retired siblings with the shared cause so
+                    # `observe status` never reports them as not_attempted.
+                    with contextlib.suppress(Exception):
+                        store.note_outbox_session_reason(
+                            workspace_commitment,
+                            row.codex_session_id,
+                            decision.reason,
+                        )
                 elif decision.reason in global_stop:
                     break
                 continue
+            consecutive_unavailable = 0
             if decision.action is ObservationDrainAction.QUARANTINE:
                 store.quarantine_outbox_row(
                     workspace_commitment,
