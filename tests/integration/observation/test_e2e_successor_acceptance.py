@@ -23,23 +23,38 @@ from yoetz.cli.observe_hooks import handle_observe
 from yoetz.domain.values import Timestamp
 
 
-def test_rendered_hooks_declare_workspace_binding_and_three_second_budget() -> None:
+def test_rendered_hooks_declare_workspace_binding_and_nonblocking_budgets() -> None:
+    """Observe hooks bind the workspace and never block a session (#209).
+
+    The old contract here — every observe timeout <= 3s — was unmeetable and
+    got every hook SIGKILLed mid-drain. The successor contract: pure-ingress
+    handlers are async (they cannot block regardless of timeout), synchronous
+    advice handlers declare a meetable 10s, and SessionEnd stays inside the
+    Codex host's hard 3s clamp.
+    """
+
     tree = render_plugin_tree()
     hooks = json.loads(tree["hooks/hooks.json"].decode("utf-8"))
-    observe_commands: list[dict[str, Any]] = []
-    for groups in hooks["hooks"].values():
+    observe_commands: list[tuple[str, dict[str, Any]]] = []
+    for event, groups in hooks["hooks"].items():
         for group in groups:
             entries = group.get("hooks", [group] if "command" in group else [])
             for hook in entries:
                 command = hook.get("command")
                 if isinstance(command, str) and "hooks observe" in command:
-                    observe_commands.append(hook)
+                    observe_commands.append((event, hook))
     assert observe_commands
-    for hook in observe_commands:
+    for event, hook in observe_commands:
         command = hook["command"]
         assert isinstance(command, str)
         assert "--workspace ." in command
-        assert int(hook["timeout"]) <= 3
+        if event == "SessionEnd":
+            assert hook.get("async") is not True
+            assert int(hook["timeout"]) <= 3
+        elif hook.get("async") is True:
+            assert int(hook["timeout"]) <= 10
+        else:
+            assert int(hook["timeout"]) <= 10
 
 
 def test_two_consented_workspaces_bind_independent_codex_sessions(
