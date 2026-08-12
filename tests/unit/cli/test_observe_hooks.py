@@ -744,6 +744,93 @@ async def test_drain_treats_service_unavailable_as_row_scoped_with_a_cap(tmp_pat
 
 
 @pytest.mark.anyio
+async def test_slow_successful_connect_is_not_charged_to_the_drain_budget(
+    tmp_path: Path,
+) -> None:
+    """The preflight bounds connect time; the budget bounds drain work.
+
+    Before the clock moved after the connect, a 0.9s connect against the
+    0.75s SessionEnd budget entered the row loop with remaining <= 0 and
+    drained nothing while recording drain_budget_exhausted — a diagnostic
+    blaming the budget for time the connect spent.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "slow-connect")
+    store.enqueue_outbox(workspace, "slow-connect", _drain_envelope(store, "slow-connect", "x", 1))
+
+    clock = {"now": 0.0}
+
+    async def slow_connect(_kind: object):
+        clock["now"] += 0.9  # slower than the whole 0.75s SessionEnd budget
+        return _InstantAckClient()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="slow-connect",
+        connect=slow_connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+        budget_seconds=0.75,
+        monotonic=lambda: clock["now"],
+    )
+    assert store.pending_outbox_count(workspace) == 0, (
+        "a slow but successful connect must leave the whole budget for draining"
+    )
+    diagnostics_path = tmp_path / "observation/hook-diagnostics.jsonl"
+    if diagnostics_path.exists():
+        assert '"reason":"drain_budget_exhausted"' not in diagnostics_path.read_text()
+
+
+@pytest.mark.anyio
+async def test_workspace_global_rejection_ends_the_pass(tmp_path: Path) -> None:
+    """vault_locked cannot heal mid-pass, so one rejection ends the drain."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    for session in ("one", "two"):
+        store.bind_codex_session(workspace, session)
+        for ordinal in (1, 2):
+            store.enqueue_outbox(
+                workspace, session, _drain_envelope(store, session, f"hook:{session}", ordinal)
+            )
+
+    attempts = 0
+
+    class LockedClient:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            nonlocal attempts
+            attempts += 1
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.VAULT_LOCKED.value,
+                    None,
+                )
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return LockedClient()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="one",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+    assert attempts == 1, "a workspace-global rejection must end the pass after one probe"
+    assert store.pending_outbox_count(workspace) == 4
+
+
+@pytest.mark.anyio
 async def test_drain_lease_prevents_concurrent_hooks_from_double_draining(
     tmp_path: Path,
 ) -> None:
