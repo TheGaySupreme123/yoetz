@@ -98,10 +98,22 @@ there is no force-replace option anywhere in the interface.
 Setup reports these activation layers independently. `installed_exact` at
 `.agents/skills/yoetz` proves the reviewed project skill bytes are present, not that a running Codex
 session loaded or followed them. `.agents/plugins/yoetz` proves only that Yoetz's managed plugin and
-hook source files are present; Codex plugin activation requires its separate marketplace/plugin
-trust flow, which setup does not perform silently. MCP `registered` proves only the configuration
-entry. A stopped service can prevent a later MCP call, but it cannot explain a session that never
-discovered the skill or attempted a Yoetz tool.
+hook source files are present. Codex plugin activation requires a separate standing-trust flow,
+which setup offers only through an exact digest-bound preview and explicit approval. The preview is
+bound to the selected executable and its SHA-256, an explicitly selected existing absolute,
+non-symlink Codex home, the executable's network-free `--version` result, repository marketplace and
+home-config preimages/proposals, managed source digest, versioned cache target/digest, and the exact
+post-consent `plugin list --marketplace yoetz --json` and `plugin add yoetz@yoetz --json` commands.
+Before approval, the version probe forces both Codex home variables to a fresh owner-private
+temporary home and removes its scratch afterward; it does not inspect inventory in the selected
+home. After approval, both variables are forced to that selected home for list/add, whose possible
+scratch, cache, config, and marketplace effects are included in the disclosed activation boundary.
+Setup reports `active` only when canonical Codex
+inventory says the repository plugin is installed and enabled and its versioned cache is byte-exact
+to the managed source, in addition to exact marketplace/config state. MCP `registered` proves only
+the separate configuration entry. Neither active inventory nor MCP registration proves a later
+session loaded a hook or delivered an observation. A stopped service can prevent a later MCP call,
+but it cannot explain a session that never discovered the skill or attempted a Yoetz tool.
 
 Two different things are called a default here, and only one of them is a policy. The **seeded
 policy** is `local_only`: every installation starts with external LLM disclosure denied, and

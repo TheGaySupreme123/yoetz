@@ -2,13 +2,13 @@
 
 This runbook guides you through previewing, installing, checking, replacing, and removing the
 canonical Yoetz Codex skill in one explicitly trusted project, while preserving any files you have
-modified. It also separates three facts that are easy to conflate: skill installation, MCP
-registration, and Codex's tested capability for a given Codex version.
+modified. It also separates four facts that are easy to conflate: skill/source installation, Codex
+plugin activation, MCP registration, and Codex's tested capability for a given Codex version.
 
 ## 1. What integration installs — and does not
 
-v0.1 installs only the canonical `SKILL.md`, its named references/compatibility data, and a
-nonsecret managed marker, at exactly:
+The standalone `yoetz integrate skill` surface installs only the canonical `SKILL.md`, its named
+references/compatibility data, and a nonsecret managed marker, at exactly:
 
 ```text
 <explicit-trusted-project>/.agents/skills/yoetz/
@@ -103,12 +103,39 @@ gated by an explicit digest-bound confirmation, run by Yoetz instead of by hand;
 foreign entry is still preserved and refused, success is verified by re-reading the entry, and
 "registered" still never implies Codex will successfully connect at runtime.
 
-The accepted setup path composes three separately reported layers in order: it installs the
-project skill at `.agents/skills/yoetz`, installs managed structural plugin/hook sources at
-`.agents/plugins/yoetz`, then verifies the MCP entry. The plugin source directory is not evidence
-that Codex activated a plugin. Current Codex plugin activation has its own marketplace and explicit
-add trust flow; setup deliberately does not mutate that global surface. This distinction is why a
-successful setup report includes both project-skill presence and plugin-source presence.
+The accepted setup path composes four separately reported layers in order: it installs the project
+skill at `.agents/skills/yoetz`, installs managed structural plugin/hook sources at
+`.agents/plugins/yoetz`, applies an explicitly approved Codex activation, then verifies the MCP
+entry. The plugin source directory, marketplace entry, or enabled config table alone is not
+evidence that Codex activated a plugin.
+
+Activation is a standing-trust mutation for future sessions in one owner-selected Codex home. The
+owner must explicitly supply an existing absolute, non-symlink home; setup never derives it from a
+wrapper basename, ambient environment, or a pre-consent Codex diagnostic. Setup binds the exact
+selected executable path and SHA-256 and obtains its version by running only `--version` with both
+`CODEX_HOME` and `CODEX_TESTING_HOME` redirected to a fresh owner-private temporary home. Codex may
+create scratch even for that command, so the temporary home is removed afterward. No selected-home
+inventory command runs before approval.
+
+The preview digest also binds the repository marketplace and selected-home config
+preimages/proposals, managed source-tree digest, cache root
+`<selected-home>/plugins/cache/yoetz/yoetz`, cache preimage/intended install-tree digest, the
+temporary-private-home probe environment, the forced selected-home environment for mutation, and
+the exact post-consent commands `plugin list --marketplace yoetz --json` and
+`plugin add yoetz@yoetz --json`. Review the displayed targets, environments, commands/digests,
+resulting marketplace/config bytes, possible selected-home scratch/cache effects, and warning
+before approving; do not substitute a manual `plugin add` for that ceremony.
+
+After consent, apply forces both home variables to the approved home, re-probes bound state under
+an owner-only home lock, CAS-fences each write, invokes the exact selected executable for scoped
+inventory/add, and validates its reported installed path/version. A later failure preserves any
+already-approved marketplace/config/cache partial state for an honest retry; it does not attempt a
+pathname rollback that could delete or overwrite a concurrent change. `active` means all of these
+agree: managed source installed, repository marketplace and selected-home config exact, canonical
+inventory says `yoetz@yoetz` is installed and enabled from this repository, and the installed
+version cache is byte-identical to the managed source. Other closed states are `installed_not_activated`,
+`not_installed`, and `foreign`. None of them—and not even `active`—proves a later Codex process
+loaded a hook or delivered an observation.
 
 Registration also decides *which* route the agent gets. Both owned serve commands classify as
 `yoetz_owned`, so the state alone cannot tell a strict registration from a policy one. Read the
@@ -190,7 +217,8 @@ manage any MCP configuration yourself if you want it removed too.
 | Compatibility is `unsupported` | Automatic activation is unprofiled; use a supported Yoetz/Codex version pair when capability evidence is required. |
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$yoetz` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |
-| Setup reports plugin source files but no Yoetz skill appears | Check `.agents/skills/yoetz`; `.agents/plugins/yoetz` alone is not an activated Codex plugin. |
+| Setup reports `installed_not_activated` | Re-run setup/recommendation preview for the exact selected executable. Review canonical inventory and the versioned cache; marketplace/config presence alone is insufficient. |
+| Setup reports plugin source files but no Yoetz skill appears | Check `.agents/skills/yoetz`; source installation and plugin activation do not prove project-skill discovery. |
 | MCP name already present | Preserve it and review ownership rather than running `mcp add`. |
 | `setup` skipped MCP registration | Codex not on PATH, or the entry is foreign-owned; run `yoetz integrate codex mcp status --json` for the exact state. |
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |

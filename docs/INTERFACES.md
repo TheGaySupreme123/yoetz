@@ -1903,10 +1903,10 @@ external LLM construction and external task/user-content disclosure but is not a
 for the four non-LLM rows. `ReviewSelectionPolicy` is the closed sections/excerpt-kinds/relevance/
 finding-prose/exact-command/caps value owned by `domain/privacy.md`; overlays meet by set
 intersection, stricter relevance, logical AND for both booleans, and minimum caps. Selector growth
-or disabling the current-data-use guard
-is a policy loosening. v0.1 owns no production transports for those four rows: setup renders
-them `unsupported` except `update_checks`, which ships a bounded structural PyPI transport and is a
-real setup yes/no (product default on). Enabling the remaining three non-LLM rows returns
+or disabling the current-data-use guard is a policy loosening. Among those four rows, v0.1 owns a
+production transport only for `update_checks`: a bounded structural PyPI transport behind a real
+setup yes/no (product default on). Setup renders the remaining three rows `unsupported`; enabling
+them returns
 `channel_unavailable` without persistence or I/O, and forced enabled state for those rows yields a
 pre-dispatch `channel_unavailable/channel_unavailable` decision receipt with no
 authorization/dispatch/commitment/attempt-body fields. A later exact capability for those rows
@@ -2428,10 +2428,26 @@ unprofiled install. ADR-012's accepted first-run setup is the one narrow excepti
 the same preview-digest-bound packaged bytes into the already approved trusted project so Codex can
 discover the project skill, while reporting compatibility `unsupported` and automatic activation
 untested. Prompt and non-prompt setup surfaces compute the project-skill preview before acceptance;
-non-prompt front ends echo both the MCP and skill preview digests, and either stale digest refuses
-the whole apply before a file is written. Setup separately reports
-`project_skill_installation`, structural plugin-source installation, MCP registration,
-hooks/consent, service routing, and semantic readiness; none of those fields implies another.
+non-prompt front ends echo the MCP, skill, and plugin-activation preview digests, and any stale
+digest refuses the whole apply before a file is written. Setup separately reports
+`project_skill_installation`, structural plugin-source installation, `plugin_activation`, MCP
+registration, hooks/consent, service routing, and semantic readiness; none of those fields implies
+another. `plugin_activation` uses the closed state
+`active|installed_not_activated|not_installed|foreign`. Its preview/inspection/application bind the
+exact selected executable path and SHA-256, an owner-supplied existing absolute non-symlink home,
+the parsed result of exact `--version`, repository marketplace and selected-home config
+preimages/proposals, installed managed source-tree digest, cache root
+`<home>/plugins/cache/yoetz/yoetz` and cache preimage/intended tree digest, and exact post-consent
+`plugin list --marketplace yoetz --json` and `plugin add yoetz@yoetz --json` commands. Preview runs
+the version probe with both home variables set to a fresh owner-private temporary home, removes its
+scratch afterward, and performs no selected-home inventory read. After consent, apply forces both
+home variables to the approved home, re-probes under its lock, and CAS-fences each write. A later
+failure preserves approved partial marketplace/config/cache state for retry and performs no
+pathname rollback that could race a concurrent replacement.
+`active` additionally requires canonical inventory to report the expected repository plugin
+installed and enabled and its installed-version cache tree to match the managed source bytes;
+marketplace/config presence alone remains `installed_not_activated`. This is standing trust for
+future sessions, not proof that a session loaded a hook or delivered observation evidence.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
 `HarnessMcpPort` methods are `status_registration`, `observe_registration`, `preview_registration`,
 and `apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,

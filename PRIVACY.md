@@ -48,12 +48,16 @@ channel never enables another. A separate global network ceiling authorizes noth
 `local_only` governs LLM disclosure and may coexist with a separately consented bounded structural
 non-LLM channel. **Package update checks** may contact the allowlisted PyPI JSON endpoint for the
 `yoetz` distribution when the durable `update_checks` channel is enabled (product default: on;
-opt-out in privacy setup). That path carries only package name/version identity — never task or
-user content — and never auto-upgrades. True Yoetz zero-network mode is the composite of
-`local_only`, the global ceiling off, and all five network channels disabled (including turning
-update checks off). That mode still permits only exact release-profiled local IPC required for the
-Yoetz service, confidential helper, approved local model, OS credential/user-presence service, and
-session-lifecycle monitor; it does not permit arbitrary AF_UNIX destinations.
+opt-out in first-run setup or privacy custom section 5). That path carries only package name/version
+identity — never task or user content — and never auto-upgrades. On a fresh, unconfigured
+installation, pre-policy advisory paths are local/cache-only and network-disabled, so nothing
+egresses before first-run setup confirms the resulting exact policy. Rerunning setup does not
+suspend or revoke an existing standing policy: ordinary service activity remains governed by that
+policy until a replacement is committed. True Yoetz zero-network mode is the
+composite of `local_only`, the global ceiling off, and all five network channels disabled (including
+turning update checks off). That mode still permits only exact release-profiled local IPC required
+for the Yoetz service, confidential helper, approved local model, OS credential/user-presence
+service, and session-lifecycle monitor; it does not permit arbitrary AF_UNIX destinations.
 
 An independent review-context profile controls which potentially useful material is selected
 before those disclosure rules run: `structural`, `goal_aware`, `assisted`, `expanded`, or `custom`.

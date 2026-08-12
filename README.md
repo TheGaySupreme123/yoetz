@@ -36,6 +36,16 @@ Full walkthrough: [Install and first run](docs/usage/install-and-first-run.md) a
 its user should follow [Agent start](docs/usage/agent-start.md): setup's questions appear only on
 the human's own terminal, and that page says what to run, what to ask, and what to recommend.
 
+For Codex observation, source files and configuration are not activation proof. Setup offers one
+standing-trust preview bound to the exact selected Codex executable and an explicitly selected,
+existing Codex home. Before consent, only that executable's `--version` runs, with both Codex home
+variables redirected to a fresh owner-private temporary home that is removed afterward; setup does
+not inspect the approved home's plugin inventory. Only explicit digest-bound approval permits the
+scoped inventory/add commands and disclosed marketplace, config, scratch, and versioned-cache
+effects in the selected home. Even an `active` result proves installed inventory and
+cache/config state for future sessions—not that a later session loaded a hook or delivered an
+observation.
+
 ## The six operations
 
 `start`, `publish_work`, `check`, `respond`, `status`, `receipt` — identical contracts on the CLI and
@@ -51,8 +61,13 @@ See [The six operations](docs/usage/six-operations.md).
 
 ## Two defaults, deliberately separate
 
-An unconfigured installation is **zero-egress and deterministic**. Nothing leaves your machine, and
-it is fully useful in that state.
+A fresh installation's unconfigured seed is **zero-egress and deterministic**: nothing leaves your
+machine before first-run setup commits a policy, and Yoetz is fully useful in that state. Setup's
+proposed privacy policy states whether Yoetz may check PyPI for package updates (default yes, with an
+opt-out). That bounded check carries only the `yoetz` package identity and version, never task or
+user content, and it never upgrades the package for you; decline it for a zero-network installation.
+Rerunning setup does not suspend or revoke an existing standing policy: ordinary activity remains
+governed by that policy until the user commits a replacement.
 
 External semantic review is a separate explicit decision. When you choose it, the CLI's recommended
 `assisted-review` recipe shows and confirms a standing policy that sends the reviewer a structured
