@@ -377,6 +377,49 @@ def test_unsafe_tree_walk_skips_root_git_internals_but_still_rejects_nested_git(
     assert nested.limitations == (SubjectStateLimitation.UNSAFE_ROOT,)
 
 
+def test_a_nested_git_inside_a_fully_ignored_subtree_is_deliberately_not_rejected(
+    tmp_path: Path,
+) -> None:
+    """A nested `.git` under a gitignore-excluded subtree does not make the root unsafe.
+
+    Pruning fully-ignored subtrees (issue #243) means the walk never sees what is inside one, so
+    the `.venv/lib/pkg/.git` of a vendored dependency no longer trips UNSAFE_ROOT. That is
+    deliberate and safe rather than a lost check: the nested-`.git` rule exists so capture never
+    reads or hashes a foreign repository's contents, and a fully-ignored subtree is already
+    outside everything capture touches — `git ls-files` never lists a path under a collapsed
+    ignored directory, and the walk never opens a file there. The narrower non-ignored case is
+    still rejected; see the nested-`.git` assertion above.
+    """
+
+    repository = _repository(tmp_path)
+    command = _command(repository)
+    (repository / ".gitignore").write_text("vendored/\n", encoding="utf-8")
+    _git(repository, "add", "--", ".gitignore")
+    _git(
+        repository,
+        "-c",
+        "user.name=Yoetz Test",
+        "-c",
+        "user.email=yoetz@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "ignore vendored",
+    )
+    foreign = repository / "vendored" / "lib" / "pkg"
+    (foreign / ".git").mkdir(parents=True)
+    (foreign / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (foreign / "module.py").write_text("vendored source\n", encoding="utf-8")
+
+    result = GitSubjectStateAdapter().capture(command)
+
+    assert result.status is SubjectStateStatus.CAPTURED
+    assert result.limitations == ()
+    # Nothing inside the ignored subtree was read: the digest is unchanged by its contents.
+    (foreign / "module.py").write_text("vendored source, edited\n", encoding="utf-8")
+    assert GitSubjectStateAdapter().capture(command).subject_state == result.subject_state
+
+
 def test_file_limit_trip_reports_bound_observed_and_limit(tmp_path: Path) -> None:
     repository = _repository(tmp_path)
     command = _command(repository)

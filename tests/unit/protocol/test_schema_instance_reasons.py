@@ -93,11 +93,20 @@ def test_schema_instance_invalid_rejects_a_free_form_family() -> None:
         SchemaInstanceInvalid(("payload",), family="Not A Family")
 
 
+@pytest.mark.parametrize("version", ["1.0", "v1.0.0", "01.0.0", "1.0.0-rc1", "", "latest"])
+def test_schema_instance_invalid_rejects_a_free_form_family_version(version: str) -> None:
+    """The version names a frozen contract, so only an exact semantic triple is admitted."""
+
+    with pytest.raises(TypeError):
+        SchemaInstanceInvalid(("payload",), family="beta", family_version=version)
+
+
 def test_schema_instance_invalid_defaults_stay_silent() -> None:
     error = SchemaInstanceInvalid(("payload",))
 
     assert error.reason is None
     assert error.family is None
+    assert error.family_version is None
     assert error.unknown_count == 0
 
 

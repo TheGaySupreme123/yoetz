@@ -14,6 +14,15 @@ from yoetz.protocol.errors import SAFE_DETAIL_KEYS, PublicErrorCode, PublicOpera
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import FRONTIER_LEAVES, OperationFailureModel
 
+# One definition of the admission shapes the protocol validator already enforces on the way out.
+# Declaring them a second time here let this projector admit a token the validator never emits, or
+# reject one it does, with nothing to catch the drift.
+from yoetz.protocol.schemas import (
+    EVENT_FAMILY_NAME_PATTERN,
+    MAX_UNKNOWN_PROPERTY_COUNT,
+    SCHEMA_VERSION_PATTERN,
+)
+
 __all__ = [
     "authoring_hint",
     "build_last_resort_internal_error_result",
@@ -180,9 +189,7 @@ _SAFE_VALUE_ERROR_REASON_TOKENS: Final = frozenset(
 _EXTRA_FORBIDDEN_REASON: Final = "extra_forbidden"
 # Payload pointers the unknown-key hint answers. Deeper pointers name their own admitted values.
 _EVENT_DRAFT_PAYLOAD_POINTER: Final = re.compile(r"/event_drafts/[0-9]{1,3}/payload", re.ASCII)
-_FAMILY_NAME: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 _REASON_CODE: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-_MAX_UNKNOWN_PROPERTY_COUNT: Final = 32
 # A closed registry of checked-in corrective sentences for facts that are true of the contract but
 # are not expressible as a JSON Schema keyword, so no hint built from the schema alone can state
 # them. Keys are `(tool, pointer, reason)`; nothing here is derived from a caller value, and the
@@ -284,9 +291,26 @@ def _family_from_validation_item(item: Mapping[str, object]) -> str | None:
     if not isinstance(ctx, Mapping):
         return None
     family = cast(Mapping[object, object], ctx).get("schema_name")
-    if type(family) is not str or _FAMILY_NAME.fullmatch(family) is None:
+    if type(family) is not str or EVENT_FAMILY_NAME_PATTERN.fullmatch(family) is None:
         return None
     return family if family in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES else None
+
+
+def _family_version_from_validation_item(item: Mapping[str, object]) -> str | None:
+    """Return the frozen schema version of the family the validator named, or None.
+
+    The validator reads it from the catalogue entry the failing schema's ``$id`` names, so it is
+    frozen schema content and never the ``schema.version`` the caller sent. Admission is closed by
+    the same version pattern the protocol validator enforces.
+    """
+
+    ctx = item.get("ctx")
+    if not isinstance(ctx, Mapping):
+        return None
+    version = cast(Mapping[object, object], ctx).get("schema_version")
+    if type(version) is not str or SCHEMA_VERSION_PATTERN.fullmatch(version) is None:
+        return None
+    return version
 
 
 def _unknown_count_from_validation_item(item: Mapping[str, object]) -> int:
@@ -296,7 +320,7 @@ def _unknown_count_from_validation_item(item: Mapping[str, object]) -> int:
     if not isinstance(ctx, Mapping):
         return 0
     count = cast(Mapping[object, object], ctx).get("count")
-    if type(count) is not int or not 1 <= count <= _MAX_UNKNOWN_PROPERTY_COUNT:
+    if type(count) is not int or not 1 <= count <= MAX_UNKNOWN_PROPERTY_COUNT:
         return 0
     return count
 
@@ -304,9 +328,9 @@ def _unknown_count_from_validation_item(item: Mapping[str, object]) -> int:
 def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
     """Project Pydantic failures to allowlisted locations and bounded reason tokens.
 
-    ``family`` and ``count`` ride along on an unknown-property location for the hint builders in
-    this module. ``build_public_error_result`` projects only ``field`` and ``reason`` to the wire,
-    so neither reaches a caller as a detail key.
+    ``family``, ``family_version``, and ``count`` ride along on an unknown-property location for
+    the hint builders in this module. ``build_public_error_result`` projects only ``field`` and
+    ``reason`` to the wire, so none of them reaches a caller as a detail key.
     """
 
     if not isinstance(exc, ValidationError):
@@ -334,6 +358,11 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
             family = _family_from_validation_item(source)
             if family is not None:
                 entry["family"] = family
+                # Only meaningful beside a family, and a family with several admitted versions is
+                # answered with the wrong key list without it (issue #239).
+                family_version = _family_version_from_validation_item(source)
+                if family_version is not None:
+                    entry["family_version"] = family_version
             count = _unknown_count_from_validation_item(source)
             if count:
                 entry["count"] = str(count)
@@ -539,7 +568,9 @@ def _unknown_payload_key_hint_parts(
             continue
         family = location.get("family")
         family = family if type(family) is str else None
-        admitted = _payload_property_names(document, family)
+        family_version = location.get("family_version")
+        family_version = family_version if type(family_version) is str else None
+        admitted = _payload_property_names(document, family, family_version)
         subject = f"the {family} schema" if family is not None and admitted else "the event schema"
         measure = _unknown_property_measure(location.get("count", ""))
         text = f"the payload carries {measure} {subject} does not admit"
@@ -556,10 +587,23 @@ def _unknown_payload_key_hint_parts(
     return parts
 
 
-def _payload_property_names(document: Mapping[str, JsonValue], family: str | None) -> str:
-    """Return the admitted payload keys of one family, or "" when they cannot all be named."""
+def _payload_property_names(
+    document: Mapping[str, JsonValue], family: str | None, family_version: str | None
+) -> str:
+    """Return the admitted payload keys of one family version, or "" when they cannot be named.
 
-    if family is None:
+    Both consts must match. A family may carry several admitted versions — ``evidence_recorded``
+    has 1.0.0 and 1.1.0 — while this presentation schema pins one branch per family. Selecting on
+    the name alone would answer a 1.1.0 failure with the 1.0.0 key list and so tell the caller to
+    delete ``digest_binding``, a key 1.1.0 requires (issue #239). When no branch matches both, the
+    caller gets the family-free wording, which still states the count and names ``schema.name``.
+
+    Both the name and the version come from frozen schema content on either side: the presentation
+    branch's own consts, and the version the validator read from the catalogue. Neither is ever
+    taken from the instance.
+    """
+
+    if family is None or family_version is None:
         return ""
     items = _event_draft_items(document)
     if items is None:
@@ -571,7 +615,11 @@ def _payload_property_names(document: Mapping[str, JsonValue], family: str | Non
         return ""
     for branch in cast(list[JsonValue], options):
         resolved = _resolve_local(document, branch)
-        if _schema_name_const(document, resolved) != family or not isinstance(resolved, Mapping):
+        if not isinstance(resolved, Mapping):
+            continue
+        if _schema_name_const(document, resolved) != family:
+            continue
+        if _schema_version_const(document, resolved) != family_version:
             continue
         branch_properties = cast(Mapping[str, JsonValue], resolved).get("properties")
         if not isinstance(branch_properties, Mapping):
@@ -606,7 +654,7 @@ def _unknown_property_measure(count: object) -> str:
     value = int(count)
     if value == 1:
         return "1 property"
-    if 2 <= value <= _MAX_UNKNOWN_PROPERTY_COUNT:
+    if 2 <= value <= MAX_UNKNOWN_PROPERTY_COUNT:
         return f"{value} properties"
     return "properties"
 
@@ -1009,7 +1057,11 @@ def _branch_covers_path(
     return True
 
 
-def _schema_name_const(document: Mapping[str, JsonValue], branch: JsonValue) -> str | None:
+def _schema_identity_const(
+    document: Mapping[str, JsonValue], branch: JsonValue, member: str
+) -> str | None:
+    """Read one frozen ``schema.<member>`` const off a draft-union branch."""
+
     node = _resolve_local(document, branch)
     if not isinstance(node, Mapping):
         return None
@@ -1023,12 +1075,20 @@ def _schema_name_const(document: Mapping[str, JsonValue], branch: JsonValue) -> 
     schema_props = cast(Mapping[str, JsonValue], schema_node).get("properties")
     if not isinstance(schema_props, Mapping):
         return None
-    name_node = cast(Mapping[str, JsonValue], schema_props).get("name")
-    name_node = _resolve_local(document, name_node) if name_node is not None else None
-    if not isinstance(name_node, Mapping):
+    member_node = cast(Mapping[str, JsonValue], schema_props).get(member)
+    member_node = _resolve_local(document, member_node) if member_node is not None else None
+    if not isinstance(member_node, Mapping):
         return None
-    const_name = cast(Mapping[str, JsonValue], name_node).get("const")
-    return const_name if type(const_name) is str else None
+    const_value = cast(Mapping[str, JsonValue], member_node).get("const")
+    return const_value if type(const_value) is str else None
+
+
+def _schema_name_const(document: Mapping[str, JsonValue], branch: JsonValue) -> str | None:
+    return _schema_identity_const(document, branch, "name")
+
+
+def _schema_version_const(document: Mapping[str, JsonValue], branch: JsonValue) -> str | None:
+    return _schema_identity_const(document, branch, "version")
 
 
 def _is_schema_discriminator_path(remaining: Sequence[str | int]) -> bool:
@@ -1175,7 +1235,10 @@ def build_public_error_result(
             "message": message,
             "retryable": retryable,
             "correlation_id": correlation_id,
-            "safe_details": details,
+            # `safe_details` keys are ASCII-ordered on the wire (docs/INTERFACES.md). Literal
+            # insertion order put `reason_code` last, which is neither the documented order nor
+            # the one every other producer of this map emits.
+            "safe_details": dict(sorted(details.items())),
         }
         return _validated_failure(public_error, request_id)
     error = PublicOperationError(

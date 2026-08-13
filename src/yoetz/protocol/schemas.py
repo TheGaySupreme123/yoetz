@@ -30,10 +30,13 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
+    "EVENT_FAMILY_NAME_PATTERN",
+    "MAX_UNKNOWN_PROPERTY_COUNT",
     "SCHEMA_MANIFEST_SCHEMA",
     "SCHEMA_MANIFEST_VERSION",
     "SCHEMA_MEMBER_COUNT",
     "SCHEMA_NAMESPACE",
+    "SCHEMA_VERSION_PATTERN",
     "SchemaArtifactRole",
     "SchemaCatalog",
     "SchemaDocument",
@@ -72,7 +75,9 @@ _MEMBER_FIELDS: Final = frozenset(
     }
 )
 _SCHEMA_NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", re.ASCII)
-_SCHEMA_VERSION_PATTERN: Final = re.compile(
+# Public because the MCP bridge admits the same shapes when it projects a validator failure to a
+# caller-facing hint. One definition, imported there, so the two surfaces cannot drift apart.
+SCHEMA_VERSION_PATTERN: Final = re.compile(
     r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$", re.ASCII
 )
 _SHA256_PATTERN: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
@@ -356,7 +361,7 @@ def _parse_manifest(data: bytes) -> tuple[_ManifestMember, ...]:
 
 
 def _derive_identity(path: str, version: str) -> tuple[str, str]:
-    if _SCHEMA_VERSION_PATTERN.fullmatch(version) is None:
+    if SCHEMA_VERSION_PATTERN.fullmatch(version) is None:
         _protocol_error("schema_version_mismatch")
     filename = path.rsplit("/", 1)[1]
     suffix = f"-{version}.schema.json"
@@ -685,7 +690,7 @@ def _validate_lookup_identity(name: object, version: object) -> tuple[str, str]:
         type(name) is not str
         or type(version) is not str
         or _SCHEMA_NAME_PATTERN.fullmatch(name) is None
-        or _SCHEMA_VERSION_PATTERN.fullmatch(version) is None
+        or SCHEMA_VERSION_PATTERN.fullmatch(version) is None
     ):
         _protocol_error("schema_name_invalid")
     return name, version
@@ -770,8 +775,8 @@ _MAX_PROJECTED_OBJECT_LOCATIONS: Final = 8
 # rejected key names are caller-controlled and never leave the validator (issue #240).
 _INSTANCE_REASON_EXTRA_FORBIDDEN: Final = "extra_forbidden"
 _INSTANCE_REASONS: Final = frozenset({_INSTANCE_REASON_EXTRA_FORBIDDEN})
-_MAX_UNKNOWN_PROPERTY_COUNT: Final = 32
-_FAMILY_NAME: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
+MAX_UNKNOWN_PROPERTY_COUNT: Final = 32
+EVENT_FAMILY_NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 
 
 class SchemaInstanceInvalid(ProtocolValueError):
@@ -780,17 +785,27 @@ class SchemaInstanceInvalid(ProtocolValueError):
     ``absolute_path`` names one nested field when jsonschema already points there.
     ``location_reasons`` carries root-level object-rule projections (pairing / conditional
     required) when the instance path is empty but the schema names safe corrective fields.
-    ``reason``, ``family``, and ``unknown_count`` describe an unknown-property failure: a closed
-    token, a frozen schema-derived family name, and a bounded cardinality. No caller-supplied key
-    or value is admitted through any of them.
+    ``reason``, ``family``, ``family_version``, and ``unknown_count`` describe an unknown-property
+    failure: a closed token, a frozen schema-derived family name, that family's frozen schema
+    version, and a bounded cardinality. No caller-supplied key or value is admitted through any of
+    them — ``family_version`` in particular is read from the catalogue entry the failing schema's
+    own ``$id`` names, never from the instance's ``schema.version``.
     """
 
-    __slots__ = ("absolute_path", "family", "location_reasons", "reason", "unknown_count")
+    __slots__ = (
+        "absolute_path",
+        "family",
+        "family_version",
+        "location_reasons",
+        "reason",
+        "unknown_count",
+    )
 
     absolute_path: tuple[str | int, ...]
     location_reasons: tuple[tuple[tuple[str | int, ...], str], ...]
     reason: str | None
     family: str | None
+    family_version: str | None
     unknown_count: int
 
     def __init__(
@@ -800,6 +815,7 @@ class SchemaInstanceInvalid(ProtocolValueError):
         *,
         reason: str | None = None,
         family: str | None = None,
+        family_version: str | None = None,
         unknown_count: int = 0,
     ) -> None:
         if type(absolute_path) is not tuple:
@@ -821,15 +837,21 @@ class SchemaInstanceInvalid(ProtocolValueError):
         if reason is not None and reason not in _INSTANCE_REASONS:
             raise TypeError("schema_instance_reason_invalid")
         if family is not None and (
-            type(family) is not str or _FAMILY_NAME.fullmatch(family) is None
+            type(family) is not str or EVENT_FAMILY_NAME_PATTERN.fullmatch(family) is None
         ):
             raise TypeError("schema_instance_family_invalid")
-        if type(unknown_count) is not int or not 0 <= unknown_count <= _MAX_UNKNOWN_PROPERTY_COUNT:
+        if family_version is not None and (
+            type(family_version) is not str
+            or SCHEMA_VERSION_PATTERN.fullmatch(family_version) is None
+        ):
+            raise TypeError("schema_instance_family_version_invalid")
+        if type(unknown_count) is not int or not 0 <= unknown_count <= MAX_UNKNOWN_PROPERTY_COUNT:
             raise TypeError("schema_instance_unknown_count_invalid")
         self.absolute_path = absolute_path
         self.location_reasons = location_reasons
         self.reason = reason
         self.family = family
+        self.family_version = family_version
         self.unknown_count = unknown_count
         super().__init__("schema_instance_invalid")
 
@@ -854,10 +876,12 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
         path = _path_items_from(best) or ()
         if path:
             reason = _instance_reason_for(best)
+            identity = _selected_family_for(best) if reason is not None else None
             raise SchemaInstanceInvalid(
                 path,
                 reason=reason,
-                family=_selected_family_for(best) if reason is not None else None,
+                family=identity[0] if identity is not None else None,
+                family_version=identity[1] if identity is not None else None,
                 unknown_count=_unknown_property_count(best) if reason is not None else 0,
             ) from None
         # Root-level object rules (dependentRequired, if/then anyOf required) report an empty
@@ -1103,6 +1127,15 @@ def _discriminator_selected_branch(exc: ValidationError) -> tuple[ValidationErro
     Returns None when the union carries no per-branch const discriminator, or when zero or several
     branches survive it: the family itself is then wrong or ambiguous, and whole-tree scoring is
     the right answer.
+
+    Known limitation, deliberate and unchanged from before issue #240: an extra key on the draft's
+    ``schema`` object itself (rather than in the payload) leaves two symmetric survivors — the
+    named family's branch and the catch-all — because neither is ruled out by a const the caller
+    chose. Selection then returns None, whole-tree scoring picks the `schema/name` failure, and the
+    caller is pointed at ``/event_drafts/N/schema/name`` for a defect that is really on the object
+    beside it. The hint that answer carries still names every admitted family, so the report is
+    imprecise rather than actively wrong, and no minimal fix exists that does not make branch
+    selection guess between two equally live survivors.
     """
 
     if exc.validator != "oneOf":
@@ -1149,14 +1182,18 @@ def _unknown_property_count(error: ValidationError) -> int:
         set(cast(Mapping[object, object], properties)) if isinstance(properties, Mapping) else set()
     )
     unknown = {key for key in cast(Mapping[object, object], instance) if key not in declared}
-    return min(len(unknown), _MAX_UNKNOWN_PROPERTY_COUNT)
+    return min(len(unknown), MAX_UNKNOWN_PROPERTY_COUNT)
 
 
-def _selected_family_for(error: ValidationError) -> str | None:
-    """Name the event family whose frozen payload schema rejected the instance.
+def _selected_family_for(error: ValidationError) -> tuple[str, str] | None:
+    """Name the event family and version whose frozen payload schema rejected the instance.
 
-    The name is read from the catalogue entry the failing schema's own ``$id`` identifies, never
-    from the instance, so nothing caller-controlled can travel under it.
+    Both halves are read from the catalogue entry the failing schema's own ``$id`` identifies,
+    never from the instance, so nothing caller-controlled can travel under either.
+
+    The version travels with the name because a family may have several admitted versions
+    (``evidence_recorded`` has 1.0.0 and 1.1.0). A consumer that keys a per-family presentation
+    branch on the name alone would answer a 1.1.0 failure with the 1.0.0 contract (issue #239).
     """
 
     schema = error.schema
@@ -1170,4 +1207,7 @@ def _selected_family_for(error: ValidationError) -> str | None:
     if document is None:
         return None
     family = document.schema_name.replace("-", "_")
-    return family if family in catalog.event_schema_versions else None
+    if family not in catalog.event_schema_versions:
+        return None
+    version = document.schema_version
+    return (family, version) if SCHEMA_VERSION_PATTERN.fullmatch(version) is not None else None
