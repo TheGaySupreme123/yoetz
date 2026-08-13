@@ -204,6 +204,10 @@ class MemoryObservationStore:
             self._state.gaps.setdefault(workspace, {}).pop(
                 ObservationGapCode.CURSOR_STALE.value, None
             )
+            if envelope.content_object_refs:
+                self._state.gaps.setdefault(workspace, {}).pop(
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value, None
+                )
             for gap in envelope.gap_codes:
                 self._note_gap(workspace, gap, envelope.receipt_time)
             if ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes:
