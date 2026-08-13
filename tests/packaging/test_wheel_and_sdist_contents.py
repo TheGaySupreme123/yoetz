@@ -220,7 +220,7 @@ def test_wheel_contains_exactly_one_package_console_entry_and_py_typed(
 
     entry_points = members[f"{dist_info_prefix}entry_points.txt"].decode("utf-8")
     assert "[console_scripts]" in entry_points
-    assert "yoetz = yoetz.cli.app:main" in entry_points
+    assert "yoetz = yoetz.cli.entry:main" in entry_points
 
 
 def test_wheel_member_names_have_no_duplicate_or_case_collision(candidate: Candidate) -> None:
