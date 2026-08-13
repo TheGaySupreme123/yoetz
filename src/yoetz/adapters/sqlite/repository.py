@@ -297,6 +297,7 @@ class SqliteLedger:
         self._lock = asyncio.Lock()
         self._state = MemoryLedgerState()
         self._requires_recovery = _head(db).sequence != 0
+        self._recovery_task: asyncio.Task[None] | None = None
 
     def open_observation_store(self) -> SqliteObservationStore:
         """Public durable-observation seam over this bundle's connection.
@@ -449,6 +450,21 @@ class SqliteLedger:
     async def _ensure_recovered(self) -> None:
         if not self._requires_recovery:
             return
+        task = self._recovery_task
+        if task is None:
+            task = asyncio.create_task(self._recover_once())
+            self._recovery_task = task
+        try:
+            await asyncio.shield(task)
+        finally:
+            if task.done() and self._recovery_task is task:
+                self._recovery_task = None
+
+    async def _recover_once(self) -> None:
+        """Rebuild one shared projection without duplicating work on caller cancellation."""
+
+        if not self._requires_recovery:
+            return
         async with self._lock:
             if not self._requires_recovery:
                 return
@@ -461,9 +477,17 @@ class SqliteLedger:
                     "ORDER BY e.ingestion_seq"
                 ).fetchall(),
             )
-            records = tuple([await self._decode_durable_record(row) for row in rows])
+            decoded_records: list[LedgerRecord] = []
+            for index, row in enumerate(rows, start=1):
+                decoded_records.append(await self._decode_durable_record(row))
+                if index % 32 == 0:
+                    await asyncio.sleep(0)
+            records = tuple(decoded_records)
             try:
-                projection = replay(records)
+                # Reducer replay is pure but can be CPU-heavy for a mature ledger.  Keep it off
+                # the service daemon's event loop so recovery of one task cannot starve control
+                # handshakes or unrelated task routes.
+                projection = await asyncio.to_thread(replay, records)
             except ValueError as exc:
                 raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
             for (
@@ -549,6 +573,7 @@ class SqliteLedger:
                 key = (operation.writer_id, operation.operation_id)
                 self._state.frozen_cases[key] = case
                 self._state.operations[key] = (operation, None)
+                await asyncio.sleep(0)
             for operation_row in self._db.execute(
                 "SELECT writer_id,operation_id,operation_kind,request_digest,state,phase,"
                 "result_canonical,result_digest,first_ingestion_seq,last_ingestion_seq,"

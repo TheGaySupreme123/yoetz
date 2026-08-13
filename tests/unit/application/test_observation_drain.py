@@ -20,6 +20,7 @@ from yoetz.domain.observation import (
     ObservationIngestRequest,
     ObservationIngestResult,
     ObservationSource,
+    ObservationStatusQuery,
 )
 from yoetz.domain.values import JsonObject, Timestamp
 
@@ -77,6 +78,14 @@ def _envelope(session: str, identity: str, ordinal: int) -> ObservationEnvelope:
             ),
             ObservationDrainAction.QUARANTINE,
         ),
+        (
+            ObservationIngestResult(
+                ObservationIngestDisposition.REJECTED,
+                ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value,
+                None,
+            ),
+            ObservationDrainAction.QUARANTINE,
+        ),
     ],
 )
 def test_route_observation_ingest_is_pure(
@@ -96,6 +105,68 @@ def test_route_unknown_rejection_reason_to_safe_retry_fallback() -> None:
 
     assert decision.action is ObservationDrainAction.RETRY
     assert decision.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
+
+
+def test_bulk_quarantine_records_terminal_reason_and_returns_rows_moved(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    corrupt = store.bind_codex_session(workspace, "corrupt")
+    healthy = store.bind_codex_session(workspace, "healthy")
+    for ordinal in (1, 2):
+        store.enqueue_outbox(
+            workspace,
+            "corrupt",
+            _envelope(corrupt, f"hook:corrupt:{ordinal}", ordinal),
+        )
+    store.enqueue_outbox(workspace, "healthy", _envelope(healthy, "hook:healthy", 1))
+
+    moved = store.quarantine_outbox_session(
+        workspace,
+        "corrupt",
+        ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value,
+    )
+
+    assert moved == 2
+    assert (
+        store.quarantine_outbox_session(
+            workspace,
+            "corrupt",
+            ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value,
+        )
+        == 0
+    )
+    assert [row.codex_session_id for row in store.list_pending_outbox_rows(workspace)] == [
+        "healthy"
+    ]
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value in status.gaps
+    assert ObservationGapCode.OUTBOX_QUARANTINED.value in status.gaps
+
+
+def test_successful_recovery_probe_heals_only_its_corrupt_session(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    first = store.bind_codex_session(workspace, "corrupt-first")
+    second = store.bind_codex_session(workspace, "corrupt-second")
+    store.enqueue_outbox(workspace, "corrupt-first", _envelope(first, "hook:first:1", 1))
+    store.enqueue_outbox(workspace, "corrupt-second", _envelope(second, "hook:second:1", 1))
+    reason = ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value
+    assert store.quarantine_outbox_session(workspace, "corrupt-first", reason) == 1
+    assert store.quarantine_outbox_session(workspace, "corrupt-second", reason) == 1
+
+    assert store.ingest(_envelope(first, "hook:first:repaired", 2)).disposition is (
+        ObservationIngestDisposition.ACCEPTED
+    )
+    assert reason in store.status(ObservationStatusQuery(workspace)).gaps
+
+    assert store.ingest(_envelope(second, "hook:second:repaired", 2)).disposition is (
+        ObservationIngestDisposition.ACCEPTED
+    )
+    healed = store.status(ObservationStatusQuery(workspace))
+    assert reason not in healed.gaps
+    assert ObservationGapCode.OUTBOX_QUARANTINED.value in healed.gaps
 
 
 class _Coordinator:
@@ -200,6 +271,49 @@ async def test_sweep_round_robins_pending_workspaces_under_limit(tmp_path: Path)
     assert summary.attempted == 2
     assert set(coordinator.calls) == expected_sessions
     assert len(store.pending_workspaces()) == 2
+
+
+@pytest.mark.anyio
+async def test_storage_corrupt_quarantines_session_backlog_and_keeps_healthy_lane(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    corrupt_commitment = store.bind_codex_session(workspace, "corrupt-session")
+    healthy_commitment = store.bind_codex_session(workspace, "healthy-session")
+    outcomes: dict[str, ObservationIngestResult | Exception] = {}
+    for ordinal in (1, 2, 3):
+        envelope = _envelope(corrupt_commitment, f"hook:corrupt:{ordinal}", ordinal)
+        store.enqueue_outbox(workspace, "corrupt-session", envelope)
+        outcomes[envelope.source_identity] = ObservationIngestResult(
+            ObservationIngestDisposition.REJECTED,
+            ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value,
+            None,
+        )
+    healthy = _envelope(healthy_commitment, "hook:healthy", 1)
+    store.enqueue_outbox(workspace, "healthy-session", healthy)
+    outcomes[healthy.source_identity] = ObservationIngestResult(
+        ObservationIngestDisposition.ACCEPTED,
+        None,
+        healthy.cursor,
+    )
+
+    coordinator = _Coordinator(outcomes)
+    summary = await ObservationOutboxSweeper(store, coordinator).sweep()
+
+    assert coordinator.calls.count("corrupt-session") == 1
+    assert coordinator.calls.count("healthy-session") == 1
+    assert summary.attempted == 2
+    assert summary.acknowledged == 1
+    assert summary.quarantined == 3
+    assert summary.reasons == ((ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value, 1),)
+    assert store.pending_outbox_count(workspace) == 0
+    assert store.quarantined_count(workspace) == 3
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value in status.gaps
+    assert ObservationGapCode.OUTBOX_QUARANTINED.value in status.gaps
+    assert store.reclaim_quarantine(workspace) == 3
 
 
 @pytest.mark.anyio

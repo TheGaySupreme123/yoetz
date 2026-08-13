@@ -167,6 +167,10 @@ def _empty_advice_event_ref_cache() -> dict[tuple[str, str], tuple[str, ...]]:
     return {}
 
 
+def _empty_storage_corrupt_sessions() -> set[str]:
+    return set()
+
+
 @dataclass
 class ObservationCoordinator:
     """Resolve Codex session → mapped task SQLite observation store + ledger."""
@@ -185,6 +189,9 @@ class ObservationCoordinator:
     observation_enabled: bool = True
     _advice_event_ref_cache: dict[tuple[str, str], tuple[str, ...]] = field(
         default_factory=_empty_advice_event_ref_cache, init=False, repr=False
+    )
+    _storage_corrupt_sessions: set[str] = field(
+        default_factory=_empty_storage_corrupt_sessions, init=False, repr=False
     )
 
     def __post_init__(self) -> None:
@@ -331,6 +338,8 @@ class ObservationCoordinator:
         expected = session_commitment_from_codex_id(self.local.key_material(), codex_session_id)
         if request.envelope.session_commitment != expected:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
+        if codex_session_id in self._storage_corrupt_sessions:
+            return _reject(ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
 
         mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
         if mapping is None:
@@ -353,6 +362,8 @@ class ObservationCoordinator:
             return _reject(reason)
 
         async with self._lock:
+            if codex_session_id in self._storage_corrupt_sessions:
+                return _reject(ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
             runtime: TaskRuntime | None = None
             stage = "runtime_route"
             try:
@@ -449,6 +460,9 @@ class ObservationCoordinator:
                 )
                 if exc.code is PublicErrorCode.VAULT_LOCKED:
                     return _reject(ObservationGapCode.VAULT_LOCKED.value)
+                if exc.code is PublicErrorCode.STORAGE_CORRUPT:
+                    self._storage_corrupt_sessions.add(codex_session_id)
+                    return _reject(ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
                 if exc.code in {
                     PublicErrorCode.SERVICE_UNAVAILABLE,
                     PublicErrorCode.BUNDLE_BUSY,

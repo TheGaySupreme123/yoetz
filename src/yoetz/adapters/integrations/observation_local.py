@@ -334,6 +334,7 @@ class _WorkspaceState:
     # quarantine, never the (possibly much older) envelope receipt time.
     quarantine: list[tuple[str, ObservationEnvelope, str, Timestamp]] | None = None
     codex_session_bindings: dict[str, str] | None = None
+    storage_corrupt_sessions: set[str] | None = None
     ended_sessions: set[str] | None = None
     session_generations: dict[str, int] | None = None
     ended_session_generations: dict[str, int] | None = None
@@ -372,6 +373,8 @@ class _WorkspaceState:
             self.quarantine = []
         if self.codex_session_bindings is None:
             self.codex_session_bindings = {}
+        if self.storage_corrupt_sessions is None:
+            self.storage_corrupt_sessions = set()
         if self.ended_sessions is None:
             self.ended_sessions = set()
         if self.session_generations is None:
@@ -429,6 +432,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         pending_outbox=list(state.pending_outbox or ()),
         quarantine=list(state.quarantine or ()),
         codex_session_bindings=dict(state.codex_session_bindings or {}),
+        storage_corrupt_sessions=set(state.storage_corrupt_sessions or ()),
         ended_sessions=set(state.ended_sessions or ()),
         session_generations=dict(state.session_generations or {}),
         ended_session_generations=dict(state.ended_session_generations or {}),
@@ -1244,6 +1248,56 @@ class LocalObservationStore:
             self._save(workspace, state)
             return True
 
+    def quarantine_outbox_session(self, workspace: str, codex_session_id: str, reason: str) -> int:
+        """Atomically quarantine every pending row for one terminally failed session."""
+
+        if type(codex_session_id) is not str or not codex_session_id:
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(reason) is not str or _OUTBOX_REASON_RE.fullmatch(reason) is None:
+            raise ProtocolValueError("invalid_event_value_type")
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            assert state.quarantine is not None
+            assert state.gaps is not None
+            assert state.storage_corrupt_sessions is not None
+            pending: list[ObservationOutboxRow] = []
+            moved: list[ObservationOutboxRow] = []
+            for row in state.pending_outbox:
+                (moved if row.codex_session_id == codex_session_id else pending).append(row)
+            if not moved:
+                return 0
+            state.pending_outbox[:] = pending
+            stamp = self._wall_timestamp()
+            existing = {
+                (
+                    entry[0],
+                    entry[1].source_identity,
+                    canonical_digest(observation_envelope_to_json(entry[1])),
+                )
+                for entry in state.quarantine
+            }
+            for row in moved:
+                identity = (
+                    codex_session_id,
+                    row.envelope.source_identity,
+                    canonical_digest(observation_envelope_to_json(row.envelope)),
+                )
+                if identity in existing:
+                    continue
+                state.quarantine.append((codex_session_id, row.envelope, reason, stamp))
+                existing.add(identity)
+            while len(state.quarantine) > _MAX_QUARANTINE:
+                evicted = state.quarantine.pop(0)
+                self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
+            if reason in {gap.value for gap in ObservationGapCode}:
+                self._note_gap_state(state, reason)
+            if reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value:
+                state.storage_corrupt_sessions.add(codex_session_id)
+            self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
+            self._save(workspace, state)
+            return len(moved)
+
     def quarantined_count(self, workspace: str) -> int:
         with self._lock:
             state = self._load(workspace)
@@ -1481,6 +1535,16 @@ class LocalObservationStore:
             self._resolve_gap_state(state, ObservationGapCode.CURSOR_STALE.value)
             if envelope.content_object_refs:
                 self._resolve_gap_state(state, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+            assert state.codex_session_bindings is not None
+            assert state.storage_corrupt_sessions is not None
+            repaired_sessions = {
+                codex_session_id
+                for codex_session_id, commitment in state.codex_session_bindings.items()
+                if commitment == envelope.session_commitment
+            }
+            state.storage_corrupt_sessions.difference_update(repaired_sessions)
+            if not state.storage_corrupt_sessions:
+                self._resolve_gap_state(state, ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
             for gap in envelope.gap_codes:
                 self._note_gap_state(state, gap)
             if ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes:
@@ -1916,11 +1980,11 @@ class LocalObservationStore:
                     "paused": consent.paused,
                 }
             )
-        return {
-            # /3 adds quarantined_at per quarantine entry and the reclaimed
-            # counter; readers of every version tolerate both directions
-            # (unknown keys ignored, missing keys defaulted).
-            "schema": "yoetz.observation-local/4",
+        payload: dict[str, JsonValue] = {
+            # /5 adds terminal corruption-session tracking. /3 added quarantined_at per
+            # quarantine entry and the reclaimed counter. Readers tolerate both directions:
+            # unknown keys are ignored and missing keys default safely.
+            "schema": "yoetz.observation-local/5",
             "workspace_commitment": workspace,
             "consent": consent_json,
             "session_workspaces": JsonObject(
@@ -2066,6 +2130,11 @@ class LocalObservationStore:
                 {key: value for key, value in sorted(state.codex_session_bindings.items())}
             ),
         }
+        if state.storage_corrupt_sessions:
+            payload["storage_corrupt_sessions"] = tuple(
+                sorted(state.storage_corrupt_sessions, key=str.encode)
+            )
+        return payload
 
     def _state_from_json(self, raw: Mapping[str, JsonValue]) -> _WorkspaceState:
         consent_raw = raw.get("consent")
@@ -2185,6 +2254,14 @@ class LocalObservationStore:
             for key, value in cast(
                 Mapping[str, JsonValue], raw.get("codex_session_bindings") or {}
             ).items()
+        }
+        storage_corrupt_sessions = {
+            str(value)
+            for value in cast(
+                tuple[JsonValue, ...] | list[JsonValue],
+                raw.get("storage_corrupt_sessions") or (),
+            )
+            if type(value) is str and value
         }
         open_pre = {
             str(key): str(value)
@@ -2348,6 +2425,7 @@ class LocalObservationStore:
             trusted_policy_digest=cast(str | None, raw.get("trusted_policy_digest")),
             trusted_policy_mac=cast(str | None, raw.get("trusted_policy_mac")),
             codex_session_bindings=bindings,
+            storage_corrupt_sessions=storage_corrupt_sessions,
         )
 
 

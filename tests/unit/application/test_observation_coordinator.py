@@ -19,6 +19,7 @@ from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
+from yoetz.application.observation_drain import ObservationOutboxSweeper
 from yoetz.application.observation_materialize import (
     materialize_observation_envelope,
     observation_writer_id,
@@ -37,6 +38,7 @@ from yoetz.domain.observation import (
 )
 from yoetz.domain.values import JsonObject, Timestamp, finding_id
 from yoetz.ports.runtime import TaskRuntime
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 
@@ -364,7 +366,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_reason == ObservationGapCode.MAPPING_MISSING.value
     assert durable.last_attempt_at == attempted_at
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/4"
+        "yoetz.observation-local/5"
     )
 
 
@@ -794,6 +796,73 @@ async def test_coordinator_rejects_without_mapping(tmp_path: Path) -> None:
     )
     assert result.disposition is ObservationIngestDisposition.REJECTED
     assert result.reason == ObservationGapCode.MAPPING_MISSING.value
+
+
+@pytest.mark.anyio
+async def test_storage_corrupt_blocks_session_for_coordinator_generation(tmp_path: Path) -> None:
+    class _CorruptRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def route(self, command: object) -> object:
+            del command
+            self.calls += 1
+            raise PublicOperationError(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "The task ledger is unreadable.",
+                False,
+            )
+
+        async def release(self, runtime: object) -> None:
+            raise AssertionError(f"unrouted runtime released: {runtime!r}")
+
+    local = LocalObservationStore(_state=tmp_path)
+    workspace = local.workspace_commitment(str(tmp_path.resolve()))
+    local.grant_consent(workspace)
+    codex_id = "storage-corrupt-session"
+    session = local.bind_codex_session(workspace, codex_id)
+    mapping = LifecycleMapping(
+        mapping_version=1,
+        codex_session_id=codex_id,
+        yoetz_task_id=_task_id(),
+        yoetz_session_id=PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+        yoetz_writer_id=PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+        last_frontier=None,
+    )
+    runtime = _CorruptRuntime()
+
+    def build_coordinator() -> ObservationCoordinator:
+        return ObservationCoordinator(
+            runtime=runtime,  # type: ignore[arg-type]
+            local=local,
+            clock=object(),  # type: ignore[arg-type]
+            ids=object(),  # type: ignore[arg-type]
+            state_root=tmp_path,
+            mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+        )
+
+    request = ObservationIngestRequest(
+        codex_session_id=codex_id, envelope=_envelope(session=session)
+    )
+    coordinator = build_coordinator()
+    first = await coordinator.ingest_request(request)
+    second = await coordinator.ingest_request(request)
+
+    assert first.disposition is ObservationIngestDisposition.REJECTED
+    assert first.reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value
+    assert second == first
+    assert runtime.calls == 1
+
+    future = replace(request.envelope, source_identity="hook:future")
+    local.enqueue_outbox(workspace, codex_id, future)
+    sweep = await ObservationOutboxSweeper(local, coordinator).sweep()
+    assert sweep.quarantined == 1
+    assert local.pending_outbox_count(workspace) == 0
+    assert runtime.calls == 1
+
+    restarted = await build_coordinator().ingest_request(request)
+    assert restarted.reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value
+    assert runtime.calls == 2
 
 
 @pytest.mark.anyio

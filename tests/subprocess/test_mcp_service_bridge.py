@@ -143,6 +143,7 @@ class _FakeClient:
         self.failure = failure
         self.calls: list[tuple[str, object]] = []
         self.route_profiles: list[tuple[str, str | None]] = []
+        self.deadlines: list[tuple[str, int | None]] = []
         self.closed = False
 
     async def connect(self) -> None:
@@ -157,28 +158,48 @@ class _FakeClient:
             raise failure
         return _failure(result_type, request.request_id)
 
-    async def start(self, request: StartRequest) -> StartResult:
+    async def start(self, request: StartRequest, *, deadline_ms: int | None = None) -> StartResult:
+        self.deadlines.append(("start", deadline_ms))
         return await self._call("start", request, StartResult)
 
-    async def publish_work(self, request: PublishWorkRequest) -> PublishWorkResult:
+    async def publish_work(
+        self, request: PublishWorkRequest, *, deadline_ms: int | None = None
+    ) -> PublishWorkResult:
+        self.deadlines.append(("publish_work", deadline_ms))
         return await self._call("publish_work", request, PublishWorkResult)
 
     async def check(
-        self, request: CheckRequest, *, route_profile: str | None = None
+        self,
+        request: CheckRequest,
+        *,
+        deadline_ms: int | None = None,
+        route_profile: str | None = None,
     ) -> CheckResult:
+        self.deadlines.append(("check", deadline_ms))
         self.route_profiles.append(("check", route_profile))
         return await self._call("check", request, CheckResult)
 
-    async def respond(self, request: RespondRequest) -> RespondResult:
+    async def respond(
+        self, request: RespondRequest, *, deadline_ms: int | None = None
+    ) -> RespondResult:
+        self.deadlines.append(("respond", deadline_ms))
         return await self._call("respond", request, RespondResult)
 
     async def status(
-        self, request: StatusRequest, *, route_profile: str | None = None
+        self,
+        request: StatusRequest,
+        *,
+        deadline_ms: int | None = None,
+        route_profile: str | None = None,
     ) -> StatusResult:
+        self.deadlines.append(("status", deadline_ms))
         self.route_profiles.append(("status", route_profile))
         return await self._call("status", request, StatusResult)
 
-    async def receipt(self, request: ReceiptRequest) -> ReceiptResult:
+    async def receipt(
+        self, request: ReceiptRequest, *, deadline_ms: int | None = None
+    ) -> ReceiptResult:
+        self.deadlines.append(("receipt", deadline_ms))
         return await self._call("receipt", request, ReceiptResult)
 
     async def close(self) -> None:
@@ -232,6 +253,14 @@ async def test_exact_six_dispatchers_use_one_ordinary_client(
         "status",
         "receipt",
     ]
+    assert client.deadlines == [
+        ("start", 30_000),
+        ("publish_work", 30_000),
+        ("check", 300_000),
+        ("respond", 30_000),
+        ("status", 30_000),
+        ("receipt", 30_000),
+    ]
     assert client.closed is False
     await bridge.close_bridge_runtime(runtime)
     assert client.closed is True
@@ -282,6 +311,50 @@ async def test_response_loss_reconnects_once_with_identical_request(
     assert len(stale.calls) == len(replacement.calls) == 1
     assert stale.calls[0][1] is replacement.calls[0][1]
     assert observed_locators == [runtime.workspace_locator, runtime.workspace_locator]
+
+
+@pytest.mark.anyio
+async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(ControlError("request_timeout", retryable=True))
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime()
+    request = _requests()["start"]
+
+    result = await bridge.dispatch_start(request, runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    error = cast(dict[str, JsonValue], result.structuredContent["error"])
+    assert error["code"] == "SERVICE_UNAVAILABLE"
+    assert error["retryable"] is True
+    assert error["message"] == (
+        "The local operation timed out and may still have committed. Retry with the same "
+        "request_id to recover the stored outcome; for an existing Yoetz session, status "
+        "view=operation can inspect that request_id."
+    )
+    assert result.structuredContent["request_id"] == request["request_id"]
+    assert client.closed is False
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_status_timeout_names_read_only_fresh_request_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(ControlError("request_timeout", retryable=True))
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_status(_requests()["status"], runtime)
+
+    assert result.structuredContent is not None
+    error = cast(dict[str, JsonValue], result.structuredContent["error"])
+    assert error["code"] == "SERVICE_UNAVAILABLE"
+    assert "requested no write" in cast(str, error["message"])
+    assert "new request_id" in cast(str, error["message"])
+    await bridge.close_bridge_runtime(runtime)
 
 
 @pytest.mark.anyio
@@ -684,8 +757,11 @@ async def test_cancellation_propagates_without_becoming_a_tool_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _CancellingClient(_FakeClient):
-        async def start(self, request: StartRequest) -> StartResult:
+        async def start(
+            self, request: StartRequest, *, deadline_ms: int | None = None
+        ) -> StartResult:
             del request
+            del deadline_ms
             raise asyncio.CancelledError
 
     _install_clients(monkeypatch, [_CancellingClient()])

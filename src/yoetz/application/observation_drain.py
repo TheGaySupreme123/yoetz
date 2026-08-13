@@ -111,6 +111,7 @@ class ObservationOutboxSweeper:
         retry_pending = 0
         quarantined = 0
         reasons: dict[str, int] = {}
+        retired_sessions: set[tuple[str, str]] = set()
 
         workspaces = tuple(dict.fromkeys(workspace for workspace, _row in rows))
         for workspace in workspaces:
@@ -120,6 +121,9 @@ class ObservationOutboxSweeper:
                 pending_rows = frozenset(self.local.list_pending_outbox_rows(workspace))
                 for selected_workspace, row in rows:
                     if selected_workspace != workspace or row not in pending_rows:
+                        continue
+                    session_key = (workspace, row.codex_session_id)
+                    if session_key in retired_sessions:
                         continue
                     attempted += 1
                     request = ObservationIngestRequest(
@@ -150,6 +154,14 @@ class ObservationOutboxSweeper:
                         retry_pending += 1
                         continue
                     if decision.action is ObservationDrainAction.QUARANTINE:
+                        if decision.reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value:
+                            retired_sessions.add(session_key)
+                            quarantined += self.local.quarantine_outbox_session(
+                                workspace,
+                                row.codex_session_id,
+                                decision.reason,
+                            )
+                            continue
                         if self.local.quarantine_outbox_row(
                             workspace,
                             attempted_row,

@@ -512,6 +512,66 @@ def _stop_service(proc: subprocess.Popen[bytes]) -> None:
             proc.wait(timeout=5)
 
 
+def test_installed_client_bounds_an_accepted_but_silent_service(
+    built_dist: _BuiltDist,
+) -> None:
+    root = _short_home("silent-service")
+    try:
+        home = root / "h"
+        yoetz_exe, env = _tool_install(built_dist.directory, root, home)
+        tool_python = root / "tool" / "yoetz" / "bin" / "python"
+        listener = subprocess.Popen(
+            [
+                str(tool_python),
+                "-c",
+                "import os, socket, time\n"
+                "from platformdirs import PlatformDirs\n"
+                "runtime = PlatformDirs(appname='yoetz', appauthor=False, roaming=False).user_runtime_path\n"
+                "runtime.mkdir(parents=True, exist_ok=True, mode=0o700)\n"
+                "os.chmod(runtime, 0o700)\n"
+                "path = runtime / 'control.sock'\n"
+                "server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+                "server.bind(str(path))\n"
+                "os.chmod(path, 0o600)\n"
+                "server.listen(1)\n"
+                "print('ready', flush=True)\n"
+                "connection, _ = server.accept()\n"
+                "time.sleep(15)\n"
+                "connection.close()\n"
+                "server.close()\n",
+            ],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            assert listener.stdout is not None
+            assert listener.stdout.readline() == b"ready\n"
+            started = time.monotonic()
+            status = subprocess.run(
+                [str(yoetz_exe), "service", "status", "--json"],
+                capture_output=True,
+                timeout=9,
+                env=env,
+                check=False,
+            )
+            elapsed = time.monotonic() - started
+
+            assert status.returncode in _BOUNDED_EXIT_CODES
+            assert elapsed < 8
+            assert listener.poll() is None
+            assert b"Traceback (most recent call last)" not in status.stderr
+        finally:
+            listener.terminate()
+            try:
+                listener.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                listener.kill()
+                listener.wait(timeout=5)
+    finally:
+        shutil.rmtree(root.parent, ignore_errors=True)
+
+
 def test_fresh_install_no_network_no_provider_secret_service_reports_locked(
     built_dist: _BuiltDist,
 ) -> None:
