@@ -1078,7 +1078,7 @@ class LocalObservationStore:
             assert state.pending_outbox is not None
             stamped = 0
             for index, row in enumerate(state.pending_outbox):
-                if row.codex_session_id == codex_session_id and row.last_reason != reason:
+                if row.codex_session_id == codex_session_id and row.last_reason is None:
                     state.pending_outbox[index] = dataclasses.replace(row, last_reason=reason)
                     stamped += 1
             if stamped:
@@ -1103,7 +1103,10 @@ class LocalObservationStore:
         if fcntl is None:  # pragma: no cover - POSIX-only host
             yield True
             return
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags, 0o600)
         try:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)

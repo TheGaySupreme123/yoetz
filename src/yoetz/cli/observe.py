@@ -164,6 +164,14 @@ def observe_status(
         codex_home=codex_home,
     )
     diagnostics = hook_diagnostic_summary(_state=_state)
+    reclaim_guidance = (
+        "reclaim with 'yoetz observe reclaim --workspace .'"
+        if root == Path.cwd().resolve()
+        else (
+            "reclaim by changing to the selected workspace and running "
+            "'yoetz observe reclaim --workspace .'"
+        )
+    )
     consent_label = (
         "absent"
         if consent is None
@@ -220,7 +228,7 @@ def observe_status(
         "quarantine": (
             f"{quarantine_depth} (evicted: {quarantine_evicted}; "
             f"reclaimed: {quarantine_reclaimed}; "
-            "reclaim with 'yoetz observe reclaim --workspace .')"
+            f"{reclaim_guidance})"
             if quarantine_depth or quarantine_evicted or quarantine_reclaimed
             else "0"
         ),

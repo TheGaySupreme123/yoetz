@@ -134,7 +134,11 @@ def test_status_surfaces_quarantine_depth_and_reclaim_empties_it(
     )
     text = capsys.readouterr().out  # type: ignore[attr-defined]
     assert "quarantine: 2" in text
-    assert "yoetz observe reclaim" in text
+    assert (
+        "reclaim by changing to the selected workspace and running "
+        "'yoetz observe reclaim --workspace .'"
+    ) in text
+    assert str(tmp_path) not in text
 
     assert (
         observe_cli.reclaim_observation(workspace=str(tmp_path), json_output=True, _state=tmp_path)

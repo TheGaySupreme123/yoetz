@@ -2298,8 +2298,10 @@ idempotently. Stream cursor advancement occurs only after outbox insertion. Sess
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
 across workspace sessions under a nonblocking per-workspace lease; within one pass a
 `mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),
-and workspace-global rejections (`vault_locked`, disabled, paused) end the pass. Quarantined detail
-is bounded by count, by the state byte budget, and by a 14-day age measured from a store-authored
+and workspace-global rejections (`vault_locked`, disabled, paused) end the pass. A
+`service_unavailable` rejection is row-scoped: later rows are still attempted, and the pass yields
+after three consecutive such rejections. Quarantined detail is bounded by count, by the state byte
+budget, and by a 14-day age measured from a store-authored
 quarantined-at time behind the trusted-clock epoch fence; an operator can drop it explicitly with
 `yoetz observe reclaim`. Every drop — cap, age, or reclaim — retains aggregate commitment, count
 (evictions and reclaims counted separately), first/last receipt times, and

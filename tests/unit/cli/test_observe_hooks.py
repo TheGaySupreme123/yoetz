@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -687,6 +688,39 @@ async def test_drain_probes_a_mapping_missing_session_once_per_pass(tmp_path: Pa
     assert all(row.last_reason == ObservationGapCode.MAPPING_MISSING.value for row in remaining)
 
 
+def test_session_reason_stamping_preserves_a_rows_observed_cause(tmp_path: Path) -> None:
+    """Skipped siblings inherit the cause without rewriting a prior real attempt."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "mixed-reasons")
+    for ordinal in (1, 2):
+        store.enqueue_outbox(
+            workspace,
+            "mixed-reasons",
+            _drain_envelope(store, "mixed-reasons", "hook:mixed-reasons", ordinal),
+        )
+    attempted, skipped = store.list_pending_outbox_rows(workspace)
+    assert store.bump_outbox_row_attempt(
+        workspace,
+        attempted,
+        reason=ObservationGapCode.SERVICE_UNAVAILABLE.value,
+    ) is not None
+
+    stamped = store.note_outbox_session_reason(
+        workspace,
+        "mixed-reasons",
+        ObservationGapCode.MAPPING_MISSING.value,
+    )
+
+    assert stamped == 1
+    attempted_after, skipped_after = store.list_pending_outbox_rows(workspace)
+    assert attempted_after.last_reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
+    assert skipped_after.row_identity == skipped.row_identity
+    assert skipped_after.last_reason == ObservationGapCode.MAPPING_MISSING.value
+
+
 @pytest.mark.anyio
 async def test_drain_treats_service_unavailable_as_row_scoped_with_a_cap(tmp_path: Path) -> None:
     """One poisoned row must not wedge the workspace drain forever.
@@ -864,6 +898,26 @@ async def test_drain_lease_prevents_concurrent_hooks_from_double_draining(
     assert not (tmp_path / "observation/hook-diagnostics.jsonl").exists()
 
 
+def test_drain_lease_refuses_a_symlink_lock_file(tmp_path: Path) -> None:
+    """A project-local symlink cannot redirect the advisory-lock target."""
+
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("host has no O_NOFOLLOW")
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    target = tmp_path / "redirected-lock-target"
+    target.write_text("unchanged", encoding="utf-8")
+    digest = workspace.removeprefix("hmac-sha256:")
+    lock_path = tmp_path / "observation" / f".drain-{digest}.lock"
+    lock_path.symlink_to(target)
+
+    with pytest.raises(OSError):
+        with store.drain_lease(workspace):
+            raise AssertionError("a symlinked drain lease must not be acquired")
+    assert target.read_text(encoding="utf-8") == "unchanged"
+
+
 def _populate_realistic_store(
     store: LocalObservationStore,
     workspace: str,
@@ -973,6 +1027,7 @@ def test_hook_invocation_parses_the_state_file_once_not_seventeen_times(
     )
 
 
+@pytest.mark.slow
 def test_hook_wall_clock_meets_the_declared_timeout_on_a_realistic_store(
     tmp_path: Path,
 ) -> None:
@@ -1030,6 +1085,7 @@ def test_hook_wall_clock_meets_the_declared_timeout_on_a_realistic_store(
     for group in events["PostToolUse"]:  # type: ignore[index, call-overload]
         for handler in group["hooks"]:  # type: ignore[index, call-overload]
             if "observe" in str(handler["command"]):  # type: ignore[index]
+                assert declared is None, "more than one observe handler declared for PostToolUse"
                 declared = handler["timeout"]  # type: ignore[index]
     assert isinstance(declared, int)
     assert elapsed < declared * 0.8, (
