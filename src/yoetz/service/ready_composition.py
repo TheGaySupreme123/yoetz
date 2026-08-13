@@ -2588,6 +2588,7 @@ async def provide_service_ready_context(
         provider_credential_connected=provider_credential_connected,
         semantic_ready=semantic_ready,
         observation_sweep=observation_sweeper.sweep,
+        observation_sweep_close=observation_sweeper.close,
         ready_recommendation_refresh=refresh_ready_recommendations,
     )
 

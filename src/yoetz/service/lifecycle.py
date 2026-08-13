@@ -648,14 +648,27 @@ def probe_singleton_holder(path: Path) -> int | None:
 
     Reading the file never disturbs the lock: taking even a shared flock would conflict with a
     daemon that is still acquiring its exclusive one, so a diagnostic could make a legitimate
-    start fail. An absent, oversized, malformed, or dead-pid stamp is simply no answer.
+    start fail. An absent, oversized, malformed, or dead-pid stamp is simply no answer, and so is
+    one that is a symlink, owned by another uid, or readable past the owner.
+
+    One residual is accepted rather than closed: the stamp may name a pid the OS has since reused
+    for an unrelated process, which ``kill(pid, 0)`` cannot tell apart. The stamp is never a fence
+    -- the flock is -- so the whole blast radius is a same-user stderr line naming the wrong pid.
     """
 
     try:
-        with path.open("rb") as source:
-            data = source.read(_MAX_SINGLETON_HOLDER_BYTES + 1)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError:
         return None
+    try:
+        facts = os.fstat(descriptor)
+        if not stat.S_ISREG(facts.st_mode) or facts.st_uid != os.geteuid() or facts.st_mode & 0o077:
+            return None
+        data = os.read(descriptor, _MAX_SINGLETON_HOLDER_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
     if not data or len(data) > _MAX_SINGLETON_HOLDER_BYTES or not data.endswith(b"\n"):
         return None
     try:

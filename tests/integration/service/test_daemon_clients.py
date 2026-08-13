@@ -1687,6 +1687,42 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("stall", "expected"),
+    [(False, "sweep_failed"), (True, "sweep_deadline_exceeded")],
+)
+async def test_only_the_deadline_reports_sweep_deadline_exceeded(
+    monkeypatch: pytest.MonkeyPatch, stall: bool, expected: str
+) -> None:
+    """asyncio.TimeoutError is TimeoutError: a socket timeout inside a sweep is not the deadline."""
+
+    reasons: list[str] = []
+
+    def record(*, component: str, operation: str, reason: str) -> str:
+        assert component == "service.daemon"
+        assert operation == "observation_sweep_failed"
+        reasons.append(reason)
+        return "err_00000000-0000-4000-8000-000000000000"
+
+    monkeypatch.setattr(daemon_module, "record_bounded_event_without_raising", record)
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_DEADLINE_SECONDS", 0.05)
+
+    async def sweep() -> ObservationDrainSummary:
+        if stall:
+            await asyncio.sleep(5)
+        # A socket or OS read timeout raised by the sweep's own work, not by its deadline.
+        raise TimeoutError("inner socket timeout")
+
+    daemon, _application, _vault, _listener = _daemon()
+
+    summary = await daemon._bounded_observation_sweep(sweep)  # pyright: ignore[reportPrivateUsage]
+
+    assert summary is None
+    assert reasons == [expected]
+    await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_endpoint_is_published_only_after_ready_activation(tmp_path: Path) -> None:
     """A control socket that exists must already be able to answer a handshake."""
 

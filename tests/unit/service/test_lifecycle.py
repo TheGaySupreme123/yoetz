@@ -10,6 +10,7 @@ import pytest
 
 from yoetz.ports.control import ServiceState
 from yoetz.ports.secret_memory import HumanAuthorizationProof
+from yoetz.protocol.canonical import canonical_encode
 from yoetz.service.lifecycle import (
     IDLE_STOP_SECONDS,
     IdleRelockPolicy,
@@ -286,3 +287,23 @@ def test_holder_probe_answers_nothing_for_a_body_it_cannot_trust(tmp_path: Path)
     assert probe_singleton_holder(path) is None
     path.write_bytes(b'{"instance_id":"svc","pid":"' + b"9" * 300 + b'"}\n')
     assert probe_singleton_holder(path) is None
+
+
+def test_holder_probe_refuses_a_stamp_anyone_else_could_have_written(tmp_path: Path) -> None:
+    """A stamp only trusted when nobody but the owner could have placed it there."""
+
+    live = canonical_encode({"instance_id": "svc", "pid": os.getpid()}) + b"\n"
+    path = tmp_path / "service.lock"
+    path.write_bytes(live)
+    path.chmod(0o600)
+    assert probe_singleton_holder(path) == os.getpid()
+
+    path.chmod(0o644)
+    assert probe_singleton_holder(path) is None
+    path.chmod(0o610)
+    assert probe_singleton_holder(path) is None
+
+    path.chmod(0o600)
+    link = tmp_path / "service.lock.link"
+    link.symlink_to(path)
+    assert probe_singleton_holder(link) is None

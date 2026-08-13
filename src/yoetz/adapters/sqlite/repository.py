@@ -127,6 +127,25 @@ def _public_error(
     )
 
 
+def _has_os_error_cause(exc: BaseException) -> bool:
+    """Report whether an environmental fault produced this error.
+
+    Several recovery arms convert ``OSError`` into ``STORAGE_CORRUPT`` alongside the decode
+    failures they are really about, so the public code alone cannot tell a bad byte from a
+    descriptor limit, a read error, or a mount that went away. Walking the causal chain keeps
+    the difference: only a verdict with no ``OSError`` anywhere under it is deterministic.
+    """
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, OSError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ if current.__cause__ is not None else current.__context__
+    return False
+
+
 def _frontier_conflict(head: Frontier) -> PublicOperationError:
     return _public_error(
         PublicErrorCode.FRONTIER_CONFLICT,
@@ -455,6 +474,8 @@ class SqliteLedger:
             # A corrupt durable row makes recovery deterministically terminal. Re-running the
             # whole replay for every later call spent O(ledger) CPU and allocation per RPC and
             # starved the control plane for minutes (#238); the verdict is already known.
+            # Invariant: only a decode verdict with no OSError under it may latch here, so a
+            # transient environmental fault can never brick an intact bundle until restart.
             raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
         task = self._recovery_task
         if task is None:
@@ -472,7 +493,7 @@ class SqliteLedger:
         try:
             await self._recover_projection()
         except PublicOperationError as exc:
-            if exc.code is PublicErrorCode.STORAGE_CORRUPT:
+            if exc.code is PublicErrorCode.STORAGE_CORRUPT and not _has_os_error_cause(exc):
                 self._recovery_failed = True
             raise
 
