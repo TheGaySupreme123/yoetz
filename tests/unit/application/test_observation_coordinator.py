@@ -1247,6 +1247,116 @@ async def test_deferred_verification_uses_a_dedicated_runtime_lease(tmp_path: Pa
 
 
 @pytest.mark.anyio
+async def test_rediscovery_drains_pending_repositories_for_every_bound_session(
+    tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+
+    from yoetz.application.observation_verification import ObservationVerificationSupervisor
+
+    workspace = "hmac-sha256:" + "7" * 64
+    task_ids = (_task_id(), _task_id())
+    session_ids = (
+        PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+        PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+    )
+    codex_ids = ("codex-rediscover-a", "codex-rediscover-b")
+    local = LocalObservationStore(_state=tmp_path)
+    local.grant_consent(workspace)
+    for codex_id in codex_ids:
+        local.bind_codex_session(workspace, codex_id)
+
+    mappings = {
+        codex_id: LifecycleMapping(
+            mapping_version=1,
+            codex_session_id=codex_id,
+            yoetz_task_id=task_id,
+            yoetz_session_id=session_id,
+            yoetz_writer_id=PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+            last_frontier=None,
+        )
+        for codex_id, task_id, session_id in zip(codex_ids, task_ids, session_ids, strict=True)
+    }
+
+    class _Repository:
+        def __init__(self) -> None:
+            self.pending = True
+
+        def list_pending_workspaces(self) -> tuple[str, ...]:
+            return (workspace,) if self.pending else ()
+
+    class _Worker:
+        service_generation = 1
+
+        def __init__(self, repository: _Repository) -> None:
+            self.repository = repository
+
+        async def run_once(self) -> None:
+            self.repository.pending = False
+            return None
+
+    class _Store:
+        def __init__(self, repository: _Repository) -> None:
+            self._repository = repository
+
+        def verification_repository(self) -> _Repository:
+            return self._repository
+
+    repositories = {session_id: _Repository() for session_id in session_ids}
+    runtimes = {
+        session_id: SimpleNamespace(
+            task_id=task_id,
+            session_id=session_id,
+            writer_id=observation_writer_id(task_id, session_id),
+            observation=_Store(repositories[session_id]),
+        )
+        for task_id, session_id in zip(task_ids, session_ids, strict=True)
+    }
+    released: list[str] = []
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            return runtimes[command.session_id]  # type: ignore[attr-defined]
+
+        async def release(self, runtime: object) -> None:
+            released.append(runtime.session_id)  # type: ignore[attr-defined]
+
+    class _Coordinator(ObservationCoordinator):
+        async def _rebuild_verification_worker(  # type: ignore[override]  # noqa: SLF001
+            self, runtime: object, *args: object, **kwargs: object
+        ) -> object:
+            del args, kwargs
+            return _Worker(repositories[runtime.session_id])  # type: ignore[attr-defined]
+
+    def _mapping_loader(codex_session_id: str, *, _state: Path | None = None):
+        del _state
+        return mappings[codex_session_id]
+
+    supervisor = ObservationVerificationSupervisor(service_generation=1)
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        mapping_loader=_mapping_loader,
+        state_root=tmp_path,
+        verification_supervisor=supervisor,
+    )
+
+    await coordinator.rediscover_pending_verification()
+    first = supervisor._handles[workspace]  # pyright: ignore[reportPrivateUsage]
+    await supervisor._drain_once()  # pyright: ignore[reportPrivateUsage]
+    second = supervisor._handles[workspace]  # pyright: ignore[reportPrivateUsage]
+
+    assert second is not first
+    assert len(released) == 1
+
+    await supervisor._drain_once()  # pyright: ignore[reportPrivateUsage]
+    assert supervisor.has_handle(workspace) is False
+    assert sorted(released) == sorted(session_ids)
+
+
+@pytest.mark.anyio
 async def test_advice_materialization_failure_does_not_advance_suppression_snapshot(
     tmp_path: Path,
 ) -> None:

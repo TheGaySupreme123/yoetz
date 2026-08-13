@@ -207,92 +207,114 @@ class ObservationCoordinator:
         if supervisor is None:
             return
         for workspace in self.local.list_consented_workspaces():
-            consent = self.local.consent_for(workspace)
-            if consent is None or not consent.active:
-                continue
-            sessions = self.local.codex_sessions_for_workspace(workspace)
-            if not sessions:
-                continue
-            for codex_session_id in sessions:
-                if supervisor.has_handle(workspace):
-                    break
-                mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
-                if mapping is None:
-                    continue
-                runtime: TaskRuntime | None = None
-                try:
-                    runtime = await self.runtime.route(
-                        RouteCommand(
-                            session_id=mapping.yoetz_session_id,
-                            writer_id=observation_writer_id(
-                                mapping.yoetz_task_id, mapping.yoetz_session_id
-                            ),
-                            access=RouteAccess.WRITE,
-                            required_capabilities=frozenset(
-                                {
-                                    RuntimeCapability.STRUCTURAL_READ,
-                                    RuntimeCapability.PAYLOAD_READ,
-                                    RuntimeCapability.WRITE,
-                                }
-                            ),
-                        )
-                    )
-                    store = self._observation_store(runtime)
-                    repository = getattr(store, "verification_repository", None)
-                    if not callable(repository):
-                        continue
-                    repo = cast(ObservationVerificationRepository, repository())
-                    pending = repo.list_pending_workspaces()
-                    if workspace not in pending:
-                        continue
-                    worker = await self._rebuild_verification_worker(
-                        runtime,
-                        workspace,
-                        store,
-                        legacy_writer_id=mapping.yoetz_writer_id,
-                    )
-                    if worker is None:
-                        continue
-
-                    async def _after(
-                        bound_workspace: str = workspace,
-                        bound_runtime: TaskRuntime = runtime,
-                        bound_store: TaskObservationPort = store,
-                        bound_legacy_writer_id: str = mapping.yoetz_writer_id,
-                    ) -> None:
-                        await self._run_advice(
-                            bound_workspace,
-                            bound_runtime,
-                            bound_store,
-                            legacy_writer_id=bound_legacy_writer_id,
-                        )
-
-                    async def _release(
-                        bound_runtime: TaskRuntime = runtime,
-                    ) -> None:
-                        await self.runtime.release(bound_runtime)
-
-                    registered = supervisor.register(
-                        VerificationDrainHandle(
-                            workspace_commitment=workspace,
-                            worker=worker,
-                            after_complete=_after,
-                            on_idle=_release,
-                        )
-                    )
-                    if registered:
-                        runtime = None
-                    break
-                except Exception:
-                    self.local.note_coverage_gap(
-                        workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
-                    )
-                finally:
-                    if runtime is not None:
-                        release = getattr(self.runtime, "release", None)
-                        if release is not None:
-                            await release(runtime)
+            await self._rediscover_workspace_pending_verification(supervisor, workspace)
         supervisor.notify()
+
+    async def _rediscover_workspace_pending_verification(
+        self,
+        supervisor: ObservationVerificationSupervisor,
+        workspace: str,
+        *,
+        sessions: tuple[str, ...] | None = None,
+        start_index: int = 0,
+    ) -> None:
+        """Register the next pending session repository for one workspace."""
+
+        if supervisor.closed or supervisor.has_handle(workspace):
+            return
+        consent = self.local.consent_for(workspace)
+        if consent is None or not consent.active:
+            return
+        if sessions is None:
+            sessions = self.local.codex_sessions_for_workspace(workspace)
+        for session_index, codex_session_id in enumerate(sessions[start_index:], start=start_index):
+            if supervisor.closed or supervisor.has_handle(workspace):
+                return
+            mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
+            if mapping is None:
+                continue
+            runtime: TaskRuntime | None = None
+            try:
+                runtime = await self.runtime.route(
+                    RouteCommand(
+                        session_id=mapping.yoetz_session_id,
+                        writer_id=observation_writer_id(
+                            mapping.yoetz_task_id, mapping.yoetz_session_id
+                        ),
+                        access=RouteAccess.WRITE,
+                        required_capabilities=frozenset(
+                            {
+                                RuntimeCapability.STRUCTURAL_READ,
+                                RuntimeCapability.PAYLOAD_READ,
+                                RuntimeCapability.WRITE,
+                            }
+                        ),
+                    )
+                )
+                store = self._observation_store(runtime)
+                repository = getattr(store, "verification_repository", None)
+                if not callable(repository):
+                    continue
+                repo = cast(ObservationVerificationRepository, repository())
+                pending = repo.list_pending_workspaces()
+                if workspace not in pending:
+                    continue
+                worker = await self._rebuild_verification_worker(
+                    runtime,
+                    workspace,
+                    store,
+                    legacy_writer_id=mapping.yoetz_writer_id,
+                )
+                if worker is None:
+                    continue
+
+                async def _after(
+                    bound_workspace: str = workspace,
+                    bound_runtime: TaskRuntime = runtime,
+                    bound_store: TaskObservationPort = store,
+                    bound_legacy_writer_id: str = mapping.yoetz_writer_id,
+                ) -> None:
+                    await self._run_advice(
+                        bound_workspace,
+                        bound_runtime,
+                        bound_store,
+                        legacy_writer_id=bound_legacy_writer_id,
+                    )
+
+                async def _release_and_continue(
+                    bound_runtime: TaskRuntime = runtime,
+                    bound_workspace: str = workspace,
+                    bound_sessions: tuple[str, ...] = sessions,
+                    next_session_index: int = session_index + 1,
+                ) -> None:
+                    await self.runtime.release(bound_runtime)
+                    await self._rediscover_workspace_pending_verification(
+                        supervisor,
+                        bound_workspace,
+                        sessions=bound_sessions,
+                        start_index=next_session_index,
+                    )
+
+                registered = supervisor.register(
+                    VerificationDrainHandle(
+                        workspace_commitment=workspace,
+                        worker=worker,
+                        after_complete=_after,
+                        on_idle=_release_and_continue,
+                    )
+                )
+                if registered:
+                    runtime = None
+                return
+            except Exception:
+                self.local.note_coverage_gap(
+                    workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                )
+            finally:
+                if runtime is not None:
+                    release = getattr(self.runtime, "release", None)
+                    if release is not None:
+                        await release(runtime)
 
     async def ingest_request(self, request: ObservationIngestRequest) -> ObservationIngestResult:
         """Coordinator ingest path used by ordinary-control ``observation_ingest``."""

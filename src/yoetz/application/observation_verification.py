@@ -147,6 +147,8 @@ class ObservationVerificationSupervisor:
         self._lock = asyncio.Lock()
 
     def register(self, handle: VerificationDrainHandle) -> bool:
+        if self._closed:
+            return False
         if handle.workspace_commitment in self._handles:
             self._wake.set()
             return False
@@ -156,6 +158,10 @@ class ObservationVerificationSupervisor:
 
     def has_handle(self, workspace_commitment: str) -> bool:
         return workspace_commitment in self._handles
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     def unregister(self, workspace_commitment: str) -> None:
         self._handles.pop(workspace_commitment, None)
