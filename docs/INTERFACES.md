@@ -152,22 +152,26 @@ ids/digests; `pending`/`quarantined` report kind without those fields; `absent` 
 them; non-publish completions report kind without append-shaped event detail. Lookups are scoped
 to the caller writer; another writer's `request_id` is reported as absent.
 MCP `publish_work` performs the same envelope-first operation lookup when the supplied body fails
-schema validation (so a malformed retry body can still recover a committed operation). Recovery
-result selection is a closed tri-state:
+schema validation (so a malformed retry body can still recover a committed operation) — except
+under a declared `dry_run: true`, which appends nothing, so no prior-operation lookup can change
+the answer to a body that already failed local validation: it returns the field-pointed
+`INVALID_REQUEST` with no service round-trip at all (#239). Only the exact boolean `true`
+declares a dry run; any other value is itself a validation defect and buys no shortcut. For real
+submissions, recovery result selection is a closed tri-state:
 - **found** (`pending` / `complete` / `quarantined`) replaces the body-validation result with the
   bounded recovery meaning for that state;
-- **authoritative absent** returns the original field-pointed `INVALID_REQUEST` (including for a
-  fresh `dry_run: true` with a malformed field — dry-run creates no operation record);
+- **authoritative absent** returns the original field-pointed `INVALID_REQUEST`;
 - **lookup unavailable** (connection, timeout, projection, or unexpected recovery failure,
-  including a nested `read_projection_failed` on the internal status read) returns retryable
-  `OPERATION_PENDING` with `reason_code: operation_recovery_unavailable`, the original publish
-  `request_id`, and the safe authoring field pointer that will apply if the operation is later
-  authoritatively absent. The remedy is: (1) retry with the **same** `request_id`; (2) if recovery
-  reports absent, correct the named field and use the intended request identity; (3) if recovery
-  reports complete, recover the stored result. An unavailable recovery oracle must never claim
-  that durable state did or did not change, must never tell the caller to mint a new `request_id`,
-  and must never promote a nested status request id or nested read-only durability message as the
-  outer publish result.
+  including a nested `read_projection_failed` on the internal status read) returns non-retryable
+  `INVALID_REQUEST` whose message states the two facts known for certain — this body failed
+  bridge-local validation, and the service could not be reached to check the `request_id` — with
+  the field-pointed locations plus `reason_code: operation_recovery_unavailable` in
+  `safe_details`. Recovery never masks a known authoring error (#65, #239): the remedy is to
+  correct the named fields and resubmit; the service remains the authority on request identity
+  and will replay or reject the `request_id` itself if it already names a committed operation. An
+  unavailable recovery oracle must never claim that durable state did or did not change, must
+  never tell the caller to mint a new `request_id`, and must never promote a nested status
+  request id or nested read-only durability message as the outer publish result.
 `read_projection_failed` is the read-only counterpart for direct status/receipt reads: nothing
 was appended, so the remedy is repeating the request rather than a same-`request_id` replay that
 has no operation record to load.
@@ -1380,8 +1384,13 @@ surface as a failure (`INTERNAL_ERROR` or otherwise).
 Unexpected exceptions recorded in that window (and at other process boundaries) emit the existing
 stderr structural line and also append one owner-only JSONL diagnostic record under `log_dir()`
 (`service.diagnostics.jsonl`, mode `0o600`, size-capped ring). Fields are limited to
-`timestamp`, `correlation_id`, `component`, `operation`, `reason`, and optional `request_id` — no
-exception text, payload, or paths. The same `correlation_id` is attached to the raised
+`timestamp`, `correlation_id`, `component`, `operation`, `reason`, optional `request_id`, and the
+optional bounded integer counts `duration_ms` and `operation_count` — no exception text, payload,
+or paths. The daemon's control-plane watchdog samples event-loop lag from a plain OS thread and
+appends `control_plane_saturation_entered`/`_persists`/`_cleared` records (component
+`service.daemon`) with those counts at a bounded cadence, so a starved control plane is diagnosed
+while it is happening rather than never (#238); sweep failures append
+`observation_sweep_failed`. The same `correlation_id` is attached to the raised
 `ControlError` (and to the reduced publish acceptance envelope when that path is taken) so the
 agent-facing public error and the durable sink share one identity. The MCP bridge reuses a
 service-supplied id rather than minting a second one; only bridge-local failures without a
@@ -2116,7 +2125,12 @@ threat review rather than an implicit partial read.
 SubjectStateCaptureResult` owns the optional local effect that produces comparable
 `SubjectStateRef` digests. Shared types are `SubjectStateCaptureCommand`,
 `SubjectStateCaptureResult`, `SubjectStateStatus`, `SubjectStateFormat`,
-`SubjectStateLimitation`, and the non-serializable `LocalWorkspaceHandle`.
+`SubjectStateLimitation`, `SubjectStateBound`, `SubjectStateLimitDetail`, and the
+non-serializable `LocalWorkspaceHandle`. When a capture fails on a file-count bound, the result's
+`limit_detail` names which bound tripped (`unsafe_tree_entries` or `untracked_file_count`) with
+the observed count and the limit — integers only, never content. The safety walk that feeds the
+`unsafe_tree_entries` bound skips the root `.git`'s internals and gitignore-excluded subtrees, so
+its count approximates the population capture actually hashes (#243).
 
 v0.1 format is `git_structural_v1`, implemented by `GitSubjectStateAdapter` under ADR-011. A
 complete result contains both `tree_digest` and `diff_digest`; every partial, changing, unsafe,
