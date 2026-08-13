@@ -65,9 +65,7 @@ class MemoryObservationState:
     )
     advice_frontier: dict[str, str] = field(default_factory=dict[str, str])
     unsupported_events: dict[str, set[str]] = field(default_factory=dict[str, set[str]])
-    gaps: dict[str, dict[str, _GapState]] = field(
-        default_factory=dict[str, dict[str, _GapState]]
-    )
+    gaps: dict[str, dict[str, _GapState]] = field(default_factory=dict[str, dict[str, _GapState]])
     last_receipt: dict[str, Timestamp] = field(default_factory=dict[str, Timestamp])
 
 

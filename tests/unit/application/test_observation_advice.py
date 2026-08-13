@@ -122,8 +122,7 @@ def test_standing_provider_condition_keeps_one_candidate_identity_as_envelopes_g
         )
     )
     many = tuple(
-        _envelope(f"hook:{index}", {"tool_name": "shell"}, pos=index)
-        for index in range(1, 21)
+        _envelope(f"hook:{index}", {"tool_name": "shell"}, pos=index) for index in range(1, 21)
     )
     latest = build_observation_advice_snapshot(
         ObservationAdviceBuildInput(

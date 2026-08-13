@@ -81,7 +81,7 @@ def _stdout_json(value: JsonValue, stream: BinaryIO | None = None) -> bool:
         out.write(canonical_encode(value) + b"\n")
         out.flush()
         return True
-    except (BrokenPipeError, OSError, ValueError):
+    except BrokenPipeError, OSError, ValueError:
         return False
 
 

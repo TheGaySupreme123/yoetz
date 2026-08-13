@@ -23,6 +23,10 @@ Use Yoetz for material multi-step work, multiple requested outcomes, delegation,
 
 Under-publishing hides the work; over-publishing buries it. The test is whether an independent reader reviewing only the ledger would reach a different conclusion without the fact.
 
+Live hook observation may append advisories or evidence after you read a frontier. Those
+observation-authored records do not invalidate the held `expected_frontier`; ordinary cooperative
+or imported work still does. On a real frontier conflict, re-read `status` rather than guessing.
+
 ## When to stop retrying
 
 <a id="stop-rules"></a>

@@ -11,7 +11,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
-    OBSERVATION_COORDINATOR_ACTOR_ID,
     AcceptedEvent,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
@@ -43,6 +42,7 @@ from yoetz.domain.events import (
     WriterChain,
     encode_payload,
     is_observation_authored,
+    is_observation_authorship,
     media_type_for,
     public_error_for_no_obligations_reason_mismatch,
     public_error_for_obligation_resolution_mismatch,
@@ -1180,11 +1180,7 @@ class MemoryLedgerAdapter:
             for entry in command.entries
         )
         observation_authored = all(
-            str(entry.author.actor_id) == OBSERVATION_COORDINATOR_ACTOR_ID
-            and entry.author.actor_type is ActorType.HARNESS
-            and entry.author.assurance is AuthorshipAssurance.HARNESS_OBSERVED
-            and entry.publication_channel
-            in {PublicationChannel.HOOK_OBSERVED, PublicationChannel.ENGINE_DERIVED}
+            is_observation_authorship(entry.author, entry.publication_channel)
             for entry in command.entries
         )
         async with self._lock:

@@ -1436,8 +1436,7 @@ class ObservationCoordinator:
         )
         projected_findings: Mapping[FindingId, ProjectionRecord[Finding]] = (
             finding_projection.state.findings
-            if finding_projection is not None
-            and type(finding_projection.state) is ProjectionState
+            if finding_projection is not None and type(finding_projection.state) is ProjectionState
             else {}
         )
         kind_by_rule = {
@@ -1465,8 +1464,18 @@ class ObservationCoordinator:
                 for source_ref in item.evidence_refs
                 for ref in refs_by_source.get(source_ref, ())
             }
-            if not matched_refs and lifecycle_ref is not None:
-                matched_refs.add(lifecycle_ref)
+            if not matched_refs:
+                # A candidate that names no envelope is a standing condition about the session,
+                # so anchor it on the session lifecycle event: one stable ref for the life of the
+                # condition, which is what lets check and receipt collapse repeats. Where no
+                # lifecycle event exists yet, fall back to every observed ref rather than
+                # dropping the finding — a finding that silently fails to land is the one
+                # outcome this must never produce.
+                if lifecycle_ref is not None:
+                    matched_refs.add(lifecycle_ref)
+                else:
+                    for observed in refs_by_source.values():
+                        matched_refs.update(observed)
             subject_refs = tuple(sorted(matched_refs, key=str.encode)[:64])
             if not subject_refs:
                 continue

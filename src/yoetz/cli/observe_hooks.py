@@ -1122,5 +1122,7 @@ def handle_observe(
             emitted = hooks_cli._stdout_json({}, stdout)  # pyright: ignore[reportPrivateUsage]
         if not emitted:
             with contextlib.suppress(BaseException):
-                record_hook_diagnostic("stdout_write_failed", event_name or "observe", _state=_state)
+                record_hook_diagnostic(
+                    "stdout_write_failed", event_name or "observe", _state=_state
+                )
         return 0

@@ -1143,7 +1143,7 @@ class LocalObservationStore:
                     and row.envelope.source_identity == source_identity
                 ):
                     del state.pending_outbox[index]
-                    self._resolve_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
+                    self._resolve_delivered(state)
                     state.last_successful_drain_mono_ms = int(self._now_mono() * 1000)
                     state.monotonic_epoch = self._boot_epoch()
                     self._save(workspace, state)
@@ -1159,7 +1159,7 @@ class LocalObservationStore:
             for index, row in enumerate(state.pending_outbox):
                 if row.row_identity == expected.row_identity and row.attempts == expected.attempts:
                     del state.pending_outbox[index]
-                    self._resolve_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
+                    self._resolve_delivered(state)
                     state.last_successful_drain_mono_ms = int(self._now_mono() * 1000)
                     state.monotonic_epoch = self._boot_epoch()
                     self._save(workspace, state)
@@ -1319,6 +1319,21 @@ class LocalObservationStore:
             True,
         )
 
+    @classmethod
+    def _resolve_delivered(cls, state: _WorkspaceState) -> None:
+        """Clear the conditions a completed delivery disproves.
+
+        A row that reached the service and was acknowledged is live evidence that the service was
+        reachable, the vault was open, and the outbox is no longer over its bound.
+        """
+
+        for code in (
+            ObservationGapCode.OUTBOX_OVERFLOW.value,
+            ObservationGapCode.SERVICE_UNAVAILABLE.value,
+            ObservationGapCode.VAULT_LOCKED.value,
+        ):
+            cls._resolve_gap_state(state, code)
+
     @staticmethod
     def _resolve_gap_state(state: _WorkspaceState, gap_code: str) -> None:
         assert state.gaps is not None
@@ -1459,6 +1474,12 @@ class LocalObservationStore:
                 state.last_hook_receipt_mono_ms = mono_ms
             else:
                 state.last_stream_reconcile_mono_ms = mono_ms
+            # Accepting an envelope is live proof the cursor advanced past whatever was stale.
+            # Content capture is only proven by an envelope that actually carried captured
+            # content, so it clears on that narrower evidence and not on ingest alone.
+            self._resolve_gap_state(state, ObservationGapCode.CURSOR_STALE.value)
+            if envelope.content_object_refs:
+                self._resolve_gap_state(state, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
             for gap in envelope.gap_codes:
                 self._note_gap_state(state, gap)
             if ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes:
@@ -1833,21 +1854,21 @@ class LocalObservationStore:
             advice_frontier=state.advice_frontier,
         )
 
-    def _current_gaps(
-        self, state: _WorkspaceState, *, mapping_available: bool
-    ) -> tuple[str, ...]:
+    def _current_gaps(self, state: _WorkspaceState, *, mapping_available: bool) -> tuple[str, ...]:
         """Project current observable gaps while retaining full history separately."""
 
         assert state.gaps is not None
         assert state.pending_outbox is not None
         assert state.quarantine is not None
+        # Codes re-derived below from live state. Everything else reports its recorded active
+        # flag, which ``_resolve_gap_state`` clears when a condition is observed to have healed.
+        # Note that gap sightings are stamped with the local wall clock while ``last_receipt`` is
+        # a caller-asserted envelope time, so the two are never compared: resolution is driven by
+        # observed signals, never by ordering one clock against the other.
         transient = {
-            ObservationGapCode.CURSOR_STALE.value,
             ObservationGapCode.MAPPING_MISSING.value,
             ObservationGapCode.OUTBOX_OVERFLOW.value,
             ObservationGapCode.OUTBOX_QUARANTINED.value,
-            ObservationGapCode.SERVICE_UNAVAILABLE.value,
-            ObservationGapCode.VAULT_LOCKED.value,
         }
         current = {code for code, seen in state.gaps.items() if seen.active} - transient
         if state.quarantine:
@@ -1860,14 +1881,13 @@ class LocalObservationStore:
         for row in state.pending_outbox:
             if row.last_reason is not None:
                 current.add(row.last_reason)
-        mapping_gap = state.gaps.get(ObservationGapCode.MAPPING_MISSING.value)
-        if mapping_gap is not None and not mapping_available:
+        # Live mapping presence outranks both the latched code and any stale row reason: a row
+        # rejected for a missing mapping keeps that reason after the mapping is restored, and
+        # reporting it again is the exact defect #219 filed.
+        if mapping_available:
+            current.discard(ObservationGapCode.MAPPING_MISSING.value)
+        elif state.gaps.get(ObservationGapCode.MAPPING_MISSING.value) is not None:
             current.add(ObservationGapCode.MAPPING_MISSING.value)
-        cursor_gap = state.gaps.get(ObservationGapCode.CURSOR_STALE.value)
-        if cursor_gap is not None and (
-            state.last_receipt is None or cursor_gap.last_seen.wire >= state.last_receipt.wire
-        ):
-            current.add(ObservationGapCode.CURSOR_STALE.value)
         return tuple(sorted(current, key=str.encode))
 
     def _state_to_json(self, workspace: str, state: _WorkspaceState) -> dict[str, JsonValue]:

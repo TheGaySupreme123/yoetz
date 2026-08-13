@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -165,9 +166,7 @@ async def test_live_upgrade_finds_materialization_under_legacy_writer(tmp_path: 
     session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
     legacy_writer_id = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
     harness_writer_id = observation_writer_id(task_id, session_id)
-    envelope = _envelope(
-        session=f"hmac-sha256:{'ae' * 32}", identity="hook:upgrade-hazard"
-    )
+    envelope = _envelope(session=f"hmac-sha256:{'ae' * 32}", identity="hook:upgrade-hazard")
     batch = materialize_observation_envelope(envelope, task_id=task_id)
     lookups: list[tuple[str, str]] = []
 
@@ -233,15 +232,76 @@ def test_mapping_gap_history_does_not_latch_after_mapping_exists(tmp_path: Path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
     store.note_coverage_gap(workspace, ObservationGapCode.MAPPING_MISSING.value)
-    assert ObservationGapCode.MAPPING_MISSING.value in store.status(
-        ObservationStatusQuery(workspace)
-    ).gaps
+    assert (
+        ObservationGapCode.MAPPING_MISSING.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
 
     store.bind_codex_session(workspace, "mapping-healed")
 
-    assert ObservationGapCode.MAPPING_MISSING.value not in store.status(
-        ObservationStatusQuery(workspace)
-    ).gaps
+    assert (
+        ObservationGapCode.MAPPING_MISSING.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+def test_mapping_gap_does_not_return_through_a_stale_pending_row_reason(tmp_path: Path) -> None:
+    """A row rejected before the mapping existed keeps that reason; status must not echo it."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-stale-reason")
+    envelope = _envelope(session=session)
+    assert store.enqueue_outbox(workspace, "sess-stale-reason", envelope) is None
+    row = store.list_pending_outbox_rows(workspace)[0]
+    assert (
+        store.bump_outbox_row_attempt(
+            workspace, row, reason=ObservationGapCode.MAPPING_MISSING.value
+        )
+        is not None
+    )
+    store.note_coverage_gap(workspace, ObservationGapCode.MAPPING_MISSING.value)
+
+    # The mapping demonstrably exists (bind_codex_session above), so the live signal wins over
+    # both the latched code and the row's stale reason. This is the exact shape of issue #219.
+    assert (
+        ObservationGapCode.MAPPING_MISSING.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+def test_content_capture_gap_clears_after_a_later_successful_observation(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-capture")
+    store.note_coverage_gap(workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+    assert (
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+    # An accepted envelope that captured no content is not evidence that capture works.
+    without_content = _envelope(session=session, identity="hook:no-content", ordinal=2)
+    assert store.ingest(without_content).disposition is ObservationIngestDisposition.ACCEPTED
+    assert (
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+    with_content = replace(
+        _envelope(session=session, identity="hook:captured", ordinal=3),
+        content_object_refs=(PREFIX_BY_KIND[IdKind.OBJECT] + str(uuid.uuid4()),),
+    )
+    assert store.ingest(with_content).disposition is ObservationIngestDisposition.ACCEPTED
+
+    # Content demonstrably captured: the historical sighting stays in gap_history but stops
+    # describing the workspace's current state.
+    assert (
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
 
 
 def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path) -> None:
@@ -282,7 +342,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_reason == ObservationGapCode.MAPPING_MISSING.value
     assert durable.last_attempt_at == attempted_at
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-            "yoetz.observation-local/4"
+        "yoetz.observation-local/4"
     )
 
 

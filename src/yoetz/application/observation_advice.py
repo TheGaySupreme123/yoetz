@@ -372,9 +372,7 @@ def build_observation_advice_snapshot(
         },
     )
     finding_ids = tuple(
-        stable_advice_finding_id(
-            item.rule_code, item.detail_token, advice_candidate_digest(item)
-        )
+        stable_advice_finding_id(item.rule_code, item.detail_token, advice_candidate_digest(item))
         for item in candidates
     )
     semantic = input_value.semantic_addon
