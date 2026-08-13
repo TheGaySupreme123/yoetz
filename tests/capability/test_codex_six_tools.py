@@ -44,14 +44,9 @@ _DEGRADED_CODES = frozenset(
         PublicErrorCode.VAULT_LOCKED.value,
     }
 )
-# Codes a rejected-but-hinted call may carry: a plain argument rejection, or the same-ID recovery
-# answer a publish body gets when no local service can say whether the operation already landed.
-_REJECTION_CODES = frozenset(
-    {
-        PublicErrorCode.INVALID_REQUEST.value,
-        PublicErrorCode.OPERATION_PENDING.value,
-    }
-)
+# The only code a rejected-but-hinted call may carry. An unreachable recovery oracle adds a
+# durability caveat to this answer; it never replaces it with an uncertain one (issue #239).
+_REJECTION_CODES = frozenset({PublicErrorCode.INVALID_REQUEST.value})
 
 
 def _serve_parameters(tmp_path: Path) -> StdioServerParameters:
@@ -303,11 +298,12 @@ async def test_mcp_stdio_six_tool_dispatch_without_claiming_codex_activation(
     assert evidence.outcome is EvidenceOutcome.PASS
 
 
-def _rejected_tool_arguments() -> dict[str, dict[str, JsonValue]]:
-    """Two rejections the 2026-08-03 dogfood actually produced, in their own shapes.
+def _rejected_tool_arguments() -> dict[str, tuple[str, dict[str, JsonValue]]]:
+    """Three rejections real dogfood sessions produced, in their own shapes.
 
-    `publish_work` puts the family value on a guessed top-level key; `check` sends half a scope.
-    Both were rejected safely before, and both left the agent with nothing to author from.
+    `envelope` puts the family value on a guessed top-level key (2026-08-03); `payload_key` sends
+    a key the family does not admit (2026-08-13, issue #240); `scope` sends half a scope. All three
+    were rejected safely before, and all three left the agent with nothing to author from.
     """
 
     valid = _schema_valid_tool_arguments()
@@ -317,11 +313,25 @@ def _rejected_tool_arguments() -> dict[str, dict[str, JsonValue]]:
     schema = cast(Mapping[str, JsonValue], draft.pop("schema"))
     draft["event_type"] = schema["name"]
     publish["event_drafts"] = [draft]
+    unknown_key_draft = dict(cast(Mapping[str, JsonValue], drafts[0]))
+    payload = dict(cast(Mapping[str, JsonValue], unknown_key_draft["payload"]))
+    payload["zzz_unknown"] = "x"
+    unknown_key_draft["payload"] = payload
+    # Declared dry run: the preview cannot append, so it must not pay for the recovery lookup.
+    unknown_key_publish: dict[str, JsonValue] = {
+        **valid["publish_work"],
+        "event_drafts": [cast(JsonValue, unknown_key_draft)],
+        "dry_run": True,
+    }
     check: dict[str, JsonValue] = {
         **valid["check"],
         "scope": cast(JsonValue, {"obligation_ids": []}),
     }
-    return {"publish_work": publish, "check": check}
+    return {
+        "envelope": ("publish_work", publish),
+        "payload_key": ("publish_work", unknown_key_publish),
+        "scope": ("check", check),
+    }
 
 
 @pytest.mark.anyio
@@ -329,8 +339,8 @@ async def test_rejected_arguments_carry_corrective_text_over_the_wire(tmp_path: 
     """Corrective text that never leaves the process repairs nothing.
 
     The dogfood host degraded the tool schema, so the error message and the guidance resources were
-    the only surfaces that reached the agent. These two calls assert the repair information arrives
-    over real MCP stdio rather than only in a unit-level hint.
+    the only surfaces that reached the agent. These three calls assert the repair information
+    arrives over real MCP stdio rather than only in a unit-level hint.
     """
 
     evidence_root = capability_evidence_output_root(tmp_path)
@@ -340,26 +350,32 @@ async def test_rejected_arguments_carry_corrective_text_over_the_wire(tmp_path: 
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
-            for name, payload in arguments.items():
+            for label, (name, payload) in arguments.items():
                 result = await session.call_tool(name, cast(dict[str, object], payload))
                 assert result.isError is True
                 assert result.structuredContent is not None
                 structured = cast(dict[str, object], result.structuredContent)
                 error = cast(dict[str, object], structured["error"])
-                # An unvalidatable publish body first consults same-ID recovery, and with no local
-                # service reachable that answers OPERATION_PENDING while still carrying the
-                # authoring hint. Either code is a rejection; the corrective text is the claim.
+                # A locally decidable rejection stays a rejection even when no service can be
+                # reached: the durability caveat rides beside it, never in place of it (#239).
                 assert error["code"] in _REJECTION_CODES
-                messages[name] = cast(str, error["message"])
+                messages[label] = cast(str, error["message"])
 
     # The draft envelope: which key carries the family, and what else the envelope must carry.
-    assert "schema.name admits" in messages["publish_work"]
-    assert "each event_drafts entry requires" in messages["publish_work"]
+    assert "schema.name admits" in messages["envelope"]
+    assert "each event_drafts entry requires" in messages["envelope"]
     for key in ("event_id", "occurred_at", "causal_parents", "artifact_refs", "evidence_refs"):
-        assert key in messages["publish_work"]
+        assert key in messages["envelope"]
+    # The unknown payload key: the class of the mistake, and the keys the family does admit.
+    assert "does not admit" in messages["payload_key"]
+    assert "plan_published" in messages["payload_key"]
+    for key in ("plan_version", "summary", "obligation_refs"):
+        assert key in messages["payload_key"]
+    assert "zzz_unknown" not in messages["payload_key"]
+    assert "each event_drafts entry requires" not in messages["payload_key"]
     # Check scope: the missing peer and the omit-the-whole-object alternative.
-    assert "claim_ids" in messages["check"]
-    assert "omit scope for the whole case" in messages["check"]
+    assert "claim_ids" in messages["scope"]
+    assert "omit scope for the whole case" in messages["scope"]
 
     context = runtime_capability_context(
         fixture_digest=bytes_digest(b"mcp-stdio-corrective-authoring"),

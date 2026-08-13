@@ -1,9 +1,11 @@
-"""Envelope-first publish recovery must not mask a known authoring error (issue #65).
+"""Envelope-first publish recovery must not mask a known authoring error (issues #65, #239).
 
 When body validation fails, the bridge still looks up the request_id so a committed operation can
 be recovered. Only an authoritative found state replaces the field-pointed INVALID_REQUEST. An
-unavailable recovery oracle returns an ambiguity-safe same-ID remedy — never the nested status
-read's "no durable state changed / new request_id" message.
+unavailable recovery oracle annotates that result with a durability caveat — never the nested
+status read's "no durable state changed / new request_id" message, and never an uncertain
+OPERATION_PENDING in place of the certain answer the bridge already holds. A declared dry run
+cannot append at all, so it never pays for the lookup.
 """
 
 from __future__ import annotations
@@ -27,6 +29,8 @@ _DIGEST = "sha256:" + "a" * 64
 # confuses the event-schema oneOf into pointing at /event_drafts/0/schema/name.
 _MALFORMED_AUTHORITY = "bad authority"
 _HOSTILE_PAYLOAD = "SECRET_MUST_NOT_LEAK"
+# The public message bound the protocol validator enforces.
+_MAX_MESSAGE_BYTES = 4096
 
 
 def _malformed_decision_arguments(
@@ -248,15 +252,18 @@ async def test_read_projection_failed_returns_operation_recovery_unavailable(
 
     assert result.isError is True
     error = _error(result)
-    assert error["code"] == PublicErrorCode.OPERATION_PENDING.value
-    assert error["retryable"] is True
+    assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
+    assert error["retryable"] is False
     assert result.structuredContent is not None
     assert result.structuredContent["request_id"] == _REQUEST
     details = cast(dict[str, object], error["safe_details"])
     assert details["reason_code"] == "operation_recovery_unavailable"
-    assert details["field"] == "/event_drafts/0/payload/authority"
+    assert details["fields"] == ["/event_drafts/0/payload/authority"]
     message = cast(str, error["message"])
-    assert "same request_id" in message
+    # Both certain facts, in that order; never a bare same-id retry the invalid body cannot pass.
+    assert "The tool arguments are invalid." in message
+    assert "could not be checked" in message
+    assert "Retry with the same request_id." not in message
     assert "No durable state changed" not in message
     assert "new request_id" not in message
     assert "read_projection_failed" not in message
@@ -283,9 +290,11 @@ async def test_public_operation_error_during_recovery_is_unavailable_not_nested(
     result = await bridge.dispatch_publish_work(_malformed_decision_arguments(), runtime)
 
     error = _error(result)
-    assert error["code"] == PublicErrorCode.OPERATION_PENDING.value
+    assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
+    assert error["retryable"] is False
     details = cast(dict[str, object], error["safe_details"])
     assert details["reason_code"] == "operation_recovery_unavailable"
+    assert details["fields"] == ["/event_drafts/0/payload/authority"]
     assert "Nested internal failure" not in cast(str, error["message"])
     await bridge.close_bridge_runtime(runtime)
 
@@ -303,19 +312,21 @@ async def test_connection_failure_during_recovery_is_unavailable(
     result = await bridge.dispatch_publish_work(_malformed_decision_arguments(), runtime)
 
     error = _error(result)
-    assert error["code"] == PublicErrorCode.OPERATION_PENDING.value
+    assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
+    assert error["retryable"] is False
     details = cast(dict[str, object], error["safe_details"])
     assert details["reason_code"] == "operation_recovery_unavailable"
+    assert details["fields"] == ["/event_drafts/0/payload/authority"]
     assert result.structuredContent is not None
     assert result.structuredContent["request_id"] == _REQUEST
     await bridge.close_bridge_runtime(runtime)
 
 
 @pytest.mark.anyio
-async def test_malformed_dry_run_absent_returns_validation_not_recovery(
+async def test_dry_run_validation_failure_skips_the_recovery_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """dry_run creates no operation record; absent lookup returns the authoring pointer."""
+    """A dry run appends nothing, so no prior operation can change the answer (issue #239)."""
 
     seen = _install_recovery_oracle(monkeypatch, status_wire=_operation_wire("absent"))
     runtime = bridge.build_bridge_runtime()
@@ -323,15 +334,139 @@ async def test_malformed_dry_run_absent_returns_validation_not_recovery(
 
     result = await bridge.dispatch_publish_work(arguments, runtime)
 
-    assert len(seen) == 1  # recovery still consults operation identity; does not special-case
+    assert seen == []
     error = _error(result)
     assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
+    assert error["retryable"] is False
     details = cast(dict[str, object], error["safe_details"])
     assert details["fields"] == ["/event_drafts/0/payload/authority"]
     # No claim about durable append / frontier / request-id consumption.
     message = cast(str, error["message"])
     assert "No durable state changed" not in message
     assert "accepted" not in message.lower() or "invalid" in message.lower()
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_dry_run_validation_failure_never_contacts_the_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2026-08-13 dogfood shape: a dry run must not reach the client factory at all."""
+
+    async def refuse(_runtime: object = bridge.BRIDGE_RUNTIME) -> object:
+        raise AssertionError("recovery must not run for a dry run")
+
+    monkeypatch.setattr(bridge, "ensure_service_client", refuse)
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_publish_work(
+        _malformed_decision_arguments(dry_run=True), runtime
+    )
+
+    error = _error(result)
+    assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
+    assert error["retryable"] is False
+    details = cast(dict[str, object], error["safe_details"])
+    assert details["fields"] == ["/event_drafts/0/payload/authority"]
+    blob = str(result.structuredContent)
+    assert "operation_recovery_unavailable" not in blob
+    assert "OPERATION_PENDING" not in blob
+    assert _MALFORMED_AUTHORITY not in blob
+    assert len(cast(str, error["message"]).encode("utf-8")) <= _MAX_MESSAGE_BYTES
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_non_dry_run_validation_failure_with_unreachable_oracle_keeps_invalid_request_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both certain facts, and a remedy the caller can actually complete (issue #239)."""
+
+    _install_recovery_oracle(
+        monkeypatch,
+        raise_on_status=ControlError("service_unavailable", retryable=True),
+    )
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_publish_work(_malformed_decision_arguments(), runtime)
+
+    error = _error(result)
+    assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
+    assert error["retryable"] is False
+    details = cast(dict[str, object], error["safe_details"])
+    assert details["fields"] == ["/event_drafts/0/payload/authority"]
+    assert details["reasons"] == ["invalid_type_or_value"]
+    assert details["reason_code"] == "operation_recovery_unavailable"
+    message = cast(str, error["message"])
+    assert "The tool arguments are invalid." in message
+    assert "the local service was unreachable" in message
+    assert "Retry with the same request_id." not in message
+    assert len(message.encode("utf-8")) <= _MAX_MESSAGE_BYTES
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("dry_run", ["true", 1, "True", [True]])
+async def test_a_dry_run_declaration_must_be_a_literal_boolean(
+    monkeypatch: pytest.MonkeyPatch, dry_run: object
+) -> None:
+    """A malformed dry_run is part of why the body is invalid; it buys no durability shortcut."""
+
+    seen = _install_recovery_oracle(monkeypatch, status_wire=_operation_wire("absent"))
+    runtime = bridge.build_bridge_runtime()
+    arguments = _malformed_decision_arguments()
+    arguments["dry_run"] = dry_run
+
+    result = await bridge.dispatch_publish_work(arguments, runtime)
+
+    assert len(seen) == 1
+    assert _error(result)["code"] == PublicErrorCode.INVALID_REQUEST.value
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_a_committed_operation_is_not_consulted_for_a_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declared behaviour change: a preview makes no durability claim, so it asks none."""
+
+    seen = _install_recovery_oracle(monkeypatch, status_wire=_operation_wire("complete"))
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_publish_work(
+        _malformed_decision_arguments(dry_run=True), runtime
+    )
+
+    assert seen == []
+    error = _error(result)
+    assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
+    assert error["code"] != PublicErrorCode.REQUEST_IDENTITY_CONFLICT.value
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_locationless_validation_failure_still_carries_the_availability_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With nothing locatable the caveat is all there is to say, and it stays machine-readable."""
+
+    _install_recovery_oracle(
+        monkeypatch,
+        raise_on_status=ControlError("service_unavailable", retryable=True),
+    )
+
+    def unlocatable(_exc: object) -> tuple[dict[str, str], ...]:
+        return ()
+
+    monkeypatch.setattr(bridge, "safe_validation_locations", unlocatable)
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_publish_work(_malformed_decision_arguments(), runtime)
+
+    error = _error(result)
+    assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
+    details = cast(dict[str, object], error["safe_details"])
+    assert details == {"reason_code": "operation_recovery_unavailable"}
     await bridge.close_bridge_runtime(runtime)
 
 
@@ -351,7 +486,7 @@ async def test_hostile_authority_text_never_appears_in_unavailable_diagnostics(
     blob = str(result.structuredContent)
     assert _HOSTILE_PAYLOAD not in blob
     error = _error(result)
-    assert cast(dict[str, object], error["safe_details"])["reason_code"] == (
-        "operation_recovery_unavailable"
-    )
+    details = cast(dict[str, object], error["safe_details"])
+    assert details["reason_code"] == "operation_recovery_unavailable"
+    assert details["fields"] == ["/event_drafts/0/payload/authority"]
     await bridge.close_bridge_runtime(runtime)

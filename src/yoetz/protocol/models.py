@@ -1076,6 +1076,9 @@ def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
                 ],
             ) from None
         if exc.absolute_path:
+            # The reason token is drawn from a closed set inside the validator, and the family and
+            # count beside it are frozen schema content, so MCP can name the class of the mistake
+            # rather than collapsing every nested failure to one generic token (issue #240).
             raise PydanticValidationError.from_exception_data(
                 type(model).__name__,
                 [
@@ -1083,7 +1086,11 @@ def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
                         "type": "value_error",
                         "loc": tuple(exc.absolute_path),
                         "input": None,
-                        "ctx": {"error": ValueError("schema_instance_invalid")},
+                        "ctx": {
+                            "error": ValueError(exc.reason or "schema_instance_invalid"),
+                            "schema_name": exc.family,
+                            "count": exc.unknown_count or None,
+                        },
                     }
                 ],
             ) from None

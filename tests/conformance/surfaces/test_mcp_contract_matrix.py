@@ -208,6 +208,41 @@ def test_rejected_event_draft_is_located_by_ordinal() -> None:
     assert secret not in hint
 
 
+def test_unknown_nested_payload_key_keeps_the_extra_forbidden_reason() -> None:
+    """Both producers of `extra_forbidden` are pinned here: the envelope model and jsonschema.
+
+    Top-level extras come from `_ClosedModel`'s `extra="forbid"`; a key inside an event payload is
+    admitted only by the frozen event schema, and its verdict reaches this projection through
+    `SchemaInstanceInvalid` (issue #240).
+    """
+
+    examples = descriptor_for("publish_work").input_schema["examples"]
+    assert isinstance(examples, list)
+    base = cast(dict[str, object], examples[0])
+    good = cast(dict[str, object], cast(list[object], base["event_drafts"])[0])
+    secret = "never_echo_this_unknown_payload_key"
+    payload = {**cast(dict[str, object], good["payload"]), secret: "x"}
+
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate({**base, "event_drafts": [{**good, "payload": payload}]})
+    locations = safe_validation_locations(captured.value)
+
+    assert {"field": "/event_drafts/0/payload", "reason": "extra_forbidden"}.items() <= (
+        locations[0].items()
+    )
+    assert secret not in repr(locations)
+    # Only the two wire keys are projected; the family and count stay inside the process.
+    wire = build_public_error_result(
+        PublicErrorCode.INVALID_REQUEST,
+        "The request is invalid.",
+        False,
+        "err_00000000-0000-4000-8000-000000000002",
+        safe_details=locations,
+    )
+    details = cast(dict[str, object], cast(dict[str, object], wire["error"])["safe_details"])
+    assert details == {"fields": ["/event_drafts/0/payload"], "reasons": ["extra_forbidden"]}
+
+
 def test_unknown_tool_message_is_sanitized() -> None:
     raw_name = "../../private/secret-tool"
     message = sanitize_unknown_tool_name(raw_name)
