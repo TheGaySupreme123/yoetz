@@ -42,6 +42,7 @@ GIT_SUBJECT_STATE_FORMAT: Final = "yoetz.git-subject-state/1"
 _FORMAT_TOKEN: Final = SubjectStateFormat.GIT_STRUCTURAL_V1.value
 _GIT_TIMEOUT_SECONDS: Final = 10.0
 _STDERR_LIMIT: Final = 16_384
+_GIT_CONFIG_LIMIT: Final = 1_048_576
 _COMMAND_OUTPUT_LIMIT: Final = MAX_SUBJECT_STATE_HASH_BYTES + 1
 _PATH_OUTPUT_LIMIT: Final = 8_388_608
 _READ_CHUNK: Final = 65_536
@@ -708,9 +709,16 @@ def _verify_git_metadata(root: Path) -> None:
         raise _CaptureFailure(SubjectStateLimitation.UNSAFE_ROOT)
     config = git_root / "config"
     try:
-        encoded = _read_small_mutable(config, _STDERR_LIMIT)
+        encoded = _read_small_mutable(config, _GIT_CONFIG_LIMIT)
     except OSError as exc:
         raise _CaptureFailure(SubjectStateLimitation.UNSAFE_ROOT) from exc
+    except _CaptureFailure as exc:
+        if exc.limitation is SubjectStateLimitation.READ_LIMIT_EXCEEDED:
+            raise _CaptureFailure(
+                SubjectStateLimitation.GIT_CONFIG_LIMIT_EXCEEDED,
+                exc.status,
+            ) from exc
+        raise
     try:
         for line in encoded.splitlines():
             section = line.lstrip().lower()

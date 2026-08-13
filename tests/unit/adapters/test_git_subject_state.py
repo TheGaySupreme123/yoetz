@@ -314,3 +314,18 @@ def test_path_safety_malicious_config_and_capture_are_read_only(tmp_path: Path) 
     assert filtered.subject_state is None
     assert filtered.limitations == (SubjectStateLimitation.UNSAFE_ROOT,)
     assert not filter_canary.exists()
+
+
+def test_git_config_scan_has_its_own_practical_bound(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    config = repository / ".git" / "config"
+    config.write_bytes(config.read_bytes() + b"# branch history\n" * 1_100)
+    assert config.stat().st_size > 16_384
+
+    captured = GitSubjectStateAdapter().capture(_command(repository))
+    assert captured.status is SubjectStateStatus.CAPTURED
+    assert captured.limitations == ()
+
+    config.write_bytes(config.read_bytes() + b"# bounded padding\n" * 70_000)
+    with pytest.raises(ValueError, match="^git_config_limit_exceeded$"):
+        open_local_workspace(repository)

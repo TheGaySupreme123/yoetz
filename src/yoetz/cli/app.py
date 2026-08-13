@@ -983,7 +983,10 @@ def state_capture(
 
     try:
         from yoetz.adapters.git_subject_state import GitSubjectStateAdapter, open_local_workspace
-        from yoetz.ports.subject_state import SubjectStateCaptureCommand, SubjectStateFormat
+        from yoetz.ports.subject_state import (
+            SubjectStateCaptureCommand,
+            SubjectStateFormat,
+        )
 
         handle = open_local_workspace(workspace)
         result = GitSubjectStateAdapter().capture(
@@ -1000,7 +1003,15 @@ def state_capture(
             "diff_digest": state.diff_digest if state is not None else None,
         }
         _human_or_json(output, json_output=json_output)
-    except OSError, ValueError:
+    except ValueError as error:
+        from yoetz.ports.subject_state import SubjectStateLimitation
+
+        reason = str(error)
+        if reason in {item.value for item in SubjectStateLimitation}:
+            _stderr(_bounded_failure_line(reason))
+            _finish(exit_code_for(PublicErrorCode.INVALID_REQUEST))
+        _finish(_usage_failure())
+    except OSError:
         _finish(_usage_failure())
 
 

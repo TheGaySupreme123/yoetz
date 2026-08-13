@@ -2125,6 +2125,13 @@ port returns no repository content, path, filename, branch, remote, Git output, 
 digest. It is client-local support used before ordinary publication, not a seventh MCP/workflow
 operation, not service-owned ambient inspection, and not an `ArtifactInspectionPort`.
 
+The closed limitation values are `not_git`, `unsafe_root`, `submodule_present`,
+`symlink_unsupported`, `object_format_unsupported`, `git_config_limit_exceeded`,
+`read_limit_exceeded`, `file_limit_exceeded`, `git_failed`, and `input_changed`. The Git config
+prefix scan has its own 1 MiB bound; it never reuses the subprocess-stderr cap. The state-capture
+CLI surfaces only one of these closed tokens, with bounded remediation where one is registered;
+unrecognized exception text remains `invalid_request` and is never echoed.
+
 Publishing a captured digest preserves the actual publication channel and authorship assurance. A
 complete capture may support `content_digest` evidence immutability, but never earns
 `harness_observed`, `hook_observed`, `artifact_verified`, or `independently_reproduced` by itself.
