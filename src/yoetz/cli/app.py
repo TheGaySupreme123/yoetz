@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import Enum
 from functools import cache
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, Final, Literal, Protocol, cast
 
 import anyio
 import typer
@@ -63,8 +63,13 @@ from yoetz.protocol.models import (
 from yoetz.protocol.schemas import schema_document_for
 from yoetz.service.client import ServiceClient, accepted_but_unresponsive, connect_service
 from yoetz.service.control_protocol import public_error_code_for_control_reason
-from yoetz.service.lifecycle import LifecycleError
 from yoetz.version import ResourceIntegrityError
+
+if TYPE_CHECKING:
+    # Runtime resolution is deliberately lazy: the client/service trust boundary pins
+    # cli.app's import graph to the ordinary service client, and yoetz.service.lifecycle
+    # is service-composition side (see tests/packaging/test_service_boundary_imports.py).
+    from yoetz.service.lifecycle import LifecycleError
 
 __all__ = [
     "app",
@@ -416,6 +421,22 @@ def _singleton_holder_pid() -> int | None:
 def _with_holder_pid(line: str) -> str:
     holder = _singleton_holder_pid()
     return line if holder is None else f"{line} (holder pid {holder})"
+
+
+def _lifecycle_exit_code(error: BaseException) -> int | None:
+    """Exit code for a bounded lifecycle refusal, or None for anything else.
+
+    A ``LifecycleError`` can only arrive from a command that already composed the daemon,
+    so its module is resolved through ``sys.modules`` rather than imported: the catch-all
+    must not pull service-composition modules into cli.app's pinned import graph.
+    """
+
+    lifecycle = sys.modules.get("yoetz.service.lifecycle")
+    if lifecycle is None:
+        return None
+    if not isinstance(error, lifecycle.LifecycleError):
+        return None
+    return _lifecycle_failure(cast("LifecycleError", error))
 
 
 def _lifecycle_failure(error: LifecycleError) -> int:
@@ -972,6 +993,9 @@ def service_run() -> None:
             "a passphrase vault"
         )
         raise typer.Exit(exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)) from None
+
+    # Free at this point: the daemon import above already composed the lifecycle module.
+    from yoetz.service.lifecycle import LifecycleError
 
     try:
         daemon_main()
@@ -2152,11 +2176,12 @@ def main() -> None:
     except KeyboardInterrupt:
         _stderr("cancelled")
         raise SystemExit(130) from None
-    except LifecycleError as error:
+    except Exception as error:
         # Defence in depth for the same defect the ``service run`` arm fixes: no command may
         # ever leak a bounded lifecycle refusal as internal_error again (#237).
-        raise SystemExit(_lifecycle_failure(error)) from None
-    except Exception:
+        lifecycle_exit = _lifecycle_exit_code(error)
+        if lifecycle_exit is not None:
+            raise SystemExit(lifecycle_exit) from None
         _stderr("internal_error: the command could not be completed")
         raise SystemExit(70) from None
 
