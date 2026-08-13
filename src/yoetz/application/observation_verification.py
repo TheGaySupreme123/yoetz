@@ -216,10 +216,13 @@ class ObservationVerificationSupervisor:
 
     async def _run_loop(self) -> None:
         while not self._closed:
+            # Consume the wake that started this pass before draining. A handle
+            # registered by an on-idle handoff during the drain then leaves the
+            # event set and starts the successor pass immediately.
+            self._wake.clear()
             await self._drain_once()
             if self._closed:
                 break
-            self._wake.clear()
             # Always park on the wake event so an empty handle set cannot busy-loop
             # and starve Application.close / supervisor.stop.
             try:

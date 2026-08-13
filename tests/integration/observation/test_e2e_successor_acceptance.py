@@ -156,6 +156,43 @@ async def test_supervisor_drains_after_notify_without_inline_await() -> None:
 
 
 @pytest.mark.anyio
+async def test_verification_supervisor_preserves_wake_from_idle_handoff() -> None:
+    workspace = "hmac-sha256:" + "b" * 64
+    supervisor = ObservationVerificationSupervisor(service_generation=1)
+    successor_ran = asyncio.Event()
+
+    class _Worker:
+        service_generation = 1
+
+        def __init__(self, ran: asyncio.Event | None = None) -> None:
+            self._ran = ran
+
+        async def run_once(self) -> None:
+            if self._ran is not None:
+                self._ran.set()
+            return None
+
+    async def _register_successor() -> None:
+        supervisor.register(
+            VerificationDrainHandle(
+                workspace_commitment=workspace,
+                worker=_Worker(successor_ran),  # type: ignore[arg-type]
+            )
+        )
+
+    await supervisor.start()
+    supervisor.register(
+        VerificationDrainHandle(
+            workspace_commitment=workspace,
+            worker=_Worker(),  # type: ignore[arg-type]
+            on_idle=_register_successor,
+        )
+    )
+    await asyncio.wait_for(successor_ran.wait(), timeout=0.25)
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
 async def test_completed_approved_check_forwards_bounded_result_for_ledger_materialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
