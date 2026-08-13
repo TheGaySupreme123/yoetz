@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
 import hashlib
 import hmac
@@ -29,6 +30,7 @@ from yoetz.protocol.ids import IdKind, new_id, validate_id
 __all__ = [
     "IDLE_STOP_SECONDS",
     "LOCK_DRAIN_SECONDS",
+    "SINGLETON_LOCK_NAME",
     "STOP_DRAIN_SECONDS",
     "Admission",
     "IdleRelockPolicy",
@@ -36,11 +38,16 @@ __all__ = [
     "ServiceInstance",
     "ServiceLifecycle",
     "SessionSecurityEvent",
+    "probe_singleton_holder",
 ]
 
 LOCK_DRAIN_SECONDS: Final = 5
 STOP_DRAIN_SECONDS: Final = 30
 IDLE_STOP_SECONDS: Final = 1_800
+# One name for the per-user singleton lock file, so the daemon that takes it and the CLI that
+# reports on its holder can never disagree about which file that is.
+SINGLETON_LOCK_NAME: Final = "service.lock"
+_MAX_SINGLETON_HOLDER_BYTES: Final = 256
 _DEFAULT_IDLE_SECONDS: Final = 900
 _IDLE_POLICY_DOMAIN: Final = "yoetz/idle-relock-policy-change/v1\x00"
 _LIFECYCLE_REASONS: Final = frozenset(
@@ -285,6 +292,7 @@ class ServiceLifecycle:
                     os.close(descriptor)
                     raise LifecycleError("service_already_running") from exc
                 self._singleton_fd = descriptor
+                self._stamp_singleton_holder(descriptor)
                 self._singleton_authority = _SingletonEndpointAuthority(
                     lambda: self._assert_singleton_descriptor_held(descriptor)
                 )
@@ -608,15 +616,62 @@ class ServiceLifecycle:
         except OSError as exc:
             raise LifecycleError("invalid_transition") from exc
 
+    def _stamp_singleton_holder(self, descriptor: int) -> None:
+        """Record advisory holder identity in the lock file the flock already owns.
+
+        The flock stays the sole mutual-exclusion authority; this content exists only so a
+        refused start can name the process it lost to instead of reporting a generic failure.
+        Every write is best effort and every reader degrades to "no pid".
+        """
+
+        body: dict[str, JsonValue] = {"instance_id": self._instance_id, "pid": os.getpid()}
+        with contextlib.suppress(OSError):
+            os.ftruncate(descriptor, 0)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.write(descriptor, canonical_encode(cast(JsonValue, body)) + b"\n")
+
     def _release_singleton(self) -> None:
         descriptor = self._singleton_fd
         self._singleton_authority = None
         self._singleton_fd = None
         if descriptor is not None:
             try:
+                with contextlib.suppress(OSError):
+                    os.ftruncate(descriptor, 0)
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(descriptor)
+
+
+def probe_singleton_holder(path: Path) -> int | None:
+    """Return the live pid stamped in a singleton lock file, or ``None`` when unknown.
+
+    Reading the file never disturbs the lock: taking even a shared flock would conflict with a
+    daemon that is still acquiring its exclusive one, so a diagnostic could make a legitimate
+    start fail. An absent, oversized, malformed, or dead-pid stamp is simply no answer.
+    """
+
+    try:
+        with path.open("rb") as source:
+            data = source.read(_MAX_SINGLETON_HOLDER_BYTES + 1)
+    except OSError:
+        return None
+    if not data or len(data) > _MAX_SINGLETON_HOLDER_BYTES or not data.endswith(b"\n"):
+        return None
+    try:
+        parsed = strict_json_parse(data[:-1])
+    except Exception:
+        return None
+    if type(parsed) is not dict:
+        return None
+    pid = cast(dict[str, JsonValue], parsed).get("pid")
+    if type(pid) is not int or not 1 <= pid < 2**31:
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    return pid
 
 
 class _ServiceGenerationStore:

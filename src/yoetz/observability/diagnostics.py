@@ -49,6 +49,11 @@ _FIELD_ORDER: Final = (
     "semantic_challenges_rejected",
     "semantic_findings_selected",
     "semantic_findings_suppressed",
+    # Loop-health counters. Both are already fenced as integers by redact_diagnostic_value; only
+    # this projection list was missing them, so a saturation record reached stderr and then
+    # vanished from the durable ring an operator actually reads.
+    "duration_ms",
+    "operation_count",
 )
 _lock = Lock()
 

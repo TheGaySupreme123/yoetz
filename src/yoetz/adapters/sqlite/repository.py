@@ -298,6 +298,7 @@ class SqliteLedger:
         self._state = MemoryLedgerState()
         self._requires_recovery = _head(db).sequence != 0
         self._recovery_task: asyncio.Task[None] | None = None
+        self._recovery_failed = False
 
     def open_observation_store(self) -> SqliteObservationStore:
         """Public durable-observation seam over this bundle's connection.
@@ -450,6 +451,11 @@ class SqliteLedger:
     async def _ensure_recovered(self) -> None:
         if not self._requires_recovery:
             return
+        if self._recovery_failed:
+            # A corrupt durable row makes recovery deterministically terminal. Re-running the
+            # whole replay for every later call spent O(ledger) CPU and allocation per RPC and
+            # starved the control plane for minutes (#238); the verdict is already known.
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
         task = self._recovery_task
         if task is None:
             task = asyncio.create_task(self._recover_once())
@@ -461,6 +467,16 @@ class SqliteLedger:
                 self._recovery_task = None
 
     async def _recover_once(self) -> None:
+        """Latch a terminal recovery verdict so it is reached at most once."""
+
+        try:
+            await self._recover_projection()
+        except PublicOperationError as exc:
+            if exc.code is PublicErrorCode.STORAGE_CORRUPT:
+                self._recovery_failed = True
+            raise
+
+    async def _recover_projection(self) -> None:
         """Rebuild one shared projection without duplicating work on caller cancellation."""
 
         if not self._requires_recovery:

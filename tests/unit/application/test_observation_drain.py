@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import time
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
 
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.integrations.observation_local import (
+    LocalObservationStore,
+    ObservationOutboxRow,
+)
 from yoetz.application.observation_drain import (
     ObservationDrainAction,
     ObservationOutboxSweeper,
@@ -411,3 +418,131 @@ async def test_overlapping_sweeps_cannot_resolve_uningested_same_source_successo
     remaining = store.list_pending_outbox_rows(workspace)
     assert len(remaining) == 1
     assert remaining[0].envelope.cursor.event_position == 2
+
+
+class _BlockingStore(LocalObservationStore):
+    """A store whose calls block their thread, standing in for flock plus a full re-encode."""
+
+    delay = 0.05
+
+    def pending_workspaces(self) -> tuple[str, ...]:
+        time.sleep(self.delay)
+        return super().pending_workspaces()
+
+    def list_pending_outbox_rows(
+        self, workspace: str, *, codex_session_id: str | None = None
+    ) -> tuple[ObservationOutboxRow, ...]:
+        time.sleep(self.delay)
+        return super().list_pending_outbox_rows(workspace, codex_session_id=codex_session_id)
+
+    def bump_outbox_row_attempt(
+        self,
+        workspace: str,
+        expected: ObservationOutboxRow,
+        *,
+        reason: str | None,
+        attempted_at: Timestamp | None = None,
+    ) -> ObservationOutboxRow | None:
+        time.sleep(self.delay)
+        return super().bump_outbox_row_attempt(
+            workspace, expected, reason=reason, attempted_at=attempted_at
+        )
+
+    def acknowledge_outbox_row(self, workspace: str, expected: ObservationOutboxRow) -> bool:
+        time.sleep(self.delay)
+        return super().acknowledge_outbox_row(workspace, expected)
+
+
+def _accepted_backlog(
+    store: LocalObservationStore, tmp_path: Path, *, rows: int
+) -> tuple[str, dict[str, ObservationIngestResult | Exception]]:
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "loop-session")
+    outcomes: dict[str, ObservationIngestResult | Exception] = {}
+    for ordinal in range(1, rows + 1):
+        envelope = _envelope(session, f"hook:loop:{ordinal}", ordinal)
+        store.enqueue_outbox(workspace, "loop-session", envelope)
+        outcomes[envelope.source_identity] = ObservationIngestResult(
+            ObservationIngestDisposition.DUPLICATE, "duplicate", None
+        )
+    return workspace, outcomes
+
+
+@pytest.mark.anyio
+async def test_sweep_never_blocks_the_event_loop(tmp_path: Path) -> None:
+    """Control work keeps its share of the loop while a sweep does its blocking store I/O."""
+
+    store = _BlockingStore(_state=tmp_path)
+    _workspace, outcomes = _accepted_backlog(store, tmp_path, rows=3)
+    beats: list[float] = []
+    stop = asyncio.Event()
+
+    async def heartbeat() -> None:
+        loop = asyncio.get_running_loop()
+        while not stop.is_set():
+            beats.append(loop.time())
+            await asyncio.sleep(0.01)
+
+    pulse = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0.02)
+    await ObservationOutboxSweeper(store, _Coordinator(outcomes)).sweep()
+    stop.set()
+    await pulse
+
+    gaps = [later - earlier for earlier, later in zip(beats, beats[1:], strict=False)]
+    assert len(gaps) > 4
+    assert max(gaps) < 0.04
+
+
+@pytest.mark.anyio
+async def test_sweep_deadline_is_now_enforceable(tmp_path: Path) -> None:
+    """``wait_for`` cannot preempt synchronous work; the sweep must give it await points."""
+
+    store = _BlockingStore(_state=tmp_path)
+    store.delay = 0.3
+    _workspace, outcomes = _accepted_backlog(store, tmp_path, rows=2)
+    sweeper = ObservationOutboxSweeper(store, _Coordinator(outcomes))
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(sweeper.sweep(), timeout=0.2)
+
+    assert asyncio.get_running_loop().time() - started < 0.4
+
+
+class _SweepAbort(BaseException):
+    """Not an Exception, so the sweeper's per-row guard cannot swallow it."""
+
+
+@pytest.mark.anyio
+async def test_drain_lease_is_released_even_when_a_row_raises(tmp_path: Path) -> None:
+    """Entering and leaving the lease in different worker threads must still be balanced."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    _workspace, _outcomes = _accepted_backlog(store, tmp_path, rows=1)
+    exits = 0
+    original = store.drain_lease
+
+    @contextlib.contextmanager
+    def counting(workspace: str) -> Generator[bool]:
+        nonlocal exits
+        with original(workspace) as owned:
+            try:
+                yield owned
+            finally:
+                exits += 1
+
+    store.drain_lease = counting  # pyright: ignore[reportAttributeAccessIssue]
+
+    class _Aborting:
+        async def ingest_request(
+            self, request: ObservationIngestRequest
+        ) -> ObservationIngestResult:
+            del request
+            raise _SweepAbort("row abort")
+
+    with pytest.raises(_SweepAbort):
+        await ObservationOutboxSweeper(store, _Aborting()).sweep()
+
+    assert exits == 1

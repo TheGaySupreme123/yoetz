@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -194,6 +195,16 @@ class ObservationCoordinator:
         default_factory=_empty_storage_corrupt_sessions, init=False, repr=False
     )
 
+    async def _local[ResultT](self, call: Callable[[], ResultT]) -> ResultT:
+        """Run one blocking local-store write off the service event loop.
+
+        These are the ``_save`` sites -- a blocking cross-process lock plus a full re-encode of
+        the workspace document -- that an ingest RPC pays while a control client waits (#238).
+        Read-only local-store calls deliberately stay on the loop; only the writes move.
+        """
+
+        return await asyncio.to_thread(call)
+
     def __post_init__(self) -> None:
         self._lock = asyncio.Lock()
         if type(self.observation_enabled) is not bool:
@@ -314,8 +325,12 @@ class ObservationCoordinator:
                     runtime = None
                 return
             except Exception:
-                self.local.note_coverage_gap(
-                    workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                await self._local(
+                    partial(
+                        self.local.note_coverage_gap,
+                        workspace,
+                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                    )
                 )
             finally:
                 if runtime is not None:
@@ -527,9 +542,12 @@ class ObservationCoordinator:
                 await self._observation_store(runtime).revoke(command)
                 seen_tasks.add(mapping.yoetz_task_id)
             except Exception:
-                self.local.note_coverage_gap(
-                    command.workspace_commitment,
-                    ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                await self._local(
+                    partial(
+                        self.local.note_coverage_gap,
+                        command.workspace_commitment,
+                        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                    )
                 )
             finally:
                 if runtime is not None:
@@ -1093,8 +1111,12 @@ class ObservationCoordinator:
             return None
         descriptor = store.workspace_locator_descriptor(workspace)
         if descriptor is None:
-            self.local.note_coverage_gap(
-                workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+            await self._local(
+                partial(
+                    self.local.note_coverage_gap,
+                    workspace,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
             )
             return None
         locator_ref = await runtime.objects.resolve_verified(*descriptor)
@@ -1114,12 +1136,22 @@ class ObservationCoordinator:
             handle = open_local_workspace(Path(locator))
             policy, _raw_policy = load_observation_check_policy(Path(locator))
         except Exception:
-            self.local.note_coverage_gap(
-                workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+            await self._local(
+                partial(
+                    self.local.note_coverage_gap,
+                    workspace,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
             )
             return None
         if not self.local.policy_digest_is_trusted(workspace, policy.raw_digest):
-            self.local.note_coverage_gap(workspace, ObservationGapCode.POLICY_UNTRUSTED.value)
+            await self._local(
+                partial(
+                    self.local.note_coverage_gap,
+                    workspace,
+                    ObservationGapCode.POLICY_UNTRUSTED.value,
+                )
+            )
             return None
         now = timestamp_from_datetime(self.clock.now_utc())
         if not store.policy_digest_is_trusted(workspace, policy.raw_digest):
@@ -1287,8 +1319,12 @@ class ObservationCoordinator:
                         excerpt_ref = await self._encrypt_captured_content(runtime, excerpt_bytes)
                         excerpt_object_id = excerpt_ref.object_id
             except Exception:
-                self.local.note_coverage_gap(
-                    workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                await self._local(
+                    partial(
+                        self.local.note_coverage_gap,
+                        workspace,
+                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                    )
                 )
                 relative_paths = ()
             inspect_recorder(
@@ -1523,10 +1559,15 @@ class ObservationCoordinator:
                     recorded_at=now,
                 )
             # Mirror into local store for hook advice delivery.
-            self.local.set_advice_snapshot(workspace, snapshot)
+            await self._local(partial(self.local.set_advice_snapshot, workspace, snapshot))
             if isinstance(runtime, TaskRuntime) and type(session_id) is str:
-                self.local.set_session_advice_snapshot(
-                    workspace, yoetz_session_id=session_id, snapshot=snapshot
+                await self._local(
+                    partial(
+                        self.local.set_session_advice_snapshot,
+                        workspace,
+                        yoetz_session_id=session_id,
+                        snapshot=snapshot,
+                    )
                 )
         if self.advice_hook is not None:
             result = self.advice_hook(
