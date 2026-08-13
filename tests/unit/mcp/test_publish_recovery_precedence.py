@@ -397,6 +397,9 @@ async def test_non_dry_run_validation_failure_with_unreachable_oracle_keeps_inva
     assert details["fields"] == ["/event_drafts/0/payload/authority"]
     assert details["reasons"] == ["invalid_type_or_value"]
     assert details["reason_code"] == "operation_recovery_unavailable"
+    # `safe_details` keys travel in ASCII order (docs/INTERFACES.md); literal insertion order put
+    # `reason_code` last, which is the one shape this map is documented never to take.
+    assert list(details) == sorted(details)
     message = cast(str, error["message"])
     assert "The tool arguments are invalid." in message
     assert "the local service was unreachable" in message
