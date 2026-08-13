@@ -1126,7 +1126,7 @@ def test_hook_wall_clock_meets_the_declared_timeout_on_a_realistic_store(
 
 
 def _write_counter(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Count workspace-state serializations, ignoring the tiny advice sidecar."""
+    """Record the name of every file the store atomically writes."""
 
     import yoetz.adapters.integrations.observation_local as local_mod
 
@@ -1143,6 +1143,14 @@ def _write_counter(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 def _state_writes(written: list[str]) -> int:
     return sum(1 for name in written if name.endswith(".json"))
+
+
+def _suffix_counts(written: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for name in written:
+        suffix = Path(name).suffix
+        counts[suffix] = counts.get(suffix, 0) + 1
+    return counts
 
 
 def test_hook_invocation_writes_the_state_file_once_not_fourteen_times(
@@ -1166,6 +1174,7 @@ def test_hook_invocation_writes_the_state_file_once_not_fourteen_times(
     async def connect(_kind: object):
         return _InstantAckClient()
 
+    out = io.BytesIO()
     code = handle_observe(
         event_name="PostToolUse",
         stdin_bytes=json.dumps(
@@ -1176,19 +1185,20 @@ def test_hook_invocation_writes_the_state_file_once_not_fourteen_times(
                 "exit_status": 0,
             }
         ).encode(),
-        stdout=io.BytesIO(),
+        stdout=out,
         workspace=str(tmp_path),
         _state=tmp_path,
         connect=connect,  # type: ignore[arg-type]
     )
     assert code == 0
-    writes = _state_writes(written)
-    # One local-pass flush, at most one per acknowledged drain row, one for the
-    # advice delivery. Seventeen were measured before the write batch.
-    assert writes <= 6, (
-        f"one hook invocation serialized the workspace state {writes} times; "
-        "the write batch is not holding the pass open"
-    )
+    delivered = "additionalContext" in out.getvalue().decode()
+    # Exact accounting, so a regression cannot hide inside a loose ceiling:
+    #   1 local-pass batch flush
+    # + 1 per drained outbox row, bounded by _HOOK_DRAIN_ROW_LIMIT (4 here)
+    # + 1 advice-delivery commit, and only when advice actually reached stdout.
+    # Seventeen were measured before the write batch. Nothing else writes: the
+    # advice sidecar and the async-pair sample are gone.
+    assert _suffix_counts(written) == {".json": 5 + int(delivered)}, written
 
 
 def test_refresh_advice_does_not_rewrite_state_when_the_snapshot_is_unchanged(
@@ -1304,9 +1314,18 @@ def _refresh_counter(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return calls
 
 
-def test_post_tool_use_fast_path_skips_advice_recompute_when_nothing_can_change(
+def test_advice_stage_runs_on_every_advice_safe_event_including_inert_envelopes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No relevance gate: an inert envelope still recomputes and still may deliver.
+
+    The removed fast path could not fire in the sessions it targeted (any
+    workspace with a coverage gap carries ``refresh_observation``), and where it
+    did fire it reasoned over the workspace snapshot while delivery prefers the
+    session snapshot — so it could withhold actionable session advice. The
+    advice stage is unconditional on advice-safe events.
+    """
+
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
@@ -1333,8 +1352,8 @@ def test_post_tool_use_fast_path_skips_advice_recompute_when_nothing_can_change(
         skip_service=True,
     )
     assert code == 0
-    assert refreshes[0] == 0, "a provably-irrelevant envelope still paid the advice recompute"
-    assert len(store.list_envelopes(workspace)) == before + 1, "the skip must never skip ingest"
+    assert refreshes[0] == 1, "the advice stage was skipped on an advice-safe event"
+    assert len(store.list_envelopes(workspace)) == before + 1
 
 
 def test_post_tool_use_still_recomputes_advice_for_a_trigger_bearing_envelope(
@@ -1413,71 +1432,3 @@ def test_end_to_end_hook_budget_is_recorded_and_exceeding_it_is_diagnosed(
     assert reasons.get("hook_budget_exceeded") == 1
     timings = dict(cast(Mapping[str, object], summary["timings"]))
     assert timings["count"] == 1
-
-
-def test_async_downgrade_is_reported_once_per_session(tmp_path: Path) -> None:
-    """A host that serializes async hooks is named once, never per tool call.
-
-    Heuristic by construction: it cannot separate "host ignored async: true"
-    from "host ran them async but the tool call was instantaneous", so the
-    Pre-duration floor and the majority over the recent window are what make one
-    emission per session safe.
-    """
-
-    from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
-
-    store = LocalObservationStore(_state=tmp_path)
-    workspace = store.workspace_commitment(str(tmp_path.resolve()))
-    store.grant_consent(workspace)
-
-    clock = [1_000.0]
-
-    def ticking() -> float:
-        clock[0] += 0.2
-        return clock[0]
-
-    notes: list[str] = []
-    for index in range(14):
-        correlation = f"pair-{index}"
-        handle_observe(
-            event_name="PreToolUse",
-            stdin_bytes=json.dumps(
-                {"session_id": "async", "tool_name": "shell", "correlation_id": correlation}
-            ).encode(),
-            stdout=io.BytesIO(),
-            workspace=str(tmp_path),
-            _state=tmp_path,
-            skip_service=True,
-            _monotonic=ticking,
-        )
-        out = io.BytesIO()
-        handle_observe(
-            event_name="PostToolUse",
-            stdin_bytes=json.dumps(
-                {
-                    "session_id": "async",
-                    "tool_name": "shell",
-                    "correlation_id": correlation,
-                    "exit_status": 0,
-                }
-            ).encode(),
-            stdout=out,
-            workspace=str(tmp_path),
-            _state=tmp_path,
-            skip_service=True,
-            _monotonic=ticking,
-        )
-        body = cast(Mapping[str, object], json.loads(out.getvalue().decode() or "{}"))
-        specific = cast(Mapping[str, object], body.get("hookSpecificOutput") or {})
-        text = str(specific.get("additionalContext") or "")
-        if "synchronously" in text:
-            notes.append(text)
-
-    summary = hook_diagnostic_summary(_state=tmp_path)
-    reasons = dict(cast(Mapping[str, object], summary["reasons"]))
-    assert reasons.get("async_hook_downgraded") == 1, (
-        f"expected exactly one downgrade report, got {reasons.get('async_hook_downgraded')}"
-    )
-    # The context note yields to real advice on the shared channel, so it is
-    # bounded above, never guaranteed: the diagnostic above is the pinned signal.
-    assert len(notes) <= 1

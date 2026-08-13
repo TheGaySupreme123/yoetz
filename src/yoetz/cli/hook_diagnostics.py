@@ -61,7 +61,6 @@ _REASONS: Final = frozenset(
         # Observability only: the end-to-end hook budget is a contract, not an
         # enforcement point. Aborting mid-hook would drop ingest.
         "hook_budget_exceeded",
-        "async_hook_downgraded",
     }
 )
 _STAGES: Final = frozenset({"advice", "drain", "import", "store", "total"})

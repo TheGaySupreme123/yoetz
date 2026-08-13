@@ -233,12 +233,83 @@ def test_repeated_identical_advice_is_delivered_once(tmp_path: Path) -> None:
     first = _snapshot(workspace, envelopes=1, composition=_STANDING)
 
     store.set_advice_snapshot(workspace, first)
-    assert store.peek_advice_for_delivery(workspace) is not None
+    delivery = store.peek_advice_for_delivery(workspace)
+    assert delivery is not None
+    store.commit_advice_delivery(workspace, delivery.delivery_identity)
     for grown in (4, 9):
         store.set_advice_snapshot(
             workspace, _snapshot(workspace, envelopes=grown, composition=_STANDING)
         )
         assert store.peek_advice_for_delivery(workspace) is None
+
+
+def test_peek_alone_never_suppresses_the_next_peek(tmp_path: Path) -> None:
+    """The selection is a pure read; only a committed delivery suppresses (#242 review).
+
+    Recording the identity before the hook wrote its stdout meant one broken
+    pipe suppressed that advice permanently — strictly worse than a repeat.
+    """
+
+    store, workspace = _consented(tmp_path)
+    store.set_advice_snapshot(workspace, _snapshot(workspace, envelopes=1, composition=_STANDING))
+
+    first = store.peek_advice_for_delivery(workspace)
+    second = store.peek_advice_for_delivery(workspace)
+    assert first is not None and second is not None
+    assert first.delivery_identity == second.delivery_identity
+    state = store._load(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert state.last_advice_suppression is None
+
+    store.commit_advice_delivery(workspace, first.delivery_identity)
+    assert store.peek_advice_for_delivery(workspace) is None
+
+
+def test_failed_stdout_write_redelivers_the_advice_on_the_next_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hook whose pipe closes mid-write must not lose the advice it selected."""
+
+    _consented(tmp_path)
+    _compose(monkeypatch, _STANDING)
+
+    class _BrokenStdout(io.BytesIO):
+        def write(self, data: object) -> int:
+            del data
+            raise BrokenPipeError("pipe closed by host")
+
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps({"session_id": "broken", "source": "startup"}).encode(),
+        stdout=_BrokenStdout(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    state = store._load(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert state.last_advice_suppression is None, (
+        "a delivery that never reached stdout was recorded as delivered"
+    )
+    assert "connect_provider" in _run(tmp_path, "Stop", "broken")
+
+
+def test_successful_emit_records_the_delivery_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _consented(tmp_path)
+    _compose(monkeypatch, _STANDING)
+
+    assert "connect_provider" in _run(tmp_path, "SessionStart", "recorded", source="startup")
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    state = store._load(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    recorded = state.last_advice_suppression
+    assert type(recorded) is str and recorded.startswith("deliver-")
+    assert "connect_provider" not in _run(tmp_path, "Stop", "recorded")
 
 
 def test_a_then_b_then_a_redelivers_a(tmp_path: Path) -> None:
@@ -259,6 +330,7 @@ def test_a_then_b_then_a_redelivers_a(tmp_path: Path) -> None:
         store.set_advice_snapshot(workspace, snapshot)
         delivery = store.peek_advice_for_delivery(workspace)
         assert delivery is not None
+        store.commit_advice_delivery(workspace, delivery.delivery_identity)
         texts.append(delivery.text)
         state = store._load(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         persisted.append(state.last_advice_suppression)

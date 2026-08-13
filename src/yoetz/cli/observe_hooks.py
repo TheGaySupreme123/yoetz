@@ -20,10 +20,9 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     validate_codex_session_id,
 )
 from yoetz.adapters.integrations.observation_local import (
-    _ASYNC_DOWNGRADE_MIN_SERIALIZED,  # pyright: ignore[reportPrivateUsage]
-    _MAX_ASYNC_PAIR_SAMPLES,  # pyright: ignore[reportPrivateUsage]
     HOOK_MAPPING_VERSION,
     YOETZ_TOOL_NAMES,
+    AdviceDelivery,
     LocalObservationStore,
     ObservationOutboxRow,
 )
@@ -123,8 +122,6 @@ _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
 # Never an abort point: the drain and preflight budgets own enforcement.
 _HOOK_TOTAL_BUDGET_SECONDS: Final = 1.0
 _TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
-# Async-downgrade detection thresholds; the store owns the sample window.
-_ASYNC_DOWNGRADE_MIN_PRE_MS: Final = 100
 _STRUCTURAL_ALLOW: Final = frozenset(
     {
         "tool_name",
@@ -507,69 +504,6 @@ def _visible_content_chunks(
 
 def _elapsed_ms(started: float, finished: float) -> int:
     return max(0, int((finished - started) * 1000))
-
-
-def _advice_stage_skippable(
-    store: LocalObservationStore, workspace_commitment: str, envelope: ObservationEnvelope
-) -> bool:
-    """True when this envelope provably cannot move advice the agent would get."""
-
-    from yoetz.kernel.policies.observation_advice import (
-        STANDING_MACHINE_ACTIONS,
-        advice_relevant,
-    )
-
-    if advice_relevant(envelope):
-        return False
-    facts = store.advice_sidecar_facts(workspace_commitment)
-    if facts is None or not facts.next_actions:
-        return False
-    return facts.next_actions <= STANDING_MACHINE_ACTIONS
-
-
-def _note_async_pair(
-    store: LocalObservationStore,
-    *,
-    workspace_commitment: str,
-    session_commitment: str,
-    event: str,
-    paired_pre: tuple[int, int] | None,
-    started_mono: float,
-    _state: Path | None,
-) -> str | None:
-    """Report once per session when the host ran async hooks synchronously.
-
-    Heuristic, and honestly bounded: it cannot distinguish "host ignored
-    ``async: true``" from "host ran them async but the tool call was
-    instantaneous". The Pre-duration floor and the majority over the recent
-    window are what make a once-per-session emission safe.
-    """
-
-    if paired_pre is None or not _is_post_event(event):
-        return None
-    finished_ms, duration_ms = paired_pre
-    serialized = int(started_mono * 1000) >= finished_ms and duration_ms >= (
-        _ASYNC_DOWNGRADE_MIN_PRE_MS
-    )
-    try:
-        observed, total = store.note_async_pair_sample(workspace_commitment, serialized=serialized)
-    except Exception:
-        return None
-    if total < _MAX_ASYNC_PAIR_SAMPLES or observed < _ASYNC_DOWNGRADE_MIN_SERIALIZED:
-        return None
-    try:
-        claimed = store.note_async_downgrade_reported(workspace_commitment, session_commitment)
-    except Exception:
-        return None
-    if not claimed:
-        return None
-    with contextlib.suppress(BaseException):
-        record_hook_diagnostic("async_hook_downgraded", event, _state=_state)
-    return (
-        "Yoetz: this host appears to run the PreToolUse observation hook "
-        "synchronously despite its async declaration, so every tool call pays "
-        "both hooks. This is a host capability note, not a Yoetz failure."
-    )
 
 
 def _record_pass_timing(
@@ -976,14 +910,18 @@ def handle_observe(
 
             return cast(AsyncRunner, anyio.run)
 
-        def _stdout_json(value: JsonValue, stream: BinaryIO | None = None) -> None:
-            if not raw_stdout_json(value, stream):
+        def _stdout_json(value: JsonValue, stream: BinaryIO | None = None) -> bool:
+            """Emit one JSON object; report whether the bytes actually left."""
+
+            emitted = raw_stdout_json(value, stream)
+            if not emitted:
                 with contextlib.suppress(BaseException):
                     record_hook_diagnostic("stdout_write_failed", event_name, _state=_state)
             if stream is None and sys.stdout is sys.__stdout__:
                 with contextlib.suppress(BaseException):
                     sys.stdout.flush()
                     sys.stdout.close()
+            return emitted
 
         payload = read_hook_payload(stdin_bytes)
         raw_event = event_name or payload.get("hook_event_name")
@@ -1058,7 +996,6 @@ def handle_observe(
                 else store.current_session_generation(workspace_commitment, session_commitment)
             )
             gap_codes: list[str] = []
-            paired_pre: tuple[int, int] | None = None
 
             # Pair pre/post via correlation_id when present.
             correlation = _token_or_none(payload.get("correlation_id")) or _token_or_none(
@@ -1070,7 +1007,6 @@ def handle_observe(
                 if not store.has_open_pre(workspace_commitment, correlation):
                     gap_codes.append(ObservationGapCode.UNPAIRED_EVENT.value)
                 else:
-                    paired_pre = store.open_pre_timing(workspace_commitment, correlation)
                     store.consume_open_pre(workspace_commitment, correlation)
 
             if resolved_event not in SUPPORTED_HOOK_EVENTS:
@@ -1163,37 +1099,13 @@ def handle_observe(
                         hook_provided_path=hook_path_token,
                     )
 
-            # PostToolUse fast path: skip the advice stage only when this
-            # envelope provably cannot change the candidate set AND every
-            # action the prior snapshot carries is a standing machine
-            # condition, which this event class withholds anyway. The second
-            # clause also keeps gap-driven advice on the full path, because
-            # observation_gap_or_stale digests the last three envelope
-            # identities and therefore moves with any new envelope. Anything
-            # unknown — no sidecar, unreadable sidecar, other actions — takes
-            # the full path; the skip can only lose work, never decide advice.
-            advice_skipped = False
-            if resolved_event == "PostToolUse" and not skip_advice_loop:
-                with contextlib.suppress(Exception):
-                    advice_skipped = _advice_stage_skippable(store, workspace_commitment, envelope)
-
             # Deterministic advice from retained envelopes (works with zero MCP publications).
             advice_started = _monotonic()
-            if not advice_skipped:
-                with contextlib.suppress(Exception):
-                    store.refresh_advice(workspace_commitment)
+            with contextlib.suppress(Exception):
+                store.refresh_advice(workspace_commitment)
             stages["advice"] = _elapsed_ms(advice_started, _monotonic())
 
         stages["store"] = _elapsed_ms(store_started, _monotonic())
-        downgrade_note = _note_async_pair(
-            store,
-            workspace_commitment=workspace_commitment,
-            session_commitment=session_commitment,
-            event=resolved_event,
-            paired_pre=paired_pre,
-            started_mono=entry_started,
-            _state=_state,
-        )
 
         # SessionStart: auto-start/attach first, persist mapping, then drain outbox.
         # Every branch below that opens a service connection is gated on
@@ -1309,20 +1221,21 @@ def handle_observe(
         stages["drain"] = _elapsed_ms(drain_started, _monotonic())
 
         # Nonblocking advice delivery at safe points (suppress Yoetz self-tool loops).
-        if (
-            not additional
-            and not advice_skipped
-            and resolved_event in ADVICE_SAFE_EVENTS
-            and not skip_advice_loop
-        ):
-            session_id = None if mapping is None else mapping.yoetz_session_id
+        # The selection is a pure read; the delivery is recorded only after the
+        # emission below succeeds, so a hook that dies mid-write costs at most
+        # one redelivery instead of suppressing that advice forever.
+        pending_delivery: AdviceDelivery | None = None
+        delivery_session_id: str | None = None
+        if not additional and resolved_event in ADVICE_SAFE_EVENTS and not skip_advice_loop:
+            delivery_session_id = None if mapping is None else mapping.yoetz_session_id
             delivery = store.peek_advice_for_delivery(
                 workspace_commitment,
-                yoetz_session_id=session_id,
+                yoetz_session_id=delivery_session_id,
                 allow_standing=resolved_event in STANDING_ADVICE_CADENCE_EVENTS,
             )
             if delivery is not None:
                 additional = delivery.text[:_MAX_ADVICE_CONTEXT]
+                pending_delivery = delivery
 
         # Release recommendations are read from one bounded local cache only.
         # Existing task/receipt advice always wins this shared context channel.
@@ -1330,26 +1243,21 @@ def handle_observe(
             with contextlib.suppress(Exception):
                 additional = _cached_recommendation_context(_state=_state)
 
-        if not additional and downgrade_note is not None:
-            additional = downgrade_note
-
-        if correlation is not None and _is_pre_event(resolved_event):
-            # Stamp when this Pre hook finished so its Post can tell whether the
-            # host serialized them (#242 sync-downgrade detection).
-            with contextlib.suppress(Exception):
-                finished = _monotonic()
-                store.note_open_pre(
-                    workspace_commitment,
-                    correlation,
-                    resolved_event,
-                    finished_mono_ms=int(finished * 1000),
-                    duration_ms=_elapsed_ms(entry_started, finished),
-                )
-
         if additional:
-            _stdout_json(_context_output(resolved_event, additional), stdout)
+            emitted = _stdout_json(_context_output(resolved_event, additional), stdout)
         else:
-            _stdout_json({}, stdout)
+            emitted = _stdout_json({}, stdout)
+        if emitted and pending_delivery is not None:
+            # Strictly after the write: delivered-but-unrecorded costs one
+            # redelivery, recorded-but-undelivered would cost the advice.
+            # Nothing past the emission may raise — the outer handler would
+            # write a second JSON object onto a stream that already has one.
+            with contextlib.suppress(BaseException):
+                store.commit_advice_delivery(
+                    workspace_commitment,
+                    pending_delivery.delivery_identity,
+                    yoetz_session_id=delivery_session_id,
+                )
         _record_pass_timing(
             resolved_event,
             entry_started=entry_started,
