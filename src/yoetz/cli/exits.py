@@ -106,6 +106,30 @@ def ceremony_refusal_message(reason: str) -> str | None:
 # caller keeps printing the token so existing machine-readable expectations stay intact.
 REMEDIATION_MESSAGES: Final = MappingProxyType(
     {
+        "support_resource_set_mismatch": (
+            "the runtime support document describes a different resource set; regenerate "
+            "resources with 'python scripts/verify_resource_manifest.py --sync', refresh "
+            "support/runtime-support.json, then sync again"
+        ),
+        "support_digest_mismatch": (
+            "support/runtime-support.json is not self-consistent; regenerate its manifest_digest "
+            "and then run 'python scripts/verify_resource_manifest.py --sync'"
+        ),
+        "resource_digest_mismatch": (
+            "an installed resource does not match the reviewed manifest; reinstall Yoetz from a "
+            "verified artifact, or regenerate the resource manifest in a source checkout"
+        ),
+        "manifest_digest_mismatch": (
+            "the installed resource manifest is not self-consistent; reinstall Yoetz from a "
+            "verified artifact, or regenerate it with 'python scripts/verify_resource_manifest.py --sync'"
+        ),
+        "resource_missing": (
+            "a reviewed installed resource is absent; reinstall Yoetz from a verified artifact"
+        ),
+        "resource_counts_invalid": (
+            "the compiled resource counts do not match the reviewed manifest; regenerate the "
+            "resource tree and update the compiled count only when the inventory intentionally changed"
+        ),
         "trusted_console_required": (
             "this ceremony needs a foreground terminal Yoetz owns (stdin and stderr on the same "
             "tty, in the foreground process group). From an agent session run "

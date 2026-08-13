@@ -295,13 +295,20 @@ class ObservationOutboxRow:
 
 
 @dataclass
+class _GapState:
+    first_seen: Timestamp
+    last_seen: Timestamp
+    active: bool = True
+
+
+@dataclass
 class _WorkspaceState:
     consent: LocalObservationConsent | None = None
     session_workspaces: dict[str, str] | None = None
     cursors: dict[str, ObservationCursor] | None = None
     dedup: set[str] | None = None
     envelopes: list[ObservationEnvelope] | None = None
-    gaps: set[str] | None = None
+    gaps: dict[str, _GapState] | None = None
     unsupported_events: set[str] | None = None
     last_receipt: Timestamp | None = None
     advice_frontier: str | None = None
@@ -347,7 +354,7 @@ class _WorkspaceState:
         if self.envelopes is None:
             self.envelopes = []
         if self.gaps is None:
-            self.gaps = set()
+            self.gaps = {}
         if self.unsupported_events is None:
             self.unsupported_events = set()
         if self.open_pre is None:
@@ -410,7 +417,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         cursors=dict(state.cursors or {}),
         dedup=set(state.dedup or ()),
         envelopes=list(state.envelopes or ()),
-        gaps=set(state.gaps or ()),
+        gaps=dict(state.gaps or {}),
         unsupported_events=set(state.unsupported_events or ()),
         session_advice=dict(state.session_advice or {}),
         session_advice_suppression=dict(state.session_advice_suppression or {}),
@@ -864,7 +871,7 @@ class LocalObservationStore:
                 ObservationAdviceBuildInput(
                     envelopes=tuple(state.envelopes),
                     lifecycle=status.lifecycle,
-                    gaps=tuple(sorted(state.gaps, key=str.encode)),
+                    gaps=status.gaps,
                     check_facts=typed_checks,
                     inspect_fact=typed_inspect,
                     composition=typed_composition,
@@ -954,7 +961,7 @@ class LocalObservationStore:
             assert state.pending_outbox is not None
             assert state.gaps is not None
             if len(state.pending_outbox) >= _MAX_OUTBOX:
-                state.gaps.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
+                self._note_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
                 self._save(workspace, state)
                 return ObservationGapCode.OUTBOX_OVERFLOW.value
             # Dedup identical source identities already pending for this session.
@@ -972,9 +979,10 @@ class LocalObservationStore:
             projected = canonical_encode(self._state_to_json(workspace, state)) + b"\n"
             if len(projected) > _MAX_STATE_BYTES:
                 state.pending_outbox.pop()
-                state.gaps.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
+                self._note_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
                 self._save(workspace, state)
                 return ObservationGapCode.OUTBOX_OVERFLOW.value
+            self._resolve_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
             self._save(workspace, state)
             return None
 
@@ -1135,6 +1143,7 @@ class LocalObservationStore:
                     and row.envelope.source_identity == source_identity
                 ):
                     del state.pending_outbox[index]
+                    self._resolve_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
                     state.last_successful_drain_mono_ms = int(self._now_mono() * 1000)
                     state.monotonic_epoch = self._boot_epoch()
                     self._save(workspace, state)
@@ -1150,6 +1159,7 @@ class LocalObservationStore:
             for index, row in enumerate(state.pending_outbox):
                 if row.row_identity == expected.row_identity and row.attempts == expected.attempts:
                     del state.pending_outbox[index]
+                    self._resolve_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
                     state.last_successful_drain_mono_ms = int(self._now_mono() * 1000)
                     state.monotonic_epoch = self._boot_epoch()
                     self._save(workspace, state)
@@ -1194,7 +1204,7 @@ class LocalObservationStore:
                 while len(state.quarantine) > _MAX_QUARANTINE:
                     evicted = state.quarantine.pop(0)
                     self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
-            state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
+            self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
             self._save(workspace, state)
             return True
 
@@ -1229,7 +1239,7 @@ class LocalObservationStore:
                 while len(state.quarantine) > _MAX_QUARANTINE:
                     evicted = state.quarantine.pop(0)
                     self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
-            state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
+            self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
             self._save(workspace, state)
             return True
 
@@ -1296,8 +1306,25 @@ class LocalObservationStore:
             state = self._load(workspace)
             assert state.gaps is not None
             if type(gap_code) is str and gap_code:
-                state.gaps.add(gap_code)
+                self._note_gap_state(state, gap_code)
             self._save(workspace, state)
+
+    def _note_gap_state(self, state: _WorkspaceState, gap_code: str) -> None:
+        assert state.gaps is not None
+        observed_at = self._wall_timestamp()
+        prior = state.gaps.get(gap_code)
+        state.gaps[gap_code] = _GapState(
+            observed_at if prior is None else prior.first_seen,
+            observed_at,
+            True,
+        )
+
+    @staticmethod
+    def _resolve_gap_state(state: _WorkspaceState, gap_code: str) -> None:
+        assert state.gaps is not None
+        prior = state.gaps.get(gap_code)
+        if prior is not None:
+            state.gaps[gap_code] = _GapState(prior.first_seen, prior.last_seen, False)
 
     def trust_policy_digest(self, workspace: str, policy_digest: str) -> None:
         """Persist a tamper-evident local activation cache for one exact digest.
@@ -1410,7 +1437,7 @@ class LocalObservationStore:
             cursor_key = _cursor_key(envelope.source, envelope.session_commitment)
             existing = state.cursors.get(cursor_key)
             if existing is not None and envelope.cursor.is_stale_relative_to(existing):
-                state.gaps.add(ObservationGapCode.CURSOR_STALE.value)
+                self._note_gap_state(state, ObservationGapCode.CURSOR_STALE.value)
                 self._save(workspace, state)
                 return ObservationIngestResult(
                     ObservationIngestDisposition.REJECTED,
@@ -1433,7 +1460,7 @@ class LocalObservationStore:
             else:
                 state.last_stream_reconcile_mono_ms = mono_ms
             for gap in envelope.gap_codes:
-                state.gaps.add(gap)
+                self._note_gap_state(state, gap)
             if ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes:
                 state.unsupported_events.add(envelope.event_kind)
             self._save(workspace, state)
@@ -1620,7 +1647,7 @@ class LocalObservationStore:
             while state.envelopes and len(payload) > _MAX_STATE_BYTES:
                 del state.envelopes[0]
                 assert state.gaps is not None
-                state.gaps.add(ObservationGapCode.TRUNCATED_PAYLOAD.value)
+                self._note_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
                 payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
         assert state.pending_outbox is not None
         assert state.quarantine is not None
@@ -1642,8 +1669,8 @@ class LocalObservationStore:
                         self._wall_timestamp(),
                     )
                 )
-            state.gaps.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
-            state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
+            self._note_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
+            self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
             payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
         while state.quarantine and len(payload) > _MAX_STATE_BYTES:
             evicted = state.quarantine.pop(0)
@@ -1695,7 +1722,7 @@ class LocalObservationStore:
             state.quarantine_evicted_first = receipt
         if state.quarantine_evicted_last is None or state.quarantine_evicted_last < receipt:
             state.quarantine_evicted_last = receipt
-        state.gaps.add(ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value)
+        self._note_gap_state(state, ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value)
 
     def _workspace_for_envelope(self, envelope: ObservationEnvelope) -> str:
         for workspace, state in self._iter_workspaces():
@@ -1767,6 +1794,7 @@ class LocalObservationStore:
             last_drain = None
         consent_active = consent is not None and consent.revoked_at is None and not consent.paused
         mapping_available = bool(state.session_workspaces) or bool(state.codex_session_bindings)
+        current_gaps = self._current_gaps(state, mapping_available=mapping_available)
         bound_sessions = set(state.session_workspaces)
         ended_sessions = state.ended_sessions or set()
         # STOPPED once every bound session has ended (consent-stop is handled in
@@ -1781,7 +1809,7 @@ class LocalObservationStore:
             # No source-frontier lag estimator is available at this local seam,
             # so never relabel undelivered rows as observed event lag.
             lag_events=0,
-            gaps=tuple(sorted(state.gaps, key=str.encode)),
+            gaps=current_gaps,
             unsupported_events=tuple(sorted(state.unsupported_events, key=str.encode)),
             advice_frontier=state.advice_frontier,
             last_hook_receipt_monotonic=last_hook,
@@ -1800,10 +1828,47 @@ class LocalObservationStore:
             source_coverage=coverage,
             last_observation_receipt_time=state.last_receipt,
             lag_events=0,
-            gaps=tuple(sorted(state.gaps, key=str.encode)),
+            gaps=current_gaps,
             unsupported_events=tuple(sorted(state.unsupported_events, key=str.encode)),
             advice_frontier=state.advice_frontier,
         )
+
+    def _current_gaps(
+        self, state: _WorkspaceState, *, mapping_available: bool
+    ) -> tuple[str, ...]:
+        """Project current observable gaps while retaining full history separately."""
+
+        assert state.gaps is not None
+        assert state.pending_outbox is not None
+        assert state.quarantine is not None
+        transient = {
+            ObservationGapCode.CURSOR_STALE.value,
+            ObservationGapCode.MAPPING_MISSING.value,
+            ObservationGapCode.OUTBOX_OVERFLOW.value,
+            ObservationGapCode.OUTBOX_QUARANTINED.value,
+            ObservationGapCode.SERVICE_UNAVAILABLE.value,
+            ObservationGapCode.VAULT_LOCKED.value,
+        }
+        current = {code for code, seen in state.gaps.items() if seen.active} - transient
+        if state.quarantine:
+            current.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
+        overflow_gap = state.gaps.get(ObservationGapCode.OUTBOX_OVERFLOW.value)
+        if len(state.pending_outbox) >= _MAX_OUTBOX or (
+            overflow_gap is not None and overflow_gap.active
+        ):
+            current.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
+        for row in state.pending_outbox:
+            if row.last_reason is not None:
+                current.add(row.last_reason)
+        mapping_gap = state.gaps.get(ObservationGapCode.MAPPING_MISSING.value)
+        if mapping_gap is not None and not mapping_available:
+            current.add(ObservationGapCode.MAPPING_MISSING.value)
+        cursor_gap = state.gaps.get(ObservationGapCode.CURSOR_STALE.value)
+        if cursor_gap is not None and (
+            state.last_receipt is None or cursor_gap.last_seen.wire >= state.last_receipt.wire
+        ):
+            current.add(ObservationGapCode.CURSOR_STALE.value)
+        return tuple(sorted(current, key=str.encode))
 
     def _state_to_json(self, workspace: str, state: _WorkspaceState) -> dict[str, JsonValue]:
         consent = state.consent
@@ -1830,7 +1895,7 @@ class LocalObservationStore:
             # /3 adds quarantined_at per quarantine entry and the reclaimed
             # counter; readers of every version tolerate both directions
             # (unknown keys ignored, missing keys defaulted).
-            "schema": "yoetz.observation-local/3",
+            "schema": "yoetz.observation-local/4",
             "workspace_commitment": workspace,
             "consent": consent_json,
             "session_workspaces": JsonObject(
@@ -1864,6 +1929,18 @@ class LocalObservationStore:
             ),
             "envelopes": tuple(observation_envelope_to_json(item) for item in state.envelopes),
             "gaps": tuple(sorted(state.gaps, key=str.encode)),
+            "gap_history": JsonObject(
+                {
+                    code: JsonObject(
+                        {
+                            "first_seen": seen.first_seen.wire,
+                            "last_seen": seen.last_seen.wire,
+                            "active": seen.active,
+                        }
+                    )
+                    for code, seen in sorted(state.gaps.items(), key=lambda item: item[0].encode())
+                }
+            ),
             "unsupported_events": tuple(sorted(state.unsupported_events, key=str.encode)),
             "last_receipt": None if state.last_receipt is None else state.last_receipt.wire,
             "advice_frontier": state.advice_frontier,
@@ -2005,6 +2082,29 @@ class LocalObservationStore:
         }
         envelopes_raw = raw.get("envelopes") or ()
         gaps_raw = raw.get("gaps") or ()
+        gap_history: dict[str, _GapState] = {}
+        raw_gap_history = raw.get("gap_history") or {}
+        if isinstance(raw_gap_history, Mapping):
+            for code, value in cast(Mapping[str, JsonValue], raw_gap_history).items():
+                if type(code) is not str or not isinstance(value, Mapping):
+                    continue
+                seen = cast(Mapping[str, JsonValue], value)
+                first_seen = seen.get("first_seen")
+                last_seen = seen.get("last_seen")
+                if type(first_seen) is not str or type(last_seen) is not str:
+                    continue
+                try:
+                    gap_history[code] = _GapState(
+                        Timestamp(first_seen),
+                        Timestamp(last_seen),
+                        seen.get("active", True) is True,
+                    )
+                except ProtocolValueError, TypeError, ValueError:
+                    continue
+        legacy_seen = self._wall_timestamp()
+        for code in cast(tuple[str, ...], gaps_raw):
+            if type(code) is str and code not in gap_history:
+                gap_history[code] = _GapState(legacy_seen, legacy_seen)
         unsupported_raw = raw.get("unsupported_events") or ()
         advice_raw = raw.get("advice_snapshot")
         stream_cursors = {
@@ -2181,7 +2281,7 @@ class LocalObservationStore:
             session_generations=session_generations,
             ended_session_generations=ended_session_generations,
             envelopes=envelopes,
-            gaps=set(cast(tuple[str, ...], gaps_raw)),
+            gaps=gap_history,
             unsupported_events=set(cast(tuple[str, ...], unsupported_raw)),
             last_receipt=None if last_receipt is None else Timestamp(str(last_receipt)),
             advice_frontier=cast(str | None, raw.get("advice_frontier")),

@@ -36,6 +36,10 @@ from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.keys.vault_passphrase import VaultRootEnvelope
 from yoetz.adapters.repository_identity import resolve_repository_privacy_context
 from yoetz.adapters.session_events import SessionEventMonitor
+from yoetz.application.observation_drain import (
+    DEFAULT_OBSERVATION_SWEEP_LIMIT,
+    ObservationDrainSummary,
+)
 from yoetz.application.publish_work import (
     PublishWorkInternalResult,
     accepted_projection_unavailable_from_internal,
@@ -186,7 +190,7 @@ _CONTROL_HANDSHAKE_DEADLINE_SECONDS: Final = 5.0
 # before the stream is closed and the listener admission slot is released.
 _CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS: Final = 300.0
 _OBSERVATION_SWEEP_INTERVAL_SECONDS: Final = 60.0
-_OBSERVATION_SWEEP_DEADLINE_SECONDS: Final = 2.0
+_OBSERVATION_SWEEP_DEADLINE_SECONDS: Final = 30.0
 _READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS: Final = 10.0
 # Soft locks may re-apply the same scoped auto-unlock / keyring load the service already uses at
 # restart. Explicit human lock and hard unlock failures stay locked until a trusted ceremony.
@@ -1397,7 +1401,7 @@ class ServiceDaemon:
             getattr(application, "ready_recommendation_refresh", None),
         )
         observation_sweep = cast(
-            Callable[[], Awaitable[object]] | None,
+            Callable[[], Awaitable[ObservationDrainSummary]] | None,
             getattr(application, "observation_sweep", None),
         )
         if not callable(recommendation_refresh) and not callable(observation_sweep):
@@ -1418,19 +1422,20 @@ class ServiceDaemon:
         service_generation: int,
         vault_generation: int,
         recommendation_refresh: Callable[[], Awaitable[object]] | None,
-        observation_sweep: Callable[[], Awaitable[object]] | None,
+        observation_sweep: Callable[[], Awaitable[ObservationDrainSummary]] | None,
     ) -> None:
         """Run bounded maintenance only while the exact generation remains published."""
 
         try:
+            summary: ObservationDrainSummary | None = None
             if observation_sweep is not None:
                 try:
-                    await asyncio.wait_for(
+                    summary = await asyncio.wait_for(
                         observation_sweep(),
                         timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS,
                     )
                 except Exception:
-                    pass
+                    summary = None
             if recommendation_refresh is not None:
                 try:
                     await asyncio.wait_for(
@@ -1443,16 +1448,27 @@ class ServiceDaemon:
             while self._ready_generation_is_current(
                 application, service_generation, vault_generation
             ):
-                await asyncio.sleep(_OBSERVATION_SWEEP_INTERVAL_SECONDS)
-                if observation_sweep is not None:
-                    try:
-                        await asyncio.wait_for(
-                            observation_sweep(),
-                            timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS,
-                        )
-                    except Exception:
-                        # The next bounded pass retries; delivery state remains durable.
-                        pass
+                if observation_sweep is None:
+                    await asyncio.sleep(_OBSERVATION_SWEEP_INTERVAL_SECONDS)
+                    continue
+                if summary is None:
+                    await asyncio.sleep(_OBSERVATION_SWEEP_INTERVAL_SECONDS)
+                else:
+                    all_retry_pending = (
+                        summary.attempted > 0 and summary.retry_pending == summary.attempted
+                    )
+                    resolved = summary.acknowledged + summary.quarantined
+                    hit_limit = summary.attempted >= DEFAULT_OBSERVATION_SWEEP_LIMIT
+                    if all_retry_pending or (resolved == 0 and not hit_limit):
+                        await asyncio.sleep(_OBSERVATION_SWEEP_INTERVAL_SECONDS)
+                try:
+                    summary = await asyncio.wait_for(
+                        observation_sweep(),
+                        timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS,
+                    )
+                except Exception:
+                    summary = None
+                    continue
         except asyncio.CancelledError:
             raise
 

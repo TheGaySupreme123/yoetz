@@ -17,12 +17,14 @@ from yoetz.adapters.integrations.codex_skill import (
     load_packaged_skill_members,
     load_packaged_skill_source,
 )
+from yoetz.domain.values import JsonValue as DomainJsonValue
 from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND, MCP_SERVER_NAME
 from yoetz.ports.integrations import (
     HarnessId,
     IntegrationError,
     IntegrationReason,
     IntegrationScope,
+    IntegrationState,
     IntegrationTarget,
 )
 from yoetz.protocol.canonical import (
@@ -69,6 +71,14 @@ class PluginInspection:
     installed_digest: str | None
     notes: tuple[str, ...]
 
+    @property
+    def state(self) -> IntegrationState:
+        return {
+            PluginHookPresence.ABSENT: IntegrationState.ABSENT,
+            PluginHookPresence.INSTALLED_UNTRUSTED_UNKNOWN: IntegrationState.MODIFIED,
+            PluginHookPresence.INSTALLED: IntegrationState.INSTALLED_EXACT,
+        }[self.presence]
+
     def __repr__(self) -> str:
         return (
             "PluginInspection("
@@ -77,8 +87,10 @@ class PluginInspection:
         )
 
 
-def _error(reason: IntegrationReason) -> IntegrationError:
-    return IntegrationError(reason, {})
+def _error(
+    reason: IntegrationReason, details: Mapping[str, DomainJsonValue] | None = None
+) -> IntegrationError:
+    return IntegrationError(reason, {} if details is None else details)
 
 
 def _sha(data: bytes) -> str:
@@ -421,14 +433,20 @@ def install_plugin(
                 raise _error(IntegrationReason.TARGET_UNSAFE)
             current = path.read_bytes()
             if current != expected and not replace_modified:
-                raise _error(IntegrationReason.MODIFIED_COPY)
+                raise _error(
+                    IntegrationReason.MODIFIED_COPY,
+                    {"relative_path": relative_path, "replace_modified": True},
+                )
         existing_marker = destination / _MARKER_NAME
         if (
             existing_marker.is_file()
             and existing_marker.read_bytes() != marker
             and not replace_modified
         ):
-            raise _error(IntegrationReason.MODIFIED_COPY)
+            raise _error(
+                IntegrationReason.MODIFIED_COPY,
+                {"relative_path": _MARKER_NAME, "replace_modified": True},
+            )
     stage = parent / f".yoetz.plugin-stage-{os.urandom(6).hex()}"
     rollback = parent / f".yoetz.plugin-rollback-{os.urandom(6).hex()}"
     destination_moved = False

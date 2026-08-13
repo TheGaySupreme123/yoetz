@@ -293,7 +293,7 @@ async def test_overlapping_sweeps_cannot_resolve_uningested_same_source_successo
     coordinator = _OverlappingCoordinator()
     await ObservationOutboxSweeper(store, coordinator, limit=1).sweep()
 
-    assert coordinator.calls == [1, 1]
+    assert coordinator.calls == [1]
     remaining = store.list_pending_outbox_rows(workspace)
     assert len(remaining) == 1
     assert remaining[0].envelope.cursor.event_position == 2

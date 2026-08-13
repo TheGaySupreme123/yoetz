@@ -164,6 +164,27 @@ def test_observe_without_consent_exits_zero_no_spool(tmp_path: Path) -> None:
     assert json.loads(stdout.getvalue().decode()) == {}
 
 
+def test_stdout_teardown_failure_exits_zero_and_records_diagnostic(tmp_path: Path) -> None:
+    class _ClosedStdout(io.BytesIO):
+        def write(self, data: object) -> int:
+            del data
+            raise ValueError("I/O operation on closed file")
+
+    code = handle_observe(
+        event_name="Stop",
+        stdin_bytes=json.dumps({"session_id": "stdout-failure"}).encode(),
+        stdout=_ClosedStdout(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+
+    assert code == 0
+    diagnostics = tmp_path / "observation/hook-diagnostics.jsonl"
+    assert diagnostics.exists()
+    assert "stdout_write_failed" in diagnostics.read_text(encoding="utf-8")
+
+
 def test_runtime_disabled_skips_capture_but_session_start_surfaces_cached_recommendation(
     tmp_path: Path,
 ) -> None:
@@ -775,7 +796,7 @@ async def test_drain_treats_service_unavailable_as_row_scoped_with_a_cap(tmp_pat
         connect=connect,  # type: ignore[arg-type]
         _state=tmp_path,
     )
-    assert len(attempts) == 5, "rows behind a service_unavailable row must still be attempted"
+    assert len(attempts) == 4, "hook drains are capped and prioritize the newest rows"
     remaining = store.list_pending_outbox_rows(workspace)
     assert [row.envelope.source_identity for row in remaining] == [poisoned]
 
@@ -888,7 +909,7 @@ async def test_drain_lease_prevents_concurrent_hooks_from_double_draining(
     with store.drain_lease(workspace) as owned:
         assert owned is True
         # A second store instance (another hook process) must lose the lease
-        # and skip the drain entirely — no connect, no diagnostics.
+        # and skip the drain entirely — no connect, with a bounded contention diagnostic.
         other = LocalObservationStore(_state=tmp_path)
         await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
             other,
@@ -898,7 +919,9 @@ async def test_drain_lease_prevents_concurrent_hooks_from_double_draining(
             _state=tmp_path,
         )
     assert connects == []
-    assert not (tmp_path / "observation/hook-diagnostics.jsonl").exists()
+    diagnostics = tmp_path / "observation/hook-diagnostics.jsonl"
+    assert diagnostics.exists()
+    assert "drain_lease_contended" in diagnostics.read_text(encoding="utf-8")
 
 
 def test_drain_lease_refuses_a_symlink_lock_file(tmp_path: Path) -> None:

@@ -112,46 +112,52 @@ class ObservationOutboxSweeper:
         quarantined = 0
         reasons: dict[str, int] = {}
 
-        for workspace, row in rows:
-            attempted += 1
-            request = ObservationIngestRequest(
-                codex_session_id=row.codex_session_id,
-                envelope=row.envelope,
-            )
-            try:
-                result = await self.coordinator.ingest_request(request)
-            except Exception:
-                result = ObservationIngestResult(
-                    ObservationIngestDisposition.REJECTED,
-                    ObservationGapCode.SERVICE_UNAVAILABLE.value,
-                    None,
-                )
-            decision = route_observation_ingest(result)
-            attempted_row = self.local.bump_outbox_row_attempt(
-                workspace,
-                row,
-                reason=decision.reason,
-            )
-            if attempted_row is None:
-                # Another drain actor already resolved this durable row.
-                continue
-            if decision.reason is not None:
-                reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
-                self.local.note_coverage_gap(workspace, decision.reason)
+        workspaces = tuple(dict.fromkeys(workspace for workspace, _row in rows))
+        for workspace in workspaces:
+            with self.local.drain_lease(workspace) as owned:
+                if not owned:
+                    continue
+                for selected_workspace, row in rows:
+                    if selected_workspace != workspace:
+                        continue
+                    attempted += 1
+                    request = ObservationIngestRequest(
+                        codex_session_id=row.codex_session_id,
+                        envelope=row.envelope,
+                    )
+                    try:
+                        result = await self.coordinator.ingest_request(request)
+                    except Exception:
+                        result = ObservationIngestResult(
+                            ObservationIngestDisposition.REJECTED,
+                            ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                            None,
+                        )
+                    decision = route_observation_ingest(result)
+                    attempted_row = self.local.bump_outbox_row_attempt(
+                        workspace,
+                        row,
+                        reason=decision.reason,
+                    )
+                    if attempted_row is None:
+                        continue
+                    if decision.reason is not None:
+                        reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
+                        self.local.note_coverage_gap(workspace, decision.reason)
 
-            if decision.action is ObservationDrainAction.RETRY:
-                retry_pending += 1
-                continue
-            if decision.action is ObservationDrainAction.QUARANTINE:
-                if self.local.quarantine_outbox_row(
-                    workspace,
-                    attempted_row,
-                    decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
-                ):
-                    quarantined += 1
-                continue
-            if self.local.acknowledge_outbox_row(workspace, attempted_row):
-                acknowledged += 1
+                    if decision.action is ObservationDrainAction.RETRY:
+                        retry_pending += 1
+                        continue
+                    if decision.action is ObservationDrainAction.QUARANTINE:
+                        if self.local.quarantine_outbox_row(
+                            workspace,
+                            attempted_row,
+                            decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                        ):
+                            quarantined += 1
+                        continue
+                    if self.local.acknowledge_outbox_row(workspace, attempted_row):
+                        acknowledged += 1
 
         return ObservationDrainSummary(
             attempted=attempted,

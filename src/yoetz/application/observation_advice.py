@@ -26,6 +26,7 @@ from yoetz.kernel.policies.observation_advice import (
     ObservationCheckFact,
     ObservationCompositionFact,
     ObservationInspectFact,
+    advice_candidate_digest,
     evidence_basis_digest,
     observation_advice_findings,
 )
@@ -371,7 +372,10 @@ def build_observation_advice_snapshot(
         },
     )
     finding_ids = tuple(
-        stable_advice_finding_id(item.rule_code, item.detail_token, basis) for item in candidates
+        stable_advice_finding_id(
+            item.rule_code, item.detail_token, advice_candidate_digest(item)
+        )
+        for item in candidates
     )
     semantic = input_value.semantic_addon
     semantic_ids: tuple[FindingId, ...] = ()

@@ -75,13 +75,14 @@ def _stderr_line(message: str) -> None:
         pass
 
 
-def _stdout_json(value: JsonValue, stream: BinaryIO | None = None) -> None:
+def _stdout_json(value: JsonValue, stream: BinaryIO | None = None) -> bool:
     out = sys.stdout.buffer if stream is None else stream
     try:
         out.write(canonical_encode(value) + b"\n")
         out.flush()
-    except BrokenPipeError:
-        pass
+        return True
+    except (BrokenPipeError, OSError, ValueError):
+        return False
 
 
 def _context_output(event_name: str, additional_context: str) -> dict[str, JsonValue]:

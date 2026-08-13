@@ -15,6 +15,7 @@ from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
     EVIDENCE_SCHEMA_VERSION,
+    OBSERVATION_COORDINATOR_ACTOR_ID,
     ActionKind,
     ActionRecordedPayload,
     ClaimKind,
@@ -61,10 +62,11 @@ __all__ = [
     "MaterializedObservationDraft",
     "canonical_logical_identity",
     "materialize_observation_envelope",
+    "observation_writer_id",
     "stable_observation_id",
 ]
 
-MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.1.0"
+MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.2.0"
 _LOGICAL_IDENTITY_DOMAIN: Final = "yoetz/observation-logical-identity/v1"
 _ID_DOMAIN: Final = b"yoetz/observation-materialize-id/v1\x00"
 _FILE_TOOLS: Final = frozenset(
@@ -510,7 +512,10 @@ def materialize_observation_envelope(
         )
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
-    if kind in _COMPLETION_KINDS or kind.endswith("Complete") or "claim" in kind.lower():
+    explicit_claim_kind = structural.get("claim_kind")
+    if type(explicit_claim_kind) is str and explicit_claim_kind in {
+        member.value for member in ClaimKind
+    }:
         claim = stable_observation_id(
             kind=IdKind.CLAIM,
             task_id=task_id,
@@ -532,11 +537,43 @@ def materialize_observation_envelope(
                 occurred_at=envelope.receipt_time,
                 payload=ClaimRecordedPayload(
                     claim_id(claim),
-                    ClaimKind.COMPLETION if kind == "Stop" else ClaimKind.MATERIAL,
-                    "Observation-derived claim; not automatic completion proof",
+                    ClaimKind(explicit_claim_kind),
+                    "Explicit claim signal observed; not automatic completion proof",
                     (),
                 ),
                 role="claim",
+            )
+        )
+        return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
+
+    if kind in _COMPLETION_KINDS or kind.endswith("Complete") or "claim" in kind.lower():
+        evidence = stable_observation_id(
+            kind=IdKind.EVIDENCE,
+            task_id=task_id,
+            source_identity=envelope.source_identity,
+            mapping_version=mapping,
+            role="completion_signal",
+        )
+        event = stable_observation_id(
+            kind=IdKind.EVENT,
+            task_id=task_id,
+            source_identity=envelope.source_identity,
+            mapping_version=mapping,
+            role="completion_signal_event",
+        )
+        drafts.append(
+            _draft(
+                event=event,
+                schema_name="evidence_recorded",
+                occurred_at=envelope.receipt_time,
+                payload=EvidenceRecordedPayload(
+                    evidence_id(evidence),
+                    EvidenceKind.OTHER,
+                    EvidenceImmutability.METADATA_ONLY,
+                    envelope.receipt_time,
+                    description=f"Observed completion signal kind={kind}",
+                ),
+                role="completion_signal",
             )
         )
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
@@ -640,9 +677,21 @@ def observation_operation_digest(
 
 def observation_author() -> Actor:
     return Actor(
-        actor_id("yoetz:observation-coordinator"),
+        actor_id(OBSERVATION_COORDINATOR_ACTOR_ID),
         ActorType.HARNESS,
         AuthorshipAssurance.HARNESS_OBSERVED,
+    )
+
+
+def observation_writer_id(task_id: str, session_id: str) -> str:
+    """Derive the admitted harness writer for one task session."""
+
+    return stable_observation_id(
+        kind=IdKind.WRITER,
+        task_id=task_id,
+        source_identity=session_id,
+        mapping_version="obs-writer/1.0.0",
+        role="observation",
     )
 
 

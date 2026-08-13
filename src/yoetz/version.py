@@ -146,6 +146,11 @@ _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 class ResourceIntegrityError(ValueError):
     """A required installed resource failed a bounded integrity check."""
 
+    def __init__(self, reason: str, *, detail: str = "") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
+
 
 @dataclass(frozen=True, slots=True)
 class ResourceIdentity:

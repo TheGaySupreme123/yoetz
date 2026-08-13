@@ -97,6 +97,7 @@ __all__ = [
     "MAX_REF_LIST",
     "MAX_REQUESTED_ITEMS",
     "MAX_TEXT_BYTES",
+    "OBSERVATION_COORDINATOR_ACTOR_ID",
     "PAYLOAD_TYPES",
     "SCHEMA_VERSION",
     "EVIDENCE_SCHEMA_VERSION",
@@ -124,6 +125,7 @@ __all__ = [
     "IntegrationKind",
     "LedgerChain",
     "LedgerRecord",
+    "is_observation_authored",
     "ObligationChange",
     "ObligationChangeKind",
     "NoObligationsReason",
@@ -162,6 +164,8 @@ __all__ = [
     "media_type_for",
     "normalize_payload_json",
 ]
+
+OBSERVATION_COORDINATOR_ACTOR_ID: Final = "yoetz:observation-coordinator"
 
 SCHEMA_VERSION: Final = "1.0.0"
 EVIDENCE_SCHEMA_VERSION: Final = "1.1.0"
@@ -2888,6 +2892,18 @@ class UnknownEvent:
 
 
 type LedgerRecord = AcceptedEvent | UnknownEvent
+
+
+def is_observation_authored(record: LedgerRecord) -> bool:
+    """Recognize only service-stamped observation coordinator records."""
+
+    return (
+        str(record.author.actor_id) == OBSERVATION_COORDINATOR_ACTOR_ID
+        and record.author.actor_type is ActorType.HARNESS
+        and record.author.assurance is AuthorshipAssurance.HARNESS_OBSERVED
+        and record.publication_channel
+        in {PublicationChannel.HOOK_OBSERVED, PublicationChannel.ENGINE_DERIVED}
+    )
 
 
 def accepted_record_to_json(record: LedgerRecord) -> JsonObject:
