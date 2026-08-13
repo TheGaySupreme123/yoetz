@@ -273,8 +273,12 @@ carried them; they are listed because each one describes the behavior that now s
   no longer replaces the field-pointed `INVALID_REQUEST` with a false “no durable state changed /
   use a new request_id” message. Lookup is a closed tri-state: found recovery results retain
   precedence; authoritative absence returns the original authoring pointer; unavailable recovery
-  returns retryable `OPERATION_PENDING` / `operation_recovery_unavailable` with the original
-  publish `request_id` and the safe field that will apply once recovery can answer.
+  keeps the field-pointed, non-retryable `INVALID_REQUEST` primary and carries
+  `operation_recovery_unavailable` as a `reason_code` beside the `fields`/`reasons` locations in
+  the same `safe_details`, with a caveat that a prior operation under this `request_id` could not
+  be checked and that resubmitting the corrected body lets the service replay or reject the
+  `request_id` itself. When nothing is locatable, `safe_details` carries that `reason_code`
+  alone.
 
 - **`check` can return a finding.** A check that raised even one finding committed durably and then
   failed to project, so the caller received `INTERNAL_ERROR` / `response_projection_failed` and
@@ -427,7 +431,9 @@ carried them; they are listed because each one describes the behavior that now s
   envelope stream, so it churned on every tool call while the rendered text never changed. Hook
   delivery is now deduplicated on a content identity over exactly what the agent receives —
   materialization, ledger history, and `observe status` keep the evidence-sensitive identity
-  untouched — and standing machine conditions the agent cannot act on (`connect_provider`)
+  untouched, and the content identity excludes evidence references because some rules cite a
+  rolling window over the envelope stream — and standing machine conditions the agent cannot act
+  on (`connect_provider`)
   travel only on session-boundary events, falling through to the next actionable item on
   per-tool-call hooks rather than masking it (issue #241).
 - Every workspace exec call paid 3.5–7.5 seconds of synchronous observe-hook overhead — process
@@ -435,17 +441,16 @@ carried them; they are listed because each one describes the behavior that now s
   10–18 full serialize-and-fsync cycles of the workspace state file per hook. The hook entry now
   goes through a minimal shim with a lazy application package (~45 ms of imports), a hook pass
   batches its state mutations into single flushes fenced before any service RPC, an unchanged
-  advice snapshot is no longer rewritten, provably advice-irrelevant envelopes skip the advice
-  recompute (guarded by a property test against the policy's own constants), end-to-end hook
-  timing is measured with a `hook_budget_exceeded` diagnostic, and a host that silently runs
-  `async`-declared hooks synchronously is detected and reported once per session. Measured
-  end-to-end: ~0.55 s against a realistic store, from 1.7–2.5 s (issue #242).
+  advice snapshot is no longer rewritten, and end-to-end hook timing is measured with a
+  `hook_budget_exceeded` diagnostic. Measured end-to-end: ~0.55 s against a realistic store,
+  from 1.7–2.5 s (issue #242).
 - `yoetz state capture` could not capture Yoetz's own repository: the pre-hash safety walk
   counted every filesystem entry under the root — including the root `.git` object store and
   gitignore-excluded trees like a vendored `.venv` — against the 10,000-entry bound, 40× more
   than the population capture actually hashes, and the failure never said which bound tripped.
   The walk now skips the root `.git`'s internals (nested `.git` rejection and every per-entry
-  safety check are preserved) and prunes fully-ignored subtrees using git's own exclusion
+  safety check are preserved outside gitignore-excluded subtrees) and prunes fully-ignored
+  subtrees using git's own exclusion
   semantics, and any file-count limit failure reports the bound that tripped with observed count
   and limit as integers in `limit_detail` (issue #243).
 - A receipt reported `semantic_review_not_requested` for a task whose semantic review had been

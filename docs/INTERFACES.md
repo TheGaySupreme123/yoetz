@@ -87,7 +87,10 @@ Allowlisted `safe_details` keys include structural recovery fields such as `reas
 `sequence`, and `head_digest` (for `FRONTIER_CONFLICT` current-head recovery). For MCP
 `INVALID_REQUEST` validation failures, `safe_details` may also carry parallel `fields` and
 `reasons` arrays: each entry is an allowlisted JSON pointer and a closed reason token for that
-location (same index order; at most eight locations). Pointers use only trusted location segments;
+location (same index order; at most eight locations). `reason_code` may co-occur with
+`fields`/`reasons` in the same `safe_details` — a `publish_work` validation failure whose
+prior-operation lookup was unavailable carries both — and the whole mapping is emitted in ASCII
+key order (`fields`, `reason_code`, `reasons`). Pointers use only trusted location segments;
 unknown or hostile property names are never echoed. Closed reason tokens are:
 
 - `missing` — a required property is absent;
