@@ -13,11 +13,13 @@ __all__ = [
     "MAX_SUBJECT_STATE_FILES",
     "MAX_SUBJECT_STATE_HASH_BYTES",
     "LocalWorkspaceHandle",
+    "SubjectStateBound",
     "SubjectStateCaptureCommand",
     "SubjectStateCapturePort",
     "SubjectStateCaptureResult",
     "SubjectStateFormat",
     "SubjectStateLimitation",
+    "SubjectStateLimitDetail",
     "SubjectStateStatus",
 ]
 
@@ -46,6 +48,34 @@ class SubjectStateLimitation(str, Enum):  # noqa: UP042 - exact wire-valued Enum
     FILE_LIMIT_EXCEEDED = "file_limit_exceeded"
     GIT_FAILED = "git_failed"
     INPUT_CHANGED = "input_changed"
+
+
+class SubjectStateBound(str, Enum):  # noqa: UP042 - exact wire-valued Enum is required
+    """Which walk/bound a ``FILE_LIMIT_EXCEEDED`` trip counted against.
+
+    Sibling detail for ``SubjectStateLimitation``, not a replacement: the closed
+    limitation vocabulary stays pinned, this only names which bound tripped.
+    """
+
+    UNSAFE_TREE_ENTRIES = "unsafe_tree_entries"
+    UNTRACKED_FILE_COUNT = "untracked_file_count"
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectStateLimitDetail:
+    """Observed count and limit for one bound trip. Carries no content, only integers."""
+
+    bound: SubjectStateBound
+    observed: int
+    limit: int
+
+    def __post_init__(self) -> None:
+        if type(self.bound) is not SubjectStateBound:
+            raise ProtocolValueError("invalid_subject_state")
+        if type(self.observed) is not int or self.observed < 0:
+            raise ProtocolValueError("invalid_subject_state")
+        if type(self.limit) is not int or self.limit < 0:
+            raise ProtocolValueError("invalid_subject_state")
 
 
 @final
@@ -116,6 +146,7 @@ class SubjectStateCaptureResult:
     limitations: tuple[SubjectStateLimitation, ...]
     bytes_hashed: int
     files_hashed: int
+    limit_detail: tuple[SubjectStateLimitDetail, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.status) is not SubjectStateStatus:
@@ -129,6 +160,10 @@ class SubjectStateCaptureResult:
         limitation_values = tuple(value.value for value in self.limitations)
         if limitation_values != tuple(sorted(set(limitation_values), key=str.encode)):
             raise ProtocolValueError("invalid_subject_state")
+        if type(self.limit_detail) is not tuple or any(
+            type(value) is not SubjectStateLimitDetail for value in self.limit_detail
+        ):
+            raise ProtocolValueError("invalid_subject_state")
         if (
             type(self.bytes_hashed) is not int
             or not 0 <= self.bytes_hashed <= MAX_SUBJECT_STATE_HASH_BYTES
@@ -138,7 +173,11 @@ class SubjectStateCaptureResult:
             raise ProtocolValueError("invalid_subject_state")
 
         if self.status is SubjectStateStatus.CAPTURED:
-            if type(self.subject_state) is not SubjectStateRef or self.limitations:
+            if (
+                type(self.subject_state) is not SubjectStateRef
+                or self.limitations
+                or self.limit_detail
+            ):
                 raise ProtocolValueError("invalid_subject_state")
             state = self.subject_state
             if (
@@ -150,6 +189,8 @@ class SubjectStateCaptureResult:
                 raise ProtocolValueError("invalid_subject_state")
         else:
             if self.subject_state is not None or not self.limitations:
+                raise ProtocolValueError("invalid_subject_state")
+            if len(self.limit_detail) > len(self.limitations):
                 raise ProtocolValueError("invalid_subject_state")
             if (
                 self.status is SubjectStateStatus.CHANGED_DURING_CAPTURE

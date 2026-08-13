@@ -8,11 +8,14 @@ from pathlib import Path
 
 import pytest
 
+from yoetz.adapters import git_subject_state as git_subject_state_module
 from yoetz.adapters.git_subject_state import GitSubjectStateAdapter, open_local_workspace
 from yoetz.ports.subject_state import (
+    SubjectStateBound,
     SubjectStateCaptureCommand,
     SubjectStateFormat,
     SubjectStateLimitation,
+    SubjectStateLimitDetail,
     SubjectStateStatus,
 )
 
@@ -187,6 +190,9 @@ def test_file_and_byte_caps_discard_all_candidate_digests(tmp_path: Path) -> Non
     assert file_limited.bytes_hashed == 0
     assert file_limited.files_hashed == 0
     assert file_limited.limitations == (SubjectStateLimitation.FILE_LIMIT_EXCEEDED,)
+    assert file_limited.limit_detail == (
+        SubjectStateLimitDetail(SubjectStateBound.UNSAFE_TREE_ENTRIES, 2, 1),
+    )
 
     byte_limited = GitSubjectStateAdapter(_max_hash_bytes=5).capture(command)
     assert byte_limited.status is SubjectStateStatus.UNSUPPORTED
@@ -314,3 +320,94 @@ def test_path_safety_malicious_config_and_capture_are_read_only(tmp_path: Path) 
     assert filtered.subject_state is None
     assert filtered.limitations == (SubjectStateLimitation.UNSAFE_ROOT,)
     assert not filter_canary.exists()
+
+
+def test_unsafe_tree_walk_skips_gitignored_trees_but_still_scans_partially_tracked_ones(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    command = _command(repository)
+    (repository / ".gitignore").write_text("big_ignored/\nmixed/\n", encoding="utf-8")
+    big_ignored = repository / "big_ignored"
+    big_ignored.mkdir()
+    for index in range(50):
+        (big_ignored / f"junk-{index}.txt").write_text("junk", encoding="utf-8")
+
+    # A fully-ignored 50-file subtree is collapsed to one prune-set entry, never
+    # walked, so the tight file limit only ever sees the four root-level entries.
+    pruned = GitSubjectStateAdapter(_max_files=5).capture(command)
+    assert pruned.status is SubjectStateStatus.CAPTURED
+
+    mixed = repository / "mixed"
+    mixed.mkdir()
+    (mixed / "keep.txt").write_text("kept\n", encoding="utf-8")
+    _git(repository, "add", "--force", "--", "mixed/keep.txt")
+    os.mkfifo(mixed / "pipe")
+    try:
+        # A tracked file inside "mixed/" stops git from collapsing it, so the walk
+        # still descends and still rejects the untracked FIFO sitting alongside it.
+        partially_tracked = GitSubjectStateAdapter().capture(command)
+        assert partially_tracked.status is SubjectStateStatus.UNSUPPORTED
+        assert partially_tracked.limitations == (SubjectStateLimitation.SYMLINK_UNSUPPORTED,)
+    finally:
+        (mixed / "pipe").unlink()
+
+
+def test_unsafe_tree_walk_skips_root_git_internals_but_still_rejects_nested_git(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    command = _command(repository)
+    canary = repository / ".git" / "canary"
+    canary.mkdir()
+    for index in range(10):
+        (canary / f"junk-{index}.txt").write_text("junk", encoding="utf-8")
+
+    # Root .git internals are never descended into, so a tight file limit that would
+    # trip on ten extra entries under .git/canary sees only the two root entries.
+    bounded = GitSubjectStateAdapter(_max_files=5).capture(command)
+    assert bounded.status is SubjectStateStatus.CAPTURED
+
+    nested_git = repository / "nested" / ".git"
+    nested_git.mkdir(parents=True)
+    # A .git anywhere other than the root is still rejected: pruning is confined to
+    # the root's own metadata directory, not to every directory named ".git".
+    nested = GitSubjectStateAdapter().capture(command)
+    assert nested.status is SubjectStateStatus.STATE_NOT_OBSERVED
+    assert nested.limitations == (SubjectStateLimitation.UNSAFE_ROOT,)
+
+
+def test_file_limit_trip_reports_bound_observed_and_limit(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    command = _command(repository)
+    (repository / "one.txt").write_text("one", encoding="utf-8")
+    (repository / "two.txt").write_text("two", encoding="utf-8")
+
+    # Root scandir order is .git, one.txt, tracked.txt, two.txt: .git is entry 1
+    # (allowed and skipped without descent), one.txt is entry 2, which trips 2 > 1.
+    result = GitSubjectStateAdapter(_max_files=1).capture(command)
+    assert result.status is SubjectStateStatus.UNSUPPORTED
+    assert result.limitations == (SubjectStateLimitation.FILE_LIMIT_EXCEEDED,)
+    assert result.limit_detail == (
+        SubjectStateLimitDetail(SubjectStateBound.UNSAFE_TREE_ENTRIES, 2, 1),
+    )
+
+
+def test_hash_untracked_file_limit_reports_bound_observed_and_limit(tmp_path: Path) -> None:
+    repository = _repository(tmp_path)
+    (repository / "one.txt").write_text("one", encoding="utf-8")
+    (repository / "two.txt").write_text("two", encoding="utf-8")
+    handle = open_local_workspace(repository)
+    # _hash_untracked's own FILE_LIMIT_EXCEEDED check is unreachable through the public
+    # capture() path: _reject_unsafe_tree_entries runs first against the same
+    # self._max_files and always trips sooner (it also counts .git and directories).
+    # This white-box call exercises the detail-labeling at that site directly.
+    workspace = git_subject_state_module._workspace_payload(  # pyright: ignore[reportPrivateUsage]
+        handle
+    )
+    adapter = GitSubjectStateAdapter(_max_files=1)
+    with pytest.raises(git_subject_state_module._CaptureFailure) as excinfo:  # pyright: ignore[reportPrivateUsage]
+        adapter._hash_untracked(workspace, 0)  # pyright: ignore[reportPrivateUsage]
+    assert excinfo.value.detail == SubjectStateLimitDetail(
+        SubjectStateBound.UNTRACKED_FILE_COUNT, 2, 1
+    )
