@@ -697,7 +697,8 @@ async def test_rpc_deadline_covers_blocked_send_and_bounded_cancel_attempt() -> 
         await client.receipt(_receipt_request(20), deadline_ms=10)
 
     assert asyncio.get_running_loop().time() - started < 0.2
-    assert stream.send_attempts == 2
+    assert stream.send_attempts == 1
+    assert stream.closed is True
     await client.close()
 
 
@@ -832,6 +833,7 @@ async def test_unanswered_timeout_tombstones_bound_new_admission() -> None:
     with pytest.raises(ControlError, match="service_unavailable"):
         await client.receipt(_receipt_request(63), deadline_ms=1)
     assert len(stream.sent) == sent_before
+    assert stream.closed is True
     await client.close()
 
 

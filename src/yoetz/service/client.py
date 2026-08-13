@@ -727,15 +727,15 @@ class ServiceClient(ControlClientPort):
             or request.service_generation != self._session.service_generation
         ):
             raise ControlError("service_unavailable", retryable=True)
-        if (
-            request.rpc_id in self._pending
-            or request.rpc_id in self._retired_rpc_ids
-            or len(self._pending) + len(self._retired_rpc_ids) >= _MAX_IN_FLIGHT
-        ):
+        if request.rpc_id in self._pending or request.rpc_id in self._retired_rpc_ids:
+            raise ControlError("service_unavailable", retryable=True)
+        if len(self._pending) + len(self._retired_rpc_ids) >= _MAX_IN_FLIGHT:
+            await self._fail_connection(ControlError("service_unavailable", retryable=True))
             raise ControlError("service_unavailable", retryable=True)
 
         future = asyncio.get_running_loop().create_future()
         self._pending[request.rpc_id] = future
+        sent = False
         try:
             try:
                 self._session.admit(request)
@@ -743,19 +743,31 @@ class ServiceClient(ControlClientPort):
                 raise ControlError("frame_invalid") from exc
             if request.deadline_ms is None:
                 await self._send(request)
+                sent = True
                 result = await future
             else:
                 try:
                     async with asyncio.timeout(request.deadline_ms / 1_000):
                         await self._send(request)
+                        sent = True
                         result = await asyncio.shield(future)
                 except TimeoutError as exc:
-                    self._retire_call(request.rpc_id, future)
-                    await self._request_cancel(request.rpc_id)
+                    if sent:
+                        self._retire_call(request.rpc_id, future)
+                        await self._request_cancel(request.rpc_id)
+                    else:
+                        future.cancel()
+                        await self._fail_connection(
+                            ControlError("service_unavailable", retryable=True)
+                        )
                     raise ControlError("request_timeout", retryable=True) from exc
         except asyncio.CancelledError:
-            self._retire_call(request.rpc_id, future)
-            await self._request_cancel(request.rpc_id)
+            if sent:
+                self._retire_call(request.rpc_id, future)
+                await self._request_cancel(request.rpc_id)
+            else:
+                future.cancel()
+                await self._fail_connection(ControlError("service_unavailable", retryable=True))
             raise
         finally:
             self._pending.pop(request.rpc_id, None)
