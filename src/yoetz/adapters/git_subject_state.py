@@ -21,10 +21,12 @@ from yoetz.ports.subject_state import (
     MAX_SUBJECT_STATE_FILES,
     MAX_SUBJECT_STATE_HASH_BYTES,
     LocalWorkspaceHandle,
+    SubjectStateBound,
     SubjectStateCaptureCommand,
     SubjectStateCaptureResult,
     SubjectStateFormat,
     SubjectStateLimitation,
+    SubjectStateLimitDetail,
     SubjectStateStatus,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest
@@ -143,15 +145,18 @@ class _CaptureCounts:
 
 
 class _CaptureFailure(Exception):
-    __slots__ = ("limitation", "status")
+    __slots__ = ("detail", "limitation", "status")
 
     def __init__(
         self,
         limitation: SubjectStateLimitation,
         status: SubjectStateStatus = SubjectStateStatus.STATE_NOT_OBSERVED,
+        *,
+        detail: SubjectStateLimitDetail | None = None,
     ) -> None:
         self.limitation = limitation
         self.status = status
+        self.detail = detail
         super().__init__(limitation.value)
 
 
@@ -394,7 +399,7 @@ class GitSubjectStateAdapter:
                 counts.files_hashed,
             )
         except _CaptureFailure as exc:
-            return _closed_result(exc.status, exc.limitation)
+            return _closed_result(exc.status, exc.limitation, exc.detail)
         except _OutputLimit:
             return _closed_result(
                 SubjectStateStatus.UNSUPPORTED,
@@ -570,6 +575,9 @@ class GitSubjectStateAdapter:
             raise _CaptureFailure(
                 SubjectStateLimitation.FILE_LIMIT_EXCEEDED,
                 SubjectStateStatus.UNSUPPORTED,
+                detail=SubjectStateLimitDetail(
+                    SubjectStateBound.UNTRACKED_FILE_COUNT, len(paths), self._max_files
+                ),
             )
         hasher = hashlib.sha256()
         hasher.update(_UNTRACKED_DOMAIN)
@@ -624,11 +632,16 @@ class GitSubjectStateAdapter:
         return f"sha256:{hasher.hexdigest()}", total_bytes, len(paths)
 
     def _reject_unsafe_tree_entries(self, workspace: _WorkspaceDescriptor) -> None:
-        pending = [workspace.root]
+        # Ignored subtrees are never opened by capture (`_hash_untracked` restricts itself
+        # to `ls-files --others --exclude-standard`), so recursion may skip them entirely.
+        # This is one bounded git call, not a walk: `--directory` collapses a fully-ignored
+        # directory to a single trailing-slash entry without descending into it.
+        ignored_prefixes = _collect_ignored_prefixes(workspace.root, self._runner)
+        pending: list[tuple[Path, bytes]] = [(workspace.root, b"")]
         entries_seen = 0
         path_bytes_seen = 0
         while pending:
-            directory = pending.pop()
+            directory, relative_dir = pending.pop()
             try:
                 with os.scandir(directory) as entries:
                     ordered = sorted(entries, key=lambda entry: os.fsencode(entry.name))
@@ -641,6 +654,9 @@ class GitSubjectStateAdapter:
                     raise _CaptureFailure(
                         SubjectStateLimitation.FILE_LIMIT_EXCEEDED,
                         SubjectStateStatus.UNSUPPORTED,
+                        detail=SubjectStateLimitDetail(
+                            SubjectStateBound.UNSAFE_TREE_ENTRIES, entries_seen, self._max_files
+                        ),
                     )
                 if path_bytes_seen > _PATH_OUTPUT_LIMIT:
                     raise _CaptureFailure(
@@ -662,9 +678,18 @@ class GitSubjectStateAdapter:
                         SubjectStateStatus.UNSUPPORTED,
                     )
                 if stat.S_ISDIR(facts.st_mode):
-                    if entry.name == ".git" and directory != workspace.root:
-                        raise _CaptureFailure(SubjectStateLimitation.UNSAFE_ROOT)
-                    pending.append(Path(entry.path))
+                    if entry.name == ".git":
+                        if directory != workspace.root:
+                            raise _CaptureFailure(SubjectStateLimitation.UNSAFE_ROOT)
+                        # Root .git is already verified by _verify_git_metadata and is
+                        # never opened directly; only the hardened git subprocess touches
+                        # the object store, so its internals need no per-file walk.
+                        continue
+                    name_bytes = os.fsencode(entry.name)
+                    relative = name_bytes if not relative_dir else relative_dir + b"/" + name_bytes
+                    if relative in ignored_prefixes or relative + b"/" in ignored_prefixes:
+                        continue  # gitignore-excluded subtree: capture never opens files inside it
+                    pending.append((Path(entry.path), relative))
 
     def _verify_still_same_root(self, workspace: _WorkspaceDescriptor) -> None:
         facts = os.fstat(workspace.descriptor)
@@ -965,6 +990,38 @@ def _validate_relative_git_path(path: bytes) -> None:
         raise _CaptureFailure(SubjectStateLimitation.UNSAFE_ROOT)
 
 
+def _validate_relative_git_tree_path(path: bytes) -> None:
+    """Like ``_validate_relative_git_path``, but allows exactly one trailing ``/``.
+
+    ``ls-files --directory`` reports a fully-ignored directory as ``name/``; the prune
+    set must accept that form without weakening the underlying traversal validation.
+    """
+
+    _validate_relative_git_path(path[:-1] if path.endswith(b"/") else path)
+
+
+def _collect_ignored_prefixes(root: Path, runner: _GitRunner) -> frozenset[bytes]:
+    """Return the set of gitignore-excluded top-level paths the walk must not recurse into.
+
+    One bounded git call, mirroring `_hash_untracked`'s own technique. `--directory` makes
+    git collapse a fully-ignored directory to a single trailing-slash entry instead of
+    listing its contents, so this is cheap regardless of how large the ignored subtree is.
+    """
+
+    _, raw = runner.run(
+        root,
+        ("ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"),
+        stdout_limit=_PATH_OUTPUT_LIMIT,
+    )
+    try:
+        entries = _nul_entries(raw)
+    finally:
+        _overwrite(raw)
+    for entry in entries:
+        _validate_relative_git_tree_path(entry)
+    return frozenset(entries)
+
+
 def _verify_untracked_file(facts: os.stat_result) -> None:
     expected_uid = os.geteuid() if hasattr(os, "geteuid") else os.getuid()
     if not stat.S_ISREG(facts.st_mode) or facts.st_uid != expected_uid or facts.st_nlink != 1:
@@ -999,7 +1056,9 @@ def _overwrite(buffer: bytearray) -> None:
 
 
 def _closed_result(
-    status: SubjectStateStatus, limitation: SubjectStateLimitation
+    status: SubjectStateStatus,
+    limitation: SubjectStateLimitation,
+    detail: SubjectStateLimitDetail | None = None,
 ) -> SubjectStateCaptureResult:
     return SubjectStateCaptureResult(
         status,
@@ -1008,4 +1067,5 @@ def _closed_result(
         (limitation,),
         0,
         0,
+        (detail,) if detail is not None else (),
     )

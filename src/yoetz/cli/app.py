@@ -995,6 +995,10 @@ def state_capture(
             "files_hashed": result.files_hashed,
             "format": result.format.value,
             "limitations": [item.value for item in result.limitations],
+            "limit_detail": [
+                {"bound": item.bound.value, "observed": item.observed, "limit": item.limit}
+                for item in result.limit_detail
+            ],
             "status": result.status.value,
             "tree_digest": state.tree_digest if state is not None else None,
             "diff_digest": state.diff_digest if state is not None else None,
