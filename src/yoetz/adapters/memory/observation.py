@@ -44,6 +44,13 @@ class MemoryObservationConsent:
         return self.revoked_at is None and not self.paused
 
 
+@dataclass(frozen=True, slots=True)
+class _GapState:
+    first_seen: Timestamp
+    last_seen: Timestamp
+    active: bool = True
+
+
 @dataclass
 class MemoryObservationState:
     consent: dict[str, MemoryObservationConsent] = field(
@@ -59,7 +66,7 @@ class MemoryObservationState:
     )
     advice_frontier: dict[str, str] = field(default_factory=dict[str, str])
     unsupported_events: dict[str, set[str]] = field(default_factory=dict[str, set[str]])
-    gaps: dict[str, set[str]] = field(default_factory=dict[str, set[str]])
+    gaps: dict[str, dict[str, _GapState]] = field(default_factory=dict[str, dict[str, _GapState]])
     last_receipt: dict[str, Timestamp] = field(default_factory=dict[str, Timestamp])
 
 
@@ -169,7 +176,9 @@ class MemoryObservationStore:
             cursor_key = (workspace, envelope.source, envelope.session_commitment)
             existing = self._state.cursors.get(cursor_key)
             if existing is not None and envelope.cursor.is_stale_relative_to(existing):
-                self._note_gap(workspace, ObservationGapCode.CURSOR_STALE.value)
+                self._note_gap(
+                    workspace, ObservationGapCode.CURSOR_STALE.value, envelope.receipt_time
+                )
                 return ObservationIngestResult(
                     ObservationIngestDisposition.REJECTED,
                     ObservationGapCode.CURSOR_STALE.value,
@@ -179,7 +188,9 @@ class MemoryObservationStore:
                 existing is not None
                 and envelope.cursor.source_generation < existing.source_generation
             ):
-                self._note_gap(workspace, ObservationGapCode.CURSOR_STALE.value)
+                self._note_gap(
+                    workspace, ObservationGapCode.CURSOR_STALE.value, envelope.receipt_time
+                )
                 return ObservationIngestResult(
                     ObservationIngestDisposition.REJECTED,
                     ObservationGapCode.CURSOR_STALE.value,
@@ -189,8 +200,13 @@ class MemoryObservationStore:
             self._state.cursors[cursor_key] = envelope.cursor
             self._state.envelopes.append((workspace, envelope))
             self._state.last_receipt[workspace] = envelope.receipt_time
+            # Successful advancement, rather than the untrusted receipt timestamp, proves that
+            # a previously stale cursor is no longer the current ingest condition.
+            self._resolve_gap(workspace, ObservationGapCode.CURSOR_STALE.value)
+            if envelope.content_object_refs:
+                self._resolve_gap(workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
             for gap in envelope.gap_codes:
-                self._note_gap(workspace, gap)
+                self._note_gap(workspace, gap, envelope.receipt_time)
             if ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes:
                 self._state.unsupported_events.setdefault(workspace, set()).add(envelope.event_kind)
             # Force encode to keep structural bytes bounded at rest.
@@ -315,8 +331,20 @@ class MemoryObservationStore:
             )
         return consent
 
-    def _note_gap(self, workspace: str, code: str) -> None:
-        self._state.gaps.setdefault(workspace, set()).add(code)
+    def _note_gap(self, workspace: str, code: str, seen_at: Timestamp) -> None:
+        history = self._state.gaps.setdefault(workspace, {})
+        prior = history.get(code)
+        history[code] = _GapState(
+            seen_at if prior is None else prior.first_seen,
+            seen_at,
+            True,
+        )
+
+    def _resolve_gap(self, workspace: str, code: str) -> None:
+        history = self._state.gaps.setdefault(workspace, {})
+        prior = history.get(code)
+        if prior is not None:
+            history[code] = _GapState(prior.first_seen, prior.last_seen, False)
 
     def _status_unlocked(self, workspace_commitment: str) -> ObservationStatus:
         import time
@@ -335,7 +363,9 @@ class MemoryObservationStore:
         for workspace, envelope in self._state.envelopes:
             if workspace == workspace_commitment:
                 coverage[envelope.source] = True
-        gaps = tuple(sorted(self._state.gaps.get(workspace_commitment, set()), key=str.encode))
+        history = self._state.gaps.get(workspace_commitment, {})
+        current = {code for code, seen in history.items() if seen.active}
+        gaps = tuple(sorted(current, key=str.encode))
         unsupported = tuple(
             sorted(self._state.unsupported_events.get(workspace_commitment, set()), key=str.encode)
         )

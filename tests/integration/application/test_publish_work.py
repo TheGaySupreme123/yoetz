@@ -322,6 +322,71 @@ async def test_stale_expected_frontier_sequence_conflicts() -> None:
     assert caught.value.safe_details.get("head_digest") == first.result_frontier.head_digest
 
 
+async def test_caller_cannot_spoof_observation_author_to_bypass_frontier_guard() -> None:
+    app, _ = _composition()
+    spoofed_wire = _request().model_dump(mode="json")
+    spoofed_wire.pop("dry_run", None)
+    spoofed_wire["actor"] = {
+        "actor_id": "yoetz:observation-coordinator",
+        "actor_type": "harness",
+    }
+    first = await execute_publish_work(
+        cast(Application, app), PublishWorkRequestModel.model_validate(spoofed_wire)
+    )
+
+    stale_spoofed_wire = dict(spoofed_wire)
+    stale_spoofed_wire["request_id"] = "req_00000000-0000-4000-8000-000000000219"
+    stale_spoofed_wire["expected_frontier"] = {
+        "sequence": "0",
+        "head_digest": "genesis",
+    }
+    stale_spoofed_event = dict(cast(list[dict[str, object]], stale_spoofed_wire["event_drafts"])[0])
+    stale_spoofed_event["event_id"] = "evt_00000000-0000-4000-8000-000000000220"
+    stale_spoofed_payload = dict(cast(dict[str, object], stale_spoofed_event["payload"]))
+    stale_spoofed_payload["action_id"] = "act_00000000-0000-4000-8000-000000000221"
+    stale_spoofed_event["payload"] = stale_spoofed_payload
+    stale_spoofed_wire["event_drafts"] = [stale_spoofed_event]
+
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(
+            cast(Application, app),
+            PublishWorkRequestModel.model_validate(stale_spoofed_wire),
+        )
+
+    assert first.result_frontier.sequence == 1
+    assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+
+
+async def test_state_sensitive_batch_without_frontier_names_required_field() -> None:
+    app, _ = _composition()
+    action = _draft(event_tail=214, action_tail=215)
+    result: dict[str, object] = {
+        "event_id": "evt_00000000-0000-4000-8000-000000000216",
+        "schema": {"name": "result_recorded", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:01:00.000Z",
+        "causal_parents": (action["event_id"],),
+        "payload": {
+            "result_id": "res_00000000-0000-4000-8000-000000000217",
+            "action_id": "act_00000000-0000-4000-8000-000000000215",
+            "outcome": "success",
+            "summary": "Completed the bounded action.",
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_publish_work(
+            cast(Application, app),
+            _request(request_tail=218, event_drafts=(action, result)),
+        )
+
+    assert caught.value.code is PublicErrorCode.EVENT_INVALID
+    assert caught.value.retryable is True
+    assert caught.value.safe_details.get("reason_code") == "expected_frontier_required"
+    assert "expected_frontier" in caught.value.message
+
+
 async def test_mutated_event_drafts_same_request_id_is_request_identity_conflict() -> None:
     """Run-3 sequence: same request_id with a different body must not re-append or invalidate."""
 

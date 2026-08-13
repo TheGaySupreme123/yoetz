@@ -17,6 +17,11 @@ Use the exact enum values returned by the protocol; this reference does not crea
 
 Deterministic evidence says what a reviewed rule computed from the accepted record. Semantic evidence retains provider, model, policy, request, response, and review provenance. Imported evidence never gains cooperative authorship merely because Yoetz stores it. A digest records identity, not content inspection. TOML, path, or metadata construction is not proof of SDK wire dispatch or semantic review (Yoetz cooperative/evidence boundary).
 
+Observation-derived records are evidence of what the harness observed. They are not claims on the
+agent's behalf. Completion and material claims come only from an explicit cooperative publication
+or an explicit admitted claim signal; a lifecycle `Stop` or agent-message envelope alone cannot
+support completion wording.
+
 Digest-bearing evidence separates four facts: the evidence family, the exact byte subject, whether
 the bytes were retained, and who established that binding. Ordinary publication remains
 `caller_asserted` even when it supplies a valid SHA-256 digest. Only the approved-check service path

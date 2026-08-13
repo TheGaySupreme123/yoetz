@@ -97,6 +97,7 @@ __all__ = [
     "MAX_REF_LIST",
     "MAX_REQUESTED_ITEMS",
     "MAX_TEXT_BYTES",
+    "OBSERVATION_COORDINATOR_ACTOR_ID",
     "PAYLOAD_TYPES",
     "SCHEMA_VERSION",
     "EVIDENCE_SCHEMA_VERSION",
@@ -124,6 +125,8 @@ __all__ = [
     "IntegrationKind",
     "LedgerChain",
     "LedgerRecord",
+    "is_observation_authored",
+    "is_observation_authorship",
     "ObligationChange",
     "ObligationChangeKind",
     "NoObligationsReason",
@@ -162,6 +165,8 @@ __all__ = [
     "media_type_for",
     "normalize_payload_json",
 ]
+
+OBSERVATION_COORDINATOR_ACTOR_ID: Final = "yoetz:observation-coordinator"
 
 SCHEMA_VERSION: Final = "1.0.0"
 EVIDENCE_SCHEMA_VERSION: Final = "1.1.0"
@@ -2888,6 +2893,30 @@ class UnknownEvent:
 
 
 type LedgerRecord = AcceptedEvent | UnknownEvent
+
+
+def is_observation_authorship(author: Actor, publication_channel: PublicationChannel) -> bool:
+    """Recognize only service-stamped observation coordinator authorship.
+
+    Two of these four facts are caller-supplied through ``publish_work`` (``actor_id`` and
+    ``actor_type``); ``assurance`` and ``publication_channel`` are service-derived and are what
+    make the pair unforgeable. Every caller must test all four, so the predicate lives here once
+    rather than being restated per call site.
+    """
+
+    return (
+        str(author.actor_id) == OBSERVATION_COORDINATOR_ACTOR_ID
+        and author.actor_type is ActorType.HARNESS
+        and author.assurance is AuthorshipAssurance.HARNESS_OBSERVED
+        and publication_channel
+        in {PublicationChannel.HOOK_OBSERVED, PublicationChannel.ENGINE_DERIVED}
+    )
+
+
+def is_observation_authored(record: LedgerRecord) -> bool:
+    """Recognize only service-stamped observation coordinator records."""
+
+    return is_observation_authorship(record.author, record.publication_channel)
 
 
 def accepted_record_to_json(record: LedgerRecord) -> JsonObject:

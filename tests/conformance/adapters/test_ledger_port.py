@@ -27,10 +27,18 @@ from yoetz.domain.findings import (
     SemanticFailureClass,
     SemanticProvenance,
 )
-from yoetz.domain.values import parse_rfc3339_millis
+from yoetz.domain.values import (
+    Actor,
+    ActorType,
+    actor_id,
+    event_id,
+    object_id,
+    parse_rfc3339_millis,
+)
 from yoetz.ports.ledger import (
     AppendCommand,
     AppendEntry,
+    AppendResult,
     AppendWarning,
     AttemptOutcome,
     CheckCommitResult,
@@ -54,6 +62,11 @@ from yoetz.ports.objects import (
 from yoetz.ports.runtime import OwnershipFence
 from yoetz.ports.semantic import SamplingParams
 from yoetz.protocol.canonical import canonical_encode
+from yoetz.protocol.coverage import (
+    AuthorshipAssurance,
+    PublicationChannel,
+    coverage_for_channel,
+)
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 from yoetz.protocol.models import SemanticReason, SemanticStatus
@@ -260,6 +273,171 @@ async def test_append_batch_contract() -> None:
         with pytest.raises(PublicOperationError) as caught:
             await adapter.append_batch(conflict)
         assert caught.value.code is PublicErrorCode.IDEMPOTENCY_CONFLICT
+
+
+@pytest.mark.anyio
+async def test_observation_only_frontier_advance_is_tolerated_with_adapter_parity() -> None:
+    base = ledger_command(unknown=True)
+    observation = replace(
+        base,
+        writer_id="wri_00000000-0000-4000-8000-000000000091",
+        entries=(
+            replace(
+                base.entries[0],
+                author=Actor(
+                    actor_id("yoetz:observation-coordinator"),
+                    ActorType.HARNESS,
+                    AuthorshipAssurance.HARNESS_OBSERVED,
+                ),
+                publication_channel=PublicationChannel.HOOK_OBSERVED,
+                coverage=coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+            ),
+        ),
+    )
+    held = ledger_command(request_suffix="3", unknown=True, expected_frontier=0)
+    held = replace(
+        held,
+        entries=(
+            replace(
+                held.entries[0],
+                draft=replace(
+                    held.entries[0].draft,
+                    event_id=event_id("evt_00000000-0000-4000-8000-000000000092"),
+                ),
+                payload_object=replace(
+                    held.entries[0].payload_object,
+                    object_id=object_id("obj_00000000-0000-4000-8000-000000000093"),
+                ),
+            ),
+        ),
+    )
+
+    results: list[AppendResult] = []
+    for adapter in (memory_ledger(observation), sqlite_ledger(observation)):
+        await adapter.append_batch(observation)
+        results.append(await adapter.append_batch(held))
+    assert results[0] == results[1]
+    assert results[0].subject_frontier.sequence == 1
+
+
+@pytest.mark.anyio
+async def test_spoofed_observation_actor_does_not_bypass_frontier_guard() -> None:
+    base = ledger_command(unknown=True)
+    spoofed = replace(
+        base,
+        entries=(
+            replace(
+                base.entries[0],
+                author=Actor(
+                    actor_id("yoetz:observation-coordinator"),
+                    ActorType.HARNESS,
+                    AuthorshipAssurance.SELF_ASSERTED,
+                ),
+                publication_channel=PublicationChannel.LOCAL_CLI,
+                coverage=coverage_for_channel(PublicationChannel.LOCAL_CLI),
+            ),
+        ),
+    )
+    held = ledger_command(request_suffix="3", unknown=True, expected_frontier=0)
+    held = replace(
+        held,
+        entries=(
+            replace(
+                held.entries[0],
+                draft=replace(
+                    held.entries[0].draft,
+                    event_id=event_id("evt_00000000-0000-4000-8000-000000000093"),
+                ),
+            ),
+        ),
+    )
+
+    for adapter in (memory_ledger(spoofed), sqlite_ledger(spoofed)):
+        await adapter.append_batch(spoofed)
+        with pytest.raises(PublicOperationError) as caught:
+            await adapter.append_batch(held)
+        assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+
+
+@pytest.mark.anyio
+async def test_observation_append_waits_while_check_case_is_frozen() -> None:
+    base = ledger_command(unknown=True)
+    observation = ledger_command(request_suffix="3", unknown=True, expected_frontier=1)
+    observation = replace(
+        observation,
+        writer_id="wri_00000000-0000-4000-8000-000000000094",
+        entries=(
+            replace(
+                observation.entries[0],
+                draft=replace(
+                    observation.entries[0].draft,
+                    event_id=event_id("evt_00000000-0000-4000-8000-000000000095"),
+                ),
+                author=Actor(
+                    actor_id("yoetz:observation-coordinator"),
+                    ActorType.HARNESS,
+                    AuthorshipAssurance.HARNESS_OBSERVED,
+                ),
+                publication_channel=PublicationChannel.HOOK_OBSERVED,
+                coverage=coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+            ),
+        ),
+    )
+
+    for adapter in (memory_ledger(base), sqlite_ledger(base)):
+        result = await adapter.append_batch(base)
+        frozen = await adapter.freeze_case(
+            base.session_id,
+            base.writer_id,
+            result.result_frontier.sequence,
+            "req_00000000-0000-4000-8000-000000000096",
+            "sha256:" + "9" * 64,
+        )
+        assert isinstance(frozen, FrozenCase)
+        with pytest.raises(PublicOperationError) as caught:
+            await adapter.append_batch(observation)
+        assert caught.value.code is PublicErrorCode.OPERATION_PENDING
+        assert caught.value.retryable is True
+
+
+@pytest.mark.anyio
+async def test_observation_append_resumes_after_frozen_check_terminalizes() -> None:
+    base = ledger_command()
+    observation = ledger_command(request_suffix="3", index=1, expected_frontier=1)
+    observation = replace(
+        observation,
+        writer_id="wri_00000000-0000-4000-8000-000000000097",
+        entries=(
+            replace(
+                observation.entries[0],
+                author=Actor(
+                    actor_id("yoetz:observation-coordinator"),
+                    ActorType.HARNESS,
+                    AuthorshipAssurance.HARNESS_OBSERVED,
+                ),
+                publication_channel=PublicationChannel.HOOK_OBSERVED,
+                coverage=coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+            ),
+        ),
+    )
+
+    for adapter in (memory_ledger(base), sqlite_ledger(base)):
+        result = await adapter.append_batch(base)
+        frozen = await adapter.freeze_case(
+            base.session_id,
+            base.writer_id,
+            result.result_frontier.sequence,
+            "req_00000000-0000-4000-8000-000000000099",
+            "sha256:" + "9" * 64,
+        )
+        assert isinstance(frozen, FrozenCase)
+        await adapter.fail_check_if_current(
+            frozen.lease,
+            PublicOperationError(PublicErrorCode.STORAGE_UNSAFE, "terminal", False),
+        )
+
+        appended = await adapter.append_batch(observation)
+        assert appended.result_frontier.sequence == 2
 
 
 @pytest.mark.anyio

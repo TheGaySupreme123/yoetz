@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -133,13 +134,61 @@ async def test_supervisor_drains_after_notify_without_inline_await() -> None:
 
     worker.run_once = _run_once  # type: ignore[method-assign]
     supervisor = ObservationVerificationSupervisor(service_generation=1)
+    idle = {"count": 0}
+
+    async def _on_idle() -> None:
+        idle["count"] += 1
+
     await supervisor.start()
     supervisor.register(
-        VerificationDrainHandle(workspace_commitment="hmac-sha256:" + "a" * 64, worker=worker)
+        VerificationDrainHandle(
+            workspace_commitment="hmac-sha256:" + "a" * 64,
+            worker=worker,
+            on_idle=_on_idle,
+        )
     )
     supervisor.notify()
     await asyncio.sleep(0.05)
     assert ran["count"] >= 1
+    assert idle["count"] == 1
+    assert supervisor.has_handle("hmac-sha256:" + "a" * 64) is False
+    await supervisor.stop()
+
+
+@pytest.mark.anyio
+async def test_verification_supervisor_preserves_wake_from_idle_handoff() -> None:
+    workspace = "hmac-sha256:" + "b" * 64
+    supervisor = ObservationVerificationSupervisor(service_generation=1)
+    successor_ran = asyncio.Event()
+
+    class _Worker:
+        service_generation = 1
+
+        def __init__(self, ran: asyncio.Event | None = None) -> None:
+            self._ran = ran
+
+        async def run_once(self) -> None:
+            if self._ran is not None:
+                self._ran.set()
+            return None
+
+    async def _register_successor() -> None:
+        supervisor.register(
+            VerificationDrainHandle(
+                workspace_commitment=workspace,
+                worker=_Worker(successor_ran),  # type: ignore[arg-type]
+            )
+        )
+
+    await supervisor.start()
+    supervisor.register(
+        VerificationDrainHandle(
+            workspace_commitment=workspace,
+            worker=_Worker(),  # type: ignore[arg-type]
+            on_idle=_register_successor,
+        )
+    )
+    await asyncio.wait_for(successor_ran.wait(), timeout=0.25)
     await supervisor.stop()
 
 
@@ -262,6 +311,7 @@ async def test_approved_check_materialization_is_service_owned_and_idempotent(
         approval_commitment,
     )
     from yoetz.application.observation_coordinator import ObservationCoordinator
+    from yoetz.application.observation_materialize import observation_writer_id
     from yoetz.domain.events import (
         AcceptedEvent,
         EvidenceDigestProvenance,
@@ -328,7 +378,15 @@ async def test_approved_check_materialization_is_service_owned_and_idempotent(
 
     await coordinator._materialize_approved_check(runtime, completed)  # pyright: ignore[reportPrivateUsage]
     object_count = len(objects._data)  # pyright: ignore[reportPrivateUsage]
-    await coordinator._materialize_approved_check(runtime, completed)  # pyright: ignore[reportPrivateUsage]
+    harness_runtime = replace(
+        runtime,
+        writer_id=observation_writer_id(runtime.task_id, runtime.session_id),
+    )
+    await coordinator._materialize_approved_check(  # pyright: ignore[reportPrivateUsage]
+        harness_runtime,
+        completed,
+        legacy_writer_id=runtime.writer_id,
+    )
     assert len(objects._data) == object_count  # pyright: ignore[reportPrivateUsage]
 
     records = [row async for row in ledger.load_events(seed.session_id)]

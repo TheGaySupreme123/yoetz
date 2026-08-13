@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
@@ -25,11 +26,7 @@ from yoetz.adapters.integrations.observation_local import (
     LocalObservationStore,
     ObservationOutboxRow,
 )
-from yoetz.application.observation_drain import (
-    DEFAULT_OBSERVATION_SWEEP_LIMIT,
-    ObservationDrainAction,
-    route_observation_ingest,
-)
+from yoetz.application.observation_drain import ObservationDrainAction, route_observation_ingest
 from yoetz.application.recommendations import cached_pending_recommendations
 from yoetz.cli import hooks as hooks_cli
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic
@@ -92,12 +89,13 @@ _MAX_CONTENT_CHUNK: Final = 256 * 1024
 # Ingest rejections that are recoverable: keep the outbox entry pending for a
 # later drain. Anything else is permanently invalid and gets quarantined so it
 # is never silently dropped as if committed.
-_HOOK_DRAIN_BUDGET_SECONDS: Final = 1.75
+_HOOK_DRAIN_BUDGET_SECONDS: Final = 0.20
+_HOOK_DRAIN_ROW_LIMIT: Final = 4
 # Codex hard-clamps SessionEnd hooks to 3 seconds. The default drain budget
 # plus ingest/encode overhead measured within ~0.5s of that ceiling on a
 # realistic store, so SessionEnd drains under a tighter budget: an undrained
 # row is retried on the next session's hooks, a SIGKILLed hook drains nothing.
-_SESSION_END_DRAIN_BUDGET_SECONDS: Final = 0.75
+_SESSION_END_DRAIN_BUDGET_SECONDS: Final = 0.15
 # A run of consecutive service_unavailable rejections means the service is
 # struggling now; yield the pass and let a later hook retry rather than
 # spending the rest of the budget collecting identical failures.
@@ -535,6 +533,7 @@ async def _drain_outbox(
 
     with store.drain_lease(workspace_commitment) as owned:
         if not owned:
+            record_hook_diagnostic("drain_lease_contended", event_name, _state=_state)
             return
         await _drain_outbox_leased(
             store,
@@ -596,7 +595,7 @@ async def _drain_outbox_leased(
         session_order.remove(codex_session_id)
         session_order.insert(0, codex_session_id)
     pending: list[ObservationOutboxRow] = []
-    while grouped and len(pending) < DEFAULT_OBSERVATION_SWEEP_LIMIT:
+    while grouped and len(pending) < _HOOK_DRAIN_ROW_LIMIT:
         for session_id in tuple(session_order):
             queue = grouped.get(session_id)
             if not queue:
@@ -605,7 +604,7 @@ async def _drain_outbox_leased(
             pending.append(queue.pop(0))
             if not queue:
                 grouped.pop(session_id, None)
-            if len(pending) >= DEFAULT_OBSERVATION_SWEEP_LIMIT:
+            if len(pending) >= _HOOK_DRAIN_ROW_LIMIT:
                 break
     # Retryable rejections split three ways by scope (the reason vocabulary is
     # RETRYABLE_OBSERVATION_REJECTIONS in application/observation_drain.py):
@@ -792,17 +791,27 @@ def handle_observe(
     mapped-session status, and outbox drains are all skipped).
     """
 
-    import anyio
-
-    runner: AsyncRunner = cast(AsyncRunner, anyio.run if run_async is None else run_async)
-    store = LocalObservationStore(_state=_state)
-    # Shared hook IO/status helpers live in cli.hooks; intentional private seam reuse.
-    _stderr_line = hooks_cli._stderr_line  # pyright: ignore[reportPrivateUsage]
-    _stdout_json = hooks_cli._stdout_json  # pyright: ignore[reportPrivateUsage]
-    _context_output = hooks_cli._context_output  # pyright: ignore[reportPrivateUsage]
-    _active_context = hooks_cli._active_context  # pyright: ignore[reportPrivateUsage]
-    _read_status = hooks_cli._read_status  # pyright: ignore[reportPrivateUsage]
     try:
+        import anyio
+
+        runner: AsyncRunner = cast(AsyncRunner, anyio.run if run_async is None else run_async)
+        store = LocalObservationStore(_state=_state)
+        # Shared hook IO/status helpers live in cli.hooks; intentional private seam reuse.
+        _stderr_line = hooks_cli._stderr_line  # pyright: ignore[reportPrivateUsage]
+        raw_stdout_json = hooks_cli._stdout_json  # pyright: ignore[reportPrivateUsage]
+        _context_output = hooks_cli._context_output  # pyright: ignore[reportPrivateUsage]
+        _active_context = hooks_cli._active_context  # pyright: ignore[reportPrivateUsage]
+        _read_status = hooks_cli._read_status  # pyright: ignore[reportPrivateUsage]
+
+        def _stdout_json(value: JsonValue, stream: BinaryIO | None = None) -> None:
+            if not raw_stdout_json(value, stream):
+                with contextlib.suppress(BaseException):
+                    record_hook_diagnostic("stdout_write_failed", event_name, _state=_state)
+            if stream is None and sys.stdout is sys.__stdout__:
+                with contextlib.suppress(BaseException):
+                    sys.stdout.flush()
+                    sys.stdout.close()
+
         payload = hooks_cli.read_hook_payload(stdin_bytes)
         raw_event = event_name or payload.get("hook_event_name")
         if type(raw_event) is not str or not raw_event:
@@ -1099,11 +1108,19 @@ def handle_observe(
         else:
             _stdout_json({}, stdout)
         return 0
-    except Exception:
-        _stderr_line("hook_observe_degraded: observe")
-        record_hook_diagnostic("observe", "observe", _state=_state)
-        try:
-            _stdout_json({}, stdout)
-        except Exception:
-            pass
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            hooks_cli._stderr_line(  # pyright: ignore[reportPrivateUsage]
+                "hook_observe_degraded: observe"
+            )
+        with contextlib.suppress(BaseException):
+            record_hook_diagnostic("observe", event_name or "observe", _state=_state)
+        emitted = False
+        with contextlib.suppress(BaseException):
+            emitted = hooks_cli._stdout_json({}, stdout)  # pyright: ignore[reportPrivateUsage]
+        if not emitted:
+            with contextlib.suppress(BaseException):
+                record_hook_diagnostic(
+                    "stdout_write_failed", event_name or "observe", _state=_state
+                )
         return 0

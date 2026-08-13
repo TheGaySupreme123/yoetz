@@ -105,6 +105,45 @@ def test_completion_without_verification_is_clear() -> None:
     )
 
 
+def test_standing_provider_condition_keeps_one_candidate_identity_as_envelopes_grow() -> None:
+    composition = ObservationCompositionFact(
+        semantic_configured=True,
+        semantic_ready=False,
+        provider_factory_ids=("provider-a",),
+        connected_provider_ids=(),
+    )
+    first = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(_envelope("hook:one", {"tool_name": "shell"}),),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            composition=composition,
+            has_real_observation=True,
+        )
+    )
+    many = tuple(
+        _envelope(f"hook:{index}", {"tool_name": "shell"}, pos=index) for index in range(1, 21)
+    )
+    latest = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=many,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            composition=composition,
+            has_real_observation=True,
+        )
+    )
+    assert first is not None and latest is not None
+    first_provider = next(
+        item for item in first.ranked_items if item.rule_code == "provider_not_ready"
+    )
+    latest_provider = next(
+        item for item in latest.ranked_items if item.rule_code == "provider_not_ready"
+    )
+    assert latest_provider.finding_id == first_provider.finding_id
+    assert latest.evidence_basis_digest != first.evidence_basis_digest
+
+
 def test_semantic_packet_minimization() -> None:
     envelopes = (
         _envelope(

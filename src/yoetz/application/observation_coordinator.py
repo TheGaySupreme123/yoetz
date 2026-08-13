@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
@@ -38,6 +38,7 @@ from yoetz.application.observation_materialize import (
     media_type_for_schema,
     observation_author,
     observation_operation_digest,
+    observation_writer_id,
     stable_observation_id,
 )
 from yoetz.application.observation_verification import (
@@ -67,8 +68,15 @@ from yoetz.domain.events import (
     encode_payload,
     media_type_for,
 )
-from yoetz.domain.findings import FINDING_KIND_TRAITS, Finding, FindingKind, FindingOrigin
+from yoetz.domain.findings import (
+    FINDING_KIND_TRAITS,
+    Finding,
+    FindingId,
+    FindingKind,
+    FindingOrigin,
+)
 from yoetz.domain.observation import (
+    AdviceItem,
     ObservationContentChunk,
     ObservationContentKind,
     ObservationControlCommand,
@@ -80,6 +88,7 @@ from yoetz.domain.observation import (
     ObservationRevokeCommand,
     ObservationStatus,
     ObservationStatusQuery,
+    observation_envelope_to_json,
 )
 from yoetz.domain.values import (
     Frontier,
@@ -93,6 +102,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
     timestamp_from_string,
 )
+from yoetz.kernel.projections import ProjectionRecord, ProjectionState
 from yoetz.observability.logging import record_unexpected_exception_without_raising
 from yoetz.observability.privacy import redact_sensitive_content
 from yoetz.ports.clock import ClockPort
@@ -153,6 +163,10 @@ def _reject(reason: str, cursor: object | None = None) -> ObservationIngestResul
     )
 
 
+def _empty_advice_event_ref_cache() -> dict[tuple[str, str], tuple[str, ...]]:
+    return {}
+
+
 @dataclass
 class ObservationCoordinator:
     """Resolve Codex session → mapped task SQLite observation store + ledger."""
@@ -169,6 +183,9 @@ class ObservationCoordinator:
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
     observation_enabled: bool = True
+    _advice_event_ref_cache: dict[tuple[str, str], tuple[str, ...]] = field(
+        default_factory=_empty_advice_event_ref_cache, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -190,69 +207,114 @@ class ObservationCoordinator:
         if supervisor is None:
             return
         for workspace in self.local.list_consented_workspaces():
-            consent = self.local.consent_for(workspace)
-            if consent is None or not consent.active:
-                continue
-            sessions = self.local.codex_sessions_for_workspace(workspace)
-            if not sessions:
-                continue
-            for codex_session_id in sessions:
-                mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
-                if mapping is None:
-                    continue
-                runtime: TaskRuntime | None = None
-                try:
-                    runtime = await self.runtime.route(
-                        RouteCommand(
-                            session_id=mapping.yoetz_session_id,
-                            writer_id=mapping.yoetz_writer_id,
-                            access=RouteAccess.WRITE,
-                            required_capabilities=frozenset(
-                                {
-                                    RuntimeCapability.STRUCTURAL_READ,
-                                    RuntimeCapability.PAYLOAD_READ,
-                                    RuntimeCapability.WRITE,
-                                }
-                            ),
-                        )
-                    )
-                    store = self._observation_store(runtime)
-                    repository = getattr(store, "verification_repository", None)
-                    if not callable(repository):
-                        continue
-                    repo = cast(ObservationVerificationRepository, repository())
-                    pending = repo.list_pending_workspaces()
-                    if workspace not in pending:
-                        continue
-                    worker = await self._rebuild_verification_worker(runtime, workspace, store)
-                    if worker is None:
-                        continue
-
-                    async def _after(
-                        bound_workspace: str = workspace,
-                        bound_runtime: TaskRuntime = runtime,
-                        bound_store: TaskObservationPort = store,
-                    ) -> None:
-                        await self._run_advice(bound_workspace, bound_runtime, bound_store)
-
-                    supervisor.register(
-                        VerificationDrainHandle(
-                            workspace_commitment=workspace,
-                            worker=worker,
-                            after_complete=_after,
-                        )
-                    )
-                    break
-                except Exception:
-                    self.local.note_coverage_gap(
-                        workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
-                    )
-                finally:
-                    if runtime is not None:
-                        release = getattr(self.runtime, "release", None)
-                        if release is not None:
-                            await release(runtime)
+            await self._rediscover_workspace_pending_verification(supervisor, workspace)
         supervisor.notify()
+
+    async def _rediscover_workspace_pending_verification(
+        self,
+        supervisor: ObservationVerificationSupervisor,
+        workspace: str,
+        *,
+        sessions: tuple[str, ...] | None = None,
+        start_index: int = 0,
+    ) -> None:
+        """Register the next pending session repository for one workspace."""
+
+        if supervisor.closed or supervisor.has_handle(workspace):
+            return
+        consent = self.local.consent_for(workspace)
+        if consent is None or not consent.active:
+            return
+        if sessions is None:
+            sessions = self.local.codex_sessions_for_workspace(workspace)
+        for session_index, codex_session_id in enumerate(sessions[start_index:], start=start_index):
+            if supervisor.closed or supervisor.has_handle(workspace):
+                return
+            mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
+            if mapping is None:
+                continue
+            runtime: TaskRuntime | None = None
+            try:
+                runtime = await self.runtime.route(
+                    RouteCommand(
+                        session_id=mapping.yoetz_session_id,
+                        writer_id=observation_writer_id(
+                            mapping.yoetz_task_id, mapping.yoetz_session_id
+                        ),
+                        access=RouteAccess.WRITE,
+                        required_capabilities=frozenset(
+                            {
+                                RuntimeCapability.STRUCTURAL_READ,
+                                RuntimeCapability.PAYLOAD_READ,
+                                RuntimeCapability.WRITE,
+                            }
+                        ),
+                    )
+                )
+                store = self._observation_store(runtime)
+                repository = getattr(store, "verification_repository", None)
+                if not callable(repository):
+                    continue
+                repo = cast(ObservationVerificationRepository, repository())
+                pending = repo.list_pending_workspaces()
+                if workspace not in pending:
+                    continue
+                worker = await self._rebuild_verification_worker(
+                    runtime,
+                    workspace,
+                    store,
+                    legacy_writer_id=mapping.yoetz_writer_id,
+                )
+                if worker is None:
+                    continue
+
+                async def _after(
+                    bound_workspace: str = workspace,
+                    bound_runtime: TaskRuntime = runtime,
+                    bound_store: TaskObservationPort = store,
+                    bound_legacy_writer_id: str = mapping.yoetz_writer_id,
+                ) -> None:
+                    await self._run_advice(
+                        bound_workspace,
+                        bound_runtime,
+                        bound_store,
+                        legacy_writer_id=bound_legacy_writer_id,
+                    )
+
+                async def _release_and_continue(
+                    bound_runtime: TaskRuntime = runtime,
+                    bound_workspace: str = workspace,
+                    bound_sessions: tuple[str, ...] = sessions,
+                    next_session_index: int = session_index + 1,
+                ) -> None:
+                    await self.runtime.release(bound_runtime)
+                    await self._rediscover_workspace_pending_verification(
+                        supervisor,
+                        bound_workspace,
+                        sessions=bound_sessions,
+                        start_index=next_session_index,
+                    )
+
+                registered = supervisor.register(
+                    VerificationDrainHandle(
+                        workspace_commitment=workspace,
+                        worker=worker,
+                        after_complete=_after,
+                        on_idle=_release_and_continue,
+                    )
+                )
+                if registered:
+                    runtime = None
+                return
+            except Exception:
+                self.local.note_coverage_gap(
+                    workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                )
+            finally:
+                if runtime is not None:
+                    release = getattr(self.runtime, "release", None)
+                    if release is not None:
+                        await release(runtime)
 
     async def ingest_request(self, request: ObservationIngestRequest) -> ObservationIngestResult:
         """Coordinator ingest path used by ordinary-control ``observation_ingest``."""
@@ -297,7 +359,9 @@ class ObservationCoordinator:
                 runtime = await self.runtime.route(
                     RouteCommand(
                         session_id=mapping.yoetz_session_id,
-                        writer_id=mapping.yoetz_writer_id,
+                        writer_id=observation_writer_id(
+                            mapping.yoetz_task_id, mapping.yoetz_session_id
+                        ),
                         access=RouteAccess.WRITE,
                         required_capabilities=frozenset(
                             {
@@ -346,7 +410,12 @@ class ObservationCoordinator:
                 batch = materialize_observation_envelope(envelope, task_id=runtime.task_id)
                 if batch.skip_reason is None and batch.drafts:
                     stage = "ledger_append"
-                    claim = await self._append_materialized(runtime, envelope, batch)
+                    claim = await self._append_materialized(
+                        runtime,
+                        envelope,
+                        batch,
+                        legacy_writer_id=mapping.yoetz_writer_id,
+                    )
                     if claim is not None:
                         operation_id, materialization_digest = claim
                         store.record_logical_identity_claim(
@@ -360,9 +429,17 @@ class ObservationCoordinator:
                         )
 
                 stage = "verification"
-                await self._enqueue_verification(runtime, workspace, store, envelope)
+                await self._enqueue_verification(
+                    runtime,
+                    workspace,
+                    store,
+                    envelope,
+                    legacy_writer_id=mapping.yoetz_writer_id,
+                )
                 stage = "advice"
-                await self._run_advice(workspace, runtime, store)
+                await self._run_advice(
+                    workspace, runtime, store, legacy_writer_id=mapping.yoetz_writer_id
+                )
                 return result
             except PublicOperationError as exc:
                 record_unexpected_exception_without_raising(
@@ -426,7 +503,9 @@ class ObservationCoordinator:
                 runtime = await self.runtime.route(
                     RouteCommand(
                         session_id=mapping.yoetz_session_id,
-                        writer_id=mapping.yoetz_writer_id,
+                        writer_id=observation_writer_id(
+                            mapping.yoetz_task_id, mapping.yoetz_session_id
+                        ),
                         access=RouteAccess.WRITE,
                         required_capabilities=frozenset({RuntimeCapability.WRITE}),
                     )
@@ -453,11 +532,29 @@ class ObservationCoordinator:
             )
         return store
 
+    async def _route_observation_runtime(self, task_id: str, session_id: str) -> TaskRuntime:
+        return await self.runtime.route(
+            RouteCommand(
+                session_id=session_id,
+                writer_id=observation_writer_id(task_id, session_id),
+                access=RouteAccess.WRITE,
+                required_capabilities=frozenset(
+                    {
+                        RuntimeCapability.STRUCTURAL_READ,
+                        RuntimeCapability.PAYLOAD_READ,
+                        RuntimeCapability.WRITE,
+                    }
+                ),
+            )
+        )
+
     async def _append_materialized(
         self,
         runtime: TaskRuntime,
         envelope: ObservationEnvelope,
         batch: MaterializedObservationBatch,
+        *,
+        legacy_writer_id: str | None = None,
     ) -> tuple[str, str] | None:
         writer_id = runtime.writer_id
         if writer_id is None:
@@ -476,6 +573,20 @@ class ObservationCoordinator:
         existing = await runtime.ledger.lookup_operation(writer_id, operation_id)
         if existing is not None:
             return operation_id, digest
+        if legacy_writer_id is not None and legacy_writer_id != writer_id:
+            legacy_digest = observation_operation_digest(
+                task_id=runtime.task_id,
+                session_id=runtime.session_id,
+                writer_id=legacy_writer_id,
+                logical_identity=canonical_logical_identity(envelope),
+                draft_roles=tuple(item.role for item in batch.drafts),
+            )
+            legacy_operation_id = self._stable_operation_id(legacy_digest)
+            if (
+                await runtime.ledger.lookup_operation(legacy_writer_id, legacy_operation_id)
+                is not None
+            ):
+                return legacy_operation_id, legacy_digest
 
         author = observation_author()
         refs: list[ObjectRef] = []
@@ -540,6 +651,8 @@ class ObservationCoordinator:
         self,
         runtime: TaskRuntime,
         completed: CompletedApprovedCheck,
+        *,
+        legacy_writer_id: str | None = None,
     ) -> None:
         """Append one idempotent service-owned action/evidence/result graph."""
 
@@ -563,6 +676,26 @@ class ObservationCoordinator:
         operation_id = self._stable_operation_id(operation_digest)
         if await runtime.ledger.lookup_operation(writer_id, operation_id) is not None:
             return
+        if legacy_writer_id is not None and legacy_writer_id != writer_id:
+            legacy_digest = canonical_digest(
+                JsonObject(
+                    {
+                        "format": "yoetz.approved-check-ledger-materialization/1",
+                        "job_id": completed.job.job_id,
+                        "approval_commitment": completed.job.approval_commitment,
+                        "result_digest": result.result_digest,
+                        "task_id": runtime.task_id,
+                        "session_id": runtime.session_id,
+                        "writer_id": legacy_writer_id,
+                    }
+                )
+            )
+            legacy_operation_id = self._stable_operation_id(legacy_digest)
+            if (
+                await runtime.ledger.lookup_operation(legacy_writer_id, legacy_operation_id)
+                is not None
+            ):
+                return
 
         receipt_document = JsonObject(
             {
@@ -854,6 +987,8 @@ class ObservationCoordinator:
         workspace: str,
         store: TaskObservationPort,
         envelope: ObservationEnvelope,
+        *,
+        legacy_writer_id: str | None = None,
     ) -> None:
         """Capture subject state, enqueue durable work, wake the supervisor.
 
@@ -861,22 +996,61 @@ class ObservationCoordinator:
         scenarios keep completing within the same await.
         """
 
-        worker = await self._prepare_verification_worker(runtime, workspace, store, envelope)
+        worker = await self._prepare_verification_worker(
+            runtime,
+            workspace,
+            store,
+            envelope,
+            legacy_writer_id=legacy_writer_id,
+        )
         if worker is None:
             return
         if self.verification_supervisor is not None:
+            supervisor = self.verification_supervisor
+            if supervisor.has_handle(workspace):
+                supervisor.notify(workspace)
+                return
 
-            async def _after() -> None:
-                await self._run_advice(workspace, runtime, store)
-
-            self.verification_supervisor.register(
-                VerificationDrainHandle(
-                    workspace_commitment=workspace,
-                    worker=worker,
-                    after_complete=_after,
-                )
+            deferred_runtime = await self._route_observation_runtime(
+                runtime.task_id, runtime.session_id
             )
-            self.verification_supervisor.notify(workspace)
+            try:
+                deferred_store = self._observation_store(deferred_runtime)
+                deferred_worker = await self._rebuild_verification_worker(
+                    deferred_runtime,
+                    workspace,
+                    deferred_store,
+                    legacy_writer_id=legacy_writer_id,
+                )
+                if deferred_worker is None:
+                    await self.runtime.release(deferred_runtime)
+                    return
+
+                async def _after() -> None:
+                    await self._run_advice(
+                        workspace,
+                        deferred_runtime,
+                        deferred_store,
+                        legacy_writer_id=legacy_writer_id,
+                    )
+
+                async def _release() -> None:
+                    await self.runtime.release(deferred_runtime)
+
+                registered = supervisor.register(
+                    VerificationDrainHandle(
+                        workspace_commitment=workspace,
+                        worker=deferred_worker,
+                        after_complete=_after,
+                        on_idle=_release,
+                    )
+                )
+                if not registered:
+                    await self.runtime.release(deferred_runtime)
+            except BaseException:
+                await self.runtime.release(deferred_runtime)
+                raise
+            supervisor.notify(workspace)
             return
         while await worker.run_once() is not None:
             pass
@@ -887,6 +1061,8 @@ class ObservationCoordinator:
         workspace: str,
         store: TaskObservationPort,
         envelope: ObservationEnvelope,
+        *,
+        legacy_writer_id: str | None = None,
     ) -> ObservationVerificationWorker | None:
         """Build a worker and enqueue if subject state changed; never run checks here."""
 
@@ -1024,7 +1200,7 @@ class ObservationCoordinator:
             now=now_wire,
             lease_expires_at=lease_expiry,
             materialize_result=lambda completed: self._materialize_approved_check(
-                runtime, completed
+                runtime, completed, legacy_writer_id=legacy_writer_id
             ),
         )
         worker.enqueue_if_changed(
@@ -1118,6 +1294,8 @@ class ObservationCoordinator:
         runtime: TaskRuntime,
         workspace: str,
         store: TaskObservationPort,
+        *,
+        legacy_writer_id: str | None = None,
     ) -> ObservationVerificationWorker | None:
         """Rebuild a drain worker for already-pending durable jobs (no enqueue)."""
 
@@ -1224,7 +1402,7 @@ class ObservationCoordinator:
             now=now_wire,
             lease_expires_at=lease_expiry,
             materialize_result=lambda completed: self._materialize_approved_check(
-                runtime, completed
+                runtime, completed, legacy_writer_id=legacy_writer_id
             ),
         )
 
@@ -1270,7 +1448,12 @@ class ObservationCoordinator:
             return self.ids.new(IdKind.REQUEST)
 
     async def _run_advice(
-        self, workspace: str, runtime: TaskRuntime | str, store: TaskObservationPort
+        self,
+        workspace: str,
+        runtime: TaskRuntime | str,
+        store: TaskObservationPort,
+        *,
+        legacy_writer_id: str | None = None,
     ) -> None:
         task_id = runtime.task_id if isinstance(runtime, TaskRuntime) else runtime
         envelopes = store.list_envelopes(workspace)
@@ -1284,7 +1467,12 @@ class ObservationCoordinator:
             # advancing it first could make a failed ledger append disappear on
             # retry and let the outbox ACK without the finding ever landing.
             if isinstance(runtime, TaskRuntime):
-                await self._materialize_advice_findings(runtime, envelopes, snapshot)
+                await self._materialize_advice_findings(
+                    runtime,
+                    envelopes,
+                    snapshot,
+                    legacy_writer_id=legacy_writer_id,
+                )
             now = timestamp_from_datetime(self.clock.now_utc())
             store.set_advice_snapshot(workspace, snapshot, now)
             session_id = runtime.session_id if isinstance(runtime, TaskRuntime) else None
@@ -1337,26 +1525,55 @@ class ObservationCoordinator:
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
                 await cast(Awaitable[None], result)
 
+    def _materialized_event_refs(
+        self, task_id: str, envelope: ObservationEnvelope
+    ) -> tuple[str, ...]:
+        key = (task_id, canonical_digest(observation_envelope_to_json(envelope)))
+        cached = self._advice_event_ref_cache.pop(key, None)
+        if cached is not None:
+            self._advice_event_ref_cache[key] = cached
+            return cached
+        batch = materialize_observation_envelope(envelope, task_id=task_id)
+        refs = tuple(str(item.draft.event_id) for item in batch.drafts)
+        self._advice_event_ref_cache[key] = refs
+        while len(self._advice_event_ref_cache) > 4096:
+            self._advice_event_ref_cache.pop(next(iter(self._advice_event_ref_cache)))
+        return refs
+
     async def _materialize_advice_findings(
         self,
         runtime: TaskRuntime,
         envelopes: tuple[ObservationEnvelope, ...],
         snapshot: object,
+        *,
+        legacy_writer_id: str | None = None,
     ) -> None:
         from yoetz.domain.observation import AdviceSnapshot
 
         if type(snapshot) is not AdviceSnapshot or runtime.writer_id is None:
             return
-        refs: set[str] = set()
+        refs_by_source: dict[str, set[str]] = {}
         for envelope in envelopes:
-            batch = materialize_observation_envelope(envelope, task_id=runtime.task_id)
-            refs.update(str(item.draft.event_id) for item in batch.drafts)
-        if not refs:
-            return
+            refs_by_source.setdefault(envelope.source_identity, set()).update(
+                self._materialized_event_refs(runtime.task_id, envelope)
+            )
+        lifecycle_ref: str | None = None
+        async for record in runtime.ledger.load_events(runtime.session_id):
+            if record.schema.name in {"session_opened", "session_resumed"}:
+                lifecycle_ref = str(record.event_id)
+                break
         projection = await runtime.ledger.load_projection(
             runtime.session_id, ProjectionView.COMPACT
         )
         frontier = Frontier.genesis() if projection is None else projection.frontier
+        finding_projection = await runtime.ledger.load_projection(
+            runtime.session_id, ProjectionView.CANDIDATE_FINDINGS
+        )
+        projected_findings: Mapping[FindingId, ProjectionRecord[Finding]] = (
+            finding_projection.state.findings
+            if finding_projection is not None and type(finding_projection.state) is ProjectionState
+            else {}
+        )
         kind_by_rule = {
             "failed_command_unresolved": FindingKind.FAILED_WORK_OMITTED,
             "edit_after_successful_check": FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
@@ -1368,11 +1585,43 @@ class ObservationCoordinator:
             "provider_not_ready": FindingKind.MATERIAL_LIMITATION_OMITTED,
             "semantic_claim_without_attempt": FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
         }
-        items = tuple(
+        candidate_items = tuple(
             item
             for item in snapshot.ranked_items
             if item.origin == "deterministic" and item.rule_code in kind_by_rule
         )
+        if not candidate_items:
+            return
+        items: list[tuple[AdviceItem, tuple[str, ...]]] = []
+        for item in candidate_items:
+            matched_refs = {
+                ref
+                for source_ref in item.evidence_refs
+                for ref in refs_by_source.get(source_ref, ())
+            }
+            if not matched_refs:
+                # A candidate that names no envelope is a standing condition about the session,
+                # so anchor it on the session lifecycle event: one stable ref for the life of the
+                # condition, which is what lets check and receipt collapse repeats. Where no
+                # lifecycle event exists yet, fall back to every observed ref rather than
+                # dropping the finding — a finding that silently fails to land is the one
+                # outcome this must never produce.
+                if lifecycle_ref is not None:
+                    matched_refs.add(lifecycle_ref)
+                else:
+                    for observed in refs_by_source.values():
+                        matched_refs.update(observed)
+            subject_refs = tuple(sorted(matched_refs, key=str.encode)[:64])
+            if not subject_refs:
+                continue
+            existing_finding = projected_findings.get(item.finding_id)
+            if (
+                existing_finding is not None
+                and existing_finding.payload is not None
+                and tuple(str(ref) for ref in existing_finding.payload.subject_refs) == subject_refs
+            ):
+                continue
+            items.append((item, subject_refs))
         if not items:
             return
         request_digest_value = canonical_digest(
@@ -1380,8 +1629,13 @@ class ObservationCoordinator:
                 {
                     "format": "yoetz.observation-advice-findings/1",
                     "task_id": runtime.task_id,
-                    "suppression_identity": snapshot.suppression_identity,
-                    "evidence_basis_digest": snapshot.evidence_basis_digest,
+                    "findings": tuple(
+                        {
+                            "finding_id": str(item.finding_id),
+                            "subject_refs": subject_refs,
+                        }
+                        for item, subject_refs in items
+                    ),
                 }
             )
         )
@@ -1389,11 +1643,14 @@ class ObservationCoordinator:
         existing = await runtime.ledger.lookup_operation(runtime.writer_id, operation_id)
         if existing is not None:
             return
+        if legacy_writer_id is not None and legacy_writer_id != runtime.writer_id:
+            if await runtime.ledger.lookup_operation(legacy_writer_id, operation_id) is not None:
+                return
         entries: list[AppendEntry] = []
         object_refs: list[ObjectRef] = []
         envelope_coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
-        subject_refs = tuple(event_id(ref) for ref in sorted(refs, key=str.encode)[-64:])
-        for item in items:
+        for item, subject_ref_values in items:
+            subject_refs = tuple(event_id(ref) for ref in subject_ref_values)
             kind = kind_by_rule[item.rule_code]
             policy_id = (
                 "work-integrity"
@@ -1426,8 +1683,11 @@ class ObservationCoordinator:
                     stable_observation_id(
                         kind=IdKind.EVENT,
                         task_id=runtime.task_id,
-                        source_identity=snapshot.suppression_identity,
-                        mapping_version="obs-advice/1.0.0",
+                        source_identity=(
+                            f"advice-candidate:{item.finding_id}:"
+                            f"{canonical_digest(JsonObject({'subject_refs': subject_ref_values}))}"
+                        ),
+                        mapping_version="obs-advice/1.1.0",
                         role=str(item.finding_id),
                     )
                 ),

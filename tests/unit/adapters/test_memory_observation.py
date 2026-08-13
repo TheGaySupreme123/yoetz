@@ -37,16 +37,21 @@ def _cursor(*, generation: int = 1, byte_pos: int = 10, event_pos: int = 1) -> O
     )
 
 
-def _envelope(*, cursor: ObservationCursor | None = None) -> ObservationEnvelope:
+def _envelope(
+    *,
+    cursor: ObservationCursor | None = None,
+    receipt_time: Timestamp = _TIME,
+    content_object_refs: tuple[str, ...] = (),
+) -> ObservationEnvelope:
     return ObservationEnvelope(
         session_commitment=_SESSION,
         event_kind="PostToolUse",
         source_identity="hook:evt-1",
         source=ObservationSource.CODEX_HOOK,
         cursor=cursor or _cursor(),
-        receipt_time=_TIME,
+        receipt_time=receipt_time,
         structural_payload=JsonObject({"tool_name": "shell", "exit_status": 0}),
-        content_object_refs=(),
+        content_object_refs=content_object_refs,
         gap_codes=(),
     )
 
@@ -100,5 +105,83 @@ def test_resume_without_consent_fails() -> None:
         store = MemoryObservationStore()
         with pytest.raises(PublicOperationError):
             await store.resume(ObservationControlCommand(_WORKSPACE))
+
+    asyncio.run(run())
+
+
+def test_successful_cursor_advance_clears_stale_gap_despite_future_receipt_time() -> None:
+    async def run() -> None:
+        store = MemoryObservationStore()
+        store.grant_consent(_WORKSPACE, _TIME)
+        store.bind_session(_WORKSPACE, _SESSION)
+        assert (await store.ingest(_envelope(cursor=_cursor(event_pos=2)))).disposition is (
+            ObservationIngestDisposition.ACCEPTED
+        )
+        stale = await store.ingest(
+            _envelope(
+                cursor=_cursor(event_pos=1),
+                receipt_time=Timestamp("2099-01-01T00:00:00.000Z"),
+            )
+        )
+        assert stale.reason == ObservationGapCode.CURSOR_STALE.value
+        assert (
+            ObservationGapCode.CURSOR_STALE.value
+            in (await store.status(ObservationStatusQuery(_WORKSPACE))).gaps
+        )
+
+        advanced = await store.ingest(_envelope(cursor=_cursor(event_pos=3)))
+        assert advanced.disposition is ObservationIngestDisposition.ACCEPTED
+        assert (
+            ObservationGapCode.CURSOR_STALE.value
+            not in (await store.status(ObservationStatusQuery(_WORKSPACE))).gaps
+        )
+        history = store._state.gaps[_WORKSPACE][  # pyright: ignore[reportPrivateUsage]
+            ObservationGapCode.CURSOR_STALE.value
+        ]
+        assert history.first_seen == Timestamp("2099-01-01T00:00:00.000Z")
+        assert history.last_seen == Timestamp("2099-01-01T00:00:00.000Z")
+        assert history.active is False
+
+    asyncio.run(run())
+
+
+def test_captured_content_clears_capture_unavailable_gap() -> None:
+    async def run() -> None:
+        store = MemoryObservationStore()
+        store.grant_consent(_WORKSPACE, _TIME)
+        store.bind_session(_WORKSPACE, _SESSION)
+        gap = _envelope()
+        gap = ObservationEnvelope(
+            session_commitment=gap.session_commitment,
+            event_kind=gap.event_kind,
+            source_identity=gap.source_identity,
+            source=gap.source,
+            cursor=gap.cursor,
+            receipt_time=gap.receipt_time,
+            structural_payload=gap.structural_payload,
+            content_object_refs=gap.content_object_refs,
+            gap_codes=(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,),
+        )
+        assert (await store.ingest(gap)).disposition is ObservationIngestDisposition.ACCEPTED
+        assert (
+            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+            in (await store.status(ObservationStatusQuery(_WORKSPACE))).gaps
+        )
+
+        captured = await store.ingest(
+            _envelope(
+                cursor=_cursor(event_pos=2),
+                content_object_refs=("obj_00000000-0000-4000-8000-000000000001",),
+            )
+        )
+        assert captured.disposition is ObservationIngestDisposition.ACCEPTED
+        assert (
+            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+            not in (await store.status(ObservationStatusQuery(_WORKSPACE))).gaps
+        )
+        history = store._state.gaps[_WORKSPACE][  # pyright: ignore[reportPrivateUsage]
+            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        ]
+        assert history.active is False
 
     asyncio.run(run())

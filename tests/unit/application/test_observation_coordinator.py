@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -18,7 +19,10 @@ from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
-from yoetz.application.observation_materialize import materialize_observation_envelope
+from yoetz.application.observation_materialize import (
+    materialize_observation_envelope,
+    observation_writer_id,
+)
 from yoetz.domain.observation import (
     ObservationCursor,
     ObservationEnvelope,
@@ -125,6 +129,88 @@ def test_materialize_pre_post_and_unpaired() -> None:
     assert ObservationGapCode.UNPAIRED_EVENT.value in unpaired.gaps
 
 
+def test_completion_signal_is_evidence_unless_claim_kind_is_explicit() -> None:
+    task = _task_id()
+    session = f"hmac-sha256:{'ac' * 32}"
+    stop = materialize_observation_envelope(
+        _envelope(session=session, kind="Stop", identity="hook:stop"), task_id=task
+    )
+    assert stop.drafts[0].draft.schema.name == "evidence_recorded"
+    assert stop.drafts[0].role == "completion_signal"
+
+    envelope = _envelope(session=session, kind="AgentMessage", identity="hook:explicit")
+    structural = dict(envelope.structural_payload)
+    structural["claim_kind"] = "completion"
+    explicit = materialize_observation_envelope(
+        ObservationEnvelope(
+            session_commitment=envelope.session_commitment,
+            event_kind=envelope.event_kind,
+            source_identity=envelope.source_identity,
+            source=envelope.source,
+            cursor=envelope.cursor,
+            receipt_time=envelope.receipt_time,
+            structural_payload=JsonObject(structural),
+            content_object_refs=envelope.content_object_refs,
+            gap_codes=envelope.gap_codes,
+        ),
+        task_id=task,
+    )
+    assert explicit.drafts[0].draft.schema.name == "claim_recorded"
+
+
+@pytest.mark.anyio
+async def test_live_upgrade_finds_materialization_under_legacy_writer(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    task_id = _task_id()
+    session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    legacy_writer_id = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
+    harness_writer_id = observation_writer_id(task_id, session_id)
+    envelope = _envelope(session=f"hmac-sha256:{'ae' * 32}", identity="hook:upgrade-hazard")
+    batch = materialize_observation_envelope(envelope, task_id=task_id)
+    lookups: list[tuple[str, str]] = []
+
+    class _Ledger:
+        async def lookup_operation(self, writer_id: str, operation_id: str):
+            lookups.append((writer_id, operation_id))
+            return object() if writer_id == legacy_writer_id else None
+
+    class _Clock:
+        def now_utc(self) -> Timestamp:
+            return Timestamp("2026-01-01T00:00:00.000Z")
+
+    class _Ids:
+        def new(self, kind: IdKind) -> str:
+            return PREFIX_BY_KIND[kind] + str(uuid.uuid4())
+
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=_Ids(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+    )
+    runtime = SimpleNamespace(
+        task_id=task_id,
+        session_id=session_id,
+        writer_id=harness_writer_id,
+        ledger=_Ledger(),
+    )
+
+    recovered = await coordinator._append_materialized(  # pyright: ignore[reportPrivateUsage]
+        cast(TaskRuntime, runtime),
+        envelope,
+        batch,
+        legacy_writer_id=legacy_writer_id,
+    )
+
+    assert recovered is not None
+    assert [writer for writer, _operation in lookups] == [
+        harness_writer_id,
+        legacy_writer_id,
+    ]
+
+
 def test_local_outbox_enqueue_ack_and_overflow(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -139,6 +225,105 @@ def test_local_outbox_enqueue_ack_and_overflow(tmp_path: Path) -> None:
     assert store.pending_outbox_count(workspace) == 1
     assert store.acknowledge_outbox(workspace, "sess-outbox", envelope.source_identity) is True
     assert store.pending_outbox_count(workspace) == 0
+
+
+def test_outbox_ack_does_not_clear_source_reported_overflow(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-source-overflow")
+    source_overflow = _envelope(
+        session=session,
+        identity="hook:source-overflow",
+        gaps=(ObservationGapCode.OUTBOX_OVERFLOW.value,),
+    )
+    assert store.ingest(source_overflow).disposition is ObservationIngestDisposition.ACCEPTED
+
+    delivery = _envelope(session=session, identity="hook:delivery", ordinal=2)
+    assert store.enqueue_outbox(workspace, "sess-source-overflow", delivery) is None
+    assert store.acknowledge_outbox(workspace, "sess-source-overflow", delivery.source_identity)
+
+    assert (
+        ObservationGapCode.OUTBOX_OVERFLOW.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+def test_mapping_gap_history_does_not_latch_after_mapping_exists(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.note_coverage_gap(workspace, ObservationGapCode.MAPPING_MISSING.value)
+    assert (
+        ObservationGapCode.MAPPING_MISSING.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+    store.bind_codex_session(workspace, "mapping-healed")
+
+    assert (
+        ObservationGapCode.MAPPING_MISSING.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+def test_mapping_gap_does_not_return_through_a_stale_pending_row_reason(tmp_path: Path) -> None:
+    """A row rejected before the mapping existed keeps that reason; status must not echo it."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-stale-reason")
+    envelope = _envelope(session=session)
+    assert store.enqueue_outbox(workspace, "sess-stale-reason", envelope) is None
+    row = store.list_pending_outbox_rows(workspace)[0]
+    assert (
+        store.bump_outbox_row_attempt(
+            workspace, row, reason=ObservationGapCode.MAPPING_MISSING.value
+        )
+        is not None
+    )
+    store.note_coverage_gap(workspace, ObservationGapCode.MAPPING_MISSING.value)
+
+    # The mapping demonstrably exists (bind_codex_session above), so the live signal wins over
+    # both the latched code and the row's stale reason. This is the exact shape of issue #219.
+    assert (
+        ObservationGapCode.MAPPING_MISSING.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+def test_content_capture_gap_clears_after_a_later_successful_observation(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-capture")
+    store.note_coverage_gap(workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+    assert (
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+    # An accepted envelope that captured no content is not evidence that capture works.
+    without_content = _envelope(session=session, identity="hook:no-content", ordinal=2)
+    assert store.ingest(without_content).disposition is ObservationIngestDisposition.ACCEPTED
+    assert (
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+    with_content = replace(
+        _envelope(session=session, identity="hook:captured", ordinal=3),
+        content_object_refs=(PREFIX_BY_KIND[IdKind.OBJECT] + str(uuid.uuid4()),),
+    )
+    assert store.ingest(with_content).disposition is ObservationIngestDisposition.ACCEPTED
+
+    # Content demonstrably captured: the historical sighting stays in gap_history but stops
+    # describing the workspace's current state.
+    assert (
+        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
 
 
 def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path) -> None:
@@ -179,7 +364,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_reason == ObservationGapCode.MAPPING_MISSING.value
     assert durable.last_attempt_at == attempted_at
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/3"
+        "yoetz.observation-local/4"
     )
 
 
@@ -834,7 +1019,7 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
         summary="A failed command remains unresolved.",
         detail="Resolve the failed command and rerun the check.",
         recommended_next_action="rerun_check",
-        evidence_refs=(),
+        evidence_refs=("hook:advice-materialization",),
         coverage=item_coverage,
         freshness_frontier="frontier-1",
     )
@@ -851,8 +1036,16 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
     class _Ledger:
         async def load_projection(self, loaded_session_id: str, view: ProjectionView):
             assert loaded_session_id == session_id
-            assert view is ProjectionView.COMPACT
+            assert view in {ProjectionView.COMPACT, ProjectionView.CANDIDATE_FINDINGS}
             return None
+
+        async def _events(self):
+            if False:
+                yield None
+
+        def load_events(self, loaded_session_id: str):
+            assert loaded_session_id == session_id
+            return self._events()
 
         async def lookup_operation(self, loaded_writer_id: str, operation_id: str):
             assert loaded_writer_id == writer_id
@@ -885,6 +1078,14 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
         return None
 
     monkeypatch.setattr(coordinator_module, "run_prepared_append", _capture_append)
+    materialize_calls: list[str] = []
+    real_materialize = coordinator_module.materialize_observation_envelope
+
+    def _count_materialize(envelope: ObservationEnvelope, *, task_id: str):
+        materialize_calls.append(envelope.source_identity)
+        return real_materialize(envelope, task_id=task_id)
+
+    monkeypatch.setattr(coordinator_module, "materialize_observation_envelope", _count_materialize)
 
     class _Clock:
         def now_utc(self) -> datetime:
@@ -935,6 +1136,224 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
     assert entries[0].draft.payload.coverage == item_coverage  # type: ignore[union-attr]
     assert entries[0].publication_channel is PublicationChannel.ENGINE_DERIVED
     assert entries[0].coverage == coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
+
+    revised_item = replace(item, evidence_refs=("hook:advice-revision",))
+    revised_snapshot = replace(
+        snapshot,
+        ranked_items=(revised_item,),
+        evidence_basis_digest="sha256:" + "d" * 64,
+        suppression_identity="advice-materialization-2",
+    )
+    await coordinator._materialize_advice_findings(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        cast(TaskRuntime, runtime),
+        (
+            envelope,
+            _envelope(
+                session=f"hmac-sha256:{'d' * 64}",
+                kind="PostToolUse",
+                identity="hook:advice-revision",
+                ordinal=2,
+                exit_status=2,
+            ),
+        ),
+        revised_snapshot,  # type: ignore[arg-type]
+    )
+    assert len(captured) == 2
+    assert captured[0].command.entries[0].draft.event_id != (
+        captured[1].command.entries[0].draft.event_id
+    )
+    assert materialize_calls == ["hook:advice-materialization", "hook:advice-revision"]
+
+
+@pytest.mark.anyio
+async def test_deferred_verification_uses_a_dedicated_runtime_lease(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from yoetz.application.observation_verification import ObservationVerificationSupervisor
+
+    task_id = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
+    session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    writer_id = observation_writer_id(task_id, session_id)
+    current_worker = object()
+    deferred_worker = object()
+    deferred_store = object()
+    current_runtime = SimpleNamespace(
+        task_id=task_id,
+        session_id=session_id,
+        writer_id=writer_id,
+    )
+    deferred_runtime = SimpleNamespace(
+        task_id=task_id,
+        session_id=session_id,
+        writer_id=writer_id,
+        observation=deferred_store,
+    )
+    routed: list[object] = []
+    released: list[object] = []
+    advised: list[tuple[object, object]] = []
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            routed.append(command)
+            return deferred_runtime
+
+        async def release(self, runtime: object) -> None:
+            released.append(runtime)
+
+    class _Coordinator(ObservationCoordinator):
+        async def _prepare_verification_worker(self, *args: object, **kwargs: object):  # type: ignore[override]  # noqa: SLF001
+            del args, kwargs
+            return current_worker
+
+        async def _rebuild_verification_worker(self, *args: object, **kwargs: object):  # type: ignore[override]  # noqa: SLF001
+            del kwargs
+            assert args[0] is deferred_runtime
+            assert args[2] is deferred_store
+            return deferred_worker
+
+        async def _run_advice(
+            self, workspace: str, runtime: object, store: object, **kwargs: object
+        ):  # type: ignore[override]  # noqa: SLF001
+            del workspace, kwargs
+            advised.append((runtime, store))
+
+    supervisor = ObservationVerificationSupervisor(service_generation=1)
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        verification_supervisor=supervisor,
+    )
+    envelope = _envelope(session=f"hmac-sha256:{'9' * 64}")
+    await coordinator._enqueue_verification(  # pyright: ignore[reportPrivateUsage]
+        cast(TaskRuntime, current_runtime),
+        "hmac-sha256:" + "8" * 64,
+        cast(object, object()),  # type: ignore[arg-type]
+        envelope,
+    )
+
+    handle = next(iter(supervisor._handles.values()))  # pyright: ignore[reportPrivateUsage]
+    assert routed
+    assert handle.worker is deferred_worker
+    assert handle.worker is not current_worker
+    assert handle.after_complete is not None
+    await handle.after_complete()
+    assert advised == [(deferred_runtime, deferred_store)]
+    assert handle.on_idle is not None
+    await handle.on_idle()
+    assert released == [deferred_runtime]
+
+
+@pytest.mark.anyio
+async def test_rediscovery_drains_pending_repositories_for_every_bound_session(
+    tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+
+    from yoetz.application.observation_verification import ObservationVerificationSupervisor
+
+    workspace = "hmac-sha256:" + "7" * 64
+    task_ids = (_task_id(), _task_id())
+    session_ids = (
+        PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+        PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+    )
+    codex_ids = ("codex-rediscover-a", "codex-rediscover-b")
+    local = LocalObservationStore(_state=tmp_path)
+    local.grant_consent(workspace)
+    for codex_id in codex_ids:
+        local.bind_codex_session(workspace, codex_id)
+
+    mappings = {
+        codex_id: LifecycleMapping(
+            mapping_version=1,
+            codex_session_id=codex_id,
+            yoetz_task_id=task_id,
+            yoetz_session_id=session_id,
+            yoetz_writer_id=PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+            last_frontier=None,
+        )
+        for codex_id, task_id, session_id in zip(codex_ids, task_ids, session_ids, strict=True)
+    }
+
+    class _Repository:
+        def __init__(self) -> None:
+            self.pending = True
+
+        def list_pending_workspaces(self) -> tuple[str, ...]:
+            return (workspace,) if self.pending else ()
+
+    class _Worker:
+        service_generation = 1
+
+        def __init__(self, repository: _Repository) -> None:
+            self.repository = repository
+
+        async def run_once(self) -> None:
+            self.repository.pending = False
+            return None
+
+    class _Store:
+        def __init__(self, repository: _Repository) -> None:
+            self._repository = repository
+
+        def verification_repository(self) -> _Repository:
+            return self._repository
+
+    repositories = {session_id: _Repository() for session_id in session_ids}
+    runtimes = {
+        session_id: SimpleNamespace(
+            task_id=task_id,
+            session_id=session_id,
+            writer_id=observation_writer_id(task_id, session_id),
+            observation=_Store(repositories[session_id]),
+        )
+        for task_id, session_id in zip(task_ids, session_ids, strict=True)
+    }
+    released: list[str] = []
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            return runtimes[command.session_id]  # type: ignore[attr-defined]
+
+        async def release(self, runtime: object) -> None:
+            released.append(runtime.session_id)  # type: ignore[attr-defined]
+
+    class _Coordinator(ObservationCoordinator):
+        async def _rebuild_verification_worker(  # type: ignore[override]  # noqa: SLF001
+            self, runtime: object, *args: object, **kwargs: object
+        ) -> object:
+            del args, kwargs
+            return _Worker(repositories[runtime.session_id])  # type: ignore[attr-defined]
+
+    def _mapping_loader(codex_session_id: str, *, _state: Path | None = None):
+        del _state
+        return mappings[codex_session_id]
+
+    supervisor = ObservationVerificationSupervisor(service_generation=1)
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        mapping_loader=_mapping_loader,
+        state_root=tmp_path,
+        verification_supervisor=supervisor,
+    )
+
+    await coordinator.rediscover_pending_verification()
+    first = supervisor._handles[workspace]  # pyright: ignore[reportPrivateUsage]
+    await supervisor._drain_once()  # pyright: ignore[reportPrivateUsage]
+    second = supervisor._handles[workspace]  # pyright: ignore[reportPrivateUsage]
+
+    assert second is not first
+    assert len(released) == 1
+
+    await supervisor._drain_once()  # pyright: ignore[reportPrivateUsage]
+    assert supervisor.has_handle(workspace) is False
+    assert sorted(released) == sorted(session_ids)
 
 
 @pytest.mark.anyio
@@ -1017,7 +1436,11 @@ async def test_advice_materialization_failure_does_not_advance_suppression_snaps
 
     class _RetryCoordinator(ObservationCoordinator):
         async def _materialize_advice_findings(  # type: ignore[override]
-            self, runtime: TaskRuntime, envelopes: tuple[ObservationEnvelope, ...], value: object
+            self,
+            runtime: TaskRuntime,
+            envelopes: tuple[ObservationEnvelope, ...],
+            value: object,
+            **_kwargs: object,
         ) -> None:
             nonlocal attempts
             attempts += 1
@@ -1124,10 +1547,14 @@ async def test_duplicate_ingest_reconciles_ledger_instead_of_early_return(tmp_pa
             return PREFIX_BY_KIND[kind] + str(uuid.uuid4())
 
     class _RecordingCoordinator(ObservationCoordinator):
-        async def _append_materialized(self, runtime: object, envelope: object, batch: object):  # type: ignore[override]  # noqa: SLF001
+        async def _append_materialized(  # type: ignore[override]  # noqa: SLF001
+            self, runtime: object, envelope: object, batch: object, **_kwargs: object
+        ):
             calls["append"] += 1
 
-        async def _run_advice(self, workspace: str, task_id: str, store: object):  # type: ignore[override]  # noqa: SLF001
+        async def _run_advice(  # type: ignore[override]  # noqa: SLF001
+            self, workspace: str, task_id: str, store: object, **_kwargs: object
+        ):
             calls["advice"] += 1
 
     local = LocalObservationStore(_state=tmp_path)

@@ -41,6 +41,8 @@ from yoetz.domain.events import (
     UnknownEvent,
     WriterChain,
     encode_payload,
+    is_observation_authored,
+    is_observation_authorship,
     media_type_for,
     public_error_for_no_obligations_reason_mismatch,
     public_error_for_obligation_resolution_mismatch,
@@ -1144,6 +1146,20 @@ class MemoryLedgerAdapter:
             raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
         return record
 
+    def _has_active_frozen_case_unlocked(self, session_id: str) -> bool:
+        return any(
+            (writer := self._state.writers.get(case_writer_id)) is not None
+            and writer.session_id == session_id
+            and (operation := self._state.operations.get((case_writer_id, operation_id)))
+            is not None
+            and operation[0].state is OperationState.PENDING
+            for case_writer_id, operation_id in self._state.frozen_cases
+        )
+
+    async def has_active_frozen_case(self, session_id: str) -> bool:
+        async with self._lock:
+            return self._has_active_frozen_case_unlocked(session_id)
+
     def _replace_pending_record(
         self,
         record: OperationRecord,
@@ -1177,6 +1193,10 @@ class MemoryLedgerAdapter:
             or entry.publication_channel is PublicationChannel.CODEX_JSONL_IMPORT
             for entry in command.entries
         )
+        observation_authored = all(
+            is_observation_authorship(entry.author, entry.publication_channel)
+            for entry in command.entries
+        )
         async with self._lock:
             prior = self._state.operations.get(key)
             if prior is not None:
@@ -1185,6 +1205,9 @@ class MemoryLedgerAdapter:
                     raise _error(PublicErrorCode.IDEMPOTENCY_CONFLICT)
                 if operation.state is OperationState.COMPLETE and prior_result is not None:
                     return replace(prior_result, outcome="replayed")
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+
+            if observation_authored and self._has_active_frozen_case_unlocked(command.session_id):
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
 
             if command.operation_kind is OperationKind.RECEIPT and self._pending_import(
@@ -1197,6 +1220,14 @@ class MemoryLedgerAdapter:
             if (
                 command.expected_frontier is not None
                 and command.expected_frontier != subject.sequence
+                and not (
+                    command.expected_frontier < subject.sequence
+                    and all(
+                        is_observation_authored(record)
+                        for record in self._state.records
+                        if record.ledger.ingestion_sequence > command.expected_frontier
+                    )
+                )
             ):
                 raise _frontier_conflict(subject)
             writer = self._state.writers.get(command.writer_id)
@@ -1205,99 +1236,80 @@ class MemoryLedgerAdapter:
             elif writer.task_id != command.task_id or writer.session_id != command.session_id:
                 raise _error(PublicErrorCode.EVENT_INVALID)
             snapshot_records = self._state.records
-            snapshot_projection = self._state.projection
-            snapshot_writer = self._state.writers.get(command.writer_id)
-
-        seen = {record.event_id for record in snapshot_records}
-        prior_batch: set[str] = set()
-        new_records: list[LedgerRecord] = []
-        summaries: list[AcceptedEventSummary] = []
-        previous_ledger = subject.head_digest
-        previous_writer = writer.head_digest
-        for offset, item in enumerate(command.entries):
-            if item.draft.event_id in seen or item.draft.event_id in prior_batch:
-                raise _error(PublicErrorCode.EVENT_INVALID)
-            if any(
-                parent not in seen and parent not in prior_batch
-                for parent in item.draft.causal_parents
-            ):
-                raise _error(PublicErrorCode.EVENT_INVALID)
-            ingestion = subject.sequence + offset + 1
-            writer_sequence = writer.next_sequence + offset
-            try:
-                record = _record_preimage(
-                    command,
-                    offset,
-                    ingestion_sequence=ingestion,
-                    writer_sequence=writer_sequence,
-                    previous_ledger_digest=previous_ledger,
-                    previous_writer_digest=previous_writer,
-                    accepted_at=accepted_at,
+            seen = {record.event_id for record in snapshot_records}
+            prior_batch: set[str] = set()
+            new_records: list[LedgerRecord] = []
+            summaries: list[AcceptedEventSummary] = []
+            previous_ledger = subject.head_digest
+            previous_writer = writer.head_digest
+            for offset, item in enumerate(command.entries):
+                if item.draft.event_id in seen or item.draft.event_id in prior_batch:
+                    raise _error(PublicErrorCode.EVENT_INVALID)
+                if any(
+                    parent not in seen and parent not in prior_batch
+                    for parent in item.draft.causal_parents
+                ):
+                    raise _error(PublicErrorCode.EVENT_INVALID)
+                ingestion = subject.sequence + offset + 1
+                writer_sequence = writer.next_sequence + offset
+                try:
+                    record = _record_preimage(
+                        command,
+                        offset,
+                        ingestion_sequence=ingestion,
+                        writer_sequence=writer_sequence,
+                        previous_ledger_digest=previous_ledger,
+                        previous_writer_digest=previous_writer,
+                        accepted_at=accepted_at,
+                    )
+                except ValueError as exc:
+                    raise _error(PublicErrorCode.EVENT_INVALID) from exc
+                new_records.append(record)
+                summaries.append(
+                    AcceptedEventSummary(
+                        record.event_id,
+                        ingestion,
+                        writer_sequence,
+                        record.entry_digest,
+                        item.projection_status,
+                    )
                 )
+                previous_ledger = record.entry_digest
+                previous_writer = record.entry_digest
+                prior_batch.add(record.event_id)
+            proposed = snapshot_records + tuple(new_records)
+            try:
+                projection = replay(proposed)
+            except NoObligationsReasonMismatch as exc:
+                draft_index: int | None = None
+                if exc.event_id is not None:
+                    for index, item in enumerate(command.entries):
+                        if item.draft.event_id == exc.event_id:
+                            draft_index = index
+                            break
+                raise public_error_for_no_obligations_reason_mismatch(
+                    exc, event_index=draft_index
+                ) from exc
+            except ObligationResolutionMismatch as exc:
+                draft_index = None
+                if exc.event_id is not None:
+                    for index, item in enumerate(command.entries):
+                        if item.draft.event_id == exc.event_id:
+                            draft_index = index
+                            break
+                raise public_error_for_obligation_resolution_mismatch(
+                    exc, event_index=draft_index
+                ) from exc
             except ValueError as exc:
                 raise _error(PublicErrorCode.EVENT_INVALID) from exc
-            new_records.append(record)
-            summaries.append(
-                AcceptedEventSummary(
-                    record.event_id,
-                    ingestion,
-                    writer_sequence,
-                    record.entry_digest,
-                    item.projection_status,
-                )
+            result_frontier = Frontier(projection.frontier, projection.head_digest)
+            warnings = (
+                (AppendWarning.UNKNOWN_EVENT_SCHEMA_PRESERVED,)
+                if any(type(record) is UnknownEvent for record in new_records)
+                else ()
             )
-            previous_ledger = record.entry_digest
-            previous_writer = record.entry_digest
-            prior_batch.add(record.event_id)
-        proposed = snapshot_records + tuple(new_records)
-        try:
-            projection = replay(proposed)
-        except NoObligationsReasonMismatch as exc:
-            draft_index: int | None = None
-            if exc.event_id is not None:
-                for index, item in enumerate(command.entries):
-                    if item.draft.event_id == exc.event_id:
-                        draft_index = index
-                        break
-            raise public_error_for_no_obligations_reason_mismatch(
-                exc, event_index=draft_index
-            ) from exc
-        except ObligationResolutionMismatch as exc:
-            draft_index: int | None = None
-            if exc.event_id is not None:
-                for index, item in enumerate(command.entries):
-                    if item.draft.event_id == exc.event_id:
-                        draft_index = index
-                        break
-            raise public_error_for_obligation_resolution_mismatch(
-                exc, event_index=draft_index
-            ) from exc
-        except ValueError as exc:
-            raise _error(PublicErrorCode.EVENT_INVALID) from exc
-        result_frontier = Frontier(projection.frontier, projection.head_digest)
-        warnings = (
-            (AppendWarning.UNKNOWN_EVENT_SCHEMA_PRESERVED,)
-            if any(type(record) is UnknownEvent for record in new_records)
-            else ()
-        )
-        result = AppendResult("accepted", tuple(summaries), subject, result_frontier, warnings)
-        operation = build_append_operation_record(command, result, accepted_at)
-        async with self._lock:
-            prior = self._state.operations.get(key)
-            if prior is not None:
-                prior_operation, prior_result = prior
-                if prior_operation.request_digest != command.request_digest:
-                    raise _error(PublicErrorCode.IDEMPOTENCY_CONFLICT)
-                if prior_operation.state is OperationState.COMPLETE and prior_result is not None:
-                    return replace(prior_result, outcome="replayed")
-                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
-            if (
-                self._state.records != snapshot_records
-                or self._state.projection != snapshot_projection
-                or self._state.writers.get(command.writer_id) != snapshot_writer
-            ):
-                head = Frontier(self._state.projection.frontier, self._state.projection.head_digest)
-                raise _frontier_conflict(head)
+            result = AppendResult("accepted", tuple(summaries), subject, result_frontier, warnings)
+            operation = build_append_operation_record(command, result, accepted_at)
             if command.operation_kind is OperationKind.RECEIPT and self._pending_import(
                 command.session_id
             ):

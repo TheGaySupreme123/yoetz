@@ -109,6 +109,12 @@ never from caller-controlled keys or free-form exception text. Unrecognized obje
 to a bounded generic `INVALID_REQUEST` without inventing field pointers.
 
 Protocol reason
+`expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
+`expected_frontier`. It names that field and is retryable because validation wrote no durable
+operation; the caller may reuse the same `request_id` with a corrected body. Here `retryable`
+describes whether safe recovery exists for the durable state reached, not whether the request bytes
+must remain unchanged. A stale supplied frontier remains `frontier_changed`.
+
 `response_projection_failed` marks a post-commit shaping failure for non-`publish_work` writes (and
 for the genuinely impossible case where even the minimal publish envelope cannot be built): the
 write may already be durable, so the public error is retryable and same-`request_id` resume is the
@@ -1056,6 +1062,13 @@ requires the same predicate in the reclaim CAS. `commit_check_if_current` repeat
 commit, and `append_batch` does the same for a new
 `operation_kind=receipt`. Terminal same-digest replay precedes this predicate because it commits
 nothing. SQLite uses the co-located importer rows; memory uses one shared task-state lock.
+
+`append_batch` normally requires an exact task-global `expected_frontier`. A held frontier may be
+behind the head only when every intervening record is observation-authored under ADR-022's exact
+actor-id, actor-type, assurance, and channel predicate. The accepted batch still appends at and
+reports the real head. Any other intervening record conflicts. Observation appends receive
+retryable `OPERATION_PENDING` while a case for their session is frozen; check commit equality is not
+relaxed.
 
 `ProjectionView` is `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`,
 `evidence`, `history`, or `versions`. Application status also admits `view=operation` (operation
@@ -2235,7 +2248,9 @@ Shared closed types:
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
   mapping version. Cursors are crash-stable and generation-fenced.
 - `ObservationStatus` — lifecycle `active|degraded|stale|stopped`, source coverage, last
-  observation, lag, gaps, unsupported events, and the current `AdviceSnapshot` frontier identity.
+  observation, lag, currently true gaps, unsupported events, and the current `AdviceSnapshot`
+  frontier identity. Per-code first/last-seen history is retained separately and does not make a
+  healed mapping, cursor, quarantine, or outbox condition remain current forever.
 - `AdviceSnapshot` — ranked `AdviceItem` values (finding id, deterministic rule code, priority,
   summary, evidence-linked detail, next action, evidence refs, coverage, freshness) plus exact
   evidence basis, confidence/coverage, recommended next action, freshness, and suppression
@@ -2244,7 +2259,9 @@ Shared closed types:
   it is never a seventh MCP tool. Deterministic observation-advice policies derive the snapshot
   from retained envelopes (and optional inspect/approved-check/composition facts) even with zero
   cooperative Yoetz MCP publications. Optional semantic advice is additive only, through the
-  privacy gateway, over minimized approved packets.
+  privacy gateway, over minimized approved packets. Deterministic finding identity is
+  candidate-scoped; envelope-linked candidates use only their mapped ledger events as subject refs,
+  while standing session conditions use the stable lifecycle event.
 
 Independent verification support (local control, not MCP):
 

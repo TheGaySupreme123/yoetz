@@ -19,6 +19,8 @@ __all__ = [
     "ObservationCheckFact",
     "ObservationCompositionFact",
     "ObservationInspectFact",
+    "advice_candidate_digest",
+    "evidence_basis_digest",
     "observation_advice_findings",
 ]
 
@@ -601,3 +603,19 @@ def evidence_basis_digest(
     if extra:
         payload["extra"] = dict(sorted(extra.items(), key=lambda pair: pair[0].encode("ascii")))
     return canonical_digest(payload)
+
+
+def advice_candidate_digest(candidate: ObservationAdviceCandidate) -> str:
+    """Return the stable identity of one standing advice condition."""
+
+    if type(candidate) is not ObservationAdviceCandidate:
+        raise ValueError("observation_advice_invalid")
+    return canonical_digest(
+        {
+            "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/{OBSERVATION_ADVICE_POLICY_VERSION}",
+            "kind": candidate.kind.value,
+            "rule_code": candidate.rule_code,
+            "evidence_refs": candidate.evidence_refs,
+            "detail_token": candidate.detail_token,
+        }
+    )

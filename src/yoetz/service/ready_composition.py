@@ -727,7 +727,9 @@ def _initialize_fresh_bundle(path: Path, *, command: object, clock: ClockPort) -
         _close_db(db)
 
 
-def _admitted_writers_for_session(catalog_db: apsw.Connection, session_id: str) -> frozenset[str]:
+def _admitted_writers_for_session(
+    catalog_db: apsw.Connection, task_id: str, session_id: str
+) -> frozenset[str]:
     """Load durable writer IDs attached to one active session from completed starts."""
 
     rows = catalog_db.execute(
@@ -735,7 +737,11 @@ def _admitted_writers_for_session(catalog_db: apsw.Connection, session_id: str) 
         "WHERE session_id = ? AND state = 'complete'",
         (session_id,),
     ).fetchall()
-    writers = frozenset(cast(str, row[0]) for row in rows)
+    from yoetz.application.observation_materialize import observation_writer_id
+
+    writers = frozenset(
+        {*(cast(str, row[0]) for row in rows), observation_writer_id(task_id, session_id)}
+    )
     if any(type(item) is not str for item in writers):
         raise ValueError("admitted_writer_ids_invalid")
     return writers
@@ -802,7 +808,9 @@ def build_runtime_adapter_factories(
             catalog_path=catalog_path,
             bundle_base=paths.bundle,
             route=route,
-            admitted_writer_ids=_admitted_writers_for_session(catalog_db, session_id),
+            admitted_writer_ids=_admitted_writers_for_session(
+                catalog_db, cast(str, getattr(route, "task_id")), session_id
+            ),
             fresh_allocation=False,
         )
 

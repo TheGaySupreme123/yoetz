@@ -41,6 +41,8 @@ from yoetz.domain.events import (
     WriterChain,
     decode_payload,
     encode_payload,
+    is_observation_authored,
+    is_observation_authorship,
     media_type_for,
     public_error_for_no_obligations_reason_mismatch,
     public_error_for_obligation_resolution_mismatch,
@@ -416,6 +418,7 @@ def _corrective_message(reason_code: str, schema_name: str | None) -> str | None
 def _event_invalid(
     reason_code: str = "invalid_event_value_type",
     *,
+    retryable: bool = False,
     event_index: int | None = None,
     subfield: str | None = None,
     payload_field: str | None = None,
@@ -423,7 +426,13 @@ def _event_invalid(
 ) -> PublicOperationError:
     # Only a stale frontier is fixed by rereading status; every other reason needs the event
     # payload corrected first, and retrying it unchanged would fail the same way.
-    if reason_code == "frontier_changed":
+    if reason_code == "expected_frontier_required":
+        message = (
+            "The event batch is invalid. State-sensitive event families require "
+            "expected_frontier. Call status to read the current frontier, then retry "
+            "idempotently with the same request_id and expected_frontier set."
+        )
+    elif reason_code == "frontier_changed":
         message = (
             "The event batch is invalid. Call status to read the current frontier, then retry "
             "idempotently with the same request_id."
@@ -442,7 +451,9 @@ def _event_invalid(
             # Which draft failed is the difference between a one-line fix and re-deriving the
             # whole batch; a batch may carry up to MAX_EVENTS_PER_BATCH drafts.
             details["field"] = pointer
-    return PublicOperationError(PublicErrorCode.EVENT_INVALID, message, False, safe_details=details)
+    return PublicOperationError(
+        PublicErrorCode.EVENT_INVALID, message, retryable, safe_details=details
+    )
 
 
 def _mapping(value: JsonValue) -> Mapping[str, JsonValue]:
@@ -594,7 +605,7 @@ def _validate_admission(
         item.draft.schema in PAYLOAD_TYPES and item.draft.schema.name in _STATE_SENSITIVE_FAMILIES
         for item in drafts
     ):
-        raise _event_invalid("frontier_changed")
+        raise _event_invalid("expected_frontier_required", retryable=True)
 
 
 def _validate_order(drafts: tuple[_PreparedDraft, ...]) -> None:
@@ -1187,20 +1198,14 @@ async def _preflight_dry_run_feasibility(
     """
 
     current = await runtime.ledger.load_frontier()
-    # Ordinary publish passes only the integer sequence into AppendCommand; digest is not a gate.
-    if request.expected_frontier is not None:
-        expected_sequence = int(request.expected_frontier.sequence)
-        if expected_sequence != current.sequence:
-            raise PublicOperationError(
-                PublicErrorCode.FRONTIER_CONFLICT,
-                (
-                    "The event batch is invalid. Call status to read the current frontier, then "
-                    "retry idempotently with the same request_id."
-                ),
-                True,
-                safe_details={"reason_code": "frontier_changed"},
-            )
-
+    if is_observation_authorship(prepared.author, prepared.channel) and (
+        await runtime.ledger.has_active_frozen_case(runtime.session_id)
+    ):
+        raise PublicOperationError(
+            PublicErrorCode.OPERATION_PENDING,
+            "An active check is holding this session frontier.",
+            True,
+        )
     existing_records: list[LedgerRecord] = []
     seen: set[str] = set()
     writer_sequence = 1
@@ -1211,6 +1216,25 @@ async def _preflight_dry_run_feasibility(
         if str(record.writer.writer_id) == cast(str, runtime.writer_id):
             writer_sequence = int(record.writer.sequence) + 1
             previous_writer_digest = record.entry_digest
+
+    # Ordinary publish passes only the integer sequence into AppendCommand; digest is not a gate.
+    if request.expected_frontier is not None:
+        expected_sequence = int(request.expected_frontier.sequence)
+        observation_only_advance = expected_sequence < current.sequence and all(
+            is_observation_authored(record)
+            for record in existing_records
+            if record.ledger.ingestion_sequence > expected_sequence
+        )
+        if expected_sequence != current.sequence and not observation_only_advance:
+            raise PublicOperationError(
+                PublicErrorCode.FRONTIER_CONFLICT,
+                (
+                    "The event batch is invalid. Call status to read the current frontier, then "
+                    "retry idempotently with the same request_id."
+                ),
+                True,
+                safe_details={"reason_code": "frontier_changed"},
+            )
 
     prior_batch: set[str] = set()
     for index, item in enumerate(prepared.drafts):

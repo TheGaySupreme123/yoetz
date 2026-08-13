@@ -58,6 +58,7 @@ from yoetz.protocol.models import (
 from yoetz.protocol.schemas import schema_document_for
 from yoetz.service.client import ServiceClient, connect_service
 from yoetz.service.control_protocol import public_error_code_for_control_reason
+from yoetz.version import ResourceIntegrityError
 
 __all__ = [
     "app",
@@ -509,9 +510,15 @@ def hooks_observe(
 ) -> None:
     """Unified bounded observation ingress for Codex lifecycle hooks."""
 
-    module = importlib.import_module("yoetz.cli.observe_hooks")
-    handler = cast(Callable[..., int], getattr(module, "handle_observe"))
-    _finish(handler(event_name=event, workspace=workspace))
+    try:
+        module = importlib.import_module("yoetz.cli.observe_hooks")
+        handler = cast(Callable[..., int], getattr(module, "handle_observe"))
+        handler(event_name=event, workspace=workspace)
+    except BaseException:
+        try:
+            _stdout_json({})
+        except BaseException:
+            pass
 
 
 def _observe_operation(name: str) -> Callable[..., int]:
@@ -1936,6 +1943,13 @@ def version_command(
             getattr(module, "version_manifest_json"),
         )
         _safe_write(sys.stdout.buffer, serializer(builder(), include_resources=resources) + b"\n")
+    except ResourceIntegrityError as error:
+        detail = f" {error.detail}" if error.detail else ""
+        _stderr(f"version: FAIL ({error.reason}){detail}")
+        remediation = remediation_message(error.reason)
+        if remediation is not None:
+            _stderr(f"version: remediation: {remediation}")
+        raise typer.Exit(1) from None
     except ImportError:
         _stdout_json({"package_name": "yoetz", "package_version": __version__})
 

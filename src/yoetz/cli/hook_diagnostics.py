@@ -53,8 +53,10 @@ _REASONS: Final = frozenset(
         "paused",
         "timeout",
         "drain_budget_exhausted",
+        "drain_lease_contended",
         "drain_preflight_failed",
         "runtime_gate_unsafe",
+        "stdout_write_failed",
     }
 )
 _thread_lock = Lock()

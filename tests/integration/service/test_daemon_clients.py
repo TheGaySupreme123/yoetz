@@ -12,6 +12,7 @@ import pytest
 import yoetz.service.daemon as daemon_module
 from builders.privacy_policies import INSTALLATION_ID, local_only_policy
 from yoetz.adapters.privacy.catalog import encode_privacy_policy_json
+from yoetz.application.observation_drain import ObservationDrainSummary
 from yoetz.application.publish_work import PublishWorkInternalResult
 from yoetz.application.service import (
     ClientProjectionContext,
@@ -1628,7 +1629,7 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
         events.append("recommendation_refresh")
         return object()
 
-    async def sweep() -> object:
+    async def sweep() -> ObservationDrainSummary:
         events.append("sweep")
         if events.count("sweep") >= 2:
             two_sweeps.set()
@@ -1637,7 +1638,13 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
         except asyncio.CancelledError:
             events.append("sweep_cancelled")
             raise
-        return object()
+        return ObservationDrainSummary(
+            attempted=1,
+            acknowledged=1,
+            retry_pending=0,
+            quarantined=0,
+            reasons=(),
+        )
 
     application.ready_recommendation_refresh = refresh
     application.observation_sweep = sweep

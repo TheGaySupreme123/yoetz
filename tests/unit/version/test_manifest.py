@@ -95,3 +95,13 @@ def test_resource_reader_is_a_closed_logical_name_lookup() -> None:
             pass
         else:
             raise AssertionError(f"unexpected resource read: {name}")
+
+
+def test_resource_integrity_error_exposes_bounded_reason_and_detail() -> None:
+    error = ResourceIntegrityError(
+        "support_resource_set_mismatch", detail="support/runtime-support.json"
+    )
+
+    assert str(error) == "support_resource_set_mismatch"
+    assert error.reason == "support_resource_set_mismatch"
+    assert error.detail == "support/runtime-support.json"

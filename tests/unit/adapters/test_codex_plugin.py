@@ -23,6 +23,7 @@ from yoetz.ports.integrations import (
     IntegrationFile,
     IntegrationReason,
     IntegrationScope,
+    IntegrationState,
     IntegrationTarget,
     SkillSource,
 )
@@ -252,6 +253,7 @@ def test_install_allow_untested_installs_hooks(tmp_path: Path) -> None:
     target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
     inspection = install_plugin(target, resource_source=_resources(), allow_untested=True)
     assert inspection.presence is PluginHookPresence.INSTALLED
+    assert inspection.state is IntegrationState.INSTALLED_EXACT
     assert inspection.trust_observable is False
     assert (tmp_path / ".agents/plugins/yoetz/hooks/hooks.json").is_file()
 
@@ -272,6 +274,10 @@ def test_install_refuses_locally_modified_file(
     with pytest.raises(IntegrationError) as caught:
         install_plugin(target, resource_source=resources)
     assert caught.value.reason is IntegrationReason.MODIFIED_COPY
+    assert caught.value.safe_details == {
+        "relative_path": "hooks/hooks.json",
+        "replace_modified": True,
+    }
 
 
 def test_install_refuses_symlinked_plugin_ancestor(

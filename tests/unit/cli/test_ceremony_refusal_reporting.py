@@ -143,6 +143,14 @@ def test_unmapped_tokens_have_no_remediation() -> None:
     assert remediation_message("authorize_failed") is None
 
 
+def test_resource_count_remediation_names_the_owning_sync_script() -> None:
+    message = remediation_message("resource_counts_invalid")
+
+    assert message is not None
+    assert "scripts/verify_resource_manifest.py --sync" in message
+    assert "update the compiled count" not in message
+
+
 def test_secret_rejected_names_the_credential_and_the_retry() -> None:
     """A refused or unusable key must not look like a dead service; name the retry."""
 
