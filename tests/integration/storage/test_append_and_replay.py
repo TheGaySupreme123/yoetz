@@ -630,3 +630,53 @@ async def test_sqlite_reopen_recovers_pending_check_from_sole_resume_pointer(
     ).fetchone() == (expected_ref.object_id,)
     assert len(objects.refs_for_kind(ObjectKind.CHECK_RESUME)) == 1
     reopened_db.close()
+
+
+@pytest.mark.anyio
+async def test_failed_recovery_is_not_replayed_for_every_later_call(tmp_path: Path) -> None:
+    """A deterministically terminal recovery must be decided once, not on every later call."""
+
+    command, objects = command_from_records(replay_records("projection-rebuild")[:1])
+    path = tmp_path / "terminal-recovery.sqlite3"
+    ledger, db = file_sqlite_for(command, objects, path)
+    await ledger.append_batch(command)
+    check_request = uuid_id("req", 80_003)
+    frozen = await ledger.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        check_request,
+        "sha256:" + "7" * 64,
+    )
+    assert type(frozen) is FrozenCase
+    operation = await ledger.lookup_operation(command.writer_id, check_request)
+    assert operation is not None and operation.resume_object_ref is not None
+    # Make the pending operation's resume descriptor unreadable: the frozen-case arm of recovery
+    # then raises STORAGE_CORRUPT, but only after the whole ledger has already been decoded.
+    db.execute(
+        "UPDATE objects SET durable_at=? WHERE object_id=?",
+        ("not-a-timestamp", operation.resume_object_ref.object_id),
+    )
+    db.close()
+
+    reopened, reopened_db = file_sqlite_for(command, objects, path)
+    decoded = 0
+    original = reopened._decode_durable_record  # pyright: ignore[reportPrivateUsage]
+
+    async def counting(row: tuple[object, ...]) -> LedgerRecord:
+        nonlocal decoded
+        decoded += 1
+        return await original(row)
+
+    reopened._decode_durable_record = counting  # pyright: ignore[reportPrivateUsage]
+
+    counts: list[int] = []
+    for _ in range(3):
+        with pytest.raises(PublicOperationError) as failure:
+            await reopened.load_projection(command.session_id, ProjectionView.CANDIDATE_FINDINGS)
+        assert failure.value.code is PublicErrorCode.STORAGE_CORRUPT
+        counts.append(decoded)
+
+    assert counts[0] >= 1
+    assert counts == [counts[0], counts[0], counts[0]]
+    reopened_db.close()

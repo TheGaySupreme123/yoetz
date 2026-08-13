@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from typing import Final, Protocol
 
 from yoetz.adapters.integrations.observation_local import (
@@ -77,6 +79,19 @@ def route_observation_ingest(result: ObservationIngestResult) -> ObservationDrai
     return ObservationDrainDecision(action, reason)
 
 
+async def _off_loop[ResultT](call: Callable[[], ResultT]) -> ResultT:
+    """Run one blocking local-store call off the caller's event loop.
+
+    Every ``LocalObservationStore`` method takes a blocking cross-process lock and re-encodes the
+    whole workspace document. Running those on the service loop thread let a hook storm hold the
+    daemon's control plane for minutes, with no await point for the sweep deadline to cancel at
+    (#238). The store's own reentrant thread lock is acquired and released inside a single worker
+    thread on every hop, so no lock is ever held across an await.
+    """
+
+    return await asyncio.to_thread(call)
+
+
 class ObservationIngestCoordinator(Protocol):
     def ingest_request(
         self, request: ObservationIngestRequest
@@ -105,7 +120,7 @@ class ObservationOutboxSweeper:
             raise ValueError("observation_sweep_limit_invalid")
 
     async def sweep(self) -> ObservationDrainSummary:
-        rows = self._fair_pending_rows()
+        rows = await _off_loop(self._fair_pending_rows)
         attempted = 0
         acknowledged = 0
         retry_pending = 0
@@ -115,10 +130,17 @@ class ObservationOutboxSweeper:
 
         workspaces = tuple(dict.fromkeys(workspace for workspace, _row in rows))
         for workspace in workspaces:
-            with self.local.drain_lease(workspace) as owned:
+            # The lease is a POSIX file lock, which belongs to the open descriptor rather than to
+            # the thread that took it, so entering and leaving it from different worker threads is
+            # correct and keeps the whole hold off the event loop.
+            lease = self.local.drain_lease(workspace)
+            owned = await _off_loop(lease.__enter__)
+            try:
                 if not owned:
                     continue
-                pending_rows = frozenset(self.local.list_pending_outbox_rows(workspace))
+                pending_rows = frozenset(
+                    await _off_loop(partial(self.local.list_pending_outbox_rows, workspace))
+                )
                 for selected_workspace, row in rows:
                     if selected_workspace != workspace or row not in pending_rows:
                         continue
@@ -139,16 +161,21 @@ class ObservationOutboxSweeper:
                             None,
                         )
                     decision = route_observation_ingest(result)
-                    attempted_row = self.local.bump_outbox_row_attempt(
-                        workspace,
-                        row,
-                        reason=decision.reason,
+                    attempted_row = await _off_loop(
+                        partial(
+                            self.local.bump_outbox_row_attempt,
+                            workspace,
+                            row,
+                            reason=decision.reason,
+                        )
                     )
                     if attempted_row is None:
                         continue
                     if decision.reason is not None:
                         reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
-                        self.local.note_coverage_gap(workspace, decision.reason)
+                        await _off_loop(
+                            partial(self.local.note_coverage_gap, workspace, decision.reason)
+                        )
 
                     if decision.action is ObservationDrainAction.RETRY:
                         retry_pending += 1
@@ -156,21 +183,31 @@ class ObservationOutboxSweeper:
                     if decision.action is ObservationDrainAction.QUARANTINE:
                         if decision.reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value:
                             retired_sessions.add(session_key)
-                            quarantined += self.local.quarantine_outbox_session(
-                                workspace,
-                                row.codex_session_id,
-                                decision.reason,
+                            quarantined += await _off_loop(
+                                partial(
+                                    self.local.quarantine_outbox_session,
+                                    workspace,
+                                    row.codex_session_id,
+                                    decision.reason,
+                                )
                             )
                             continue
-                        if self.local.quarantine_outbox_row(
-                            workspace,
-                            attempted_row,
-                            decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                        if await _off_loop(
+                            partial(
+                                self.local.quarantine_outbox_row,
+                                workspace,
+                                attempted_row,
+                                decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                            )
                         ):
                             quarantined += 1
                         continue
-                    if self.local.acknowledge_outbox_row(workspace, attempted_row):
+                    if await _off_loop(
+                        partial(self.local.acknowledge_outbox_row, workspace, attempted_row)
+                    ):
                         acknowledged += 1
+            finally:
+                await _off_loop(partial(lease.__exit__, None, None, None))
 
         return ObservationDrainSummary(
             attempted=attempted,

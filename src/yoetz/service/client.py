@@ -101,6 +101,7 @@ __all__ = [
     "PrivacyReceiptGetResult",
     "PrivacyReceiptNotFound",
     "ServiceClient",
+    "accepted_but_unresponsive",
     "connect_service",
     "connect_service_on_demand",
 ]
@@ -1104,6 +1105,17 @@ class _AcceptedServiceUnresponsive(ControlError):
         super().__init__("service_unavailable", retryable=True)
 
 
+def accepted_but_unresponsive(error: BaseException) -> bool:
+    """True when a fixed endpoint accepted this connection and never completed its handshake.
+
+    "Nothing is listening" and "something is listening and silent" call for opposite next steps,
+    and the wire reason is the same for both. The distinction is only ever available here, on the
+    client that observed it (#237).
+    """
+
+    return type(error) is _AcceptedServiceUnresponsive
+
+
 def _consume_background_task[ResultT](task: asyncio.Task[ResultT]) -> None:
     try:
         task.result()
@@ -1272,8 +1284,13 @@ async def connect_service_on_demand(
         await asyncio.sleep(min(_SERVICE_START_POLL_SECONDS, deadline - time.monotonic()))
         try:
             return await connect_with_remaining_budget()
-        except _AcceptedServiceUnresponsive:
-            raise
+        except _AcceptedServiceUnresponsive as exc:
+            # This process spawned the owner milliseconds ago. Accepted-but-silent here means
+            # "still starting", not "wedged": no successor is involved, so spending the remaining
+            # budget is the remedy rather than an unbounded wait. The pre-spawn arm above is
+            # unchanged and still fails fast for a pre-existing owner (#232/#233).
+            last_error = exc
+            continue
         except ControlError as exc:
             last_error = exc
             if exc.reason != "service_unavailable":
