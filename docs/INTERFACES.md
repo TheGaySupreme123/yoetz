@@ -2275,7 +2275,9 @@ Independent verification support (local control, not MCP):
 - `ObservationVerificationSupervisor` — ready-lifecycle background owner that wakes on enqueue,
   discovers pending work at startup, drains one serialized check per workspace through the
   enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest
-  never executes approved checks inside the three-second RPC budget.
+  never executes approved checks inside the hook RPC budget. Pure-ingress hook handlers declare
+  `"async": true` and never block a host tool call; handlers that return advice context stay
+  synchronous with a declared 10-second budget, and `SessionEnd` keeps the host-clamped 3 seconds.
 
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
 The normalized locator is authenticated encrypted content; plaintext keeps only commitment and
@@ -2294,8 +2296,16 @@ identity, roles, operation digest, and stable ledger IDs. The logical-identity r
 two-bit source mask; duplicates retry incomplete content/store/ledger/verification/advice work
 idempotently. Stream cursor advancement occurs only after outbox insertion. Session end is
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
-across workspace sessions. Quarantine eviction retains aggregate commitment, count, first/last
-receipt times, and `quarantine_detail_evicted`.
+across workspace sessions under a nonblocking per-workspace lease; within one pass a
+`mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),
+and workspace-global rejections (`vault_locked`, disabled, paused) end the pass. A
+`service_unavailable` rejection is row-scoped: later rows are still attempted, and the pass yields
+after three consecutive such rejections. Quarantined detail is bounded by count, by the state byte
+budget, and by a 14-day age measured from a store-authored
+quarantined-at time behind the trusted-clock epoch fence; an operator can drop it explicitly with
+`yoetz observe reclaim`. Every drop — cap, age, or reclaim — retains aggregate commitment, count
+(evictions and reclaims counted separately), first/last receipt times, and
+`quarantine_detail_evicted`.
 
 `hook_observed` (publication channel and artifact-observation class) and `harness_observed`
 authorship require real observation evidence under an active consented observation arm — never a

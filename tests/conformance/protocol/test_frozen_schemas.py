@@ -268,6 +268,41 @@ def test_schema_uris_and_versions_are_stable() -> None:
     assert schemas.event_schema_versions(catalog) == catalog.event_schema_versions
 
 
+def test_every_packaged_member_is_a_valid_draft_2020_12_schema() -> None:
+    """The build-time invariant behind the #210 runtime fast path.
+
+    ``load_schema_catalog`` no longer meta-validates members whose bytes match
+    the packaged manifest digest, so this test is where meta-validity of the
+    packaged catalog is enforced. If it is deleted, nothing checks it anywhere.
+    """
+
+    from jsonschema import Draft202012Validator
+
+    manifest = _load_manifest(_load_manifest_bytes(_ROOT_SCHEMA_DIR))
+    members = _schema_files_from_manifest(manifest)
+    assert len(members) == _EXPECTED_MEMBER_COUNT
+    for member in members:
+        data = (_ROOT_SCHEMA_DIR / member["path"]).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == member["sha256"].removeprefix("sha256:")
+        parsed = strict_json_parse(data)
+        assert canonical_encode(parsed) == data, f"not canonical: {member['path']}"
+        Draft202012Validator.check_schema(cast(dict[str, Any], parsed))
+
+
+def test_manifest_digest_is_available_without_building_the_catalog() -> None:
+    """#210: handshakes hash the manifest without paying for the catalog."""
+
+    schemas = _schema_module()
+    schemas.schema_manifest_digest.cache_clear()
+    schemas._load_catalog_state.cache_clear()
+    digest = schemas.schema_manifest_digest()
+    assert digest == f"sha256:{hashlib.sha256(_load_manifest_bytes(_ROOT_SCHEMA_DIR)).hexdigest()}"
+    assert schemas._load_catalog_state.cache_info().misses == 0, (
+        "schema_manifest_digest built the full catalog; the handshake fast path is gone"
+    )
+    assert digest == schemas.load_schema_catalog().manifest_digest
+
+
 def test_schema_instance_validation_stays_local_when_catalog_available() -> None:
     schemas = _schema_module()
     try:

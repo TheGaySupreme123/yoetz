@@ -29,6 +29,18 @@ describes behavior intended for the first release rather than a change from a pr
   explain failures, and `yoetz observe status|drain` reports and repairs undelivered work without
   silently deleting it. `[observation].enabled` is a typed local configuration gate that defaults
   on; per-workspace observation consent remains independently required.
+  Observation hooks no longer block the session (#209/#210/#211): pure-ingress handlers are
+  declared `"async": true`, advice-returning handlers get a meetable 10-second budget, the control
+  handshake hashes the schema manifest without building the catalog, the local store caches its
+  parse behind a stat validator, and the drain stops re-probing sessions whose rejections cannot
+  heal mid-pass. Quarantined observation detail is now bounded by a clock-fenced 14-day age in
+  addition to count and byte caps, `yoetz observe reclaim --workspace <path>` drops it explicitly,
+  and `yoetz observe status` reports quarantine depth plus separate involuntary-eviction and
+  operator-reclaim counts.
+  **Upgrade note:** the hook timeout/async changes alter Codex's per-hook trust hashes. On an
+  existing install every changed hook reports `Modified` and is silently skipped until re-approved
+  through Codex's startup hooks review (or the equivalent trust configuration); until then only
+  the unchanged hooks fire. Re-approve the yoetz hooks after upgrading the plugin tree.
 
 - A reusable recommended-defaults advisory surface (ADR-021): releases register reviewed
   recommendations, heavy control points cache pending items, and SessionStart may ask the agent to
@@ -146,7 +158,7 @@ describes behavior intended for the first release rather than a change from a pr
 
 - First-party Codex **live observation and advice** as a required v0.1 capability (ADR-010
   amendment): dual-source ingest (hooks primary + selective session-stream reconciliation), local
-  `ObservationPort` control (`yoetz observe status|grant|pause|resume|revoke|reconcile`), unified
+  `ObservationPort` control (`yoetz observe status|grant|pause|resume|revoke|reconcile|drain|reclaim`), unified
   `yoetz hooks observe`, project-level observation consent via private workspace commitment,
   automatic session↔task attachment without depending on MCP `start`, descriptor-safe workspace
   inspection, approved-check runner, and deterministic `AdviceSnapshot` guidance (optional semantic

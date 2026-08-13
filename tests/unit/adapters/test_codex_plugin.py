@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from yoetz.adapters.integrations.codex_plugin import (
     PluginHookPresence,
     inspect_plugin,
     install_plugin,
+    parse_hooks_json,
     render_plugin_tree,
 )
 from yoetz.adapters.integrations.codex_skill import SkillResourceSource, load_packaged_skill_source
@@ -176,9 +178,60 @@ def test_render_plugin_tree_wires_observation_and_compat_hooks() -> None:
     assert "yoetz hooks observe --workspace . --event PreToolUse" in hooks
     assert "yoetz hooks observe --workspace . --event PermissionRequest" in hooks
     assert "yoetz hooks observe --workspace . --event SubagentStop" in hooks
-    assert '"timeout":3' in hooks.replace(" ", "")
     assert "mcp__yoetz__start" in hooks
     assert "resume|compact" in hooks
+
+
+def _observe_handler(parsed: Mapping[str, object], event: str) -> dict[str, object]:
+    groups = parsed["hooks"][event]  # type: ignore[index, call-overload]
+    for group in groups:  # type: ignore[union-attr]
+        for handler in group["hooks"]:  # type: ignore[index, call-overload]
+            if str(handler["command"]).startswith("yoetz hooks observe "):  # type: ignore[index]
+                return dict(handler)  # type: ignore[arg-type, call-overload]
+    raise AssertionError(f"no observe handler declared for {event}")
+
+
+def test_observe_hook_execution_modes_never_block_tool_calls() -> None:
+    """#209: pure-ingress handlers are async; advice handlers get a meetable timeout.
+
+    Sync PreToolUse/PostToolUse at an unmeetable 3s added ~6s to every tool
+    call and had both hooks SIGKILLed at the deadline. The contract is now:
+    handlers that always emit ``{}`` declare ``"async": true`` (Codex ignores
+    the field on hosts that predate it), handlers that return
+    ``additionalContext`` stay synchronous at 10s, and SessionEnd stays inside
+    the host's hard 3s clamp so it never draws a per-session warning.
+    """
+
+    from yoetz.cli.observe_hooks import ADVICE_SAFE_EVENTS, SUPPORTED_HOOK_EVENTS
+
+    parsed = dict(
+        parse_hooks_json(render_plugin_tree(resource_source=_resources())["hooks/hooks.json"])
+    )
+    pure_ingress = (
+        "PreToolUse",
+        "PermissionRequest",
+        "PreCompact",
+        "PostCompact",
+        "SubagentStart",
+        "SubagentStop",
+    )
+    # The async split's real invariant: async iff the handler never returns
+    # additionalContext, i.e. iff the event is outside ADVICE_SAFE_EVENTS and
+    # outside the cue-only UserPromptSubmit. If someone adds an event to
+    # ADVICE_SAFE_EVENTS while it is still declared async here, Codex would
+    # silently defer its advice to the next turn boundary.
+    assert set(pure_ingress) == SUPPORTED_HOOK_EVENTS - ADVICE_SAFE_EVENTS - {"UserPromptSubmit"}
+    for event in pure_ingress:
+        handler = _observe_handler(parsed, event)
+        assert handler.get("async") is True, f"{event} observe must not block the session"
+        assert handler["timeout"] == 10, f"{event} needs an explicit modest timeout"
+    for event in ("SessionStart", "PostToolUse", "Stop"):
+        handler = _observe_handler(parsed, event)
+        assert "async" not in handler, f"{event} returns additionalContext; async drops it"
+        assert handler["timeout"] == 10, f"{event} declared timeout must be meetable"
+    session_end = _observe_handler(parsed, "SessionEnd")
+    assert "async" not in session_end, "Codex downgrades async SessionEnd with a warning"
+    assert session_end["timeout"] == 3, "Codex hard-clamps SessionEnd timeouts above 3s"
 
 
 def test_install_refuses_when_tested_set_empty(tmp_path: Path) -> None:

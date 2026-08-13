@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import os
 import re
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final, cast
 
@@ -70,6 +71,14 @@ _MAX_DEDUP: Final = 4_096
 _MAX_OPEN_PRE: Final = 256
 _MAX_OUTBOX: Final = 512
 _MAX_QUARANTINE: Final = 512
+# Quarantined detail is a diagnostic aid, not the durable record; entries this
+# stale are pure per-hook parse/encode tax (#211). Age-expired detail folds
+# into the same aggregate eviction evidence as count/byte-cap evictions.
+_MAX_QUARANTINE_AGE_DAYS: Final = 14
+# Parse-cache entry bound: hooks touch one workspace, the daemon's sweep loop
+# touches all of them — without a cap the daemon would retain a parsed object
+# graph per workspace forever.
+_MAX_STATE_CACHE_ENTRIES: Final = 8
 _MAX_HOOK_SEQUENCES: Final = 256
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 # Wall/monotonic drift tolerated before persisted monotonic samples are treated
@@ -312,12 +321,16 @@ class _WorkspaceState:
     # after a restart or reboot they are fenced off (see `_epoch_matches`).
     monotonic_epoch: float | None = None
     pending_outbox: list[ObservationOutboxRow] | None = None
-    quarantine: list[tuple[str, ObservationEnvelope, str]] | None = None
+    # (codex_session_id, envelope, reason, quarantined_at). The timestamp is
+    # store-authored at quarantine time so the age bound measures time *in*
+    # quarantine, never the (possibly much older) envelope receipt time.
+    quarantine: list[tuple[str, ObservationEnvelope, str, Timestamp]] | None = None
     codex_session_bindings: dict[str, str] | None = None
     ended_sessions: set[str] | None = None
     session_generations: dict[str, int] | None = None
     ended_session_generations: dict[str, int] | None = None
     quarantine_evicted_count: int = 0
+    quarantine_reclaimed_count: int = 0
     quarantine_evicted_commitment: str | None = None
     quarantine_evicted_first: Timestamp | None = None
     quarantine_evicted_last: Timestamp | None = None
@@ -383,6 +396,37 @@ def _load_session_advice(raw: object) -> dict[str, AdviceSnapshot]:
     return result
 
 
+def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
+    """Independent copy of one workspace state for the parse cache.
+
+    Containers are copied; contained values (envelopes, rows, cursors,
+    snapshots, timestamps) are frozen dataclasses or immutable builtins, so a
+    shallow container copy fully isolates callers from the cached instance.
+    """
+
+    return dataclasses.replace(
+        state,
+        session_workspaces=dict(state.session_workspaces or {}),
+        cursors=dict(state.cursors or {}),
+        dedup=set(state.dedup or ()),
+        envelopes=list(state.envelopes or ()),
+        gaps=set(state.gaps or ()),
+        unsupported_events=set(state.unsupported_events or ()),
+        session_advice=dict(state.session_advice or {}),
+        session_advice_suppression=dict(state.session_advice_suppression or {}),
+        open_pre=dict(state.open_pre or {}),
+        stream_cursors=dict(state.stream_cursors or {}),
+        stream_partials=dict(state.stream_partials or {}),
+        hook_sequences=dict(state.hook_sequences or {}),
+        pending_outbox=list(state.pending_outbox or ()),
+        quarantine=list(state.quarantine or ()),
+        codex_session_bindings=dict(state.codex_session_bindings or {}),
+        ended_sessions=set(state.ended_sessions or ()),
+        session_generations=dict(state.session_generations or {}),
+        ended_session_generations=dict(state.ended_session_generations or {}),
+    )
+
+
 def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
     return canonical_digest(
         JsonObject(
@@ -412,6 +456,17 @@ class LocalObservationStore:
         self._lock = _InterprocessStoreLock(self._root / ".store.lock")
         self._monotonic = _monotonic
         self._wall = _wall
+        # Parse cache keyed by workspace commitment, validated by the state
+        # file's (inode, size, mtime_ns, ctime_ns). Hooks are one-shot
+        # processes that call many store methods against the same file;
+        # re-reading and re-parsing a ~400KB state on every method call
+        # dominated hook wall time (#209). _atomic_write replaces the inode,
+        # so a stat match means the cached parse is byte-current even across
+        # processes. Bounded so the long-lived daemon, which iterates every
+        # workspace on its sweep loop, never accretes one parsed object graph
+        # per workspace it has ever seen.
+        self._state_cache: dict[str, tuple[tuple[int, int, int, int], _WorkspaceState]] = {}
+        self._key_material_cache: bytes | None = None
 
     def _now_mono(self) -> float:
         import time
@@ -449,6 +504,14 @@ class LocalObservationStore:
             material = os.urandom(_KEY_BYTES)
             _atomic_write(path, material)
             return material
+
+    def _cached_key_material(self) -> bytes:
+        # The key file is created once and never rewritten, so a per-instance
+        # memo is safe; the uncached read costs a file open per call, which
+        # multiplies badly inside per-entry loops (quarantine eviction).
+        if self._key_material_cache is None:
+            self._key_material_cache = self.key_material()
+        return self._key_material_cache
 
     def set_runtime_enabled(self, enabled: bool) -> None:
         """Publish the service-loaded observation gate for config-free hook reads.
@@ -998,6 +1061,66 @@ class LocalObservationStore:
             value = state.last_successful_drain_mono_ms
             return None if value is None else value / 1000.0
 
+    def note_outbox_session_reason(self, workspace: str, codex_session_id: str, reason: str) -> int:
+        """Stamp a shared last_reason on every un-reasoned pending row of one session.
+
+        Used when a drain pass retires a session after one probe (its rows all
+        fail identically): the probed row carries the reason from its real
+        attempt, and this stamps the skipped siblings in a single save so
+        ``observe status`` reports the true shared cause instead of
+        ``not_attempted``. Attempt counts are untouched — no attempt was made.
+        """
+
+        if _OUTBOX_REASON_RE.fullmatch(reason) is None:
+            raise ProtocolValueError("invalid_event_value_type")
+        with self._lock:
+            state = self._load(workspace)
+            assert state.pending_outbox is not None
+            stamped = 0
+            for index, row in enumerate(state.pending_outbox):
+                if row.codex_session_id == codex_session_id and row.last_reason is None:
+                    state.pending_outbox[index] = dataclasses.replace(row, last_reason=reason)
+                    stamped += 1
+            if stamped:
+                self._save(workspace, state)
+            return stamped
+
+    @contextlib.contextmanager
+    def drain_lease(self, workspace: str) -> Generator[bool]:
+        """Nonblocking per-workspace drain mutex; yields whether it was acquired.
+
+        Codex runs async hooks concurrently (up to 8), and every hook drains
+        the same workspace outbox. Without a lease each concurrent hook
+        re-ingests the identical backlog — 8x daemon load for zero additional
+        delivery. Losing the lease is not a failure: another live hook process
+        is already draining.
+        """
+
+        digest = workspace.removeprefix("hmac-sha256:")
+        if len(digest) != 64:
+            raise ProtocolValueError("invalid_commitment")
+        path = self._root / f".drain-{digest}.lock"
+        if fcntl is None:  # pragma: no cover - POSIX-only host
+            yield True
+            return
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
     def acknowledge_outbox(
         self, workspace: str, codex_session_id: str, source_identity: str
     ) -> bool:
@@ -1039,8 +1162,10 @@ class LocalObservationStore:
         """Move a permanently-rejected outbox entry into a bounded, visible quarantine.
 
         Quarantined entries are never treated as committed: they leave the pending
-        drain queue but are retained (never silently dropped) and surface as an
-        ``outbox_quarantined`` coverage gap in status until an operator clears them.
+        drain queue but are retained and surface as an ``outbox_quarantined``
+        coverage gap in status until an operator reclaims them or the count,
+        byte-budget, or clock-fenced age bound folds them into the aggregate
+        eviction evidence — never a silent drop.
         """
 
         with self._lock:
@@ -1060,17 +1185,15 @@ class LocalObservationStore:
             if moved is None:
                 return False
             already = any(
-                q_session == codex_session_id and q_env.source_identity == source_identity
-                for q_session, q_env, _ in state.quarantine
+                entry[0] == codex_session_id and entry[1].source_identity == source_identity
+                for entry in state.quarantine
             )
             if not already:
-                state.quarantine.append((codex_session_id, moved, reason))
+                state.quarantine.append((codex_session_id, moved, reason, self._wall_timestamp()))
                 # Bounded detail with permanent aggregate evidence for evictions.
                 while len(state.quarantine) > _MAX_QUARANTINE:
-                    evicted_session, evicted_envelope, evicted_reason = state.quarantine.pop(0)
-                    self._record_quarantine_eviction(
-                        state, evicted_session, evicted_envelope, evicted_reason
-                    )
+                    evicted = state.quarantine.pop(0)
+                    self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
             state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
             self._save(workspace, state)
             return True
@@ -1094,18 +1217,18 @@ class LocalObservationStore:
             if moved is None:
                 return False
             already = any(
-                session == expected.codex_session_id
-                and envelope.source_identity == moved.source_identity
-                and observation_envelope_to_json(envelope) == observation_envelope_to_json(moved)
-                for session, envelope, _ in state.quarantine
+                entry[0] == expected.codex_session_id
+                and entry[1].source_identity == moved.source_identity
+                and observation_envelope_to_json(entry[1]) == observation_envelope_to_json(moved)
+                for entry in state.quarantine
             )
             if not already:
-                state.quarantine.append((expected.codex_session_id, moved, reason))
+                state.quarantine.append(
+                    (expected.codex_session_id, moved, reason, self._wall_timestamp())
+                )
                 while len(state.quarantine) > _MAX_QUARANTINE:
-                    evicted_session, evicted_envelope, evicted_reason = state.quarantine.pop(0)
-                    self._record_quarantine_eviction(
-                        state, evicted_session, evicted_envelope, evicted_reason
-                    )
+                    evicted = state.quarantine.pop(0)
+                    self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
             state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
             self._save(workspace, state)
             return True
@@ -1116,7 +1239,51 @@ class LocalObservationStore:
             assert state.quarantine is not None
             return len(state.quarantine)
 
-    def list_quarantine(self, workspace: str) -> tuple[tuple[str, ObservationEnvelope, str], ...]:
+    def quarantine_facts(self, workspace: str) -> tuple[int, int, int]:
+        """Return (quarantine depth, involuntary evictions, operator reclaims).
+
+        The two loss counters are deliberately separate: an eviction is yoetz
+        destroying detail on its own (byte cap or age bound), a reclaim is the
+        operator deliberately dropping it. Folding them together would let a
+        voluntary cleanup read as data loss, or vice versa.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.quarantine is not None
+            return (
+                len(state.quarantine),
+                state.quarantine_evicted_count,
+                state.quarantine_reclaimed_count,
+            )
+
+    def reclaim_quarantine(self, workspace: str) -> int:
+        """Operator-initiated drop of all quarantined observation detail.
+
+        Reclaimed entries extend the same aggregate commitment chain as
+        cap/age evictions but are counted separately (operator action, not
+        data loss), so a recovered install can shed the per-hook tax without
+        the drop becoming silent or reading as destruction.
+        Returns how many entries were reclaimed.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.quarantine is not None
+            reclaimed = len(state.quarantine)
+            if reclaimed == 0:
+                return 0
+            for entry in state.quarantine:
+                self._record_quarantine_eviction(
+                    state, entry[0], entry[1], entry[2], reclaimed=True
+                )
+            state.quarantine.clear()
+            self._save(workspace, state)
+            return reclaimed
+
+    def list_quarantine(
+        self, workspace: str
+    ) -> tuple[tuple[str, ObservationEnvelope, str, Timestamp], ...]:
         with self._lock:
             state = self._load(workspace)
             assert state.quarantine is not None
@@ -1371,8 +1538,32 @@ class LocalObservationStore:
             result.append((workspace, self._load(workspace)))
         return result
 
+    def _stat_key(self, path: Path) -> tuple[int, int, int, int] | None:
+        try:
+            if path.is_symlink():
+                return None
+            facts = path.stat()
+        except OSError:
+            return None
+        return (facts.st_ino, facts.st_size, facts.st_mtime_ns, facts.st_ctime_ns)
+
+    def _cache_state(
+        self,
+        workspace_commitment: str,
+        key: tuple[int, int, int, int],
+        state: _WorkspaceState,
+    ) -> None:
+        self._state_cache.pop(workspace_commitment, None)
+        self._state_cache[workspace_commitment] = (key, _copy_state(state))
+        while len(self._state_cache) > _MAX_STATE_CACHE_ENTRIES:
+            self._state_cache.pop(next(iter(self._state_cache)))
+
     def _load(self, workspace_commitment: str) -> _WorkspaceState:
         path = self._workspace_path(workspace_commitment)
+        before = self._stat_key(path)
+        cached = self._state_cache.get(workspace_commitment)
+        if cached is not None and before is not None and cached[0] == before:
+            return _copy_state(cached[1])
         raw = _read_bytes(path, maximum=_MAX_LEGACY_STATE_BYTES)
         if raw is None:
             return _WorkspaceState()
@@ -1382,12 +1573,46 @@ class LocalObservationStore:
             return _WorkspaceState()
         if not isinstance(parsed, Mapping):
             return _WorkspaceState()
-        return self._state_from_json(cast(Mapping[str, JsonValue], parsed))
+        state = self._state_from_json(cast(Mapping[str, JsonValue], parsed))
+        # Cache only when the file provably did not change while it was read.
+        if before is not None and before == self._stat_key(path):
+            self._cache_state(workspace_commitment, before, state)
+        return state
+
+    def _prune_expired_quarantine(self, state: _WorkspaceState) -> None:
+        assert state.quarantine is not None
+        if not state.quarantine:
+            return
+        # Fence the destructive path on a trusted clock, like every other
+        # wall-time consumer in this module: after a reboot, snapshot restore,
+        # or clock jump the persisted epoch disagrees and pruning is skipped
+        # until fresh progress re-establishes it. Age is measured from the
+        # store-authored quarantined_at, never the (possibly far older)
+        # envelope receipt time.
+        if not self._epoch_matches(state.monotonic_epoch):
+            return
+        horizon = datetime.fromtimestamp(self._wall_now(), UTC) - timedelta(
+            days=_MAX_QUARANTINE_AGE_DAYS
+        )
+        # RFC3339 wire strings at fixed precision order lexicographically, so
+        # this hot-path comparison never reparses timestamps.
+        horizon_wire = timestamp_from_datetime(
+            horizon.replace(microsecond=(horizon.microsecond // 1000) * 1000)
+        ).wire
+        kept: list[tuple[str, ObservationEnvelope, str, Timestamp]] = []
+        for entry in state.quarantine:
+            if entry[3].wire < horizon_wire:
+                self._record_quarantine_eviction(state, entry[0], entry[1], entry[2])
+            else:
+                kept.append(entry)
+        if len(kept) != len(state.quarantine):
+            state.quarantine[:] = kept
 
     def _save(self, workspace_commitment: str, state: _WorkspaceState) -> None:
         directory = self._root / "workspaces"
         _ensure_dir(directory)
         path = self._workspace_path(workspace_commitment)
+        self._prune_expired_quarantine(state)
         payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
         if len(payload) > _MAX_STATE_BYTES:
             # Retain authority state and make every observation-detail loss explicit.
@@ -1403,21 +1628,26 @@ class LocalObservationStore:
         while state.pending_outbox and len(payload) > _MAX_STATE_BYTES:
             row = state.pending_outbox.pop(0)
             already = any(
-                session == row.codex_session_id
-                and observation_envelope_to_json(envelope)
+                entry[0] == row.codex_session_id
+                and observation_envelope_to_json(entry[1])
                 == observation_envelope_to_json(row.envelope)
-                for session, envelope, _ in state.quarantine
+                for entry in state.quarantine
             )
             if not already:
                 state.quarantine.append(
-                    (row.codex_session_id, row.envelope, ObservationGapCode.OUTBOX_OVERFLOW.value)
+                    (
+                        row.codex_session_id,
+                        row.envelope,
+                        ObservationGapCode.OUTBOX_OVERFLOW.value,
+                        self._wall_timestamp(),
+                    )
                 )
             state.gaps.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
             state.gaps.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
             payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
         while state.quarantine and len(payload) > _MAX_STATE_BYTES:
-            session, envelope, reason = state.quarantine.pop(0)
-            self._record_quarantine_eviction(state, session, envelope, reason)
+            evicted = state.quarantine.pop(0)
+            self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
             payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
         if len(payload) > _MAX_STATE_BYTES:
             raise _error(
@@ -1426,6 +1656,11 @@ class LocalObservationStore:
                 retryable=False,
             )
         _atomic_write(path, payload)
+        key = self._stat_key(path)
+        if key is None:
+            self._state_cache.pop(workspace_commitment, None)
+        else:
+            self._cache_state(workspace_commitment, key, state)
 
     def _record_quarantine_eviction(
         self,
@@ -1433,6 +1668,8 @@ class LocalObservationStore:
         codex_session_id: str,
         envelope: ObservationEnvelope,
         reason: str,
+        *,
+        reclaimed: bool = False,
     ) -> None:
         assert state.gaps is not None
         material = JsonObject(
@@ -1442,17 +1679,22 @@ class LocalObservationStore:
                 "source_identity": envelope.source_identity,
                 "source_commitment": envelope.cursor.last_source_commitment,
                 "reason": reason,
+                "reclaimed": reclaimed,
                 "codex_session_commitment": session_commitment_from_codex_id(
-                    self.key_material(), codex_session_id
+                    self._cached_key_material(), codex_session_id
                 ),
             }
         )
         state.quarantine_evicted_commitment = canonical_digest(material)
-        state.quarantine_evicted_count += 1
+        if reclaimed:
+            state.quarantine_reclaimed_count += 1
+        else:
+            state.quarantine_evicted_count += 1
         receipt = envelope.receipt_time
-        if state.quarantine_evicted_first is None:
+        if state.quarantine_evicted_first is None or receipt < state.quarantine_evicted_first:
             state.quarantine_evicted_first = receipt
-        state.quarantine_evicted_last = receipt
+        if state.quarantine_evicted_last is None or state.quarantine_evicted_last < receipt:
+            state.quarantine_evicted_last = receipt
         state.gaps.add(ObservationGapCode.QUARANTINE_DETAIL_EVICTED.value)
 
     def _workspace_for_envelope(self, envelope: ObservationEnvelope) -> str:
@@ -1585,7 +1827,10 @@ class LocalObservationStore:
                 }
             )
         return {
-            "schema": "yoetz.observation-local/2",
+            # /3 adds quarantined_at per quarantine entry and the reclaimed
+            # counter; readers of every version tolerate both directions
+            # (unknown keys ignored, missing keys defaulted).
+            "schema": "yoetz.observation-local/3",
             "workspace_commitment": workspace,
             "consent": consent_json,
             "session_workspaces": JsonObject(
@@ -1692,14 +1937,16 @@ class LocalObservationStore:
             "quarantine": tuple(
                 JsonObject(
                     {
-                        "codex_session_id": session,
-                        "envelope": observation_envelope_to_json(envelope),
-                        "reason": reason,
+                        "codex_session_id": entry[0],
+                        "envelope": observation_envelope_to_json(entry[1]),
+                        "reason": entry[2],
+                        "quarantined_at": entry[3].wire,
                     }
                 )
-                for session, envelope, reason in (state.quarantine or ())
+                for entry in (state.quarantine or ())
             ),
             "quarantine_evicted_count": state.quarantine_evicted_count,
+            "quarantine_reclaimed_count": state.quarantine_reclaimed_count,
             "quarantine_evicted_commitment": state.quarantine_evicted_commitment,
             "quarantine_evicted_first": (
                 None
@@ -1880,7 +2127,11 @@ class LocalObservationStore:
                 )
             except ProtocolValueError, TypeError, ValueError:
                 continue
-        quarantine: list[tuple[str, ObservationEnvelope, str]] = []
+        quarantine: list[tuple[str, ObservationEnvelope, str, Timestamp]] = []
+        # Entries written before quarantined_at existed default to load time:
+        # their true quarantine age is unknown, so the age bound restarts
+        # rather than destroying them retroactively.
+        quarantined_at_default = self._wall_timestamp()
         for item in cast(tuple[JsonValue, ...] | list[JsonValue], raw.get("quarantine") or ()):
             if not isinstance(item, Mapping):
                 continue
@@ -1894,7 +2145,13 @@ class LocalObservationStore:
                 or not isinstance(envelope_raw, Mapping)
             ):
                 continue
+            raw_quarantined_at = row.get("quarantined_at")
             try:
+                quarantined_at = (
+                    Timestamp(raw_quarantined_at)
+                    if type(raw_quarantined_at) is str
+                    else quarantined_at_default
+                )
                 quarantine.append(
                     (
                         session,
@@ -1902,6 +2159,7 @@ class LocalObservationStore:
                             JsonObject(cast(Mapping[str, JsonValue], envelope_raw))
                         ),
                         reason,
+                        quarantined_at,
                     )
                 )
             except ProtocolValueError, TypeError, ValueError:
@@ -1909,6 +2167,10 @@ class LocalObservationStore:
         raw_quarantine_evicted_count = raw.get("quarantine_evicted_count", 0)
         quarantine_evicted_count = (
             raw_quarantine_evicted_count if type(raw_quarantine_evicted_count) is int else 0
+        )
+        raw_quarantine_reclaimed_count = raw.get("quarantine_reclaimed_count", 0)
+        quarantine_reclaimed_count = (
+            raw_quarantine_reclaimed_count if type(raw_quarantine_reclaimed_count) is int else 0
         )
         return _WorkspaceState(
             consent=consent,
@@ -1944,6 +2206,7 @@ class LocalObservationStore:
             pending_outbox=pending_outbox,
             quarantine=quarantine,
             quarantine_evicted_count=quarantine_evicted_count,
+            quarantine_reclaimed_count=quarantine_reclaimed_count,
             quarantine_evicted_commitment=cast(
                 str | None, raw.get("quarantine_evicted_commitment")
             ),

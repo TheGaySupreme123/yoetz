@@ -96,6 +96,71 @@ def test_status_separates_undelivered_from_lag_and_reports_ambiguous_activation(
     assert payload["hook_diagnostics"]["reasons"]["service_unavailable"] == 1
 
 
+def test_status_surfaces_quarantine_depth_and_reclaim_empties_it(
+    tmp_path: Path, capsys: object
+) -> None:
+    """#211: quarantine is a first-class status line, and reclaim drops it loudly."""
+
+    from yoetz.cli.observe_hooks import map_hook_payload_to_envelope
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "quarantine-cli")
+    session = store.session_commitment("quarantine-cli")
+    for ordinal in (1, 2):
+        envelope = map_hook_payload_to_envelope(
+            "PostToolUse",
+            {"session_id": "quarantine-cli", "tool_name": "shell", "correlation_id": f"q{ordinal}"},
+            session_commitment=session,
+            event_ordinal=ordinal,
+            key_material=store.key_material(),
+        )
+        store.ingest(envelope)
+        store.enqueue_outbox(workspace, "quarantine-cli", envelope)
+        assert store.quarantine_outbox(
+            workspace, "quarantine-cli", envelope.source_identity, "consent_revoked"
+        )
+
+    assert (
+        observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=tmp_path) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
+    assert payload["quarantine_count"] == 2
+    assert payload["quarantine_evicted_count"] == 0
+
+    assert (
+        observe_cli.observe_status(workspace=str(tmp_path), json_output=False, _state=tmp_path) == 0
+    )
+    text = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "quarantine: 2" in text
+    assert (
+        "reclaim by changing to the selected workspace and running "
+        "'yoetz observe reclaim --workspace .'"
+    ) in text
+    assert str(tmp_path) not in text
+
+    assert (
+        observe_cli.reclaim_observation(workspace=str(tmp_path), json_output=True, _state=tmp_path)
+        == 0
+    )
+    reclaim_payload = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
+    assert reclaim_payload["reclaimed"] == 2
+    assert reclaim_payload["quarantine_count"] == 0
+    # A voluntary reclaim is never reported as involuntary eviction.
+    assert reclaim_payload["quarantine_evicted_count"] == 0
+    assert reclaim_payload["quarantine_reclaimed_count"] == 2
+    assert str(tmp_path) not in json.dumps(reclaim_payload)
+
+    assert (
+        observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=tmp_path) == 0
+    )
+    after = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
+    assert after["quarantine_count"] == 0
+    assert after["quarantine_evicted_count"] == 0
+    assert after["quarantine_reclaimed_count"] == 2
+
+
 def test_status_inspects_only_the_explicit_codex_target(
     tmp_path: Path, capsys: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:

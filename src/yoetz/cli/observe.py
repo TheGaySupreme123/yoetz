@@ -157,12 +157,21 @@ def observe_status(
     undelivered, delivery_causes, last_drain, mapping_present = _delivery_facts(
         store, commitment, state_root=_state
     )
+    quarantine_depth, quarantine_evicted, quarantine_reclaimed = store.quarantine_facts(commitment)
     plugin_activation = _activation_state(
         root,
         codex_path=codex_path,
         codex_home=codex_home,
     )
     diagnostics = hook_diagnostic_summary(_state=_state)
+    reclaim_guidance = (
+        "reclaim with 'yoetz observe reclaim --workspace .'"
+        if root == Path.cwd().resolve()
+        else (
+            "reclaim by changing to the selected workspace and running "
+            "'yoetz observe reclaim --workspace .'"
+        )
+    )
     consent_label = (
         "absent"
         if consent is None
@@ -196,6 +205,9 @@ def observe_status(
                 "undelivered_count": undelivered,
                 "delivery_causes": delivery_causes,
                 "last_successful_drain": last_drain,
+                "quarantine_count": quarantine_depth,
+                "quarantine_evicted_count": quarantine_evicted,
+                "quarantine_reclaimed_count": quarantine_reclaimed,
                 "mapping_present": mapping_present,
                 "hook_diagnostics": diagnostics,
                 "plugin_activation": plugin_activation,
@@ -212,6 +224,13 @@ def observe_status(
             f"{undelivered} (cause: "
             f"{','.join(f'{key}={value}' for key, value in delivery_causes.items()) or 'none'}; "
             f"last successful drain: {last_drain})"
+        ),
+        "quarantine": (
+            f"{quarantine_depth} (evicted: {quarantine_evicted}; "
+            f"reclaimed: {quarantine_reclaimed}; "
+            f"{reclaim_guidance})"
+            if quarantine_depth or quarantine_evicted or quarantine_reclaimed
+            else "0"
         ),
         "mapping_present": str(mapping_present),
         "plugin_activation": plugin_activation,
@@ -359,6 +378,36 @@ def drain_observation(
             "reasons: " + (", ".join(f"{key}={value}" for key, value in reasons.items()) or "none")
         )
     return code
+
+
+def reclaim_observation(*, workspace: str, json_output: bool, _state: Path | None = None) -> int:
+    """Operator-initiated drop of quarantined observation detail (#211).
+
+    Quarantine detail is a diagnostic aid whose only ongoing effect is
+    per-hook parse/encode tax; once the underlying delivery failure is fixed,
+    this is how a recovered install sheds it. The drop extends the aggregate
+    eviction commitment chain and is counted separately from involuntary
+    evictions, never silent and never conflated with data loss.
+    """
+
+    store = LocalObservationStore(_state=_state)
+    commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
+    reclaimed = store.reclaim_quarantine(commitment)
+    depth, evicted, total_reclaimed = store.quarantine_facts(commitment)
+    if json_output:
+        _emit(
+            {
+                "workspace_commitment": commitment,
+                "reclaimed": reclaimed,
+                "quarantine_count": depth,
+                "quarantine_evicted_count": evicted,
+                "quarantine_reclaimed_count": total_reclaimed,
+            },
+            json_output=True,
+        )
+        return 0
+    typer.echo(f"observation_quarantine_reclaimed:{reclaimed} (reclaimed total: {total_reclaimed})")
+    return 0
 
 
 def grant_observation(*, workspace: str, _state: Path | None = None) -> int:

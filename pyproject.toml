@@ -79,5 +79,6 @@ markers = [
     "live: opt-in live external integration; excluded from default CI",
     "live_keyring: live OS keyring probe; opt-in / release only",
     "live_provider: approved live provider profile probe; release environment only",
+    "slow: wall-clock or resource-sensitive regression guard; may be deselected on contended runners",
     "soak: long-running scale/resource soak; nightly/release profile only",
 ]

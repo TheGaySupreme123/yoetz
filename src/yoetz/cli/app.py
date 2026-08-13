@@ -570,6 +570,22 @@ def observe_drain_cmd(
     _finish(_observe_operation("drain_observation")(workspace=workspace, json_output=json_output))
 
 
+@observe_app.command("reclaim")
+def observe_reclaim_cmd(
+    workspace: Annotated[
+        str,
+        typer.Option("--workspace", help="Workspace path (commitment only stored)."),
+    ],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Drop quarantined observation detail, recording the drop in eviction evidence.
+
+    Destructive like grant/pause/revoke, so the workspace is explicit — no cwd default.
+    """
+
+    _finish(_observe_operation("reclaim_observation")(workspace=workspace, json_output=json_output))
+
+
 @observe_app.command("grant")
 def observe_grant_cmd(
     workspace: Annotated[str, typer.Option("--workspace", help="Workspace path to consent.")],

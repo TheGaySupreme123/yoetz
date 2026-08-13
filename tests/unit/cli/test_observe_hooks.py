@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -624,3 +625,473 @@ async def test_drain_budget_stops_without_advancing_unfinished_row(tmp_path: Pat
     assert store.list_pending_outbox_rows(workspace)[0].attempts == 0
     diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
     assert '"reason":"drain_budget_exhausted"' in diagnostics
+
+
+@pytest.mark.anyio
+async def test_drain_probes_a_mapping_missing_session_once_per_pass(tmp_path: Path) -> None:
+    """#211's recurrence tax: a dead-session backlog must not eat the drain budget.
+
+    mapping_missing is session-scoped and cannot heal mid-pass, so one
+    rejection retires the whole session for the rest of the pass while other
+    sessions still deliver.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    for session, count in (("dead", 5), ("healthy", 2)):
+        store.bind_codex_session(workspace, session)
+        for ordinal in range(1, count + 1):
+            store.enqueue_outbox(
+                workspace, session, _drain_envelope(store, session, f"hook:{session}", ordinal)
+            )
+
+    attempts: list[str] = []
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del deadline_ms
+            session = str(body["codex_session_id"])  # type: ignore[index]
+            attempts.append(session)
+            if session == "dead":
+                return observation_ingest_result_to_json(
+                    ObservationIngestResult(
+                        ObservationIngestDisposition.REJECTED,
+                        ObservationGapCode.MAPPING_MISSING.value,
+                        None,
+                    )
+                )
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="dead",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+    assert attempts.count("dead") == 1, "a mapping_missing session must be probed once per pass"
+    assert attempts.count("healthy") == 2, "healthy sessions must still deliver in the same pass"
+    remaining = store.list_pending_outbox_rows(workspace)
+    assert {row.codex_session_id for row in remaining} == {"dead"}
+    assert len(remaining) == 5
+    # Retired siblings carry the shared cause so `observe status` reports
+    # mapping_missing=5, never a misleading not_attempted.
+    assert all(row.last_reason == ObservationGapCode.MAPPING_MISSING.value for row in remaining)
+
+
+def test_session_reason_stamping_preserves_a_rows_observed_cause(tmp_path: Path) -> None:
+    """Skipped siblings inherit the cause without rewriting a prior real attempt."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "mixed-reasons")
+    for ordinal in (1, 2):
+        store.enqueue_outbox(
+            workspace,
+            "mixed-reasons",
+            _drain_envelope(store, "mixed-reasons", "hook:mixed-reasons", ordinal),
+        )
+    attempted, skipped = store.list_pending_outbox_rows(workspace)
+    assert (
+        store.bump_outbox_row_attempt(
+            workspace,
+            attempted,
+            reason=ObservationGapCode.SERVICE_UNAVAILABLE.value,
+        )
+        is not None
+    )
+
+    stamped = store.note_outbox_session_reason(
+        workspace,
+        "mixed-reasons",
+        ObservationGapCode.MAPPING_MISSING.value,
+    )
+
+    assert stamped == 1
+    attempted_after, skipped_after = store.list_pending_outbox_rows(workspace)
+    assert attempted_after.last_reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
+    assert skipped_after.row_identity == skipped.row_identity
+    assert skipped_after.last_reason == ObservationGapCode.MAPPING_MISSING.value
+
+
+@pytest.mark.anyio
+async def test_drain_treats_service_unavailable_as_row_scoped_with_a_cap(tmp_path: Path) -> None:
+    """One poisoned row must not wedge the workspace drain forever.
+
+    service_unavailable is the catch-all for row-scoped failures (bundle
+    contention, one malformed envelope), so healthy rows behind it still
+    deliver; only a consecutive run of them yields the pass.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "mixed")
+    for ordinal in range(1, 6):
+        store.enqueue_outbox(
+            workspace, "mixed", _drain_envelope(store, "mixed", "hook:mixed", ordinal)
+        )
+    poisoned = store.list_pending_outbox_rows(workspace)[0].envelope.source_identity
+
+    attempts: list[str] = []
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del deadline_ms
+            identity = str(body["envelope"]["source_identity"])  # type: ignore[index]
+            attempts.append(identity)
+            if identity == poisoned:
+                return observation_ingest_result_to_json(
+                    ObservationIngestResult(
+                        ObservationIngestDisposition.REJECTED,
+                        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                        None,
+                    )
+                )
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="mixed",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+    assert len(attempts) == 5, "rows behind a service_unavailable row must still be attempted"
+    remaining = store.list_pending_outbox_rows(workspace)
+    assert [row.envelope.source_identity for row in remaining] == [poisoned]
+
+
+@pytest.mark.anyio
+async def test_slow_successful_connect_is_not_charged_to_the_drain_budget(
+    tmp_path: Path,
+) -> None:
+    """The preflight bounds connect time; the budget bounds drain work.
+
+    Before the clock moved after the connect, a 0.9s connect against the
+    0.75s SessionEnd budget entered the row loop with remaining <= 0 and
+    drained nothing while recording drain_budget_exhausted — a diagnostic
+    blaming the budget for time the connect spent.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "slow-connect")
+    store.enqueue_outbox(workspace, "slow-connect", _drain_envelope(store, "slow-connect", "x", 1))
+
+    clock = {"now": 0.0}
+
+    async def slow_connect(_kind: object):
+        clock["now"] += 0.9  # slower than the whole 0.75s SessionEnd budget
+        return _InstantAckClient()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="slow-connect",
+        connect=slow_connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+        budget_seconds=0.75,
+        monotonic=lambda: clock["now"],
+    )
+    assert store.pending_outbox_count(workspace) == 0, (
+        "a slow but successful connect must leave the whole budget for draining"
+    )
+    diagnostics_path = tmp_path / "observation/hook-diagnostics.jsonl"
+    if diagnostics_path.exists():
+        assert '"reason":"drain_budget_exhausted"' not in diagnostics_path.read_text()
+
+
+@pytest.mark.anyio
+async def test_workspace_global_rejection_ends_the_pass(tmp_path: Path) -> None:
+    """vault_locked cannot heal mid-pass, so one rejection ends the drain."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    for session in ("one", "two"):
+        store.bind_codex_session(workspace, session)
+        for ordinal in (1, 2):
+            store.enqueue_outbox(
+                workspace, session, _drain_envelope(store, session, f"hook:{session}", ordinal)
+            )
+
+    attempts = 0
+
+    class LockedClient:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            nonlocal attempts
+            attempts += 1
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.VAULT_LOCKED.value,
+                    None,
+                )
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return LockedClient()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="one",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+    assert attempts == 1, "a workspace-global rejection must end the pass after one probe"
+    assert store.pending_outbox_count(workspace) == 4
+
+
+@pytest.mark.anyio
+async def test_drain_lease_prevents_concurrent_hooks_from_double_draining(
+    tmp_path: Path,
+) -> None:
+    """#209 made hooks genuinely concurrent; only one may drain at a time."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "leased")
+    store.enqueue_outbox(workspace, "leased", _drain_envelope(store, "leased", "x", 1))
+
+    connects: list[object] = []
+
+    async def recording_connect(kind: object):
+        connects.append(kind)
+        raise RuntimeError("offline")
+
+    with store.drain_lease(workspace) as owned:
+        assert owned is True
+        # A second store instance (another hook process) must lose the lease
+        # and skip the drain entirely — no connect, no diagnostics.
+        other = LocalObservationStore(_state=tmp_path)
+        await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+            other,
+            workspace_commitment=workspace,
+            codex_session_id="leased",
+            connect=recording_connect,
+            _state=tmp_path,
+        )
+    assert connects == []
+    assert not (tmp_path / "observation/hook-diagnostics.jsonl").exists()
+
+
+def test_drain_lease_refuses_a_symlink_lock_file(tmp_path: Path) -> None:
+    """A project-local symlink cannot redirect the advisory-lock target."""
+
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("host has no O_NOFOLLOW")
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    target = tmp_path / "redirected-lock-target"
+    target.write_text("unchanged", encoding="utf-8")
+    digest = workspace.removeprefix("hmac-sha256:")
+    lock_path = tmp_path / "observation" / f".drain-{digest}.lock"
+    lock_path.symlink_to(target)
+
+    with pytest.raises(OSError):
+        with store.drain_lease(workspace):
+            raise AssertionError("a symlinked drain lease must not be acquired")
+    assert target.read_text(encoding="utf-8") == "unchanged"
+
+
+def _populate_realistic_store(
+    store: LocalObservationStore,
+    workspace: str,
+    session: str,
+    *,
+    envelopes: int = 250,
+    pending: int = 60,
+    quarantined: int = 199,
+) -> None:
+    """Grow one workspace state to the shape the 2026-08-12 regression ran at.
+
+    Hook cost is store-size-dependent, so latency guards against a small
+    fixture pass trivially (#209). The live store that measured 3.06-4.89s
+    held 256 envelopes, 73 pending rows, and 199 quarantine entries in a
+    ~384KB file; this builds the same order of magnitude in one save.
+    """
+
+    state = store._load(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert state.envelopes is not None
+    assert state.pending_outbox is not None
+    assert state.quarantine is not None
+    assert state.dedup is not None
+    from datetime import UTC, datetime
+
+    from yoetz.adapters.integrations.observation_local import (
+        ObservationOutboxRow,
+        _dedup_key,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.domain.values import timestamp_from_datetime
+
+    quarantined_at = timestamp_from_datetime(datetime.now(UTC).replace(microsecond=0))
+    for ordinal in range(1, envelopes + pending + quarantined + 1):
+        envelope = _drain_envelope(store, session, f"hook:bulk:{ordinal}", ordinal)
+        if ordinal <= envelopes:
+            state.envelopes.append(envelope)
+            state.dedup.add(_dedup_key(workspace, envelope))
+        elif ordinal <= envelopes + pending:
+            state.pending_outbox.append(
+                ObservationOutboxRow(codex_session_id=session, envelope=envelope)
+            )
+        else:
+            state.quarantine.append((session, envelope, "service_unavailable", quarantined_at))
+    store._save(workspace, state)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+
+class _InstantAckClient:
+    async def observation_ingest(self, body: object, *, deadline_ms: int):
+        del body, deadline_ms
+        # DUPLICATE routes to ACKNOWLEDGE without needing a service cursor.
+        return observation_ingest_result_to_json(
+            ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+def test_hook_invocation_parses_the_state_file_once_not_seventeen_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#209: one hook process loads the store once and reuses the parse.
+
+    Before the stat-validated parse cache, every store method re-read and
+    re-parsed the whole workspace state file — 17 times per hook invocation
+    against the live 384KB store.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "parse-count")
+    _populate_realistic_store(store, workspace, "parse-count", pending=8, quarantined=40)
+
+    parses = 0
+    original = LocalObservationStore._state_from_json  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    def counting(self: LocalObservationStore, raw: object):
+        nonlocal parses
+        parses += 1
+        return original(self, raw)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(LocalObservationStore, "_state_from_json", counting)
+
+    async def connect(_kind: object):
+        return _InstantAckClient()
+
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "parse-count",
+                "tool_name": "shell",
+                "correlation_id": "pc-1",
+                "exit_status": 0,
+            }
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+    assert code == 0
+    assert parses == 1, (
+        f"one hook invocation parsed the workspace state {parses} times; "
+        "the per-instance parse cache is not being hit (33 parses measured "
+        "with the cache neutered at this fixture shape)"
+    )
+
+
+@pytest.mark.slow
+def test_hook_wall_clock_meets_the_declared_timeout_on_a_realistic_store(
+    tmp_path: Path,
+) -> None:
+    """#209's guard: hook wall time vs the timeout hooks.json declares.
+
+    The 2026-08-12 regression measured 3.06-4.89s per hook at exactly this
+    store shape against a declared 3s, and nothing went red because no test
+    asserted wall clock at a realistic store size. The bound is the declared
+    timeout with a safety margin: absolute machine-calibrated bounds flake
+    (a 3.0s bound measured 0.5s locally and 3.09s on a shared CI runner), so
+    the machine-independent cache-regression duty lives in the parse-count
+    test above, and this test owns the contract that a hook never comes near
+    the budget Codex kills it at.
+    """
+
+    import time as time_module
+
+    from yoetz.adapters.integrations.codex_plugin import parse_hooks_json, render_plugin_tree
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "latency")
+    _populate_realistic_store(store, workspace, "latency")
+    state_file = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    assert state_file.stat().st_size >= 250_000, (
+        "latency guard must run against a realistically-sized store; "
+        f"got {state_file.stat().st_size} bytes"
+    )
+
+    async def connect(_kind: object):
+        return _InstantAckClient()
+
+    started = time_module.monotonic()
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "latency",
+                "tool_name": "shell",
+                "correlation_id": "lat-1",
+                "exit_status": 0,
+            }
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+    elapsed = time_module.monotonic() - started
+    assert code == 0
+    hooks = parse_hooks_json(render_plugin_tree()["hooks/hooks.json"])
+    events = hooks["hooks"]
+    declared = None
+    for group in events["PostToolUse"]:  # type: ignore[index, call-overload]
+        for handler in group["hooks"]:  # type: ignore[index, call-overload]
+            if "observe" in str(handler["command"]):  # type: ignore[index]
+                assert declared is None, "more than one observe handler declared for PostToolUse"
+                declared = handler["timeout"]  # type: ignore[index]
+    assert isinstance(declared, int)
+    assert elapsed < declared * 0.8, (
+        f"hook invocation took {elapsed:.2f}s against a realistic store — "
+        f"within 20% of the declared {declared}s timeout Codex kills it at"
+    )
