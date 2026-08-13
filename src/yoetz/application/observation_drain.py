@@ -117,8 +117,9 @@ class ObservationOutboxSweeper:
             with self.local.drain_lease(workspace) as owned:
                 if not owned:
                     continue
+                pending_rows = frozenset(self.local.list_pending_outbox_rows(workspace))
                 for selected_workspace, row in rows:
-                    if selected_workspace != workspace:
+                    if selected_workspace != workspace or row not in pending_rows:
                         continue
                     attempted += 1
                     request = ObservationIngestRequest(

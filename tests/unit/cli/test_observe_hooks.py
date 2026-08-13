@@ -796,9 +796,9 @@ async def test_drain_treats_service_unavailable_as_row_scoped_with_a_cap(tmp_pat
         connect=connect,  # type: ignore[arg-type]
         _state=tmp_path,
     )
-    assert len(attempts) == 4, "hook drains are capped and prioritize the newest rows"
+    assert len(attempts) == 4, "hook drains are capped while preserving cursor order"
     remaining = store.list_pending_outbox_rows(workspace)
-    assert [row.envelope.source_identity for row in remaining] == [poisoned]
+    assert [row.envelope.cursor.event_position for row in remaining] == [1, 5]
 
 
 @pytest.mark.anyio

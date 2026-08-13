@@ -199,6 +199,11 @@ class MemoryObservationStore:
             self._state.cursors[cursor_key] = envelope.cursor
             self._state.envelopes.append((workspace, envelope))
             self._state.last_receipt[workspace] = envelope.receipt_time
+            # Successful advancement, rather than the untrusted receipt timestamp, proves that
+            # a previously stale cursor is no longer the current ingest condition.
+            self._state.gaps.setdefault(workspace, {}).pop(
+                ObservationGapCode.CURSOR_STALE.value, None
+            )
             for gap in envelope.gap_codes:
                 self._note_gap(workspace, gap, envelope.receipt_time)
             if ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes:
@@ -352,11 +357,6 @@ class MemoryObservationStore:
                 coverage[envelope.source] = True
         history = self._state.gaps.get(workspace_commitment, {})
         current = set(history)
-        cursor_gap = history.get(ObservationGapCode.CURSOR_STALE.value)
-        last_receipt = self._state.last_receipt.get(workspace_commitment)
-        if cursor_gap is not None and last_receipt is not None:
-            if cursor_gap.last_seen.wire < last_receipt.wire:
-                current.discard(ObservationGapCode.CURSOR_STALE.value)
         gaps = tuple(sorted(current, key=str.encode))
         unsupported = tuple(
             sorted(self._state.unsupported_events.get(workspace_commitment, set()), key=str.encode)

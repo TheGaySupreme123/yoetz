@@ -227,6 +227,28 @@ def test_local_outbox_enqueue_ack_and_overflow(tmp_path: Path) -> None:
     assert store.pending_outbox_count(workspace) == 0
 
 
+def test_outbox_ack_does_not_clear_source_reported_overflow(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "sess-source-overflow")
+    source_overflow = _envelope(
+        session=session,
+        identity="hook:source-overflow",
+        gaps=(ObservationGapCode.OUTBOX_OVERFLOW.value,),
+    )
+    assert store.ingest(source_overflow).disposition is ObservationIngestDisposition.ACCEPTED
+
+    delivery = _envelope(session=session, identity="hook:delivery", ordinal=2)
+    assert store.enqueue_outbox(workspace, "sess-source-overflow", delivery) is None
+    assert store.acknowledge_outbox(workspace, "sess-source-overflow", delivery.source_identity)
+
+    assert (
+        ObservationGapCode.OUTBOX_OVERFLOW.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
 def test_mapping_gap_history_does_not_latch_after_mapping_exists(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -1106,6 +1128,32 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
     assert entries[0].draft.payload.coverage == item_coverage  # type: ignore[union-attr]
     assert entries[0].publication_channel is PublicationChannel.ENGINE_DERIVED
     assert entries[0].coverage == coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
+
+    revised_item = replace(item, evidence_refs=("hook:advice-revision",))
+    revised_snapshot = replace(
+        snapshot,
+        ranked_items=(revised_item,),
+        evidence_basis_digest="sha256:" + "d" * 64,
+        suppression_identity="advice-materialization-2",
+    )
+    await coordinator._materialize_advice_findings(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        cast(TaskRuntime, runtime),
+        (
+            envelope,
+            _envelope(
+                session=f"hmac-sha256:{'d' * 64}",
+                kind="PostToolUse",
+                identity="hook:advice-revision",
+                ordinal=2,
+                exit_status=2,
+            ),
+        ),
+        revised_snapshot,  # type: ignore[arg-type]
+    )
+    assert len(captured) == 2
+    assert captured[0].command.entries[0].draft.event_id != (
+        captured[1].command.entries[0].draft.event_id
+    )
 
 
 @pytest.mark.anyio

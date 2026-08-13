@@ -37,14 +37,16 @@ def _cursor(*, generation: int = 1, byte_pos: int = 10, event_pos: int = 1) -> O
     )
 
 
-def _envelope(*, cursor: ObservationCursor | None = None) -> ObservationEnvelope:
+def _envelope(
+    *, cursor: ObservationCursor | None = None, receipt_time: Timestamp = _TIME
+) -> ObservationEnvelope:
     return ObservationEnvelope(
         session_commitment=_SESSION,
         event_kind="PostToolUse",
         source_identity="hook:evt-1",
         source=ObservationSource.CODEX_HOOK,
         cursor=cursor or _cursor(),
-        receipt_time=_TIME,
+        receipt_time=receipt_time,
         structural_payload=JsonObject({"tool_name": "shell", "exit_status": 0}),
         content_object_refs=(),
         gap_codes=(),
@@ -100,5 +102,35 @@ def test_resume_without_consent_fails() -> None:
         store = MemoryObservationStore()
         with pytest.raises(PublicOperationError):
             await store.resume(ObservationControlCommand(_WORKSPACE))
+
+    asyncio.run(run())
+
+
+def test_successful_cursor_advance_clears_stale_gap_despite_future_receipt_time() -> None:
+    async def run() -> None:
+        store = MemoryObservationStore()
+        store.grant_consent(_WORKSPACE, _TIME)
+        store.bind_session(_WORKSPACE, _SESSION)
+        assert (await store.ingest(_envelope(cursor=_cursor(event_pos=2)))).disposition is (
+            ObservationIngestDisposition.ACCEPTED
+        )
+        stale = await store.ingest(
+            _envelope(
+                cursor=_cursor(event_pos=1),
+                receipt_time=Timestamp("2099-01-01T00:00:00.000Z"),
+            )
+        )
+        assert stale.reason == ObservationGapCode.CURSOR_STALE.value
+        assert (
+            ObservationGapCode.CURSOR_STALE.value
+            in (await store.status(ObservationStatusQuery(_WORKSPACE))).gaps
+        )
+
+        advanced = await store.ingest(_envelope(cursor=_cursor(event_pos=3)))
+        assert advanced.disposition is ObservationIngestDisposition.ACCEPTED
+        assert (
+            ObservationGapCode.CURSOR_STALE.value
+            not in (await store.status(ObservationStatusQuery(_WORKSPACE))).gaps
+        )
 
     asyncio.run(run())

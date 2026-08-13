@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -262,6 +263,7 @@ async def test_approved_check_materialization_is_service_owned_and_idempotent(
         approval_commitment,
     )
     from yoetz.application.observation_coordinator import ObservationCoordinator
+    from yoetz.application.observation_materialize import observation_writer_id
     from yoetz.domain.events import (
         AcceptedEvent,
         EvidenceDigestProvenance,
@@ -328,7 +330,15 @@ async def test_approved_check_materialization_is_service_owned_and_idempotent(
 
     await coordinator._materialize_approved_check(runtime, completed)  # pyright: ignore[reportPrivateUsage]
     object_count = len(objects._data)  # pyright: ignore[reportPrivateUsage]
-    await coordinator._materialize_approved_check(runtime, completed)  # pyright: ignore[reportPrivateUsage]
+    harness_runtime = replace(
+        runtime,
+        writer_id=observation_writer_id(runtime.task_id, runtime.session_id),
+    )
+    await coordinator._materialize_approved_check(  # pyright: ignore[reportPrivateUsage]
+        harness_runtime,
+        completed,
+        legacy_writer_id=runtime.writer_id,
+    )
     assert len(objects._data) == object_count  # pyright: ignore[reportPrivateUsage]
 
     records = [row async for row in ledger.load_events(seed.session_id)]

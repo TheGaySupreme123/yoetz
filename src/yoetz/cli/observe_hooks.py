@@ -590,8 +590,6 @@ async def _drain_outbox_leased(
     grouped: dict[str, list[ObservationOutboxRow]] = {}
     for row in all_pending:
         grouped.setdefault(row.codex_session_id, []).append(row)
-    for rows in grouped.values():
-        rows.reverse()
     session_order = sorted(grouped, key=str.encode)
     if codex_session_id in grouped:
         session_order.remove(codex_session_id)

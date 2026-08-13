@@ -88,6 +88,7 @@ _OUTBOX_REASON_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 _RUNTIME_GATE_SCHEMA: Final = "yoetz.observation-runtime-gate/1"
 _RUNTIME_GATE_NAME: Final = "runtime-gate.json"
 _MAX_RUNTIME_GATE_BYTES: Final = 256
+_LOCAL_OUTBOX_OVERFLOW_GAP: Final = "_local_outbox_overflow"
 
 YOETZ_TOOL_NAMES: Final = frozenset(
     {
@@ -961,7 +962,7 @@ class LocalObservationStore:
             assert state.pending_outbox is not None
             assert state.gaps is not None
             if len(state.pending_outbox) >= _MAX_OUTBOX:
-                self._note_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
+                self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
                 self._save(workspace, state)
                 return ObservationGapCode.OUTBOX_OVERFLOW.value
             # Dedup identical source identities already pending for this session.
@@ -979,10 +980,10 @@ class LocalObservationStore:
             projected = canonical_encode(self._state_to_json(workspace, state)) + b"\n"
             if len(projected) > _MAX_STATE_BYTES:
                 state.pending_outbox.pop()
-                self._note_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
+                self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
                 self._save(workspace, state)
                 return ObservationGapCode.OUTBOX_OVERFLOW.value
-            self._resolve_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
+            self._resolve_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
             self._save(workspace, state)
             return None
 
@@ -1328,9 +1329,9 @@ class LocalObservationStore:
         """
 
         for code in (
-            ObservationGapCode.OUTBOX_OVERFLOW.value,
             ObservationGapCode.SERVICE_UNAVAILABLE.value,
             ObservationGapCode.VAULT_LOCKED.value,
+            _LOCAL_OUTBOX_OVERFLOW_GAP,
         ):
             cls._resolve_gap_state(state, code)
 
@@ -1690,7 +1691,7 @@ class LocalObservationStore:
                         self._wall_timestamp(),
                     )
                 )
-            self._note_gap_state(state, ObservationGapCode.OUTBOX_OVERFLOW.value)
+            self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
             self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
             payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
         while state.quarantine and len(payload) > _MAX_STATE_BYTES:
@@ -1869,14 +1870,18 @@ class LocalObservationStore:
             ObservationGapCode.MAPPING_MISSING.value,
             ObservationGapCode.OUTBOX_OVERFLOW.value,
             ObservationGapCode.OUTBOX_QUARANTINED.value,
+            _LOCAL_OUTBOX_OVERFLOW_GAP,
         }
         current = {code for code, seen in state.gaps.items() if seen.active} - transient
         if state.quarantine:
             current.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
-        overflow_gap = state.gaps.get(ObservationGapCode.OUTBOX_OVERFLOW.value)
+        overflow_gap = state.gaps.get(_LOCAL_OUTBOX_OVERFLOW_GAP)
         if len(state.pending_outbox) >= _MAX_OUTBOX or (
             overflow_gap is not None and overflow_gap.active
         ):
+            current.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
+        source_overflow = state.gaps.get(ObservationGapCode.OUTBOX_OVERFLOW.value)
+        if source_overflow is not None and source_overflow.active:
             current.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
         for row in state.pending_outbox:
             if row.last_reason is not None:

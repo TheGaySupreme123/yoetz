@@ -235,7 +235,12 @@ class ObservationCoordinator:
                     pending = repo.list_pending_workspaces()
                     if workspace not in pending:
                         continue
-                    worker = await self._rebuild_verification_worker(runtime, workspace, store)
+                    worker = await self._rebuild_verification_worker(
+                        runtime,
+                        workspace,
+                        store,
+                        legacy_writer_id=mapping.yoetz_writer_id,
+                    )
                     if worker is None:
                         continue
 
@@ -590,6 +595,8 @@ class ObservationCoordinator:
         self,
         runtime: TaskRuntime,
         completed: CompletedApprovedCheck,
+        *,
+        legacy_writer_id: str | None = None,
     ) -> None:
         """Append one idempotent service-owned action/evidence/result graph."""
 
@@ -613,6 +620,26 @@ class ObservationCoordinator:
         operation_id = self._stable_operation_id(operation_digest)
         if await runtime.ledger.lookup_operation(writer_id, operation_id) is not None:
             return
+        if legacy_writer_id is not None and legacy_writer_id != writer_id:
+            legacy_digest = canonical_digest(
+                JsonObject(
+                    {
+                        "format": "yoetz.approved-check-ledger-materialization/1",
+                        "job_id": completed.job.job_id,
+                        "approval_commitment": completed.job.approval_commitment,
+                        "result_digest": result.result_digest,
+                        "task_id": runtime.task_id,
+                        "session_id": runtime.session_id,
+                        "writer_id": legacy_writer_id,
+                    }
+                )
+            )
+            legacy_operation_id = self._stable_operation_id(legacy_digest)
+            if (
+                await runtime.ledger.lookup_operation(legacy_writer_id, legacy_operation_id)
+                is not None
+            ):
+                return
 
         receipt_document = JsonObject(
             {
@@ -913,7 +940,13 @@ class ObservationCoordinator:
         scenarios keep completing within the same await.
         """
 
-        worker = await self._prepare_verification_worker(runtime, workspace, store, envelope)
+        worker = await self._prepare_verification_worker(
+            runtime,
+            workspace,
+            store,
+            envelope,
+            legacy_writer_id=legacy_writer_id,
+        )
         if worker is None:
             return
         if self.verification_supervisor is not None:
@@ -944,6 +977,8 @@ class ObservationCoordinator:
         workspace: str,
         store: TaskObservationPort,
         envelope: ObservationEnvelope,
+        *,
+        legacy_writer_id: str | None = None,
     ) -> ObservationVerificationWorker | None:
         """Build a worker and enqueue if subject state changed; never run checks here."""
 
@@ -1081,7 +1116,7 @@ class ObservationCoordinator:
             now=now_wire,
             lease_expires_at=lease_expiry,
             materialize_result=lambda completed: self._materialize_approved_check(
-                runtime, completed
+                runtime, completed, legacy_writer_id=legacy_writer_id
             ),
         )
         worker.enqueue_if_changed(
@@ -1175,6 +1210,8 @@ class ObservationCoordinator:
         runtime: TaskRuntime,
         workspace: str,
         store: TaskObservationPort,
+        *,
+        legacy_writer_id: str | None = None,
     ) -> ObservationVerificationWorker | None:
         """Rebuild a drain worker for already-pending durable jobs (no enqueue)."""
 
@@ -1281,7 +1318,7 @@ class ObservationCoordinator:
             now=now_wire,
             lease_expires_at=lease_expiry,
             materialize_result=lambda completed: self._materialize_approved_check(
-                runtime, completed
+                runtime, completed, legacy_writer_id=legacy_writer_id
             ),
         )
 
@@ -1548,7 +1585,10 @@ class ObservationCoordinator:
                     stable_observation_id(
                         kind=IdKind.EVENT,
                         task_id=runtime.task_id,
-                        source_identity=f"advice-candidate:{item.finding_id}",
+                        source_identity=(
+                            f"advice-candidate:{item.finding_id}:"
+                            f"{canonical_digest(JsonObject({'subject_refs': subject_ref_values}))}"
+                        ),
                         mapping_version="obs-advice/1.1.0",
                         role=str(item.finding_id),
                     )

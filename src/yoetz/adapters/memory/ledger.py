@@ -1146,6 +1146,20 @@ class MemoryLedgerAdapter:
             raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
         return record
 
+    def _has_active_frozen_case_unlocked(self, session_id: str) -> bool:
+        return any(
+            (writer := self._state.writers.get(case_writer_id)) is not None
+            and writer.session_id == session_id
+            and (operation := self._state.operations.get((case_writer_id, operation_id)))
+            is not None
+            and operation[0].state is OperationState.PENDING
+            for case_writer_id, operation_id in self._state.frozen_cases
+        )
+
+    async def has_active_frozen_case(self, session_id: str) -> bool:
+        async with self._lock:
+            return self._has_active_frozen_case_unlocked(session_id)
+
     def _replace_pending_record(
         self,
         record: OperationRecord,
@@ -1193,11 +1207,7 @@ class MemoryLedgerAdapter:
                     return replace(prior_result, outcome="replayed")
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
 
-            if observation_authored and any(
-                (writer := self._state.writers.get(case_writer_id)) is not None
-                and writer.session_id == command.session_id
-                for case_writer_id, _operation_id in self._state.frozen_cases
-            ):
+            if observation_authored and self._has_active_frozen_case_unlocked(command.session_id):
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
 
             if command.operation_kind is OperationKind.RECEIPT and self._pending_import(

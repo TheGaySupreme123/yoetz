@@ -401,6 +401,46 @@ async def test_observation_append_waits_while_check_case_is_frozen() -> None:
 
 
 @pytest.mark.anyio
+async def test_observation_append_resumes_after_frozen_check_terminalizes() -> None:
+    base = ledger_command()
+    observation = ledger_command(request_suffix="3", index=1, expected_frontier=1)
+    observation = replace(
+        observation,
+        writer_id="wri_00000000-0000-4000-8000-000000000097",
+        entries=(
+            replace(
+                observation.entries[0],
+                author=Actor(
+                    actor_id("yoetz:observation-coordinator"),
+                    ActorType.HARNESS,
+                    AuthorshipAssurance.HARNESS_OBSERVED,
+                ),
+                publication_channel=PublicationChannel.HOOK_OBSERVED,
+                coverage=coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+            ),
+        ),
+    )
+
+    for adapter in (memory_ledger(base), sqlite_ledger(base)):
+        result = await adapter.append_batch(base)
+        frozen = await adapter.freeze_case(
+            base.session_id,
+            base.writer_id,
+            result.result_frontier.sequence,
+            "req_00000000-0000-4000-8000-000000000099",
+            "sha256:" + "9" * 64,
+        )
+        assert isinstance(frozen, FrozenCase)
+        await adapter.fail_check_if_current(
+            frozen.lease,
+            PublicOperationError(PublicErrorCode.STORAGE_UNSAFE, "terminal", False),
+        )
+
+        appended = await adapter.append_batch(observation)
+        assert appended.result_frontier.sequence == 2
+
+
+@pytest.mark.anyio
 async def test_load_and_freeze_contract() -> None:
     command = ledger_command()
     adapters = (memory_ledger(command), sqlite_ledger(command))

@@ -42,6 +42,7 @@ from yoetz.domain.events import (
     decode_payload,
     encode_payload,
     is_observation_authored,
+    is_observation_authorship,
     media_type_for,
     public_error_for_no_obligations_reason_mismatch,
     public_error_for_obligation_resolution_mismatch,
@@ -1197,6 +1198,14 @@ async def _preflight_dry_run_feasibility(
     """
 
     current = await runtime.ledger.load_frontier()
+    if is_observation_authorship(prepared.author, prepared.channel) and (
+        await runtime.ledger.has_active_frozen_case(runtime.session_id)
+    ):
+        raise PublicOperationError(
+            PublicErrorCode.OPERATION_PENDING,
+            "An active check is holding this session frontier.",
+            True,
+        )
     existing_records: list[LedgerRecord] = []
     seen: set[str] = set()
     writer_sequence = 1

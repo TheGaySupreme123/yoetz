@@ -1408,6 +1408,8 @@ class LedgerPort(Protocol):
 
     async def load_frontier(self) -> Frontier: ...
 
+    async def has_active_frozen_case(self, session_id: str) -> bool: ...
+
     def load_events(
         self,
         session_id: str,
