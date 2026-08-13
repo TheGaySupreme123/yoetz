@@ -702,11 +702,14 @@ def test_session_reason_stamping_preserves_a_rows_observed_cause(tmp_path: Path)
             _drain_envelope(store, "mixed-reasons", "hook:mixed-reasons", ordinal),
         )
     attempted, skipped = store.list_pending_outbox_rows(workspace)
-    assert store.bump_outbox_row_attempt(
-        workspace,
-        attempted,
-        reason=ObservationGapCode.SERVICE_UNAVAILABLE.value,
-    ) is not None
+    assert (
+        store.bump_outbox_row_attempt(
+            workspace,
+            attempted,
+            reason=ObservationGapCode.SERVICE_UNAVAILABLE.value,
+        )
+        is not None
+    )
 
     stamped = store.note_outbox_session_reason(
         workspace,
