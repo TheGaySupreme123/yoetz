@@ -100,6 +100,8 @@ __all__ = [
 ]
 
 _SERVER_NAME: Final = "yoetz"
+_WORKFLOW_RPC_DEADLINE_MS: Final = 30_000
+_SEMANTIC_CHECK_RPC_DEADLINE_MS: Final = 300_000
 _REGISTERED_TOOL_NAMES: Final = frozenset(
     {"start", "publish_work", "check", "respond", "status", "receipt"}
 )
@@ -132,6 +134,7 @@ _OPERATION_RECOVERY_UNAVAILABLE_MESSAGE: Final = (
     "correct the named authoring fields and resubmit with the intended request identity."
 )
 _OPERATION_RECOVERY_UNAVAILABLE_DETAILS: Final = {"reason_code": "operation_recovery_unavailable"}
+_WRITE_OPERATIONS: Final = frozenset({"start", "publish_work", "check", "respond", "receipt"})
 _REQUEST_TEMPLATES_GUIDANCE_URI: Final = "yoetz://guidance/request-templates.md"
 _GUIDANCE_BY_OPERATION: Final = MappingProxyType(
     {
@@ -443,7 +446,27 @@ def _control_error_result(
             operation=operation,
             safe_details={"reason_code": "privacy_projection_unavailable"},
         )
-    if error.reason in {"service_unavailable", "service_draining", "request_timeout"}:
+    if error.reason == "request_timeout":
+        if operation in _WRITE_OPERATIONS:
+            message = (
+                "The local operation timed out and may still have committed. Retry with the same "
+                "request_id to recover the stored outcome; for an existing Yoetz session, status "
+                "view=operation can inspect that request_id."
+            )
+        else:
+            message = (
+                "The local status read timed out and requested no write. Repeat the read with a "
+                "new request_id."
+            )
+        return structured_error_result(
+            PublicErrorCode.SERVICE_UNAVAILABLE,
+            message,
+            retryable=True,
+            request_id=request_id,
+            correlation_id=service_correlation_id,
+            operation=operation,
+        )
+    if error.reason in {"service_unavailable", "service_draining"}:
         return structured_error_result(
             PublicErrorCode.SERVICE_UNAVAILABLE,
             "The local service is unavailable; retry after it is ready.",
@@ -613,7 +636,7 @@ async def dispatch_start(
         arguments,
         StartRequest,
         StartResult,
-        lambda client, request: client.start(request),
+        lambda client, request: client.start(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
         runtime,
         "start",
     )
@@ -754,7 +777,7 @@ async def _publish_recovery_from_envelope(
         status_result = await _invoke_with_reconnect(
             runtime,
             status_request,
-            lambda service, request: service.status(request),
+            lambda service, request: service.status(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
         )
     except PublicOperationError as exc:
         # A nested public failure (session conflict, projection, etc.) does not prove the
@@ -885,7 +908,7 @@ async def dispatch_publish_work(
         arguments,
         PublishWorkRequest,
         PublishWorkResult,
-        lambda client, request: client.publish_work(request),
+        lambda client, request: client.publish_work(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
         runtime,
         "publish_work",
     )
@@ -898,7 +921,11 @@ async def dispatch_check(
         arguments,
         CheckRequest,
         CheckResult,
-        lambda client, request: client.check(request, route_profile=runtime.route_profile),
+        lambda client, request: client.check(
+            request,
+            deadline_ms=_SEMANTIC_CHECK_RPC_DEADLINE_MS,
+            route_profile=runtime.route_profile,
+        ),
         runtime,
         "check",
     )
@@ -911,7 +938,7 @@ async def dispatch_respond(
         arguments,
         RespondRequest,
         RespondResult,
-        lambda client, request: client.respond(request),
+        lambda client, request: client.respond(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
         runtime,
         "respond",
     )
@@ -924,7 +951,11 @@ async def dispatch_status(
         arguments,
         StatusRequest,
         StatusResult,
-        lambda client, request: client.status(request, route_profile=runtime.route_profile),
+        lambda client, request: client.status(
+            request,
+            deadline_ms=_WORKFLOW_RPC_DEADLINE_MS,
+            route_profile=runtime.route_profile,
+        ),
         runtime,
         "status",
     )
@@ -937,7 +968,7 @@ async def dispatch_receipt(
         arguments,
         ReceiptRequest,
         ReceiptResult,
-        lambda client, request: client.receipt(request),
+        lambda client, request: client.receipt(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
         runtime,
         "receipt",
     )

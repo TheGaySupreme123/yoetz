@@ -1457,6 +1457,11 @@ class ServiceDaemon:
                 resolved = 0 if summary is None else summary.acknowledged + summary.quarantined
                 if resolved == 0:
                     await asyncio.sleep(_OBSERVATION_SWEEP_INTERVAL_SECONDS)
+                else:
+                    # A sweep implementation may complete without suspending.  Even while making
+                    # progress, give control connections and other READY work one scheduler turn
+                    # before the next immediate bulk-drain pass.
+                    await asyncio.sleep(0)
                 try:
                     summary = await asyncio.wait_for(
                         observation_sweep(),

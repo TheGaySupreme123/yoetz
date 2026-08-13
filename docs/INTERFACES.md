@@ -1349,6 +1349,17 @@ cancelled solely for lack of a subsequent frame. Each control-result write is al
 bounded (**5 minutes**): a peer that stops reading cannot retain an in-flight call entry (and
 thus the inactive-session exemption) indefinitely via send backpressure.
 
+The ordinary client independently bounds each connect-plus-handshake attempt to **5 seconds** and
+closes a half-open stream on expiry. On-demand startup has one **30-second** monotonic budget that
+includes its initial attempt, spawn, and polling; an accepted but silent existing endpoint is
+reported unavailable rather than causing a second daemon to be spawned. The MCP bridge supplies a
+**30-second** call deadline for `start`, `publish_work`, `respond`, `status`, and `receipt`, and a
+**300-second** deadline for `check`; these use the existing private `deadline_ms` envelope field and
+do not change the public six-tool schemas. A timed-out write has an unknown outcome: the bridge
+must preserve its retryable failure shape, say that it may already have committed, and direct the
+caller to retry with the same `request_id` (and operation status where applicable). A timed-out
+read may simply be repeated.
+
 The private `ControlCallRequest` envelope may carry `route_profile=policy|strict` only for `check`
 and `status`. It is set by the MCP bridge from its immutable process profile, is absent from public
 operation request models, and is rejected on every other control method. `strict` prevents
@@ -2317,7 +2328,13 @@ across workspace sessions under a nonblocking per-workspace lease; within one pa
 `mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),
 and workspace-global rejections (`vault_locked`, disabled, paused) end the pass. A
 `service_unavailable` rejection is row-scoped: later rows are still attempted, and the pass yields
-after three consecutive such rejections. Quarantined detail is bounded by count, by the state byte
+after three consecutive such rejections. `observation_storage_corrupt` is terminal for its Codex
+session in the current READY generation: the coordinator remembers that session after the first
+bundle `STORAGE_CORRUPT`, later ingests are rejected without reopening the bundle, and the sweeper
+atomically moves that session's pending backlog to quarantine while healthy lanes continue. A new
+READY generation clears the in-memory suppression and permits one recovery probe. A successful
+probe removes that session from the local corruption set and resolves the workspace corruption gap
+only when no affected session remains. Quarantined detail is bounded by count, by the state byte
 budget, and by a 14-day age measured from a store-authored
 quarantined-at time behind the trusted-clock epoch fence; an operator can drop it explicitly with
 `yoetz observe reclaim`. Every drop — cap, age, or reclaim — retains aggregate commitment, count

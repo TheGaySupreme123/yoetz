@@ -160,6 +160,15 @@ count, byte budget, and a clock-fenced 14-day age with an explicit operator recl
 retains aggregate commitment/count/time range plus a loss gap, with involuntary evictions and
 operator reclaims counted separately.
 
+An observation route that encounters bundle `STORAGE_CORRUPT` records the exact terminal
+`observation_storage_corrupt` gap and quarantines that Codex session's pending delivery backlog.
+The READY-generation coordinator suppresses further recovery attempts for that Codex session so a
+poisoned mapped task cannot starve healthy sessions or ordinary control. The suppression is not a
+durable claim that repair is impossible: composing a new READY generation clears it and permits one
+fresh recovery probe after operator repair or restart. A successful probe clears that session's
+current corruption condition; the workspace gap heals only after no affected session remains.
+Maintenance re-sweeps always yield to the event loop before repeating.
+
 After every completed tool action, ready-service composition captures a descriptor-safe structural
 workspace digest. Real state change enqueues exact-policy verification; unchanged state does not.
 Approved checks never execute inside the hook RPC budget. A generation-fenced

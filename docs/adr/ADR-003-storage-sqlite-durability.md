@@ -39,7 +39,13 @@ fault/contention matrix on both advertised platforms.
    canonical event bytes never rewritten by migration; newer unknown write-schema fails closed.
 8. **Corruption response:** integrity failure quarantines the bundle (writes disabled,
    `STORAGE_CORRUPT`), preserves originals under `quarantine/`, and directs to
-   backup/restore. Projection-only corruption is repaired by generation replay.
+   backup/restore. Projection-only corruption is repaired by generation replay. Recovery of an
+   existing bundle must remain cooperative with the trusted local service: decoding yields in
+   bounded batches and the pure CPU replay reducer runs outside the service event loop, so one
+   large or corrupt task cannot monopolize ordinary control. An observation route that encounters
+   `STORAGE_CORRUPT` does not reinterpret the bundle as healthy or retry indefinitely; ADR-010's
+   terminal observation quarantine contains that delivery lane while preserving the original
+   storage recovery contract.
 
 ## Consequences
 

@@ -1631,13 +1631,10 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
 
     async def sweep() -> ObservationDrainSummary:
         events.append("sweep")
+        if events.count("sweep") == 1:
+            asyncio.get_running_loop().call_soon(events.append, "control_turn")
         if events.count("sweep") >= 2:
             two_sweeps.set()
-        try:
-            await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            events.append("sweep_cancelled")
-            raise
         return ObservationDrainSummary(
             attempted=1,
             acknowledged=1,
@@ -1680,7 +1677,7 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
     await daemon.activate_ready_application(7, 3)
 
     await asyncio.wait_for(two_sweeps.wait(), timeout=1)
-    assert events[:3] == ["sweep", "recommendation_refresh", "sweep"]
+    assert events[:4] == ["sweep", "recommendation_refresh", "control_turn", "sweep"]
     await daemon.lock()
     count_after_lock = events.count("sweep")
     await asyncio.sleep(0.03)

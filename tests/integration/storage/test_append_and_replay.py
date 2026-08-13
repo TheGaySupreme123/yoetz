@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 import uuid
 from collections.abc import Sequence
 from dataclasses import replace
@@ -13,6 +14,7 @@ from pathlib import Path
 import apsw
 import pytest
 
+import yoetz.adapters.sqlite.repository as sqlite_repository
 from builders.ledger_adapters import (
     FixedClock,
     FixedIds,
@@ -425,6 +427,82 @@ async def test_replay_after_append_matches_reference_projection(tmp_path: Path) 
     assert operation.result_locator is not None
     assert operation.result_locator.last_ingestion_sequence == len(records)
     assert stored.frontier == Frontier(expected.frontier, expected.head_digest)
+    reopened_db.close()
+
+
+@pytest.mark.anyio
+async def test_sqlite_recovery_replays_projection_off_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = replay_records("projection-rebuild")
+    command, objects = command_from_records(records)
+    path = tmp_path / "off-loop-replay.sqlite3"
+    first, first_db = file_sqlite_for(command, objects, path)
+    await first.append_batch(command)
+    first_db.close()
+
+    event_loop_thread = threading.get_ident()
+    replay_threads: list[int] = []
+    original_replay = replay
+
+    def observed_replay(durable: tuple[LedgerRecord, ...]) -> ProjectionState:
+        replay_threads.append(threading.get_ident())
+        return original_replay(durable)
+
+    monkeypatch.setattr(sqlite_repository, "replay", observed_replay)
+    reopened, reopened_db = file_sqlite_for(command, objects, path)
+
+    projection = await reopened.load_projection(
+        command.session_id, ProjectionView.CANDIDATE_FINDINGS
+    )
+
+    assert projection is not None
+    assert replay_threads
+    assert all(thread_id != event_loop_thread for thread_id in replay_threads)
+    reopened_db.close()
+
+
+@pytest.mark.anyio
+async def test_cancelled_recovery_retry_reuses_one_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records = replay_records("projection-rebuild")
+    command, objects = command_from_records(records)
+    path = tmp_path / "shared-recovery.sqlite3"
+    first, first_db = file_sqlite_for(command, objects, path)
+    await first.append_batch(command)
+    first_db.close()
+
+    started = threading.Event()
+    release = threading.Event()
+    replay_calls = 0
+    original_replay = replay
+
+    def blocked_replay(durable: tuple[LedgerRecord, ...]) -> ProjectionState:
+        nonlocal replay_calls
+        replay_calls += 1
+        started.set()
+        assert release.wait(timeout=2)
+        return original_replay(durable)
+
+    monkeypatch.setattr(sqlite_repository, "replay", blocked_replay)
+    reopened, reopened_db = file_sqlite_for(command, objects, path)
+    first_load = asyncio.create_task(
+        reopened.load_projection(command.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    first_load.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_load
+
+    retry = asyncio.create_task(
+        reopened.load_projection(command.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    )
+    await asyncio.sleep(0)
+    assert replay_calls == 1
+    release.set()
+    assert await retry is not None
+    assert replay_calls == 1
     reopened_db.close()
 
 

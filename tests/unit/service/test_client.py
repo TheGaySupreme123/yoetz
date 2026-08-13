@@ -250,7 +250,10 @@ async def test_on_demand_connect_spawns_only_after_absent_service(
     calls = 0
     spawned = 0
 
-    async def scripted_connect(kind: ControlClientKind) -> object:
+    async def scripted_connect(
+        kind: ControlClientKind,
+        **_kwargs: object,
+    ) -> object:
         nonlocal calls
         assert kind is ControlClientKind.MCP_BRIDGE
         calls += 1
@@ -262,7 +265,7 @@ async def test_on_demand_connect_spawns_only_after_absent_service(
         nonlocal spawned
         spawned += 1
 
-    monkeypatch.setattr(client_module, "connect_service", scripted_connect)
+    monkeypatch.setattr(client_module, "_connect_service_attempt", scripted_connect)
     monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
     connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.2)
     assert connected is expected
@@ -280,7 +283,10 @@ async def test_on_demand_reuses_workspace_locator_for_every_reconnect_attempt(
     observed: list[WorkspaceLocator | None] = []
 
     async def scripted_connect(
-        kind: ControlClientKind, *, workspace_locator: WorkspaceLocator | None = None
+        kind: ControlClientKind,
+        *,
+        workspace_locator: WorkspaceLocator | None = None,
+        **_kwargs: object,
     ) -> object:
         assert kind is ControlClientKind.MCP_BRIDGE
         observed.append(workspace_locator)
@@ -288,7 +294,7 @@ async def test_on_demand_reuses_workspace_locator_for_every_reconnect_attempt(
             raise ControlError("service_unavailable", retryable=True)
         return expected
 
-    monkeypatch.setattr(client_module, "connect_service", scripted_connect)
+    monkeypatch.setattr(client_module, "_connect_service_attempt", scripted_connect)
     monkeypatch.setattr(client_module, "_spawn_service_process", lambda: None)
     connected = await connect_service_on_demand(
         ControlClientKind.MCP_BRIDGE,
@@ -298,6 +304,101 @@ async def test_on_demand_reuses_workspace_locator_for_every_reconnect_attempt(
 
     assert connected is expected
     assert observed == [locator, locator]
+
+
+@pytest.mark.anyio
+async def test_on_demand_does_not_spawn_after_accepted_service_stalls_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.service.client as client_module
+
+    stream = _FakeStream()
+    spawned = 0
+
+    async def connect() -> AuthenticatedUnixStream:
+        return cast(AuthenticatedUnixStream, stream)
+
+    async def stalled_handshake(*_args: object, **_kwargs: object) -> object:
+        await asyncio.Event().wait()
+
+    def spawn() -> None:
+        nonlocal spawned
+        spawned += 1
+
+    monkeypatch.setattr(client_module, "connect_control", connect)
+    monkeypatch.setattr(client_module, "client_handshake", stalled_handshake)
+    monkeypatch.setattr(client_module, "_CONNECT_HANDSHAKE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+
+    with pytest.raises(ControlError, match="service_unavailable"):
+        await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.2)
+
+    assert stream.closed is True
+    assert spawned == 0
+
+
+@pytest.mark.anyio
+async def test_on_demand_initial_connect_is_inside_the_total_start_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.service.client as client_module
+
+    spawned = 0
+
+    async def stalled_connect() -> AuthenticatedUnixStream:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    def spawn() -> None:
+        nonlocal spawned
+        spawned += 1
+
+    monkeypatch.setattr(client_module, "connect_control", stalled_connect)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(ControlError, match="service_unavailable"):
+        await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.1)
+
+    assert asyncio.get_running_loop().time() - started < 0.5
+    assert spawned == 0
+
+
+@pytest.mark.anyio
+async def test_connect_timeout_does_not_wait_for_never_closing_accepted_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.service.client as client_module
+
+    class _NeverClosingStream(_FakeStream):
+        async def aclose(self) -> None:
+            await asyncio.Event().wait()
+
+    stream = _NeverClosingStream()
+    spawned = 0
+
+    async def connect() -> AuthenticatedUnixStream:
+        return cast(AuthenticatedUnixStream, stream)
+
+    async def stalled_handshake(*_args: object, **_kwargs: object) -> object:
+        await asyncio.Event().wait()
+
+    def spawn() -> None:
+        nonlocal spawned
+        spawned += 1
+
+    monkeypatch.setattr(client_module, "connect_control", connect)
+    monkeypatch.setattr(client_module, "client_handshake", stalled_handshake)
+    monkeypatch.setattr(client_module, "_CONNECT_HANDSHAKE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(client_module, "_STREAM_CLOSE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(ControlError, match="service_unavailable"):
+        await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.2)
+
+    assert asyncio.get_running_loop().time() - started < 0.1
+    assert spawned == 0
 
 
 def test_on_demand_service_environment_strips_secret_shaped_names(
@@ -571,6 +672,167 @@ def _receipt_request(seed: int) -> ReceiptRequest:
             "redaction_profile": "default_local_export",
         }
     )
+
+
+class _BlockedSendStream(_FakeStream):
+    def __init__(self, *, allow_count: int) -> None:
+        super().__init__()
+        self.allow_count = allow_count
+        self.send_attempts = 0
+
+    async def send_all(self, data: Buffer) -> None:
+        self.send_attempts += 1
+        if self.send_attempts > self.allow_count:
+            await asyncio.Event().wait()
+        await super().send_all(data)
+
+
+@pytest.mark.anyio
+async def test_rpc_deadline_covers_blocked_send_and_bounded_cancel_attempt() -> None:
+    stream = _BlockedSendStream(allow_count=0)
+    client = _client(stream, ControlClientKind.MCP_BRIDGE)
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(ControlError, match="request_timeout"):
+        await client.receipt(_receipt_request(20), deadline_ms=10)
+
+    assert asyncio.get_running_loop().time() - started < 0.2
+    assert stream.send_attempts == 2
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_blocked_cancel_notification_cannot_materially_extend_rpc_deadline() -> None:
+    stream = _BlockedSendStream(allow_count=1)
+    client = _client(stream, ControlClientKind.MCP_BRIDGE)
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(ControlError, match="request_timeout"):
+        await client.receipt(_receipt_request(21), deadline_ms=10)
+
+    assert asyncio.get_running_loop().time() - started < 0.2
+    assert len(stream.sent) == 1
+    assert stream.send_attempts == 2
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_late_timed_out_result_is_retired_without_poisoning_concurrent_call() -> None:
+    stream = _FakeStream()
+    client = _client(stream, ControlClientKind.MCP_BRIDGE)
+
+    with pytest.raises(ControlError, match="request_timeout"):
+        await client.receipt(_receipt_request(22), deadline_ms=10)
+    first = next(
+        frame
+        for frame in (decode_control_frame(encoded) for encoded in stream.sent)
+        if frame["kind"] == "call"
+    )
+
+    healthy = asyncio.create_task(client.receipt(_receipt_request(23), deadline_ms=500))
+    await _wait_for_sent(stream, 3)
+    second = decode_control_frame(stream.sent[2])
+    assert second["kind"] == "call"
+
+    for frame in (first, second):
+        await stream.feed(
+            encode_control_frame(
+                ControlResult(
+                    protocol_version="1.0",
+                    rpc_id=cast(str, frame["rpc_id"]),
+                    service_instance_id=_SERVICE_ID,
+                    service_generation="1",
+                    method=ControlMethod.RECEIPT,
+                    outcome="error",
+                    body=ControlError("privacy_projection_unavailable", retryable=True),
+                )
+            )
+        )
+
+    with pytest.raises(ControlError, match="privacy_projection_unavailable"):
+        await healthy
+    assert stream.closed is False
+    assert client._retired_rpc_ids == set()  # pyright: ignore[reportPrivateUsage]
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_late_result_during_bounded_cancel_window_uses_tombstone_first() -> None:
+    class _BlockedCancelOnceStream(_FakeStream):
+        def __init__(self) -> None:
+            super().__init__()
+            self.send_attempts = 0
+
+        async def send_all(self, data: Buffer) -> None:
+            self.send_attempts += 1
+            if self.send_attempts == 2:
+                await asyncio.Event().wait()
+            await super().send_all(data)
+
+    stream = _BlockedCancelOnceStream()
+    client = _client(stream, ControlClientKind.MCP_BRIDGE)
+    timed_out = asyncio.create_task(client.receipt(_receipt_request(24), deadline_ms=10))
+    await _wait_for_sent(stream, 1)
+    first = decode_control_frame(stream.sent[0])
+    for _ in range(100):
+        if stream.send_attempts == 2:
+            break
+        await asyncio.sleep(0.001)
+    assert stream.send_attempts == 2
+
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, first["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.RECEIPT,
+                outcome="error",
+                body=ControlError("privacy_projection_unavailable", retryable=True),
+            )
+        )
+    )
+    with pytest.raises(ControlError, match="request_timeout"):
+        await timed_out
+
+    healthy = asyncio.create_task(client.receipt(_receipt_request(25), deadline_ms=500))
+    await _wait_for_sent(stream, 2)
+    second = decode_control_frame(stream.sent[1])
+    await stream.feed(
+        encode_control_frame(
+            ControlResult(
+                protocol_version="1.0",
+                rpc_id=cast(str, second["rpc_id"]),
+                service_instance_id=_SERVICE_ID,
+                service_generation="1",
+                method=ControlMethod.RECEIPT,
+                outcome="error",
+                body=ControlError("privacy_projection_unavailable", retryable=True),
+            )
+        )
+    )
+    with pytest.raises(ControlError, match="privacy_projection_unavailable"):
+        await healthy
+    assert stream.closed is False
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_unanswered_timeout_tombstones_bound_new_admission() -> None:
+    stream = _FakeStream()
+    client = _client(stream, ControlClientKind.MCP_BRIDGE)
+
+    for seed in range(30, 62):
+        with pytest.raises(ControlError, match="request_timeout"):
+            await client.receipt(_receipt_request(seed), deadline_ms=1)
+
+    assert len(client._retired_rpc_ids) == 32  # pyright: ignore[reportPrivateUsage]
+    sent_before = len(stream.sent)
+    with pytest.raises(ControlError, match="service_unavailable"):
+        await client.receipt(_receipt_request(63), deadline_ms=1)
+    assert len(stream.sent) == sent_before
+    await client.close()
 
 
 @pytest.mark.anyio

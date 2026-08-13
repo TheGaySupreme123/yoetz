@@ -106,6 +106,8 @@ __all__ = [
 ]
 
 _MAX_IN_FLIGHT: Final = 32
+_CANCEL_SEND_TIMEOUT_SECONDS: Final = 0.05
+_STREAM_CLOSE_TIMEOUT_SECONDS: Final = 0.05
 _WORKFLOW_METHODS: Final = frozenset(
     {
         ControlMethod.START,
@@ -120,6 +122,7 @@ _LIFECYCLE_METHODS: Final = frozenset(
     {ControlMethod.SERVICE_STATUS, ControlMethod.SERVICE_LOCK, ControlMethod.SERVICE_STOP}
 )
 _PRIVATE_CONSTRUCTOR_TOKEN: Final = object()
+_CONNECT_HANDSHAKE_TIMEOUT_SECONDS: Final = 5.0
 _SERVICE_START_TIMEOUT_SECONDS: Final = 30.0
 _SERVICE_START_POLL_SECONDS: Final = 0.05
 _SECRET_ENV_MARKERS: Final = (
@@ -575,6 +578,7 @@ class ServiceClient(ControlClientPort):
         "_pending",
         "_pid",
         "_receiver",
+        "_retired_rpc_ids",
         "_session",
         "_stream",
         "_write_lock",
@@ -598,6 +602,7 @@ class ServiceClient(ControlClientPort):
         self._pid = os.getpid()
         self._closed = False
         self._pending: dict[str, asyncio.Future[ControlResult]] = {}
+        self._retired_rpc_ids: set[str] = set()
         self._write_lock = asyncio.Lock()
         self._receiver = asyncio.create_task(self._receive_results())
 
@@ -646,6 +651,13 @@ class ServiceClient(ControlClientPort):
                 ):
                     raise ControlError("service_unavailable", retryable=True)
                 pending = self._pending.get(result.rpc_id)
+                if result.rpc_id in self._retired_rpc_ids:
+                    try:
+                        self._session.correlate(result)
+                    except ControlProtocolError as exc:
+                        raise ControlError("frame_invalid") from exc
+                    self._retired_rpc_ids.remove(result.rpc_id)
+                    continue
                 if pending is None or pending.done():
                     raise ControlError("frame_invalid")
                 try:
@@ -667,10 +679,11 @@ class ServiceClient(ControlClientPort):
         if not self._closed:
             self._closed = True
             self._session.close()
+            self._retired_rpc_ids.clear()
             for pending in tuple(self._pending.values()):
                 if not pending.done():
                     pending.set_exception(error)
-            await self._stream.aclose()
+            await _best_effort_close_stream(self._stream)
         if not from_receiver and self._receiver is not asyncio.current_task():
             self._receiver.cancel()
             await asyncio.gather(self._receiver, return_exceptions=True)
@@ -686,10 +699,25 @@ class ServiceClient(ControlClientPort):
             service_generation=self._session.service_generation,
             target_rpc_id=target_rpc_id,
         )
+        task = asyncio.create_task(self._send(request))
         try:
-            await asyncio.shield(self._send(request))
-        except ControlError, asyncio.CancelledError:
+            done, _pending = await asyncio.wait((task,), timeout=_CANCEL_SEND_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            task.cancel()
+            task.add_done_callback(_consume_background_task)
             return
+        if task in done:
+            _consume_background_task(task)
+            return
+        task.cancel()
+        task.add_done_callback(_consume_background_task)
+
+    def _retire_call(self, rpc_id: str, future: asyncio.Future[ControlResult]) -> None:
+        """Keep bounded correlation state for a terminal result that may still arrive."""
+
+        if not future.done():
+            self._retired_rpc_ids.add(rpc_id)
+            future.cancel()
 
     async def call(self, request: ControlCallRequest) -> ControlResult:
         self._ensure_live()
@@ -699,7 +727,11 @@ class ServiceClient(ControlClientPort):
             or request.service_generation != self._session.service_generation
         ):
             raise ControlError("service_unavailable", retryable=True)
-        if request.rpc_id in self._pending or len(self._pending) >= _MAX_IN_FLIGHT:
+        if (
+            request.rpc_id in self._pending
+            or request.rpc_id in self._retired_rpc_ids
+            or len(self._pending) + len(self._retired_rpc_ids) >= _MAX_IN_FLIGHT
+        ):
             raise ControlError("service_unavailable", retryable=True)
 
         future = asyncio.get_running_loop().create_future()
@@ -709,17 +741,20 @@ class ServiceClient(ControlClientPort):
                 self._session.admit(request)
             except ControlProtocolError as exc:
                 raise ControlError("frame_invalid") from exc
-            await self._send(request)
             if request.deadline_ms is None:
+                await self._send(request)
                 result = await future
             else:
                 try:
                     async with asyncio.timeout(request.deadline_ms / 1_000):
-                        result = await future
+                        await self._send(request)
+                        result = await asyncio.shield(future)
                 except TimeoutError as exc:
+                    self._retire_call(request.rpc_id, future)
                     await self._request_cancel(request.rpc_id)
                     raise ControlError("request_timeout", retryable=True) from exc
         except asyncio.CancelledError:
+            self._retire_call(request.rpc_id, future)
             await self._request_cancel(request.rpc_id)
             raise
         finally:
@@ -1050,6 +1085,101 @@ def _connected_client(
     )
 
 
+class _AcceptedServiceUnresponsive(ControlError):
+    """A fixed endpoint accepted locally but did not complete its bounded handshake."""
+
+    def __init__(self) -> None:
+        super().__init__("service_unavailable", retryable=True)
+
+
+def _consume_background_task[ResultT](task: asyncio.Task[ResultT]) -> None:
+    try:
+        task.result()
+    except BaseException:
+        pass
+
+
+async def _best_effort_close_stream(stream: AuthenticatedUnixStream) -> None:
+    """Bound cleanup even when a faulty peer stream never completes ``aclose``."""
+
+    task = asyncio.create_task(stream.aclose())
+    try:
+        done, _pending = await asyncio.wait((task,), timeout=_STREAM_CLOSE_TIMEOUT_SECONDS)
+    except BaseException:
+        task.cancel()
+        task.add_done_callback(_consume_background_task)
+        raise
+    if task in done:
+        _consume_background_task(task)
+        return
+    task.cancel()
+    task.add_done_callback(_consume_background_task)
+
+
+async def _connect_service_attempt(
+    client_kind: ControlClientKind,
+    *,
+    workspace_locator: WorkspaceLocator | None,
+    projection_render_mode: ProjectionRenderMode,
+    output_is_controlling_tty: bool,
+    timeout_seconds: float,
+) -> ServiceClient:
+    """Connect and handshake within one attempt budget, preserving accepted-socket identity."""
+
+    stream: AuthenticatedUnixStream | None = None
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            stream = await connect_control()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        handshake = asyncio.create_task(
+            client_handshake(
+                stream,
+                client_kind,
+                __version__,
+                workspace_locator=workspace_locator,
+                projection_render_mode=projection_render_mode,
+                output_is_controlling_tty=output_is_controlling_tty,
+            )
+        )
+        try:
+            done, _pending = await asyncio.wait((handshake,), timeout=remaining)
+        except BaseException:
+            handshake.cancel()
+            handshake.add_done_callback(_consume_background_task)
+            raise
+        if handshake not in done:
+            handshake.cancel()
+            handshake.add_done_callback(_consume_background_task)
+            raise TimeoutError
+        session = handshake.result()
+        return _connected_client(stream, session, client_kind)
+    except TimeoutError as exc:
+        accepted = stream is not None
+        if stream is not None:
+            await _best_effort_close_stream(stream)
+        error: ControlError
+        if accepted:
+            error = _AcceptedServiceUnresponsive()
+        else:
+            error = ControlError("service_unavailable", retryable=True)
+        raise error from exc
+    except LocalControlTransportError as exc:
+        if stream is not None:
+            await _best_effort_close_stream(stream)
+        raise _transport_error(exc) from exc
+    except ControlProtocolError as exc:
+        if stream is not None:
+            await _best_effort_close_stream(stream)
+        raise _protocol_error(exc) from exc
+    except BaseException:
+        if stream is not None:
+            await _best_effort_close_stream(stream)
+        raise
+
+
 async def connect_service(
     client_kind: ControlClientKind,
     *,
@@ -1067,30 +1197,13 @@ async def connect_service(
         raise TypeError("projection_render_mode_invalid")
     if type(output_is_controlling_tty) is not bool:
         raise TypeError("projection_tty_fact_invalid")
-    stream: AuthenticatedUnixStream | None = None
-    try:
-        stream = await connect_control()
-        session = await client_handshake(
-            stream,
-            client_kind,
-            __version__,
-            workspace_locator=workspace_locator,
-            projection_render_mode=projection_render_mode,
-            output_is_controlling_tty=output_is_controlling_tty,
-        )
-        return _connected_client(stream, session, client_kind)
-    except LocalControlTransportError as exc:
-        if stream is not None:
-            await stream.aclose()
-        raise _transport_error(exc) from exc
-    except ControlProtocolError as exc:
-        if stream is not None:
-            await stream.aclose()
-        raise _protocol_error(exc) from exc
-    except Exception:
-        if stream is not None:
-            await stream.aclose()
-        raise
+    return await _connect_service_attempt(
+        client_kind,
+        workspace_locator=workspace_locator,
+        projection_render_mode=projection_render_mode,
+        output_is_controlling_tty=output_is_controlling_tty,
+        timeout_seconds=_CONNECT_HANDSHAKE_TIMEOUT_SECONDS,
+    )
 
 
 async def connect_service_on_demand(
@@ -1112,26 +1225,43 @@ async def connect_service_on_demand(
         raise TypeError("workspace_locator_invalid")
     if type(timeout_seconds) is not float or not 0.1 <= timeout_seconds <= 30.0:
         raise ValueError("service_start_timeout_invalid")
+    deadline = time.monotonic() + timeout_seconds
+
+    async def connect_with_remaining_budget() -> ServiceClient:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ControlError("service_unavailable", retryable=True)
+        return await _connect_service_attempt(
+            client_kind,
+            workspace_locator=workspace_locator,
+            projection_render_mode=ProjectionRenderMode.MACHINE_READABLE,
+            output_is_controlling_tty=False,
+            timeout_seconds=min(_CONNECT_HANDSHAKE_TIMEOUT_SECONDS, remaining),
+        )
+
     try:
-        if workspace_locator is None:
-            return await connect_service(client_kind)
-        return await connect_service(client_kind, workspace_locator=workspace_locator)
+        return await connect_with_remaining_budget()
+    except _AcceptedServiceUnresponsive:
+        # A process already owns and accepted the fixed endpoint. Starting a successor cannot
+        # repair that process and only creates a singleton race, so fail this bounded attempt.
+        raise
     except ControlError as exc:
         if exc.reason != "service_unavailable":
             raise
+    if time.monotonic() >= deadline:
+        raise ControlError("service_unavailable", retryable=True)
     try:
         _spawn_service_process()
     except OSError as exc:
         raise ControlError("service_unavailable", retryable=True) from exc
 
-    deadline = time.monotonic() + timeout_seconds
     last_error: ControlError | None = None
     while time.monotonic() < deadline:
-        await asyncio.sleep(_SERVICE_START_POLL_SECONDS)
+        await asyncio.sleep(min(_SERVICE_START_POLL_SECONDS, deadline - time.monotonic()))
         try:
-            if workspace_locator is None:
-                return await connect_service(client_kind)
-            return await connect_service(client_kind, workspace_locator=workspace_locator)
+            return await connect_with_remaining_budget()
+        except _AcceptedServiceUnresponsive:
+            raise
         except ControlError as exc:
             last_error = exc
             if exc.reason != "service_unavailable":
