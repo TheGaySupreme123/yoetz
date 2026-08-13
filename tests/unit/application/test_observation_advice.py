@@ -183,6 +183,63 @@ def test_delivery_identity_is_stable_while_the_envelope_stream_grows() -> None:
     assert hook_advice_context(one) == hook_advice_context(twenty)
 
 
+def _gap_snapshot(count: int):
+    """Gap advice over ``count`` envelopes; its evidence refs are the last three."""
+
+    built = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=tuple(
+                _envelope(f"hook:gap{index}", {"tool_name": "Read"}, pos=index)
+                for index in range(1, count + 1)
+            ),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=("source_lag",),
+            has_real_observation=True,
+        )
+    )
+    assert built is not None
+    assert built.ranked_items[0].rule_code == "observation_gap_or_stale"
+    return built
+
+
+def test_delivery_identity_ignores_evidence_refs_that_are_a_rolling_window() -> None:
+    """A rule may cite the last three envelopes; that citation is not a new condition.
+
+    ``observation_gap_or_stale`` cites ``envelopes[-3:]``, so an identity that
+    folded in the evidence ref moved on every single hook and stormed exactly
+    like the standing condition #241 fixed (measured: delivered on 12 of 12
+    consecutive PostToolUse hooks).
+    """
+
+    first = _gap_snapshot(3)
+    later = _gap_snapshot(9)
+
+    assert first.ranked_items[0].evidence_refs != later.ranked_items[0].evidence_refs
+    assert hook_advice_context(first) != hook_advice_context(later), (
+        "the delivered text must still carry its (moved) evidence reference"
+    )
+    assert advice_delivery_identity(first) == advice_delivery_identity(later), (
+        "the dedup key moved with a rolling evidence window; the advice will storm"
+    )
+
+
+def test_delivery_identity_changes_with_rule_code_or_next_action() -> None:
+    """Everything that names the condition stays in the key."""
+
+    import dataclasses
+
+    snapshot = _gap_snapshot(3)
+    item = snapshot.ranked_items[0]
+    baseline = advice_delivery_identity(snapshot, item=item)
+
+    other_rule = dataclasses.replace(item, rule_code="provider_not_ready")
+    other_action = dataclasses.replace(item, recommended_next_action="connect_provider")
+    other_summary = dataclasses.replace(item, summary="A different summary")
+    other_detail = dataclasses.replace(item, detail="A different detail")
+    for changed in (other_rule, other_action, other_summary, other_detail):
+        assert advice_delivery_identity(snapshot, item=changed) != baseline
+
+
 def test_delivery_identity_changes_when_the_rendered_text_changes() -> None:
     standing = build_observation_advice_snapshot(
         ObservationAdviceBuildInput(

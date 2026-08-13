@@ -119,8 +119,10 @@ def test_timing_rows_round_trip_and_reason_counts_are_unpolluted(tmp_path: Path)
     assert timings == {"count": 1, "last_ms": 1_842, "max_ms": 1_842}
 
 
-def test_async_downgrade_and_budget_reasons_are_admitted_tokens(tmp_path: Path) -> None:
-    for reason in ("async_hook_downgraded", "hook_budget_exceeded"):
+def test_budget_reason_is_an_admitted_token_and_unknown_reasons_are_closed(
+    tmp_path: Path,
+) -> None:
+    for reason in ("hook_budget_exceeded", "async_hook_downgraded"):
         record_hook_diagnostic(reason, "PostToolUse", _state=tmp_path)
     rows = [
         json.loads(line)
@@ -128,4 +130,7 @@ def test_async_downgrade_and_budget_reasons_are_admitted_tokens(tmp_path: Path) 
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert [row["reason"] for row in rows] == ["async_hook_downgraded", "hook_budget_exceeded"]
+    # The async-downgrade detector was removed: its predicate flagged compliant
+    # async hosts, so its token is no longer admitted and closes to the
+    # unknown-reason fallback.
+    assert [row["reason"] for row in rows] == ["hook_budget_exceeded", "unknown_reason"]

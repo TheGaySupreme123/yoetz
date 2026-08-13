@@ -11,8 +11,6 @@ from yoetz.domain.observation import ObservationEnvelope, ObservationGapCode, Ob
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 
 __all__ = [
-    "ADVICE_TRIGGER_FIELDS",
-    "ADVICE_TRIGGER_TOOLS",
     "STANDING_MACHINE_ACTIONS",
     "OBSERVATION_ADVICE_FACT_CODES",
     "OBSERVATION_ADVICE_POLICY_ID",
@@ -23,7 +21,6 @@ __all__ = [
     "ObservationCompositionFact",
     "ObservationInspectFact",
     "advice_candidate_digest",
-    "advice_relevant",
     "evidence_basis_digest",
     "observation_advice_findings",
 ]
@@ -181,10 +178,8 @@ class ObservationAdviceCandidate:
             raise ValueError("observation_advice_invalid")
 
 
-# Structural payload fields the rules below read. ADVICE_TRIGGER_FIELDS is
-# assembled from these exact names so a rule and the relevance gate can never
-# drift apart; tests/property/test_advice_relevance_gate.py scans this module
-# for any literal that escapes them.
+# Structural payload fields the rules below read, named once so a rule and its
+# accessor cannot drift apart.
 _FIELD_TOOL_NAME: Final = "tool_name"
 _FIELD_EXIT_STATUS: Final = "exit_status"
 _FIELD_SUCCESS: Final = "success"
@@ -195,29 +190,9 @@ _FIELD_MAPPING_HINT: Final = "mapping_hint"
 _FIELD_SUBAGENT_ID: Final = "subagent_id"
 _FIELD_ACTION: Final = "action"
 _FIELD_ATTEMPT: Final = "attempt"
-# Read only as correlation keys, and only inside a branch already gated on a
-# trigger tool, so their presence alone can never change a verdict.
+# Read only as correlation keys.
 _FIELD_CORRELATION_ID: Final = "correlation_id"
 _FIELD_TOOL_CALL_ID: Final = "tool_call_id"
-
-ADVICE_TRIGGER_FIELDS: Final = frozenset(
-    {
-        _FIELD_TOOL_NAME,
-        _FIELD_EXIT_STATUS,
-        _FIELD_SUCCESS,
-        _FIELD_CLAIM_KIND,
-        _FIELD_RESULT_STATUS,
-        _FIELD_CHANGED_PATHS_DIGEST,
-        _FIELD_MAPPING_HINT,
-        _FIELD_SUBAGENT_ID,
-        _FIELD_ACTION,
-        _FIELD_ATTEMPT,
-    }
-)
-# The tool vocabulary the rules key on. Exported for callers that report which
-# observations drive advice; membership deliberately does NOT license a skip,
-# because _static_for_live matches live/static hints against *any* tool name.
-ADVICE_TRIGGER_TOOLS: Final = _EDIT_TOOLS | _CHECK_TOOLS | frozenset({"shell", "Bash", "bash"})
 
 
 def _ascii(value: str) -> bytes:
@@ -262,49 +237,6 @@ def _mapping_hint(envelope: ObservationEnvelope) -> str | None:
 def _subagent_id(envelope: ObservationEnvelope) -> str | None:
     value = envelope.structural_payload.get(_FIELD_SUBAGENT_ID)
     return value if type(value) is str else None
-
-
-def advice_relevant(envelope: ObservationEnvelope) -> bool:
-    """True unless this envelope alone provably cannot change the candidate set.
-
-    Conservative by construction: False means "provably irrelevant"; anything
-    unrecognised returns True. The proof is per-envelope and holds only while
-    the context's own envelope-independent rules are quiet — the
-    ``observation_gap_or_stale`` rule digests the last three envelope
-    identities, so it changes with *any* new envelope. Callers must therefore
-    also require that no gap-driven advice is live; see the guard in
-    ``yoetz.cli.observe_hooks``.
-    """
-
-    if envelope.gap_codes:
-        return True
-    payload = envelope.structural_payload
-    if any(
-        payload.get(field) is not None
-        for field in ADVICE_TRIGGER_FIELDS
-        if field != _FIELD_TOOL_NAME
-    ):
-        return True
-    tool = payload.get(_FIELD_TOOL_NAME)
-    if tool is None:
-        return False
-    return type(tool) is not str or not _tool_name_is_inert(tool)
-
-
-def _tool_name_is_inert(value: str) -> bool:
-    """True when no rule can key on this tool name.
-
-    A tool name reaches the rules two ways: membership in the edit/check
-    vocabularies, and substring matching against the live/static hint sets in
-    _static_for_live. Both are checked here against the same constants the
-    rules read, so `Read`/`Grep`-shaped calls are provably inert while
-    `mcp__…`-shaped ones (which contain a live hint) are not.
-    """
-
-    if value in ADVICE_TRIGGER_TOOLS:
-        return False
-    lowered = value.lower()
-    return not any(token in lowered for token in _LIVE_CLAIM_HINTS | _STATIC_CHECK_HINTS)
 
 
 def _envelope_ref(envelope: ObservationEnvelope) -> str:
