@@ -1,4 +1,12 @@
-"""Report control-plane saturation from a thread a blocked event loop cannot stall."""
+"""Report control-plane saturation from a thread a blocked event loop cannot stall.
+
+Invariant: the sampler thread never touches the stdlib logging sink. That path writes to stderr
+under the handler's ``RLock``, which the loop thread also takes, so a full or unread stderr pipe
+would block the one thread whose whole job is to keep reporting while everything else is stuck --
+and it would do so holding a lock the loop needs. Records go straight to the durable diagnostics
+ring, which has its own lock and its own file, and which is the sink an operator reads anyway
+because MCP-spawned services swallow stderr.
+"""
 
 from __future__ import annotations
 
@@ -8,11 +16,15 @@ import time
 from collections.abc import Callable
 from typing import Final
 
-from yoetz.observability.logging import record_bounded_counts_without_raising
+from yoetz.observability.diagnostics import append_diagnostic_record
+from yoetz.protocol.ids import IdKind, new_id
 
 __all__ = ["ControlPlaneWatchdog"]
 
 _COMPONENT: Final = "service.daemon"
+# Bounded counter names this reporter may emit. Both are already in the diagnostics field order
+# and fenced as integers there; naming them here keeps the sampler from widening the record.
+_COUNT_FIELDS: Final = ("duration_ms", "operation_count")
 # The loop-side task rewrites the heartbeat at this cadence; lag is measured against it, so a
 # healthy loop reads as roughly zero lag rather than one interval of it.
 _HEARTBEAT_INTERVAL_SECONDS: Final = 0.5
@@ -26,11 +38,19 @@ _SATURATION_REPEAT_SECONDS: Final = 60.0
 
 
 def _record(operation: str, seconds: float, connections: int) -> None:
-    record_bounded_counts_without_raising(
+    counts: dict[str, object] = dict(
+        zip(_COUNT_FIELDS, (int(seconds * 1_000), connections), strict=True)
+    )
+    try:
+        correlation_id = new_id(IdKind.CORRELATION)
+    except BaseException:
+        return
+    append_diagnostic_record(
+        correlation_id=correlation_id,
         component=_COMPONENT,
         operation=operation,
-        outcome="event_loop_lag",
-        counts={"duration_ms": int(seconds * 1_000), "operation_count": connections},
+        reason="event_loop_lag",
+        counts=counts,
     )
 
 
@@ -41,6 +61,9 @@ class ControlPlaneWatchdog:
     reporting -- so an outage would only ever be described after it ended. A plain OS thread
     samples a monotonic heartbeat the loop writes and emits on its own, which is why a
     multi-minute control-plane outage can be seen while it is still going on (#238).
+
+    Emission goes to the durable diagnostics ring only; see the module docstring for why the
+    stderr logger is not on this thread's path.
     """
 
     def __init__(

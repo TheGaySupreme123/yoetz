@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -71,6 +73,57 @@ def test_watchdog_reports_entry_and_exit_with_bounded_cadence() -> None:
     assert len(records) == 3
     assert records[2][0] == "control_plane_saturation_cleared"
     assert records[2][1] == int((166.4 - 105.0) * 1_000)
+
+
+def test_watchdog_emit_never_waits_on_the_stderr_logging_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged stderr sink must not stall the one thread still able to report the stall."""
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    logger = logging.getLogger("yoetz.service.daemon")
+    wedged = threading.Lock()
+
+    class _Wedged(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            del record
+            with wedged:
+                pass
+
+    handler = _Wedged()
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    wedged.acquire()
+    finished = threading.Event()
+
+    def sample_once() -> None:
+        watchdog = ControlPlaneWatchdog(
+            connections_in_flight=lambda: 2,
+            monotonic=_Clock(100.0).monotonic,
+        )
+        watchdog._beat = 0.0  # pyright: ignore[reportPrivateUsage]
+        watchdog.sample()
+        finished.set()
+
+    sampler = threading.Thread(target=sample_once, name="yoetz-control-plane-watchdog")
+    sampler.start()
+    try:
+        assert finished.wait(timeout=5)
+    finally:
+        wedged.release()
+        sampler.join(timeout=5)
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+    lines = [
+        json.loads(line)
+        for line in diagnostic_log_path(root=tmp_path).read_text(encoding="ascii").splitlines()
+        if line.strip()
+    ]
+    assert [line["operation"] for line in lines] == ["control_plane_saturation_entered"]
+    assert lines[0]["operation_count"] == 2
+    assert lines[0]["reason"] == "event_loop_lag"
 
 
 @pytest.mark.anyio

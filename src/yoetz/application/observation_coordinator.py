@@ -196,11 +196,13 @@ class ObservationCoordinator:
     )
 
     async def _local[ResultT](self, call: Callable[[], ResultT]) -> ResultT:
-        """Run one blocking local-store write off the service event loop.
+        """Run one blocking local-store call off the service event loop.
 
-        These are the ``_save`` sites -- a blocking cross-process lock plus a full re-encode of
-        the workspace document -- that an ingest RPC pays while a control client waits (#238).
-        Read-only local-store calls deliberately stay on the loop; only the writes move.
+        Every ``LocalObservationStore`` entry point takes the same unbounded cross-process
+        flock, so a read is no safer on the loop than a write: whoever holds the lock decides
+        how long the daemon stops answering control clients (#238). Reads route through here
+        too. The store's own reentrant thread lock is taken and released inside a single worker
+        thread on each hop, so no lock is ever held across an await.
         """
 
         return await asyncio.to_thread(call)
@@ -224,7 +226,7 @@ class ObservationCoordinator:
         supervisor = self.verification_supervisor
         if supervisor is None:
             return
-        for workspace in self.local.list_consented_workspaces():
+        for workspace in await self._local(self.local.list_consented_workspaces):
             await self._rediscover_workspace_pending_verification(supervisor, workspace)
         supervisor.notify()
 
@@ -240,11 +242,13 @@ class ObservationCoordinator:
 
         if supervisor.closed or supervisor.has_handle(workspace):
             return
-        consent = self.local.consent_for(workspace)
+        consent = await self._local(partial(self.local.consent_for, workspace))
         if consent is None or not consent.active:
             return
         if sessions is None:
-            sessions = self.local.codex_sessions_for_workspace(workspace)
+            sessions = await self._local(
+                partial(self.local.codex_sessions_for_workspace, workspace)
+            )
         for session_index, codex_session_id in enumerate(sessions[start_index:], start=start_index):
             if supervisor.closed or supervisor.has_handle(workspace):
                 return
@@ -350,7 +354,8 @@ class ObservationCoordinator:
         except ProtocolValueError:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
 
-        expected = session_commitment_from_codex_id(self.local.key_material(), codex_session_id)
+        key_material = await self._local(self.local.key_material)
+        expected = session_commitment_from_codex_id(key_material, codex_session_id)
         if request.envelope.session_commitment != expected:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
         if codex_session_id in self._storage_corrupt_sessions:
@@ -360,10 +365,12 @@ class ObservationCoordinator:
         if mapping is None:
             return _reject(ObservationGapCode.MAPPING_MISSING.value)
 
-        workspace = self.local.find_workspace_for_codex_session(codex_session_id)
+        workspace = await self._local(
+            partial(self.local.find_workspace_for_codex_session, codex_session_id)
+        )
         if workspace is None:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
-        consent = self.local.consent_for(workspace)
+        consent = await self._local(partial(self.local.consent_for, workspace))
         if consent is None or not consent.active:
             reason = (
                 ObservationGapCode.CONSENT_REVOKED.value
@@ -507,23 +514,24 @@ class ObservationCoordinator:
         return _reject(ObservationGapCode.MAPPING_MISSING.value)
 
     async def status(self, query: ObservationStatusQuery) -> ObservationStatus:
-        return self.local.status(query)
+        return await self._local(partial(self.local.status, query))
 
     async def pause(self, command: ObservationControlCommand) -> ObservationStatus:
-        return self.local.pause(command)
+        return await self._local(partial(self.local.pause, command))
 
     async def resume(self, command: ObservationControlCommand) -> ObservationStatus:
-        return self.local.resume(command)
+        return await self._local(partial(self.local.resume, command))
 
     async def revoke(self, command: ObservationRevokeCommand) -> ObservationStatus:
-        status = self.local.revoke(command)
+        status = await self._local(partial(self.local.revoke, command))
         # The local fence is authoritative for immediately stopping new capture.
         # Best-effort bundle propagation additionally deactivates the encrypted
         # locator and exact-digest trust rows while retaining encrypted evidence.
         seen_tasks: set[str] = set()
-        for codex_session_id in self.local.codex_sessions_for_workspace(
-            command.workspace_commitment
-        ):
+        revoked_sessions = await self._local(
+            partial(self.local.codex_sessions_for_workspace, command.workspace_commitment)
+        )
+        for codex_session_id in revoked_sessions:
             mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
             if mapping is None or mapping.yoetz_task_id in seen_tasks:
                 continue
@@ -1144,7 +1152,9 @@ class ObservationCoordinator:
                 )
             )
             return None
-        if not self.local.policy_digest_is_trusted(workspace, policy.raw_digest):
+        if not await self._local(
+            partial(self.local.policy_digest_is_trusted, workspace, policy.raw_digest)
+        ):
             await self._local(
                 partial(
                     self.local.note_coverage_gap,

@@ -620,9 +620,11 @@ class ServiceDaemon:
                 # "still starting" and keeps polling (#235).
                 await lifecycle.publish_endpoint()
                 if ready_maintenance_wanted and self._application is not None:
-                    # After publication, and gated on the accept loops in _run_ready_maintenance:
-                    # tasks run FIFO, so a maintenance task created here would otherwise run its
-                    # first sweep before serve() ever reaches sock_accept.
+                    # Only a composition that supplies its own ready application reaches this:
+                    # the cold-start path activated one above, and activation starts maintenance
+                    # itself. Placement relative to publish_endpoint decides nothing -- the
+                    # _accept_armed gate inside _run_ready_maintenance is the sole thing keeping
+                    # the first sweep behind serve()'s accept loops (#235).
                     self._start_ready_maintenance(
                         self._application,
                         lifecycle.instance.generation,
@@ -1476,25 +1478,7 @@ class ServiceDaemon:
                 await self._accept_armed.wait()
             summary: ObservationDrainSummary | None = None
             if observation_sweep is not None:
-                try:
-                    summary = await asyncio.wait_for(
-                        observation_sweep(),
-                        timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS,
-                    )
-                except TimeoutError:
-                    summary = None
-                    record_bounded_event_without_raising(
-                        component="service.daemon",
-                        operation="observation_sweep_failed",
-                        reason="sweep_deadline_exceeded",
-                    )
-                except Exception:
-                    summary = None
-                    record_bounded_event_without_raising(
-                        component="service.daemon",
-                        operation="observation_sweep_failed",
-                        reason="sweep_failed",
-                    )
+                summary = await self._bounded_observation_sweep(observation_sweep)
             if recommendation_refresh is not None:
                 try:
                     await asyncio.wait_for(
@@ -1522,29 +1506,47 @@ class ServiceDaemon:
                     # progress, give control connections and other READY work a real share of the
                     # loop before the next immediate bulk-drain pass.
                     await asyncio.sleep(_OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS)
-                try:
-                    summary = await asyncio.wait_for(
-                        observation_sweep(),
-                        timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS,
-                    )
-                except TimeoutError:
-                    summary = None
-                    record_bounded_event_without_raising(
-                        component="service.daemon",
-                        operation="observation_sweep_failed",
-                        reason="sweep_deadline_exceeded",
-                    )
-                    continue
-                except Exception:
-                    summary = None
-                    record_bounded_event_without_raising(
-                        component="service.daemon",
-                        operation="observation_sweep_failed",
-                        reason="sweep_failed",
-                    )
-                    continue
+                summary = await self._bounded_observation_sweep(observation_sweep)
         except asyncio.CancelledError:
             raise
+
+    async def _bounded_observation_sweep(
+        self, observation_sweep: Callable[[], Awaitable[ObservationDrainSummary]]
+    ) -> ObservationDrainSummary | None:
+        """Run one deadline-bounded sweep, naming why it produced no summary."""
+
+        raised_inside = False
+
+        async def guarded() -> ObservationDrainSummary:
+            nonlocal raised_inside
+            try:
+                return await observation_sweep()
+            except Exception:
+                # Only an ordinary exception is the sweep's own. The deadline arrives as
+                # ``CancelledError``, which is a ``BaseException`` and deliberately not caught
+                # here, so it can never be mistaken for something the sweep raised.
+                raised_inside = True
+                raise
+
+        try:
+            return await asyncio.wait_for(guarded(), timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS)
+        except TimeoutError:
+            # ``asyncio.TimeoutError`` is the builtin ``TimeoutError``, so any socket or OS
+            # timeout raised inside the sweep lands here too and must not be reported as the
+            # deadline. The flag above is the discriminator.
+            reason = "sweep_failed" if raised_inside else "sweep_deadline_exceeded"
+            record_bounded_event_without_raising(
+                component="service.daemon",
+                operation="observation_sweep_failed",
+                reason=reason,
+            )
+        except Exception:
+            record_bounded_event_without_raising(
+                component="service.daemon",
+                operation="observation_sweep_failed",
+                reason="sweep_failed",
+            )
+        return None
 
     def _ready_generation_is_current(
         self,

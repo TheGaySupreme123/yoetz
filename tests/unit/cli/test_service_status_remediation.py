@@ -67,9 +67,10 @@ def test_unresponsive_guidance_names_the_holder_pid_when_the_stamp_resolves(
 
     from yoetz.protocol.canonical import canonical_encode
 
-    (tmp_path / "service.lock").write_bytes(
-        canonical_encode({"instance_id": "svc", "pid": os.getpid()}) + b"\n"
-    )
+    lock = tmp_path / "service.lock"
+    lock.write_bytes(canonical_encode({"instance_id": "svc", "pid": os.getpid()}) + b"\n")
+    # The daemon creates this owner-only; the probe refuses anything wider.
+    lock.chmod(0o600)
 
     _code, guidance = _status_stderr(monkeypatch, client_module._AcceptedServiceUnresponsive())
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 import time
 from collections.abc import Generator
 from pathlib import Path
@@ -546,3 +547,72 @@ async def test_drain_lease_is_released_even_when_a_row_raises(tmp_path: Path) ->
         await ObservationOutboxSweeper(store, _Aborting()).sweep()
 
     assert exits == 1
+
+
+@pytest.mark.anyio
+async def test_cancelling_a_sweep_mid_lease_enter_still_releases_the_lease(tmp_path: Path) -> None:
+    """A cancelled enter must not leave the drain flock owned until the generator is collected."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    _workspace, outcomes = _accepted_backlog(store, tmp_path, rows=1)
+    entering = threading.Event()
+    unblock = threading.Event()
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def blocking(workspace: str) -> Generator[bool]:
+        del workspace
+        entering.set()
+        unblock.wait(timeout=5)
+        events.append("enter")
+        try:
+            yield True
+        finally:
+            events.append("exit")
+
+    store.drain_lease = blocking  # pyright: ignore[reportAttributeAccessIssue]
+    sweeper = ObservationOutboxSweeper(store, _Coordinator(outcomes))
+    sweep = asyncio.create_task(sweeper.sweep())
+    try:
+        assert await asyncio.to_thread(entering.wait, 5)
+        sweep.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sweep
+        assert events == []
+
+        unblock.set()
+        for _ in range(500):
+            if "exit" in events:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        unblock.set()
+        sweeper.close()
+
+    assert events == ["enter", "exit"]
+
+
+@pytest.mark.anyio
+async def test_sweep_uses_its_own_pool_and_releases_it_on_close(tmp_path: Path) -> None:
+    """A sweep parked on a flock must not consume the shared default executor's workers."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    _workspace, outcomes = _accepted_backlog(store, tmp_path, rows=1)
+    sweeper = ObservationOutboxSweeper(store, _Coordinator(outcomes))
+    names: list[str] = []
+    original = store.pending_workspaces
+
+    def naming() -> tuple[str, ...]:
+        names.append(threading.current_thread().name)
+        return original()
+
+    store.pending_workspaces = naming  # pyright: ignore[reportAttributeAccessIssue]
+
+    await sweeper.sweep()
+    executor = sweeper._executor  # pyright: ignore[reportPrivateUsage]
+
+    assert executor is not None
+    assert names and all(name.startswith("yoetz-obs-sweep") for name in names)
+
+    sweeper.close()
+    assert sweeper._executor is None  # pyright: ignore[reportPrivateUsage]

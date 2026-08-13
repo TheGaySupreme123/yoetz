@@ -95,7 +95,10 @@ def test_holder_pid_is_reported_when_the_lock_stamp_resolves(
     from yoetz.protocol.canonical import canonical_encode
 
     stamp = canonical_encode({"instance_id": "svc", "pid": os.getpid()}) + b"\n"
-    (tmp_path / "service.lock").write_bytes(stamp)
+    lock = tmp_path / "service.lock"
+    lock.write_bytes(stamp)
+    # The daemon creates this owner-only; the probe refuses anything wider.
+    lock.chmod(0o600)
     _redirect_state_dir(monkeypatch, tmp_path)
 
     def refuse() -> None:
