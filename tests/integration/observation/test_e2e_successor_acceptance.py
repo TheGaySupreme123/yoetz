@@ -134,13 +134,24 @@ async def test_supervisor_drains_after_notify_without_inline_await() -> None:
 
     worker.run_once = _run_once  # type: ignore[method-assign]
     supervisor = ObservationVerificationSupervisor(service_generation=1)
+    idle = {"count": 0}
+
+    async def _on_idle() -> None:
+        idle["count"] += 1
+
     await supervisor.start()
     supervisor.register(
-        VerificationDrainHandle(workspace_commitment="hmac-sha256:" + "a" * 64, worker=worker)
+        VerificationDrainHandle(
+            workspace_commitment="hmac-sha256:" + "a" * 64,
+            worker=worker,
+            on_idle=_on_idle,
+        )
     )
     supervisor.notify()
     await asyncio.sleep(0.05)
     assert ran["count"] >= 1
+    assert idle["count"] == 1
+    assert supervisor.has_handle("hmac-sha256:" + "a" * 64) is False
     await supervisor.stop()
 
 

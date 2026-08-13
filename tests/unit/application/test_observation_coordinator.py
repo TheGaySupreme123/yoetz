@@ -1078,6 +1078,14 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
         return None
 
     monkeypatch.setattr(coordinator_module, "run_prepared_append", _capture_append)
+    materialize_calls: list[str] = []
+    real_materialize = coordinator_module.materialize_observation_envelope
+
+    def _count_materialize(envelope: ObservationEnvelope, *, task_id: str):
+        materialize_calls.append(envelope.source_identity)
+        return real_materialize(envelope, task_id=task_id)
+
+    monkeypatch.setattr(coordinator_module, "materialize_observation_envelope", _count_materialize)
 
     class _Clock:
         def now_utc(self) -> datetime:
@@ -1154,6 +1162,88 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
     assert captured[0].command.entries[0].draft.event_id != (
         captured[1].command.entries[0].draft.event_id
     )
+    assert materialize_calls == ["hook:advice-materialization", "hook:advice-revision"]
+
+
+@pytest.mark.anyio
+async def test_deferred_verification_uses_a_dedicated_runtime_lease(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from yoetz.application.observation_verification import ObservationVerificationSupervisor
+
+    task_id = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
+    session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    writer_id = observation_writer_id(task_id, session_id)
+    current_worker = object()
+    deferred_worker = object()
+    deferred_store = object()
+    current_runtime = SimpleNamespace(
+        task_id=task_id,
+        session_id=session_id,
+        writer_id=writer_id,
+    )
+    deferred_runtime = SimpleNamespace(
+        task_id=task_id,
+        session_id=session_id,
+        writer_id=writer_id,
+        observation=deferred_store,
+    )
+    routed: list[object] = []
+    released: list[object] = []
+    advised: list[tuple[object, object]] = []
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            routed.append(command)
+            return deferred_runtime
+
+        async def release(self, runtime: object) -> None:
+            released.append(runtime)
+
+    class _Coordinator(ObservationCoordinator):
+        async def _prepare_verification_worker(self, *args: object, **kwargs: object):  # type: ignore[override]  # noqa: SLF001
+            del args, kwargs
+            return current_worker
+
+        async def _rebuild_verification_worker(self, *args: object, **kwargs: object):  # type: ignore[override]  # noqa: SLF001
+            del kwargs
+            assert args[0] is deferred_runtime
+            assert args[2] is deferred_store
+            return deferred_worker
+
+        async def _run_advice(
+            self, workspace: str, runtime: object, store: object, **kwargs: object
+        ):  # type: ignore[override]  # noqa: SLF001
+            del workspace, kwargs
+            advised.append((runtime, store))
+
+    supervisor = ObservationVerificationSupervisor(service_generation=1)
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        verification_supervisor=supervisor,
+    )
+    envelope = _envelope(session=f"hmac-sha256:{'9' * 64}")
+    await coordinator._enqueue_verification(  # pyright: ignore[reportPrivateUsage]
+        cast(TaskRuntime, current_runtime),
+        "hmac-sha256:" + "8" * 64,
+        cast(object, object()),  # type: ignore[arg-type]
+        envelope,
+    )
+
+    handle = next(iter(supervisor._handles.values()))  # pyright: ignore[reportPrivateUsage]
+    assert routed
+    assert handle.worker is deferred_worker
+    assert handle.worker is not current_worker
+    assert handle.after_complete is not None
+    await handle.after_complete()
+    assert advised == [(deferred_runtime, deferred_store)]
+    assert handle.on_idle is not None
+    await handle.on_idle()
+    assert released == [deferred_runtime]
 
 
 @pytest.mark.anyio

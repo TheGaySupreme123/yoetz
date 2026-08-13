@@ -88,6 +88,7 @@ from yoetz.domain.observation import (
     ObservationRevokeCommand,
     ObservationStatus,
     ObservationStatusQuery,
+    observation_envelope_to_json,
 )
 from yoetz.domain.values import (
     Frontier,
@@ -162,6 +163,10 @@ def _reject(reason: str, cursor: object | None = None) -> ObservationIngestResul
     )
 
 
+def _empty_advice_event_ref_cache() -> dict[tuple[str, str], tuple[str, ...]]:
+    return {}
+
+
 @dataclass
 class ObservationCoordinator:
     """Resolve Codex session → mapped task SQLite observation store + ledger."""
@@ -178,6 +183,9 @@ class ObservationCoordinator:
     )
     verification_supervisor: ObservationVerificationSupervisor | None = None
     observation_enabled: bool = True
+    _advice_event_ref_cache: dict[tuple[str, str], tuple[str, ...]] = field(
+        default_factory=_empty_advice_event_ref_cache, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -206,6 +214,8 @@ class ObservationCoordinator:
             if not sessions:
                 continue
             for codex_session_id in sessions:
+                if supervisor.has_handle(workspace):
+                    break
                 mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
                 if mapping is None:
                     continue
@@ -257,13 +267,21 @@ class ObservationCoordinator:
                             legacy_writer_id=bound_legacy_writer_id,
                         )
 
-                    supervisor.register(
+                    async def _release(
+                        bound_runtime: TaskRuntime = runtime,
+                    ) -> None:
+                        await self.runtime.release(bound_runtime)
+
+                    registered = supervisor.register(
                         VerificationDrainHandle(
                             workspace_commitment=workspace,
                             worker=worker,
                             after_complete=_after,
+                            on_idle=_release,
                         )
                     )
+                    if registered:
+                        runtime = None
                     break
                 except Exception:
                     self.local.note_coverage_gap(
@@ -491,6 +509,22 @@ class ObservationCoordinator:
                 retryable=True,
             )
         return store
+
+    async def _route_observation_runtime(self, task_id: str, session_id: str) -> TaskRuntime:
+        return await self.runtime.route(
+            RouteCommand(
+                session_id=session_id,
+                writer_id=observation_writer_id(task_id, session_id),
+                access=RouteAccess.WRITE,
+                required_capabilities=frozenset(
+                    {
+                        RuntimeCapability.STRUCTURAL_READ,
+                        RuntimeCapability.PAYLOAD_READ,
+                        RuntimeCapability.WRITE,
+                    }
+                ),
+            )
+        )
 
     async def _append_materialized(
         self,
@@ -950,23 +984,51 @@ class ObservationCoordinator:
         if worker is None:
             return
         if self.verification_supervisor is not None:
+            supervisor = self.verification_supervisor
+            if supervisor.has_handle(workspace):
+                supervisor.notify(workspace)
+                return
 
-            async def _after() -> None:
-                await self._run_advice(
+            deferred_runtime = await self._route_observation_runtime(
+                runtime.task_id, runtime.session_id
+            )
+            try:
+                deferred_store = self._observation_store(deferred_runtime)
+                deferred_worker = await self._rebuild_verification_worker(
+                    deferred_runtime,
                     workspace,
-                    runtime,
-                    store,
+                    deferred_store,
                     legacy_writer_id=legacy_writer_id,
                 )
+                if deferred_worker is None:
+                    await self.runtime.release(deferred_runtime)
+                    return
 
-            self.verification_supervisor.register(
-                VerificationDrainHandle(
-                    workspace_commitment=workspace,
-                    worker=worker,
-                    after_complete=_after,
+                async def _after() -> None:
+                    await self._run_advice(
+                        workspace,
+                        deferred_runtime,
+                        deferred_store,
+                        legacy_writer_id=legacy_writer_id,
+                    )
+
+                async def _release() -> None:
+                    await self.runtime.release(deferred_runtime)
+
+                registered = supervisor.register(
+                    VerificationDrainHandle(
+                        workspace_commitment=workspace,
+                        worker=deferred_worker,
+                        after_complete=_after,
+                        on_idle=_release,
+                    )
                 )
-            )
-            self.verification_supervisor.notify(workspace)
+                if not registered:
+                    await self.runtime.release(deferred_runtime)
+            except BaseException:
+                await self.runtime.release(deferred_runtime)
+                raise
+            supervisor.notify(workspace)
             return
         while await worker.run_once() is not None:
             pass
@@ -1441,6 +1503,21 @@ class ObservationCoordinator:
             if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
                 await cast(Awaitable[None], result)
 
+    def _materialized_event_refs(
+        self, task_id: str, envelope: ObservationEnvelope
+    ) -> tuple[str, ...]:
+        key = (task_id, canonical_digest(observation_envelope_to_json(envelope)))
+        cached = self._advice_event_ref_cache.pop(key, None)
+        if cached is not None:
+            self._advice_event_ref_cache[key] = cached
+            return cached
+        batch = materialize_observation_envelope(envelope, task_id=task_id)
+        refs = tuple(str(item.draft.event_id) for item in batch.drafts)
+        self._advice_event_ref_cache[key] = refs
+        while len(self._advice_event_ref_cache) > 4096:
+            self._advice_event_ref_cache.pop(next(iter(self._advice_event_ref_cache)))
+        return refs
+
     async def _materialize_advice_findings(
         self,
         runtime: TaskRuntime,
@@ -1455,9 +1532,8 @@ class ObservationCoordinator:
             return
         refs_by_source: dict[str, set[str]] = {}
         for envelope in envelopes:
-            batch = materialize_observation_envelope(envelope, task_id=runtime.task_id)
             refs_by_source.setdefault(envelope.source_identity, set()).update(
-                str(item.draft.event_id) for item in batch.drafts
+                self._materialized_event_refs(runtime.task_id, envelope)
             )
         lifecycle_ref: str | None = None
         async for record in runtime.ledger.load_events(runtime.session_id):

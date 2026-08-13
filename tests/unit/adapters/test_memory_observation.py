@@ -135,6 +135,12 @@ def test_successful_cursor_advance_clears_stale_gap_despite_future_receipt_time(
             ObservationGapCode.CURSOR_STALE.value
             not in (await store.status(ObservationStatusQuery(_WORKSPACE))).gaps
         )
+        history = store._state.gaps[_WORKSPACE][  # pyright: ignore[reportPrivateUsage]
+            ObservationGapCode.CURSOR_STALE.value
+        ]
+        assert history.first_seen == Timestamp("2099-01-01T00:00:00.000Z")
+        assert history.last_seen == Timestamp("2099-01-01T00:00:00.000Z")
+        assert history.active is False
 
     asyncio.run(run())
 
@@ -173,5 +179,9 @@ def test_captured_content_clears_capture_unavailable_gap() -> None:
             ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
             not in (await store.status(ObservationStatusQuery(_WORKSPACE))).gaps
         )
+        history = store._state.gaps[_WORKSPACE][  # pyright: ignore[reportPrivateUsage]
+            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        ]
+        assert history.active is False
 
     asyncio.run(run())

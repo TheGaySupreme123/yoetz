@@ -124,6 +124,7 @@ class VerificationDrainHandle:
     workspace_commitment: str
     worker: ObservationVerificationWorker
     after_complete: Callable[[], Awaitable[None]] | None = None
+    on_idle: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass
@@ -145,9 +146,16 @@ class ObservationVerificationSupervisor:
         self._loop_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
-    def register(self, handle: VerificationDrainHandle) -> None:
+    def register(self, handle: VerificationDrainHandle) -> bool:
+        if handle.workspace_commitment in self._handles:
+            self._wake.set()
+            return False
         self._handles[handle.workspace_commitment] = handle
         self._wake.set()
+        return True
+
+    def has_handle(self, workspace_commitment: str) -> bool:
+        return workspace_commitment in self._handles
 
     def unregister(self, workspace_commitment: str) -> None:
         self._handles.pop(workspace_commitment, None)
@@ -194,7 +202,11 @@ class ObservationVerificationSupervisor:
         if task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        handles = tuple(self._handles.values())
         self._handles.clear()
+        for handle in handles:
+            if handle.on_idle is not None:
+                await handle.on_idle()
 
     async def _run_loop(self) -> None:
         while not self._closed:
@@ -220,6 +232,10 @@ class ObservationVerificationSupervisor:
             while not self._closed:
                 job = await handle.worker.run_once()
                 if job is None:
+                    if self._handles.get(handle.workspace_commitment) is handle:
+                        self.unregister(handle.workspace_commitment)
+                        if handle.on_idle is not None:
+                            await handle.on_idle()
                     break
                 if handle.after_complete is not None:
                     await handle.after_complete()

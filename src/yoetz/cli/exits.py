@@ -128,7 +128,8 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
         ),
         "resource_counts_invalid": (
             "the compiled resource counts do not match the reviewed manifest; regenerate the "
-            "resource tree and update the compiled count only when the inventory intentionally changed"
+            "resource tree through 'python scripts/verify_resource_manifest.py --sync' after "
+            "an intentional inventory change"
         ),
         "trusted_console_required": (
             "this ceremony needs a foreground terminal Yoetz owns (stdin and stderr on the same "

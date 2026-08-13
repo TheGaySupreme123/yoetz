@@ -334,15 +334,23 @@ async def test_caller_cannot_spoof_observation_author_to_bypass_frontier_guard()
         cast(Application, app), PublishWorkRequestModel.model_validate(spoofed_wire)
     )
 
+    stale_spoofed_wire = dict(spoofed_wire)
+    stale_spoofed_wire["request_id"] = "req_00000000-0000-4000-8000-000000000219"
+    stale_spoofed_wire["expected_frontier"] = {
+        "sequence": "0",
+        "head_digest": "genesis",
+    }
+    stale_spoofed_event = dict(cast(list[dict[str, object]], stale_spoofed_wire["event_drafts"])[0])
+    stale_spoofed_event["event_id"] = "evt_00000000-0000-4000-8000-000000000220"
+    stale_spoofed_payload = dict(cast(dict[str, object], stale_spoofed_event["payload"]))
+    stale_spoofed_payload["action_id"] = "act_00000000-0000-4000-8000-000000000221"
+    stale_spoofed_event["payload"] = stale_spoofed_payload
+    stale_spoofed_wire["event_drafts"] = [stale_spoofed_event]
+
     with pytest.raises(PublicOperationError) as caught:
         await execute_publish_work(
             cast(Application, app),
-            _request(
-                request_tail=219,
-                event_tail=220,
-                action_tail=221,
-                expected_frontier={"sequence": "0", "head_digest": "genesis"},
-            ),
+            PublishWorkRequestModel.model_validate(stale_spoofed_wire),
         )
 
     assert first.result_frontier.sequence == 1

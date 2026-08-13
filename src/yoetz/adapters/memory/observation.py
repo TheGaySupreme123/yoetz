@@ -48,6 +48,7 @@ class MemoryObservationConsent:
 class _GapState:
     first_seen: Timestamp
     last_seen: Timestamp
+    active: bool = True
 
 
 @dataclass
@@ -201,13 +202,9 @@ class MemoryObservationStore:
             self._state.last_receipt[workspace] = envelope.receipt_time
             # Successful advancement, rather than the untrusted receipt timestamp, proves that
             # a previously stale cursor is no longer the current ingest condition.
-            self._state.gaps.setdefault(workspace, {}).pop(
-                ObservationGapCode.CURSOR_STALE.value, None
-            )
+            self._resolve_gap(workspace, ObservationGapCode.CURSOR_STALE.value)
             if envelope.content_object_refs:
-                self._state.gaps.setdefault(workspace, {}).pop(
-                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value, None
-                )
+                self._resolve_gap(workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
             for gap in envelope.gap_codes:
                 self._note_gap(workspace, gap, envelope.receipt_time)
             if ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes:
@@ -340,7 +337,14 @@ class MemoryObservationStore:
         history[code] = _GapState(
             seen_at if prior is None else prior.first_seen,
             seen_at,
+            True,
         )
+
+    def _resolve_gap(self, workspace: str, code: str) -> None:
+        history = self._state.gaps.setdefault(workspace, {})
+        prior = history.get(code)
+        if prior is not None:
+            history[code] = _GapState(prior.first_seen, prior.last_seen, False)
 
     def _status_unlocked(self, workspace_commitment: str) -> ObservationStatus:
         import time
@@ -360,7 +364,7 @@ class MemoryObservationStore:
             if workspace == workspace_commitment:
                 coverage[envelope.source] = True
         history = self._state.gaps.get(workspace_commitment, {})
-        current = set(history)
+        current = {code for code, seen in history.items() if seen.active}
         gaps = tuple(sorted(current, key=str.encode))
         unsupported = tuple(
             sorted(self._state.unsupported_events.get(workspace_commitment, set()), key=str.encode)
