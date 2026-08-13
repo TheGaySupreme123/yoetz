@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from yoetz.cli.app import main
+from yoetz.cli.entry import main
 
 main()

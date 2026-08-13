@@ -11,6 +11,9 @@ from yoetz.domain.observation import ObservationEnvelope, ObservationGapCode, Ob
 from yoetz.protocol.canonical import JsonValue, canonical_digest
 
 __all__ = [
+    "ADVICE_TRIGGER_FIELDS",
+    "ADVICE_TRIGGER_TOOLS",
+    "STANDING_MACHINE_ACTIONS",
     "OBSERVATION_ADVICE_FACT_CODES",
     "OBSERVATION_ADVICE_POLICY_ID",
     "OBSERVATION_ADVICE_POLICY_VERSION",
@@ -20,6 +23,7 @@ __all__ = [
     "ObservationCompositionFact",
     "ObservationInspectFact",
     "advice_candidate_digest",
+    "advice_relevant",
     "evidence_basis_digest",
     "observation_advice_findings",
 ]
@@ -53,6 +57,13 @@ type AdviceNextAction = Literal[
     "attempt_semantic_dispatch",
     "reground_status",
 ]
+
+# Next-action tokens naming conditions of the machine/installation, not of the
+# work: the agent cannot discharge them, so evidence-sensitivity is the wrong
+# redelivery trigger and they get a bounded cadence instead (#241).
+# refresh_observation is deliberately excluded: it reflects live coverage
+# degradation the agent should hear about once per distinct occurrence.
+STANDING_MACHINE_ACTIONS: Final = frozenset({"connect_provider"})
 
 _EDIT_TOOLS: Final = frozenset(
     {
@@ -170,48 +181,130 @@ class ObservationAdviceCandidate:
             raise ValueError("observation_advice_invalid")
 
 
+# Structural payload fields the rules below read. ADVICE_TRIGGER_FIELDS is
+# assembled from these exact names so a rule and the relevance gate can never
+# drift apart; tests/property/test_advice_relevance_gate.py scans this module
+# for any literal that escapes them.
+_FIELD_TOOL_NAME: Final = "tool_name"
+_FIELD_EXIT_STATUS: Final = "exit_status"
+_FIELD_SUCCESS: Final = "success"
+_FIELD_CLAIM_KIND: Final = "claim_kind"
+_FIELD_RESULT_STATUS: Final = "result_status"
+_FIELD_CHANGED_PATHS_DIGEST: Final = "changed_paths_digest"
+_FIELD_MAPPING_HINT: Final = "mapping_hint"
+_FIELD_SUBAGENT_ID: Final = "subagent_id"
+_FIELD_ACTION: Final = "action"
+_FIELD_ATTEMPT: Final = "attempt"
+# Read only as correlation keys, and only inside a branch already gated on a
+# trigger tool, so their presence alone can never change a verdict.
+_FIELD_CORRELATION_ID: Final = "correlation_id"
+_FIELD_TOOL_CALL_ID: Final = "tool_call_id"
+
+ADVICE_TRIGGER_FIELDS: Final = frozenset(
+    {
+        _FIELD_TOOL_NAME,
+        _FIELD_EXIT_STATUS,
+        _FIELD_SUCCESS,
+        _FIELD_CLAIM_KIND,
+        _FIELD_RESULT_STATUS,
+        _FIELD_CHANGED_PATHS_DIGEST,
+        _FIELD_MAPPING_HINT,
+        _FIELD_SUBAGENT_ID,
+        _FIELD_ACTION,
+        _FIELD_ATTEMPT,
+    }
+)
+# The tool vocabulary the rules key on. Exported for callers that report which
+# observations drive advice; membership deliberately does NOT license a skip,
+# because _static_for_live matches live/static hints against *any* tool name.
+ADVICE_TRIGGER_TOOLS: Final = _EDIT_TOOLS | _CHECK_TOOLS | frozenset({"shell", "Bash", "bash"})
+
+
 def _ascii(value: str) -> bytes:
     return value.encode("ascii", errors="strict")
 
 
 def _tool(envelope: ObservationEnvelope) -> str | None:
-    value = envelope.structural_payload.get("tool_name")
+    value = envelope.structural_payload.get(_FIELD_TOOL_NAME)
     return value if type(value) is str else None
 
 
 def _exit_status(envelope: ObservationEnvelope) -> int | None:
-    value = envelope.structural_payload.get("exit_status")
+    value = envelope.structural_payload.get(_FIELD_EXIT_STATUS)
     return value if type(value) is int else None
 
 
 def _success(envelope: ObservationEnvelope) -> bool | None:
-    value = envelope.structural_payload.get("success")
+    value = envelope.structural_payload.get(_FIELD_SUCCESS)
     return value if type(value) is bool else None
 
 
 def _claim_kind(envelope: ObservationEnvelope) -> str | None:
-    value = envelope.structural_payload.get("claim_kind")
+    value = envelope.structural_payload.get(_FIELD_CLAIM_KIND)
     return value if type(value) is str else None
 
 
 def _result_status(envelope: ObservationEnvelope) -> str | None:
-    value = envelope.structural_payload.get("result_status")
+    value = envelope.structural_payload.get(_FIELD_RESULT_STATUS)
     return value if type(value) is str else None
 
 
 def _changed_paths_digest(envelope: ObservationEnvelope) -> str | None:
-    value = envelope.structural_payload.get("changed_paths_digest")
+    value = envelope.structural_payload.get(_FIELD_CHANGED_PATHS_DIGEST)
     return value if type(value) is str else None
 
 
 def _mapping_hint(envelope: ObservationEnvelope) -> str | None:
-    value = envelope.structural_payload.get("mapping_hint")
+    value = envelope.structural_payload.get(_FIELD_MAPPING_HINT)
     return value if type(value) is str else None
 
 
 def _subagent_id(envelope: ObservationEnvelope) -> str | None:
-    value = envelope.structural_payload.get("subagent_id")
+    value = envelope.structural_payload.get(_FIELD_SUBAGENT_ID)
     return value if type(value) is str else None
+
+
+def advice_relevant(envelope: ObservationEnvelope) -> bool:
+    """True unless this envelope alone provably cannot change the candidate set.
+
+    Conservative by construction: False means "provably irrelevant"; anything
+    unrecognised returns True. The proof is per-envelope and holds only while
+    the context's own envelope-independent rules are quiet — the
+    ``observation_gap_or_stale`` rule digests the last three envelope
+    identities, so it changes with *any* new envelope. Callers must therefore
+    also require that no gap-driven advice is live; see the guard in
+    ``yoetz.cli.observe_hooks``.
+    """
+
+    if envelope.gap_codes:
+        return True
+    payload = envelope.structural_payload
+    if any(
+        payload.get(field) is not None
+        for field in ADVICE_TRIGGER_FIELDS
+        if field != _FIELD_TOOL_NAME
+    ):
+        return True
+    tool = payload.get(_FIELD_TOOL_NAME)
+    if tool is None:
+        return False
+    return type(tool) is not str or not _tool_name_is_inert(tool)
+
+
+def _tool_name_is_inert(value: str) -> bool:
+    """True when no rule can key on this tool name.
+
+    A tool name reaches the rules two ways: membership in the edit/check
+    vocabularies, and substring matching against the live/static hint sets in
+    _static_for_live. Both are checked here against the same constants the
+    rules read, so `Read`/`Grep`-shaped calls are provably inert while
+    `mcp__…`-shaped ones (which contain a live hint) are not.
+    """
+
+    if value in ADVICE_TRIGGER_TOOLS:
+        return False
+    lowered = value.lower()
+    return not any(token in lowered for token in _LIVE_CLAIM_HINTS | _STATIC_CHECK_HINTS)
 
 
 def _envelope_ref(envelope: ObservationEnvelope) -> str:
@@ -246,8 +339,8 @@ def _failed_commands(envelopes: Sequence[ObservationEnvelope]) -> list[Observati
         if tool is None or tool not in shell_tools:
             continue
         key = (
-            envelope.structural_payload.get("correlation_id")
-            or envelope.structural_payload.get("tool_call_id")
+            envelope.structural_payload.get(_FIELD_CORRELATION_ID)
+            or envelope.structural_payload.get(_FIELD_TOOL_CALL_ID)
             or envelope.source_identity
         )
         if type(key) is not str:
@@ -298,7 +391,7 @@ def _edits_after_check(
         tool = _tool(envelope)
         if tool is None or tool not in _EDIT_TOOLS:
             # Also treat apply_patch action writes.
-            action = envelope.structural_payload.get("action")
+            action = envelope.structural_payload.get(_FIELD_ACTION)
             if (
                 action not in {"write", "edit", "delete"}
                 and _changed_paths_digest(envelope) is None
@@ -518,10 +611,10 @@ def _semantic_without_attempt(
         hint = (_mapping_hint(envelope) or "").lower()
         if "semantic" in claim or "live-dispatch" in claim or "live_dispatch" in claim:
             claims.append(_envelope_ref(envelope))
-        if "semantic" in hint or envelope.structural_payload.get("attempt") is not None:
+        if "semantic" in hint or envelope.structural_payload.get(_FIELD_ATTEMPT) is not None:
             if "semantic" in hint or claim in {"semantic_attempt", "dispatch_attempt"}:
                 attempts.append(_envelope_ref(envelope))
-        action = envelope.structural_payload.get("action")
+        action = envelope.structural_payload.get(_FIELD_ACTION)
         if type(action) is str and action in {"semantic_dispatch", "live_dispatch"}:
             attempts.append(_envelope_ref(envelope))
     if claims and not attempts:

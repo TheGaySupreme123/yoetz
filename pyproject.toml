@@ -39,7 +39,7 @@ semantic-openai = [
 ]
 
 [project.scripts]
-yoetz = "yoetz.cli.app:main"
+yoetz = "yoetz.cli.entry:main"
 
 [dependency-groups]
 dev = [

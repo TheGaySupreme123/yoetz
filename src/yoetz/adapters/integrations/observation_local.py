@@ -21,6 +21,7 @@ from typing import Final, cast
 
 from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
 from yoetz.domain.observation import (
+    AdviceItem,
     AdviceSnapshot,
     ObservationControlCommand,
     ObservationCursor,
@@ -51,6 +52,8 @@ except ImportError:  # pragma: no cover - the Yoetz service is hosted on POSIX
 
 __all__ = [
     "HOOK_MAPPING_VERSION",
+    "AdviceDelivery",
+    "AdviceSidecarFacts",
     "LocalObservationConsent",
     "LocalObservationStore",
     "ObservationOutboxRow",
@@ -88,6 +91,16 @@ _OUTBOX_REASON_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 _RUNTIME_GATE_SCHEMA: Final = "yoetz.observation-runtime-gate/1"
 _RUNTIME_GATE_NAME: Final = "runtime-gate.json"
 _MAX_RUNTIME_GATE_BYTES: Final = 256
+# Advice sidecar: a skip-work probe only, never authoritative.
+_MAX_ADVICE_SIDECAR_BYTES: Final = 512
+# Never a legal character in an event-kind token, so a legacy bare value parses
+# unambiguously as "event kind, no timing".
+_OPEN_PRE_SEPARATOR: Final = "|"
+# Async-downgrade detection window: a majority of the most recent Pre/Post
+# pairs must show serialization before anything is reported.
+_MAX_ASYNC_PAIR_SAMPLES: Final = 10
+_ASYNC_DOWNGRADE_MIN_SERIALIZED: Final = 8
+_ASYNC_DOWNGRADE_MIN_PRE_MS: Final = 100
 _LOCAL_OUTBOX_OVERFLOW_GAP: Final = "_local_outbox_overflow"
 
 YOETZ_TOOL_NAMES: Final = frozenset(
@@ -243,6 +256,30 @@ def _read_bytes(path: Path, *, maximum: int) -> bytes | None:
 
 
 @dataclass(frozen=True, slots=True)
+class AdviceSidecarFacts:
+    """Bounded summary of the advice a workspace state already holds.
+
+    Read from the ``.advice`` sidecar to skip work; never authoritative. Any
+    unreadable, oversized, unversioned, or otherwise suspect sidecar yields
+    None from the reader and the caller takes the full path.
+    """
+
+    delivery_identity: str | None
+    next_actions: frozenset[str]
+    envelope_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class AdviceDelivery:
+    """One hook-channel advice delivery: the snapshot, the rendered item, its text."""
+
+    snapshot: AdviceSnapshot
+    item: AdviceItem | None
+    delivery_identity: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class LocalObservationConsent:
     workspace_commitment: str
     granted_at: Timestamp
@@ -345,6 +382,10 @@ class _WorkspaceState:
     quarantine_evicted_last: Timestamp | None = None
     trusted_policy_digest: str | None = None
     trusted_policy_mac: str | None = None
+    # Bounded 0/1 ring of recent Pre/Post serialization observations, and the
+    # sessions that have already had a downgrade reported (one shot each).
+    async_pair_samples: list[int] | None = None
+    async_downgrade_sessions: set[str] | None = None
 
     def __post_init__(self) -> None:
         if self.session_workspaces is None:
@@ -385,6 +426,10 @@ class _WorkspaceState:
             self.session_advice = {}
         if self.session_advice_suppression is None:
             self.session_advice_suppression = {}
+        if self.async_pair_samples is None:
+            self.async_pair_samples = []
+        if self.async_downgrade_sessions is None:
+            self.async_downgrade_sessions = set()
 
 
 def _cursor_key(source: ObservationSource, session_commitment: str) -> str:
@@ -436,6 +481,8 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         ended_sessions=set(state.ended_sessions or ()),
         session_generations=dict(state.session_generations or {}),
         ended_session_generations=dict(state.ended_session_generations or {}),
+        async_pair_samples=list(state.async_pair_samples or ()),
+        async_downgrade_sessions=set(state.async_downgrade_sessions or ()),
     )
 
 
@@ -479,6 +526,12 @@ class LocalObservationStore:
         # per workspace it has ever seen.
         self._state_cache: dict[str, tuple[tuple[int, int, int, int], _WorkspaceState]] = {}
         self._key_material_cache: bytes | None = None
+        # Open write batches keyed by workspace commitment. Inside a batch
+        # `_load` hands back the held mutable state and `_save` only marks it
+        # dirty, so one hook pass serializes and fsyncs once instead of the
+        # 10-18 times measured on a lived-in store (#242).
+        self._batch: dict[str, _WorkspaceState] = {}
+        self._batch_dirty: set[str] = set()
 
     def _now_mono(self) -> float:
         import time
@@ -731,7 +784,23 @@ class LocalObservationStore:
             ]
             return tuple(sorted(result, key=str.encode))
 
-    def note_open_pre(self, workspace: str, correlation_id: str, event_kind: str) -> None:
+    def note_open_pre(
+        self,
+        workspace: str,
+        correlation_id: str,
+        event_kind: str,
+        *,
+        finished_mono_ms: int | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        """Record an open Pre event, optionally stamping when its hook finished.
+
+        The stamp is encoded into the existing ``str`` value slot as
+        ``<event_kind>|<finished_mono_ms>|<duration_ms>`` rather than widening
+        the persisted shape, so a pre-upgrade file's bare event kind still
+        loads and simply reports no timing.
+        """
+
         with self._lock:
             state = self._load(workspace)
             assert state.open_pre is not None
@@ -739,16 +808,65 @@ class LocalObservationStore:
                 # Drop oldest insertion order by rebuilding from remaining items.
                 oldest = next(iter(state.open_pre))
                 del state.open_pre[oldest]
-            state.open_pre[correlation_id] = event_kind
+            value = event_kind
+            if finished_mono_ms is not None and duration_ms is not None:
+                value = (
+                    f"{event_kind}{_OPEN_PRE_SEPARATOR}{max(0, finished_mono_ms)}"
+                    f"{_OPEN_PRE_SEPARATOR}{max(0, duration_ms)}"
+                )
+            state.open_pre[correlation_id] = value
             self._save(workspace, state)
 
     def consume_open_pre(self, workspace: str, correlation_id: str) -> str | None:
         with self._lock:
             state = self._load(workspace)
             assert state.open_pre is not None
-            kind = state.open_pre.pop(correlation_id, None)
+            raw = state.open_pre.pop(correlation_id, None)
             self._save(workspace, state)
-            return kind
+            return None if raw is None else raw.split(_OPEN_PRE_SEPARATOR, 1)[0]
+
+    def open_pre_timing(self, workspace: str, correlation_id: str) -> tuple[int, int] | None:
+        """Return (finished_mono_ms, duration_ms) for a paired Pre, when recorded."""
+
+        with self._lock:
+            raw = (self._load(workspace).open_pre or {}).get(correlation_id)
+        if raw is None:
+            return None
+        parts = raw.split(_OPEN_PRE_SEPARATOR)
+        if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+            return None
+        return int(parts[1]), int(parts[2])
+
+    def note_async_pair_sample(self, workspace: str, *, serialized: bool) -> tuple[int, int]:
+        """Append one Pre/Post serialization observation; return (serialized, total).
+
+        A bounded ring: only the most recent samples decide, so a host that is
+        reconfigured mid-session stops being reported within one window.
+        """
+
+        with self._lock:
+            state = self._load(workspace)
+            if state.async_pair_samples is None:
+                state.async_pair_samples = []
+            state.async_pair_samples.append(1 if serialized else 0)
+            del state.async_pair_samples[:-_MAX_ASYNC_PAIR_SAMPLES]
+            self._save(workspace, state)
+            return sum(state.async_pair_samples), len(state.async_pair_samples)
+
+    def note_async_downgrade_reported(self, workspace: str, session_commitment: str) -> bool:
+        """Claim the one-shot async-downgrade report for a session; False if already claimed."""
+
+        with self._lock:
+            state = self._load(workspace)
+            if state.async_downgrade_sessions is None:
+                state.async_downgrade_sessions = set()
+            if session_commitment in state.async_downgrade_sessions:
+                return False
+            state.async_downgrade_sessions.add(session_commitment)
+            if len(state.async_downgrade_sessions) > _MAX_HOOK_SEQUENCES:
+                state.async_downgrade_sessions.pop()
+            self._save(workspace, state)
+            return True
 
     def has_open_pre(self, workspace: str, correlation_id: str) -> bool:
         with self._lock:
@@ -762,6 +880,7 @@ class LocalObservationStore:
             state.advice_snapshot = snapshot
             state.advice_frontier = None if snapshot is None else snapshot.freshness_frontier
             self._save(workspace, state)
+            self._write_advice_sidecar(workspace, state)
 
     def set_session_advice_snapshot(
         self,
@@ -781,9 +900,32 @@ class LocalObservationStore:
             self._save(workspace, state)
 
     def peek_advice_for_delivery(
-        self, workspace: str, *, yoetz_session_id: str | None = None
-    ) -> AdviceSnapshot | None:
-        """Return a new high-value advice snapshot once per suppression identity."""
+        self,
+        workspace: str,
+        *,
+        yoetz_session_id: str | None = None,
+        allow_standing: bool = True,
+    ) -> AdviceDelivery | None:
+        """Return advice once per *rendered content* identity, not per envelope stream.
+
+        ``allow_standing=False`` withholds standing machine conditions
+        (STANDING_MACHINE_ACTIONS) and falls through to the highest-ranked
+        actionable item, so those conditions reach the agent only on the
+        session-boundary events that opt in (#241).
+
+        ``last_advice_suppression`` / ``session_advice_suppression`` hold
+        ``deliver-`` tokens from this call, not the snapshot's ``suppress-``
+        identity. Both persist as unvalidated ``str | None``, so a pre-upgrade
+        file simply never matches and the first hook after upgrade delivers
+        once — no migration, and downgrade is symmetric. They stay single
+        values, never a set: A→B→A must redeliver A.
+        """
+
+        from yoetz.application.observation_advice import (
+            advice_delivery_identity,
+            hook_advice_context,
+            select_advice_item,
+        )
 
         with self._lock:
             state = self._load(workspace)
@@ -796,20 +938,29 @@ class LocalObservationStore:
                 return None
             if not snapshot.ranked_finding_ids:
                 return None
+            item = select_advice_item(snapshot, allow_standing=allow_standing)
+            if item is None and snapshot.ranked_items:
+                # Every ranked item was cadence-gated on this event class.
+                return None
+            identity = advice_delivery_identity(snapshot, item=item)
             if type(yoetz_session_id) is str:
                 if state.session_advice_suppression is None:
                     state.session_advice_suppression = {}
-                if state.session_advice_suppression.get(yoetz_session_id) == (
-                    snapshot.suppression_identity
-                ):
+                if state.session_advice_suppression.get(yoetz_session_id) == identity:
                     return None
-                state.session_advice_suppression[yoetz_session_id] = snapshot.suppression_identity
+                state.session_advice_suppression[yoetz_session_id] = identity
             else:
-                if state.last_advice_suppression == snapshot.suppression_identity:
+                if state.last_advice_suppression == identity:
                     return None
-                state.last_advice_suppression = snapshot.suppression_identity
+                state.last_advice_suppression = identity
             self._save(workspace, state)
-            return snapshot
+            self._write_advice_sidecar(workspace, state)
+            return AdviceDelivery(
+                snapshot=snapshot,
+                item=item,
+                delivery_identity=identity,
+                text=hook_advice_context(snapshot, item=item),
+            )
 
     def advice_snapshot_for(self, workspace: str) -> AdviceSnapshot | None:
         """Non-consuming read of the current advice snapshot for status views."""
@@ -886,9 +1037,16 @@ class LocalObservationStore:
                     has_real_observation=bool(state.envelopes),
                 )
             )
-            state.advice_snapshot = snapshot
-            state.advice_frontier = None if snapshot is None else snapshot.freshness_frontier
-            self._save(workspace, state)
+            if snapshot is not state.advice_snapshot:
+                # build_observation_advice_snapshot returns the prior object
+                # unchanged when nothing moved; rewriting it cost ~91 ms of
+                # encode plus an fsync on every suppressed hook (#242). The
+                # pruning `_save` drives still runs: a hook flushes its batch
+                # exactly once regardless of this branch.
+                state.advice_snapshot = snapshot
+                state.advice_frontier = None if snapshot is None else snapshot.freshness_frontier
+                self._save(workspace, state)
+                self._write_advice_sidecar(workspace, state)
             return snapshot
 
     def get_stream_cursor(
@@ -981,14 +1139,16 @@ class LocalObservationStore:
             state.pending_outbox.append(
                 ObservationOutboxRow(codex_session_id=codex_session_id, envelope=envelope)
             )
+            # Resolve before projecting so the size-checked bytes are exactly
+            # the bytes _save would otherwise re-encode: one encode, not three.
+            self._resolve_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
             projected = canonical_encode(self._state_to_json(workspace, state)) + b"\n"
             if len(projected) > _MAX_STATE_BYTES:
                 state.pending_outbox.pop()
                 self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
                 self._save(workspace, state)
                 return ObservationGapCode.OUTBOX_OVERFLOW.value
-            self._resolve_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
-            self._save(workspace, state)
+            self._save(workspace, state, projected=projected)
             return None
 
     def list_pending_outbox(
@@ -1632,11 +1792,120 @@ class LocalObservationStore:
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
 
+    @contextlib.contextmanager
+    def batched(self, workspace_commitment: str) -> Generator[None]:
+        """Hold one workspace state open across a pass; serialize once at exit.
+
+        Durability trade-off: a SIGKILL inside a batch loses that batch's local
+        mutations rather than only the tail. That matches the outbox's design —
+        an un-acked row is retried, a lost envelope is re-ingested or recovered
+        by stream reconcile — but callers MUST close the batch before any
+        service RPC so an outbox acknowledgement can never become durable ahead
+        of the ingest it acknowledges, and MUST NOT span a network wait: the
+        batch holds the interprocess store lock for its whole duration.
+        """
+
+        with self._lock:
+            nested = workspace_commitment in self._batch
+            if not nested:
+                self._batch[workspace_commitment] = self._load(workspace_commitment)
+            try:
+                yield
+            finally:
+                if not nested:
+                    state = self._batch.pop(workspace_commitment, None)
+                    dirty = workspace_commitment in self._batch_dirty
+                    self._batch_dirty.discard(workspace_commitment)
+                    if state is not None and dirty:
+                        self._save(workspace_commitment, state)
+                        self._write_advice_sidecar(workspace_commitment, state)
+
     def _workspace_path(self, workspace_commitment: str) -> Path:
         digest = workspace_commitment.removeprefix("hmac-sha256:")
         if len(digest) != 64:
             raise ProtocolValueError("invalid_commitment")
         return self._root / "workspaces" / f"{digest}.json"
+
+    def _advice_sidecar_path(self, workspace_commitment: str) -> Path:
+        return self._workspace_path(workspace_commitment).with_suffix(".advice")
+
+    def _write_advice_sidecar(self, workspace_commitment: str, state: _WorkspaceState) -> None:
+        """Summarize the advice this state holds, for a cheap "anything new?" probe.
+
+        Caller must already hold ``self._lock`` so the sidecar is serialized
+        with the state it summarizes. Digests, closed next-action tokens, and
+        counts only — never a path, prose, or evidence reference.
+        """
+
+        if workspace_commitment in self._batch:
+            # Never let the summary become durable ahead of the state it
+            # summarizes; the batch flush rewrites it.
+            return
+        snapshot = state.advice_snapshot
+        actions: tuple[str, ...] = ()
+        if snapshot is not None:
+            actions = tuple(
+                sorted(
+                    {item.recommended_next_action for item in snapshot.ranked_items},
+                    key=str.encode,
+                )
+            )[:8]
+        payload = canonical_encode(
+            JsonObject(
+                {
+                    "actions": actions,
+                    "delivery": state.last_advice_suppression,
+                    "envelopes": len(state.envelopes or ()),
+                    "v": 1,
+                }
+            )
+        )
+        if len(payload) > _MAX_ADVICE_SIDECAR_BYTES:
+            return
+        with contextlib.suppress(OSError, PathSafetyError):
+            _ensure_dir(self._root / "workspaces")
+            _atomic_write(self._advice_sidecar_path(workspace_commitment), payload)
+
+    def advice_sidecar_facts(self, workspace_commitment: str) -> AdviceSidecarFacts | None:
+        """Read the bounded advice sidecar, or None when it cannot be trusted."""
+
+        try:
+            path = self._advice_sidecar_path(workspace_commitment)
+        except ProtocolValueError:
+            return None
+        try:
+            if path.is_symlink() or not path.is_file():
+                return None
+            facts = path.lstat()
+            if facts.st_uid != os.geteuid() or facts.st_mode & 0o077:
+                return None
+        except OSError:
+            return None
+        raw = _read_bytes(path, maximum=_MAX_ADVICE_SIDECAR_BYTES)
+        if raw is None:
+            return None
+        try:
+            parsed = strict_json_parse(raw)
+        except ProtocolValueError:
+            return None
+        if not isinstance(parsed, Mapping):
+            return None
+        body = cast(Mapping[str, JsonValue], parsed)
+        if body.get("v") != 1:
+            return None
+        raw_actions = body.get("actions")
+        if type(raw_actions) not in {list, tuple}:
+            return None
+        actions = tuple(cast(tuple[JsonValue, ...], raw_actions))
+        if any(type(item) is not str for item in actions):
+            return None
+        delivery = body.get("delivery")
+        count = body.get("envelopes")
+        return AdviceSidecarFacts(
+            delivery_identity=delivery if type(delivery) is str else None,
+            next_actions=frozenset(cast(tuple[str, ...], actions)),
+            envelope_count=count if type(count) is int and not isinstance(count, bool) else 0,
+        )
 
     def _iter_workspaces(self) -> list[tuple[str, _WorkspaceState]]:
         directory = self._root / "workspaces"
@@ -1672,6 +1941,9 @@ class LocalObservationStore:
             self._state_cache.pop(next(iter(self._state_cache)))
 
     def _load(self, workspace_commitment: str) -> _WorkspaceState:
+        held = self._batch.get(workspace_commitment)
+        if held is not None:
+            return held
         path = self._workspace_path(workspace_commitment)
         before = self._stat_key(path)
         cached = self._state_cache.get(workspace_commitment)
@@ -1721,12 +1993,31 @@ class LocalObservationStore:
         if len(kept) != len(state.quarantine):
             state.quarantine[:] = kept
 
-    def _save(self, workspace_commitment: str, state: _WorkspaceState) -> None:
+    def _save(
+        self,
+        workspace_commitment: str,
+        state: _WorkspaceState,
+        *,
+        projected: bytes | None = None,
+    ) -> None:
+        """Serialize one workspace state, trimming to the safe local bound.
+
+        ``projected`` reuses bytes a caller already encoded for a size check;
+        they are discarded when pruning mutated the state after that encode.
+        """
+
+        if self._batch.get(workspace_commitment) is state:
+            self._batch_dirty.add(workspace_commitment)
+            return
         directory = self._root / "workspaces"
         _ensure_dir(directory)
         path = self._workspace_path(workspace_commitment)
+        quarantined_before = len(state.quarantine or ())
         self._prune_expired_quarantine(state)
-        payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+        if projected is not None and len(state.quarantine or ()) == quarantined_before:
+            payload = projected
+        else:
+            payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
         if len(payload) > _MAX_STATE_BYTES:
             # Retain authority state and make every observation-detail loss explicit.
             assert state.envelopes is not None
@@ -2130,6 +2421,14 @@ class LocalObservationStore:
                 {key: value for key, value in sorted(state.codex_session_bindings.items())}
             ),
         }
+        # Emitted only once observed, so a store that never sees a Pre/Post pair
+        # keeps a byte-identical projection.
+        if state.async_pair_samples:
+            payload["async_pair_samples"] = tuple(state.async_pair_samples)
+        if state.async_downgrade_sessions:
+            payload["async_downgrade_sessions"] = tuple(
+                sorted(state.async_downgrade_sessions, key=str.encode)
+            )
         if state.storage_corrupt_sessions:
             payload["storage_corrupt_sessions"] = tuple(
                 sorted(state.storage_corrupt_sessions, key=str.encode)
@@ -2267,6 +2566,20 @@ class LocalObservationStore:
             str(key): str(value)
             for key, value in cast(Mapping[str, JsonValue], raw.get("open_pre") or {}).items()
         }
+        raw_samples = raw.get("async_pair_samples")
+        async_pair_samples = (
+            [1 if item else 0 for item in cast(tuple[JsonValue, ...], raw_samples)][
+                -_MAX_ASYNC_PAIR_SAMPLES:
+            ]
+            if type(raw_samples) in {list, tuple}
+            else []
+        )
+        raw_reported = raw.get("async_downgrade_sessions")
+        async_downgrade_sessions: set[str] = set()
+        if type(raw_reported) in {list, tuple}:
+            async_downgrade_sessions = {
+                item for item in cast(tuple[JsonValue, ...], raw_reported) if type(item) is str
+            }
         last_receipt = raw.get("last_receipt")
         envelopes: list[ObservationEnvelope] = []
         for item in cast(tuple[JsonValue, ...] | list[JsonValue], envelopes_raw):
@@ -2398,6 +2711,8 @@ class LocalObservationStore:
                 if type(key) is str and type(value) is str
             },
             open_pre=open_pre,
+            async_pair_samples=async_pair_samples,
+            async_downgrade_sessions=async_downgrade_sessions,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,
             hook_sequences=hook_sequences,

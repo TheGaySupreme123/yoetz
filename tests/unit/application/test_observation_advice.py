@@ -13,8 +13,11 @@ from yoetz.adapters.observation_semantic_advice import NullSemanticAdvice, Optio
 from yoetz.application.observation_advice import (
     ObservationAdviceBuildInput,
     ObservationAdviceContextBuilder,
+    advice_delivery_identity,
     build_observation_advice_snapshot,
+    hook_advice_context,
     minimized_semantic_evidence_packet,
+    select_advice_item,
     should_reissue_advice,
 )
 from yoetz.cli.observe_hooks import handle_observe
@@ -142,6 +145,140 @@ def test_standing_provider_condition_keeps_one_candidate_identity_as_envelopes_g
     )
     assert latest_provider.finding_id == first_provider.finding_id
     assert latest.evidence_basis_digest != first.evidence_basis_digest
+    # #241: the delivery identity is over what the agent actually receives, so
+    # it must NOT move with the envelope stream the basis digest tracks.
+    assert advice_delivery_identity(first) == advice_delivery_identity(latest)
+
+
+def test_delivery_identity_is_stable_while_the_envelope_stream_grows() -> None:
+    """The hook-channel identity keys on rendered content, not on evidence breadth."""
+
+    composition = ObservationCompositionFact(
+        semantic_configured=True,
+        semantic_ready=False,
+        provider_factory_ids=("fireworks",),
+        connected_provider_ids=(),
+    )
+
+    def _build(count: int):
+        built = build_observation_advice_snapshot(
+            ObservationAdviceBuildInput(
+                envelopes=tuple(
+                    _envelope(f"hook:{index}", {"tool_name": "shell"}, pos=index)
+                    for index in range(1, count + 1)
+                ),
+                lifecycle=ObservationLifecycle.ACTIVE,
+                gaps=(),
+                composition=composition,
+                has_real_observation=True,
+            )
+        )
+        assert built is not None
+        return built
+
+    one = _build(1)
+    twenty = _build(20)
+    assert advice_delivery_identity(one) == advice_delivery_identity(twenty)
+    assert one.evidence_basis_digest != twenty.evidence_basis_digest
+    assert hook_advice_context(one) == hook_advice_context(twenty)
+
+
+def test_delivery_identity_changes_when_the_rendered_text_changes() -> None:
+    standing = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(_envelope("hook:one", {"tool_name": "shell"}),),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            composition=ObservationCompositionFact(
+                semantic_configured=True,
+                semantic_ready=False,
+                provider_factory_ids=("fireworks",),
+                connected_provider_ids=(),
+            ),
+            has_real_observation=True,
+        )
+    )
+    failed = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(
+                _envelope(
+                    "hook:one",
+                    {"tool_name": "shell", "exit_status": 1, "correlation_id": "x1"},
+                ),
+            ),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert standing is not None and failed is not None
+    assert hook_advice_context(standing) != hook_advice_context(failed)
+    assert advice_delivery_identity(standing) != advice_delivery_identity(failed)
+
+
+def test_standing_items_fall_through_to_the_first_actionable_item() -> None:
+    """Withholding a standing item must never suppress advice ranked below it."""
+
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(_envelope("hook:one", {"tool_name": "shell", "claim_kind": "semantic"}),),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            composition=ObservationCompositionFact(
+                semantic_configured=True,
+                semantic_ready=False,
+                provider_factory_ids=("fireworks",),
+                connected_provider_ids=(),
+            ),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    assert [item.rule_code for item in snapshot.ranked_items] == [
+        "provider_not_ready",
+        "semantic_claim_without_attempt",
+    ]
+    permitted = select_advice_item(snapshot, allow_standing=True)
+    withheld = select_advice_item(snapshot, allow_standing=False)
+    assert permitted is not None and permitted.rule_code == "provider_not_ready"
+    assert withheld is not None and withheld.rule_code == "semantic_claim_without_attempt"
+
+
+def test_suppression_identity_still_tracks_evidence_for_materialization() -> None:
+    """observation_advice_history keys row distinctness on evidence; do not weaken it.
+
+    ``suppression_identity`` also carries the coordinator's materialization
+    retry-safety and ``observe status``'s advice_frontier, so the #241 fix adds
+    a second identity rather than redefining this one.
+    """
+
+    composition = ObservationCompositionFact(
+        semantic_configured=True,
+        semantic_ready=False,
+        provider_factory_ids=("fireworks",),
+        connected_provider_ids=(),
+    )
+
+    def _build(count: int):
+        built = build_observation_advice_snapshot(
+            ObservationAdviceBuildInput(
+                envelopes=tuple(
+                    _envelope(f"hook:{index}", {"tool_name": "shell"}, pos=index)
+                    for index in range(1, count + 1)
+                ),
+                lifecycle=ObservationLifecycle.ACTIVE,
+                gaps=(),
+                composition=composition,
+                has_real_observation=True,
+            )
+        )
+        assert built is not None
+        return built
+
+    narrow = _build(1)
+    broad = _build(5)
+    assert narrow.ranked_finding_ids == broad.ranked_finding_ids
+    assert narrow.suppression_identity != broad.suppression_identity
 
 
 def test_semantic_packet_minimization() -> None:
