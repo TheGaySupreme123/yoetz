@@ -6,6 +6,13 @@
 `src/yoetz/application/publish_work.py`, and `src/yoetz/service/ready_composition.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and issues #214, #216, #217, and #223.
 
+**Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
+observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
+machine condition rather than a repair to the recorded work. A requested check still records the
+exact semantic status and coverage limitation, and receipts retain that limitation; the amendment
+does not make the affected receipt clean. This is the narrow option that preserves proof-based
+finding resolution and does not change `ResponseDisposition` or finding-kind traits.
+
 ## Context
 
 Live observation and cooperative MCP publication share one task-global ledger frontier. Observation
@@ -57,6 +64,11 @@ unsupported claims and unbounded duplicate findings.
    false observation-authored claim premise but does not add a fourth `ResponseDisposition`, change
    response schemas, migrate SQL constraints, or weaken the rule that a recorded finding remains
    historically visible.
+
+8. Standing provider-readiness advice is not converted into a `material_limitation_omitted`
+   finding. That finding kind remains actionable for an omission in the work account. Provider
+   configuration and availability remain visible through observation advice before a check and
+   through the check coverage vector and receipt limitations after one.
 
 ## Security and privacy consequences
 

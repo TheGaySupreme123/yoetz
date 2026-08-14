@@ -199,6 +199,14 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
         "provider_not_configured": (
             "no provider and model are configured for this installation; run 'yoetz --set' first"
         ),
+        "unsafe_root": (
+            "the workspace or Git metadata has a symlinked, foreign-owned, writable, or otherwise "
+            "unsafe ancestor; pass the fully resolved path to a repository owned by the current user"
+        ),
+        "git_config_limit_exceeded": (
+            "the repository's .git/config exceeds the bounded 1 MiB safety scan; remove stale local "
+            "branch configuration or use a fresh clone"
+        ),
         "pending_expired": (
             "that pending decision expired before it was authorized; run "
             "'yoetz consent prepare <operation>' again"

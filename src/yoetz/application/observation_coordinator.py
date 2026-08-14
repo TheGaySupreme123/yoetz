@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any, Protocol, cast
+from types import MappingProxyType
+from typing import Any, Final, Protocol, cast
 
 from yoetz.adapters.approved_checks import ApprovedCheckRunner, ApprovedCheckStatus
 from yoetz.adapters.git_subject_state import (
@@ -129,6 +130,30 @@ from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_
 from yoetz.protocol.coverage import EvidenceImmutability, PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
+
+_ADVICE_FINDING_KIND_BY_RULE: Final = MappingProxyType(
+    {
+        "failed_command_unresolved": FindingKind.FAILED_WORK_OMITTED,
+        "edit_after_successful_check": FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
+        "completion_without_verification": FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+        "static_test_for_live_claim": FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM,
+        "subagent_finding_unaddressed": FindingKind.MATERIAL_LIMITATION_OMITTED,
+        "change_outside_plan": FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT,
+        "observation_gap_or_stale": FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+        "semantic_claim_without_attempt": FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+    }
+)
+
+
+def _materialized_advice_items(items: Sequence[AdviceItem]) -> tuple[AdviceItem, ...]:
+    """Keep advice that describes repairable work; machine conditions remain advice only."""
+
+    return tuple(
+        item
+        for item in items
+        if item.origin == "deterministic" and item.rule_code in _ADVICE_FINDING_KIND_BY_RULE
+    )
+
 
 __all__ = [
     "ObservationAdviceHook",
@@ -1652,22 +1677,7 @@ class ObservationCoordinator:
             if finding_projection is not None and type(finding_projection.state) is ProjectionState
             else {}
         )
-        kind_by_rule = {
-            "failed_command_unresolved": FindingKind.FAILED_WORK_OMITTED,
-            "edit_after_successful_check": FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
-            "completion_without_verification": FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
-            "static_test_for_live_claim": FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM,
-            "subagent_finding_unaddressed": FindingKind.MATERIAL_LIMITATION_OMITTED,
-            "change_outside_plan": FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT,
-            "observation_gap_or_stale": FindingKind.LEDGER_STALE_OR_INCOMPLETE,
-            "provider_not_ready": FindingKind.MATERIAL_LIMITATION_OMITTED,
-            "semantic_claim_without_attempt": FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
-        }
-        candidate_items = tuple(
-            item
-            for item in snapshot.ranked_items
-            if item.origin == "deterministic" and item.rule_code in kind_by_rule
-        )
+        candidate_items = _materialized_advice_items(snapshot.ranked_items)
         if not candidate_items:
             return
         items: list[tuple[AdviceItem, tuple[str, ...]]] = []
@@ -1729,7 +1739,7 @@ class ObservationCoordinator:
         envelope_coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
         for item, subject_ref_values in items:
             subject_refs = tuple(event_id(ref) for ref in subject_ref_values)
-            kind = kind_by_rule[item.rule_code]
+            kind = _ADVICE_FINDING_KIND_BY_RULE[item.rule_code]
             policy_id = (
                 "work-integrity"
                 if kind

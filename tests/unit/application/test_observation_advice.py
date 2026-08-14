@@ -20,6 +20,9 @@ from yoetz.application.observation_advice import (
     select_advice_item,
     should_reissue_advice,
 )
+from yoetz.application.observation_coordinator import (
+    _materialized_advice_items,  # pyright: ignore[reportPrivateUsage]  # noqa: PLC2701
+)
 from yoetz.cli.observe_hooks import handle_observe
 from yoetz.domain.observation import (
     ObservationCursor,
@@ -145,6 +148,7 @@ def test_standing_provider_condition_keeps_one_candidate_identity_as_envelopes_g
     )
     assert latest_provider.finding_id == first_provider.finding_id
     assert latest.evidence_basis_digest != first.evidence_basis_digest
+    assert latest_provider not in _materialized_advice_items(latest.ranked_items)
     # #241: the delivery identity is over what the agent actually receives, so
     # it must NOT move with the envelope stream the basis digest tracks.
     assert advice_delivery_identity(first) == advice_delivery_identity(latest)

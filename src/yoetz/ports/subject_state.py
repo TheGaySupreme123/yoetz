@@ -44,6 +44,7 @@ class SubjectStateLimitation(str, Enum):  # noqa: UP042 - exact wire-valued Enum
     SUBMODULE_PRESENT = "submodule_present"
     SYMLINK_UNSUPPORTED = "symlink_unsupported"
     OBJECT_FORMAT_UNSUPPORTED = "object_format_unsupported"
+    GIT_CONFIG_LIMIT_EXCEEDED = "git_config_limit_exceeded"
     READ_LIMIT_EXCEEDED = "read_limit_exceeded"
     FILE_LIMIT_EXCEEDED = "file_limit_exceeded"
     GIT_FAILED = "git_failed"
