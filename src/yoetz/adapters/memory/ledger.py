@@ -2308,7 +2308,12 @@ class MemoryLedgerAdapter:
             ),
             subject_frontier=frozen.case.frontier,
             verdict=findings.verdict,
-            returned_finding_ids=tuple(item.finding_id for item in findings.findings),
+            # Ranking is by priority/actionability/coverage, not finding ID. The event field
+            # is a canonical unique ASCII-ascending set; presentation order stays on the
+            # check result's findings tuple.
+            returned_finding_ids=tuple(
+                sorted((item.finding_id for item in findings.findings), key=str.encode)
+            ),
             suppressed_count=findings.suppressed_count,
             coverage=findings.coverage,
             semantic_status=semantic_status,

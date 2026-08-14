@@ -440,7 +440,9 @@ receipt records.
 
 `CheckRecordedPayload` carries the exact required `coverage: Coverage` from the recorded
 `RankedFindings`; reducers retain it in `latest_tested_state` and MUST NOT infer it later from the
-visible finding IDs.
+visible finding IDs. `returned_finding_ids` is the unique ASCII-ascending set of those selected
+IDs. Ranked presentation order lives on the check result's `findings` tuple and is reconstructed
+after durable replay with the registered `rank_key`; the event field is not that order.
 
 `CheckRecordedPayload.semantic_status` uses the single shared `SemanticStatus` enum:
 `not_requested`, `not_configured`, `blocked_by_policy`, `blocked_forbidden_data`,

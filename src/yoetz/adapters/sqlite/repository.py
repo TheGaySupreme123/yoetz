@@ -34,7 +34,7 @@ from yoetz.domain.events import (
     accepted_record_to_json,
     decode_payload,
 )
-from yoetz.domain.findings import RankedFindings, SemanticProvenance
+from yoetz.domain.findings import RankedFindings, SemanticProvenance, rank_key
 from yoetz.domain.values import (
     Actor,
     ActorType,
@@ -731,9 +731,17 @@ class SqliteLedger:
                             and item.payload is not None
                         }
                         try:
+                            # returned_finding_ids is the canonical set, not rank order.
+                            # Reconstruct presentation order with the registered rank_key so a
+                            # durable replay matches the original check result.
                             finding_payloads = tuple(
-                                historical_findings[finding]
-                                for finding in check_payload.returned_finding_ids
+                                sorted(
+                                    (
+                                        historical_findings[finding]
+                                        for finding in check_payload.returned_finding_ids
+                                    ),
+                                    key=rank_key,
+                                )
                             )
                         except KeyError as exc:
                             raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc

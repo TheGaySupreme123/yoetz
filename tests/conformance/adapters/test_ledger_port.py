@@ -19,9 +19,13 @@ from yoetz.adapters.memory.importer import MemoryImportState
 from yoetz.adapters.memory.ledger import MemoryLedgerAdapter, MemoryLedgerState
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.repository import SqliteLedger
-from yoetz.domain.events import EventDraft, EventPayload, UnknownEvent
+from yoetz.domain.events import CheckRecordedPayload, EventDraft, EventPayload, UnknownEvent
 from yoetz.domain.findings import (
+    FINDING_KIND_TRAITS,
     CheckVerdict,
+    Finding,
+    FindingKind,
+    FindingOrigin,
     RankedFindings,
     SemanticDispatchKind,
     SemanticFailureClass,
@@ -30,11 +34,15 @@ from yoetz.domain.findings import (
 from yoetz.domain.values import (
     Actor,
     ActorType,
+    Frontier,
     actor_id,
     event_id,
+    finding_id,
     object_id,
+    obligation_id,
     parse_rfc3339_millis,
 )
+from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
 from yoetz.ports.ledger import (
     AppendCommand,
     AppendEntry,
@@ -64,6 +72,7 @@ from yoetz.ports.semantic import SamplingParams
 from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.coverage import (
     AuthorshipAssurance,
+    Coverage,
     PublicationChannel,
     coverage_for_channel,
 )
@@ -796,6 +805,256 @@ async def test_commit_check_if_current_contract() -> None:
         assert result.outcome == "committed"
         results.append(result)
     assert results[0] == results[1]
+
+
+def _descending_rank_findings(
+    frontier: Frontier,
+    coverage: Coverage,
+    *,
+    semantic_lead: bool,
+) -> tuple[Finding, ...]:
+    """Two findings whose rank order is the reverse of ASCII finding-ID order.
+
+    The later ID is the higher-priority finding, so ``rank_findings`` returns
+    ``(...0002, ...0001)`` — the exact commit-path mismatch in issue #248.
+    """
+
+    lower = Finding(
+        finding_id=finding_id("fnd_00000000-0000-4000-8000-000000000001"),
+        kind=FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+        origin=FindingOrigin.DETERMINISTIC,
+        priority=FINDING_KIND_TRAITS[FindingKind.LEDGER_STALE_OR_INCOMPLETE][0],
+        summary="Ledger stale or incomplete",
+        detail="The recorded subject is missing required current evidence.",
+        subject_refs=(obligation_id("obl_00000000-0000-4000-8000-000000000001"),),
+        policy_id="work-integrity",
+        policy_version="0.1.0",
+        subject_frontier=frontier,
+        coverage=coverage,
+    )
+    higher = Finding(
+        finding_id=finding_id("fnd_00000000-0000-4000-8000-000000000002"),
+        kind=FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+        origin=(
+            FindingOrigin.SEMANTIC_MODEL_DERIVED if semantic_lead else FindingOrigin.DETERMINISTIC
+        ),
+        priority=FINDING_KIND_TRAITS[FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE][0],
+        summary="Claim lacks admissible evidence",
+        detail="Cite admissible evidence or narrow the completion claim.",
+        subject_refs=(obligation_id("obl_00000000-0000-4000-8000-000000000001"),),
+        policy_id="work-integrity",
+        policy_version="0.1.0",
+        subject_frontier=frontier,
+        coverage=coverage,
+        provenance=(
+            SemanticProvenance(
+                provider="fake",
+                endpoint_profile_id="fake",
+                endpoint_profile_version="1.0.0",
+                model="fake/model",
+                sdk_version="1.0.0",
+                prompt_digest="sha256:" + "1" * 64,
+                schema_digest="sha256:" + "2" * 64,
+                policy_digest="sha256:" + "3" * 64,
+                privacy_policy_digest="sha256:" + "4" * 64,
+                sampling_params=SamplingParams(128),
+                latency_ms=1,
+                semantic_attempt_id="att_00000000-0000-4000-8000-000000000002",
+                dispatch_kind=SemanticDispatchKind.EXTERNAL,
+                privacy_receipt_id="egr_00000000-0000-4000-8000-000000000002",
+                status=SemanticStatus.SUCCEEDED,
+                reason=SemanticReason.SEMANTIC_COMPLETED,
+                provider_request_id="fake-semantic-request-248",
+                egress_authorization_id="aut_00000000-0000-4000-8000-000000000002",
+                request_commitment="hmac-sha256:" + "5" * 64,
+            )
+            if semantic_lead
+            else None
+        ),
+    )
+    ranked = rank_findings(
+        (lower,) if semantic_lead else (lower, higher),
+        (higher,) if semantic_lead else (),
+        RankingContext(coverage, CheckCompleteness.COMPLETE),
+        4,
+    )
+    ids = tuple(item.finding_id for item in ranked.findings)
+    assert ids == (higher.finding_id, lower.finding_id)
+    assert ids != tuple(sorted(ids, key=str.encode))
+    return ranked.findings
+
+
+async def _ready_case(
+    adapter: MemoryLedgerAdapter | SqliteLedger,
+    command: AppendCommand,
+    request_id: str,
+    request_digest: str,
+) -> FrozenCase:
+    frozen = await adapter.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        request_id,
+        request_digest,
+    )
+    assert type(frozen) is FrozenCase
+    lease = await adapter.advance_check_phase(
+        frozen.lease,
+        CheckPhase.RESERVED,
+        CheckPhase.LOCAL_READY,
+        await _local_result_ref(adapter, command),
+    )
+    lease = await adapter.advance_check_phase(
+        lease,
+        CheckPhase.LOCAL_READY,
+        CheckPhase.READY_TO_FINALIZE,
+    )
+    return FrozenCase(frozen.case, lease)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("semantic_lead", [False, True], ids=["deterministic_only", "mixed"])
+async def test_commit_sorts_returned_finding_ids_without_reordering_ranked_findings(
+    semantic_lead: bool,
+) -> None:
+    """A multi-finding check whose rank order is not ASCII order must still commit.
+
+    Issue #248: commit copied ranked IDs into CheckRecordedPayload.returned_finding_ids,
+    which is a canonical set. Both adapters and both check modes share this boundary.
+    """
+
+    command = ledger_command()
+    results: list[CheckCommitResult] = []
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        suffix = "a" if semantic_lead else "b"
+        frozen = await _ready_case(
+            adapter,
+            command,
+            f"req_00000000-0000-4000-8000-00000000004{suffix}",
+            "sha256:" + ("a" if semantic_lead else "b") * 64,
+        )
+        selected = _descending_rank_findings(
+            frozen.case.frontier,
+            command.entries[0].coverage,
+            semantic_lead=semantic_lead,
+        )
+        ranked = RankedFindings(
+            selected,
+            0,
+            CheckVerdict.ACTION_REQUIRED,
+            command.entries[0].coverage,
+        )
+        if semantic_lead:
+            result = await adapter.commit_check_if_current(
+                frozen,
+                ranked,
+                (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),),
+                SemanticStatus.SUCCEEDED,
+                SemanticReason.SEMANTIC_COMPLETED,
+                selected[0].provenance,
+                frozen.lease.operation_id,
+            )
+        else:
+            result = await adapter.commit_check_if_current(
+                frozen,
+                ranked,
+                (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),),
+                SemanticStatus.NOT_REQUESTED,
+                SemanticReason.DETERMINISTIC_MODE,
+                None,
+                frozen.lease.operation_id,
+            )
+        assert result.outcome == "committed"
+        assert tuple(item.finding_id for item in result.findings) == (
+            selected[0].finding_id,
+            selected[1].finding_id,
+        )
+        assert result.findings[0].finding_id.encode() > result.findings[1].finding_id.encode()
+        events = [row async for row in adapter.load_events(command.session_id)]
+        recorded = next(row.payload for row in events if type(row.payload) is CheckRecordedPayload)
+        assert recorded.returned_finding_ids == (
+            selected[1].finding_id,
+            selected[0].finding_id,
+        )
+        assert recorded.returned_finding_ids == tuple(
+            sorted(recorded.returned_finding_ids, key=str.encode)
+        )
+        if semantic_lead:
+            assert result.semantic_status is SemanticStatus.SUCCEEDED
+            assert result.semantic_reason is SemanticReason.SEMANTIC_COMPLETED
+            assert result.semantic_provenance is selected[0].provenance
+            assert result.findings[0].origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+            assert result.findings[0].provenance is not None
+            assert recorded.semantic_status is SemanticStatus.SUCCEEDED
+            assert recorded.semantic_provenance is not None
+        results.append(result)
+    assert results[0].findings == results[1].findings
+    assert results[0].verdict == results[1].verdict
+
+
+@pytest.mark.anyio
+async def test_sqlite_reopen_replays_ranked_order_after_canonical_set_commit() -> None:
+    """Durable replay must restore rank order, not the stored ASCII set order."""
+
+    command = ledger_command()
+    adapter = sqlite_ledger(command)
+    await adapter.append_batch(command)
+    frozen = await _ready_case(
+        adapter,
+        command,
+        "req_00000000-0000-4000-8000-00000000004c",
+        "sha256:" + "c" * 64,
+    )
+    selected = _descending_rank_findings(
+        frozen.case.frontier,
+        command.entries[0].coverage,
+        semantic_lead=True,
+    )
+    committed = await adapter.commit_check_if_current(
+        frozen,
+        RankedFindings(
+            selected,
+            0,
+            CheckVerdict.ACTION_REQUIRED,
+            command.entries[0].coverage,
+        ),
+        (CheckPolicyExecution("work-integrity", "0.1.0", "run", "completed"),),
+        SemanticStatus.SUCCEEDED,
+        SemanticReason.SEMANTIC_COMPLETED,
+        selected[0].provenance,
+        frozen.lease.operation_id,
+    )
+    assert tuple(item.finding_id for item in committed.findings) == (
+        selected[0].finding_id,
+        selected[1].finding_id,
+    )
+
+    restarted = SqliteLedger(
+        db=adapter._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=command.task_id,
+        ownership_fence=_fence(),
+        clock=adapter._clock,  # pyright: ignore[reportPrivateUsage]
+        ids=adapter._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=adapter._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    replayed = await restarted.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        frozen.lease.operation_id,
+        "sha256:" + "c" * 64,
+    )
+    assert type(replayed) is CheckCommitResult
+    assert replayed.outcome == "replayed"
+    assert tuple(item.finding_id for item in replayed.findings) == (
+        selected[0].finding_id,
+        selected[1].finding_id,
+    )
+    assert replayed.findings[0].origin is FindingOrigin.SEMANTIC_MODEL_DERIVED
+    assert replayed.findings[0].provenance is not None
+    assert replayed.semantic_status is SemanticStatus.SUCCEEDED
+    assert replayed.semantic_provenance is not None
 
 
 @pytest.mark.anyio
