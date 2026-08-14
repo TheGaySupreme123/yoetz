@@ -268,6 +268,11 @@ def _history_json(
         "occurred_at": item.occurred_at,
         "payload_digest": item.payload_digest,
     }
+    if item.accepted_at is None:
+        body["occurred_at_consistency"] = "not_available_in_legacy_case"
+    else:
+        body["accepted_at"] = item.accepted_at
+        body["occurred_at_consistency"] = item.occurred_at_consistency
     if include_content and item.payload is not None:
         payload = dict(cast(Mapping[str, JsonValue], item.payload))
         if item.schema_name == "action_recorded" and not include_exact_command_text:

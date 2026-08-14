@@ -174,6 +174,17 @@ def test_frozen_history_is_bounded_and_legacy_cases_remain_distinct(
     assert decoded.history == ()
     assert decoded.history_availability == "not_recorded"
 
+    legacy_history = cast(dict[str, Any], strict_json_parse(canonical_encode(encoded)))
+    for item in cast(list[dict[str, Any]], legacy_history["history"]):
+        item.pop("accepted_at")
+        item.pop("occurred_at_consistency")
+    decoded_history = deterministic_case_from_json(legacy_history)
+    assert decoded_history.history
+    assert all(item.accepted_at is None for item in decoded_history.history)
+    assert deterministic_case_from_json(deterministic_case_to_json(decoded_history)) == (
+        decoded_history
+    )
+
 
 def test_frozen_history_payload_budget_marks_content_not_selected(
     monkeypatch: pytest.MonkeyPatch,

@@ -185,9 +185,9 @@ rejected with reason `ref_mirror_mismatch`, and the public error names the envel
 
 ## Event time claims
 
-`occurred_at` is a caller assertion of when the event happened. Use the best real RFC 3339 millisecond UTC time available. If the exact time is unknown, use an honest bounded approximation and understand that it remains a claim — the service does not check outside clocks and does not reject far-past, future, or out-of-order caller times.
+`occurred_at` is a caller assertion of when the event happened. Never guess it or round it to a convenient future value: use the best real RFC 3339 millisecond UTC time available. If the exact time is unknown, use an honest bounded approximation and understand that it remains a claim — the service does not check outside clocks and does not reject far-past, future, or out-of-order caller times.
 
-The service independently stamps `accepted_at` on acceptance. Both values are durable and bound into the entry digest. Ledger order, causality, supersession, optimistic concurrency, and receipt freshness use ingestion sequence and frontier, not caller time. `status` with `view=history` returns both clocks on each item so a reader never sees a caller claim alone as if it were service time.
+The service independently stamps `accepted_at` on acceptance. Both values are durable and bound into the entry digest. Ledger order, causality, supersession, optimistic concurrency, and receipt freshness use ingestion sequence and frontier, not caller time. `status` with `view=history` returns both clocks plus `occurred_at_consistency` on each item. The closed classification is `within_forward_skew_allowance` when caller time is no more than five seconds ahead of service acceptance and `ahead_of_forward_skew_allowance` otherwise. It exposes only that exact comparison; it does not verify the caller timestamp or make wall clock authoritative. The same two clocks and classification are carried into a new check's bounded frozen timeline so semantic review can see forward drift.
 
 ## Multi-agent work
 
