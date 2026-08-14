@@ -2845,8 +2845,10 @@ facade and are never MCP tools.
   composed at runtime from user, task, provider, or environment values. Shared values are
   `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
   `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
-  `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`, and
-  `PRESENTATION_INPUT_SCHEMA_BUDGETS`. `ToolDescriptor.input_schema` is the tools/list presentation
+  `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`, and
+  `PRESENTATION_INPUT_SCHEMA_BUDGETS`. Initialize `instructions` concatenate the packaged
+  `agent-instructions.md`, `workflow.md`, and `coverage-and-receipts.md` documents in that order,
+  then the route-profile suffix. `ToolDescriptor.input_schema` is the tools/list presentation
   projection (inlined common shapes, ordinary publish event families, minimal examples), preserving
   every catalogued schema-version branch for each advertised ordinary event family. Every shipped
   worked example validates against that presentation schema as well as catalog admission;
@@ -2864,7 +2866,8 @@ facade and are never MCP tools.
   the exact sufficient coverage.
 - `mcp/resources.py`: exposes the packaged harness-neutral guidance documents as MCP resources under
   stable `yoetz://guidance/<name>` URIs for hosts that return the resource text. Initialize
-  `instructions` always carry `agent-instructions.md`. A conformant `resources/read` payload does
+  `instructions` always carry `agent-instructions.md`, `workflow.md`, and
+  `coverage-and-receipts.md`. A conformant `resources/read` payload does
   not mean the host delivered those bytes to the model; an empty body is not a fetch. First-party
   skill install places the same files on disk as `references/<name>.md` beside the skill. Resources
   are static reviewed product bytes read through `importlib.resources` and digest-checked against

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from yoetz.mcp import resources as resource_module
 from yoetz.mcp.descriptors import (
+    INITIALIZE_GUIDANCE_URIS,
     ORDINARY_MCP_PUBLISH_EVENT_FAMILIES,
     PRESENTATION_INPUT_SCHEMA_BUDGETS,
     TOOL_DESCRIPTOR_DIGESTS,
@@ -314,7 +315,17 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert "frontier-bound" in descriptor_for("publish_work").description
     assert "ingestion sequence" in descriptor_for("publish_work").description
     base_instructions = read_resource("yoetz://guidance/agent-instructions.md").decode("utf-8")
+    workflow = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
+    coverage = read_resource("yoetz://guidance/coverage-and-receipts.md").decode("utf-8")
+    assert INITIALIZE_GUIDANCE_URIS == (
+        "yoetz://guidance/agent-instructions.md",
+        "yoetz://guidance/workflow.md",
+        "yoetz://guidance/coverage-and-receipts.md",
+    )
     assert server_instructions().startswith(base_instructions.rstrip())
+    assert server_instructions().startswith(
+        f"{base_instructions.rstrip()}\n\n{workflow.rstrip()}\n\n{coverage.rstrip()}\n\n"
+    )
     assert "Route profile: policy." in server_instructions()
     strict_instructions = server_instructions("strict")
     assert "Route profile: strict." in strict_instructions

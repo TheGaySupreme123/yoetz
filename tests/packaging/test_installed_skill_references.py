@@ -53,6 +53,8 @@ def test_step_zero_stops_on_an_empty_guidance_read() -> None:
     assert "do not treat the read as success" in collapsed
     assert "`references/<name>.md`" in collapsed
     assert "Do not call `start` on an empty guidance body" in collapsed
+    assert "`agent-instructions.md`, `workflow.md`, and `coverage-and-receipts.md`" in collapsed
+    assert "Both are already in initialize `instructions`" in collapsed
 
 
 def test_every_yoetz_uri_the_skill_names_is_a_registered_readable_resource() -> None:
