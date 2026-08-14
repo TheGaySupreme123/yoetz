@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
-from yoetz.cli.hook_diagnostics import record_hook_diagnostic
+from yoetz.cli.hook_diagnostics import (
+    hook_diagnostic_summary,
+    record_hook_diagnostic,
+    record_hook_timing,
+)
 
 
 def test_record_is_structural_and_owner_only(tmp_path: Path) -> None:
@@ -83,3 +89,48 @@ def test_concurrent_processes_preserve_bound_and_json_lines(tmp_path: Path) -> N
         for line in path.read_text(encoding="utf-8").splitlines():
             assert set(json.loads(line)) == {"event", "reason", "ts"}
     assert len(list(directory.glob("hook-diagnostics.jsonl.*"))) <= 1
+
+
+def test_timing_rows_round_trip_and_reason_counts_are_unpolluted(tmp_path: Path) -> None:
+    """Two row shapes share one file; neither may be counted as the other."""
+
+    record_hook_diagnostic("hook_budget_exceeded", "PostToolUse", _state=tmp_path)
+    record_hook_timing(
+        "SessionEnd",
+        ms=1_842,
+        stages={"import": 42, "store": 900, "advice": 8, "drain": 150, "bogus": 5},
+        _state=tmp_path,
+    )
+    path = tmp_path / "observation/hook-diagnostics.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert set(rows[0]) == {"event", "reason", "ts"}
+    assert set(rows[1]) == {"event", "kind", "ms", "stages", "ts"}
+    assert rows[1]["kind"] == "timing"
+    assert rows[1]["ms"] == 1_842
+    # Unknown stage names are dropped rather than persisted verbatim.
+    assert set(rows[1]["stages"]) == {"import", "store", "advice", "drain"}
+
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    assert summary["count"] == 1
+    assert summary["last_reason"] == "hook_budget_exceeded"
+    reasons = dict(cast(Mapping[str, object], summary["reasons"]))
+    assert reasons == {"hook_budget_exceeded": 1}
+    timings = dict(cast(Mapping[str, object], summary["timings"]))
+    assert timings == {"count": 1, "last_ms": 1_842, "max_ms": 1_842}
+
+
+def test_budget_reason_is_an_admitted_token_and_unknown_reasons_are_closed(
+    tmp_path: Path,
+) -> None:
+    for reason in ("hook_budget_exceeded", "async_hook_downgraded"):
+        record_hook_diagnostic(reason, "PostToolUse", _state=tmp_path)
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "observation/hook-diagnostics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    # The async-downgrade detector was removed: its predicate flagged compliant
+    # async hosts, so its token is no longer admitted and closes to the
+    # unknown-reason fallback.
+    assert [row["reason"] for row in rows] == ["hook_budget_exceeded", "unknown_reason"]

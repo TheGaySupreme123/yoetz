@@ -21,6 +21,7 @@ from yoetz.domain.observation import (
 from yoetz.kernel.policies.observation_advice import (
     OBSERVATION_ADVICE_POLICY_ID,
     OBSERVATION_ADVICE_POLICY_VERSION,
+    STANDING_MACHINE_ACTIONS,
     ObservationAdviceCandidate,
     ObservationAdviceContext,
     ObservationCheckFact,
@@ -30,6 +31,7 @@ from yoetz.kernel.policies.observation_advice import (
     evidence_basis_digest,
     observation_advice_findings,
 )
+from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.coverage import (
     ArtifactObservation,
     AuthorshipAssurance,
@@ -42,20 +44,24 @@ from yoetz.protocol.coverage import (
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 __all__ = [
+    "STANDING_MACHINE_ACTIONS",
     "ObservationAdviceBuildInput",
     "ObservationAdviceContextBuilder",
     "ObservationAdviceSemanticAddon",
     "SemanticAdvicePort",
+    "advice_delivery_identity",
     "advice_items_for_ledger",
     "build_observation_advice_snapshot",
     "hook_advice_context",
     "minimized_semantic_evidence_packet",
+    "select_advice_item",
     "should_reissue_advice",
     "stable_advice_finding_id",
 ]
 
 _SUPPRESSION_DOMAIN: Final = b"yoetz/observation-advice-suppress/v1\x00"
 _FINDING_DOMAIN: Final = b"yoetz/observation-advice-finding/v1\x00"
+_DELIVERY_DOMAIN: Final = b"yoetz/observation-advice-delivery/v1\x00"
 
 _RULE_SUMMARIES: Final[Mapping[str, str]] = {
     "failed_command_unresolved": "Unresolved failed command observed",
@@ -343,7 +349,20 @@ def _item_from_candidate(
         coverage=coverage,
         freshness_frontier=freshness_frontier,
         origin="deterministic",
+        condition_identity=_delivery_condition_identity(candidate),
     )
+
+
+def _delivery_condition_identity(candidate: ObservationAdviceCandidate) -> str:
+    """Hash the stable rule-specific condition without rolling evidence references."""
+
+    material = canonical_encode(
+        {
+            "detail_token": candidate.detail_token,
+            "rule_code": candidate.rule_code,
+        }
+    )
+    return f"condition-{hashlib.sha256(material).hexdigest()[:48]}"
 
 
 def build_observation_advice_snapshot(
@@ -471,18 +490,93 @@ def build_observation_advice_snapshot(
     return snapshot
 
 
-def hook_advice_context(snapshot: AdviceSnapshot) -> str:
-    """Highest-priority summary, reason, next action, and one evidence reference."""
+def select_advice_item(snapshot: AdviceSnapshot, *, allow_standing: bool) -> AdviceItem | None:
+    """Pick the item the hook channel should render on this event class.
 
-    if snapshot.ranked_items:
+    Falls through past standing machine conditions rather than suppressing the
+    whole snapshot, so a cadence-gated provider_not_ready can never mask an
+    actionable finding ranked below it.
+    """
+
+    if not snapshot.ranked_items:
+        # Item-less snapshots render the frontier form; see hook_advice_context.
+        return None
+    for item in snapshot.ranked_items:
+        if allow_standing or item.recommended_next_action not in STANDING_MACHINE_ACTIONS:
+            return item
+    return None
+
+
+def advice_delivery_identity(snapshot: AdviceSnapshot, *, item: AdviceItem | None = None) -> str:
+    """Identity of the *condition* the hook channel is reporting.
+
+    Keyed on the stable content of the delivered item — rule code, next action,
+    summary, detail — and on nothing that tracks the envelope stream.
+
+    Two exclusions are load-bearing:
+
+    - ``evidence_basis_digest`` (and the ``freshness_frontier`` derived from
+      it) is computed over every retained envelope, so it churns on every tool
+      call while the rendered text is byte-identical (#241).
+    - ``evidence_refs`` are excluded for the same reason. A rule's refs may be
+      a rolling window over the envelope stream rather than a stable citation:
+      ``observation_gap_or_stale`` cites the last three envelope identities, so
+      including the ref would move the identity on every hook and recreate
+      exactly the storm this identity exists to stop. ``_static_for_live``,
+      ``_subagent_unaddressed``, ``_semantic_without_attempt`` and
+      ``_edits_after_check`` accumulate refs the same way.
+
+    The delivered text still carries its evidence reference; only the dedup key
+    elides it. Redelivering when a citation moves but the condition has not is
+    noise; withholding when the condition itself changes cannot happen, because
+    rule code, next action, summary and detail are all in the key.
+    """
+
+    top = item
+    if top is None and snapshot.ranked_items:
+        # Mirror hook_advice_context: an item-less call renders the top item.
         top = snapshot.ranked_items[0]
+    condition: JsonValue
+    if top is not None:
+        condition = {
+            "condition_identity": top.condition_identity or "",
+            "detail": top.detail,
+            "next_action": top.recommended_next_action,
+            "rule_code": top.rule_code,
+            "summary": top.summary,
+        }
+    else:
+        # Item-less snapshots render the frontier form, whose every component
+        # (frontier token, finding ids) moves with the envelope stream. The
+        # recommended action is the only stable condition such a snapshot has.
+        condition = {
+            "detail": "",
+            "next_action": snapshot.recommended_next_action,
+            "rule_code": "",
+            "summary": "",
+        }
+    material = _DELIVERY_DOMAIN + canonical_encode({"condition": condition})
+    return f"deliver-{hashlib.sha256(material).hexdigest()[:48]}"
+
+
+def hook_advice_context(snapshot: AdviceSnapshot, *, item: AdviceItem | None = None) -> str:
+    """Highest-priority summary, reason, next action, and one evidence reference.
+
+    ``item`` renders a specific ranked item instead of the top one; the default
+    is byte-identical to the historical single-argument form.
+    """
+
+    top = item
+    if top is None and snapshot.ranked_items:
+        top = snapshot.ranked_items[0]
+    if top is not None:
         ref = top.evidence_refs[0] if top.evidence_refs else "evidence:none"
         text = (
             f"Yoetz: {top.summary}. Reason: {top.detail}. "
             f"Next: {top.recommended_next_action}. Evidence: {ref}."
         )
     else:
-        findings = ",".join(str(item) for item in snapshot.ranked_finding_ids[:8])
+        findings = ",".join(str(entry) for entry in snapshot.ranked_finding_ids[:8])
         text = (
             f"Yoetz advice frontier {snapshot.freshness_frontier}: "
             f"next={snapshot.recommended_next_action}; findings={findings}."

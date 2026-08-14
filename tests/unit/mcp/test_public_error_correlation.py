@@ -63,18 +63,18 @@ def test_minted_invalid_request_id_resolves_to_a_record(diagnostic_root: Path) -
         assert forbidden not in found[0]
 
 
-def test_minted_operation_pending_id_resolves_to_a_record(diagnostic_root: Path) -> None:
-    """The publish recovery remedy is retryable advice, and its id must still be joinable."""
+def test_minted_recovery_unavailable_id_resolves_to_a_record(diagnostic_root: Path) -> None:
+    """The publish recovery caveat rides a rejection, and its id must still be joinable."""
 
-    result = bridge._publish_recovery_unavailable_result(_REQUEST)  # pyright: ignore[reportPrivateUsage]
+    result = bridge._publish_validation_recovery_unavailable_result(_REQUEST)  # pyright: ignore[reportPrivateUsage]
 
     error = _error_of(result)
-    assert error["code"] == PublicErrorCode.OPERATION_PENDING.value
+    assert error["code"] == PublicErrorCode.INVALID_REQUEST.value
     correlation_id = cast(str, error["correlation_id"])
     found = lookup_diagnostic_records(correlation_id, root=diagnostic_root)
     assert len(found) == 1
     assert found[0]["operation"] == "publish_work_recovery_unavailable_public_error"
-    assert found[0]["reason"] == "operation_pending"
+    assert found[0]["reason"] == "invalid_request"
 
 
 def test_supplied_correlation_id_is_reused_and_not_re_recorded(diagnostic_root: Path) -> None:

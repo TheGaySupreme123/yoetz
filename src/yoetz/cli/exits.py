@@ -9,10 +9,12 @@ from yoetz.protocol.errors import PublicErrorCode
 
 __all__ = [
     "CEREMONY_REFUSAL_MESSAGES",
+    "LIFECYCLE_PUBLIC_CODES",
     "PUBLIC_EXIT_CODES",
     "REMEDIATION_MESSAGES",
     "ceremony_refusal_message",
     "exit_code_for",
+    "lifecycle_public_code",
     "remediation_message",
 ]
 
@@ -58,6 +60,31 @@ def exit_code_for(outcome: PublicErrorCode | Literal["success", "cancelled"]) ->
     if type(outcome) is not PublicErrorCode:
         raise TypeError("public_outcome_invalid")
     return PUBLIC_EXIT_CODES[outcome]
+
+
+# Each closed lifecycle reason names a true operating condition. Collapsing them into
+# internal_error told an operator the service had died when it was alive and holding its
+# singleton, and sent the whole incident down the wrong diagnostic path (#237).
+# ``BUNDLE_BUSY`` is the only member of the frozen public enum whose meaning is "a resource is
+# already held by another owner"; it exits 20, like every other entry here.
+# ``invalid_transition`` is deliberately absent: it is a genuine internal defect and stays
+# INTERNAL_ERROR / 70.
+LIFECYCLE_PUBLIC_CODES: Final = MappingProxyType(
+    {
+        "service_already_running": PublicErrorCode.BUNDLE_BUSY,
+        "service_draining": PublicErrorCode.SERVICE_UNAVAILABLE,
+        "vault_locked": PublicErrorCode.VAULT_LOCKED,
+        "session_monitor_unavailable": PublicErrorCode.SERVICE_UNAVAILABLE,
+        "human_authorization_required": PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED,
+        "human_authorization_stale": PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED,
+    }
+)
+
+
+def lifecycle_public_code(reason: str) -> PublicErrorCode | None:
+    """Return the public outcome for a bounded lifecycle reason, or None when unmapped."""
+
+    return LIFECYCLE_PUBLIC_CODES.get(reason)
 
 
 # A confidential ceremony the service answered and *declined* is not an unavailable service.
@@ -187,6 +214,14 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
         "pending_already_active": (
             "another pending decision is already active; authorize or deny it with "
             "'yoetz consent authorize', or wait for it to expire"
+        ),
+        "service_already_running": (
+            "another local service process already holds the singleton lock, so a second one "
+            "cannot start. Inspect it with 'yoetz service status'; if it stays unresponsive, "
+            "stop it with 'yoetz service stop' or end the holding process, then start again"
+        ),
+        "service_draining": (
+            "the local service is shutting down; wait for it to exit, then start it again"
         ),
     }
 )

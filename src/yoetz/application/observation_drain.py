@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
-from dataclasses import dataclass
+import asyncio
+import contextlib
+from asyncio import Future
+from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, field
 from enum import Enum
+from functools import partial
 from typing import Final, Protocol
 
 from yoetz.adapters.integrations.observation_local import (
@@ -29,6 +35,10 @@ __all__ = [
 ]
 
 DEFAULT_OBSERVATION_SWEEP_LIMIT: Final = 64
+# One sweep is sequential, so a single worker would do; the spare capacity only exists so a
+# handful of stranded threads (a deadline expiring against a parked flock) cannot wedge the
+# next pass outright.
+_SWEEP_EXECUTOR_WORKERS: Final = 4
 RETRYABLE_OBSERVATION_REJECTIONS: Final = frozenset(
     {
         ObservationGapCode.SERVICE_UNAVAILABLE.value,
@@ -77,6 +87,20 @@ def route_observation_ingest(result: ObservationIngestResult) -> ObservationDrai
     return ObservationDrainDecision(action, reason)
 
 
+def _release_entered_lease(lease: AbstractContextManager[bool], entering: Future[bool]) -> None:
+    """Release a drain lease whose enter completed after its sweep was already cancelled.
+
+    Cancelling the await does not stop a worker already inside ``flock``. Releasing is a single
+    unlock and close, so doing it from the loop callback costs nothing measurable and is the only
+    place left that still knows the descriptor exists.
+    """
+
+    if entering.cancelled() or entering.exception() is not None:
+        return
+    with contextlib.suppress(Exception):
+        lease.__exit__(None, None, None)
+
+
 class ObservationIngestCoordinator(Protocol):
     def ingest_request(
         self, request: ObservationIngestRequest
@@ -99,13 +123,49 @@ class ObservationOutboxSweeper:
     local: LocalObservationStore
     coordinator: ObservationIngestCoordinator
     limit: int = DEFAULT_OBSERVATION_SWEEP_LIMIT
+    _executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.limit) is not int or isinstance(self.limit, bool) or self.limit < 1:
             raise ValueError("observation_sweep_limit_invalid")
 
+    def _off_loop[ResultT](self, call: Callable[[], ResultT]) -> Future[ResultT]:
+        """Run one blocking local-store call off the caller's event loop.
+
+        Every ``LocalObservationStore`` method takes a blocking cross-process lock and re-encodes
+        the whole workspace document. Running those on the service loop thread let a hook storm
+        hold the daemon's control plane for minutes, with no await point for the sweep deadline to
+        cancel at (#238). The store's own reentrant thread lock is acquired and released inside a
+        single worker thread on every hop, so no lock is ever held across an await.
+
+        The pool is the sweeper's own rather than ``asyncio.to_thread``'s shared default: a sweep
+        that hits its deadline while a cross-process flock is contended cannot cancel the worker
+        immediately. The store bounds that wait, and this dedicated pool keeps those bounded
+        workers from delaying unrelated default-executor work in the meantime.
+
+        The future is returned rather than awaited so the lease enter below can be shielded and
+        still observed after a cancellation.
+        """
+
+        loop = asyncio.get_running_loop()
+        executor = self._executor
+        if executor is None:
+            executor = ThreadPoolExecutor(
+                max_workers=_SWEEP_EXECUTOR_WORKERS,
+                thread_name_prefix="yoetz-obs-sweep",
+            )
+            self._executor = executor
+        return loop.run_in_executor(executor, call)
+
+    def close(self) -> None:
+        """Release the sweeper's worker pool; any running lock wait is itself bounded."""
+
+        executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+
     async def sweep(self) -> ObservationDrainSummary:
-        rows = self._fair_pending_rows()
+        rows = await self._off_loop(self._fair_pending_rows)
         attempted = 0
         acknowledged = 0
         retry_pending = 0
@@ -115,10 +175,25 @@ class ObservationOutboxSweeper:
 
         workspaces = tuple(dict.fromkeys(workspace for workspace, _row in rows))
         for workspace in workspaces:
-            with self.local.drain_lease(workspace) as owned:
+            # The lease is a POSIX file lock, which belongs to the open descriptor rather than to
+            # the thread that took it, so entering and leaving it from different worker threads is
+            # correct and keeps the whole hold off the event loop.
+            lease = self.local.drain_lease(workspace)
+            entering = self._off_loop(lease.__enter__)
+            entered = False
+            try:
+                # Enter inside the guarded region. Outside it, a cancellation landing on this
+                # await left the flock and its descriptor owned with no ``__exit__`` anywhere on
+                # the path -- released only whenever the generator was finalized. The shield
+                # keeps the worker's enter observable so the release below is still reached when
+                # it lands after the sweep was cancelled.
+                owned = await asyncio.shield(entering)
+                entered = True
                 if not owned:
                     continue
-                pending_rows = frozenset(self.local.list_pending_outbox_rows(workspace))
+                pending_rows = frozenset(
+                    await self._off_loop(partial(self.local.list_pending_outbox_rows, workspace))
+                )
                 for selected_workspace, row in rows:
                     if selected_workspace != workspace or row not in pending_rows:
                         continue
@@ -139,16 +214,21 @@ class ObservationOutboxSweeper:
                             None,
                         )
                     decision = route_observation_ingest(result)
-                    attempted_row = self.local.bump_outbox_row_attempt(
-                        workspace,
-                        row,
-                        reason=decision.reason,
+                    attempted_row = await self._off_loop(
+                        partial(
+                            self.local.bump_outbox_row_attempt,
+                            workspace,
+                            row,
+                            reason=decision.reason,
+                        )
                     )
                     if attempted_row is None:
                         continue
                     if decision.reason is not None:
                         reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
-                        self.local.note_coverage_gap(workspace, decision.reason)
+                        await self._off_loop(
+                            partial(self.local.note_coverage_gap, workspace, decision.reason)
+                        )
 
                     if decision.action is ObservationDrainAction.RETRY:
                         retry_pending += 1
@@ -156,21 +236,34 @@ class ObservationOutboxSweeper:
                     if decision.action is ObservationDrainAction.QUARANTINE:
                         if decision.reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value:
                             retired_sessions.add(session_key)
-                            quarantined += self.local.quarantine_outbox_session(
-                                workspace,
-                                row.codex_session_id,
-                                decision.reason,
+                            quarantined += await self._off_loop(
+                                partial(
+                                    self.local.quarantine_outbox_session,
+                                    workspace,
+                                    row.codex_session_id,
+                                    decision.reason,
+                                )
                             )
                             continue
-                        if self.local.quarantine_outbox_row(
-                            workspace,
-                            attempted_row,
-                            decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                        if await self._off_loop(
+                            partial(
+                                self.local.quarantine_outbox_row,
+                                workspace,
+                                attempted_row,
+                                decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                            )
                         ):
                             quarantined += 1
                         continue
-                    if self.local.acknowledge_outbox_row(workspace, attempted_row):
+                    if await self._off_loop(
+                        partial(self.local.acknowledge_outbox_row, workspace, attempted_row)
+                    ):
                         acknowledged += 1
+            finally:
+                if entered:
+                    await self._off_loop(partial(lease.__exit__, None, None, None))
+                else:
+                    entering.add_done_callback(partial(_release_entered_lease, lease))
 
         return ObservationDrainSummary(
             attempted=attempted,

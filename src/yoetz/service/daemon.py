@@ -73,6 +73,7 @@ from yoetz.observability.logging import (
     LogMode,
     configure_logging,
     get_logger,
+    record_bounded_event_without_raising,
     record_public_error_without_raising,
     record_unexpected_exception_without_raising,
 )
@@ -165,11 +166,13 @@ from yoetz.service.control_protocol import (
 )
 from yoetz.service.human_control import HumanControlError, HumanControlService
 from yoetz.service.lifecycle import (
+    SINGLETON_LOCK_NAME,
     Admission,
     LifecycleError,
     ServiceLifecycle,
     SessionSecurityEvent,
 )
+from yoetz.service.loop_health import ControlPlaneWatchdog
 from yoetz.service.ready_composition import build_ready_application_factory
 from yoetz.service.secret_ingress import SecretIngressService
 from yoetz.service.unlock import UnlockCoordinator, UnlockThrottleRecord, UnlockThrottleStore
@@ -190,6 +193,9 @@ _CONTROL_HANDSHAKE_DEADLINE_SECONDS: Final = 5.0
 _CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS: Final = 300.0
 _OBSERVATION_SWEEP_INTERVAL_SECONDS: Final = 60.0
 _OBSERVATION_SWEEP_DEADLINE_SECONDS: Final = 30.0
+# Yield between two immediately consecutive drain passes. One scheduler turn is not a fair share
+# when the next pass may take a cross-process store lock a hook process also wants.
+_OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS: Final = 0.05
 _READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS: Final = 10.0
 # Soft locks may re-apply the same scoped auto-unlock / keyring load the service already uses at
 # restart. Explicit human lock and hard unlock failures stay locked until a trusted ceremony.
@@ -546,6 +552,10 @@ class ServiceDaemon:
         self._auto_unlock_reason = _composition.auto_unlock_reason
         self._monitor_state = "unavailable"
         self._stop_event = asyncio.Event()
+        # ``serve`` owns the accept loops; a daemon driven by ``start`` alone never serves and
+        # must never wait on an event nothing will set.
+        self._serving = False
+        self._accept_armed = asyncio.Event()
         self._start_lock = asyncio.Lock()
         self._activation_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
@@ -567,7 +577,6 @@ class ServiceDaemon:
             lifecycle = self._composition.lifecycle
             await lifecycle.acquire_singleton()
             try:
-                await lifecycle.publish_endpoint()
                 monitor = self._composition.session_monitor
                 if monitor is not None:
                     try:
@@ -591,22 +600,36 @@ class ServiceDaemon:
                         self._composition.vault.generation,
                     )
 
+                ready_maintenance_wanted = False
                 if self._application is not None and self._composition.vault.ready:
                     if lifecycle.state is not ServiceState.READY:
                         await lifecycle.transition(
                             ServiceState.READY,
                             vault_generation=self._composition.vault.generation,
                         )
-                    if self._ready_maintenance_task is None:
-                        self._start_ready_maintenance(
-                            self._application,
-                            lifecycle.instance.generation,
-                            self._composition.vault.generation,
-                        )
+                    ready_maintenance_wanted = self._ready_maintenance_task is None
                     self._state_reason = "none"
                 else:
                     await lifecycle.transition(ServiceState.LOCKED)
                     self._state_reason = self._locked_reason()
+                # Publish last: a socket that exists is a socket that can answer a handshake.
+                # The control endpoint is listening from the instant it is bound, so publishing
+                # before ready activation let a client connect and then wait out its own
+                # handshake deadline against a daemon that had not reached its accept loop.
+                # Until this line a connect is refused, which the on-demand connector reads as
+                # "still starting" and keeps polling (#235).
+                await lifecycle.publish_endpoint()
+                if ready_maintenance_wanted and self._application is not None:
+                    # Only a composition that supplies its own ready application reaches this:
+                    # the cold-start path activated one above, and activation starts maintenance
+                    # itself. Placement relative to publish_endpoint decides nothing -- the
+                    # _accept_armed gate inside _run_ready_maintenance is the sole thing keeping
+                    # the first sweep behind serve()'s accept loops (#235).
+                    self._start_ready_maintenance(
+                        self._application,
+                        lifecycle.instance.generation,
+                        self._composition.vault.generation,
+                    )
                 self._started = True
             except BaseException:
                 if lifecycle.state is ServiceState.STARTING:
@@ -686,11 +709,16 @@ class ServiceDaemon:
     async def serve(self) -> None:
         """Serve authenticated ordinary and human-control clients in foreground."""
 
+        self._serving = True
         await self.start()
         self._install_signal_handlers()
         idle = asyncio.create_task(self._composition.lifecycle.run_idle_monitor())
         control = asyncio.create_task(
-            self._accept_loop(self._composition.control_listener, self._serve_control_connection)
+            self._accept_loop(
+                self._composition.control_listener,
+                self._serve_control_connection,
+                arms_control_plane=True,
+            )
         )
         human: asyncio.Task[None] | None = None
         if (
@@ -703,6 +731,9 @@ class ServiceDaemon:
                     self._composition.human_connection_handler,
                 )
             )
+        watchdog = ControlPlaneWatchdog(connections_in_flight=lambda: len(self._connection_tasks))
+        watchdog.start_thread()
+        heartbeat = asyncio.create_task(watchdog.run())
         stop_wait = asyncio.create_task(self._stop_event.wait())
         stop_reason = "shutdown_requested"
         try:
@@ -713,13 +744,16 @@ class ServiceDaemon:
                 await idle
                 stop_reason = "idle_shutdown"
         finally:
-            await self.stop(stop_reason)
-            for task in (idle, control, human, stop_wait):
-                if task is not None:
-                    task.cancel()
-            for task in (idle, control, human, stop_wait):
-                if task is not None:
-                    await asyncio.gather(task, return_exceptions=True)
+            try:
+                await self.stop(stop_reason)
+            finally:
+                watchdog.close()
+                for task in (idle, control, human, stop_wait, heartbeat):
+                    if task is not None:
+                        task.cancel()
+                for task in (idle, control, human, stop_wait, heartbeat):
+                    if task is not None:
+                        await asyncio.gather(task, return_exceptions=True)
 
     async def dispatch(
         self,
@@ -1090,20 +1124,32 @@ class ServiceDaemon:
         self,
         listener: _Listener,
         handler: Callable[[ControlStream], Awaitable[None]],
+        *,
+        arms_control_plane: bool = False,
     ) -> None:
-        while not self._stop_event.is_set():
-            try:
-                stream = await listener.accept()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                if self._stopping or self._closed:
+        # Arming happens here rather than at task creation because an unset-then-set event is not
+        # a scheduling barrier: a maintenance task created earlier would find it already set and
+        # run to completion without ever yielding to this loop.
+        try:
+            while not self._stop_event.is_set():
+                if arms_control_plane:
+                    self._accept_armed.set()
+                try:
+                    stream = await listener.accept()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if self._stopping or self._closed:
+                        return
+                    await self.stop("internal_error")
                     return
-                await self.stop("internal_error")
-                return
-            task = asyncio.create_task(self._run_handler(handler, stream))
-            self._connection_tasks.add(task)
-            task.add_done_callback(self._connection_tasks.discard)
+                task = asyncio.create_task(self._run_handler(handler, stream))
+                self._connection_tasks.add(task)
+                task.add_done_callback(self._connection_tasks.discard)
+        finally:
+            if arms_control_plane:
+                # A loop that has stopped serving must never leave maintenance waiting on it.
+                self._accept_armed.set()
 
     async def _run_handler(
         self, handler: Callable[[ControlStream], Awaitable[None]], stream: ControlStream
@@ -1426,15 +1472,15 @@ class ServiceDaemon:
         """Run bounded maintenance only while the exact generation remains published."""
 
         try:
+            if self._serving:
+                # Tasks run FIFO and this one is created inside start(), before serve() creates
+                # the accept loops. Without this gate the first sweep can run to completion
+                # before _accept_loop ever reaches sock_accept, which is the server half of the
+                # cold-start window (#235/#238).
+                await self._accept_armed.wait()
             summary: ObservationDrainSummary | None = None
             if observation_sweep is not None:
-                try:
-                    summary = await asyncio.wait_for(
-                        observation_sweep(),
-                        timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS,
-                    )
-                except Exception:
-                    summary = None
+                summary = await self._bounded_observation_sweep(observation_sweep)
             if recommendation_refresh is not None:
                 try:
                     await asyncio.wait_for(
@@ -1459,19 +1505,50 @@ class ServiceDaemon:
                     await asyncio.sleep(_OBSERVATION_SWEEP_INTERVAL_SECONDS)
                 else:
                     # A sweep implementation may complete without suspending.  Even while making
-                    # progress, give control connections and other READY work one scheduler turn
-                    # before the next immediate bulk-drain pass.
-                    await asyncio.sleep(0)
-                try:
-                    summary = await asyncio.wait_for(
-                        observation_sweep(),
-                        timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS,
-                    )
-                except Exception:
-                    summary = None
-                    continue
+                    # progress, give control connections and other READY work a real share of the
+                    # loop before the next immediate bulk-drain pass.
+                    await asyncio.sleep(_OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS)
+                summary = await self._bounded_observation_sweep(observation_sweep)
         except asyncio.CancelledError:
             raise
+
+    async def _bounded_observation_sweep(
+        self, observation_sweep: Callable[[], Awaitable[ObservationDrainSummary]]
+    ) -> ObservationDrainSummary | None:
+        """Run one deadline-bounded sweep, naming why it produced no summary."""
+
+        raised_inside = False
+
+        async def guarded() -> ObservationDrainSummary:
+            nonlocal raised_inside
+            try:
+                return await observation_sweep()
+            except Exception:
+                # Only an ordinary exception is the sweep's own. The deadline arrives as
+                # ``CancelledError``, which is a ``BaseException`` and deliberately not caught
+                # here, so it can never be mistaken for something the sweep raised.
+                raised_inside = True
+                raise
+
+        try:
+            return await asyncio.wait_for(guarded(), timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS)
+        except TimeoutError:
+            # ``asyncio.TimeoutError`` is the builtin ``TimeoutError``, so any socket or OS
+            # timeout raised inside the sweep lands here too and must not be reported as the
+            # deadline. The flag above is the discriminator.
+            reason = "sweep_failed" if raised_inside else "sweep_deadline_exceeded"
+            record_bounded_event_without_raising(
+                component="service.daemon",
+                operation="observation_sweep_failed",
+                reason=reason,
+            )
+        except Exception:
+            record_bounded_event_without_raising(
+                component="service.daemon",
+                operation="observation_sweep_failed",
+                reason="sweep_failed",
+            )
+        return None
 
     def _ready_generation_is_current(
         self,
@@ -1743,7 +1820,7 @@ class _ProductionPaths:
         metadata_root = state_dir()
         ensure_owner_only_dir(metadata_root)
         verify_private_local_bundle(metadata_root)
-        return cls(root, generation, throttle, metadata_root / "service.lock", metadata_root)
+        return cls(root, generation, throttle, metadata_root / SINGLETON_LOCK_NAME, metadata_root)
 
 
 @dataclass(frozen=True, slots=True)

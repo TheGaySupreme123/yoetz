@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
@@ -18,7 +19,7 @@ try:
 except ImportError:  # pragma: no cover - supported hook hosts are POSIX
     fcntl = None  # type: ignore[assignment]
 
-__all__ = ["hook_diagnostic_summary", "record_hook_diagnostic"]
+__all__ = ["hook_diagnostic_summary", "record_hook_diagnostic", "record_hook_timing"]
 
 _MAX_DIAGNOSTIC_BYTES: Final = 64 * 1024
 _FILE_NAME: Final = "hook-diagnostics.jsonl"
@@ -57,8 +58,13 @@ _REASONS: Final = frozenset(
         "drain_preflight_failed",
         "runtime_gate_unsafe",
         "stdout_write_failed",
+        # Observability only: the end-to-end hook budget is a contract, not an
+        # enforcement point. Aborting mid-hook would drop ingest.
+        "hook_budget_exceeded",
     }
 )
+_STAGES: Final = frozenset({"advice", "drain", "import", "store", "total"})
+_MAX_STAGE_MS: Final = 3_600_000
 _thread_lock = Lock()
 
 
@@ -83,23 +89,23 @@ def record_hook_diagnostic(
 ) -> None:
     """Append one bounded structural hook failure record, rotating one prior file."""
 
+    _append_row(
+        {
+            "event": _closed(event, _EVENTS, "unknown_event"),
+            "reason": _closed(reason, _REASONS, "unknown_reason"),
+            "ts": _timestamp(),
+        },
+        _state=_state,
+    )
+
+
+def _append_row(row: dict[str, object], *, _state: Path | None) -> None:
     root = state_dir() if _state is None else _state
     directory = root / "observation"
     path = directory / _FILE_NAME
     rotated = directory / f"{_FILE_NAME}.1"
     lock_path = directory / _LOCK_NAME
-    line = (
-        json.dumps(
-            {
-                "event": _closed(event, _EVENTS, "unknown_event"),
-                "reason": _closed(reason, _REASONS, "unknown_reason"),
-                "ts": _timestamp(),
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        + b"\n"
-    )
+    line = json.dumps(row, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
     try:
         ensure_owner_only_dir(directory)
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
@@ -156,12 +162,44 @@ def record_hook_diagnostic(
         return
 
 
+def record_hook_timing(
+    event: str,
+    *,
+    ms: int,
+    stages: Mapping[str, int],
+    _state: Path | None = None,
+) -> None:
+    """Append one bounded end-to-end timing row for a hook pass.
+
+    Emitted only over budget or at session boundaries: the diagnostics file is
+    64 KiB with one rotation, and a per-hook row would halve the retained
+    failure-reason window.
+    """
+
+    bounded = {
+        name: max(0, min(int(value), _MAX_STAGE_MS))
+        for name, value in stages.items()
+        if name in _STAGES and type(value) is int and not isinstance(value, bool)
+    }
+    _append_row(
+        {
+            "event": _closed(event, _EVENTS, "unknown_event"),
+            "kind": "timing",
+            "ms": max(0, min(int(ms), _MAX_STAGE_MS)),
+            "stages": dict(sorted(bounded.items())),
+            "ts": _timestamp(),
+        },
+        _state=_state,
+    )
+
+
 def hook_diagnostic_summary(*, _state: Path | None = None) -> JsonObject:
     """Return a bounded structural summary of the current and rotated diagnostics."""
 
     root = state_dir() if _state is None else _state
     directory = root / "observation"
     rows: list[dict[str, str]] = []
+    timings: list[int] = []
     try:
         ensure_owner_only_dir(directory)
         for path in (
@@ -190,6 +228,13 @@ def hook_diagnostic_summary(*, _state: Path | None = None) -> JsonObject:
                 if type(parsed) is not dict:
                     continue
                 row = cast(dict[str, object], parsed)
+                if set(row) == {"event", "kind", "ms", "stages", "ts"}:
+                    # Timing rows are a second shape on the same file; they must
+                    # never inflate the failure-reason counts.
+                    total = row.get("ms")
+                    if row.get("kind") == "timing" and type(total) is int:
+                        timings.append(total)
+                    continue
                 if set(row) != {"event", "reason", "ts"} or any(
                     type(row.get(key)) is not str for key in ("event", "reason", "ts")
                 ):
@@ -203,7 +248,13 @@ def hook_diagnostic_summary(*, _state: Path | None = None) -> JsonObject:
                 )
     except OSError, PathSafetyError:
         return JsonObject(
-            {"count": 0, "last_event": None, "last_reason": None, "reasons": JsonObject({})}
+            {
+                "count": 0,
+                "last_event": None,
+                "last_reason": None,
+                "reasons": JsonObject({}),
+                "timings": JsonObject({"count": 0, "last_ms": None, "max_ms": None}),
+            }
         )
     reasons: dict[str, int] = {}
     for row in rows:
@@ -216,5 +267,12 @@ def hook_diagnostic_summary(*, _state: Path | None = None) -> JsonObject:
             "last_event": None if last is None else last["event"],
             "last_reason": None if last is None else last["reason"],
             "reasons": JsonObject(dict(sorted(reasons.items(), key=lambda item: item[0].encode()))),
+            "timings": JsonObject(
+                {
+                    "count": len(timings),
+                    "last_ms": timings[-1] if timings else None,
+                    "max_ms": max(timings) if timings else None,
+                }
+            ),
         }
     )

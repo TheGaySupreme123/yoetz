@@ -2538,6 +2538,10 @@ async def provide_service_ready_context(
     )
     observation_sweeper = ObservationOutboxSweeper(local_observation, observation_coordinator)
 
+    def close_observation_maintenance() -> None:
+        observation_sweeper.close()
+        observation_coordinator.close()
+
     async def refresh_ready_recommendations() -> object:
         # READY has no exact selected-Codex-home identity.  Never infer the
         # normal ambient home while an isolated host may own this daemon.
@@ -2588,6 +2592,7 @@ async def provide_service_ready_context(
         provider_credential_connected=provider_credential_connected,
         semantic_ready=semantic_ready,
         observation_sweep=observation_sweeper.sweep,
+        observation_sweep_close=close_observation_maintenance,
         ready_recommendation_refresh=refresh_ready_recommendations,
     )
 

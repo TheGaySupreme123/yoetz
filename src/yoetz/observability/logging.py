@@ -56,6 +56,9 @@ _FIELD_ORDER: Final = (
     "semantic_challenges_rejected",
     "semantic_findings_selected",
     "semantic_findings_suppressed",
+    # Admits the loop-health connection count into _CALLER_FIELDS/_COUNT_FIELDS below, so a
+    # bounded-counts caller can report how much work was in flight during a stall.
+    "operation_count",
 )
 _FIELD_SET: Final = frozenset(_FIELD_ORDER)
 _CALLER_FIELDS: Final = _FIELD_SET - {"timestamp", "level", "component", "operation"}

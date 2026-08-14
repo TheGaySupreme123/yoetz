@@ -10,9 +10,11 @@ from __future__ import annotations
 import base64
 import contextlib
 import dataclasses
+import errno
 import os
 import re
 import threading
+import time
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,6 +23,7 @@ from typing import Final, cast
 
 from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
 from yoetz.domain.observation import (
+    AdviceItem,
     AdviceSnapshot,
     ObservationControlCommand,
     ObservationCursor,
@@ -51,6 +54,7 @@ except ImportError:  # pragma: no cover - the Yoetz service is hosted on POSIX
 
 __all__ = [
     "HOOK_MAPPING_VERSION",
+    "AdviceDelivery",
     "LocalObservationConsent",
     "LocalObservationStore",
     "ObservationOutboxRow",
@@ -88,7 +92,13 @@ _OUTBOX_REASON_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 _RUNTIME_GATE_SCHEMA: Final = "yoetz.observation-runtime-gate/1"
 _RUNTIME_GATE_NAME: Final = "runtime-gate.json"
 _MAX_RUNTIME_GATE_BYTES: Final = 256
+# Never a legal character in an event-kind token. An interim build stamped
+# hook timing after the kind as ``<kind>|<...>``; the reader below still trims
+# it so such a value can never be mistaken for an event kind.
+_OPEN_PRE_SEPARATOR: Final = "|"
 _LOCAL_OUTBOX_OVERFLOW_GAP: Final = "_local_outbox_overflow"
+_STORE_LOCK_TIMEOUT_SECONDS: Final = 2.0
+_STORE_LOCK_POLL_SECONDS: Final = 0.01
 
 YOETZ_TOOL_NAMES: Final = frozenset(
     {
@@ -132,7 +142,9 @@ class _InterprocessStoreLock:
 
     def __enter__(self) -> _InterprocessStoreLock:
         state = self._state
-        state.thread_lock.acquire()
+        deadline = time.monotonic() + _STORE_LOCK_TIMEOUT_SECONDS
+        if not state.thread_lock.acquire(timeout=_STORE_LOCK_TIMEOUT_SECONDS):
+            raise TimeoutError("observation_store_lock_timeout")
         if state.depth == 0:
             flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
             if hasattr(os, "O_NOFOLLOW"):
@@ -142,7 +154,17 @@ class _InterprocessStoreLock:
                 descriptor = os.open(self._path, flags, 0o600)
                 os.fchmod(descriptor, 0o600)
                 if fcntl is not None:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                    while True:
+                        try:
+                            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except OSError as exc:
+                            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                                raise
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise TimeoutError("observation_store_lock_timeout") from exc
+                            time.sleep(min(_STORE_LOCK_POLL_SECONDS, remaining))
             except BaseException:
                 if descriptor is not None:
                     os.close(descriptor)
@@ -240,6 +262,16 @@ def _read_bytes(path: Path, *, maximum: int) -> bytes | None:
         return data
     except OSError:
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class AdviceDelivery:
+    """One hook-channel advice delivery: the snapshot, the rendered item, its text."""
+
+    snapshot: AdviceSnapshot
+    item: AdviceItem | None
+    delivery_identity: str
+    text: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,6 +511,12 @@ class LocalObservationStore:
         # per workspace it has ever seen.
         self._state_cache: dict[str, tuple[tuple[int, int, int, int], _WorkspaceState]] = {}
         self._key_material_cache: bytes | None = None
+        # Open write batches keyed by workspace commitment. Inside a batch
+        # `_load` hands back the held mutable state and `_save` only marks it
+        # dirty, so one hook pass serializes and fsyncs once instead of the
+        # 10-18 times measured on a lived-in store (#242).
+        self._batch: dict[str, _WorkspaceState] = {}
+        self._batch_dirty: set[str] = set()
 
     def _now_mono(self) -> float:
         import time
@@ -732,6 +770,8 @@ class LocalObservationStore:
             return tuple(sorted(result, key=str.encode))
 
     def note_open_pre(self, workspace: str, correlation_id: str, event_kind: str) -> None:
+        """Record an open Pre event awaiting its Post."""
+
         with self._lock:
             state = self._load(workspace)
             assert state.open_pre is not None
@@ -746,9 +786,11 @@ class LocalObservationStore:
         with self._lock:
             state = self._load(workspace)
             assert state.open_pre is not None
-            kind = state.open_pre.pop(correlation_id, None)
+            raw = state.open_pre.pop(correlation_id, None)
+            if raw is None:
+                return None
             self._save(workspace, state)
-            return kind
+            return raw.split(_OPEN_PRE_SEPARATOR, 1)[0]
 
     def has_open_pre(self, workspace: str, correlation_id: str) -> bool:
         with self._lock:
@@ -781,9 +823,31 @@ class LocalObservationStore:
             self._save(workspace, state)
 
     def peek_advice_for_delivery(
-        self, workspace: str, *, yoetz_session_id: str | None = None
-    ) -> AdviceSnapshot | None:
-        """Return a new high-value advice snapshot once per suppression identity."""
+        self,
+        workspace: str,
+        *,
+        yoetz_session_id: str | None = None,
+        allow_standing: bool = True,
+    ) -> AdviceDelivery | None:
+        """Select advice to deliver once per *condition* identity. Never mutates state.
+
+        Pure read by construction: the caller records the delivery with
+        ``commit_advice_delivery`` only after the text has actually reached the
+        agent. Persisting the identity here would mean a hook killed between
+        the save and the stdout write suppresses that advice permanently, which
+        is strictly worse than the storm this cadence exists to stop.
+
+        ``allow_standing=False`` withholds standing machine conditions
+        (STANDING_MACHINE_ACTIONS) and falls through to the highest-ranked
+        actionable item, so those conditions reach the agent only on the
+        session-boundary events that opt in (#241).
+        """
+
+        from yoetz.application.observation_advice import (
+            advice_delivery_identity,
+            hook_advice_context,
+            select_advice_item,
+        )
 
         with self._lock:
             state = self._load(workspace)
@@ -796,20 +860,59 @@ class LocalObservationStore:
                 return None
             if not snapshot.ranked_finding_ids:
                 return None
+            item = select_advice_item(snapshot, allow_standing=allow_standing)
+            if item is None and snapshot.ranked_items:
+                # Every ranked item was cadence-gated on this event class.
+                return None
+            identity = advice_delivery_identity(snapshot, item=item)
+            if type(yoetz_session_id) is str:
+                delivered = (state.session_advice_suppression or {}).get(yoetz_session_id)
+            else:
+                delivered = state.last_advice_suppression
+            if delivered == identity:
+                return None
+            return AdviceDelivery(
+                snapshot=snapshot,
+                item=item,
+                delivery_identity=identity,
+                text=hook_advice_context(snapshot, item=item),
+            )
+
+    def commit_advice_delivery(
+        self,
+        workspace: str,
+        delivery_identity: str,
+        *,
+        yoetz_session_id: str | None = None,
+    ) -> None:
+        """Record advice as delivered — call only after the text reached the agent.
+
+        ``last_advice_suppression`` / ``session_advice_suppression`` hold
+        ``deliver-`` tokens, not the snapshot's ``suppress-`` identity. Both
+        persist as unvalidated ``str | None``, so a pre-upgrade file simply
+        never matches and the first hook after upgrade delivers once — no
+        migration, and downgrade is symmetric. They stay single values, never a
+        set: A→B→A must redeliver A.
+
+        A crash between the emission and this call costs at most one
+        redelivery; the reverse order would cost the advice entirely.
+        """
+
+        if type(delivery_identity) is not str or not delivery_identity:
+            raise ProtocolValueError("invalid_event_value_type")
+        with self._lock:
+            state = self._load(workspace)
             if type(yoetz_session_id) is str:
                 if state.session_advice_suppression is None:
                     state.session_advice_suppression = {}
-                if state.session_advice_suppression.get(yoetz_session_id) == (
-                    snapshot.suppression_identity
-                ):
-                    return None
-                state.session_advice_suppression[yoetz_session_id] = snapshot.suppression_identity
+                if state.session_advice_suppression.get(yoetz_session_id) == delivery_identity:
+                    return
+                state.session_advice_suppression[yoetz_session_id] = delivery_identity
             else:
-                if state.last_advice_suppression == snapshot.suppression_identity:
-                    return None
-                state.last_advice_suppression = snapshot.suppression_identity
+                if state.last_advice_suppression == delivery_identity:
+                    return
+                state.last_advice_suppression = delivery_identity
             self._save(workspace, state)
-            return snapshot
 
     def advice_snapshot_for(self, workspace: str) -> AdviceSnapshot | None:
         """Non-consuming read of the current advice snapshot for status views."""
@@ -886,9 +989,15 @@ class LocalObservationStore:
                     has_real_observation=bool(state.envelopes),
                 )
             )
-            state.advice_snapshot = snapshot
-            state.advice_frontier = None if snapshot is None else snapshot.freshness_frontier
-            self._save(workspace, state)
+            if snapshot is not state.advice_snapshot:
+                # build_observation_advice_snapshot returns the prior object
+                # unchanged when nothing moved; rewriting it cost ~91 ms of
+                # encode plus an fsync on every suppressed hook (#242). The
+                # pruning `_save` drives still runs: a hook flushes its batch
+                # exactly once regardless of this branch.
+                state.advice_snapshot = snapshot
+                state.advice_frontier = None if snapshot is None else snapshot.freshness_frontier
+                self._save(workspace, state)
             return snapshot
 
     def get_stream_cursor(
@@ -981,14 +1090,16 @@ class LocalObservationStore:
             state.pending_outbox.append(
                 ObservationOutboxRow(codex_session_id=codex_session_id, envelope=envelope)
             )
+            # Resolve before projecting so the size-checked bytes are exactly
+            # the bytes _save would otherwise re-encode: one encode, not three.
+            self._resolve_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
             projected = canonical_encode(self._state_to_json(workspace, state)) + b"\n"
             if len(projected) > _MAX_STATE_BYTES:
                 state.pending_outbox.pop()
                 self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
                 self._save(workspace, state)
                 return ObservationGapCode.OUTBOX_OVERFLOW.value
-            self._resolve_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
-            self._save(workspace, state)
+            self._save(workspace, state, projected=projected)
             return None
 
     def list_pending_outbox(
@@ -1113,6 +1224,42 @@ class LocalObservationStore:
         if len(digest) != 64:
             raise ProtocolValueError("invalid_commitment")
         path = self._root / f".drain-{digest}.lock"
+        if fcntl is None:  # pragma: no cover - POSIX-only host
+            yield True
+            return
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+    @contextlib.contextmanager
+    def advice_delivery_lease(self, workspace: str) -> Generator[bool]:
+        """Nonblocking advice-delivery mutex independent of workspace state.
+
+        The lease serializes selection, stdout emission, and the subsequent
+        delivery commit across concurrent hook processes.  It deliberately
+        uses a separate lock file: a blocked host stdout pipe may delay another
+        advice delivery, but must never block observation ingest or outbox work
+        that needs the workspace-state lock.
+        """
+
+        digest = workspace.removeprefix("hmac-sha256:")
+        if len(digest) != 64:
+            raise ProtocolValueError("invalid_commitment")
+        path = self._root / f".advice-delivery-{digest}.lock"
         if fcntl is None:  # pragma: no cover - POSIX-only host
             yield True
             return
@@ -1632,6 +1779,33 @@ class LocalObservationStore:
             self._save(command.workspace_commitment, state)
             return self._status_unlocked(command.workspace_commitment)
 
+    @contextlib.contextmanager
+    def batched(self, workspace_commitment: str) -> Generator[None]:
+        """Hold one workspace state open across a pass; serialize once at exit.
+
+        Durability trade-off: a SIGKILL inside a batch loses that batch's local
+        mutations rather than only the tail. That matches the outbox's design —
+        an un-acked row is retried, a lost envelope is re-ingested or recovered
+        by stream reconcile — but callers MUST close the batch before any
+        service RPC so an outbox acknowledgement can never become durable ahead
+        of the ingest it acknowledges, and MUST NOT span a network wait: the
+        batch holds the interprocess store lock for its whole duration.
+        """
+
+        with self._lock:
+            nested = workspace_commitment in self._batch
+            if not nested:
+                self._batch[workspace_commitment] = self._load(workspace_commitment)
+            try:
+                yield
+            finally:
+                if not nested:
+                    state = self._batch.pop(workspace_commitment, None)
+                    dirty = workspace_commitment in self._batch_dirty
+                    self._batch_dirty.discard(workspace_commitment)
+                    if state is not None and dirty:
+                        self._save(workspace_commitment, state)
+
     def _workspace_path(self, workspace_commitment: str) -> Path:
         digest = workspace_commitment.removeprefix("hmac-sha256:")
         if len(digest) != 64:
@@ -1672,6 +1846,9 @@ class LocalObservationStore:
             self._state_cache.pop(next(iter(self._state_cache)))
 
     def _load(self, workspace_commitment: str) -> _WorkspaceState:
+        held = self._batch.get(workspace_commitment)
+        if held is not None:
+            return held
         path = self._workspace_path(workspace_commitment)
         before = self._stat_key(path)
         cached = self._state_cache.get(workspace_commitment)
@@ -1721,12 +1898,31 @@ class LocalObservationStore:
         if len(kept) != len(state.quarantine):
             state.quarantine[:] = kept
 
-    def _save(self, workspace_commitment: str, state: _WorkspaceState) -> None:
+    def _save(
+        self,
+        workspace_commitment: str,
+        state: _WorkspaceState,
+        *,
+        projected: bytes | None = None,
+    ) -> None:
+        """Serialize one workspace state, trimming to the safe local bound.
+
+        ``projected`` reuses bytes a caller already encoded for a size check;
+        they are discarded when pruning mutated the state after that encode.
+        """
+
+        if self._batch.get(workspace_commitment) is state:
+            self._batch_dirty.add(workspace_commitment)
+            return
         directory = self._root / "workspaces"
         _ensure_dir(directory)
         path = self._workspace_path(workspace_commitment)
+        quarantined_before = len(state.quarantine or ())
         self._prune_expired_quarantine(state)
-        payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+        if projected is not None and len(state.quarantine or ()) == quarantined_before:
+            payload = projected
+        else:
+            payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
         if len(payload) > _MAX_STATE_BYTES:
             # Retain authority state and make every observation-detail loss explicit.
             assert state.envelopes is not None

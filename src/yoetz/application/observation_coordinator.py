@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, Protocol, cast
@@ -218,6 +220,30 @@ class ObservationCoordinator:
     _storage_corrupt_sessions: set[str] = field(
         default_factory=_empty_storage_corrupt_sessions, init=False, repr=False
     )
+    _local_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+
+    async def _local[ResultT](self, call: Callable[[], ResultT]) -> ResultT:
+        """Run one blocking local-store call off the service event loop.
+
+        Every ``LocalObservationStore`` entry point takes the same potentially blocking
+        cross-process flock, so a read is no safer on the loop than a write. Reads route through
+        this dedicated bounded pool too; the store also bounds acquisition so cancellation cannot
+        leave a worker parked indefinitely (#238). The reentrant thread lock is acquired and
+        released inside one worker on each hop, so no lock is held across an await.
+        """
+
+        executor = self._local_executor
+        if executor is None:
+            executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="yoetz-obs-local")
+            self._local_executor = executor
+        return await asyncio.get_running_loop().run_in_executor(executor, call)
+
+    def close(self) -> None:
+        """Stop accepting local-store work; bounded lock waits let running workers retire."""
+
+        executor, self._local_executor = self._local_executor, None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def __post_init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -238,7 +264,7 @@ class ObservationCoordinator:
         supervisor = self.verification_supervisor
         if supervisor is None:
             return
-        for workspace in self.local.list_consented_workspaces():
+        for workspace in await self._local(self.local.list_consented_workspaces):
             await self._rediscover_workspace_pending_verification(supervisor, workspace)
         supervisor.notify()
 
@@ -254,11 +280,13 @@ class ObservationCoordinator:
 
         if supervisor.closed or supervisor.has_handle(workspace):
             return
-        consent = self.local.consent_for(workspace)
+        consent = await self._local(partial(self.local.consent_for, workspace))
         if consent is None or not consent.active:
             return
         if sessions is None:
-            sessions = self.local.codex_sessions_for_workspace(workspace)
+            sessions = await self._local(
+                partial(self.local.codex_sessions_for_workspace, workspace)
+            )
         for session_index, codex_session_id in enumerate(sessions[start_index:], start=start_index):
             if supervisor.closed or supervisor.has_handle(workspace):
                 return
@@ -339,8 +367,12 @@ class ObservationCoordinator:
                     runtime = None
                 return
             except Exception:
-                self.local.note_coverage_gap(
-                    workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                await self._local(
+                    partial(
+                        self.local.note_coverage_gap,
+                        workspace,
+                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                    )
                 )
             finally:
                 if runtime is not None:
@@ -360,7 +392,8 @@ class ObservationCoordinator:
         except ProtocolValueError:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
 
-        expected = session_commitment_from_codex_id(self.local.key_material(), codex_session_id)
+        key_material = await self._local(self.local.key_material)
+        expected = session_commitment_from_codex_id(key_material, codex_session_id)
         if request.envelope.session_commitment != expected:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
         if codex_session_id in self._storage_corrupt_sessions:
@@ -370,10 +403,12 @@ class ObservationCoordinator:
         if mapping is None:
             return _reject(ObservationGapCode.MAPPING_MISSING.value)
 
-        workspace = self.local.find_workspace_for_codex_session(codex_session_id)
+        workspace = await self._local(
+            partial(self.local.find_workspace_for_codex_session, codex_session_id)
+        )
         if workspace is None:
             return _reject(ObservationGapCode.CONSENT_MISSING.value)
-        consent = self.local.consent_for(workspace)
+        consent = await self._local(partial(self.local.consent_for, workspace))
         if consent is None or not consent.active:
             reason = (
                 ObservationGapCode.CONSENT_REVOKED.value
@@ -517,23 +552,24 @@ class ObservationCoordinator:
         return _reject(ObservationGapCode.MAPPING_MISSING.value)
 
     async def status(self, query: ObservationStatusQuery) -> ObservationStatus:
-        return self.local.status(query)
+        return await self._local(partial(self.local.status, query))
 
     async def pause(self, command: ObservationControlCommand) -> ObservationStatus:
-        return self.local.pause(command)
+        return await self._local(partial(self.local.pause, command))
 
     async def resume(self, command: ObservationControlCommand) -> ObservationStatus:
-        return self.local.resume(command)
+        return await self._local(partial(self.local.resume, command))
 
     async def revoke(self, command: ObservationRevokeCommand) -> ObservationStatus:
-        status = self.local.revoke(command)
+        status = await self._local(partial(self.local.revoke, command))
         # The local fence is authoritative for immediately stopping new capture.
         # Best-effort bundle propagation additionally deactivates the encrypted
         # locator and exact-digest trust rows while retaining encrypted evidence.
         seen_tasks: set[str] = set()
-        for codex_session_id in self.local.codex_sessions_for_workspace(
-            command.workspace_commitment
-        ):
+        revoked_sessions = await self._local(
+            partial(self.local.codex_sessions_for_workspace, command.workspace_commitment)
+        )
+        for codex_session_id in revoked_sessions:
             mapping = self.mapping_loader(codex_session_id, _state=self.state_root)
             if mapping is None or mapping.yoetz_task_id in seen_tasks:
                 continue
@@ -552,9 +588,12 @@ class ObservationCoordinator:
                 await self._observation_store(runtime).revoke(command)
                 seen_tasks.add(mapping.yoetz_task_id)
             except Exception:
-                self.local.note_coverage_gap(
-                    command.workspace_commitment,
-                    ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                await self._local(
+                    partial(
+                        self.local.note_coverage_gap,
+                        command.workspace_commitment,
+                        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                    )
                 )
             finally:
                 if runtime is not None:
@@ -1118,8 +1157,12 @@ class ObservationCoordinator:
             return None
         descriptor = store.workspace_locator_descriptor(workspace)
         if descriptor is None:
-            self.local.note_coverage_gap(
-                workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+            await self._local(
+                partial(
+                    self.local.note_coverage_gap,
+                    workspace,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
             )
             return None
         locator_ref = await runtime.objects.resolve_verified(*descriptor)
@@ -1139,12 +1182,24 @@ class ObservationCoordinator:
             handle = open_local_workspace(Path(locator))
             policy, _raw_policy = load_observation_check_policy(Path(locator))
         except Exception:
-            self.local.note_coverage_gap(
-                workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+            await self._local(
+                partial(
+                    self.local.note_coverage_gap,
+                    workspace,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
             )
             return None
-        if not self.local.policy_digest_is_trusted(workspace, policy.raw_digest):
-            self.local.note_coverage_gap(workspace, ObservationGapCode.POLICY_UNTRUSTED.value)
+        if not await self._local(
+            partial(self.local.policy_digest_is_trusted, workspace, policy.raw_digest)
+        ):
+            await self._local(
+                partial(
+                    self.local.note_coverage_gap,
+                    workspace,
+                    ObservationGapCode.POLICY_UNTRUSTED.value,
+                )
+            )
             return None
         now = timestamp_from_datetime(self.clock.now_utc())
         if not store.policy_digest_is_trusted(workspace, policy.raw_digest):
@@ -1312,8 +1367,12 @@ class ObservationCoordinator:
                         excerpt_ref = await self._encrypt_captured_content(runtime, excerpt_bytes)
                         excerpt_object_id = excerpt_ref.object_id
             except Exception:
-                self.local.note_coverage_gap(
-                    workspace, ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                await self._local(
+                    partial(
+                        self.local.note_coverage_gap,
+                        workspace,
+                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                    )
                 )
                 relative_paths = ()
             inspect_recorder(
@@ -1548,10 +1607,15 @@ class ObservationCoordinator:
                     recorded_at=now,
                 )
             # Mirror into local store for hook advice delivery.
-            self.local.set_advice_snapshot(workspace, snapshot)
+            await self._local(partial(self.local.set_advice_snapshot, workspace, snapshot))
             if isinstance(runtime, TaskRuntime) and type(session_id) is str:
-                self.local.set_session_advice_snapshot(
-                    workspace, yoetz_session_id=session_id, snapshot=snapshot
+                await self._local(
+                    partial(
+                        self.local.set_session_advice_snapshot,
+                        workspace,
+                        yoetz_session_id=session_id,
+                        snapshot=snapshot,
+                    )
                 )
         if self.advice_hook is not None:
             result = self.advice_hook(

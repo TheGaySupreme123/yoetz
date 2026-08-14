@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from yoetz.domain.observation import (
+    AdviceItem,
     AdviceSnapshot,
     ObservationCursor,
     ObservationEnvelope,
@@ -12,6 +13,8 @@ from yoetz.domain.observation import (
     ObservationLifecycle,
     ObservationSource,
     ObservationStatus,
+    advice_item_from_json,
+    advice_item_to_json,
     observation_cursor_from_json,
     observation_cursor_to_json,
     observation_earns_hook_observed,
@@ -127,8 +130,6 @@ def test_workspace_commitment_from_path_is_hmac_and_path_free() -> None:
 
 
 def test_advice_snapshot_and_coverage_helper() -> None:
-    from yoetz.domain.observation import AdviceItem
-
     item = AdviceItem(
         finding_id=_FINDING,
         rule_code="failed_command_unresolved",
@@ -175,3 +176,22 @@ def test_advice_snapshot_and_coverage_helper() -> None:
         advice_frontier=None,
     )
     assert observation_earns_hook_observed(degraded, True) is False
+
+
+def test_advice_item_rejects_non_string_condition_identity_from_json() -> None:
+    item = AdviceItem(
+        finding_id=_FINDING,
+        rule_code="failed_command_unresolved",
+        priority=1,
+        summary="Unresolved failed command observed",
+        detail="A tool result failed and was not followed by a successful retry",
+        recommended_next_action="resolve_failed_command",
+        evidence_refs=("hook:1",),
+        coverage=_coverage(),
+        freshness_frontier="frontier-1",
+        condition_identity="condition-1",
+    )
+    encoded = JsonObject({**advice_item_to_json(item), "condition_identity": 123})
+
+    with pytest.raises(ProtocolValueError, match="invalid_event_value_type"):
+        advice_item_from_json(encoded)

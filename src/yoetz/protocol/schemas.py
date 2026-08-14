@@ -30,10 +30,13 @@ from yoetz.protocol.canonical import (
 from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
+    "EVENT_FAMILY_NAME_PATTERN",
+    "MAX_UNKNOWN_PROPERTY_COUNT",
     "SCHEMA_MANIFEST_SCHEMA",
     "SCHEMA_MANIFEST_VERSION",
     "SCHEMA_MEMBER_COUNT",
     "SCHEMA_NAMESPACE",
+    "SCHEMA_VERSION_PATTERN",
     "SchemaArtifactRole",
     "SchemaCatalog",
     "SchemaDocument",
@@ -72,7 +75,9 @@ _MEMBER_FIELDS: Final = frozenset(
     }
 )
 _SCHEMA_NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", re.ASCII)
-_SCHEMA_VERSION_PATTERN: Final = re.compile(
+# Public because the MCP bridge admits the same shapes when it projects a validator failure to a
+# caller-facing hint. One definition, imported there, so the two surfaces cannot drift apart.
+SCHEMA_VERSION_PATTERN: Final = re.compile(
     r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$", re.ASCII
 )
 _SHA256_PATTERN: Final = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
@@ -356,7 +361,7 @@ def _parse_manifest(data: bytes) -> tuple[_ManifestMember, ...]:
 
 
 def _derive_identity(path: str, version: str) -> tuple[str, str]:
-    if _SCHEMA_VERSION_PATTERN.fullmatch(version) is None:
+    if SCHEMA_VERSION_PATTERN.fullmatch(version) is None:
         _protocol_error("schema_version_mismatch")
     filename = path.rsplit("/", 1)[1]
     suffix = f"-{version}.schema.json"
@@ -685,7 +690,7 @@ def _validate_lookup_identity(name: object, version: object) -> tuple[str, str]:
         type(name) is not str
         or type(version) is not str
         or _SCHEMA_NAME_PATTERN.fullmatch(name) is None
-        or _SCHEMA_VERSION_PATTERN.fullmatch(version) is None
+        or SCHEMA_VERSION_PATTERN.fullmatch(version) is None
     ):
         _protocol_error("schema_name_invalid")
     return name, version
@@ -766,6 +771,13 @@ _OBJECT_RULE_PAIRED: Final = "paired_field_required"
 _OBJECT_RULE_CONDITIONAL: Final = "conditional_field_required"
 _OBJECT_RULE_REASONS: Final = frozenset({_OBJECT_RULE_PAIRED, _OBJECT_RULE_CONDITIONAL})
 _MAX_PROJECTED_OBJECT_LOCATIONS: Final = 8
+# Closed reason token for a nested instance failure. Only the class of the mistake travels; the
+# rejected key names are caller-controlled and never leave the validator (issue #240).
+_INSTANCE_REASON_EXTRA_FORBIDDEN: Final = "extra_forbidden"
+_INSTANCE_REASONS: Final = frozenset({_INSTANCE_REASON_EXTRA_FORBIDDEN})
+MAX_UNKNOWN_PROPERTY_COUNT: Final = 32
+_UNKNOWN_PROPERTY_COUNT_OVERFLOW: Final = MAX_UNKNOWN_PROPERTY_COUNT + 1
+EVENT_FAMILY_NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 
 
 class SchemaInstanceInvalid(ProtocolValueError):
@@ -774,17 +786,38 @@ class SchemaInstanceInvalid(ProtocolValueError):
     ``absolute_path`` names one nested field when jsonschema already points there.
     ``location_reasons`` carries root-level object-rule projections (pairing / conditional
     required) when the instance path is empty but the schema names safe corrective fields.
+    ``reason``, ``family``, ``family_version``, and ``unknown_count`` describe an unknown-property
+    failure: a closed token, a frozen schema-derived family name, that family's frozen schema
+    version, and a bounded cardinality. No caller-supplied key or value is admitted through any of
+    them — ``family_version`` in particular is read from the catalogue entry the failing schema's
+    own ``$id`` names, never from the instance's ``schema.version``.
     """
 
-    __slots__ = ("absolute_path", "location_reasons")
+    __slots__ = (
+        "absolute_path",
+        "family",
+        "family_version",
+        "location_reasons",
+        "reason",
+        "unknown_count",
+    )
 
     absolute_path: tuple[str | int, ...]
     location_reasons: tuple[tuple[tuple[str | int, ...], str], ...]
+    reason: str | None
+    family: str | None
+    family_version: str | None
+    unknown_count: int
 
     def __init__(
         self,
         absolute_path: tuple[str | int, ...] = (),
         location_reasons: tuple[tuple[tuple[str | int, ...], str], ...] = (),
+        *,
+        reason: str | None = None,
+        family: str | None = None,
+        family_version: str | None = None,
+        unknown_count: int = 0,
     ) -> None:
         if type(absolute_path) is not tuple:
             raise TypeError("schema_instance_path_invalid")
@@ -795,15 +828,35 @@ class SchemaInstanceInvalid(ProtocolValueError):
         for item in location_reasons:
             if type(item) is not tuple or len(item) != 2:
                 raise TypeError("schema_instance_locations_invalid")
-            path, reason = item
+            path, item_reason = item
             if type(path) is not tuple:
                 raise TypeError("schema_instance_locations_invalid")
             if any(type(segment) is not str and type(segment) is not int for segment in path):
                 raise TypeError("schema_instance_locations_invalid")
-            if type(reason) is not str or reason not in _OBJECT_RULE_REASONS:
+            if type(item_reason) is not str or item_reason not in _OBJECT_RULE_REASONS:
                 raise TypeError("schema_instance_locations_invalid")
+        if reason is not None and reason not in _INSTANCE_REASONS:
+            raise TypeError("schema_instance_reason_invalid")
+        if family is not None and (
+            type(family) is not str or EVENT_FAMILY_NAME_PATTERN.fullmatch(family) is None
+        ):
+            raise TypeError("schema_instance_family_invalid")
+        if family_version is not None and (
+            type(family_version) is not str
+            or SCHEMA_VERSION_PATTERN.fullmatch(family_version) is None
+        ):
+            raise TypeError("schema_instance_family_version_invalid")
+        if (
+            type(unknown_count) is not int
+            or not 0 <= unknown_count <= _UNKNOWN_PROPERTY_COUNT_OVERFLOW
+        ):
+            raise TypeError("schema_instance_unknown_count_invalid")
         self.absolute_path = absolute_path
         self.location_reasons = location_reasons
+        self.reason = reason
+        self.family = family
+        self.family_version = family_version
+        self.unknown_count = unknown_count
         super().__init__("schema_instance_invalid")
 
 
@@ -823,9 +876,18 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
         validator_api = cast(_ValidatorProtocol, cast(object, validator))
         validator_api.validate(_plain_validation_value(value))
     except ValidationError as exc:
-        path = _best_schema_instance_path(exc)
+        best = _best_schema_instance_error(exc)
+        path = _path_items_from(best) or ()
         if path:
-            raise SchemaInstanceInvalid(path) from None
+            reason = _instance_reason_for(best)
+            identity = _selected_family_for(best) if reason is not None else None
+            raise SchemaInstanceInvalid(
+                path,
+                reason=reason,
+                family=identity[0] if identity is not None else None,
+                family_version=identity[1] if identity is not None else None,
+                unknown_count=_unknown_property_count(best) if reason is not None else 0,
+            ) from None
         # Root-level object rules (dependentRequired, if/then anyOf required) report an empty
         # instance path. Project only schema-named fields so MCP can name the corrective pair.
         projected = _project_root_object_rule_locations(exc)
@@ -993,14 +1055,20 @@ def _project_conditional_required_alternatives(
     return tuple(ordered)
 
 
-def _best_schema_instance_path(exc: ValidationError) -> tuple[str | int, ...]:
-    """Prefer the deepest actionable nested path under a ``oneOf`` failure.
+def _best_schema_instance_error(exc: ValidationError) -> ValidationError:
+    """Prefer the deepest actionable nested failure under a ``oneOf``.
 
     Jsonschema reports a failed event-draft union at ``event_drafts/N``. The nested context
     already names the matching branch's payload field (for example ``action_kind``); surfacing
-    that path is what makes nested authoring hints possible without reading caller values.
+    that failure is what makes nested authoring hints possible without reading caller values.
+
+    When the caller's own discriminator selects exactly one branch, only that branch is scored:
+    every other branch failed on a const the caller never chose, so naming it hands back the value
+    already sent (issue #240). Otherwise the whole tree is scored exactly as before.
     """
 
+    selected = _discriminator_selected_branch(exc)
+    best_error = exc
     best_path = _path_items_from(exc) or ()
     best_score = -1
 
@@ -1014,7 +1082,9 @@ def _best_schema_instance_path(exc: ValidationError) -> tuple[str | int, ...]:
         elif validator == "required":
             points += 30
         elif validator == "additionalProperties":
-            points -= 40
+            # An unknown key is noise across branches the caller never selected, and the most
+            # specific fact known once the walk is confined to the branch it did select.
+            points += 0 if selected is not None else -40
         elif validator == "oneOf":
             points -= 10
         if "payload" in path:
@@ -1022,15 +1092,127 @@ def _best_schema_instance_path(exc: ValidationError) -> tuple[str | int, ...]:
         return points
 
     def visit(error: ValidationError) -> None:
-        nonlocal best_path, best_score
+        nonlocal best_error, best_path, best_score
         path = _path_items_from(error)
         if path is not None:
             points = score(error, path)
             if points > best_score or (points == best_score and len(path) > len(best_path)):
+                best_error = error
                 best_score = points
                 best_path = path
         for nested in error.context or ():
             visit(nested)
 
-    visit(exc)
-    return best_path
+    for root in selected if selected is not None else (exc,):
+        visit(root)
+    return best_error
+
+
+_DISCRIMINATOR_TAILS: Final = (("schema", "name"), ("schema", "version"))
+_MIN_DISCRIMINATED_BRANCHES: Final = 2
+
+
+def _is_discriminator_rejection(error: ValidationError) -> bool:
+    """True when a branch was ruled out by the family discriminator alone."""
+
+    path = _path_items_from(error)
+    if path is None:
+        return False
+    if error.validator == "const" and tuple(path[-2:]) in _DISCRIMINATOR_TAILS:
+        return True
+    # The catch-all branch admits only families the catalogue does not name, so it rejects a named
+    # one through ``not`` on the same discriminator object rather than through a const.
+    return error.validator == "not" and tuple(path[-1:]) == ("schema",)
+
+
+def _discriminator_selected_branch(exc: ValidationError) -> tuple[ValidationError, ...] | None:
+    """Return the failures of the one ``oneOf`` branch the caller's discriminator selected.
+
+    Returns None when the union carries no per-branch const discriminator, or when zero or several
+    branches survive it: the family itself is then wrong or ambiguous, and whole-tree scoring is
+    the right answer.
+
+    Known limitation, deliberate and unchanged from before issue #240: an extra key on the draft's
+    ``schema`` object itself (rather than in the payload) leaves two symmetric survivors — the
+    named family's branch and the catch-all — because neither is ruled out by a const the caller
+    chose. Selection then returns None, whole-tree scoring picks the `schema/name` failure, and the
+    caller is pointed at ``/event_drafts/N/schema/name`` for a defect that is really on the object
+    beside it. The hint that answer carries still names every admitted family, so the report is
+    imprecise rather than actively wrong, and no minimal fix exists that does not make branch
+    selection guess between two equally live survivors.
+    """
+
+    if exc.validator != "oneOf":
+        return None
+    branches: dict[int, list[ValidationError]] = {}
+    for nested in exc.context or ():
+        schema_path = list(nested.schema_path)
+        if not schema_path or type(schema_path[0]) is not int:
+            return None
+        branches.setdefault(schema_path[0], []).append(nested)
+    if len(branches) < _MIN_DISCRIMINATED_BRANCHES:
+        return None
+    discriminated = 0
+    survivors: list[list[ValidationError]] = []
+    for errors in branches.values():
+        rejections = [error for error in errors if _is_discriminator_rejection(error)]
+        if not rejections:
+            survivors.append(errors)
+            continue
+        if any(error.validator == "const" for error in rejections):
+            discriminated += 1
+    if discriminated < _MIN_DISCRIMINATED_BRANCHES or len(survivors) != 1:
+        return None
+    return tuple(survivors[0])
+
+
+def _instance_reason_for(error: ValidationError) -> str | None:
+    """Return the closed reason token for one instance failure, or None when it has no name."""
+
+    if error.validator == "additionalProperties":
+        return _INSTANCE_REASON_EXTRA_FORBIDDEN
+    return None
+
+
+def _unknown_property_count(error: ValidationError) -> int:
+    """Count the instance keys the schema does not declare, bounded and without retaining one."""
+
+    instance = error.instance
+    schema = error.schema
+    if not isinstance(instance, Mapping) or not isinstance(schema, Mapping):
+        return 0
+    properties = cast(Mapping[str, JsonValue], schema).get("properties")
+    declared: set[object] = (
+        set(cast(Mapping[object, object], properties)) if isinstance(properties, Mapping) else set()
+    )
+    unknown = {key for key in cast(Mapping[object, object], instance) if key not in declared}
+    count = len(unknown)
+    return count if count <= MAX_UNKNOWN_PROPERTY_COUNT else _UNKNOWN_PROPERTY_COUNT_OVERFLOW
+
+
+def _selected_family_for(error: ValidationError) -> tuple[str, str] | None:
+    """Name the event family and version whose frozen payload schema rejected the instance.
+
+    Both halves are read from the catalogue entry the failing schema's own ``$id`` identifies,
+    never from the instance, so nothing caller-controlled can travel under either.
+
+    The version travels with the name because a family may have several admitted versions
+    (``evidence_recorded`` has 1.0.0 and 1.1.0). A consumer that keys a per-family presentation
+    branch on the name alone would answer a 1.1.0 failure with the 1.0.0 contract (issue #239).
+    """
+
+    schema = error.schema
+    if not isinstance(schema, Mapping):
+        return None
+    schema_id = cast(Mapping[str, JsonValue], schema).get("$id")
+    if type(schema_id) is not str:
+        return None
+    catalog = _load_catalog_state().catalog
+    document = catalog.by_id.get(schema_id)
+    if document is None:
+        return None
+    family = document.schema_name.replace("-", "_")
+    if family not in catalog.event_schema_versions:
+        return None
+    version = document.schema_version
+    return (family, version) if SCHEMA_VERSION_PATTERN.fullmatch(version) is not None else None
