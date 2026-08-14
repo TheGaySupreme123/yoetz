@@ -152,6 +152,7 @@ def _materialized_advice_items(items: Sequence[AdviceItem]) -> tuple[AdviceItem,
         if item.origin == "deterministic" and item.rule_code in _ADVICE_FINDING_KIND_BY_RULE
     )
 
+
 __all__ = [
     "ObservationAdviceHook",
     "ObservationCoordinator",
