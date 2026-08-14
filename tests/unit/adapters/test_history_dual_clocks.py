@@ -16,7 +16,7 @@ import pytest
 from builders.replay import replay_records
 from integration.storage.test_append_and_replay import command_from_records, memory_for
 from yoetz.domain.events import accepted_record_digest_preimage
-from yoetz.domain.values import timestamp_from_string
+from yoetz.domain.values import occurred_at_consistency, timestamp_from_string
 from yoetz.mcp.descriptors import descriptor_for
 from yoetz.ports.ledger import ProjectionQuery
 from yoetz.protocol.canonical import JsonValue, entry_digest
@@ -72,6 +72,7 @@ async def test_history_exposes_exact_occurred_and_accepted_at_in_ingestion_order
         # FixedClock in the memory harness stamps acceptance independently of caller time.
         assert item.accepted_at == "2026-07-19T12:00:00.000Z"
         assert item.occurred_at != item.accepted_at
+        assert item.occurred_at_consistency == "within_forward_skew_allowance"
 
     # Caller times reverse while sequence advances — proof order is not wall-clock.
     occurred = tuple(item.occurred_at for item in items)
@@ -111,6 +112,10 @@ async def test_far_past_and_future_caller_timestamps_remain_claims() -> None:
     items = tuple(cast(StatusHistoryItemModel, item) for item in page.items)
     assert tuple(item.occurred_at for item in items) == (far_past, future)
     assert all(item.accepted_at == "2026-07-19T12:00:00.000Z" for item in items)
+    assert tuple(item.occurred_at_consistency for item in items) == (
+        "within_forward_skew_allowance",
+        "ahead_of_forward_skew_allowance",
+    )
     assert tuple(int(item.ingestion_sequence) for item in items) == (1, 2)
 
 
@@ -145,6 +150,19 @@ async def test_history_item_accepted_at_is_structural_metadata() -> None:
     }
     assert classify_result_leaf("status", wire, "/page/items/0/accepted_at") == "public_structural"
     assert classify_result_leaf("status", wire, "/page/items/0/occurred_at") == "public_structural"
+    assert (
+        classify_result_leaf("status", wire, "/page/items/0/occurred_at_consistency")
+        == "public_structural"
+    )
+
+
+def test_occurred_at_consistency_uses_closed_five_second_forward_allowance() -> None:
+    accepted = timestamp_from_string("2026-07-19T12:00:00.000Z")
+    boundary = timestamp_from_string("2026-07-19T12:00:05.000Z")
+    beyond = timestamp_from_string("2026-07-19T12:00:05.001Z")
+
+    assert occurred_at_consistency(boundary, accepted) == "within_forward_skew_allowance"
+    assert occurred_at_consistency(beyond, accepted) == "ahead_of_forward_skew_allowance"
 
 
 def test_entry_digest_still_binds_occurred_at_and_accepted_at() -> None:
@@ -178,6 +196,7 @@ def test_history_item_schema_requires_both_clocks() -> None:
         "ingestion_sequence": "1",
         "occurred_at": "2026-03-06T12:00:03.000Z",
         "accepted_at": "2026-03-06T18:30:00.000Z",
+        "occurred_at_consistency": "within_forward_skew_allowance",
         "projection_status": "projected",
         "summary_code": "plan_published",
     }
@@ -188,6 +207,11 @@ def test_history_item_schema_requires_both_clocks() -> None:
     del missing["accepted_at"]
     with pytest.raises(Exception):
         StatusHistoryItemModel.model_validate(missing)
+
+    missing_consistency = dict(item)
+    del missing_consistency["occurred_at_consistency"]
+    with pytest.raises(Exception):
+        StatusHistoryItemModel.model_validate(missing_consistency)
 
 
 def test_event_draft_schema_describes_occurred_at_as_claim() -> None:
@@ -221,6 +245,7 @@ def test_publish_and_status_descriptors_distinguish_clocks() -> None:
     assert "frontier-bound" in publish
     assert "occurred_at" in status
     assert "accepted_at" in status
+    assert "forward-skew classification" in status
     assert "ingestion sequence" in status
     # Must not instruct agents that Yoetz checked outside event time.
     assert "verified" not in publish

@@ -1125,8 +1125,11 @@ or `none`, and recorded waiver expiry is never evaluated against wall clock for 
 filtering, or resolution. Evidence strength is exact, availability concerns only declared captured
 content (never a path/URL probe), and freshness is the weaker source-envelope/projection freshness
 capped at `redacted_gap` for unavailable captured content. History is accepted-envelope metadata
-including caller-asserted `occurred_at` and digest-bound service `accepted_at` (ordering remains
-ingestion sequence; caller time is never a sort or filter key);
+including caller-asserted `occurred_at`, digest-bound service `accepted_at`, and the exact
+`occurred_at_consistency` comparison. The comparison is `within_forward_skew_allowance` through
+five seconds ahead of acceptance and `ahead_of_forward_skew_allowance` beyond it; it verifies no
+outside clock. Ordering remains ingestion sequence and caller time is never a sort or filter key.
+New check cases carry both clocks and this classification in their bounded frozen timelines;
 versions is one verified runtime manifest; compact uses exact structural counters and bounded
 summaries.
 

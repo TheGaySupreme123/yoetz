@@ -64,6 +64,7 @@ from yoetz.domain.values import (
     event_id,
     finding_id,
     object_id,
+    occurred_at_consistency,
     request_id,
     session_id,
     task_id,
@@ -773,6 +774,9 @@ def _projection_items(
                 ingestion_sequence=str(row.ledger.ingestion_sequence),
                 occurred_at=row.occurred_at.wire,
                 accepted_at=row.ledger.accepted_at.wire,
+                occurred_at_consistency=occurred_at_consistency(
+                    row.occurred_at, row.ledger.accepted_at
+                ),
                 projection_status=(
                     "unknown_unprojected" if type(row) is UnknownEvent else "projected"
                 ),

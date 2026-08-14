@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from functools import total_ordering
 from types import MappingProxyType, NotImplementedType
-from typing import Final, NewType, cast, final
+from typing import Final, Literal, NewType, cast, final
 
 from yoetz.protocol.canonical import (
     MAX_JSON_DEPTH,
@@ -27,6 +27,7 @@ __all__ = [
     "REPOSITORY_GRANT_CONTINUATION_INSTRUCTION",
     "REPOSITORY_GRANT_CONTINUATION_KIND",
     "GENESIS_DIGEST",
+    "OCCURRED_AT_FORWARD_SKEW_ALLOWANCE_MILLISECONDS",
     "ActionId",
     "Actor",
     "ActorId",
@@ -64,6 +65,7 @@ __all__ = [
     "frontier_from_json",
     "object_id",
     "obligation_id",
+    "occurred_at_consistency",
     "parse_rfc3339_millis",
     "parse_wire_sequence",
     "receipt_id",
@@ -85,6 +87,12 @@ type JsonScalar = str | int | bool | None
 type JsonValue = JsonScalar | tuple[JsonValue, ...] | JsonObject
 
 GENESIS_DIGEST: Final = "genesis"
+OCCURRED_AT_FORWARD_SKEW_ALLOWANCE_MILLISECONDS: Final = 5_000
+
+type OccurredAtConsistency = Literal[
+    "within_forward_skew_allowance",
+    "ahead_of_forward_skew_allowance",
+]
 
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
 _MAX_SQLITE_SIGNED_INTEGER: Final = 2**63 - 1
@@ -453,6 +461,19 @@ def timestamp_from_string(value: object) -> Timestamp:
 
 def timestamp_from_datetime(dt: object) -> Timestamp:
     return Timestamp(format_rfc3339_millis(dt))
+
+
+def occurred_at_consistency(
+    occurred_at: Timestamp, accepted_at: Timestamp
+) -> OccurredAtConsistency:
+    """Classify only whether caller time exceeds the closed service-clock allowance."""
+
+    if type(occurred_at) is not Timestamp or type(accepted_at) is not Timestamp:
+        raise ProtocolValueError("invalid_timestamp")
+    allowance = timedelta(milliseconds=OCCURRED_AT_FORWARD_SKEW_ALLOWANCE_MILLISECONDS)
+    if occurred_at.as_datetime() <= accepted_at.as_datetime() + allowance:
+        return "within_forward_skew_allowance"
+    return "ahead_of_forward_skew_allowance"
 
 
 def add_utc_milliseconds(dt: object, milliseconds: object) -> datetime:

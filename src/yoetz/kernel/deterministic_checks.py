@@ -51,6 +51,7 @@ from yoetz.domain.values import (
     frontier_from_json,
     object_id,
     obligation_id,
+    occurred_at_consistency,
     result_id,
     timestamp_from_string,
     validate_sha256_digest,
@@ -581,6 +582,14 @@ class FrozenHistoryEvent:
     schema_version: str
     ingestion_sequence: int
     occurred_at: str
+    accepted_at: str | None
+    occurred_at_consistency: (
+        Literal[
+            "within_forward_skew_allowance",
+            "ahead_of_forward_skew_allowance",
+        ]
+        | None
+    )
     payload_digest: str
     content_visibility: Literal["available", "not_recorded", "not_selected", "redacted_never_send"]
     payload: JsonValue | None
@@ -590,7 +599,8 @@ class FrozenHistoryEvent:
             object.__setattr__(self, "event_id", event_id(self.event_id))
             schema = EventSchema(self.schema_name, self.schema_version)
             validate_sha256_digest(self.payload_digest)
-            timestamp_from_string(self.occurred_at)
+            occurred = timestamp_from_string(self.occurred_at)
+            accepted = None if self.accepted_at is None else timestamp_from_string(self.accepted_at)
         except (TypeError, ValueError) as exc:
             raise _invalid_case() from exc
         if (
@@ -599,6 +609,12 @@ class FrozenHistoryEvent:
             or not 1 <= self.ingestion_sequence <= _MAX_SAFE_INTEGER
             or self.content_visibility
             not in {"available", "not_recorded", "not_selected", "redacted_never_send"}
+        ):
+            raise _invalid_case()
+        if (accepted is None) is not (self.occurred_at_consistency is None):
+            raise _invalid_case()
+        if accepted is not None and self.occurred_at_consistency != occurred_at_consistency(
+            occurred, accepted
         ):
             raise _invalid_case()
         if self.content_visibility == "available":
@@ -879,6 +895,14 @@ def deterministic_case_to_json(case: DeterministicCase) -> dict[str, JsonValue]:
                 "payload_digest": item.payload_digest,
                 "content_visibility": item.content_visibility,
                 "payload": item.payload,
+                **(
+                    {}
+                    if item.accepted_at is None
+                    else {
+                        "accepted_at": item.accepted_at,
+                        "occurred_at_consistency": item.occurred_at_consistency,
+                    }
+                ),
             }
             for item in case.history
         ],
@@ -948,20 +972,35 @@ def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
         history_omitted_before_count = 0
         if source_keys == _CASE_JSON_KEYS:
             for raw_item in _case_json_array(source["history"]):
-                item = _case_json_object(
-                    raw_item,
-                    required=frozenset(
-                        {
-                            "event_id",
-                            "schema_name",
-                            "schema_version",
-                            "ingestion_sequence",
-                            "occurred_at",
-                            "payload_digest",
-                            "content_visibility",
-                            "payload",
-                        }
-                    ),
+                item = _case_json_object(raw_item)
+                legacy_history_keys = frozenset(
+                    {
+                        "event_id",
+                        "schema_name",
+                        "schema_version",
+                        "ingestion_sequence",
+                        "occurred_at",
+                        "payload_digest",
+                        "content_visibility",
+                        "payload",
+                    }
+                )
+                current_history_keys = legacy_history_keys | frozenset(
+                    {"accepted_at", "occurred_at_consistency"}
+                )
+                if frozenset(item) not in {legacy_history_keys, current_history_keys}:
+                    raise _invalid_case()
+                accepted_at = cast(str, item["accepted_at"]) if "accepted_at" in item else None
+                consistency = (
+                    cast(
+                        Literal[
+                            "within_forward_skew_allowance",
+                            "ahead_of_forward_skew_allowance",
+                        ],
+                        item["occurred_at_consistency"],
+                    )
+                    if "occurred_at_consistency" in item
+                    else None
                 )
                 history.append(
                     FrozenHistoryEvent(
@@ -970,6 +1009,8 @@ def deterministic_case_from_json(value: JsonValue) -> DeterministicCase:
                         schema_version=cast(str, item["schema_version"]),
                         ingestion_sequence=cast(int, item["ingestion_sequence"]),
                         occurred_at=cast(str, item["occurred_at"]),
+                        accepted_at=accepted_at,
+                        occurred_at_consistency=consistency,
                         payload_digest=cast(str, item["payload_digest"]),
                         content_visibility=cast(
                             Literal[
@@ -1449,6 +1490,10 @@ def build_deterministic_case(
                 schema_version=record.schema.version,
                 ingestion_sequence=record.ledger.ingestion_sequence,
                 occurred_at=record.occurred_at.wire,
+                accepted_at=record.ledger.accepted_at.wire,
+                occurred_at_consistency=occurred_at_consistency(
+                    record.occurred_at, record.ledger.accepted_at
+                ),
                 payload_digest=record.projection_locator.canonical_payload_digest,
                 content_visibility=visibility,
                 payload=history_payload,

@@ -195,6 +195,11 @@ def test_provider_packet_preserves_detailed_frozen_history_by_category() -> None
         typed = cast(Mapping[str, JsonValue], document)
         kind = typed.get("kind")
         assert type(kind) is str
+        assert typed["accepted_at"] is not None
+        assert typed["occurred_at_consistency"] in {
+            "within_forward_skew_allowance",
+            "ahead_of_forward_skew_allowance",
+        }
         by_kind[kind] = typed
 
     def payload_for(kind: str) -> Mapping[str, JsonValue]:
