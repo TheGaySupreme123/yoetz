@@ -240,12 +240,17 @@ def test_finding_identity_ignores_evidence_refs_that_are_a_rolling_window() -> N
 
 
 def test_delivery_identity_distinguishes_successive_failed_commands() -> None:
+    shared_prefix = "same-correlation-prefix-" + "x" * 40
     first = build_observation_advice_snapshot(
         ObservationAdviceBuildInput(
             envelopes=(
                 _envelope(
                     "hook:fail-a",
-                    {"tool_name": "shell", "exit_status": 2, "correlation_id": "command-a"},
+                    {
+                        "tool_name": "shell",
+                        "exit_status": 2,
+                        "correlation_id": shared_prefix + "-a",
+                    },
                 ),
             ),
             lifecycle=ObservationLifecycle.ACTIVE,
@@ -258,17 +263,29 @@ def test_delivery_identity_distinguishes_successive_failed_commands() -> None:
             envelopes=(
                 _envelope(
                     "hook:fail-a",
-                    {"tool_name": "shell", "exit_status": 2, "correlation_id": "command-a"},
+                    {
+                        "tool_name": "shell",
+                        "exit_status": 2,
+                        "correlation_id": shared_prefix + "-a",
+                    },
                     pos=1,
                 ),
                 _envelope(
                     "hook:resolve-a",
-                    {"tool_name": "shell", "exit_status": 0, "correlation_id": "command-a"},
+                    {
+                        "tool_name": "shell",
+                        "exit_status": 0,
+                        "correlation_id": shared_prefix + "-a",
+                    },
                     pos=2,
                 ),
                 _envelope(
                     "hook:fail-b",
-                    {"tool_name": "shell", "exit_status": 3, "correlation_id": "command-b"},
+                    {
+                        "tool_name": "shell",
+                        "exit_status": 3,
+                        "correlation_id": shared_prefix + "-b",
+                    },
                     pos=3,
                 ),
             ),

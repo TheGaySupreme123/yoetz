@@ -287,13 +287,19 @@ def _failed_commands(envelopes: Sequence[ObservationEnvelope]) -> list[Observati
         elif exit_status == 0 or success is True:
             unresolved.pop(key, None)
     for key, envelope in unresolved.items():
+        cause_digest = canonical_digest(
+            {
+                "correlation_key": key,
+                "source_identity": envelope.source_identity,
+            }
+        )
         results.append(
             _candidate(
                 FindingKind.FAILED_WORK_OMITTED,
                 "failed_command_unresolved",
                 "resolve_failed_command",
                 (_envelope_ref(envelope),),
-                f"failed:{key[:48]}",
+                f"failed:{cause_digest.removeprefix('sha256:')}",
             )
         )
     return results
