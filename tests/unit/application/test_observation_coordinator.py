@@ -24,6 +24,7 @@ from yoetz.application.observation_materialize import (
     materialize_observation_envelope,
     observation_writer_id,
 )
+from yoetz.domain.findings import Finding
 from yoetz.domain.observation import (
     ObservationCursor,
     ObservationEnvelope,
@@ -1102,6 +1103,15 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
         ranked_items=(item,),
     )
 
+    ledger_events: list[SimpleNamespace] = []
+
+    def _remember_envelope_events(source: ObservationEnvelope) -> None:
+        batch = materialize_observation_envelope(source, task_id=task_id)
+        for draft in batch.drafts:
+            ledger_events.append(
+                SimpleNamespace(event_id=draft.draft.event_id, schema=draft.draft.schema)
+            )
+
     class _Ledger:
         async def load_projection(self, loaded_session_id: str, view: ProjectionView):
             assert loaded_session_id == session_id
@@ -1109,8 +1119,8 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
             return None
 
         async def _events(self):
-            if False:
-                yield None
+            for record in ledger_events:
+                yield record
 
         def load_events(self, loaded_session_id: str):
             assert loaded_session_id == session_id
@@ -1191,6 +1201,7 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
         identity="hook:advice-materialization",
         exit_status=2,
     )
+    _remember_envelope_events(envelope)
 
     await coordinator._materialize_advice_findings(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         cast(TaskRuntime, runtime),
@@ -1213,18 +1224,17 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
         evidence_basis_digest="sha256:" + "d" * 64,
         suppression_identity="advice-materialization-2",
     )
+    revision_envelope = _envelope(
+        session=f"hmac-sha256:{'d' * 64}",
+        kind="PostToolUse",
+        identity="hook:advice-revision",
+        ordinal=2,
+        exit_status=2,
+    )
+    _remember_envelope_events(revision_envelope)
     await coordinator._materialize_advice_findings(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         cast(TaskRuntime, runtime),
-        (
-            envelope,
-            _envelope(
-                session=f"hmac-sha256:{'d' * 64}",
-                kind="PostToolUse",
-                identity="hook:advice-revision",
-                ordinal=2,
-                exit_status=2,
-            ),
-        ),
+        (envelope, revision_envelope),
         revised_snapshot,  # type: ignore[arg-type]
     )
     assert len(captured) == 2
@@ -1232,6 +1242,153 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
         captured[1].command.entries[0].draft.event_id
     )
     assert materialize_calls == ["hook:advice-materialization", "hook:advice-revision"]
+    first_payload = captured[0].command.entries[0].draft.payload
+    assert type(first_payload) is Finding
+    assert first_payload.subject_refs
+    assert {str(ref) for ref in first_payload.subject_refs} <= {
+        str(record.event_id) for record in ledger_events
+    }
+
+
+@pytest.mark.anyio
+async def test_advice_finding_subject_refs_never_cite_unappended_drafts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Computed materialization IDs that never entered the ledger must not become citations."""
+
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from yoetz.application import observation_coordinator as coordinator_module
+    from yoetz.application.unit_of_work import PreparedMutation
+    from yoetz.domain.observation import AdviceItem, AdviceSnapshot
+    from yoetz.ports.ledger import ProjectionView
+    from yoetz.ports.objects import ObjectRef
+    from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
+
+    task_id = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
+    session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    writer_id = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
+    lifecycle = PREFIX_BY_KIND[IdKind.EVENT] + "00000000-0000-4000-8000-000000000001"
+    item_coverage = coverage_for_channel(PublicationChannel.HOOK_OBSERVED)
+    item = AdviceItem(
+        finding_id=finding_id(PREFIX_BY_KIND[IdKind.FINDING] + str(uuid.uuid4())),
+        rule_code="failed_command_unresolved",
+        priority=10,
+        summary="A failed command remains unresolved.",
+        detail="Resolve the failed command and rerun the check.",
+        recommended_next_action="rerun_check",
+        evidence_refs=("hook:unappended-draft",),
+        coverage=item_coverage,
+        freshness_frontier="frontier-1",
+    )
+    snapshot = AdviceSnapshot(
+        ranked_finding_ids=(item.finding_id,),
+        evidence_basis_digest="sha256:" + "a" * 64,
+        confidence_coverage=item_coverage,
+        recommended_next_action="rerun_check",
+        freshness_frontier="frontier-1",
+        suppression_identity="advice-unappended-1",
+        ranked_items=(item,),
+    )
+
+    class _Ledger:
+        async def load_projection(self, loaded_session_id: str, view: ProjectionView):
+            del loaded_session_id, view
+            return None
+
+        async def _events(self):
+            yield SimpleNamespace(
+                event_id=lifecycle,
+                schema=SimpleNamespace(name="session_opened"),
+            )
+
+        def load_events(self, loaded_session_id: str):
+            del loaded_session_id
+            return self._events()
+
+        async def lookup_operation(self, loaded_writer_id: str, operation_id: str):
+            del loaded_writer_id, operation_id
+            return None
+
+    class _Objects:
+        async def stage(self, source: object, metadata: object):
+            return source, metadata
+
+        async def finalize(self, staged: tuple[object, object]) -> ObjectRef:
+            source, metadata = staged
+            data = source.data  # type: ignore[attr-defined]
+            assert isinstance(data, bytes)
+            return ObjectRef(
+                PREFIX_BY_KIND[IdKind.OBJECT] + str(uuid.uuid4()),
+                len(data),
+                "hmac-sha256:" + "b" * 64,
+                "sha256:" + "c" * 64,
+                "yoetz-object/1",
+                "test-key-1",
+                metadata,  # type: ignore[arg-type]
+            )
+
+    captured: list[PreparedMutation] = []
+
+    async def _capture_append(ledger: object, prepared: PreparedMutation):
+        del ledger
+        captured.append(prepared)
+        return None
+
+    monkeypatch.setattr(coordinator_module, "run_prepared_append", _capture_append)
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Ids:
+        def new(self, kind: IdKind) -> str:
+            return PREFIX_BY_KIND[kind] + str(uuid.uuid4())
+
+    class _UnusedRuntimePort:
+        async def route(self, command: object) -> object:
+            raise AssertionError("route must not be called")
+
+        async def release(self, runtime: object) -> None:
+            return None
+
+    runtime = SimpleNamespace(
+        task_id=task_id,
+        session_id=session_id,
+        writer_id=writer_id,
+        ledger=_Ledger(),
+        objects=_Objects(),
+    )
+    coordinator = ObservationCoordinator(
+        runtime=_UnusedRuntimePort(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=_Ids(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+    )
+    envelope = _envelope(
+        session=f"hmac-sha256:{'d' * 64}",
+        kind="PostToolUse",
+        identity="hook:unappended-draft",
+        exit_status=2,
+    )
+    computed = {
+        str(draft.draft.event_id)
+        for draft in materialize_observation_envelope(envelope, task_id=task_id).drafts
+    }
+    assert computed
+    await coordinator._materialize_advice_findings(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        cast(TaskRuntime, runtime),
+        (envelope,),
+        snapshot,  # type: ignore[arg-type]
+    )
+
+    assert len(captured) == 1
+    payload = captured[0].command.entries[0].draft.payload
+    assert type(payload) is Finding
+    assert tuple(str(ref) for ref in payload.subject_refs) == (lifecycle,)
+    assert computed.isdisjoint(str(ref) for ref in payload.subject_refs)
 
 
 @pytest.mark.anyio

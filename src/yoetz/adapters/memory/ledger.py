@@ -1726,7 +1726,12 @@ class MemoryLedgerAdapter:
                 return FrozenCase(case, renewed)
         assert projection is not None and frontier is not None and records is not None
         availability = await self.load_case_availability(session_id, frontier, projection)
-        case = build_deterministic_case(projection, records, availability)
+        try:
+            case = build_deterministic_case(projection, records, availability)
+        except ValueError as exc:
+            if str(exc) == "deterministic_case_invalid":
+                raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+            raise
         dependency = _case_dependency_digest(case)
         case_json = deterministic_case_to_json(case)
         case_bytes = canonical_encode(

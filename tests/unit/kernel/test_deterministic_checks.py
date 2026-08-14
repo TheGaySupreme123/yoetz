@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
 from types import MappingProxyType
@@ -17,13 +18,22 @@ from yoetz.domain.events import (
     ClaimRecordedPayload,
     NoObligationsReason,
     PlanPublishedPayload,
+    accepted_record_digest_preimage,
+    encode_payload,
 )
-from yoetz.domain.findings import FindingKind, FindingOrigin
+from yoetz.domain.findings import FINDING_KIND_TRAITS, Finding, FindingKind, FindingOrigin
 from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
 )
-from yoetz.domain.values import claim_id, object_id, obligation_id
+from yoetz.domain.values import (
+    Frontier,
+    claim_id,
+    event_id,
+    finding_id,
+    object_id,
+    obligation_id,
+)
 from yoetz.kernel import deterministic_checks
 from yoetz.kernel.deterministic_checks import (
     DETERMINISTIC_FINDING_TEMPLATES,
@@ -43,7 +53,21 @@ from yoetz.kernel.policies.research_evidence import RESEARCH_EVIDENCE_POLICY_PAC
 from yoetz.kernel.policies.work_integrity import WORK_INTEGRITY_POLICY_PACK
 from yoetz.kernel.projections import empty_projection_state
 from yoetz.kernel.reducers import replay
-from yoetz.protocol.canonical import canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    canonical_digest,
+    canonical_encode,
+    entry_digest,
+    strict_json_parse,
+)
+from yoetz.protocol.coverage import (
+    ArtifactObservation,
+    AuthorshipAssurance,
+    CheckType,
+    Coverage,
+    EvidenceImmutability,
+    LedgerFreshness,
+    PublicationChannel,
+)
 
 
 def test_genesis_case_is_exact_and_immutable() -> None:
@@ -358,3 +382,141 @@ def test_unknown_or_tampered_pack_is_rejected() -> None:
     )
     with pytest.raises(ValueError, match="policy_wiring_invalid"):
         run_deterministic_policies(case, PolicyPack("work-integrity", "0.1.1"))
+
+
+def _observation_finding_coverage() -> Coverage:
+    return Coverage(
+        publication_channels=(PublicationChannel.ENGINE_DERIVED,),
+        authorship_assurance=AuthorshipAssurance.HARNESS_OBSERVED,
+        artifact_observation=ArtifactObservation.HOOK_OBSERVED,
+        evidence_immutability=EvidenceImmutability.METADATA_ONLY,
+        ledger_freshness=LedgerFreshness.CURRENT,
+        check_types=(CheckType.DETERMINISTIC,),
+        known_gaps=(),
+    )
+
+
+def _observation_finding(*, number: int, subject_refs: tuple[str, ...]) -> Finding:
+    kind = FindingKind.FAILED_WORK_OMITTED
+    return Finding(
+        finding_id(f"fnd_30000000-0000-4000-8000-{number:012x}"),
+        kind,
+        FindingOrigin.DETERMINISTIC,
+        FINDING_KIND_TRAITS[kind][0],
+        "A failed command remains unresolved.",
+        "Resolve the failed command and rerun the check.",
+        tuple(
+            event_id(ref) if ref.startswith("evt_") else obligation_id(ref)
+            for ref in sorted(subject_refs)
+        ),
+        "work-integrity",
+        "0.1.0",
+        Frontier(1, "sha256:" + "b" * 64),
+        _observation_finding_coverage(),
+        None,
+    )
+
+
+def _append_finding_record(
+    prefix: tuple[Any, ...],
+    finding: Finding,
+    *,
+    number: int,
+) -> tuple[Any, ...]:
+    template = next(
+        record
+        for record in prefix
+        if type(record) is AcceptedEvent and record.schema.name == "finding_recorded"
+    )
+    last = prefix[-1]
+    assert type(last) is AcceptedEvent
+    payload_digest = canonical_digest(encode_payload(finding))
+    next_event = event_id(f"evt_30000000-0000-4000-8000-{number:012x}")
+    next_object = object_id(f"obj_30000000-0000-4000-8000-{number:012x}")
+    next_ledger = replace(
+        last.ledger,
+        ingestion_sequence=last.ledger.ingestion_sequence + 1,
+        previous_entry_digest=last.entry_digest,
+    )
+    next_ref = replace(template.payload_ref, object_id=next_object)
+    preimage: dict[str, Any] = dict(accepted_record_digest_preimage(template))
+    raw_payload_ref = cast(Mapping[str, Any], preimage["payload_ref"])
+    preimage["event_id"] = next_event
+    preimage["payload_ref"] = {**raw_payload_ref, "object_id": next_object}
+    preimage["ledger"] = {
+        "ingestion_sequence": str(next_ledger.ingestion_sequence),
+        "previous_entry_digest": next_ledger.previous_entry_digest,
+        "accepted_at": next_ledger.accepted_at.wire,
+    }
+    record = replace(
+        template,
+        event_id=next_event,
+        payload=finding,
+        payload_ref=next_ref,
+        ledger=next_ledger,
+        entry_digest=entry_digest(cast(Any, preimage)),
+        projection_locator=replace(
+            template.projection_locator,
+            logical_key=str(finding.finding_id),
+            canonical_payload_digest=payload_digest,
+        ),
+    )
+    return (*prefix, record)
+
+
+def test_case_keeps_observation_finding_citations_outside_history_or_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Receipt/case construction must not crash on observation finding event citations.
+
+    Two shapes appear together in the #253 dogfood ledger: citations of real early
+    events that fall outside the frozen history window, and citations of computed
+    observation draft IDs that were never appended.
+    """
+
+    base = replay_records("all-event-families")
+    early = next(
+        record
+        for record in base
+        if type(record) is AcceptedEvent
+        and record.schema.name
+        in {
+            "action_recorded",
+            "check_recorded",
+            "claim_recorded",
+            "decision_recorded",
+            "evidence_recorded",
+            "finding_recorded",
+            "obligation_published",
+            "plan_published",
+            "plan_revised",
+            "response_recorded",
+            "result_recorded",
+        }
+    )
+    phantom = event_id("evt_40000000-0000-4000-8000-0000000000aa")
+    records = base
+    for index in range(1, 81):
+        cited = (str(early.event_id), str(event_id(f"evt_40000000-0000-4000-8000-{index:012x}")))
+        records = _append_finding_record(
+            records,
+            _observation_finding(number=index, subject_refs=cited),
+            number=index,
+        )
+    records = _append_finding_record(
+        records,
+        _observation_finding(number=81, subject_refs=(str(phantom),)),
+        number=81,
+    )
+
+    monkeypatch.setattr(deterministic_checks, "MAX_FROZEN_HISTORY_EVENTS", 2)
+    projection = replay(records)
+    case = build_deterministic_case(projection, records, CaseAvailabilityFacts())
+
+    assert early.event_id in case.allowed_ids
+    assert early.event_id not in {item.event_id for item in case.history}
+    assert phantom not in case.allowed_ids
+    assert any(gap.code == "missing_ref" for gap in case.gaps)
+    assert any(gap.marker == "missing_ref:cited_event_absent" for gap in case.gaps)
+    assert len(case.projection.findings) >= 80
+    assert case.history_omitted_before_count > 0

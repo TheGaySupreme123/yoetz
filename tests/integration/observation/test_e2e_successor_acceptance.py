@@ -440,6 +440,7 @@ async def test_advice_finding_materialization_passes_real_ledger_validation(tmp_
 
     seed = append_command()
     ledger = memory_adapter(seed)
+    await ledger.append_batch(seed)
     objects = cast(MemoryObjects, ledger._objects)  # pyright: ignore[reportPrivateUsage]
     runtime = TaskRuntime(
         seed.task_id,
@@ -516,13 +517,14 @@ async def test_advice_finding_materialization_passes_real_ledger_validation(tmp_
     )
 
     records = [row async for row in ledger.load_events(seed.session_id)]
-    assert len(records) == 1
-    accepted = records[0]
+    assert len(records) == 2
+    accepted = records[1]
     assert type(accepted) is AcceptedEvent
     assert accepted.schema.name == "finding_recorded"
+    assert type(accepted.payload) is Finding
+    assert tuple(str(ref) for ref in accepted.payload.subject_refs) == (str(records[0].event_id),)
     assert accepted.publication_channel is PublicationChannel.ENGINE_DERIVED
     assert accepted.coverage == coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
-    assert type(accepted.payload) is Finding
     assert accepted.payload.coverage == mixed_coverage
 
 
