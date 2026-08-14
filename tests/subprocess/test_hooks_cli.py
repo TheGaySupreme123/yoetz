@@ -199,9 +199,9 @@ def test_observe_hook_process_wall_clock_including_startup(
         "the hook process did not write the redirected store; the measured time "
         "is not the realistic-store path"
     )
-    # 0.55s measured on this checkout after the import diet and the write
-    # batch; the ceiling leaves headroom for shared runners without letting the
-    # pre-fix 1.67-2.50s band back in.
-    assert elapsed < 0.9, (
+    # 0.55s measured locally and 1.09s on a loaded Linux runner after the import
+    # diet and write batch. Keep enough shared-runner headroom while still
+    # excluding the pre-fix 1.67-2.50s band.
+    assert elapsed < 1.5, (
         f"one observe hook process took {elapsed:.2f}s end to end, startup included"
     )
