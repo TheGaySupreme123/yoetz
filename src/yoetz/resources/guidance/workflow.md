@@ -93,7 +93,7 @@ Same conversation resuming, or a fresh conversation continuing the same work →
 
 Candidate findings are what deterministic packs currently say about the record. They carry no verdict and cannot be cited as a check. An empty candidate list means only that no rule fired in that advisory read. Only a recorded check can support receipt-bounded completion wording.
 
-The cheapest finding is the one that never fires. Before the first `check`, confirm that completion scope is declared, every requested item has an exact `attempted_items` entry, every claim has linked evidence, and every declared obligation is resolved or deliberately left open with a stated reason. A typed empty-scope declaration still produces `completion_scope_declared_none` when a completion claim exists; it records the scope decision rather than proving it. That pre-flight costs one `status` read; an actionable finding costs the receipt for the rest of the task.
+The cheapest finding is the one that never fires. Before the first `check`, confirm that completion scope is declared, every requested item has an exact `attempted_items` entry on the `action_recorded` event that attempted it (`attempted_items` belongs to that family alone — never a claim — and each entry copies the obligation's `requested_items` `value` string exactly), every claim has linked evidence, and every declared obligation is resolved or deliberately left open with a stated reason. A typed empty-scope declaration still produces `completion_scope_declared_none` when a completion claim exists; it records the scope decision rather than proving it. That pre-flight costs one `status` read; an actionable finding costs the receipt for the rest of the task.
 
 ## Degraded and unavailable behavior
 

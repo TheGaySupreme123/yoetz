@@ -225,7 +225,7 @@ Prefer receipt format `markdown` or `text`. Default policy can return usable `js
 
 `respond` records your disposition and links your evidence; it does not clear the finding. Every actionable finding recorded in a task keeps the receipt conclusion at `unresolved_findings_remain`, whichever disposition you record, even when later checks return no findings. Repair the record anyway — it stops the next check from firing the same rule — but do not call an acknowledged finding resolved, and do not promise a clean receipt afterwards.
 
-Publish exactly the first time: an exact `attempted_items` entry for every requested item, evidence for every claim.
+Publish exactly the first time: an exact `attempted_items` entry for every requested item, evidence for every claim. `attempted_items` belongs to `action_recorded.payload` only — never `claim_recorded` — and each entry copies the obligation's `requested_items` `value` string exactly; see the action template in `yoetz://guidance/request-templates.md`.
 
 ## When to stop retrying
 
