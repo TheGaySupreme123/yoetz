@@ -129,6 +129,9 @@ type CallableSemanticReview = Callable[
     [tuple[ObservationAdviceCandidate, ...], str, tuple[str, ...], str | None],
     ObservationAdviceSemanticAddon | None | Awaitable[ObservationAdviceSemanticAddon | None],
 ]
+type CallableComposition = Callable[
+    [], ObservationCompositionFact | None | Awaitable[ObservationCompositionFact | None]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,10 +159,21 @@ class ObservationAdviceContextBuilder:
 
     check_facts: CallableFacts | None = None
     inspect_fact: CallableInspect | None = None
-    composition: ObservationCompositionFact | None = None
+    # A callable composition is resolved on every build so standing provider
+    # advice reflects current machine facts instead of a READY-time
+    # snapshot (#265); a plain fact value stays supported for fixed contexts.
+    composition: ObservationCompositionFact | CallableComposition | None = None
     plan_path_digests: CallablePlans | None = None
     semantic_addon: CallableSemantic | None = None
     semantic_review: CallableSemanticReview | None = None
+
+    async def _resolve_composition(self) -> ObservationCompositionFact | None:
+        if not callable(self.composition):
+            return self.composition
+        resolved = self.composition()
+        if inspect.isawaitable(resolved):
+            resolved = await resolved
+        return resolved if type(resolved) is ObservationCompositionFact else None
 
     async def build(
         self,
@@ -169,6 +183,7 @@ class ObservationAdviceContextBuilder:
         yoetz_session_id: str | None = None,
     ) -> AdviceSnapshot | None:
         envelopes = store.list_envelopes(workspace)
+        composition = await self._resolve_composition()
         status = await store.status(ObservationStatusQuery(workspace))
         store_check_facts = getattr(store, "load_check_facts", None)
         checks: tuple[ObservationCheckFact, ...] = ()
@@ -190,7 +205,7 @@ class ObservationAdviceContextBuilder:
                 gaps=status.gaps,
                 check_facts=checks,
                 inspect_fact=inspect_fact,
-                composition=self.composition,
+                composition=composition,
                 plan_path_digests=plans,
             )
             candidates = observation_advice_findings(context)
@@ -224,7 +239,7 @@ class ObservationAdviceContextBuilder:
                 gaps=status.gaps,
                 check_facts=checks,
                 inspect_fact=inspect_fact,
-                composition=self.composition,
+                composition=composition,
                 plan_path_digests=plans,
                 prior_snapshot=prior,
                 semantic_addon=semantic,
