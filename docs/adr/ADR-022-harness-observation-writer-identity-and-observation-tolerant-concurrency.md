@@ -1,10 +1,11 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-08-14 for moderator-approved issue #244.
+**Amended:** 2026-08-14 for moderator-approved issue #244 and the reopened issue #216 recurrence.
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/adapters/memory/ledger.py`,
-`src/yoetz/application/publish_work.py`, and `src/yoetz/service/ready_composition.py`.
+`src/yoetz/application/publish_work.py`, `src/yoetz/kernel/policies/observation_advice.py`, and
+`src/yoetz/service/ready_composition.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
 issues #214, #216, #217, #223, #224, #225, #226, #227, and #244.
 
@@ -63,10 +64,13 @@ unsupported claims and unbounded duplicate findings.
    structural payload explicitly carries an admitted `claim_kind`. Mapping version
    `obs-ledger/1.2.0` separates these identities from historical observation-derived claims.
 
-6. Deterministic advice finding ids are candidate-scoped over policy, kind, rule code, evidence
-   refs, and detail token. Candidate subject refs map only their source envelopes to ledger event ids;
-   a standing condition with no envelope anchors to the session lifecycle event. Already-recorded
-   candidates with the same subject refs are not appended again.
+6. Deterministic advice finding IDs are condition-scoped over policy, kind, rule code, and detail
+   token. Evidence refs prove the condition but never identify it: several rules intentionally cite
+   a rolling or accumulating envelope window. Candidate subject refs map only their source envelopes
+   to ledger event ids; a standing condition with no envelope anchors to the session lifecycle
+   event. Once a readable finding for that condition exists, later evidence-window or frontier
+   changes do not append another `finding_recorded` event. The current observation snapshot and
+   coverage/gap state retain the changing evidence context without growing the durable finding set.
 
 7. A provenance-dispute response disposition is deferred to issue #224. This change removes the
    false observation-authored claim premise but does not add a fourth `ResponseDisposition`, change
@@ -118,4 +122,6 @@ outbox rather than weakening verdict binding. Observation can contribute evidenc
 advice without impersonating the agent or minting the same standing finding indefinitely. Routine
 reads retain their local observation evidence without producing an unbounded task-ledger trail, and
 cooperative writers learn about meaningful observation-authored frontier motion before their next
-state-sensitive operation.
+state-sensitive operation. Observation-advice policy `0.1.1` applies the condition-scoped identity
+to new materialization. Historical duplicate findings remain append-only evidence; this change does
+not erase or rewrite an existing task ledger.

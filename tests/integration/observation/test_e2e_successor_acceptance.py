@@ -421,6 +421,7 @@ async def test_advice_finding_materialization_passes_real_ledger_validation(tmp_
         ownership_fence,
     )
     from yoetz.application.observation_coordinator import ObservationCoordinator
+    from yoetz.application.observation_materialize import materialize_observation_envelope
     from yoetz.domain.events import AcceptedEvent
     from yoetz.domain.findings import Finding
     from yoetz.domain.observation import (
@@ -526,6 +527,41 @@ async def test_advice_finding_materialization_passes_real_ledger_validation(tmp_
     assert accepted.publication_channel is PublicationChannel.ENGINE_DERIVED
     assert accepted.coverage == coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
     assert accepted.payload.coverage == mixed_coverage
+
+    revision_envelope = replace(
+        envelope,
+        source_identity="hook:advice-ledger-revision",
+        cursor=replace(envelope.cursor, event_position=2),
+        structural_payload=JsonObject(
+            {
+                "tool_name": "shell",
+                "tool_call_id": "advice-ledger-revision",
+                "correlation_id": "advice-ledger-revision",
+                "exit_status": 2,
+            }
+        ),
+    )
+    await coordinator._append_materialized(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        revision_envelope,
+        materialize_observation_envelope(revision_envelope, task_id=seed.task_id),
+    )
+    before_repeat = [row async for row in ledger.load_events(seed.session_id)]
+    revised_item = replace(item, evidence_refs=(revision_envelope.source_identity,))
+    await coordinator._materialize_advice_findings(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        (envelope, revision_envelope),
+        replace(
+            snapshot,
+            ranked_items=(revised_item,),
+            evidence_basis_digest="sha256:" + "d" * 64,
+            suppression_identity="advice-ledger-validation-2",
+        ),
+    )
+    after_repeat = [row async for row in ledger.load_events(seed.session_id)]
+
+    assert len(after_repeat) == len(before_repeat)
+    assert sum(row.schema.name == "finding_recorded" for row in after_repeat) == 1
 
 
 def test_untrusted_workspace_dot_does_not_bind_without_consent(

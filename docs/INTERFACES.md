@@ -2319,9 +2319,13 @@ Shared closed types:
   it is never a seventh MCP tool. Deterministic observation-advice policies derive the snapshot
   from retained envelopes (and optional inspect/approved-check/composition facts) even with zero
   cooperative Yoetz MCP publications. Optional semantic advice is additive only, through the
-  privacy gateway, over minimized approved packets. Deterministic finding identity is
-  candidate-scoped; envelope-linked candidates use only their mapped ledger events as subject refs,
-  while standing session conditions use the stable lifecycle event.
+  privacy gateway, over minimized approved packets. Deterministic finding identity is condition-
+  scoped over policy, kind, rule code, and rule-specific cause; rolling or accumulating evidence
+  refs never participate in identity. Envelope-linked candidates use only their mapped ledger
+  events as the first durable subject anchors, while standing session conditions use the stable
+  lifecycle event. Once a readable condition finding exists, later evidence-window or frontier
+  changes update the observation snapshot and coverage/gap state without appending another
+  `finding_recorded` event.
   Hook-channel delivery is relevance-scoped: task-scoped conditions come from the mapped Yoetz
   session snapshot when one exists, otherwise from the current Codex session's retained envelopes.
   The workspace-wide snapshot is not a fallback for task-scoped work. Deliberately workspace-
