@@ -471,7 +471,12 @@ def occurred_at_consistency(
     if type(occurred_at) is not Timestamp or type(accepted_at) is not Timestamp:
         raise ProtocolValueError("invalid_timestamp")
     allowance = timedelta(milliseconds=OCCURRED_AT_FORWARD_SKEW_ALLOWANCE_MILLISECONDS)
-    if occurred_at.as_datetime() <= accepted_at.as_datetime() + allowance:
+    accepted_datetime = accepted_at.as_datetime()
+    occurred_datetime = occurred_at.as_datetime()
+    if (
+        accepted_datetime > datetime.max.replace(tzinfo=UTC) - allowance
+        or occurred_datetime <= accepted_datetime + allowance
+    ):
         return "within_forward_skew_allowance"
     return "ahead_of_forward_skew_allowance"
 

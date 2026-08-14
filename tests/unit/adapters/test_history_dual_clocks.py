@@ -165,6 +165,13 @@ def test_occurred_at_consistency_uses_closed_five_second_forward_allowance() -> 
     assert occurred_at_consistency(beyond, accepted) == "ahead_of_forward_skew_allowance"
 
 
+def test_occurred_at_consistency_handles_the_timestamp_ceiling() -> None:
+    accepted = timestamp_from_string("9999-12-31T23:59:59.000Z")
+    occurred = timestamp_from_string("9999-12-31T23:59:59.999Z")
+
+    assert occurred_at_consistency(occurred, accepted) == "within_forward_skew_allowance"
+
+
 def test_entry_digest_still_binds_occurred_at_and_accepted_at() -> None:
     """Entry digests continue to bind both clocks; neither is ornamental."""
 
