@@ -13,7 +13,12 @@ from typing import Final, Literal, cast
 
 from yoetz.mcp.resources import read_resource
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.schemas import SCHEMA_NAMESPACE, load_schema_catalog, schema_document_for
+from yoetz.protocol.schemas import (
+    SCHEMA_NAMESPACE,
+    SCHEMA_VERSION_PATTERN,
+    load_schema_catalog,
+    schema_document_for,
+)
 
 __all__ = [
     "ORDINARY_MCP_PUBLISH_EVENT_FAMILIES",
@@ -94,7 +99,7 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
                 "max_conditional_nodes": 0,
                 "max_defs_count": 20,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 28_000,
+                "max_encoded_bytes": 32_000,
             }
         ),
         "check-request": MappingProxyType(
@@ -539,10 +544,16 @@ def _event_family_from_draft_branch(branch: Mapping[str, JsonValue]) -> str | No
         return None
     uri = ref.partition("#")[0]
     marker = "/events/"
-    if marker not in uri or not uri.endswith("-1.0.0.schema.json"):
+    suffix = ".schema.json"
+    if marker not in uri or not uri.endswith(suffix):
         return None
-    slug = uri.rsplit(marker, 1)[1].removesuffix("-1.0.0.schema.json")
-    return slug.replace("-", "_")
+    stem = uri.rsplit(marker, 1)[1].removesuffix(suffix)
+    for delimiter in (index for index, char in enumerate(stem) if char == "-"):
+        slug = stem[:delimiter]
+        version = stem[delimiter + 1 :]
+        if slug and SCHEMA_VERSION_PATTERN.fullmatch(version) is not None:
+            return slug.replace("-", "_")
+    return None
 
 
 def _project_event_draft_for_ordinary_mcp(
@@ -553,6 +564,7 @@ def _project_event_draft_for_ordinary_mcp(
     if not isinstance(one_of, list):
         raise RuntimeError("mcp_event_draft_projection_invalid")
     kept: list[JsonValue] = []
+    kept_families: set[str] = set()
     for branch in cast(list[JsonValue], one_of):
         if not isinstance(branch, Mapping):
             continue
@@ -563,7 +575,8 @@ def _project_event_draft_for_ordinary_mcp(
         family = _event_family_from_draft_branch(branch_map)
         if family in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES:
             kept.append(_mutable_json(branch_map))
-    if len(kept) != len(ORDINARY_MCP_PUBLISH_EVENT_FAMILIES):
+            kept_families.add(family)
+    if kept_families != set(ORDINARY_MCP_PUBLISH_EVENT_FAMILIES):
         raise RuntimeError("mcp_event_draft_projection_incomplete")
     projected["oneOf"] = kept
     return projected
