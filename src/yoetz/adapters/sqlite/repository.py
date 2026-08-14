@@ -127,6 +127,25 @@ def _public_error(
     )
 
 
+def _has_os_error_cause(exc: BaseException) -> bool:
+    """Report whether an environmental fault produced this error.
+
+    Several recovery arms convert ``OSError`` into ``STORAGE_CORRUPT`` alongside the decode
+    failures they are really about, so the public code alone cannot tell a bad byte from a
+    descriptor limit, a read error, or a mount that went away. Walking the causal chain keeps
+    the difference: only a verdict with no ``OSError`` anywhere under it is deterministic.
+    """
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, OSError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ if current.__cause__ is not None else current.__context__
+    return False
+
+
 def _frontier_conflict(head: Frontier) -> PublicOperationError:
     return _public_error(
         PublicErrorCode.FRONTIER_CONFLICT,
@@ -298,6 +317,7 @@ class SqliteLedger:
         self._state = MemoryLedgerState()
         self._requires_recovery = _head(db).sequence != 0
         self._recovery_task: asyncio.Task[None] | None = None
+        self._recovery_failed = False
 
     def open_observation_store(self) -> SqliteObservationStore:
         """Public durable-observation seam over this bundle's connection.
@@ -450,6 +470,13 @@ class SqliteLedger:
     async def _ensure_recovered(self) -> None:
         if not self._requires_recovery:
             return
+        if self._recovery_failed:
+            # A corrupt durable row makes recovery deterministically terminal. Re-running the
+            # whole replay for every later call spent O(ledger) CPU and allocation per RPC and
+            # starved the control plane for minutes (#238); the verdict is already known.
+            # Invariant: only a decode verdict with no OSError under it may latch here, so a
+            # transient environmental fault can never brick an intact bundle until restart.
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
         task = self._recovery_task
         if task is None:
             task = asyncio.create_task(self._recover_once())
@@ -461,6 +488,16 @@ class SqliteLedger:
                 self._recovery_task = None
 
     async def _recover_once(self) -> None:
+        """Latch a terminal recovery verdict so it is reached at most once."""
+
+        try:
+            await self._recover_projection()
+        except PublicOperationError as exc:
+            if exc.code is PublicErrorCode.STORAGE_CORRUPT and not _has_os_error_cause(exc):
+                self._recovery_failed = True
+            raise
+
+    async def _recover_projection(self) -> None:
         """Rebuild one shared projection without duplicating work on caller cancellation."""
 
         if not self._requires_recovery:

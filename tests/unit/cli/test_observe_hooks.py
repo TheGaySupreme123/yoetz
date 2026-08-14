@@ -6,7 +6,9 @@ import asyncio
 import io
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -1114,7 +1116,320 @@ def test_hook_wall_clock_meets_the_declared_timeout_on_a_realistic_store(
                 assert declared is None, "more than one observe handler declared for PostToolUse"
                 declared = handler["timeout"]  # type: ignore[index]
     assert isinstance(declared, int)
-    assert elapsed < declared * 0.8, (
+    # The machine-independent parse/write-count tests own the tight regression
+    # contract. This wall-clock smoke bound still excludes the pre-fix 1.67-2.50s
+    # band without failing solely because a shared runner is briefly loaded.
+    assert elapsed < declared * 0.4, (
         f"hook invocation took {elapsed:.2f}s against a realistic store — "
-        f"within 20% of the declared {declared}s timeout Codex kills it at"
+        f"over 40% of the declared {declared}s timeout Codex kills it at"
     )
+
+
+def _write_counter(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the name of every file the store atomically writes."""
+
+    import yoetz.adapters.integrations.observation_local as local_mod
+
+    written: list[str] = []
+    original = local_mod._atomic_write  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    def counting(path: Path, payload: bytes) -> None:
+        written.append(path.name)
+        original(path, payload)
+
+    monkeypatch.setattr(local_mod, "_atomic_write", counting)
+    return written
+
+
+def _state_writes(written: list[str]) -> int:
+    return sum(1 for name in written if name.endswith(".json"))
+
+
+def _suffix_counts(written: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for name in written:
+        suffix = Path(name).suffix
+        counts[suffix] = counts.get(suffix, 0) + 1
+    return counts
+
+
+def test_hook_invocation_writes_the_state_file_once_not_fourteen_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#242: one hook pass serializes the workspace state a bounded number of times.
+
+    The parse-count guard above pins reads; nothing pinned writes, so 10-18
+    serialize+fsync cycles per hook survived #209/#213. At the live 525KB store
+    each cycle measured ~91ms of encode alone — 0.9-1.6s per hook.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "write-count")
+    _populate_realistic_store(store, workspace, "write-count", pending=8, quarantined=40)
+
+    written = _write_counter(monkeypatch)
+
+    async def connect(_kind: object):
+        return _InstantAckClient()
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "write-count",
+                "tool_name": "shell",
+                "correlation_id": "wc-1",
+                "exit_status": 0,
+            }
+        ).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+        _monotonic=lambda: 0.0,
+    )
+    assert code == 0
+    delivered = "additionalContext" in out.getvalue().decode()
+    # Exact accounting, so a regression cannot hide inside a loose ceiling:
+    #   1 local-pass batch flush
+    # + 1 per drained outbox row, bounded by _HOOK_DRAIN_ROW_LIMIT (4 here)
+    # + 1 advice-delivery commit, and only when advice actually reached stdout.
+    # Seventeen were measured before the write batch. Nothing else writes: the
+    # advice sidecar and the async-pair sample are gone.
+    assert _suffix_counts(written) == {".json": 5 + int(delivered)}, written
+
+
+def test_refresh_advice_does_not_rewrite_state_when_the_snapshot_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "noop-advice")
+    _populate_realistic_store(
+        store, workspace, "noop-advice", envelopes=8, pending=0, quarantined=0
+    )
+
+    first = store.refresh_advice(workspace)
+    written = _write_counter(monkeypatch)
+    second = store.refresh_advice(workspace)
+
+    assert first is not None and second is first
+    assert _state_writes(written) == 0, (
+        "an unchanged advice snapshot was rewritten; the build returns the prior "
+        "object identically when nothing moved"
+    )
+
+
+def test_quarantine_pruning_still_runs_on_a_hook_whose_advice_refresh_no_ops(
+    tmp_path: Path,
+) -> None:
+    """The no-op-save guard must not cost a pruning opportunity (#242 risk 16).
+
+    ``_save`` is what drives quarantine expiry and the size trims, so skipping
+    it in ``refresh_advice`` is only safe because the write batch guarantees the
+    pass still flushes exactly once.
+    """
+
+    from datetime import UTC, datetime, timedelta
+
+    from yoetz.domain.values import timestamp_from_datetime
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "prune")
+    _populate_realistic_store(store, workspace, "prune", envelopes=4, pending=0, quarantined=0)
+
+    stale = timestamp_from_datetime((datetime.now(UTC) - timedelta(days=90)).replace(microsecond=0))
+    state = store._load(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert state.quarantine is not None
+    state.quarantine.append(
+        (
+            session,
+            _drain_envelope(store, session, "hook:stale", 9_000),
+            "service_unavailable",
+            stale,
+        )
+    )
+    store._save(workspace, state)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert store.quarantined_count(workspace) == 1
+
+    # A second identical refresh no-ops; the hook pass must still prune.
+    store.refresh_advice(workspace)
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {"session_id": "prune", "tool_name": "shell", "exit_status": 0}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    assert store.quarantined_count(workspace) == 0
+
+
+def _seed_standing_only_advice(store: LocalObservationStore, workspace: str) -> None:
+    """Persist an advice snapshot whose every action is a standing machine condition."""
+
+    from yoetz.application.observation_advice import (
+        ObservationAdviceBuildInput,
+        build_observation_advice_snapshot,
+    )
+    from yoetz.domain.observation import ObservationLifecycle
+    from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
+
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=store.list_envelopes(workspace),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            composition=ObservationCompositionFact(
+                semantic_configured=True,
+                semantic_ready=False,
+                provider_factory_ids=("fireworks",),
+                connected_provider_ids=(),
+            ),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    assert {item.recommended_next_action for item in snapshot.ranked_items} == {"connect_provider"}
+    store.set_advice_snapshot(workspace, snapshot)
+
+
+def _refresh_counter(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    calls = [0]
+    original = LocalObservationStore.refresh_advice
+
+    def counting(self: LocalObservationStore, workspace_commitment: str, **kwargs: object):
+        calls[0] += 1
+        return original(self, workspace_commitment, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(LocalObservationStore, "refresh_advice", counting)
+    return calls
+
+
+def test_advice_stage_runs_on_every_advice_safe_event_including_inert_envelopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No relevance gate: an inert envelope still recomputes and still may deliver.
+
+    The removed fast path could not fire in the sessions it targeted (any
+    workspace with a coverage gap carries ``refresh_observation``), and where it
+    did fire it reasoned over the workspace snapshot while delivery prefers the
+    session snapshot — so it could withhold actionable session advice. The
+    advice stage is unconditional on advice-safe events.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {"session_id": "fast", "tool_name": "shell", "exit_status": 0}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    _seed_standing_only_advice(store, workspace)
+    before = len(store.list_envelopes(workspace))
+
+    refreshes = _refresh_counter(monkeypatch)
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps({"session_id": "fast", "tool_name": "Read"}).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    assert refreshes[0] == 1, "the advice stage was skipped on an advice-safe event"
+    assert len(store.list_envelopes(workspace)) == before + 1
+
+
+def test_post_tool_use_still_recomputes_advice_for_a_trigger_bearing_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {"session_id": "trigger", "tool_name": "shell", "exit_status": 0}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    _seed_standing_only_advice(store, workspace)
+
+    refreshes = _refresh_counter(monkeypatch)
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "trigger",
+                "tool_name": "shell",
+                "exit_status": 1,
+                "correlation_id": "t1",
+            }
+        ).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    assert refreshes[0] == 1
+    assert "resolve_failed_command" in out.getvalue().decode()
+
+
+def test_end_to_end_hook_budget_is_recorded_and_exceeding_it_is_diagnosed(
+    tmp_path: Path,
+) -> None:
+    """The budget is an observability contract: over it, the hook still succeeds."""
+
+    from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    elapsed = [0.0]
+
+    def creeping() -> float:
+        elapsed[0] += 5.0
+        return elapsed[0]
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {"session_id": "budget", "tool_name": "shell", "exit_status": 0}
+        ).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+        _monotonic=creeping,
+    )
+    assert code == 0
+    assert out.getvalue().endswith(b"\n")
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    reasons = dict(cast(Mapping[str, object], summary["reasons"]))
+    assert reasons.get("hook_budget_exceeded") == 1
+    timings = dict(cast(Mapping[str, object], summary["timings"]))
+    assert timings["count"] == 1

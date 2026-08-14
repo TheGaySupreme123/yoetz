@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Final, cast
@@ -12,6 +13,15 @@ from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import SAFE_DETAIL_KEYS, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import FRONTIER_LEAVES, OperationFailureModel
+
+# One definition of the admission shapes the protocol validator already enforces on the way out.
+# Declaring them a second time here let this projector admit a token the validator never emits, or
+# reject one it does, with nothing to catch the drift.
+from yoetz.protocol.schemas import (
+    EVENT_FAMILY_NAME_PATTERN,
+    MAX_UNKNOWN_PROPERTY_COUNT,
+    SCHEMA_VERSION_PATTERN,
+)
 
 __all__ = [
     "authoring_hint",
@@ -24,10 +34,12 @@ __all__ = [
 
 # Every name here is a frozen presentation-schema property name, never a caller-controlled key, so
 # naming one leaks nothing the caller did not already send. The import-time gate at the bottom of
-# this module keeps the set complete: a `required` name that is missing from here projects to its
-# allowlisted parent, and the caller is told the parent is `missing` when it is present and valid.
+# this module keeps the set complete over every declared name: one that is missing from here
+# projects to its allowlisted parent, so the caller is told the parent is `missing` when it is
+# present and valid, or that a whole payload is wrong when one key inside it is.
 _SAFE_LOCATION_SEGMENTS: Final = frozenset(
     {
+        "acceptance_criteria",
         "actor",
         "actor_id",
         "actor_type",
@@ -35,10 +47,14 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         # only to /event_drafts/N and the hint cannot name admitted members.
         "action_id",
         "action_kind",
+        "affected_obligation_ids",
+        "after_sequence",
+        "alternatives",
         "artifact_refs",
         "asserted_by",
         "assignee_actor_id",
         "at_frontier",
+        "attempted_items",
         "authority",
         "captured_object_id",
         "causal_parents",
@@ -55,6 +71,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "diff_digest",
         "disposition",
         "display_name",
+        "disputes_refs",
         "dry_run",
         "event_drafts",
         "event_id",
@@ -62,16 +79,21 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "evidence_id",
         "evidence_kind",
         "evidence_refs",
+        "exit_status",
         "expected_frontier",
         "external_ref",
         "filter",
         "finding_frontier",
         "finding_id",
         "format",
+        "freshness",
+        "handoff_of",
         # Frontier leaves. Without them a wrong key inside expected_frontier/at_frontier projects
         # to the parent object and the caller learns only that "something" there is wrong.
         "head_digest",
         "include",
+        "include_resolved",
+        "include_unavailable",
         "integration",
         "item_kind",
         "kind",
@@ -79,6 +101,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "max_findings",
         "mode",
         "name",
+        "no_obligations_reason",
         "obligation_changes",
         "obligation_id",
         "obligation_ids",
@@ -86,10 +109,12 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "observed_at",
         "occurred_at",
         "operation_request_id",
+        "origin",
         "outcome",
         "payload",
         "plan_version",
         "policy_packs",
+        "priority",
         "protocol_version",
         "publication_channel",
         "rationale",
@@ -98,6 +123,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "reference",
         "replacement_obligation_ids",
         "request_id",
+        "requested_items",
         "requested_view",
         "resolution_evidence_refs",
         "result_id",
@@ -106,13 +132,16 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "schema_version",
         "scope",
         "scope_description",
+        "scope_exclusions",
         "sequence",
         "session_id",
+        "source_refs",
         "statement",
         "status",
         "strength",
         "subject_state",
         "summary",
+        "supersedes_event_id",
         "supersedes_plan_version",
         "supporting_refs",
         "task_id",
@@ -124,12 +153,16 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "waiver_expiry",
         "waiver_scope",
         "workspace_ref",
+        "write_policy",
         "writer_id",
     }
 )
 # The reviewed escape hatch for the gate below. Empty today: no frozen `required` name has been
 # judged unsafe to name. Adding one is an explicit review decision, not silent drift.
 _DELIBERATELY_UNLOCATABLE: Final[frozenset[str]] = frozenset()
+# The same escape hatch for merely *declared* names. Empty today: every frozen presentation-schema
+# property is a name the caller already sent, so locating one leaks nothing.
+_DELIBERATELY_UNLOCATABLE_DECLARED: Final[frozenset[str]] = frozenset()
 _SAFE_VALIDATION_REASONS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "missing": "missing",
@@ -147,11 +180,16 @@ _SAFE_VALIDATION_REASONS: Final[Mapping[str, str]] = MappingProxyType(
         "conditional_field_required": "conditional_field_required",
     }
 )
-# ValueError ctx tokens from `_validate_model_against_schema` object-rule projection. Only these
-# may replace the generic value_error reason; never trust free-form exception text.
+# ValueError ctx tokens from `_validate_model_against_schema` projection: root-level object rules,
+# and the closed instance reason a nested schema failure carries. Only these may replace the
+# generic value_error reason; never trust free-form exception text.
 _SAFE_VALUE_ERROR_REASON_TOKENS: Final = frozenset(
-    {"paired_field_required", "conditional_field_required"}
+    {"paired_field_required", "conditional_field_required", "extra_forbidden"}
 )
+_EXTRA_FORBIDDEN_REASON: Final = "extra_forbidden"
+# Payload pointers the unknown-key hint answers. Deeper pointers name their own admitted values.
+_EVENT_DRAFT_PAYLOAD_POINTER: Final = re.compile(r"/event_drafts/[0-9]{1,3}/payload", re.ASCII)
+_REASON_CODE: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 # A closed registry of checked-in corrective sentences for facts that are true of the contract but
 # are not expressible as a JSON Schema keyword, so no hint built from the schema alone can state
 # them. Keys are `(tool, pointer, reason)`; nothing here is derived from a caller value, and the
@@ -240,8 +278,60 @@ def _reason_from_validation_item(item: Mapping[str, object]) -> str:
     return _SAFE_VALIDATION_REASONS.get(raw_reason, "invalid_type_or_value")
 
 
+def _family_from_validation_item(item: Mapping[str, object]) -> str | None:
+    """Return the frozen event family the validator named, or None.
+
+    Admission is doubly closed: the token must look like a family name and must be one this bridge
+    publishes, so nothing caller-controlled can arrive under the key.
+    """
+
+    from yoetz.mcp.descriptors import ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
+
+    ctx = item.get("ctx")
+    if not isinstance(ctx, Mapping):
+        return None
+    family = cast(Mapping[object, object], ctx).get("schema_name")
+    if type(family) is not str or EVENT_FAMILY_NAME_PATTERN.fullmatch(family) is None:
+        return None
+    return family if family in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES else None
+
+
+def _family_version_from_validation_item(item: Mapping[str, object]) -> str | None:
+    """Return the frozen schema version of the family the validator named, or None.
+
+    The validator reads it from the catalogue entry the failing schema's ``$id`` names, so it is
+    frozen schema content and never the ``schema.version`` the caller sent. Admission is closed by
+    the same version pattern the protocol validator enforces.
+    """
+
+    ctx = item.get("ctx")
+    if not isinstance(ctx, Mapping):
+        return None
+    version = cast(Mapping[object, object], ctx).get("schema_version")
+    if type(version) is not str or SCHEMA_VERSION_PATTERN.fullmatch(version) is None:
+        return None
+    return version
+
+
+def _unknown_count_from_validation_item(item: Mapping[str, object]) -> int:
+    """Return the bounded count of unadmitted properties, or 0 when the validator named none."""
+
+    ctx = item.get("ctx")
+    if not isinstance(ctx, Mapping):
+        return 0
+    count = cast(Mapping[object, object], ctx).get("count")
+    if type(count) is not int or not 1 <= count <= MAX_UNKNOWN_PROPERTY_COUNT + 1:
+        return 0
+    return count
+
+
 def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
-    """Project Pydantic failures to allowlisted locations and bounded reason tokens."""
+    """Project Pydantic failures to allowlisted locations and bounded reason tokens.
+
+    ``family``, ``family_version``, and ``count`` ride along on an unknown-property location for
+    the hint builders in this module. ``build_public_error_result`` projects only ``field`` and
+    ``reason`` to the wire, so none of them reaches a caller as a detail key.
+    """
 
     if not isinstance(exc, ValidationError):
         return ()
@@ -261,8 +351,22 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
         # Empty pointers (model-level failures with no path) are not actionable; omit them.
         if pointer is None or pointer == "":
             continue
-        reason = _reason_from_validation_item(cast(Mapping[str, object], item))
-        projected.append({"field": pointer, "reason": reason})
+        source = cast(Mapping[str, object], item)
+        reason = _reason_from_validation_item(source)
+        entry = {"field": pointer, "reason": reason}
+        if reason == _EXTRA_FORBIDDEN_REASON:
+            family = _family_from_validation_item(source)
+            if family is not None:
+                entry["family"] = family
+                # Only meaningful beside a family, and a family with several admitted versions is
+                # answered with the wrong key list without it (issue #239).
+                family_version = _family_version_from_validation_item(source)
+                if family_version is not None:
+                    entry["family_version"] = family_version
+            count = _unknown_count_from_validation_item(source)
+            if count:
+                entry["count"] = str(count)
+        projected.append(entry)
         if len(projected) == _MAX_VALIDATION_LOCATIONS:
             break
     return tuple(projected)
@@ -305,6 +409,7 @@ def authoring_hint(
         # Fixed order, least specific last, so truncation at _MAX_HINT_FIELDS always keeps the
         # part that names the most about how to author the next request.
         keyed_parts: list[tuple[str, tuple[str, str]]] = [
+            *_unknown_payload_key_hint_parts(document, locations),
             *((text, (text, "")) for text in _object_rule_hint_parts(document, locations)),
             *_event_draft_hint_parts(document, locations),
             *((text, (text, "")) for text in _corrective_hint_parts(tool, locations)),
@@ -323,7 +428,8 @@ def authoring_hint(
                 reason = location.get("reason", "")
                 if type(pointer) is not str or not pointer.startswith("/"):
                     continue
-                # Object-rule locations already contributed schema-derived pairing text above.
+                # Object-rule and unknown-property locations already contributed their own
+                # schema-derived text above; the union node itself admits no values to name.
                 if reason in _SAFE_VALUE_ERROR_REASON_TOKENS:
                     continue
                 label, admitted, family = _hint_for_pointer(document, pointer)
@@ -406,18 +512,11 @@ def _event_draft_hint_parts(
     families are stated once under the label that says where they go.
     """
 
-    if not any(_is_event_draft_index_pointer(location) for location in locations):
+    if not any(_recital_applies(location) for location in locations):
         return []
-    properties = document.get("properties")
-    if not isinstance(properties, Mapping):
+    node = _event_draft_items(document)
+    if node is None:
         return []
-    drafts = _resolve_local(document, cast(Mapping[str, JsonValue], properties).get("event_drafts"))
-    if not isinstance(drafts, Mapping):
-        return []
-    items = _resolve_local(document, cast(Mapping[str, JsonValue], drafts).get("items"))
-    if not isinstance(items, Mapping):
-        return []
-    node = cast(Mapping[str, JsonValue], items)
     item_properties = node.get("properties")
     if not isinstance(item_properties, Mapping):
         return []
@@ -432,6 +531,150 @@ def _event_draft_hint_parts(
     if admitted:
         parts.append((f"schema.name admits {admitted}", ("schema.name", admitted)))
     return parts
+
+
+def _event_draft_items(document: Mapping[str, JsonValue]) -> Mapping[str, JsonValue] | None:
+    """Resolve the frozen `event_drafts` item node, or None when this schema has none."""
+
+    properties = document.get("properties")
+    if not isinstance(properties, Mapping):
+        return None
+    drafts = _resolve_local(document, cast(Mapping[str, JsonValue], properties).get("event_drafts"))
+    if not isinstance(drafts, Mapping):
+        return None
+    items = _resolve_local(document, cast(Mapping[str, JsonValue], drafts).get("items"))
+    if not isinstance(items, Mapping):
+        return None
+    return cast(Mapping[str, JsonValue], items)
+
+
+def _unknown_payload_key_hint_parts(
+    document: Mapping[str, JsonValue], locations: Sequence[Mapping[str, str]]
+) -> list[tuple[str, tuple[str, str]]]:
+    """Name the admitted payload keys for a family whose payload carried unknown properties.
+
+    Admitted key names are frozen presentation-schema content — the same class of fact this module
+    already speaks for enum members and required lists. The rejected key names are
+    caller-controlled and are never echoed; only the closed reason token, the pointer, and a
+    bounded integer count travel out of the validator (issue #240).
+    """
+
+    parts: list[tuple[str, tuple[str, str]]] = []
+    for location in locations:
+        if location.get("reason", "") != _EXTRA_FORBIDDEN_REASON:
+            continue
+        pointer = location.get("field", "")
+        if type(pointer) is not str or _EVENT_DRAFT_PAYLOAD_POINTER.fullmatch(pointer) is None:
+            continue
+        family = location.get("family")
+        family = family if type(family) is str else None
+        family_version = location.get("family_version")
+        family_version = family_version if type(family_version) is str else None
+        admitted = _payload_property_names(document, family, family_version)
+        subject = f"the {family} schema" if family is not None and admitted else "the event schema"
+        measure = _unknown_property_measure(location.get("count", ""))
+        text = f"the payload carries {measure} {subject} does not admit"
+        if admitted:
+            text = f"{text}; admitted keys are {admitted}"
+        parts.append((text, (text, "")))
+        if not admitted:
+            # Without the family the caller still needs the contract; the recital is gated off.
+            names = _union_schema_names(document, cast(JsonValue, _event_draft_items(document)))
+            if names:
+                parts.append((f"schema.name admits {names}", ("schema.name", names)))
+        if len(parts) >= _MAX_HINT_FIELDS:
+            break
+    return parts
+
+
+def _payload_property_names(
+    document: Mapping[str, JsonValue], family: str | None, family_version: str | None
+) -> str:
+    """Return the admitted payload keys of one family version, or "" when they cannot be named.
+
+    Both consts must match. A family may carry several admitted versions — ``evidence_recorded``
+    has 1.0.0 and 1.1.0 — while this presentation schema pins one branch per family. Selecting on
+    the name alone would answer a 1.1.0 failure with the 1.0.0 key list and so tell the caller to
+    delete ``digest_binding``, a key 1.1.0 requires (issue #239). When no branch matches both, the
+    caller gets the family-free wording, which still states the count and names ``schema.name``.
+
+    Both the name and the version come from frozen schema content on either side: the presentation
+    branch's own consts, and the version the validator read from the catalogue. Neither is ever
+    taken from the instance.
+    """
+
+    if family is None or family_version is None:
+        return ""
+    items = _event_draft_items(document)
+    if items is None:
+        return ""
+    options = items.get("oneOf")
+    if not isinstance(options, list):
+        options = items.get("anyOf")
+    if not isinstance(options, list):
+        return ""
+    for branch in cast(list[JsonValue], options):
+        resolved = _resolve_local(document, branch)
+        if not isinstance(resolved, Mapping):
+            continue
+        if _schema_name_const(document, resolved) != family:
+            continue
+        if _schema_version_const(document, resolved) != family_version:
+            continue
+        branch_properties = cast(Mapping[str, JsonValue], resolved).get("properties")
+        if not isinstance(branch_properties, Mapping):
+            return ""
+        payload = _resolve_local(
+            document, cast(Mapping[str, JsonValue], branch_properties).get("payload")
+        )
+        if not isinstance(payload, Mapping):
+            return ""
+        payload_properties = cast(Mapping[str, JsonValue], payload).get("properties")
+        if not isinstance(payload_properties, Mapping):
+            return ""
+        names = sorted(
+            key for key in cast(Mapping[object, object], payload_properties) if type(key) is str
+        )
+        # A partial list would read as complete and send the caller after the wrong key.
+        if not names or len(names) > _MAX_HINT_SCHEMA_NAMES:
+            return ""
+        if any(name not in _SAFE_LOCATION_SEGMENTS for name in names):
+            return ""
+        return _format_required_list(
+            cast(JsonValue, names), cast(Mapping[str, JsonValue], payload_properties)
+        )
+    return ""
+
+
+def _unknown_property_measure(count: object) -> str:
+    """Render the bounded cardinality of unadmitted keys, never a key name."""
+
+    if type(count) is not str or not count.isdigit():
+        return "properties"
+    value = int(count)
+    if value == 1:
+        return "1 property"
+    if value == MAX_UNKNOWN_PROPERTY_COUNT + 1:
+        return f"at least {MAX_UNKNOWN_PROPERTY_COUNT} properties"
+    if 2 <= value <= MAX_UNKNOWN_PROPERTY_COUNT:
+        return f"{value} properties"
+    return "properties"
+
+
+def _recital_applies(location: Mapping[str, str]) -> bool:
+    """Whether the draft-envelope recital answers this location.
+
+    The recital answers "this entry is not a draft". An unknown key *inside* a payload proves the
+    entry already is one and that its family was admitted, so the recital would assert facts the
+    request already satisfies (issue #240). An unknown key on the draft object itself is still an
+    envelope defect, and the recital is exactly right for it.
+    """
+
+    if not _is_event_draft_index_pointer(location):
+        return False
+    if location.get("reason", "") != _EXTRA_FORBIDDEN_REASON:
+        return True
+    return not location.get("field", "").endswith("/payload")
 
 
 def _is_event_draft_index_pointer(location: Mapping[str, str]) -> bool:
@@ -816,7 +1059,11 @@ def _branch_covers_path(
     return True
 
 
-def _schema_name_const(document: Mapping[str, JsonValue], branch: JsonValue) -> str | None:
+def _schema_identity_const(
+    document: Mapping[str, JsonValue], branch: JsonValue, member: str
+) -> str | None:
+    """Read one frozen ``schema.<member>`` const off a draft-union branch."""
+
     node = _resolve_local(document, branch)
     if not isinstance(node, Mapping):
         return None
@@ -830,12 +1077,20 @@ def _schema_name_const(document: Mapping[str, JsonValue], branch: JsonValue) -> 
     schema_props = cast(Mapping[str, JsonValue], schema_node).get("properties")
     if not isinstance(schema_props, Mapping):
         return None
-    name_node = cast(Mapping[str, JsonValue], schema_props).get("name")
-    name_node = _resolve_local(document, name_node) if name_node is not None else None
-    if not isinstance(name_node, Mapping):
+    member_node = cast(Mapping[str, JsonValue], schema_props).get(member)
+    member_node = _resolve_local(document, member_node) if member_node is not None else None
+    if not isinstance(member_node, Mapping):
         return None
-    const_name = cast(Mapping[str, JsonValue], name_node).get("const")
-    return const_name if type(const_name) is str else None
+    const_value = cast(Mapping[str, JsonValue], member_node).get("const")
+    return const_value if type(const_value) is str else None
+
+
+def _schema_name_const(document: Mapping[str, JsonValue], branch: JsonValue) -> str | None:
+    return _schema_identity_const(document, branch, "name")
+
+
+def _schema_version_const(document: Mapping[str, JsonValue], branch: JsonValue) -> str | None:
+    return _schema_identity_const(document, branch, "version")
 
 
 def _is_schema_discriminator_path(remaining: Sequence[str | int]) -> bool:
@@ -961,20 +1216,31 @@ def build_public_error_result(
     *,
     request_id: str | None = None,
     safe_details: object | None = None,
+    details_reason_code: str | None = None,
 ) -> dict[str, JsonValue]:
-    """Build and schema-check one exact public operation-failure result."""
+    """Build and schema-check one exact public operation-failure result.
+
+    ``details_reason_code`` carries a second machine-readable fact beside field locations, so a
+    caller never has to choose between knowing what to fix and knowing what else happened.
+    """
 
     if type(safe_details) is tuple:
         locations = cast(tuple[Mapping[str, str], ...], safe_details)
+        details: dict[str, object] = {
+            "fields": tuple(location["field"] for location in locations),
+            "reasons": tuple(location["reason"] for location in locations),
+        }
+        if type(details_reason_code) is str and _REASON_CODE.fullmatch(details_reason_code):
+            details["reason_code"] = details_reason_code
         public_error: dict[str, object] = {
             "code": code.value,
             "message": message,
             "retryable": retryable,
             "correlation_id": correlation_id,
-            "safe_details": {
-                "fields": tuple(location["field"] for location in locations),
-                "reasons": tuple(location["reason"] for location in locations),
-            },
+            # `safe_details` keys are ASCII-ordered on the wire (docs/INTERFACES.md). Literal
+            # insertion order put `reason_code` last, which is neither the documented order nor
+            # the one every other producer of this map emits.
+            "safe_details": dict(sorted(details.items())),
         }
         return _validated_failure(public_error, request_id)
     error = PublicOperationError(
@@ -1051,6 +1317,11 @@ def _check_locatable_required_names() -> None:
 
     The same pass keeps the corrective registry honest: every field name a checked-in sentence
     mentions must still be declared by that tool's presentation schema.
+
+    Declared-but-not-required names are held to the same rule. A payload key such as `source_refs`
+    that is absent from the allowlist collapses its failure to `/event_drafts/N/payload`, which is
+    what the 2026-08-13 dogfood was answered with, and the hint then recites envelope requirements
+    the request already satisfied (issue #240).
     """
 
     from yoetz.mcp.descriptors import descriptor_for
@@ -1061,6 +1332,8 @@ def _check_locatable_required_names() -> None:
         _schema_names(cast(JsonValue, descriptor_for(tool).input_schema), required, declared)
         if required - _SAFE_LOCATION_SEGMENTS - _DELIBERATELY_UNLOCATABLE:
             raise RuntimeError("safe_location_segments_missing_required_field")
+        if declared - _SAFE_LOCATION_SEGMENTS - _DELIBERATELY_UNLOCATABLE_DECLARED:
+            raise RuntimeError("safe_location_segments_missing_declared_field")
         for (registered_tool, _, _), (_, fields) in _CORRECTIVE_HINTS.items():
             if registered_tool == tool and not set(fields) <= declared:
                 raise RuntimeError("corrective_hint_names_unknown_field")

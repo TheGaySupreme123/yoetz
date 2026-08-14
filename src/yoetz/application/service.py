@@ -608,6 +608,11 @@ class Application:
     ready_recommendation_refresh: Callable[[], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
     )
+    # The sweeper owns a worker pool of its own; this generation's close is the only place that
+    # can release it, so it travels with the sweep it belongs to.
+    observation_sweep_close: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False
+    )
     enforce_repository_identity: bool = True
     _close_lock: asyncio.Lock = field(init=False, repr=False, compare=False)
     _close_task: asyncio.Task[None] | None = field(
@@ -630,6 +635,8 @@ class Application:
             self.ready_recommendation_refresh
         ):
             raise TypeError("ready_recommendation_refresh_invalid")
+        if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
+            raise TypeError("observation_sweep_close_invalid")
         if type(self.enforce_repository_identity) is not bool:
             raise TypeError("repository_identity_enforcement_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
@@ -1201,10 +1208,18 @@ class Application:
     async def _close_once(self) -> None:
         failure: BaseException | None = None
         try:
+            # First: the sweep loop is already cancelled by this point, and a worker still parked
+            # on a cross-process flock must not hold this teardown open.
+            if self.observation_sweep_close is not None:
+                self.observation_sweep_close()
+        except BaseException as exc:
+            failure = exc
+        try:
             if self.verification_supervisor is not None:
                 await self.verification_supervisor.stop()
         except BaseException as exc:
-            failure = exc
+            if failure is None:
+                failure = exc
         try:
             await self.privacy.close()
         except BaseException as exc:
@@ -1260,6 +1275,9 @@ class ServiceReadyContext:
     ready_recommendation_refresh: Callable[[], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
     )
+    observation_sweep_close: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -1283,6 +1301,8 @@ class ServiceReadyContext:
             self.ready_recommendation_refresh
         ):
             raise TypeError("ready_recommendation_refresh_invalid")
+        if self.observation_sweep_close is not None and not callable(self.observation_sweep_close):
+            raise TypeError("observation_sweep_close_invalid")
         # Readiness may never outrun the resolved binding. A connected provider that is not the
         # configured one leaves dispatch on the credential-unavailable path, so a readiness flag
         # set without it would report ready while every check reports unavailable.
@@ -1342,6 +1362,7 @@ class ReadyApplicationFactory:
                 semantic_ready=context.semantic_ready,
                 observation_sweep=context.observation_sweep,
                 ready_recommendation_refresh=context.ready_recommendation_refresh,
+                observation_sweep_close=context.observation_sweep_close,
                 enforce_repository_identity=True,
             )
             if context.verification_supervisor is not None:
@@ -1357,11 +1378,27 @@ class ReadyApplicationFactory:
 async def _close_ready_context(context: object) -> None:
     if not isinstance(context, ServiceReadyContext):
         return
+    failure: BaseException | None = None
+    try:
+        if context.observation_sweep_close is not None:
+            context.observation_sweep_close()
+    except BaseException as exc:
+        failure = exc
     try:
         if context.verification_supervisor is not None:
             await context.verification_supervisor.stop()
-    finally:
-        try:
-            await context.privacy.close()
-        finally:
-            await context.runtime.close()
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+    try:
+        await context.privacy.close()
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+    try:
+        await context.runtime.close()
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+    if failure is not None:
+        raise failure

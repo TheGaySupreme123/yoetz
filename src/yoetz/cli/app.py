@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import Enum
 from functools import cache
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO, Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, Final, Literal, Protocol, cast
 
 import anyio
 import typer
@@ -18,7 +18,12 @@ from pydantic import BaseModel, ValidationError
 
 from yoetz import __version__
 from yoetz.cli.agent_start import AGENT_START_HANDOFF
-from yoetz.cli.exits import ceremony_refusal_message, exit_code_for, remediation_message
+from yoetz.cli.exits import (
+    ceremony_refusal_message,
+    exit_code_for,
+    lifecycle_public_code,
+    remediation_message,
+)
 from yoetz.cli.render import (
     render_human_awaiting_human,
     render_human_check,
@@ -56,9 +61,15 @@ from yoetz.protocol.models import (
     public_model_to_wire,
 )
 from yoetz.protocol.schemas import schema_document_for
-from yoetz.service.client import ServiceClient, connect_service
+from yoetz.service.client import ServiceClient, accepted_but_unresponsive, connect_service
 from yoetz.service.control_protocol import public_error_code_for_control_reason
 from yoetz.version import ResourceIntegrityError
+
+if TYPE_CHECKING:
+    # Runtime resolution is deliberately lazy: the client/service trust boundary pins
+    # cli.app's import graph to the ordinary service client, and yoetz.service.lifecycle
+    # is service-composition side (see tests/packaging/test_service_boundary_imports.py).
+    from yoetz.service.lifecycle import LifecycleError
 
 __all__ = [
     "app",
@@ -391,8 +402,70 @@ def _elevated_failure(error: Exception) -> int:
     return 2
 
 
+def _singleton_holder_pid() -> int | None:
+    """Best-effort advisory pid of the process holding the service singleton, else None.
+
+    Never takes the lock: even a shared flock conflicts with a daemon still acquiring its
+    exclusive one, so a diagnostic could make a legitimate start fail.
+    """
+
+    try:
+        from yoetz.config.paths import state_dir
+        from yoetz.service.lifecycle import SINGLETON_LOCK_NAME, probe_singleton_holder
+
+        return probe_singleton_holder(state_dir() / SINGLETON_LOCK_NAME)
+    except Exception:
+        return None
+
+
+def _with_holder_pid(line: str) -> str:
+    holder = _singleton_holder_pid()
+    return line if holder is None else f"{line} (holder pid {holder})"
+
+
+def _lifecycle_exit_code(error: BaseException) -> int | None:
+    """Exit code for a bounded lifecycle refusal, or None for anything else.
+
+    A ``LifecycleError`` can only arrive from a command that already composed the daemon,
+    so its module is resolved through ``sys.modules`` rather than imported: the catch-all
+    must not pull service-composition modules into cli.app's pinned import graph.
+    """
+
+    lifecycle = sys.modules.get("yoetz.service.lifecycle")
+    if lifecycle is None:
+        return None
+    if not isinstance(error, lifecycle.LifecycleError):
+        return None
+    return _lifecycle_failure(cast("LifecycleError", error))
+
+
+def _lifecycle_failure(error: LifecycleError) -> int:
+    """Report a bounded lifecycle refusal as the operating condition it names."""
+
+    code = lifecycle_public_code(error.reason)
+    if code is None:
+        _stderr("internal_error: the command could not be completed")
+        return exit_code_for(PublicErrorCode.INTERNAL_ERROR)
+    _stderr(_with_holder_pid(_bounded_failure_line(error.reason)))
+    return exit_code_for(code)
+
+
 def _control_failure(error: ControlError) -> int:
     code = public_error_code_for_control_reason(error.reason)
+    if code is PublicErrorCode.SERVICE_UNAVAILABLE and accepted_but_unresponsive(error):
+        # A service that answered the connect and then went silent is running. Prescribing
+        # 'service run' here sent an operator to a command that must refuse, and the refusal
+        # then read as "the service died" (#237).
+        _stderr(
+            _with_holder_pid(
+                "service_unavailable: a local service is listening but did not answer within "
+                "5 seconds; it may still be starting or may be wedged. Wait and retry "
+                "'yoetz service status'. Do not run 'yoetz service run' -- it will refuse "
+                "while that process holds the singleton; stop it with 'yoetz service stop' "
+                "instead"
+            )
+        )
+        return exit_code_for(code)
     guidance = {
         PublicErrorCode.VAULT_LOCKED: (
             "vault_locked: run `yoetz service unlock` on a local terminal "
@@ -921,7 +994,13 @@ def service_run() -> None:
         )
         raise typer.Exit(exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)) from None
 
-    daemon_main()
+    # Free at this point: the daemon import above already composed the lifecycle module.
+    from yoetz.service.lifecycle import LifecycleError
+
+    try:
+        daemon_main()
+    except LifecycleError as error:
+        _finish(_lifecycle_failure(error))
 
 
 @service_app.command("diagnostics")
@@ -995,6 +1074,10 @@ def state_capture(
             "files_hashed": result.files_hashed,
             "format": result.format.value,
             "limitations": [item.value for item in result.limitations],
+            "limit_detail": [
+                {"bound": item.bound.value, "observed": item.observed, "limit": item.limit}
+                for item in result.limit_detail
+            ],
             "status": result.status.value,
             "tree_digest": state.tree_digest if state is not None else None,
             "diff_digest": state.diff_digest if state is not None else None,
@@ -2093,7 +2176,12 @@ def main() -> None:
     except KeyboardInterrupt:
         _stderr("cancelled")
         raise SystemExit(130) from None
-    except Exception:
+    except Exception as error:
+        # Defence in depth for the same defect the ``service run`` arm fixes: no command may
+        # ever leak a bounded lifecycle refusal as internal_error again (#237).
+        lifecycle_exit = _lifecycle_exit_code(error)
+        if lifecycle_exit is not None:
+            raise SystemExit(lifecycle_exit) from None
         _stderr("internal_error: the command could not be completed")
         raise SystemExit(70) from None
 

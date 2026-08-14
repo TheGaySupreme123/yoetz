@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import sys
 import time
@@ -10,7 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, Final, Protocol, cast
+from typing import TYPE_CHECKING, BinaryIO, Final, Protocol, cast
 
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
@@ -23,15 +22,22 @@ from yoetz.adapters.integrations.codex_lifecycle import (
 from yoetz.adapters.integrations.observation_local import (
     HOOK_MAPPING_VERSION,
     YOETZ_TOOL_NAMES,
+    AdviceDelivery,
     LocalObservationStore,
     ObservationOutboxRow,
 )
-from yoetz.application.observation_drain import ObservationDrainAction, route_observation_ingest
-from yoetz.application.recommendations import cached_pending_recommendations
-from yoetz.cli import hooks as hooks_cli
-from yoetz.cli.hook_diagnostics import record_hook_diagnostic
+from yoetz.cli import hook_io
+from yoetz.cli.hook_diagnostics import record_hook_diagnostic, record_hook_timing
+from yoetz.cli.hook_io import (
+    context_output as _context_output,
+)
+from yoetz.cli.hook_io import (
+    read_hook_payload,
+)
+from yoetz.cli.hook_io import (
+    stderr_line as _stderr_line,
+)
 from yoetz.domain.observation import (
-    AdviceSnapshot,
     ObservationContentChunk,
     ObservationContentKind,
     ObservationCursor,
@@ -53,16 +59,16 @@ from yoetz.domain.values import (
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
-from yoetz.observability.privacy import redact_sensitive_content
-from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError
-from yoetz.protocol.ids import IdKind, new_id
-from yoetz.protocol.models import StartRequest
-from yoetz.service.client import connect_service
+
+if TYPE_CHECKING:
+    from yoetz.cli import hooks as hooks_cli
+    from yoetz.ports.control import ControlClientKind
 
 __all__ = [
     "ADVICE_SAFE_EVENTS",
+    "STANDING_ADVICE_CADENCE_EVENTS",
     "SUPPORTED_HOOK_EVENTS",
     "handle_observe",
     "map_hook_payload_to_envelope",
@@ -84,6 +90,12 @@ SUPPORTED_HOOK_EVENTS: Final = frozenset(
     }
 )
 ADVICE_SAFE_EVENTS: Final = frozenset({"PostToolUse", "SessionStart", "Stop", "SessionEnd"})
+# Standing machine conditions (connect_provider and kin) reach the agent at
+# session boundaries only. PostToolUse is deliberately excluded: it is the
+# per-tool-call channel that produced 29 byte-identical injections in one
+# session (#241). Codex fires Stop per assistant turn, so the achievable bound
+# is once per turn and only when a different advice text intervened.
+STANDING_ADVICE_CADENCE_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
 _MAX_ADVICE_CONTEXT: Final = 1_200
 _MAX_CONTENT_CHUNK: Final = 256 * 1024
 # Ingest rejections that are recoverable: keep the outbox entry pending for a
@@ -106,6 +118,10 @@ _DRAIN_MAX_CONSECUTIVE_UNAVAILABLE: Final = 3
 # 69-schema catalog), and 1.0s leaves margin for daemon contention without
 # letting a dead daemon consume the whole drain budget.
 _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
+# End-to-end observability contract for one hook pass, process start included.
+# Never an abort point: the drain and preflight budgets own enforcement.
+_HOOK_TOTAL_BUDGET_SECONDS: Final = 1.0
+_TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
 _STRUCTURAL_ALLOW: Final = frozenset(
     {
         "tool_name",
@@ -141,6 +157,33 @@ type AsyncRunner = Callable[[Callable[[], Awaitable[object]]], object]
 type ServiceConnector = hooks_cli.ServiceConnector
 
 
+def __getattr__(name: str) -> object:
+    """Resolve the service-client seam on demand.
+
+    ``connect_service`` stays a patchable module attribute (tests bind it to a
+    forbidden connector) without ``yoetz.service.client`` — and through it
+    ``protocol.schemas``/jsonschema — being imported by hooks that never open a
+    connection (#242).
+    """
+
+    if name == "connect_service":
+        from yoetz.service.client import connect_service
+
+        return connect_service
+    raise AttributeError(name)
+
+
+def _connect_service() -> object:
+    """Return the connector, honoring a module-attribute override."""
+
+    override = globals().get("connect_service")
+    if override is not None:
+        return override
+    from yoetz.service.client import connect_service
+
+    return connect_service
+
+
 class _HookDrainClient(Protocol):
     async def observation_ingest(
         self, body: DomainJsonValue, *, deadline_ms: int | None = None
@@ -150,6 +193,12 @@ class _HookDrainClient(Protocol):
 
 
 type HookDrainConnector = Callable[[ControlClientKind], Awaitable[_HookDrainClient]]
+
+
+class _StartClient(Protocol):
+    async def start(self, request: object, *, deadline_ms: int | None = None) -> object: ...
+
+    async def close(self) -> None: ...
 
 
 def _now() -> Timestamp:
@@ -348,6 +397,8 @@ def _visible_content_chunks(
     ``truncated_payload`` without inventing success.
     """
 
+    from yoetz.observability.privacy import redact_sensitive_content
+
     selected: list[tuple[ObservationContentKind, str, bytes]] = []
 
     def add(kind: ObservationContentKind, label: str, value: JsonValue) -> None:
@@ -451,13 +502,39 @@ def _visible_content_chunks(
     return tuple(chunks), truncated
 
 
-def _advice_context(snapshot: AdviceSnapshot) -> str:
-    from yoetz.application.observation_advice import hook_advice_context
+def _elapsed_ms(started: float, finished: float) -> int:
+    return max(0, int((finished - started) * 1000))
 
-    return hook_advice_context(snapshot)[:_MAX_ADVICE_CONTEXT]
+
+def _record_pass_timing(
+    event: str,
+    *,
+    entry_started: float,
+    stages: Mapping[str, int],
+    monotonic: Callable[[], float],
+    _state: Path | None,
+) -> None:
+    """Record the end-to-end hook budget.
+
+    Observability only: exceeding the budget never aborts a pass, because that
+    would drop ingest. The drain and preflight budgets stay the enforcement
+    points. Rows are emitted only over budget or at a session boundary, so the
+    64 KiB diagnostics window keeps its failure-reason history.
+    """
+
+    with contextlib.suppress(BaseException):
+        total_ms = _elapsed_ms(entry_started, monotonic())
+        over = total_ms > int(_HOOK_TOTAL_BUDGET_SECONDS * 1000)
+        if not over and event not in _TIMING_REPORT_EVENTS:
+            return
+        if over:
+            record_hook_diagnostic("hook_budget_exceeded", event, _state=_state)
+        record_hook_timing(event, ms=total_ms, stages={**stages, "total": total_ms}, _state=_state)
 
 
 def _cached_recommendation_context(*, _state: Path | None) -> str:
+    from yoetz.application.recommendations import cached_pending_recommendations
+
     pending = cached_pending_recommendations(root=_state, limit=1)
     if not pending:
         return ""
@@ -478,6 +555,8 @@ async def _try_service_ingest(
     deadline_ms: int,
 ) -> ObservationIngestResult:
     """Attempt one typed ingest through an already-open preflight client."""
+
+    from yoetz.ports.control import ControlError
 
     try:
         body = observation_ingest_request_to_json(
@@ -568,11 +647,19 @@ async def _drain_outbox_leased(
     session in the same workspace.
     """
 
+    import asyncio
+
+    from yoetz.application.observation_drain import (
+        ObservationDrainAction,
+        route_observation_ingest,
+    )
+    from yoetz.ports.control import ControlClientKind
+
     all_pending = store.list_pending_outbox_rows(workspace_commitment)
     if not all_pending:
         return
 
-    connector = cast(HookDrainConnector, connect_service) if connect is None else connect
+    connector = cast(HookDrainConnector, _connect_service()) if connect is None else connect
     client: _HookDrainClient
     try:
         client = await asyncio.wait_for(
@@ -656,19 +743,34 @@ async def _drain_outbox_leased(
                 record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
                 break
             decision = route_observation_ingest(result)
-            attempted = store.bump_outbox_row_attempt(
-                workspace_commitment, row, reason=decision.reason
-            )
+            # One batch per row, opened only after this row's RPC returned and
+            # closed before the next one: the acknowledgement is never durable
+            # ahead of the ingest it acknowledges, and the store lock never
+            # spans a network wait (#242).
+            with store.batched(workspace_commitment):
+                attempted = store.bump_outbox_row_attempt(
+                    workspace_commitment, row, reason=decision.reason
+                )
+                if attempted is not None:
+                    if decision.reason is not None:
+                        store.note_coverage_gap(workspace_commitment, decision.reason)
+                    if chunks and decision.action is not ObservationDrainAction.ACKNOWLEDGE:
+                        store.note_coverage_gap(
+                            workspace_commitment,
+                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                        )
+                    if decision.action is ObservationDrainAction.QUARANTINE:
+                        store.quarantine_outbox_row(
+                            workspace_commitment,
+                            attempted,
+                            decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                        )
+                    elif decision.action is ObservationDrainAction.ACKNOWLEDGE:
+                        store.acknowledge_outbox_row(workspace_commitment, attempted)
             if attempted is None:
                 continue
             if decision.reason is not None:
-                store.note_coverage_gap(workspace_commitment, decision.reason)
                 record_hook_diagnostic(decision.reason, event_name, _state=_state)
-            if chunks and decision.action is not ObservationDrainAction.ACKNOWLEDGE:
-                store.note_coverage_gap(
-                    workspace_commitment,
-                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
-                )
             if decision.action is ObservationDrainAction.RETRY:
                 if decision.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value:
                     consecutive_unavailable += 1
@@ -690,14 +792,6 @@ async def _drain_outbox_leased(
                     break
                 continue
             consecutive_unavailable = 0
-            if decision.action is ObservationDrainAction.QUARANTINE:
-                store.quarantine_outbox_row(
-                    workspace_commitment,
-                    attempted,
-                    decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
-                )
-                continue
-            store.acknowledge_outbox_row(workspace_commitment, attempted)
     finally:
         with contextlib.suppress(Exception):
             await client.close()
@@ -715,10 +809,14 @@ async def _try_auto_start(
     """
 
     from yoetz import __version__
+    from yoetz.ports.control import ControlClientKind
+    from yoetz.protocol.ids import IdKind, new_id
+    from yoetz.protocol.models import StartRequest
 
+    connector = cast(Callable[[ControlClientKind], Awaitable[object]], _connect_service())
     client = None
     try:
-        client = await connect_service(ControlClientKind.CLI)
+        client = cast("_StartClient", await connector(ControlClientKind.CLI))
         request = StartRequest.model_validate(
             {
                 "protocol_version": "0.1",
@@ -783,36 +881,49 @@ def handle_observe(
     connect: ServiceConnector | None = None,
     run_async: AsyncRunner | None = None,
     skip_service: bool = False,
+    _entry_monotonic: float | None = None,
+    _monotonic: Callable[[], float] = time.monotonic,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
     ``skip_service`` keeps the hook fully local: capture, binding, and outbox
     enqueue still run, but no service connection is ever opened (auto-attach,
     mapped-session status, and outbox drains are all skipped).
+
+    ``_entry_monotonic`` is the console shim's pre-import sample; without it the
+    recorded import stage reads zero rather than guessing.
     """
 
+    entry_started = _monotonic() if _entry_monotonic is None else _entry_monotonic
+    stages: dict[str, int] = {}
     try:
-        import anyio
-
-        runner: AsyncRunner = cast(AsyncRunner, anyio.run if run_async is None else run_async)
         store = LocalObservationStore(_state=_state)
-        # Shared hook IO/status helpers live in cli.hooks; intentional private seam reuse.
-        _stderr_line = hooks_cli._stderr_line  # pyright: ignore[reportPrivateUsage]
-        raw_stdout_json = hooks_cli._stdout_json  # pyright: ignore[reportPrivateUsage]
-        _context_output = hooks_cli._context_output  # pyright: ignore[reportPrivateUsage]
-        _active_context = hooks_cli._active_context  # pyright: ignore[reportPrivateUsage]
-        _read_status = hooks_cli._read_status  # pyright: ignore[reportPrivateUsage]
+        stages["import"] = _elapsed_ms(entry_started, _monotonic())
+        raw_stdout_json = hook_io.stdout_json
 
-        def _stdout_json(value: JsonValue, stream: BinaryIO | None = None) -> None:
-            if not raw_stdout_json(value, stream):
+        def _resolve_runner() -> AsyncRunner:
+            """Resolve the async runner only on a branch that opens a connection."""
+
+            if run_async is not None:
+                return run_async
+            import anyio
+
+            return cast(AsyncRunner, anyio.run)
+
+        def _stdout_json(value: JsonValue, stream: BinaryIO | None = None) -> bool:
+            """Emit one JSON object; report whether the bytes actually left."""
+
+            emitted = raw_stdout_json(value, stream)
+            if not emitted:
                 with contextlib.suppress(BaseException):
                     record_hook_diagnostic("stdout_write_failed", event_name, _state=_state)
             if stream is None and sys.stdout is sys.__stdout__:
                 with contextlib.suppress(BaseException):
                     sys.stdout.flush()
                     sys.stdout.close()
+            return emitted
 
-        payload = hooks_cli.read_hook_payload(stdin_bytes)
+        payload = read_hook_payload(stdin_bytes)
         raw_event = event_name or payload.get("hook_event_name")
         if type(raw_event) is not str or not raw_event:
             _stdout_json({}, stdout)
@@ -872,119 +983,129 @@ def handle_observe(
             return 0
 
         assert workspace_commitment is not None
-        session_commitment = store.bind_codex_session(workspace_commitment, codex_session_id)
-        source_generation = (
-            store.begin_session_generation(workspace_commitment, session_commitment)
-            if resolved_event == "SessionStart"
-            else store.current_session_generation(workspace_commitment, session_commitment)
-        )
-        gap_codes: list[str] = []
-
-        # Pair pre/post via correlation_id when present.
-        correlation = _token_or_none(payload.get("correlation_id")) or _token_or_none(
-            payload.get("tool_call_id")
-        )
-        if correlation is not None and _is_pre_event(resolved_event):
-            store.note_open_pre(workspace_commitment, correlation, resolved_event)
-        elif correlation is not None and _is_post_event(resolved_event):
-            if not store.has_open_pre(workspace_commitment, correlation):
-                gap_codes.append(ObservationGapCode.UNPAIRED_EVENT.value)
-            else:
-                store.consume_open_pre(workspace_commitment, correlation)
-
-        if resolved_event not in SUPPORTED_HOOK_EVENTS:
-            gap_codes.append(ObservationGapCode.UNSUPPORTED_EVENT.value)
-
-        tool_name = _token_or_none(payload.get("tool_name"))
-        skip_advice_loop = tool_name is not None and tool_name in YOETZ_TOOL_NAMES
-
-        supplied_ordinal = _event_ordinal_from_payload(payload)
-        event_ordinal = (
-            supplied_ordinal
-            if supplied_ordinal is not None
-            else store.allocate_hook_ordinal(workspace_commitment, session_commitment)
-        )
-
-        envelope = map_hook_payload_to_envelope(
-            resolved_event,
-            payload,
-            session_commitment=session_commitment,
-            event_ordinal=event_ordinal,
-            key_material=store.key_material(),
-            source_generation=source_generation,
-            gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
-        )
-        content_chunks, content_truncated = _visible_content_chunks(
-            resolved_event,
-            payload,
-            envelope=envelope,
-            workspace_locator=workspace_locator,
-        )
-        if content_truncated:
-            envelope = replace(
-                envelope,
-                gap_codes=tuple(
-                    sorted(
-                        {*envelope.gap_codes, ObservationGapCode.TRUNCATED_PAYLOAD.value},
-                        key=str.encode,
-                    )
-                ),
+        store_started = _monotonic()
+        # One flush for the whole local pass. The batch is closed before any
+        # service RPC so an outbox acknowledgement can never become durable
+        # ahead of the ingest it acknowledges, and it never spans a network
+        # wait: it holds the interprocess store lock for its duration.
+        with store.batched(workspace_commitment):
+            session_commitment = store.bind_codex_session(workspace_commitment, codex_session_id)
+            source_generation = (
+                store.begin_session_generation(workspace_commitment, session_commitment)
+                if resolved_event == "SessionStart"
+                else store.current_session_generation(workspace_commitment, session_commitment)
             )
-        content_map = {envelope.source_identity: content_chunks} if content_chunks else None
+            gap_codes: list[str] = []
 
-        # Local durable ingest first (never plaintext transcript spool).
-        local_result = store.ingest(envelope)
-        if local_result.disposition.value == "accepted":
-            overflow = store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
-            if overflow is not None:
-                if content_chunks:
-                    store.note_coverage_gap(
-                        workspace_commitment,
-                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
-                    )
-                _stderr_line(f"hook_observe_degraded: {overflow}")
-                record_hook_diagnostic("outbox_overflow", resolved_event, _state=_state)
+            # Pair pre/post via correlation_id when present.
+            correlation = _token_or_none(payload.get("correlation_id")) or _token_or_none(
+                payload.get("tool_call_id")
+            )
+            if correlation is not None and _is_pre_event(resolved_event):
+                store.note_open_pre(workspace_commitment, correlation, resolved_event)
+            elif correlation is not None and _is_post_event(resolved_event):
+                if not store.has_open_pre(workspace_commitment, correlation):
+                    gap_codes.append(ObservationGapCode.UNPAIRED_EVENT.value)
+                else:
+                    store.consume_open_pre(workspace_commitment, correlation)
 
-        # Persist session end so lifecycle can report STOPPED once every bound
-        # session has ended.
-        if resolved_event == "SessionEnd":
-            with contextlib.suppress(Exception):
-                store.note_session_end(
-                    workspace_commitment,
-                    session_commitment,
-                    generation=source_generation,
-                )
+            if resolved_event not in SUPPORTED_HOOK_EVENTS:
+                gap_codes.append(ObservationGapCode.UNSUPPORTED_EVENT.value)
 
-        # Selective secondary stream reconciliation (path never persisted/disclosed).
-        with contextlib.suppress(Exception):
-            from yoetz.adapters.integrations.codex_session_stream import (
-                CodexSessionStreamLocator,
-                reconcile_session_stream,
-                resolve_codex_home,
-                should_trigger_stream_reconcile,
+            tool_name = _token_or_none(payload.get("tool_name"))
+            skip_advice_loop = tool_name is not None and tool_name in YOETZ_TOOL_NAMES
+
+            supplied_ordinal = _event_ordinal_from_payload(payload)
+            event_ordinal = (
+                supplied_ordinal
+                if supplied_ordinal is not None
+                else store.allocate_hook_ordinal(workspace_commitment, session_commitment)
             )
 
-            hook_path = payload.get("session_file") or payload.get("transcript_path")
-            hook_path_token = hook_path if type(hook_path) is str else None
-            session_source = payload.get("source")
-            if should_trigger_stream_reconcile(
+            envelope = map_hook_payload_to_envelope(
                 resolved_event,
-                last_reconcile_mono=store.last_stream_reconcile_mono(workspace_commitment),
-                session_source=session_source if type(session_source) is str else None,
-            ):
-                locator = CodexSessionStreamLocator(resolve_codex_home())
-                reconcile_session_stream(
-                    store,
-                    workspace_commitment=workspace_commitment,
-                    session_commitment=session_commitment,
-                    codex_session_id=codex_session_id,
-                    locator=locator,
-                    hook_provided_path=hook_path_token,
+                payload,
+                session_commitment=session_commitment,
+                event_ordinal=event_ordinal,
+                key_material=store.key_material(),
+                source_generation=source_generation,
+                gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
+            )
+            content_chunks, content_truncated = _visible_content_chunks(
+                resolved_event,
+                payload,
+                envelope=envelope,
+                workspace_locator=workspace_locator,
+            )
+            if content_truncated:
+                envelope = replace(
+                    envelope,
+                    gap_codes=tuple(
+                        sorted(
+                            {*envelope.gap_codes, ObservationGapCode.TRUNCATED_PAYLOAD.value},
+                            key=str.encode,
+                        )
+                    ),
+                )
+            content_map = {envelope.source_identity: content_chunks} if content_chunks else None
+
+            # Local durable ingest first (never plaintext transcript spool).
+            local_result = store.ingest(envelope)
+            if local_result.disposition.value == "accepted":
+                overflow = store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
+                if overflow is not None:
+                    if content_chunks:
+                        store.note_coverage_gap(
+                            workspace_commitment,
+                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                        )
+                    _stderr_line(f"hook_observe_degraded: {overflow}")
+                    record_hook_diagnostic("outbox_overflow", resolved_event, _state=_state)
+
+            # Persist session end so lifecycle can report STOPPED once every bound
+            # session has ended.
+            if resolved_event == "SessionEnd":
+                with contextlib.suppress(Exception):
+                    store.note_session_end(
+                        workspace_commitment,
+                        session_commitment,
+                        generation=source_generation,
+                    )
+
+            # Selective secondary stream reconciliation (path never persisted/disclosed).
+            with contextlib.suppress(Exception):
+                from yoetz.adapters.integrations.codex_session_stream import (
+                    CodexSessionStreamLocator,
+                    reconcile_session_stream,
+                    resolve_codex_home,
+                    should_trigger_stream_reconcile,
                 )
 
-        # Deterministic advice from retained envelopes (works with zero MCP publications).
-        with contextlib.suppress(Exception):
-            store.refresh_advice(workspace_commitment)
+                hook_path = payload.get("session_file") or payload.get("transcript_path")
+                hook_path_token = hook_path if type(hook_path) is str else None
+                session_source = payload.get("source")
+                if should_trigger_stream_reconcile(
+                    resolved_event,
+                    last_reconcile_mono=store.last_stream_reconcile_mono(workspace_commitment),
+                    session_source=session_source if type(session_source) is str else None,
+                ):
+                    locator = CodexSessionStreamLocator(resolve_codex_home())
+                    reconcile_session_stream(
+                        store,
+                        workspace_commitment=workspace_commitment,
+                        session_commitment=session_commitment,
+                        codex_session_id=codex_session_id,
+                        locator=locator,
+                        hook_provided_path=hook_path_token,
+                    )
+
+            # Deterministic advice from retained envelopes (works with zero MCP publications).
+            advice_started = _monotonic()
+            with contextlib.suppress(Exception):
+                store.refresh_advice(workspace_commitment)
+            stages["advice"] = _elapsed_ms(advice_started, _monotonic())
+
+        stages["store"] = _elapsed_ms(store_started, _monotonic())
 
         # SessionStart: auto-start/attach first, persist mapping, then drain outbox.
         # Every branch below that opens a service connection is gated on
@@ -992,9 +1113,17 @@ def handle_observe(
         # never create or attach real ledger tasks.
         additional = ""
         mapping: LifecycleMapping | None = load_mapping(codex_session_id, _state=_state)
+        drain_started = _monotonic()
         if resolved_event == "SessionStart":
             source = payload.get("source")
             if source != "clear":
+                # SessionStart-only status/attach helpers: they drag protocol.models
+                # and service.client, which no other event needs (#242).
+                from yoetz.cli.hooks import (
+                    _active_context,  # pyright: ignore[reportPrivateUsage]
+                    _read_status,  # pyright: ignore[reportPrivateUsage]
+                )
+
                 with acquire_session_lock(codex_session_id, _state=_state) as owned:
                     if owned:
                         mapping = load_mapping(codex_session_id, _state=_state)
@@ -1003,7 +1132,7 @@ def handle_observe(
                             async def _attach() -> LifecycleMapping | None:
                                 return await _try_auto_start(codex_session_id, _state=_state)
 
-                            mapping = cast(LifecycleMapping | None, runner(_attach))
+                            mapping = cast(LifecycleMapping | None, _resolve_runner()(_attach))
                             if mapping is None:
                                 additional = (
                                     "Yoetz observation is consented for this workspace; "
@@ -1016,13 +1145,14 @@ def handle_observe(
                             active_mapping = mapping
 
                             async def _status() -> object:
-                                connector: hooks_cli.ServiceConnector = (
-                                    connect if connect is not None else connect_service
+                                connector = cast(
+                                    "hooks_cli.ServiceConnector",
+                                    connect if connect is not None else _connect_service(),
                                 )
                                 return await _read_status(active_mapping, connect=connector)
 
                             kind, updated = cast(
-                                tuple[str, LifecycleMapping | None], runner(_status)
+                                tuple[str, LifecycleMapping | None], _resolve_runner()(_status)
                             )
                             if kind == "active" and updated is not None:
                                 store_mapping(updated, _state=_state)
@@ -1049,10 +1179,11 @@ def handle_observe(
                                     connect=cast(HookDrainConnector | None, connect),
                                     event_name=resolved_event,
                                     _state=_state,
+                                    monotonic=_monotonic,
                                 )
 
                             with contextlib.suppress(Exception):
-                                runner(_drain)
+                                _resolve_runner()(_drain)
 
         if not skip_service and resolved_event != "SessionStart":
             # Every later mapped hook drains the complete session outbox, so the
@@ -1074,10 +1205,11 @@ def handle_observe(
                         if resolved_event == "SessionEnd"
                         else _HOOK_DRAIN_BUDGET_SECONDS
                     ),
+                    monotonic=_monotonic,
                 )
 
             with contextlib.suppress(Exception):
-                runner(_drain_all)
+                _resolve_runner()(_drain_all)
 
         if content_chunks and skip_service:
             # Content is intentionally ephemeral. Without a ready mapped
@@ -1088,36 +1220,71 @@ def handle_observe(
                 ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
             )
 
-        # Nonblocking advice delivery at safe points (suppress Yoetz self-tool loops).
-        if not additional and resolved_event in ADVICE_SAFE_EVENTS and not skip_advice_loop:
-            session_id = None if mapping is None else mapping.yoetz_session_id
-            snapshot = store.peek_advice_for_delivery(
-                workspace_commitment, yoetz_session_id=session_id
-            )
-            if snapshot is not None:
-                additional = _advice_context(snapshot)
+        stages["drain"] = _elapsed_ms(drain_started, _monotonic())
 
-        # Release recommendations are read from one bounded local cache only.
-        # Existing task/receipt advice always wins this shared context channel.
-        if not additional and resolved_event == "SessionStart" and not skip_advice_loop:
-            with contextlib.suppress(Exception):
-                additional = _cached_recommendation_context(_state=_state)
+        # Advice selection and commit are serialized with the stdout write by a
+        # dedicated delivery lease. The lease is independent of workspace state:
+        # a blocked host pipe delays advice, never observation ingest or outbox work.
+        # Commit remains after emit, so a failed write never suppresses a later delivery.
+        pending_delivery: AdviceDelivery | None = None
+        delivery_session_id: str | None = None
+        delivery_eligible = (
+            not additional and resolved_event in ADVICE_SAFE_EVENTS and not skip_advice_loop
+        )
+        delivery_gate = (
+            store.advice_delivery_lease(workspace_commitment)
+            if delivery_eligible
+            else contextlib.nullcontext(False)
+        )
+        with delivery_gate as delivery_acquired:
+            if delivery_eligible and delivery_acquired:
+                delivery_session_id = None if mapping is None else mapping.yoetz_session_id
+                delivery = store.peek_advice_for_delivery(
+                    workspace_commitment,
+                    yoetz_session_id=delivery_session_id,
+                    allow_standing=resolved_event in STANDING_ADVICE_CADENCE_EVENTS,
+                )
+                if delivery is not None:
+                    additional = delivery.text[:_MAX_ADVICE_CONTEXT]
+                    pending_delivery = delivery
 
-        if additional:
-            _stdout_json(_context_output(resolved_event, additional), stdout)
-        else:
-            _stdout_json({}, stdout)
+            # Release recommendations are read from one bounded local cache only.
+            # Existing task/receipt advice always wins this shared context channel.
+            if not additional and resolved_event == "SessionStart" and not skip_advice_loop:
+                with contextlib.suppress(Exception):
+                    additional = _cached_recommendation_context(_state=_state)
+
+            if additional:
+                emitted = _stdout_json(_context_output(resolved_event, additional), stdout)
+            else:
+                emitted = _stdout_json({}, stdout)
+            if emitted and pending_delivery is not None:
+                # Strictly after the write: delivered-but-unrecorded costs one
+                # redelivery, recorded-but-undelivered would cost the advice.
+                # Nothing past the emission may raise — the outer handler would
+                # write a second JSON object onto a stream that already has one.
+                with contextlib.suppress(BaseException):
+                    store.commit_advice_delivery(
+                        workspace_commitment,
+                        pending_delivery.delivery_identity,
+                        yoetz_session_id=delivery_session_id,
+                    )
+        _record_pass_timing(
+            resolved_event,
+            entry_started=entry_started,
+            stages=stages,
+            monotonic=_monotonic,
+            _state=_state,
+        )
         return 0
     except BaseException:
         with contextlib.suppress(BaseException):
-            hooks_cli._stderr_line(  # pyright: ignore[reportPrivateUsage]
-                "hook_observe_degraded: observe"
-            )
+            _stderr_line("hook_observe_degraded: observe")
         with contextlib.suppress(BaseException):
             record_hook_diagnostic("observe", event_name or "observe", _state=_state)
         emitted = False
         with contextlib.suppress(BaseException):
-            emitted = hooks_cli._stdout_json({}, stdout)  # pyright: ignore[reportPrivateUsage]
+            emitted = hook_io.stdout_json({}, stdout)
         if not emitted:
             with contextlib.suppress(BaseException):
                 record_hook_diagnostic(

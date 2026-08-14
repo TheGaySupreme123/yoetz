@@ -11,6 +11,14 @@ import threading
 import time
 from pathlib import Path
 
+from test_process_owner_fencing import (
+    cleanup_environment,
+    isolated_environment,
+    spawn_service,
+    terminate_service,
+    wait_status,
+)
+
 _DAEMON_PROBE = r"""
 import asyncio, os, sys
 from datetime import UTC, datetime
@@ -298,3 +306,34 @@ def test_control_stop_exits_unlinks_endpoint_and_releases_singleton(tmp_path: Pa
             owner.kill()
             owner.wait(timeout=5)
         shutil.rmtree(runtime_path, ignore_errors=True)
+
+
+def test_service_run_against_a_held_singleton_reports_service_already_running(
+    tmp_path: Path,
+) -> None:
+    """A live owner is an operating condition, not an internal failure of the second start."""
+
+    environment = isolated_environment(tmp_path / "installation")
+    owner = spawn_service(environment)
+    try:
+        wait_status(environment, (owner,))
+
+        refused = subprocess.run(  # noqa: S603 - fixed interpreter and installed module
+            (sys.executable, "-m", "yoetz", "service", "run"),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            env=environment,
+            close_fds=True,
+            timeout=30,
+            check=False,
+        )
+
+        assert refused.returncode == 20
+        assert refused.stdout == b""
+        assert b"service_already_running" in refused.stderr
+        assert b"internal_error" not in refused.stderr
+        assert b"Traceback (most recent call last)" not in refused.stderr
+        assert f"holder pid {owner.pid}".encode("ascii") in refused.stderr
+    finally:
+        terminate_service(owner)
+        cleanup_environment(environment)

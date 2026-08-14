@@ -267,6 +267,7 @@ async def test_on_demand_connect_spawns_only_after_absent_service(
 
     monkeypatch.setattr(client_module, "_connect_service_attempt", scripted_connect)
     monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    monkeypatch.setattr(client_module, "_SERVICE_START_POLL_SECONDS", 0.01)
     connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.2)
     assert connected is expected
     assert spawned == 1
@@ -335,6 +336,83 @@ async def test_on_demand_does_not_spawn_after_accepted_service_stalls_handshake(
 
     assert stream.closed is True
     assert spawned == 0
+
+
+@pytest.mark.anyio
+async def test_on_demand_tolerates_the_daemon_it_just_spawned_until_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon this call started is still starting, not wedged, while it stays silent."""
+
+    import yoetz.service.client as client_module
+
+    expected = object()
+    attempts = 0
+    spawned = 0
+
+    async def scripted_connect(
+        kind: ControlClientKind,
+        **_kwargs: object,
+    ) -> object:
+        nonlocal attempts
+        assert kind is ControlClientKind.MCP_BRIDGE
+        attempts += 1
+        if attempts == 1:
+            raise ControlError("service_unavailable", retryable=True)
+        if attempts <= 3:
+            raise client_module._AcceptedServiceUnresponsive()  # pyright: ignore[reportPrivateUsage]
+        return expected
+
+    def spawn() -> None:
+        nonlocal spawned
+        spawned += 1
+
+    monkeypatch.setattr(client_module, "_connect_service_attempt", scripted_connect)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+
+    connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=1.0)
+
+    assert connected is expected
+    assert spawned == 1
+    assert attempts == 4
+
+
+@pytest.mark.anyio
+async def test_on_demand_accepted_unresponsive_after_spawn_still_ends_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tolerating the startup window must not restore an unbounded wait."""
+
+    import yoetz.service.client as client_module
+
+    attempts = 0
+    spawned = 0
+
+    async def scripted_connect(
+        kind: ControlClientKind,
+        **_kwargs: object,
+    ) -> object:
+        nonlocal attempts
+        assert kind is ControlClientKind.MCP_BRIDGE
+        attempts += 1
+        if attempts == 1:
+            raise ControlError("service_unavailable", retryable=True)
+        raise client_module._AcceptedServiceUnresponsive()  # pyright: ignore[reportPrivateUsage]
+
+    def spawn() -> None:
+        nonlocal spawned
+        spawned += 1
+
+    monkeypatch.setattr(client_module, "_connect_service_attempt", scripted_connect)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(ControlError, match="service_unavailable"):
+        await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.3)
+
+    assert asyncio.get_running_loop().time() - started < 1.0
+    assert spawned == 1
+    assert attempts > 2
 
 
 @pytest.mark.anyio

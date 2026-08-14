@@ -20,6 +20,7 @@ from yoetz.observability.logging import (
     LogMode,
     configure_logging,
     exception_origin,
+    record_bounded_counts_without_raising,
     record_unexpected_exception_without_raising,
 )
 from yoetz.protocol.ids import IdKind, validate_id
@@ -213,3 +214,32 @@ def test_diagnostic_origin_is_rejected_unless_it_is_a_yoetz_source_location(
         root=tmp_path,
     )
     assert lookup_diagnostic_records(bare, root=tmp_path)[0]["origin"] == "yoetz:12"
+
+
+def test_bounded_counts_reach_the_durable_ring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loop-health counters are useless on stderr alone; the ring is what an operator reads."""
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    configure_logging(
+        LoggingConfig(level="error"),  # type: ignore[arg-type]
+        LogMode.SERVICE,
+        clock=frozen_clock(utc=_NOW, monotonic=0.0),
+    )
+
+    correlation_id = record_bounded_counts_without_raising(
+        component="service.daemon",
+        operation="control_plane_saturation_entered",
+        outcome="event_loop_lag",
+        counts={"duration_ms": 12_345, "operation_count": 7},
+    )
+
+    found = lookup_diagnostic_records(correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["operation"] == "control_plane_saturation_entered"
+    assert found[0]["reason"] == "event_loop_lag"
+    assert found[0]["duration_ms"] == 12_345
+    assert found[0]["operation_count"] == 7

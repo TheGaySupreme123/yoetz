@@ -126,14 +126,17 @@ _READ_PROJECTION_FAILED_MESSAGE: Final = (
     "the authoritative frontier."
 )
 _READ_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "read_projection_failed"}
-# Envelope-first publish recovery could not learn whether request_id already names a write.
-# Never claim durability either way, and never hand the nested status request_id to the caller.
-_OPERATION_RECOVERY_UNAVAILABLE_MESSAGE: Final = (
-    "Operation recovery could not determine whether this request_id already names a committed "
-    "operation. Retry with the same request_id. If recovery later reports the operation absent, "
-    "correct the named authoring fields and resubmit with the intended request identity."
+# Two facts are known for certain when envelope-first recovery cannot answer: this body failed
+# bridge-local validation, and the recovery oracle could not be reached. The certain, actionable
+# one leads; the durability caveat is stated plainly beside it rather than in place of it (issues
+# #65, #239). The remedy is always safe: the service is the authority on request identity and will
+# replay or reject the id itself.
+_PUBLISH_RECOVERY_UNCHECKED_CAVEAT: Final = (
+    " A prior operation under this request_id could not be checked; the local service was "
+    "unreachable. Correct the named fields and resubmit; the service will replay or reject the "
+    "request_id itself if it already names a committed operation."
 )
-_OPERATION_RECOVERY_UNAVAILABLE_DETAILS: Final = {"reason_code": "operation_recovery_unavailable"}
+_PUBLISH_RECOVERY_UNAVAILABLE_REASON: Final = "operation_recovery_unavailable"
 _WRITE_OPERATIONS: Final = frozenset({"start", "publish_work", "check", "respond", "receipt"})
 _REQUEST_TEMPLATES_GUIDANCE_URI: Final = "yoetz://guidance/request-templates.md"
 _GUIDANCE_BY_OPERATION: Final = MappingProxyType(
@@ -313,6 +316,7 @@ def structured_error_result(
     retryable: bool = False,
     request_id: str | None = None,
     safe_details: object | None = None,
+    details_reason_code: str | None = None,
     correlation_id: str | None = None,
     operation: str | None = None,
 ) -> types.CallToolResult:
@@ -322,7 +326,8 @@ def structured_error_result(
     exception recorder — and is reused verbatim. When it is absent this mints the id *and* writes
     the durable diagnostic line under it, because an id minted straight into the envelope resolves
     to nothing (issue #191). ``operation`` only names the failing tool in that record; it never
-    reaches the wire.
+    reaches the wire. ``details_reason_code`` rides beside field locations, which no other
+    ``safe_details`` shape can carry.
     """
 
     resolved_correlation_id = (
@@ -343,6 +348,7 @@ def structured_error_result(
             resolved_correlation_id,
             request_id=request_id,
             safe_details=safe_details,
+            details_reason_code=details_reason_code,
         )
         return _result_from_wire(wire)
     except Exception:
@@ -690,38 +696,52 @@ class _PublishRecoveryOutcome:
     """Result of looking up a request_id after body validation failed.
 
     Only FOUND replaces the authoring diagnostic. ABSENT yields the original field-pointed
-    validation result. UNAVAILABLE is ambiguity-safe: same request_id, no durability claim.
+    validation result. UNAVAILABLE annotates it with a durability caveat rather than replacing it:
+    an uncertain durability claim must never displace the certain authoring one (issue #239).
     """
 
     kind: _PublishRecoveryKind
     result: types.CallToolResult | None = None
 
 
-def _publish_recovery_unavailable_result(
+def _publish_is_declared_dry_run(arguments: Mapping[str, object]) -> bool:
+    """True only for the exact boolean ``dry_run: true``.
+
+    A dry run appends nothing, so no prior-operation lookup can change the answer to a body that
+    already failed local validation, and the oracle's deadline would be pure tax on the authoring
+    loop (issues #239, #240). Anything other than the literal boolean is itself a validation
+    failure and must not buy a durability shortcut.
+    """
+
+    return arguments.get("dry_run") is True
+
+
+def _publish_validation_recovery_unavailable_result(
     request_id: str | None,
     locations: Sequence[Mapping[str, str]] = (),
 ) -> types.CallToolResult:
-    """Retryable same-ID remedy when the recovery oracle cannot answer."""
+    """Field-pointed INVALID_REQUEST primary, unreachable-oracle caveat alongside."""
 
-    details: dict[str, object] = dict(_OPERATION_RECOVERY_UNAVAILABLE_DETAILS)
-    # Surface the first safe authoring pointer so the caller knows what to fix if recovery is
-    # later authoritatively absent — never hostile payload text, only structural locations.
-    if locations:
-        first = locations[0]
-        field = first.get("field")
-        if type(field) is str:
-            details["field"] = field
-    message = _OPERATION_RECOVERY_UNAVAILABLE_MESSAGE
-    if locations:
-        hint = _authoring_hint_for("publish_work", locations)
-        if hint:
-            message = message + hint
+    message = (
+        "The tool arguments are invalid."
+        + _PUBLISH_RECOVERY_UNCHECKED_CAVEAT
+        + _authoring_hint_for("publish_work", locations)
+    )
+    if not locations:
+        # Nothing locatable: keep the availability signal machine-readable and say no more.
+        return structured_error_result(
+            PublicErrorCode.INVALID_REQUEST,
+            message,
+            request_id=request_id,
+            safe_details={"reason_code": _PUBLISH_RECOVERY_UNAVAILABLE_REASON},
+            operation="publish_work_recovery_unavailable",
+        )
     return structured_error_result(
-        PublicErrorCode.OPERATION_PENDING,
+        PublicErrorCode.INVALID_REQUEST,
         message,
-        retryable=True,
         request_id=request_id,
-        safe_details=details,
+        safe_details=tuple(locations),
+        details_reason_code=_PUBLISH_RECOVERY_UNAVAILABLE_REASON,
         operation="publish_work_recovery_unavailable",
     )
 
@@ -875,15 +895,17 @@ async def dispatch_publish_work(
     try:
         PublishWorkRequest.model_validate(arguments)
     except ValidationError as exc:
-        # Envelope-first recovery: when the body fails schema validation, still look up the
-        # request_id so run-3-style replays never die as bare INVALID_REQUEST. Only an
-        # authoritative found operation replaces the authoring diagnostic.
+        # Envelope-first recovery still runs for real submissions so a request_id that already
+        # names a commit is never reported as a bare INVALID_REQUEST (PR #47). A declared dry run
+        # cannot append, so the lookup can only cost the oracle deadline and confuse the answer
+        # (issues #239, #240).
         locations = safe_validation_locations(exc)
-        recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)
-        if recovery.kind is _PublishRecoveryKind.FOUND and recovery.result is not None:
-            return recovery.result
-        if recovery.kind is _PublishRecoveryKind.UNAVAILABLE:
-            return _publish_recovery_unavailable_result(request_id, locations)
+        if not _publish_is_declared_dry_run(arguments):
+            recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)
+            if recovery.kind is _PublishRecoveryKind.FOUND and recovery.result is not None:
+                return recovery.result
+            if recovery.kind is _PublishRecoveryKind.UNAVAILABLE:
+                return _publish_validation_recovery_unavailable_result(request_id, locations)
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
             invalid_request_message("publish_work", locations),

@@ -273,8 +273,12 @@ carried them; they are listed because each one describes the behavior that now s
   no longer replaces the field-pointed `INVALID_REQUEST` with a false “no durable state changed /
   use a new request_id” message. Lookup is a closed tri-state: found recovery results retain
   precedence; authoritative absence returns the original authoring pointer; unavailable recovery
-  returns retryable `OPERATION_PENDING` / `operation_recovery_unavailable` with the original
-  publish `request_id` and the safe field that will apply once recovery can answer.
+  keeps the field-pointed, non-retryable `INVALID_REQUEST` primary and carries
+  `operation_recovery_unavailable` as a `reason_code` beside the `fields`/`reasons` locations in
+  the same `safe_details`, with a caveat that a prior operation under this `request_id` could not
+  be checked and that resubmitting the corrected body lets the service replay or reject the
+  `request_id` itself. When nothing is locatable, `safe_details` carries that `reason_code`
+  alone.
 
 - **`check` can return a finding.** A check that raised even one finding committed durably and then
   failed to project, so the caller received `INTERNAL_ERROR` / `response_projection_failed` and
@@ -377,6 +381,78 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- The very first MCP call after a cold start could return `SERVICE_UNAVAILABLE` from a healthy
+  install: the daemon published its control endpoint and accepted connections up to ~19 seconds
+  before it could answer a handshake, and the on-demand connector treated the silent socket of
+  the daemon it had itself just spawned as wedged, abandoning most of its 30-second budget after
+  ~8 seconds. The endpoint is now published only after activation settles — a connect during
+  startup is refused, which the connector correctly treats as still-starting — and the post-spawn
+  poll loop keeps polling an accepted-but-silent successor to the deadline. A genuinely wedged
+  pre-existing daemon still fails fast without spawning a successor (issue #235).
+- `yoetz service run` against a live daemon holding the singleton lock reported
+  `internal_error: the command could not be completed` (exit 70), telling one dogfood agent the
+  service had died and could not be restarted while it was alive the whole time. The refusal now
+  reports `service_already_running` with the holder pid (best-effort, stamped advisorily into the
+  already-held lock file) at exit 20, every known `LifecycleError` reason maps to a truthful
+  bounded message before the catch-all can degrade it, and `service status` distinguishes "no
+  daemon — start one" from "a daemon is listening but not answering — do not run `service run`;
+  it will refuse" (issue #237).
+- The daemon could starve its own control plane for 10–20 minutes with zero diagnostics and then
+  recover silently: the observation sweeper ran every store call — each a blocking cross-process
+  flock plus a full workspace-document re-encode — synchronously on the event-loop thread, a
+  corrupt pending row made every later RPC repeat the entire failed ledger recovery, and the
+  sweeper task could run before the accept loop existed. Sweeper and coordinator store writes now
+  run off-loop (making the 30-second sweep deadline enforceable for the first time), a failed
+  recovery latches its verdict instead of replaying the ledger per call, the first sweep waits
+  for the control accept loop to arm, and a watchdog thread that cannot be blocked by the loop
+  reports `control_plane_saturation_entered`/`_persists`/`_cleared` with loop lag and in-flight
+  counts to the diagnostics ring while the outage is happening (issue #238).
+- A `publish_work` whose body failed bridge-local validation while the service was unreachable
+  returned retryable `OPERATION_PENDING` prescribing a same-`request_id` retry that could never
+  succeed, burying the deterministic `INVALID_REQUEST` the bridge already held — and a declared
+  `dry_run: true`, which appends nothing, still paid the ~5-second recovery lookup. A dry-run
+  validation failure now returns the field-pointed `INVALID_REQUEST` with no service round-trip;
+  a real submission with the oracle unreachable keeps the validation result primary and states
+  both known facts — the body failed locally, and the prior-operation check could not run —
+  non-retryably, alongside `reason_code: operation_recovery_unavailable` (issue #239).
+- Unknown payload keys on an event draft were reported as `invalid_type_or_value` at
+  `/event_drafts/N/schema/name` — a field that was correct — with a hint reciting envelope
+  requirements the request already satisfied, because the jsonschema oneOf scorer weighed
+  discriminator failures from branches the caller never selected and the closed
+  `extra_forbidden` token was destroyed on the jsonschema-to-pydantic boundary. The scorer now
+  restricts itself to the branch the discriminator selected, `extra_forbidden` survives to
+  `safe_details.reasons`, and the hint states what happened — "the payload carries N properties
+  the `<family>` schema does not admit" — naming the admitted keys (frozen schema content) and a
+  bounded count, never the caller-controlled key names. Frozen payload property names joined the
+  safe-location allowlist with an import-time completeness gate, so a bad value under one now
+  points at that key instead of collapsing to the payload root (issue #240).
+- A standing `provider_not_ready` advice was injected 29 times byte-identical in one 24-minute
+  session: the delivery gate keyed on a suppression identity that hashes the whole retained
+  envelope stream, so it churned on every tool call while the rendered text never changed. Hook
+  delivery is now deduplicated on a content identity over exactly what the agent receives —
+  materialization, ledger history, and `observe status` keep the evidence-sensitive identity
+  untouched, and the content identity excludes evidence references because some rules cite a
+  rolling window over the envelope stream — and standing machine conditions the agent cannot act
+  on (`connect_provider`)
+  travel only on session-boundary events, falling through to the next actionable item on
+  per-tool-call hooks rather than masking it (issue #241).
+- Every workspace exec call paid 3.5–7.5 seconds of synchronous observe-hook overhead — process
+  startup importing the full CLI graph (~325 ms per hook) and, dominating on a lived-in store,
+  10–18 full serialize-and-fsync cycles of the workspace state file per hook. The hook entry now
+  goes through a minimal shim with a lazy application package (~45 ms of imports), a hook pass
+  batches its state mutations into single flushes fenced before any service RPC, an unchanged
+  advice snapshot is no longer rewritten, and end-to-end hook timing is measured with a
+  `hook_budget_exceeded` diagnostic. Measured end-to-end: ~0.55 s against a realistic store,
+  from 1.7–2.5 s (issue #242).
+- `yoetz state capture` could not capture Yoetz's own repository: the pre-hash safety walk
+  counted every filesystem entry under the root — including the root `.git` object store and
+  gitignore-excluded trees like a vendored `.venv` — against the 10,000-entry bound, 40× more
+  than the population capture actually hashes, and the failure never said which bound tripped.
+  The walk now skips the root `.git`'s internals (nested `.git` rejection and every per-entry
+  safety check are preserved outside gitignore-excluded subtrees) and prunes fully-ignored
+  subtrees using git's own exclusion
+  semantics, and any file-count limit failure reports the bound that tripped with observed count
+  and limit as integers in `limit_detail` (issue #243).
 - A receipt reported `semantic_review_not_requested` for a task whose semantic review had been
   requested and refused. The stop-rules make a blocked review a coverage gap rather than a retry,
   so the agent falls back to `deterministic_only` — and that successor check replaced the recorded

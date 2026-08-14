@@ -306,6 +306,11 @@ def test_state_capture_command_performs_no_write_or_network_effect(
         timeout=_PROBE_TIMEOUT,
     )
     assert completed.returncode == 0
+    # This repository's own checkout is exactly the shape that used to fail: a long-lived `.git`
+    # and gitignore-excluded trees pushed the safety walk past its file ceiling, so capture came
+    # back `unsupported` on the project it ships with (issue #243). Exiting 0 alone did not catch
+    # that — the status has to say `captured`.
+    assert json.loads(completed.stdout.decode("utf-8"))["status"] == "captured"
 
     after = subprocess.run(  # noqa: S603 - fixed argv, no shell, trusted local git binary
         ["git", "-C", str(_REPO_ROOT), "status", "--porcelain"],

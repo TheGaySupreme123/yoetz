@@ -32,9 +32,11 @@ method name.
 The v0.1 default is one restartable service authority per user and installation. A user supervisor,
 interactive setup, or the fixed untrusted-client launcher may start the foreground service process;
 the launcher conveys no key, credential, provider, path, or policy authority. The service starts in
-`starting`, binds and authenticates its local control endpoint, attempts OS-keyring unlock, and
-enters either `ready` or `locked`. It remains reachable while locked so a human can inspect
-structural status and initiate the dedicated unlock flow. Only `ready` admits workflows,
+`starting`, attempts OS-keyring unlock, settles into either `ready` or `locked`, and only then
+binds, authenticates, and publishes its local control endpoint. The service never publishes an
+endpoint it cannot yet answer; until publication a client's connect is refused, which the
+on-demand connector treats as still-starting rather than unavailable (#235). It remains reachable
+while locked so a human can inspect structural status and initiate the dedicated unlock flow. Only `ready` admits workflows,
 maintenance, imports, payload access, or egress.
 
 Authenticated local connections and admitted work hold a process-idle lease. Once both counts stay

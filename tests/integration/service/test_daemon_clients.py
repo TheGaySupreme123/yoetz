@@ -1687,6 +1687,150 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("stall", "expected"),
+    [(False, "sweep_failed"), (True, "sweep_deadline_exceeded")],
+)
+async def test_only_the_deadline_reports_sweep_deadline_exceeded(
+    monkeypatch: pytest.MonkeyPatch, stall: bool, expected: str
+) -> None:
+    """asyncio.TimeoutError is TimeoutError: a socket timeout inside a sweep is not the deadline."""
+
+    reasons: list[str] = []
+
+    def record(*, component: str, operation: str, reason: str) -> str:
+        assert component == "service.daemon"
+        assert operation == "observation_sweep_failed"
+        reasons.append(reason)
+        return "err_00000000-0000-4000-8000-000000000000"
+
+    monkeypatch.setattr(daemon_module, "record_bounded_event_without_raising", record)
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_DEADLINE_SECONDS", 0.05)
+
+    async def sweep() -> ObservationDrainSummary:
+        if stall:
+            await asyncio.sleep(5)
+        # A socket or OS read timeout raised by the sweep's own work, not by its deadline.
+        raise TimeoutError("inner socket timeout")
+
+    daemon, _application, _vault, _listener = _daemon()
+
+    summary = await daemon._bounded_observation_sweep(sweep)  # pyright: ignore[reportPrivateUsage]
+
+    assert summary is None
+    assert reasons == [expected]
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_endpoint_is_published_only_after_ready_activation(tmp_path: Path) -> None:
+    """A control socket that exists must already be able to answer a handshake."""
+
+    events: list[str] = []
+
+    async def publish(_instance: object) -> None:
+        events.append("publish")
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        events.append("activate_start")
+        for _ in range(3):
+            await asyncio.sleep(0)
+        events.append("activate_end")
+        return _Application()
+
+    vault = _Vault()
+    vault.ready = True
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+        endpoint_publisher=publish,
+    )
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+        )
+    )
+
+    await daemon.start()
+
+    assert events == ["activate_start", "activate_end", "publish"]
+    assert daemon.status().state is ServiceState.READY
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_first_sweep_waits_for_the_control_accept_loop(tmp_path: Path) -> None:
+    """Maintenance is created before the accept loops exist; it must not run before them."""
+
+    events: list[str] = []
+    swept = asyncio.Event()
+
+    class Listener(_Listener):
+        async def accept(self) -> object:
+            if "accept_armed" not in events:
+                events.append("accept_armed")
+            return await super().accept()
+
+    async def sweep() -> ObservationDrainSummary:
+        events.append("sweep")
+        swept.set()
+        return ObservationDrainSummary(
+            attempted=0,
+            acknowledged=0,
+            retry_pending=0,
+            quarantined=0,
+            reasons=(),
+        )
+
+    application = _Application()
+    application.observation_sweep = sweep  # pyright: ignore[reportAttributeAccessIssue]
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    vault = _Vault()
+    vault.ready = True
+    lifecycle = ServiceLifecycle(
+        _Clock(),
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+    )
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+        )
+    )
+
+    serving = asyncio.create_task(daemon.serve())
+    try:
+        await asyncio.wait_for(swept.wait(), timeout=2)
+    finally:
+        await daemon.stop()
+        await asyncio.wait_for(serving, timeout=2)
+
+    assert events.index("accept_armed") < events.index("sweep")
+
+
+@pytest.mark.anyio
 async def test_preunlocked_vault_activates_ready_application_on_daemon_start(
     tmp_path: Path,
 ) -> None:
