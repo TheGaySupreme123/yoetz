@@ -22,6 +22,8 @@ __all__ = [
 
 _MAX_SUMMARY_BYTES: Final = 512
 _SAFE_TOKEN: Final = re.compile(r"^[A-Za-z0-9_+.-]{1,128}$", re.ASCII)
+# Closed shape for the frozen field and family tokens the repair clause may carry (issue #266).
+_FIELD_NAME: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 _SAFE_COUNT: Final = re.compile(r"^(?:0|[1-9][0-9]{0,18})$", re.ASCII)
 _CORRELATION_ID: Final = re.compile(
     r"^err_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -85,8 +87,38 @@ def _bounded(summary: str) -> str:
     return summary
 
 
+def _repair_clause(error: Mapping[str, JsonValue]) -> str:
+    """Render the bounded field-ownership repair fact, or "" when none travels on the error.
+
+    Hosts are not required to surface structured content, so the one schema-derived repair
+    sentence is repeated on the text channel (issue #266). Every token the sentence carries was
+    drawn from frozen schema or registry content upstream, and each is re-gated here against the
+    closed field-name shape so this projector admits nothing else.
+    """
+
+    details = error.get("safe_details")
+    if not isinstance(details, Mapping):
+        return ""
+    typed = cast(Mapping[str, JsonValue], details)
+    if typed.get("repair_kind") != "field_ownership":
+        return ""
+    field = typed.get("repair_field")
+    owner = typed.get("repair_owning_family")
+    selected = typed.get("repair_selected_family")
+    for token in (field, owner, selected):
+        if type(token) is not str or _FIELD_NAME.fullmatch(token) is None:
+            return ""
+    return f" Repair: {field} is admitted only by the {owner} payload, not {selected}."
+
+
 def summary_for_public_error(envelope: object) -> str:
-    """Render only the stable public error identity, never message or rejected input."""
+    """Render only the stable public error identity, never message or rejected input.
+
+    The single exception is the bounded field-ownership repair fact: its tokens are frozen
+    schema and registry content, never caller input, and a host that drops structured content
+    would otherwise lose the only correction that stops a caller deleting a required record
+    (issue #266).
+    """
 
     source = _mapping(envelope)
     nested = source.get("error")
@@ -102,7 +134,10 @@ def summary_for_public_error(envelope: object) -> str:
         if type(correlation) is str and _CORRELATION_ID.fullmatch(correlation) is not None
         else "unavailable"
     )
-    return _bounded(f"Error {code}; retryable: {retry_text}; correlation: {correlation_text}.")
+    return _bounded(
+        f"Error {code}; retryable: {retry_text}; correlation: {correlation_text}."
+        f"{_repair_clause(error)}"
+    )
 
 
 def summary_for_check(envelope: object) -> str:
