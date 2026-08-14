@@ -1723,6 +1723,31 @@ class ObservationCoordinator:
 
         if type(snapshot) is not AdviceSnapshot or runtime.writer_id is None:
             return
+        candidate_items = _materialized_advice_items(snapshot.ranked_items)
+        if not candidate_items:
+            return
+        finding_projection = await runtime.ledger.load_projection(
+            runtime.session_id, ProjectionView.CANDIDATE_FINDINGS
+        )
+        projected_findings: Mapping[FindingId, ProjectionRecord[Finding]] = (
+            finding_projection.state.findings
+            if finding_projection is not None and type(finding_projection.state) is ProjectionState
+            else {}
+        )
+        candidate_items = tuple(
+            item
+            for item in candidate_items
+            if (
+                (existing := projected_findings.get(item.finding_id)) is None
+                or existing.payload is None
+            )
+        )
+        if not candidate_items:
+            # A readable condition finding already anchors the durable record.
+            # Rolling evidence remains current in the observation snapshot and
+            # coverage/gap state; appending a revision here would invalidate
+            # checks and grow the ledger once per routine envelope.
+            return
         refs_by_source: dict[str, set[str]] = {}
         for envelope in envelopes:
             refs_by_source.setdefault(envelope.source_identity, set()).update(
@@ -1741,17 +1766,6 @@ class ObservationCoordinator:
             runtime.session_id, ProjectionView.COMPACT
         )
         frontier = Frontier.genesis() if projection is None else projection.frontier
-        finding_projection = await runtime.ledger.load_projection(
-            runtime.session_id, ProjectionView.CANDIDATE_FINDINGS
-        )
-        projected_findings: Mapping[FindingId, ProjectionRecord[Finding]] = (
-            finding_projection.state.findings
-            if finding_projection is not None and type(finding_projection.state) is ProjectionState
-            else {}
-        )
-        candidate_items = _materialized_advice_items(snapshot.ranked_items)
-        if not candidate_items:
-            return
         items: list[tuple[AdviceItem, tuple[str, ...]]] = []
         for item in candidate_items:
             matched_refs = {
@@ -1776,13 +1790,6 @@ class ObservationCoordinator:
                         matched_refs.update(ref for ref in observed if ref in known_event_ids)
             subject_refs = tuple(sorted(matched_refs, key=str.encode)[:64])
             if not subject_refs:
-                continue
-            existing_finding = projected_findings.get(item.finding_id)
-            if (
-                existing_finding is not None
-                and existing_finding.payload is not None
-                and tuple(str(ref) for ref in existing_finding.payload.subject_refs) == subject_refs
-            ):
                 continue
             items.append((item, subject_refs))
         if not items:

@@ -26,7 +26,7 @@ __all__ = [
 ]
 
 OBSERVATION_ADVICE_POLICY_ID: Final = "observation-advice"
-OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.0"
+OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.1"
 
 OBSERVATION_ADVICE_FACT_CODES: Final = frozenset(
     {
@@ -631,7 +631,14 @@ def evidence_basis_digest(
 
 
 def advice_candidate_digest(candidate: ObservationAdviceCandidate) -> str:
-    """Return the stable identity of one standing advice condition."""
+    """Return the stable identity of one advice condition.
+
+    Evidence references prove the condition but do not identify it. Several
+    rules intentionally retain rolling or accumulating reference windows, so
+    including them here would mint a new finding for every routine envelope.
+    ``detail_token`` carries the rule-specific cause when multiple independent
+    instances of one rule must remain distinct.
+    """
 
     if type(candidate) is not ObservationAdviceCandidate:
         raise ValueError("observation_advice_invalid")
@@ -640,7 +647,6 @@ def advice_candidate_digest(candidate: ObservationAdviceCandidate) -> str:
             "policy": f"{OBSERVATION_ADVICE_POLICY_ID}/{OBSERVATION_ADVICE_POLICY_VERSION}",
             "kind": candidate.kind.value,
             "rule_code": candidate.rule_code,
-            "evidence_refs": candidate.evidence_refs,
             "detail_token": candidate.detail_token,
         }
     )

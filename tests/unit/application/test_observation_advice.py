@@ -228,6 +228,17 @@ def test_delivery_identity_ignores_evidence_refs_that_are_a_rolling_window() -> 
     )
 
 
+def test_finding_identity_ignores_evidence_refs_that_are_a_rolling_window() -> None:
+    """A standing condition remains one durable finding as its citations move (#216)."""
+
+    first = _gap_snapshot(3)
+    later = _gap_snapshot(9)
+
+    assert first.ranked_items[0].evidence_refs != later.ranked_items[0].evidence_refs
+    assert first.evidence_basis_digest != later.evidence_basis_digest
+    assert first.ranked_items[0].finding_id == later.ranked_items[0].finding_id
+
+
 def test_delivery_identity_distinguishes_successive_failed_commands() -> None:
     first = build_observation_advice_snapshot(
         ObservationAdviceBuildInput(
@@ -268,6 +279,7 @@ def test_delivery_identity_distinguishes_successive_failed_commands() -> None:
     )
     assert first is not None and later is not None
     assert first.ranked_items[0].summary == later.ranked_items[0].summary
+    assert first.ranked_items[0].finding_id != later.ranked_items[0].finding_id
     assert advice_delivery_identity(first) != advice_delivery_identity(later)
 
 
