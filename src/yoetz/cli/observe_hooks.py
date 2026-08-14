@@ -1222,44 +1222,50 @@ def handle_observe(
 
         stages["drain"] = _elapsed_ms(drain_started, _monotonic())
 
-        # Nonblocking advice delivery at safe points (suppress Yoetz self-tool loops).
-        # The selection is a pure read; the delivery is recorded only after the
-        # emission below succeeds, so a hook that dies mid-write costs at most
-        # one redelivery instead of suppressing that advice forever.
+        # Advice selection and commit are serialized with the bounded stdout write. This keeps
+        # concurrent hook processes from selecting the same identity while preserving the
+        # commit-after-emit invariant: a failed write never suppresses a later delivery.
         pending_delivery: AdviceDelivery | None = None
         delivery_session_id: str | None = None
-        if not additional and resolved_event in ADVICE_SAFE_EVENTS and not skip_advice_loop:
-            delivery_session_id = None if mapping is None else mapping.yoetz_session_id
-            delivery = store.peek_advice_for_delivery(
-                workspace_commitment,
-                yoetz_session_id=delivery_session_id,
-                allow_standing=resolved_event in STANDING_ADVICE_CADENCE_EVENTS,
-            )
-            if delivery is not None:
-                additional = delivery.text[:_MAX_ADVICE_CONTEXT]
-                pending_delivery = delivery
-
-        # Release recommendations are read from one bounded local cache only.
-        # Existing task/receipt advice always wins this shared context channel.
-        if not additional and resolved_event == "SessionStart" and not skip_advice_loop:
-            with contextlib.suppress(Exception):
-                additional = _cached_recommendation_context(_state=_state)
-
-        if additional:
-            emitted = _stdout_json(_context_output(resolved_event, additional), stdout)
-        else:
-            emitted = _stdout_json({}, stdout)
-        if emitted and pending_delivery is not None:
-            # Strictly after the write: delivered-but-unrecorded costs one
-            # redelivery, recorded-but-undelivered would cost the advice.
-            # Nothing past the emission may raise — the outer handler would
-            # write a second JSON object onto a stream that already has one.
-            with contextlib.suppress(BaseException):
-                store.commit_advice_delivery(
+        delivery_eligible = (
+            not additional and resolved_event in ADVICE_SAFE_EVENTS and not skip_advice_loop
+        )
+        delivery_gate = (
+            store.batched(workspace_commitment) if delivery_eligible else contextlib.nullcontext()
+        )
+        with delivery_gate:
+            if delivery_eligible:
+                delivery_session_id = None if mapping is None else mapping.yoetz_session_id
+                delivery = store.peek_advice_for_delivery(
                     workspace_commitment,
-                    pending_delivery.delivery_identity,
                     yoetz_session_id=delivery_session_id,
+                    allow_standing=resolved_event in STANDING_ADVICE_CADENCE_EVENTS,
                 )
+                if delivery is not None:
+                    additional = delivery.text[:_MAX_ADVICE_CONTEXT]
+                    pending_delivery = delivery
+
+            # Release recommendations are read from one bounded local cache only.
+            # Existing task/receipt advice always wins this shared context channel.
+            if not additional and resolved_event == "SessionStart" and not skip_advice_loop:
+                with contextlib.suppress(Exception):
+                    additional = _cached_recommendation_context(_state=_state)
+
+            if additional:
+                emitted = _stdout_json(_context_output(resolved_event, additional), stdout)
+            else:
+                emitted = _stdout_json({}, stdout)
+            if emitted and pending_delivery is not None:
+                # Strictly after the write: delivered-but-unrecorded costs one
+                # redelivery, recorded-but-undelivered would cost the advice.
+                # Nothing past the emission may raise — the outer handler would
+                # write a second JSON object onto a stream that already has one.
+                with contextlib.suppress(BaseException):
+                    store.commit_advice_delivery(
+                        workspace_commitment,
+                        pending_delivery.delivery_identity,
+                        yoetz_session_id=delivery_session_id,
+                    )
         _record_pass_timing(
             resolved_event,
             entry_started=entry_started,

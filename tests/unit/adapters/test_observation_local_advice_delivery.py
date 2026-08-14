@@ -18,7 +18,7 @@ from typing import cast
 
 import pytest
 
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.integrations.observation_local import AdviceDelivery, LocalObservationStore
 from yoetz.application.observation_advice import (
     ObservationAdviceBuildInput,
     build_observation_advice_snapshot,
@@ -163,6 +163,56 @@ def test_standing_advice_delivered_once_then_suppressed_across_n_envelope_ingest
         f"standing advice reached the agent {len(standing)} times across "
         f"{len(emitted)} hooks (indices {standing}); the incident measured 29"
     )
+
+
+def test_hook_serializes_advice_selection_through_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _consented(tmp_path)
+    _compose(monkeypatch, _STANDING)
+    phases: list[tuple[str, bool]] = []
+    original_peek = LocalObservationStore.peek_advice_for_delivery
+    original_commit = LocalObservationStore.commit_advice_delivery
+
+    def peek(
+        self: LocalObservationStore,
+        workspace: str,
+        *,
+        yoetz_session_id: str | None = None,
+        allow_standing: bool = True,
+    ) -> AdviceDelivery | None:
+        phases.append(
+            ("peek", workspace in self._batch)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        )
+        return original_peek(
+            self,
+            workspace,
+            yoetz_session_id=yoetz_session_id,
+            allow_standing=allow_standing,
+        )
+
+    def commit(
+        self: LocalObservationStore,
+        workspace: str,
+        delivery_identity: str,
+        *,
+        yoetz_session_id: str | None = None,
+    ) -> None:
+        phases.append(
+            ("commit", workspace in self._batch)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        )
+        original_commit(
+            self,
+            workspace,
+            delivery_identity,
+            yoetz_session_id=yoetz_session_id,
+        )
+
+    monkeypatch.setattr(LocalObservationStore, "peek_advice_for_delivery", peek)
+    monkeypatch.setattr(LocalObservationStore, "commit_advice_delivery", commit)
+
+    assert "connect_provider" in _run(tmp_path, "SessionStart", "serialized", source="startup")
+    assert phases == [("peek", True), ("commit", True)]
 
 
 def test_standing_advice_never_masks_actionable_advice(

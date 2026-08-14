@@ -979,9 +979,7 @@ def advice_item_from_json(value: JsonValue) -> AdviceItem:
         freshness_frontier=cast(str, source["freshness_frontier"]),
         origin=_advice_origin(source["origin"]),
         condition_identity=(
-            cast(str, source["condition_identity"])
-            if type(source.get("condition_identity")) is str
-            else None
+            cast(str, source["condition_identity"]) if "condition_identity" in source else None
         ),
     )
 
