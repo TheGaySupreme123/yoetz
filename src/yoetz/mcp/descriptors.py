@@ -21,6 +21,7 @@ from yoetz.protocol.schemas import (
 )
 
 __all__ = [
+    "INITIALIZE_GUIDANCE_URIS",
     "ORDINARY_MCP_PUBLISH_EVENT_FAMILIES",
     "PRESENTATION_INPUT_SCHEMA_BUDGETS",
     "McpRouteProfile",
@@ -38,7 +39,11 @@ __all__ = [
 type McpRouteProfile = Literal["policy", "strict"]
 
 _SCHEMA_VERSION: Final = "1.0.0"
-_INSTRUCTIONS_URI: Final = "yoetz://guidance/agent-instructions.md"
+INITIALIZE_GUIDANCE_URIS: Final[tuple[str, ...]] = (
+    "yoetz://guidance/agent-instructions.md",
+    "yoetz://guidance/workflow.md",
+    "yoetz://guidance/coverage-and-receipts.md",
+)
 _GUIDANCE_URI: Final = re.compile(r"yoetz://guidance/[a-z0-9.-]+\.md", re.ASCII)
 _FORBIDDEN_CLAIMS: Final = re.compile(
     r"\b(?:authenticated|enforces?|gates?|observes?|proved|proves?|verified)\b",
@@ -1521,7 +1526,10 @@ def server_instructions(profile: McpRouteProfile = "policy") -> str:
 
     if profile not in TOOL_DESCRIPTORS:
         raise ValueError("mcp_route_profile_invalid")
-    base = read_resource(_INSTRUCTIONS_URI).decode("utf-8", errors="strict").rstrip()
+    base = "\n\n".join(
+        read_resource(uri).decode("utf-8", errors="strict").rstrip()
+        for uri in INITIALIZE_GUIDANCE_URIS
+    )
     return (
         f"{base}\n\nRoute profile: {profile}. "
         + (

@@ -43,6 +43,20 @@ def test_the_skill_is_packaged_at_all() -> None:
     assert _skill_text().strip(), "the installed skill is empty"
 
 
+def test_step_zero_stops_on_an_empty_guidance_read() -> None:
+    """An empty resources/read is a silent miss, not a successful Step 0 (issue #203)."""
+
+    text = _skill_text()
+    collapsed = " ".join(text.split())
+    assert "resolve without any repository checkout" not in collapsed
+    assert "If a `resources/read` result has no text, do not proceed" in collapsed
+    assert "do not treat the read as success" in collapsed
+    assert "`references/<name>.md`" in collapsed
+    assert "Do not call `start` on an empty guidance body" in collapsed
+    assert "`agent-instructions.md`, `workflow.md`, and `coverage-and-receipts.md`" in collapsed
+    assert "Both are already in initialize `instructions`" in collapsed
+
+
 def test_every_yoetz_uri_the_skill_names_is_a_registered_readable_resource() -> None:
     registered = {resource.uri for resource in GUIDANCE_RESOURCES}
     named = set(_YOETZ_URI.findall(_skill_text()))

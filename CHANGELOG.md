@@ -389,6 +389,12 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- Codex Step 0 treated an empty MCP `resources/read` as success and advertised that guidance URIs
+  "resolve without any repository checkout". The skill now stops on an empty body and opens the
+  matching installed `references/<name>.md` copy. Initialize `instructions` also append
+  `workflow.md` and `coverage-and-receipts.md` so those Step 0 documents arrive without depending
+  on `resources/read`. `docs/INTERFACES.md` no longer states that unprofiled hosts can fetch those
+  documents unconditionally (issue #203).
 - A Stop hook that selected advice completed in ~1.4s with exit 0, then Codex marked it Failed
   with `hook returned invalid stop hook JSON output`. Stop has no `hookSpecificOutput`; the
   event-agnostic emitter was writing `additionalContext` onto a wire type that only admits

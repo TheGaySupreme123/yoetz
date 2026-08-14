@@ -11,7 +11,7 @@ from typing import cast
 import pytest
 from mcp import types
 
-from yoetz.mcp.descriptors import TOOL_DESCRIPTORS
+from yoetz.mcp.descriptors import INITIALIZE_GUIDANCE_URIS, TOOL_DESCRIPTORS
 from yoetz.mcp.resources import GUIDANCE_RESOURCES
 from yoetz.mcp.resources import read_resource as read_guidance_resource
 from yoetz.mcp.server import BRIDGE_RUNTIME, list_resources, list_tools
@@ -117,9 +117,20 @@ async def test_static_inventory_is_exact_and_verified() -> None:
     assert [str(resource.uri) for resource in resources] == [
         item.uri for item in GUIDANCE_RESOURCES
     ]
-    assert BRIDGE_RUNTIME.instructions.startswith(
+    agent = (
         read_guidance_resource("yoetz://guidance/agent-instructions.md").decode("utf-8").rstrip()
     )
+    workflow = read_guidance_resource("yoetz://guidance/workflow.md").decode("utf-8").rstrip()
+    coverage = (
+        read_guidance_resource("yoetz://guidance/coverage-and-receipts.md").decode("utf-8").rstrip()
+    )
+    assert INITIALIZE_GUIDANCE_URIS == (
+        "yoetz://guidance/agent-instructions.md",
+        "yoetz://guidance/workflow.md",
+        "yoetz://guidance/coverage-and-receipts.md",
+    )
+    assert BRIDGE_RUNTIME.instructions.startswith(agent)
+    assert BRIDGE_RUNTIME.instructions.startswith(f"{agent}\n\n{workflow}\n\n{coverage}\n\n")
     assert "Route profile: policy." in BRIDGE_RUNTIME.instructions
 
 

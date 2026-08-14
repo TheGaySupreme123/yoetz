@@ -66,12 +66,15 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    coverage. Unprofiled or unsupported cells keep both arms absent. Support is never inferred
    across neighboring host versions.
 
-4. **Three delivery tiers, with tier 0 self-sufficient.** Tier 0 is
-   `guidance/agent-instructions.md`, served verbatim as the MCP initialize `instructions` string, and
-   reaches every host unconditionally. Tier 1 exposes the five documents as
-   `yoetz://guidance/<name>` MCP resources for hosts that read them. Tier 2 installs them on disk
-   for a first-party harness. Because tier 0 is the only tier guaranteed to arrive, it must carry
-   every rule whose absence would cause harm, rather than summarizing and deferring.
+4. **Three delivery tiers, with tier 0 self-sufficient.** Tier 0 is the MCP initialize
+   `instructions` string. It begins with `guidance/agent-instructions.md` verbatim (the safety
+   floor) and appends `workflow.md` and `coverage-and-receipts.md` so the Step 0 documents required
+   before the first `start` and `check` do not depend on `resources/read`. That string reaches every
+   host unconditionally. Tier 1 exposes the five documents as `yoetz://guidance/<name>` MCP
+   resources for hosts that return the resource text. Tier 2 installs them on disk for a first-party
+   harness. Because tier 0 is the only tier guaranteed to arrive, it must carry every rule whose
+   absence would cause harm, rather than summarizing and deferring. `publication-policy.md` and
+   `request-templates.md` remain resource/disk-only.
 
 5. **MCP declares tools and resources only.** No prompts, sampling, roots, completions, or resource
    subscribe/listChanged. Resources are static reviewed product documents: they reach no service,
@@ -134,6 +137,13 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
 registration is global, file-free, and marker-free, so reusing the skill-install types would
 misuse fields designed for on-disk trusted-project content. The guarantee below is unchanged —
 adding a harness is still one `HarnessId` value plus adapters, with no shared-type edits.
+
+**Amendment (2026-08-14, issue #203):** Initialize `instructions` still begin with
+`guidance/agent-instructions.md` verbatim. They then append `workflow.md` and
+`coverage-and-receipts.md` so those Step 0 documents arrive on the transport-independent channel
+when a host yields an empty `resources/read`. MCP resources remain the on-demand copies for hosts
+that return the text; first-party disk copies remain the empty-read recovery path. This does not
+add a seventh tool.
 
 **Amendment (2026-08-14, issue #222):** Codex hook stdout is event-specific. `SessionStart`,
 `PostToolUse`, and `UserPromptSubmit` keep `hookSpecificOutput.additionalContext`. `Stop` and
