@@ -1,11 +1,12 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
-**Status:** Accepted (2026-08-13), acknowledged for issues #214–#223.
+**Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
 **Amended:** 2026-08-14 for moderator-approved issue #244.
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/adapters/memory/ledger.py`,
 `src/yoetz/application/publish_work.py`, and `src/yoetz/service/ready_composition.py`.
-**Relates to:** ADR-009, ADR-010, ADR-020, and issues #214, #216, #217, #223, and #244.
+**Relates to:** ADR-009, ADR-010, ADR-020, and
+issues #214, #216, #217, #223, #224, #225, #226, #227, and #244.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -28,11 +29,17 @@ unsupported claims and unbounded duplicate findings.
 
 ## Decisions
 
-1. Each task session has a deterministic observation writer derived from task id, session id,
-   mapping version `obs-writer/1.0.0`, and role `observation`. Admission derives this writer alongside
-   writers admitted by completed starts; it does not fabricate a start operation or add durable
-   authority. Existing observation operations are looked up under both this writer and the legacy
-   cooperative writer during an upgrade.
+1. Each task session has a deterministic observation writer:
+   `observation_writer_id(task_id, session_id)` calls `stable_observation_id` with
+   `kind=IdKind.WRITER`, `source_identity=session_id`, mapping version `obs-writer/1.0.0`, and role
+   `observation`. `_admitted_writers_for_session` unions that derived id with the writers admitted by
+   completed starts; derivation does not grant durable authority. Existing observation operations
+   are looked up under both this writer and the legacy cooperative writer during an upgrade.
+
+   A second `start` is not an admission mechanism: attach semantics mint a fresh session on every
+   start path. A synthetic `start_operations` row would assert a start that never happened in the
+   table whose history establishes that fact. A separate catalog table would require a migration
+   and a resume lifecycle for an identity that is already a pure function of task and session ids.
 
 2. A record is observation-authored only when all four facts hold: actor id is
    `yoetz:observation-coordinator`, actor type is `harness`, authorship assurance is

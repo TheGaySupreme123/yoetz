@@ -118,6 +118,12 @@ operation; the caller may reuse the same `request_id` with a corrected body. Her
 describes whether safe recovery exists for the durable state reached, not whether the request bytes
 must remain unchanged. A stale supplied frontier remains `frontier_changed`.
 
+For an accepted state-sensitive batch, `expected_frontier` is task-scoped. Under ADR-022, a held
+frontier may trail the current head only when every intervening record is observation-authored under
+the exact service-derived predicate; the batch appends at the real head and reports that head as
+`subject_frontier`. Any cooperative or imported intervening record still raises
+`FRONTIER_CONFLICT`.
+
 `response_projection_failed` marks a post-commit shaping failure for non-`publish_work` writes (and
 for the genuinely impossible case where even the minimal publish envelope cannot be built): the
 write may already be durable, so the public error is retryable and same-`request_id` resume is the
@@ -2279,6 +2285,13 @@ an MCP tool and does not extend the six-tool public workflow. Methods are:
 - `pause(command: ObservationControlCommand) -> ObservationStatus`;
 - `resume(command: ObservationControlCommand) -> ObservationStatus`;
 - `revoke(command: ObservationRevokeCommand) -> ObservationStatus`.
+
+Ledger materialization uses ADR-022's derived harness writer identity:
+`observation_writer_id(task_id, session_id)` applies mapping version `obs-writer/1.0.0` and role
+`observation`, and admission unions that id with writers from completed starts without fabricating a
+start operation. Observation-derived lifecycle records are evidence under that writer, not claims
+on the cooperative agent's behalf. Materialization emits `evidence_recorded` unless the structural
+payload itself carries an explicitly admitted `claim_kind`.
 
 Shared closed types:
 
