@@ -112,6 +112,12 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    material, imports, and provider-derived semantic prose — including every reviewer challenge —
    still require the explicit `agent_context_categories` grant.
 
+   ADR-022's derived observation writer is `engine_derived_from_self_authored` for this provenance
+   decision: a hook observation records the requesting agent's own action, not another writer's
+   independent authorship. Production still constructs `LocalPrivacyEnforcer` without a provenance
+   resolver, so this classification is a forward contract for the resolver rather than a claim that
+   the widening path ships today.
+
    **Revised 2026-07-24 — default agent-context disclosure of verification output.** Under the
    default LOCAL_ONLY bootstrap policy, `agent_context` may include Yoetz-authored verification
    projection content for the requesting agent's own task: `finding_summary` and

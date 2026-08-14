@@ -11,8 +11,8 @@
 `src/yoetz/service/ready_composition.py`, `src/yoetz/config/models.py`, and
 `src/yoetz/config/write.py`.
 **Relates to:** ADR-009 (data egress and privacy), ADR-010 (harness integration port), ADR-012
-(first-run setup wizard), ADR-014 (TOML settings), and ADR-016 (human review for non-default
-actions).
+(first-run setup wizard), ADR-014 (TOML settings), ADR-016 (human review for non-default actions),
+and ADR-022 (observation writer identity and observation-tolerant concurrency).
 
 ## Context
 
@@ -57,7 +57,9 @@ not become a bundled consent switch.
    recommendation. The instruction asks the agent to explain the recommendation and request the
    user's approval, naming exact accept and decline commands. The hook observes no answer and
    changes no configuration. Retrieved recommendation text, agent inference, silence, or prior
-   history is not approval.
+   history is not approval. ADR-022 separately governs the stable identity and authorship of the
+   observation advice that shares this delivery channel; a recommendation never becomes an
+   observation-authored claim.
 
 5. **Only `yoetz recommend` applies or records a decision.** `list` re-evaluates and reports the
    current bounded set. `decline <id>` records the refusal without applying the recommendation.
