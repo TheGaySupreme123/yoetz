@@ -1660,11 +1660,15 @@ class ObservationCoordinator:
             refs_by_source.setdefault(envelope.source_identity, set()).update(
                 self._materialized_event_refs(runtime.task_id, envelope)
             )
+        known_event_ids: set[str] = set()
         lifecycle_ref: str | None = None
         async for record in runtime.ledger.load_events(runtime.session_id):
-            if record.schema.name in {"session_opened", "session_resumed"}:
+            known_event_ids.add(str(record.event_id))
+            if lifecycle_ref is None and record.schema.name in {
+                "session_opened",
+                "session_resumed",
+            }:
                 lifecycle_ref = str(record.event_id)
-                break
         projection = await runtime.ledger.load_projection(
             runtime.session_id, ProjectionView.COMPACT
         )
@@ -1686,19 +1690,22 @@ class ObservationCoordinator:
                 ref
                 for source_ref in item.evidence_refs
                 for ref in refs_by_source.get(source_ref, ())
+                if ref in known_event_ids
             }
             if not matched_refs:
                 # A candidate that names no envelope is a standing condition about the session,
                 # so anchor it on the session lifecycle event: one stable ref for the life of the
                 # condition, which is what lets check and receipt collapse repeats. Where no
-                # lifecycle event exists yet, fall back to every observed ref rather than
-                # dropping the finding — a finding that silently fails to land is the one
-                # outcome this must never produce.
+                # lifecycle event exists yet, fall back to every observed ref that was actually
+                # appended rather than dropping the finding — a finding that silently fails to
+                # land is the one outcome this must never produce. Computed draft IDs that
+                # never entered the ledger stay out of subject_refs: receipt case construction
+                # must not see citations that cannot be closed against the accepted prefix.
                 if lifecycle_ref is not None:
                     matched_refs.add(lifecycle_ref)
                 else:
                     for observed in refs_by_source.values():
-                        matched_refs.update(observed)
+                        matched_refs.update(ref for ref in observed if ref in known_event_ids)
             subject_refs = tuple(sorted(matched_refs, key=str.encode)[:64])
             if not subject_refs:
                 continue

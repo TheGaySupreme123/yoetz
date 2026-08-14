@@ -557,19 +557,36 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
         availability = await runtime.ledger.load_case_availability(
             runtime.session_id, frontier, projection
         )
-        case = build_deterministic_case(projection, records, availability)
-        context = _context(projection, frontier, case, records)
-        now = app.clock.now_utc()
-        document = build_receipt(
-            context,
-            receipt_id(app.ids.new(IdKind.RECEIPT)),
-            task_id(runtime.task_id),
-            session_id(runtime.session_id),
-            timestamp_from_datetime(now),
-            versions,
-            request.redaction_profile,
-            request.include,
-        )
+        try:
+            case = build_deterministic_case(projection, records, availability)
+            context = _context(projection, frontier, case, records)
+            now = app.clock.now_utc()
+            document = build_receipt(
+                context,
+                receipt_id(app.ids.new(IdKind.RECEIPT)),
+                task_id(runtime.task_id),
+                session_id(runtime.session_id),
+                timestamp_from_datetime(now),
+                versions,
+                request.redaction_profile,
+                request.include,
+            )
+        except ValueError as exc:
+            # Remaining case/receipt construction failures are a storage or projection
+            # inconsistency. Finding citations that name events outside the accepted prefix
+            # are represented as missing_ref gaps inside build_deterministic_case and must
+            # not reach this path. Do not collapse a classified ledger condition to
+            # INTERNAL_ERROR.
+            if str(exc) in {
+                "deterministic_case_invalid",
+                "receipt_build_context_invalid",
+                "projection_corrupt",
+            }:
+                raise _error(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "The receipt case is unreadable.",
+                ) from exc
+            raise
         document_json = cast(JsonValue, receipt_document_to_json(document))
         document_bytes = canonical_encode(document_json)
         digest = canonical_digest(document_json)

@@ -234,6 +234,31 @@ def test_evidence_claim_response_redaction_paths() -> None:
     assert "redacted_object:obj_20000002-0000-4000-8000-000000000900" in state.coverage_gaps
 
 
+def test_finding_event_subject_ref_outside_prefix_does_not_overflow_projection_gaps() -> None:
+    records = list(_records("all-event-families"))
+    finding = next(
+        record
+        for record in records
+        if type(record) is AcceptedEvent and record.schema.name == "finding_recorded"
+    )
+    assert finding.payload is not None
+    from yoetz.domain.events import encode_payload
+    from yoetz.protocol.canonical import canonical_digest
+
+    phantom = event_id("evt_40000000-0000-4000-8000-0000000000aa")
+    payload = replace(finding.payload, subject_refs=(phantom,))
+    records[records.index(finding)] = replace(
+        finding,
+        payload=payload,
+        projection_locator=replace(
+            finding.projection_locator,
+            canonical_payload_digest=canonical_digest(encode_payload(payload)),
+        ),
+    )
+    state = replay(tuple(records))
+    assert not any(marker.startswith("missing_ref:") for marker in state.coverage_gaps)
+
+
 def test_finding_check_receipt_records() -> None:
     records = _records("all-event-families")
     before_redaction = replay(records[:13])

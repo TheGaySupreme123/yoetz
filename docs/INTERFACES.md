@@ -819,8 +819,18 @@ deciding between the two, shared by the receipt and by compact status coverage.
   artifact/freshness caps but caps immutability at `content_digest`, adding respectively
   `redacted_object` or `captured_object_unavailable`. An unresolved typed ref preserves all other
   dimensions, caps freshness at `partial`, and adds `missing_ref`; an opaque event does the same and
-  adds `unknown_event`. Every cap is a registered component-wise minimum, existing gaps are unioned
-  and sorted, and overflow of the 64-token bound fails case freezing rather than truncating.
+  adds `unknown_event`. Finding and contradiction citations may name an `evt_` id that is absent
+  from the accepted prefix (observation advice historically computed those ids from envelopes that
+  were never appended). Replay does not mint one `missing_ref` marker per such citation — that
+  would overflow the 64-gap projection and receipt bounds on a large observation finding set.
+  Case construction instead keeps those citations out of `allowed_ids` and, when no `missing_ref`
+  is already present, adds one task-global `missing_ref:cited_event_absent` gap. Projection
+  `source_event_id` values, selected frozen-history members, and
+  `latest_tested_state.source_check_event_id` remain required: a missing one is still an invalid
+  case and surfaces as a bounded `STORAGE_CORRUPT` receipt/status/check error, never
+  `INTERNAL_ERROR`. Every cap is a registered component-wise
+  minimum, existing gaps are unioned and sorted, and overflow of the 64-token bound fails case
+  freezing rather than truncating.
   Relevant digest evidence additionally contributes `evidence_digest_subject_legacy_unknown`,
   `evidence_content_digest_only`, or `evidence_content_withheld`. Relevance follows the current
   claim/obligation/response support graph (including referenced results); unrelated historical

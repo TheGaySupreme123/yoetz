@@ -666,7 +666,15 @@ async def _candidate_page(
     availability = await runtime.ledger.load_case_availability(
         runtime.session_id, frontier, projection
     )
-    case = build_deterministic_case(projection, records, availability)
+    try:
+        case = build_deterministic_case(projection, records, availability)
+    except ValueError as exc:
+        if str(exc) == "deterministic_case_invalid":
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "The status case is unreadable.",
+            ) from exc
+        raise
     assessments, _ = run_deterministic_policies(case, CheckScope((), ()), _PACKS)
     indexed = tuple(enumerate(assessments))
     ordered = tuple(

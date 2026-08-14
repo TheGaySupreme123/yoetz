@@ -1457,11 +1457,28 @@ def build_deterministic_case(
     history = tuple(reversed(newest_first))
 
     source_by_ref = _logical_sources(projection)
+    cited_event_absent = False
 
     def add_event_ref(ref: EventId) -> None:
         if ref not in records_by_event:
             raise _invalid_case()
         source_by_ref[ref] = ref
+
+    def add_optional_event_ref(ref: EventId) -> None:
+        """Bind a cited event when it is in the prefix; otherwise note a bounded gap.
+
+        Projection source events and the selected history window remain required. Finding
+        and contradiction citations can name an event that was never appended — observation
+        advice historically computed those IDs from envelopes. Receipts admit at most 64
+        gaps, so many dangling citations collapse to one task-global missing_ref rather
+        than one marker per finding.
+        """
+
+        nonlocal cited_event_absent
+        if ref in records_by_event:
+            source_by_ref[ref] = ref
+            return
+        cited_event_absent = True
 
     for record in _projection_records(projection):
         add_event_ref(record.source_event_id)
@@ -1471,16 +1488,21 @@ def build_deterministic_case(
         add_event_ref(projection.latest_tested_state.source_check_event_id)
     for contradiction in projection.contradictions.values():
         if contradiction.disputed_ref.startswith("evt_"):
-            add_event_ref(event_id(contradiction.disputed_ref))
+            add_optional_event_ref(event_id(contradiction.disputed_ref))
     for record in projection.findings.values():
         if record.payload is not None:
             for ref in record.payload.subject_refs:
                 if ref.startswith("evt_"):
-                    add_event_ref(event_id(ref))
+                    add_optional_event_ref(event_id(ref))
     for gap in gaps.values():
         for ref in gap.subject_refs:
-            if ref.startswith("evt_"):
-                add_event_ref(event_id(ref))
+            if not ref.startswith("evt_"):
+                continue
+            cited = event_id(ref)
+            if cited in records_by_event:
+                source_by_ref[cited] = cited
+    if cited_event_absent and not any(gap.code == "missing_ref" for gap in gaps.values()):
+        _add_gap(gaps, "missing_ref:cited_event_absent", "missing_ref", ())
 
     redacted_object_by_evidence: dict[EvidenceId, set[ObjectId]] = {}
     for target in redacted_objects:
