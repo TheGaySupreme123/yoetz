@@ -135,6 +135,15 @@ registration is global, file-free, and marker-free, so reusing the skill-install
 misuse fields designed for on-disk trusted-project content. The guarantee below is unchanged —
 adding a harness is still one `HarnessId` value plus adapters, with no shared-type edits.
 
+**Amendment (2026-08-14):** Hook advice delivery no longer falls back to the workspace-wide
+`advice_snapshot` for task-scoped conditions. Before a Codex session is mapped, task-scoped
+advice is selected only from that Codex session's retained envelopes. After mapping, delivery
+uses the mapped Yoetz session snapshot when present, otherwise the current Codex session's
+envelopes. Workspace-standing machine conditions (`connect_provider`) remain readable from the
+workspace snapshot at the documented session-boundary cadence. Suppression is keyed by Yoetz
+session when mapped and by Codex session commitment when unmapped, so one task cannot silence
+or re-enable another. No new durable field or observation-authority change.
+
 **Amendment (2026-07-22):** First-party Codex observation is required for v0.1 completion of the
 Codex integration, still on protocol version `0.1`. Observation is a sibling local-control
 capability (`ObservationPort`), not a seventh MCP tool and not an `IntegrationsPort` overload.

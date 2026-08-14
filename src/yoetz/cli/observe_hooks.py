@@ -1243,6 +1243,7 @@ def handle_observe(
                     workspace_commitment,
                     yoetz_session_id=delivery_session_id,
                     allow_standing=resolved_event in STANDING_ADVICE_CADENCE_EVENTS,
+                    session_commitment=session_commitment,
                 )
                 if delivery is not None:
                     additional = delivery.text[:_MAX_ADVICE_CONTEXT]
@@ -1268,6 +1269,7 @@ def handle_observe(
                         workspace_commitment,
                         pending_delivery.delivery_identity,
                         yoetz_session_id=delivery_session_id,
+                        session_commitment=session_commitment,
                     )
         _record_pass_timing(
             resolved_event,

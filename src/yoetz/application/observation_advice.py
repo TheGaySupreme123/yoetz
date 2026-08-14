@@ -55,6 +55,7 @@ __all__ = [
     "hook_advice_context",
     "minimized_semantic_evidence_packet",
     "select_advice_item",
+    "select_standing_item",
     "should_reissue_advice",
     "stable_advice_finding_id",
 ]
@@ -503,6 +504,17 @@ def select_advice_item(snapshot: AdviceSnapshot, *, allow_standing: bool) -> Adv
         return None
     for item in snapshot.ranked_items:
         if allow_standing or item.recommended_next_action not in STANDING_MACHINE_ACTIONS:
+            return item
+    return None
+
+
+def select_standing_item(snapshot: AdviceSnapshot) -> AdviceItem | None:
+    """Highest-ranked workspace-standing machine condition, if the snapshot has one."""
+
+    if not snapshot.ranked_items:
+        return None
+    for item in snapshot.ranked_items:
+        if item.recommended_next_action in STANDING_MACHINE_ACTIONS:
             return item
     return None
 
