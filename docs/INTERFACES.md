@@ -2297,6 +2297,13 @@ Shared closed types:
   privacy gateway, over minimized approved packets. Deterministic finding identity is
   candidate-scoped; envelope-linked candidates use only their mapped ledger events as subject refs,
   while standing session conditions use the stable lifecycle event.
+  Hook-channel delivery is relevance-scoped: task-scoped conditions come from the mapped Yoetz
+  session snapshot when one exists, otherwise from the current Codex session's retained envelopes.
+  The workspace-wide snapshot is not a fallback for task-scoped work. Deliberately workspace-
+  standing machine conditions remain deliverable from that workspace snapshot at the documented
+  session-boundary cadence. The agent-visible context carries only the bounded rule, action, and
+  evidence token; deciding whether the advice belongs to the current target never requires
+  inspecting Yoetz storage.
 
 Independent verification support (local control, not MCP):
 

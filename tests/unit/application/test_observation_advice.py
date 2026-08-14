@@ -18,6 +18,7 @@ from yoetz.application.observation_advice import (
     hook_advice_context,
     minimized_semantic_evidence_packet,
     select_advice_item,
+    select_standing_item,
     should_reissue_advice,
 )
 from yoetz.application.observation_coordinator import (
@@ -344,8 +345,10 @@ def test_standing_items_fall_through_to_the_first_actionable_item() -> None:
     ]
     permitted = select_advice_item(snapshot, allow_standing=True)
     withheld = select_advice_item(snapshot, allow_standing=False)
+    standing = select_standing_item(snapshot)
     assert permitted is not None and permitted.rule_code == "provider_not_ready"
     assert withheld is not None and withheld.rule_code == "semantic_claim_without_attempt"
+    assert standing is not None and standing.rule_code == "provider_not_ready"
 
 
 def test_suppression_identity_still_tracks_evidence_for_materialization() -> None:
@@ -578,7 +581,12 @@ def test_observe_hook_refresh_advice_without_mcp_tools(tmp_path: Path) -> None:
     serialized = json.dumps(payload)
     assert "resolve_failed_command" in serialized or status.advice_frontier != "none"
     # Second peek is suppressed (same evidence frontier).
-    assert store.peek_advice_for_delivery(workspace) is None
+    assert (
+        store.peek_advice_for_delivery(
+            workspace, session_commitment=store.session_commitment("advice-1")
+        )
+        is None
+    )
     _ = context
     text = serialized
     assert "AKIA" not in text

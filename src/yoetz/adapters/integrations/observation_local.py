@@ -31,6 +31,7 @@ from yoetz.domain.observation import (
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestResult,
+    ObservationLifecycle,
     ObservationRevokeCommand,
     ObservationSource,
     ObservationStatus,
@@ -439,6 +440,61 @@ def _load_session_advice(raw: object) -> dict[str, AdviceSnapshot]:
     return result
 
 
+def _advice_delivery_scope_key(
+    *,
+    yoetz_session_id: str | None,
+    session_commitment: str | None,
+) -> str | None:
+    """Prefer the mapped Yoetz session; otherwise the current Codex session."""
+
+    if type(yoetz_session_id) is str:
+        return yoetz_session_id
+    if type(session_commitment) is str:
+        return session_commitment
+    return None
+
+
+def _task_scoped_delivery_snapshot(
+    state: _WorkspaceState,
+    *,
+    yoetz_session_id: str | None,
+    session_commitment: str | None,
+) -> AdviceSnapshot | None:
+    """Task-scoped snapshot for hook delivery: never the workspace fallback.
+
+    A mapped Yoetz session snapshot is authority when present. Otherwise the
+    current Codex session's retained envelopes are rebuilt in memory so a
+    same-session failed command stays deliverable before ``start`` returns.
+    """
+
+    if type(yoetz_session_id) is str and state.session_advice is not None:
+        mapped = state.session_advice.get(yoetz_session_id)
+        if mapped is not None:
+            return mapped
+    if type(session_commitment) is not str or not session_commitment:
+        return None
+    envelopes = tuple(
+        envelope
+        for envelope in (state.envelopes or ())
+        if envelope.session_commitment == session_commitment
+    )
+    if not envelopes:
+        return None
+    from yoetz.application.observation_advice import (
+        ObservationAdviceBuildInput,
+        build_observation_advice_snapshot,
+    )
+
+    return build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=envelopes,
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+
+
 def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
     """Independent copy of one workspace state for the parse cache.
 
@@ -828,6 +884,7 @@ class LocalObservationStore:
         *,
         yoetz_session_id: str | None = None,
         allow_standing: bool = True,
+        session_commitment: str | None = None,
     ) -> AdviceDelivery | None:
         """Select advice to deliver once per *condition* identity. Never mutates state.
 
@@ -836,6 +893,12 @@ class LocalObservationStore:
         agent. Persisting the identity here would mean a hook killed between
         the save and the stdout write suppresses that advice permanently, which
         is strictly worse than the storm this cadence exists to stop.
+
+        Task-scoped conditions never fall back to the workspace-wide snapshot
+        (#249). A mapped Yoetz session uses its own snapshot when present;
+        otherwise selection is rebuilt from the current Codex session's
+        retained envelopes. The workspace snapshot may contribute only
+        deliberately standing machine conditions.
 
         ``allow_standing=False`` withholds standing machine conditions
         (STANDING_MACHINE_ACTIONS) and falls through to the highest-ranked
@@ -847,26 +910,40 @@ class LocalObservationStore:
             advice_delivery_identity,
             hook_advice_context,
             select_advice_item,
+            select_standing_item,
         )
 
         with self._lock:
             state = self._load(workspace)
-            snapshot: AdviceSnapshot | None = None
-            if type(yoetz_session_id) is str and state.session_advice is not None:
-                snapshot = state.session_advice.get(yoetz_session_id)
+            snapshot = _task_scoped_delivery_snapshot(
+                state,
+                yoetz_session_id=yoetz_session_id,
+                session_commitment=session_commitment,
+            )
+            item = None
+            if snapshot is not None:
+                if not snapshot.ranked_finding_ids:
+                    snapshot = None
+                else:
+                    item = select_advice_item(snapshot, allow_standing=allow_standing)
+                    if item is None and snapshot.ranked_items:
+                        # Every ranked item on the task-scoped snapshot was
+                        # cadence-gated on this event class.
+                        snapshot = None
+            if snapshot is None and allow_standing and state.advice_snapshot is not None:
+                standing = select_standing_item(state.advice_snapshot)
+                if standing is not None:
+                    snapshot = state.advice_snapshot
+                    item = standing
             if snapshot is None:
-                snapshot = state.advice_snapshot
-            if snapshot is None:
-                return None
-            if not snapshot.ranked_finding_ids:
-                return None
-            item = select_advice_item(snapshot, allow_standing=allow_standing)
-            if item is None and snapshot.ranked_items:
-                # Every ranked item was cadence-gated on this event class.
                 return None
             identity = advice_delivery_identity(snapshot, item=item)
-            if type(yoetz_session_id) is str:
-                delivered = (state.session_advice_suppression or {}).get(yoetz_session_id)
+            scope = _advice_delivery_scope_key(
+                yoetz_session_id=yoetz_session_id,
+                session_commitment=session_commitment,
+            )
+            if type(scope) is str:
+                delivered = (state.session_advice_suppression or {}).get(scope)
             else:
                 delivered = state.last_advice_suppression
             if delivered == identity:
@@ -884,6 +961,7 @@ class LocalObservationStore:
         delivery_identity: str,
         *,
         yoetz_session_id: str | None = None,
+        session_commitment: str | None = None,
     ) -> None:
         """Record advice as delivered — call only after the text reached the agent.
 
@@ -894,6 +972,11 @@ class LocalObservationStore:
         migration, and downgrade is symmetric. They stay single values, never a
         set: A→B→A must redeliver A.
 
+        Mapped deliveries key suppression by Yoetz session; unmapped hook
+        deliveries key it by Codex session commitment so one task cannot
+        silence another (#249). Callers that pass neither still use the
+        workspace-wide slot.
+
         A crash between the emission and this call costs at most one
         redelivery; the reverse order would cost the advice entirely.
         """
@@ -902,12 +985,16 @@ class LocalObservationStore:
             raise ProtocolValueError("invalid_event_value_type")
         with self._lock:
             state = self._load(workspace)
-            if type(yoetz_session_id) is str:
+            scope = _advice_delivery_scope_key(
+                yoetz_session_id=yoetz_session_id,
+                session_commitment=session_commitment,
+            )
+            if type(scope) is str:
                 if state.session_advice_suppression is None:
                     state.session_advice_suppression = {}
-                if state.session_advice_suppression.get(yoetz_session_id) == delivery_identity:
+                if state.session_advice_suppression.get(scope) == delivery_identity:
                     return
-                state.session_advice_suppression[yoetz_session_id] = delivery_identity
+                state.session_advice_suppression[scope] = delivery_identity
             else:
                 if state.last_advice_suppression == delivery_identity:
                     return
