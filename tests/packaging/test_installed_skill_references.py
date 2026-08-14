@@ -47,11 +47,12 @@ def test_step_zero_stops_on_an_empty_guidance_read() -> None:
     """An empty resources/read is a silent miss, not a successful Step 0 (issue #203)."""
 
     text = _skill_text()
+    collapsed = " ".join(text.split())
     assert "resolve without any repository checkout" not in text
-    assert "If a `resources/read` result has no text, do not proceed" in text
-    assert "do not treat the read as success" in text
-    assert "`references/<name>.md`" in text
-    assert "Do not call `start` on an empty guidance body" in text
+    assert "If a `resources/read` result has no text, do not proceed" in collapsed
+    assert "do not treat the read as success" in collapsed
+    assert "`references/<name>.md`" in collapsed
+    assert "Do not call `start` on an empty guidance body" in collapsed
 
 
 def test_every_yoetz_uri_the_skill_names_is_a_registered_readable_resource() -> None:
