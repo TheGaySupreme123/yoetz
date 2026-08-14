@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Awaitable, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import partial
@@ -194,18 +195,30 @@ class ObservationCoordinator:
     _storage_corrupt_sessions: set[str] = field(
         default_factory=_empty_storage_corrupt_sessions, init=False, repr=False
     )
+    _local_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
 
     async def _local[ResultT](self, call: Callable[[], ResultT]) -> ResultT:
         """Run one blocking local-store call off the service event loop.
 
-        Every ``LocalObservationStore`` entry point takes the same unbounded cross-process
-        flock, so a read is no safer on the loop than a write: whoever holds the lock decides
-        how long the daemon stops answering control clients (#238). Reads route through here
-        too. The store's own reentrant thread lock is taken and released inside a single worker
-        thread on each hop, so no lock is ever held across an await.
+        Every ``LocalObservationStore`` entry point takes the same potentially blocking
+        cross-process flock, so a read is no safer on the loop than a write. Reads route through
+        this dedicated bounded pool too; the store also bounds acquisition so cancellation cannot
+        leave a worker parked indefinitely (#238). The reentrant thread lock is acquired and
+        released inside one worker on each hop, so no lock is held across an await.
         """
 
-        return await asyncio.to_thread(call)
+        executor = self._local_executor
+        if executor is None:
+            executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="yoetz-obs-local")
+            self._local_executor = executor
+        return await asyncio.get_running_loop().run_in_executor(executor, call)
+
+    def close(self) -> None:
+        """Stop accepting local-store work; bounded lock waits let running workers retire."""
+
+        executor, self._local_executor = self._local_executor, None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def __post_init__(self) -> None:
         self._lock = asyncio.Lock()

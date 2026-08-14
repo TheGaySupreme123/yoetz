@@ -67,6 +67,14 @@ _DISCRIMINATED_UNION: dict[str, Any] = {
             },
             "required": ["schema", "payload"],
         },
+        {
+            "properties": {
+                "schema": {
+                    "type": "object",
+                    "not": {"required": ["name"]},
+                }
+            }
+        },
     ],
 }
 
@@ -85,7 +93,7 @@ def test_schema_instance_invalid_rejects_an_unregistered_reason() -> None:
 
 def test_schema_instance_invalid_rejects_an_out_of_range_count() -> None:
     with pytest.raises(TypeError):
-        SchemaInstanceInvalid(("payload",), unknown_count=33)
+        SchemaInstanceInvalid(("payload",), unknown_count=34)
 
 
 def test_schema_instance_invalid_rejects_a_free_form_family() -> None:

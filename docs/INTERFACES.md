@@ -2345,7 +2345,10 @@ across workspace sessions under a nonblocking per-workspace lease; within one pa
 `mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),
 and workspace-global rejections (`vault_locked`, disabled, paused) end the pass. A
 `service_unavailable` rejection is row-scoped: later rows are still attempted, and the pass yields
-after three consecutive such rejections. `observation_storage_corrupt` is terminal for its Codex
+after three consecutive such rejections. Local observation-store acquisition is capped at two
+seconds for both the process-local reentrant lock and the cross-process flock. Coordinator and
+sweeper calls use separate bounded executors, so cancellation cannot strand an exit-blocking flock
+wait or exhaust the shared default executor. `observation_storage_corrupt` is terminal for its Codex
 session in the current READY generation: the coordinator remembers that session after the first
 bundle `STORAGE_CORRUPT`, later ingests are rejected without reopening the bundle, and the sweeper
 atomically moves that session's pending backlog to quarantine while healthy lanes continue. A new

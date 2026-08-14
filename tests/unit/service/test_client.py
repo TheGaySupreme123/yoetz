@@ -267,6 +267,7 @@ async def test_on_demand_connect_spawns_only_after_absent_service(
 
     monkeypatch.setattr(client_module, "_connect_service_attempt", scripted_connect)
     monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    monkeypatch.setattr(client_module, "_SERVICE_START_POLL_SECONDS", 0.01)
     connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.2)
     assert connected is expected
     assert spawned == 1
@@ -404,7 +405,6 @@ async def test_on_demand_accepted_unresponsive_after_spawn_still_ends_at_the_dea
 
     monkeypatch.setattr(client_module, "_connect_service_attempt", scripted_connect)
     monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
-    monkeypatch.setattr(client_module, "_CONNECT_HANDSHAKE_TIMEOUT_SECONDS", 0.05)
     started = asyncio.get_running_loop().time()
 
     with pytest.raises(ControlError, match="service_unavailable"):

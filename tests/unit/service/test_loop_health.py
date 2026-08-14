@@ -126,6 +126,32 @@ def test_watchdog_emit_never_waits_on_the_stderr_logging_handler(
     assert lines[0]["reason"] == "event_loop_lag"
 
 
+def test_watchdog_thread_retries_after_one_sampling_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.service.loop_health as loop_health
+
+    monkeypatch.setattr(loop_health, "_WATCHDOG_SAMPLE_SECONDS", 0.01)
+    calls = 0
+    recovered = threading.Event()
+    watchdog = ControlPlaneWatchdog(connections_in_flight=lambda: 0)
+
+    def sample() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient sink failure")
+        recovered.set()
+
+    monkeypatch.setattr(watchdog, "sample", sample)
+    watchdog.start_thread()
+    try:
+        assert recovered.wait(timeout=1.0)
+    finally:
+        watchdog.close()
+    assert calls >= 2
+
+
 @pytest.mark.anyio
 async def test_watchdog_emits_while_the_loop_is_blocked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

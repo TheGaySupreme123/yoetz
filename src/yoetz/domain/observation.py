@@ -651,6 +651,7 @@ class AdviceItem:
     coverage: Coverage
     freshness_frontier: str
     origin: Literal["deterministic", "semantic_model_derived"] = "deterministic"
+    condition_identity: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "finding_id", finding_id(self.finding_id))
@@ -664,6 +665,8 @@ class AdviceItem:
             raise _invalid("invalid_coverage_value")
         object.__setattr__(self, "freshness_frontier", _token(self.freshness_frontier))
         object.__setattr__(self, "origin", _advice_origin(self.origin))
+        if self.condition_identity is not None:
+            object.__setattr__(self, "condition_identity", _token(self.condition_identity))
 
 
 def _ranked_advice_items(value: object) -> tuple[AdviceItem, ...]:
@@ -939,6 +942,7 @@ def advice_item_to_json(value: AdviceItem) -> JsonObject:
             "coverage": JsonObject(coverage_to_json(value.coverage)),
             "freshness_frontier": value.freshness_frontier,
             "origin": value.origin,
+            "condition_identity": value.condition_identity,
         }
     )
 
@@ -959,7 +963,8 @@ def advice_item_from_json(value: JsonValue) -> AdviceItem:
         "freshness_frontier",
         "origin",
     )
-    if set(source) != set(required):
+    source_keys = set(source)
+    if source_keys != set(required) and source_keys != {*required, "condition_identity"}:
         raise _invalid()
     refs = source["evidence_refs"]
     return AdviceItem(
@@ -973,6 +978,11 @@ def advice_item_from_json(value: JsonValue) -> AdviceItem:
         coverage=coverage_from_json(source["coverage"]),
         freshness_frontier=cast(str, source["freshness_frontier"]),
         origin=_advice_origin(source["origin"]),
+        condition_identity=(
+            cast(str, source["condition_identity"])
+            if type(source.get("condition_identity")) is str
+            else None
+        ),
     )
 
 

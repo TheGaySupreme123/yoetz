@@ -776,6 +776,7 @@ _MAX_PROJECTED_OBJECT_LOCATIONS: Final = 8
 _INSTANCE_REASON_EXTRA_FORBIDDEN: Final = "extra_forbidden"
 _INSTANCE_REASONS: Final = frozenset({_INSTANCE_REASON_EXTRA_FORBIDDEN})
 MAX_UNKNOWN_PROPERTY_COUNT: Final = 32
+_UNKNOWN_PROPERTY_COUNT_OVERFLOW: Final = MAX_UNKNOWN_PROPERTY_COUNT + 1
 EVENT_FAMILY_NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 
 
@@ -845,7 +846,10 @@ class SchemaInstanceInvalid(ProtocolValueError):
             or SCHEMA_VERSION_PATTERN.fullmatch(family_version) is None
         ):
             raise TypeError("schema_instance_family_version_invalid")
-        if type(unknown_count) is not int or not 0 <= unknown_count <= MAX_UNKNOWN_PROPERTY_COUNT:
+        if (
+            type(unknown_count) is not int
+            or not 0 <= unknown_count <= _UNKNOWN_PROPERTY_COUNT_OVERFLOW
+        ):
             raise TypeError("schema_instance_unknown_count_invalid")
         self.absolute_path = absolute_path
         self.location_reasons = location_reasons
@@ -1182,7 +1186,8 @@ def _unknown_property_count(error: ValidationError) -> int:
         set(cast(Mapping[object, object], properties)) if isinstance(properties, Mapping) else set()
     )
     unknown = {key for key in cast(Mapping[object, object], instance) if key not in declared}
-    return min(len(unknown), MAX_UNKNOWN_PROPERTY_COUNT)
+    count = len(unknown)
+    return count if count <= MAX_UNKNOWN_PROPERTY_COUNT else _UNKNOWN_PROPERTY_COUNT_OVERFLOW
 
 
 def _selected_family_for(error: ValidationError) -> tuple[str, str] | None:

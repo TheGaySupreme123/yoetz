@@ -119,7 +119,8 @@ def test_a_later_family_version_is_never_answered_with_the_earlier_key_list() ->
     """
 
     request = _single_draft_request(_MULTI_VERSION_FAMILY)
-    assert request["event_drafts"][0]["schema"]["version"] == "1.1.0"
+    example_version = cast(str, request["event_drafts"][0]["schema"]["version"])
+    assert example_version != "1.0.0", "the presentation branch pins 1.0.0; pick a later example"
     assert _LATER_ONLY_PAYLOAD_KEY in request["event_drafts"][0]["payload"]
     request["event_drafts"][0]["payload"]["zzz_unknown"] = "x"
 
@@ -127,7 +128,7 @@ def test_a_later_family_version_is_never_answered_with_the_earlier_key_list() ->
     message = invalid_request_message("publish_work", locations)
 
     assert locations[0]["family"] == _MULTI_VERSION_FAMILY
-    assert locations[0]["family_version"] == "1.1.0"
+    assert locations[0]["family_version"] == example_version
     # No key list at all rather than the wrong one: naming 1.0.0's keys would tell the caller to
     # delete the evidence-integrity key 1.1.0 requires.
     assert "admitted keys are" not in message
@@ -136,6 +137,16 @@ def test_a_later_family_version_is_never_answered_with_the_earlier_key_list() ->
     assert "the payload carries 1 property the event schema does not admit" in message
     assert "schema.name admits" in message
     assert len(message.encode("utf-8")) <= _MAX_MESSAGE_BYTES
+
+
+def test_unknown_payload_count_reports_saturation_as_a_lower_bound() -> None:
+    request = _obligation_request()
+    request["event_drafts"][0]["payload"].update({f"unknown_{index}": "x" for index in range(33)})
+
+    message = _message(request)
+
+    assert "at least 32 properties" in message
+    assert "carries 32 properties" not in message
 
 
 def test_a_family_without_a_version_gets_no_key_list() -> None:

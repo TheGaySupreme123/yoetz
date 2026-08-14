@@ -320,7 +320,7 @@ def _unknown_count_from_validation_item(item: Mapping[str, object]) -> int:
     if not isinstance(ctx, Mapping):
         return 0
     count = cast(Mapping[object, object], ctx).get("count")
-    if type(count) is not int or not 1 <= count <= MAX_UNKNOWN_PROPERTY_COUNT:
+    if type(count) is not int or not 1 <= count <= MAX_UNKNOWN_PROPERTY_COUNT + 1:
         return 0
     return count
 
@@ -654,6 +654,8 @@ def _unknown_property_measure(count: object) -> str:
     value = int(count)
     if value == 1:
         return "1 property"
+    if value == MAX_UNKNOWN_PROPERTY_COUNT + 1:
+        return f"at least {MAX_UNKNOWN_PROPERTY_COUNT} properties"
     if 2 <= value <= MAX_UNKNOWN_PROPERTY_COUNT:
         return f"{value} properties"
     return "properties"

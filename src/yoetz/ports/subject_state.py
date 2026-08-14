@@ -76,6 +76,8 @@ class SubjectStateLimitDetail:
             raise ProtocolValueError("invalid_subject_state")
         if type(self.limit) is not int or self.limit < 0:
             raise ProtocolValueError("invalid_subject_state")
+        if self.observed <= self.limit:
+            raise ProtocolValueError("invalid_subject_state")
 
 
 @final
@@ -163,6 +165,8 @@ class SubjectStateCaptureResult:
         if type(self.limit_detail) is not tuple or any(
             type(value) is not SubjectStateLimitDetail for value in self.limit_detail
         ):
+            raise ProtocolValueError("invalid_subject_state")
+        if self.limit_detail and SubjectStateLimitation.FILE_LIMIT_EXCEEDED not in self.limitations:
             raise ProtocolValueError("invalid_subject_state")
         if (
             type(self.bytes_hashed) is not int

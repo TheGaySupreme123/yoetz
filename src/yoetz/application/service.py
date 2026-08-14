@@ -1378,13 +1378,27 @@ class ReadyApplicationFactory:
 async def _close_ready_context(context: object) -> None:
     if not isinstance(context, ServiceReadyContext):
         return
+    failure: BaseException | None = None
     try:
         if context.observation_sweep_close is not None:
             context.observation_sweep_close()
+    except BaseException as exc:
+        failure = exc
+    try:
         if context.verification_supervisor is not None:
             await context.verification_supervisor.stop()
-    finally:
-        try:
-            await context.privacy.close()
-        finally:
-            await context.runtime.close()
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+    try:
+        await context.privacy.close()
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+    try:
+        await context.runtime.close()
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+    if failure is not None:
+        raise failure

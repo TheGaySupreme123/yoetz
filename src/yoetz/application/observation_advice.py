@@ -349,7 +349,20 @@ def _item_from_candidate(
         coverage=coverage,
         freshness_frontier=freshness_frontier,
         origin="deterministic",
+        condition_identity=_delivery_condition_identity(candidate),
     )
+
+
+def _delivery_condition_identity(candidate: ObservationAdviceCandidate) -> str:
+    """Hash the stable rule-specific condition without rolling evidence references."""
+
+    material = canonical_encode(
+        {
+            "detail_token": candidate.detail_token,
+            "rule_code": candidate.rule_code,
+        }
+    )
+    return f"condition-{hashlib.sha256(material).hexdigest()[:48]}"
 
 
 def build_observation_advice_snapshot(
@@ -526,6 +539,7 @@ def advice_delivery_identity(snapshot: AdviceSnapshot, *, item: AdviceItem | Non
     condition: JsonValue
     if top is not None:
         condition = {
+            "condition_identity": top.condition_identity or "",
             "detail": top.detail,
             "next_action": top.recommended_next_action,
             "rule_code": top.rule_code,

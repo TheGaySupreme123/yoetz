@@ -48,10 +48,11 @@ _MAX_MODULES: Final = 400
 
 def _probe(source: str) -> dict[str, object]:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.fspath(_REPO_ROOT / "src")
+    environment.pop("PYTHONPATH", None)
     environment.pop("PYTHONSTARTUP", None)
+    seeded_source = f"import sys; sys.path.insert(0, {os.fspath(_REPO_ROOT / 'src')!r})\n" + source
     completed = subprocess.run(  # noqa: S603 - fixed in-repository interpreter and source
-        [sys.executable, "-I", "-c", source],
+        [sys.executable, "-I", "-c", seeded_source],
         capture_output=True,
         env=environment,
         check=False,

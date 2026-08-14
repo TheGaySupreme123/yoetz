@@ -142,8 +142,9 @@ class ControlPlaneWatchdog:
             try:
                 self.sample()
             except Exception:
-                # A watchdog that can raise is a watchdog that can take the process with it.
-                return
+                # Diagnostics are best effort. A transient sink failure must not silence every
+                # later saturation and recovery sample until the daemon restarts.
+                continue
 
     def _in_flight(self) -> int:
         try:

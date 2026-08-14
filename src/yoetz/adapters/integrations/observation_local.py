@@ -10,9 +10,11 @@ from __future__ import annotations
 import base64
 import contextlib
 import dataclasses
+import errno
 import os
 import re
 import threading
+import time
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -95,6 +97,8 @@ _MAX_RUNTIME_GATE_BYTES: Final = 256
 # it so such a value can never be mistaken for an event kind.
 _OPEN_PRE_SEPARATOR: Final = "|"
 _LOCAL_OUTBOX_OVERFLOW_GAP: Final = "_local_outbox_overflow"
+_STORE_LOCK_TIMEOUT_SECONDS: Final = 2.0
+_STORE_LOCK_POLL_SECONDS: Final = 0.01
 
 YOETZ_TOOL_NAMES: Final = frozenset(
     {
@@ -138,7 +142,9 @@ class _InterprocessStoreLock:
 
     def __enter__(self) -> _InterprocessStoreLock:
         state = self._state
-        state.thread_lock.acquire()
+        deadline = time.monotonic() + _STORE_LOCK_TIMEOUT_SECONDS
+        if not state.thread_lock.acquire(timeout=_STORE_LOCK_TIMEOUT_SECONDS):
+            raise TimeoutError("observation_store_lock_timeout")
         if state.depth == 0:
             flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
             if hasattr(os, "O_NOFOLLOW"):
@@ -148,7 +154,17 @@ class _InterprocessStoreLock:
                 descriptor = os.open(self._path, flags, 0o600)
                 os.fchmod(descriptor, 0o600)
                 if fcntl is not None:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                    while True:
+                        try:
+                            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except OSError as exc:
+                            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                                raise
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise TimeoutError("observation_store_lock_timeout") from exc
+                            time.sleep(min(_STORE_LOCK_POLL_SECONDS, remaining))
             except BaseException:
                 if descriptor is not None:
                     os.close(descriptor)
@@ -771,8 +787,10 @@ class LocalObservationStore:
             state = self._load(workspace)
             assert state.open_pre is not None
             raw = state.open_pre.pop(correlation_id, None)
+            if raw is None:
+                return None
             self._save(workspace, state)
-            return None if raw is None else raw.split(_OPEN_PRE_SEPARATOR, 1)[0]
+            return raw.split(_OPEN_PRE_SEPARATOR, 1)[0]
 
     def has_open_pre(self, workspace: str, correlation_id: str) -> bool:
         with self._lock:

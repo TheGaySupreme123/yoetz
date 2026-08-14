@@ -223,6 +223,49 @@ def test_delivery_identity_ignores_evidence_refs_that_are_a_rolling_window() -> 
     )
 
 
+def test_delivery_identity_distinguishes_successive_failed_commands() -> None:
+    first = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(
+                _envelope(
+                    "hook:fail-a",
+                    {"tool_name": "shell", "exit_status": 2, "correlation_id": "command-a"},
+                ),
+            ),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    later = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(
+                _envelope(
+                    "hook:fail-a",
+                    {"tool_name": "shell", "exit_status": 2, "correlation_id": "command-a"},
+                    pos=1,
+                ),
+                _envelope(
+                    "hook:resolve-a",
+                    {"tool_name": "shell", "exit_status": 0, "correlation_id": "command-a"},
+                    pos=2,
+                ),
+                _envelope(
+                    "hook:fail-b",
+                    {"tool_name": "shell", "exit_status": 3, "correlation_id": "command-b"},
+                    pos=3,
+                ),
+            ),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert first is not None and later is not None
+    assert first.ranked_items[0].summary == later.ranked_items[0].summary
+    assert advice_delivery_identity(first) != advice_delivery_identity(later)
+
+
 def test_delivery_identity_changes_with_rule_code_or_next_action() -> None:
     """Everything that names the condition stays in the key."""
 

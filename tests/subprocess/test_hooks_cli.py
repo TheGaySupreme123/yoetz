@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 import yoetz.cli.app as cli
+from yoetz.config.paths import state_dir
 
 _RUNNER = CliRunner()
 
@@ -137,7 +138,9 @@ def _populate_wall_clock_store(state: Path, workspace_dir: Path) -> None:
 
 
 @pytest.mark.slow
-def test_observe_hook_process_wall_clock_including_startup(tmp_path: Path) -> None:
+def test_observe_hook_process_wall_clock_including_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The only guard that can see process startup — the term #242 says nothing bounds.
 
     Every in-process latency test starts after the interpreter and the import
@@ -152,7 +155,8 @@ def test_observe_hook_process_wall_clock_including_startup(tmp_path: Path) -> No
         pytest.skip("no installed console script to measure")
 
     home = tmp_path / "home"
-    state = home / "Library" / "Application Support" / "yoetz"
+    monkeypatch.setenv("HOME", str(home))
+    state = state_dir()
     state.mkdir(parents=True)
     state.chmod(0o700)
     workspace_dir = home / "project"
@@ -162,6 +166,7 @@ def test_observe_hook_process_wall_clock_including_startup(tmp_path: Path) -> No
     assert store_file.stat().st_size >= 250_000, (
         f"the wall-clock guard must run against a realistic store; got {store_file.stat().st_size}"
     )
+    before = store_file.read_bytes()
 
     environment = dict(os.environ)
     environment["HOME"] = str(home)
@@ -190,8 +195,10 @@ def test_observe_hook_process_wall_clock_including_startup(tmp_path: Path) -> No
 
     assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
     assert completed.stdout.endswith(b"\n")
-    if store_file.stat().st_mtime_ns == 0:  # pragma: no cover - defensive
-        pytest.skip("the redirected state root was not used")
+    assert store_file.read_bytes() != before, (
+        "the hook process did not write the redirected store; the measured time "
+        "is not the realistic-store path"
+    )
     # 0.55s measured on this checkout after the import diet and the write
     # batch; the ceiling leaves headroom for shared runners without letting the
     # pre-fix 1.67-2.50s band back in.

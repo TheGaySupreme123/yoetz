@@ -744,14 +744,16 @@ class ServiceDaemon:
                 await idle
                 stop_reason = "idle_shutdown"
         finally:
-            await self.stop(stop_reason)
-            watchdog.close()
-            for task in (idle, control, human, stop_wait, heartbeat):
-                if task is not None:
-                    task.cancel()
-            for task in (idle, control, human, stop_wait, heartbeat):
-                if task is not None:
-                    await asyncio.gather(task, return_exceptions=True)
+            try:
+                await self.stop(stop_reason)
+            finally:
+                watchdog.close()
+                for task in (idle, control, human, stop_wait, heartbeat):
+                    if task is not None:
+                        task.cancel()
+                for task in (idle, control, human, stop_wait, heartbeat):
+                    if task is not None:
+                        await asyncio.gather(task, return_exceptions=True)
 
     async def dispatch(
         self,

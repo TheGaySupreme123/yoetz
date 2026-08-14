@@ -50,7 +50,7 @@ def _observe_fast_path(arguments: list[str]) -> int | None:
     try:
         from yoetz.cli.observe_hooks import handle_observe
 
-        handle_observe(
+        return handle_observe(
             event_name=event,
             workspace=workspace,
             _entry_monotonic=_ENTRY_MONOTONIC,

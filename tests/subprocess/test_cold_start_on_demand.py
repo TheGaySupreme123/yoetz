@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 import sys
 import time
@@ -100,8 +101,17 @@ async def run():
         endpoint_publisher=publish, endpoint_cleanup=cleanup)
     await lifecycle.acquire_singleton()
     print("acquired", flush=True)
-    composition = ServiceComposition(lifecycle, listener, None, None, None, None, Vault(),
-        ready_application_factory=factory)
+    composition = ServiceComposition(
+        lifecycle=lifecycle,
+        control_listener=listener,
+        secret_ingress_listener=None,
+        human_control_listener=None,
+        human_control_service=None,
+        session_monitor=None,
+        human_connection_handler=None,
+        vault=Vault(),
+        ready_application_factory=factory,
+    )
     await ServiceDaemon(_composition=composition).serve()
 
 asyncio.run(run())
@@ -174,54 +184,75 @@ def _run_on_demand(environment: dict[str, str], *, timeout: float) -> dict[str, 
     return cast(dict[str, object], decoded)
 
 
+def _read_ready_line(
+    process: subprocess.Popen[bytes], *, expected: bytes, timeout: float, stderr_path: Path
+) -> None:
+    assert process.stdout is not None
+    readable, _, _ = select.select((process.stdout,), (), (), timeout)
+    if readable:
+        observed = process.stdout.readline()
+        if observed == expected:
+            return
+    else:
+        observed = b"<timeout>"
+    stderr = stderr_path.read_bytes()[-4_096:] if stderr_path.exists() else b""
+    raise AssertionError(
+        f"probe readiness mismatch: expected {expected!r}, got {observed!r}; stderr={stderr!r}"
+    )
+
+
 def test_slow_activation_first_on_demand_connect_succeeds_within_the_budget(
     tmp_path: Path,
 ) -> None:
     environment = isolated_environment(tmp_path / "installation")
     environment["_YOETZ_TEST_ACTIVATION_DELAY"] = str(_ACTIVATION_DELAY_SECONDS)
+    stderr_path = tmp_path / "slow-daemon.stderr"
+    stderr_stream = stderr_path.open("wb")
     owner = subprocess.Popen(  # noqa: S603 - fixed interpreter and in-repo probe
         (sys.executable, "-I", "-c", _SLOW_DAEMON_PROBE),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=stderr_stream,
         env=environment,
         close_fds=True,
         start_new_session=True,
     )
     try:
-        assert owner.stdout is not None
-        assert owner.stdout.readline() == b"acquired\n"
+        _read_ready_line(owner, expected=b"acquired\n", timeout=10.0, stderr_path=stderr_path)
 
         observed = _run_on_demand(environment, timeout=45.0)
 
         assert observed["outcome"] == "connected", observed
         elapsed_ms = observed["elapsed_ms"]
         assert type(elapsed_ms) is int
-        # It waited out the activation instead of aborting inside it, and stayed in budget.
-        assert elapsed_ms >= int(_ACTIVATION_DELAY_SECONDS * 1_000) - 1_000
+        # The isolated client pays its own imports before this timer begins, so
+        # a lower elapsed bound would depend on machine speed. The live owner
+        # and successful connection pin the behavioral contract instead.
+        assert owner.poll() is None, stderr_path.read_text(encoding="utf-8", errors="replace")
         assert elapsed_ms < 30_000
     finally:
         terminate_service(owner)
-        owner.stdout.close() if owner.stdout is not None else None
-        if owner.stderr is not None:
-            owner.stderr.close()
+        if owner.stdout is not None:
+            owner.stdout.close()
+        stderr_stream.close()
         cleanup_environment(environment)
 
 
 def test_pre_existing_silent_owner_still_fails_fast_without_a_successor(tmp_path: Path) -> None:
     environment = isolated_environment(tmp_path / "installation")
+    stderr_path = tmp_path / "silent-owner.stderr"
+    stderr_stream = stderr_path.open("wb")
     listener = subprocess.Popen(  # noqa: S603 - fixed interpreter and in-repo probe
         (sys.executable, "-I", "-c", _SILENT_OWNER_PROBE),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=stderr_stream,
         env=environment,
         close_fds=True,
         start_new_session=True,
     )
     try:
-        assert listener.stdout is not None
-        assert listener.stdout.readline() == b"ready\n"
+        _read_ready_line(listener, expected=b"ready\n", timeout=5.0, stderr_path=stderr_path)
         started = time.monotonic()
 
         observed = _run_on_demand(environment, timeout=20.0)
@@ -237,6 +268,5 @@ def test_pre_existing_silent_owner_still_fails_fast_without_a_successor(tmp_path
             listener.wait(timeout=5)
         if listener.stdout is not None:
             listener.stdout.close()
-        if listener.stderr is not None:
-            listener.stderr.close()
+        stderr_stream.close()
         cleanup_environment(environment)

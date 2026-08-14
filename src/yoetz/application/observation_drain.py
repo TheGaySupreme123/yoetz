@@ -139,10 +139,9 @@ class ObservationOutboxSweeper:
         single worker thread on every hop, so no lock is ever held across an await.
 
         The pool is the sweeper's own rather than ``asyncio.to_thread``'s shared default: a sweep
-        that hits its deadline against a parked cross-process flock leaves its worker blocked with
-        nothing to cancel it, and enough of those on the default pool would starve every other
-        ``to_thread`` caller in the process -- ledger replay and coordinator writes included.
-        Stranding threads here can only slow later sweeps.
+        that hits its deadline while a cross-process flock is contended cannot cancel the worker
+        immediately. The store bounds that wait, and this dedicated pool keeps those bounded
+        workers from delaying unrelated default-executor work in the meantime.
 
         The future is returned rather than awaited so the lease enter below can be shielded and
         still observed after a cancellation.
@@ -159,7 +158,7 @@ class ObservationOutboxSweeper:
         return loop.run_in_executor(executor, call)
 
     def close(self) -> None:
-        """Release the sweeper's worker pool without waiting on a parked flock."""
+        """Release the sweeper's worker pool; any running lock wait is itself bounded."""
 
         executor, self._executor = self._executor, None
         if executor is not None:

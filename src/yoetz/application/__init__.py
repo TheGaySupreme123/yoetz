@@ -74,7 +74,9 @@ def __getattr__(name: str) -> object:
     module = _LAZY.get(name)
     if module is None:
         raise AttributeError(name)
-    return getattr(importlib.import_module(module), name)
+    value = getattr(importlib.import_module(module), name)
+    globals()[name] = value
+    return value
 
 
 def __dir__() -> list[str]:

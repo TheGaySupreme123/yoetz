@@ -13,11 +13,31 @@ from yoetz.adapters.git_subject_state import GitSubjectStateAdapter, open_local_
 from yoetz.ports.subject_state import (
     SubjectStateBound,
     SubjectStateCaptureCommand,
+    SubjectStateCaptureResult,
     SubjectStateFormat,
     SubjectStateLimitation,
     SubjectStateLimitDetail,
     SubjectStateStatus,
 )
+from yoetz.protocol.errors import ProtocolValueError
+
+
+def test_limit_detail_requires_an_actual_overflow() -> None:
+    with pytest.raises(ProtocolValueError, match="invalid_subject_state"):
+        SubjectStateLimitDetail(SubjectStateBound.UNTRACKED_FILE_COUNT, 4, 4)
+
+
+def test_capture_result_rejects_limit_detail_without_limit_limitation() -> None:
+    with pytest.raises(ProtocolValueError, match="invalid_subject_state"):
+        SubjectStateCaptureResult(
+            status=SubjectStateStatus.STATE_NOT_OBSERVED,
+            subject_state=None,
+            format=SubjectStateFormat.GIT_STRUCTURAL_V1,
+            limitations=(SubjectStateLimitation.NOT_GIT,),
+            bytes_hashed=0,
+            files_hashed=0,
+            limit_detail=(SubjectStateLimitDetail(SubjectStateBound.UNTRACKED_FILE_COUNT, 5, 4),),
+        )
 
 
 def _git(repository: Path, *arguments: str) -> bytes:

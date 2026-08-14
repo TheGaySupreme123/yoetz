@@ -1113,6 +1113,7 @@ def handle_observe(
         # never create or attach real ledger tasks.
         additional = ""
         mapping: LifecycleMapping | None = load_mapping(codex_session_id, _state=_state)
+        drain_started = _monotonic()
         if resolved_event == "SessionStart":
             source = payload.get("source")
             if source != "clear":
@@ -1178,12 +1179,12 @@ def handle_observe(
                                     connect=cast(HookDrainConnector | None, connect),
                                     event_name=resolved_event,
                                     _state=_state,
+                                    monotonic=_monotonic,
                                 )
 
                             with contextlib.suppress(Exception):
                                 _resolve_runner()(_drain)
 
-        drain_started = _monotonic()
         if not skip_service and resolved_event != "SessionStart":
             # Every later mapped hook drains the complete session outbox, so the
             # current envelope plus any stream-recovered or previously-pending
@@ -1204,6 +1205,7 @@ def handle_observe(
                         if resolved_event == "SessionEnd"
                         else _HOOK_DRAIN_BUDGET_SECONDS
                     ),
+                    monotonic=_monotonic,
                 )
 
             with contextlib.suppress(Exception):
