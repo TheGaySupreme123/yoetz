@@ -117,13 +117,13 @@ def _hooks_json() -> bytes:
     #
     # Execution-mode split (#209): handlers that only ingest and always emit {}
     # run "async": true so they never sit in a tool call's critical path — an
-    # async Codex hook cannot block or return a decision, which these never do.
+    # async Codex hook cannot apply control effects, which these never need.
     # Handlers that return additionalContext (SessionStart advice/attach,
-    # PostToolUse/Stop advice) stay synchronous with a timeout the handler can
-    # actually meet; Codex's own default would be 600s, so 10s here is still a
-    # deliberate bound, not a relaxation. SessionEnd is host-clamped to 3s max
-    # and is downgraded to sync (with a per-session warning) if declared async,
-    # so it keeps its own explicit 3.
+    # PostToolUse advice) or a Stop ``decision: block`` stay synchronous with a
+    # timeout the handler can actually meet; Codex's own default would be 600s,
+    # so 10s here is still a deliberate bound, not a relaxation. SessionEnd is
+    # host-clamped to 3s max, discards stdout, and is downgraded to sync (with
+    # a per-session warning) if declared async, so it keeps its own explicit 3.
     observe = "yoetz hooks observe --workspace . --event"
     observe_timeout = 10
     session_end_timeout = 3

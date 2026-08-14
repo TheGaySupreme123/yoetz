@@ -89,13 +89,17 @@ SUPPORTED_HOOK_EVENTS: Final = frozenset(
         "SubagentStop",
     }
 )
-ADVICE_SAFE_EVENTS: Final = frozenset({"PostToolUse", "SessionStart", "Stop", "SessionEnd"})
+# Events that can deliver advice on a Codex-valid output contract. SessionEnd
+# is excluded: the host discards its stdout, so a peek/commit there would
+# consume advice the agent never sees (#222).
+ADVICE_SAFE_EVENTS: Final = frozenset({"PostToolUse", "SessionStart", "Stop"})
 # Standing machine conditions (connect_provider and kin) reach the agent at
 # session boundaries only. PostToolUse is deliberately excluded: it is the
 # per-tool-call channel that produced 29 byte-identical injections in one
 # session (#241). Codex fires Stop per assistant turn, so the achievable bound
-# is once per turn and only when a different advice text intervened.
-STANDING_ADVICE_CADENCE_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
+# is once per turn and only when a different advice text intervened. SessionEnd
+# is teardown-only and cannot continue the agent.
+STANDING_ADVICE_CADENCE_EVENTS: Final = frozenset({"SessionStart", "Stop"})
 _MAX_ADVICE_CONTEXT: Final = 1_200
 _MAX_CONTENT_CHUNK: Final = 256 * 1024
 # Ingest rejections that are recoverable: keep the outbox entry pending for a
@@ -1228,8 +1232,15 @@ def handle_observe(
         # Commit remains after emit, so a failed write never suppresses a later delivery.
         pending_delivery: AdviceDelivery | None = None
         delivery_session_id: str | None = None
+        # stop_hook_active is the host loop guard: a prior Stop already
+        # continued this turn. Blocking again would loop; leave advice for a
+        # later turn or SessionStart instead of consuming it here.
+        stop_already_active = payload.get("stop_hook_active") is True
         delivery_eligible = (
-            not additional and resolved_event in ADVICE_SAFE_EVENTS and not skip_advice_loop
+            not additional
+            and resolved_event in ADVICE_SAFE_EVENTS
+            and not skip_advice_loop
+            and not stop_already_active
         )
         delivery_gate = (
             store.advice_delivery_lease(workspace_commitment)

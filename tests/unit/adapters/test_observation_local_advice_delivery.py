@@ -130,9 +130,11 @@ def _run(tmp_path: Path, event: str, session: str, **payload: object) -> str:
     assert code == 0
     emitted = cast(Mapping[str, object], json.loads(out.getvalue().decode() or "{}"))
     specific = emitted.get("hookSpecificOutput")
-    if not isinstance(specific, Mapping):
-        return ""
-    return str(cast(Mapping[str, object], specific).get("additionalContext") or "")
+    if isinstance(specific, Mapping):
+        return str(cast(Mapping[str, object], specific).get("additionalContext") or "")
+    if emitted.get("decision") == "block":
+        return str(emitted.get("reason") or "")
+    return ""
 
 
 def _consented(tmp_path: Path) -> tuple[LocalObservationStore, str]:
@@ -368,6 +370,110 @@ def test_successful_emit_records_the_delivery_identity(
     recorded = (state.session_advice_suppression or {}).get(store.session_commitment("recorded"))
     assert type(recorded) is str and recorded.startswith("deliver-")
     assert "connect_provider" not in _run(tmp_path, "Stop", "recorded")
+
+
+def test_stop_advice_uses_block_decision_not_hook_specific_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#222: Codex Stop rejects hookSpecificOutput as invalid JSON."""
+
+    _consented(tmp_path)
+    _compose(monkeypatch, _STANDING)
+    _run(tmp_path, "SessionStart", "stop-shape", source="startup")
+    failed = _run(
+        tmp_path,
+        "PostToolUse",
+        "stop-shape",
+        tool_name="shell",
+        exit_status=1,
+        correlation_id="c1",
+    )
+    assert "resolve_failed_command" in failed
+    _run(
+        tmp_path,
+        "PostToolUse",
+        "stop-shape",
+        tool_name="shell",
+        exit_status=0,
+        correlation_id="c1",
+    )
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="Stop",
+        stdin_bytes=json.dumps({"session_id": "stop-shape", "hook_event_name": "Stop"}).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    emitted = json.loads(out.getvalue().decode())
+    assert "hookSpecificOutput" not in emitted
+    assert emitted["decision"] == "block"
+    assert "connect_provider" in str(emitted["reason"])
+
+
+def test_stop_hook_active_does_not_block_or_consume_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Host loop guard: a prior Stop already continued this turn (#222)."""
+
+    _consented(tmp_path)
+    _compose(monkeypatch, _STANDING)
+    _run(tmp_path, "SessionStart", "loop-guard", source="startup")
+    failed = _run(
+        tmp_path,
+        "PostToolUse",
+        "loop-guard",
+        tool_name="shell",
+        exit_status=1,
+        correlation_id="c1",
+    )
+    assert "resolve_failed_command" in failed
+    _run(
+        tmp_path,
+        "PostToolUse",
+        "loop-guard",
+        tool_name="shell",
+        exit_status=0,
+        correlation_id="c1",
+    )
+
+    guarded = _run(tmp_path, "Stop", "loop-guard", stop_hook_active=True)
+    assert guarded == ""
+    assert "connect_provider" in _run(tmp_path, "Stop", "loop-guard")
+
+
+def test_session_end_does_not_consume_undeliverable_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SessionEnd stdout is discarded; peek/commit there would lose the advice."""
+
+    _consented(tmp_path)
+    _compose(monkeypatch, _STANDING)
+    _run(tmp_path, "SessionStart", "teardown", source="startup")
+    failed = _run(
+        tmp_path,
+        "PostToolUse",
+        "teardown",
+        tool_name="shell",
+        exit_status=1,
+        correlation_id="c1",
+    )
+    assert "resolve_failed_command" in failed
+    _run(
+        tmp_path,
+        "PostToolUse",
+        "teardown",
+        tool_name="shell",
+        exit_status=0,
+        correlation_id="c1",
+    )
+
+    teardown = _run(tmp_path, "SessionEnd", "teardown")
+    assert teardown == ""
+    assert "connect_provider" in _run(tmp_path, "Stop", "teardown")
 
 
 def test_a_then_b_then_a_redelivers_a(tmp_path: Path) -> None:

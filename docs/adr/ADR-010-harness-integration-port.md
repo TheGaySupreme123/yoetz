@@ -135,6 +135,14 @@ registration is global, file-free, and marker-free, so reusing the skill-install
 misuse fields designed for on-disk trusted-project content. The guarantee below is unchanged —
 adding a harness is still one `HarnessId` value plus adapters, with no shared-type edits.
 
+**Amendment (2026-08-14, issue #222):** Codex hook stdout is event-specific. `SessionStart`,
+`PostToolUse`, and `UserPromptSubmit` keep `hookSpecificOutput.additionalContext`. `Stop` and
+`SubagentStop` have no such field: JSON that includes `hookSpecificOutput` is marked Failed with
+`hook returned invalid stop hook JSON output`. When Stop has advice, Yoetz emits
+`decision: block` plus `reason` so the text reaches the model as a continuation, and it does not
+block again when the host sets `stop_hook_active`. `SessionEnd` has no output schema and the host
+discards stdout, so it is not advice-safe and never consumes a pending delivery.
+
 **Amendment (2026-08-14):** Hook advice delivery no longer falls back to the workspace-wide
 `advice_snapshot` for task-scoped conditions. Before a Codex session is mapped, task-scoped
 advice is selected only from that Codex session's retained envelopes. After mapping, delivery

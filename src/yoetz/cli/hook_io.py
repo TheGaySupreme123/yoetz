@@ -15,11 +15,31 @@ from typing import BinaryIO, Final, cast
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError
 
-__all__ = ["context_output", "read_hook_payload", "stderr_line", "stdout_json"]
+__all__ = [
+    "ADDITIONAL_CONTEXT_EVENTS",
+    "STOP_CONTROL_EVENTS",
+    "context_output",
+    "read_hook_payload",
+    "stderr_line",
+    "stdout_json",
+]
 
 _MAX_STDIN_BYTES: Final = 262_144
 _MAX_CONTEXT_CHARS: Final = 2_000
 _MAX_STDERR_CHARS: Final = 200
+# Codex events whose output schema admits hookSpecificOutput.additionalContext.
+ADDITIONAL_CONTEXT_EVENTS: Final = frozenset(
+    {
+        "PostToolUse",
+        "PreToolUse",
+        "SessionStart",
+        "SubagentStart",
+        "UserPromptSubmit",
+    }
+)
+# Codex Stop / SubagentStop admit only universal fields plus decision/reason.
+# hookSpecificOutput is invalid and the host marks the hook Failed (#222).
+STOP_CONTROL_EVENTS: Final = frozenset({"Stop", "SubagentStop"})
 
 
 def stderr_line(message: str) -> None:
@@ -42,15 +62,29 @@ def stdout_json(value: JsonValue, stream: BinaryIO | None = None) -> bool:
 
 
 def context_output(event_name: str, additional_context: str) -> dict[str, JsonValue]:
+    """Return the Codex-valid stdout object for one event's advice text.
+
+    SessionStart / PostToolUse / UserPromptSubmit inject model-visible
+    ``additionalContext``. Stop / SubagentStop have no such field: the only
+    way to reach the model is ``decision: block`` plus ``reason``. Every other
+    event, including SessionEnd (stdout discarded), emits ``{}``.
+    """
+
     text = additional_context.strip()
+    if not text:
+        return {}
     if len(text) > _MAX_CONTEXT_CHARS:
         text = text[:_MAX_CONTEXT_CHARS]
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": event_name,
-            "additionalContext": text,
+    if event_name in STOP_CONTROL_EVENTS:
+        return {"decision": "block", "reason": text}
+    if event_name in ADDITIONAL_CONTEXT_EVENTS:
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": event_name,
+                "additionalContext": text,
+            }
         }
-    }
+    return {}
 
 
 def read_hook_payload(raw: bytes | None = None) -> Mapping[str, JsonValue]:

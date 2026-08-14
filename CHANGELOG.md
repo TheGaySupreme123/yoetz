@@ -381,6 +381,13 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- A Stop hook that selected advice completed in ~1.4s with exit 0, then Codex marked it Failed
+  with `hook returned invalid stop hook JSON output`. Stop has no `hookSpecificOutput`; the
+  event-agnostic emitter was writing `additionalContext` onto a wire type that only admits
+  universal fields plus `decision`/`reason`. Stop advice now uses `decision: block` plus
+  `reason`, with `stop_hook_active` as the host loop guard. SessionEnd no longer peeks or
+  commits advice: the host discards that stdout, so a delivery there would consume text the
+  agent never sees (issue #222).
 - The very first MCP call after a cold start could return `SERVICE_UNAVAILABLE` from a healthy
   install: the daemon published its control endpoint and accepted connections up to ~19 seconds
   before it could answer a handshake, and the on-demand connector treated the silent socket of
