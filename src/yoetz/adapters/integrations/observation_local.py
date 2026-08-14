@@ -92,6 +92,7 @@ _MAX_QUARANTINE_AGE_DAYS: Final = 14
 # graph per workspace forever.
 _MAX_STATE_CACHE_ENTRIES: Final = 8
 _MAX_HOOK_SEQUENCES: Final = 256
+_MAX_FRONTIER_MOTION_NOTICES: Final = 256
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 # Wall/monotonic drift tolerated before persisted monotonic samples are treated
 # as belonging to a different boot epoch (and therefore fenced off).
@@ -478,6 +479,26 @@ def _load_session_advice(raw: object) -> dict[str, AdviceSnapshot]:
         try:
             result[key] = advice_snapshot_from_json(
                 JsonObject(cast(Mapping[str, JsonValue], value))
+            )
+        except ProtocolValueError, TypeError, ValueError:
+            continue
+    return result
+
+
+def _load_frontier_motion_notices(raw: object) -> dict[str, FrontierMotionNotice]:
+    if not isinstance(raw, Mapping):
+        return {}
+    result: dict[str, FrontierMotionNotice] = {}
+    for key, value in cast(Mapping[str, JsonValue], raw).items():
+        if type(key) is not str or not isinstance(value, Mapping):
+            continue
+        notice = cast(Mapping[str, JsonValue], value)
+        try:
+            result[key] = FrontierMotionNotice(
+                cast(int, notice.get("from_sequence")),
+                cast(int, notice.get("to_sequence")),
+                cast(str, notice.get("head_digest")),
+                cast(int, notice.get("observation_record_count")),
             )
         except ProtocolValueError, TypeError, ValueError:
             continue
@@ -2085,6 +2106,21 @@ class LocalObservationStore:
         if len(kept) != len(state.quarantine):
             state.quarantine[:] = kept
 
+    def _prune_frontier_motion_notices(self, state: _WorkspaceState) -> None:
+        """Drop ended-session notices and cap the per-workspace mapping."""
+
+        notices = state.frontier_motion_notices
+        if not notices:
+            return
+        ended = state.ended_sessions or set()
+        bindings = state.codex_session_bindings or {}
+        for session_id in tuple(notices):
+            commitment = bindings.get(session_id)
+            if commitment is not None and commitment in ended:
+                del notices[session_id]
+        while len(notices) > _MAX_FRONTIER_MOTION_NOTICES:
+            del notices[next(iter(notices))]
+
     def _save(
         self,
         workspace_commitment: str,
@@ -2105,8 +2141,14 @@ class LocalObservationStore:
         _ensure_dir(directory)
         path = self._workspace_path(workspace_commitment)
         quarantined_before = len(state.quarantine or ())
+        notices_before = len(state.frontier_motion_notices or ())
         self._prune_expired_quarantine(state)
-        if projected is not None and len(state.quarantine or ()) == quarantined_before:
+        self._prune_frontier_motion_notices(state)
+        if (
+            projected is not None
+            and len(state.quarantine or ()) == quarantined_before
+            and len(state.frontier_motion_notices or ()) == notices_before
+        ):
             payload = projected
         else:
             payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
@@ -2775,22 +2817,7 @@ class LocalObservationStore:
         quarantine_reclaimed_count = (
             raw_quarantine_reclaimed_count if type(raw_quarantine_reclaimed_count) is int else 0
         )
-        frontier_motion_notices: dict[str, FrontierMotionNotice] = {}
-        for key, value in cast(
-            Mapping[str, JsonValue], raw.get("frontier_motion_notices") or {}
-        ).items():
-            if type(key) is not str or not isinstance(value, Mapping):
-                continue
-            notice = cast(Mapping[str, JsonValue], value)
-            try:
-                frontier_motion_notices[key] = FrontierMotionNotice(
-                    cast(int, notice.get("from_sequence")),
-                    cast(int, notice.get("to_sequence")),
-                    cast(str, notice.get("head_digest")),
-                    cast(int, notice.get("observation_record_count")),
-                )
-            except ProtocolValueError, TypeError, ValueError:
-                continue
+        frontier_motion_notices = _load_frontier_motion_notices(raw.get("frontier_motion_notices"))
         return _WorkspaceState(
             consent=consent,
             session_workspaces=session_workspaces,

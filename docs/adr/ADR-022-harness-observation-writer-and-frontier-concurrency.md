@@ -73,19 +73,23 @@ unsupported claims and unbounded duplicate findings.
 
 9. Successful routine reads are rate-limited at the task-ledger boundary. The hook adapter labels
    only a closed set of read tools and conservatively parsed single read-only shell commands as
-   `routine_read`; shell composition, redirection, mutation flags, unknown commands, and other
+   `routine_read`; path-qualified executables, side-effecting Git options, shell composition,
+   redirection, mutation flags, unknown commands, explicit failures or denials, and other
    ambiguity fail closed to ordinary materialization. The complete hook envelope remains in the
    bounded local observation store, but its pre-event and successful post-event do not mint
    individual task-ledger records. A failed post-event still materializes action and result records,
    and edits, checks, tests, lifecycle events, and other non-routine observations are unchanged.
 
 10. Every newly accepted observation-authored append records one bounded pending frontier-motion
-    notice for the originating Codex session. Contiguous undelivered appends coalesce their
-    from/to sequences and record count. A later advice-safe `PostToolUse` hook surfaces that the
-    motion was hook-observed, explains that held cooperative publish frontiers remain admissible
-    only across observation-authored motion, and directs exact-frontier operations to refresh
-    status. The notice is removed only after its bytes reach the hook consumer. It grants no
-    authority, changes no optimistic-concurrency predicate, and adds no MCP operation.
+    notice for the originating Codex session. A retry of a completed append whose local notice
+    write did not land reconstructs that notice from the committed append's frontier metadata.
+    Contiguous undelivered appends coalesce their from/to sequences and record count. The
+    per-workspace notice map is capped and drops ended-session entries before serialization. A
+    later advice-safe `PostToolUse` hook surfaces that the motion was hook-observed, explains that
+    held cooperative publish frontiers remain admissible only across observation-authored motion,
+    and directs exact-frontier operations to refresh status. The notice is removed only after its
+    bytes reach the hook consumer. It grants no authority, changes no optimistic-concurrency
+    predicate, and adds no MCP operation.
 
 ## Security and privacy consequences
 

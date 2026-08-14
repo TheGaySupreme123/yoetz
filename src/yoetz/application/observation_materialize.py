@@ -160,6 +160,14 @@ def _exit_status(payload: Mapping[str, JsonValue]) -> int | None:
     return None
 
 
+def _explicit_post_failure(payload: Mapping[str, JsonValue]) -> bool:
+    """True when a post-event is an explicit failure or denial, not status-unknown."""
+
+    if _exit_status(payload) not in {None, 0}:
+        return True
+    return payload.get("success") is False or payload.get("denied") is True
+
+
 def _action_kind(tool: str | None) -> ActionKind:
     if tool is None:
         return ActionKind.OTHER
@@ -337,7 +345,7 @@ def materialize_observation_envelope(
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind == "PostToolUse":
-        if routine_read and _exit_status(structural) in {None, 0}:
+        if routine_read and not _explicit_post_failure(structural):
             return MaterializedObservationBatch(
                 (), coverage, channel, gaps, "routine_read_coalesced"
             )

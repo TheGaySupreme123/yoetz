@@ -279,13 +279,23 @@ def _routine_read_action(payload: Mapping[str, JsonValue]) -> bool:
         return False
     if not argv:
         return False
-    command = argv[0].rsplit("/", 1)[-1]
+    command = argv[0]
+    if "/" in command or "\\" in command:
+        # Path-qualified names are not the closed basename set; a local `./ls`
+        # or `/tmp/head` is an arbitrary executable, not a trusted read tool.
+        return False
     if command == "rg" and any(arg == "--pre" or arg.startswith("--pre=") for arg in argv[1:]):
         # ripgrep's preprocessor is an arbitrary executable, not a read primitive.
         return False
     if command in _READ_ONLY_COMMANDS:
         return True
     if command == "git" and len(argv) >= 2:
+        if any(
+            arg == "--ext-diff" or arg == "--output" or arg.startswith("--output=")
+            for arg in argv[1:]
+        ):
+            # `--output` writes a file; `--ext-diff` runs an external helper.
+            return False
         return argv[1] in {"diff", "log", "rev-parse", "show", "status"}
     return False
 
@@ -325,8 +335,17 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         digest = _token_or_none(nested.get("changed_paths_digest"))
         if digest is not None and "changed_paths_digest" not in fields:
             fields["changed_paths_digest"] = digest
-    if event_name in {"PreToolUse", "PostToolUse"} and _routine_read_action(payload):
+    success = _bool_or_none(payload.get("success"))
+    denied = _bool_or_none(payload.get("denied"))
+    if (
+        event_name in {"PreToolUse", "PostToolUse"}
+        and _routine_read_action(payload)
+        and success is not False
+        and denied is not True
+    ):
         # Service-owned classification overrides an untrusted host-supplied action token.
+        # Explicit failures and denials stay ordinary observations even when the
+        # tool name would otherwise be a routine read.
         fields["action"] = "routine_read"
     for key in ("exit_status", "duration_ms", "event_ordinal", "attempt"):
         number = _int_or_none(payload.get(key))

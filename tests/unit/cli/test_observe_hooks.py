@@ -161,6 +161,10 @@ def test_identical_tool_calls_remain_distinct(tmp_path: Path) -> None:
         ("exec_command", {"cmd": "rg --pre ./prepare term src"}, False),
         ("exec_command", {"cmd": "rg term src | tee report.txt"}, False),
         ("exec_command", {"cmd": "pytest -q"}, False),
+        ("exec_command", {"cmd": "./ls"}, False),
+        ("exec_command", {"cmd": "/tmp/head README.md"}, False),
+        ("exec_command", {"cmd": "git diff --output=result.patch"}, False),
+        ("exec_command", {"cmd": "git diff --ext-diff HEAD"}, False),
     ],
 )
 def test_routine_read_classification_is_conservative_and_structural(
@@ -180,6 +184,34 @@ def test_routine_read_classification_is_conservative_and_structural(
     )
     assert (envelope.structural_payload.get("action") == "routine_read") is expected
     assert "cmd" not in envelope.structural_payload
+
+
+@pytest.mark.parametrize(
+    ("payload_extra", "expected_routine"),
+    [
+        ({"exit_status": 0}, True),
+        ({"success": True}, True),
+        ({"success": False}, False),
+        ({"denied": True}, False),
+        ({"success": False, "exit_status": 0}, False),
+    ],
+)
+def test_routine_read_label_excludes_explicit_failures(
+    payload_extra: dict[str, bool | int], expected_routine: bool
+) -> None:
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "session_id": "routine-read-outcome",
+            "tool_name": "read",
+            "tool_input": {"path": "ignored"},
+            **payload_extra,
+        },
+        session_commitment=f"hmac-sha256:{'22' * 32}",
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    assert (envelope.structural_payload.get("action") == "routine_read") is expected_routine
 
 
 def test_observe_without_consent_exits_zero_no_spool(tmp_path: Path) -> None:
