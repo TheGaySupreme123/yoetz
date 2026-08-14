@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-from typing import cast
+from typing import Any, cast
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from yoetz.mcp import resources as resource_module
@@ -33,6 +34,7 @@ from yoetz.mcp.resources import (
     read_resource,
 )
 from yoetz.mcp.summaries import render_safe_compact_summary
+from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import SAFE_DETAIL_KEYS, PublicErrorCode
 from yoetz.protocol.models import (
     FRONTIER_LEAVES,
@@ -381,11 +383,22 @@ def test_advertised_input_schemas_honor_presentation_keyword_budgets() -> None:
 
 
 def test_publish_work_presentation_matches_ordinary_admission_families() -> None:
-    advertised = ordinary_publish_families_in_presentation(
-        descriptor_for("publish_work").input_schema
-    )
+    schema = descriptor_for("publish_work").input_schema
+    advertised = ordinary_publish_families_in_presentation(schema)
     assert advertised == ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
-    encoded = repr(dict(descriptor_for("publish_work").input_schema))
+    event_drafts = cast(dict[str, Any], cast(dict[str, Any], schema["properties"])["event_drafts"])
+    items = cast(dict[str, Any], event_drafts["items"])
+    branches = cast(list[dict[str, Any]], items["oneOf"])
+    evidence_versions: set[str] = set()
+    for branch in branches:
+        branch_properties = cast(dict[str, Any], branch["properties"])
+        schema_node = cast(dict[str, Any], branch_properties["schema"])
+        schema_properties = cast(dict[str, Any], schema_node["properties"])
+        if cast(dict[str, Any], schema_properties["name"])["const"] == "evidence_recorded":
+            version_node = cast(dict[str, Any], schema_properties["version"])
+            evidence_versions.add(cast(str, version_node["const"]))
+    assert evidence_versions == {"1.0.0", "1.1.0"}
+    encoded = repr(dict(schema))
     assert "opaque-unknown-event-draft" not in encoded
     assert "opaque_unknown" not in encoded
 
@@ -432,6 +445,18 @@ def test_presentation_examples_admit_under_catalog_models() -> None:
             assert isinstance(draft_schema, dict)
             exercised.add(cast(str, draft_schema["name"]))
     assert exercised == ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
+
+
+def test_publish_work_examples_validate_against_advertised_input_schema() -> None:
+    """Worked examples must validate against the contract MCP clients actually receive."""
+
+    schema = descriptor_for("publish_work").input_schema
+    examples = cast(list[JsonValue], schema["examples"])
+    validator = cast(Any, Draft202012Validator(cast(Any, schema)))
+
+    for index, example in enumerate(examples):
+        errors = sorted(validator.iter_errors(example), key=lambda error: list(error.path))
+        assert not errors, (index, tuple(error.json_path for error in errors))
 
 
 def test_presentation_input_schema_is_projection_of_catalog_shape() -> None:

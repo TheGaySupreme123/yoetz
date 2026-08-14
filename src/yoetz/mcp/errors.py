@@ -43,6 +43,8 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "actor",
         "actor_id",
         "actor_type",
+        "approval_commitment",
+        "approved_check_result_digest",
         # Frozen payload field names. Without them a nested enum failure (action_kind) projects
         # only to /event_drafts/N and the hint cannot name admitted members.
         "action_id",
@@ -56,6 +58,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "at_frontier",
         "attempted_items",
         "authority",
+        "byte_count",
         "captured_object_id",
         "causal_parents",
         "change",
@@ -64,13 +67,15 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "claim_kind",
         "client",
         "command",
+        "content_availability",
         "content_digest",
         "cursor",
         "described_state",
         "description",
         "diff_digest",
-        "disposition",
+        "digest_binding",
         "display_name",
+        "disposition",
         "disputes_refs",
         "dry_run",
         "event_drafts",
@@ -117,6 +122,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "priority",
         "protocol_version",
         "publication_channel",
+        "provenance",
         "rationale",
         "reason",
         "redaction_profile",
@@ -139,6 +145,7 @@ _SAFE_LOCATION_SEGMENTS: Final = frozenset(
         "statement",
         "status",
         "strength",
+        "subject",
         "subject_state",
         "summary",
         "supersedes_event_id",
@@ -593,10 +600,10 @@ def _payload_property_names(
     """Return the admitted payload keys of one family version, or "" when they cannot be named.
 
     Both consts must match. A family may carry several admitted versions — ``evidence_recorded``
-    has 1.0.0 and 1.1.0 — while this presentation schema pins one branch per family. Selecting on
-    the name alone would answer a 1.1.0 failure with the 1.0.0 key list and so tell the caller to
-    delete ``digest_binding``, a key 1.1.0 requires (issue #239). When no branch matches both, the
-    caller gets the family-free wording, which still states the count and names ``schema.name``.
+    has 1.0.0 and 1.1.0 — and the presentation schema preserves each versioned branch. Selecting
+    on the name alone would answer a 1.1.0 failure with the 1.0.0 key list and so tell the caller
+    to delete ``digest_binding``, a key 1.1.0 requires (issue #239). When no branch matches both,
+    the caller gets the family-free wording, which still states the count and names ``schema.name``.
 
     Both the name and the version come from frozen schema content on either side: the presentation
     branch's own consts, and the version the validator read from the catalogue. Neither is ever
@@ -1023,8 +1030,41 @@ def _select_union_branch(
     with_family = [item for item in matches if item[1] is not None]
     if len(with_family) == 1:
         return with_family[0]
+    families = {family for _, family in with_family}
+    admitted = {
+        _branch_leaf_admitted_values(document, branch, remaining) for branch, _ in with_family
+    }
+    if len(families) == 1 and len(admitted) == 1 and "" not in admitted:
+        return with_family[0]
     # Ambiguous: stay on the union node so callers can name admitted schema names.
     return None
+
+
+def _branch_leaf_admitted_values(
+    document: Mapping[str, JsonValue], branch: JsonValue, remaining: Sequence[str | int]
+) -> str:
+    """Return a branch leaf's values when a path crosses no nested union."""
+
+    node = branch
+    for segment in remaining:
+        node = _resolve_local(document, node)
+        if type(segment) is int:
+            if not isinstance(node, Mapping):
+                return ""
+            node = cast(Mapping[str, JsonValue], node).get("items")
+            if node is None:
+                return ""
+            continue
+        if not isinstance(node, Mapping):
+            return ""
+        properties = cast(Mapping[str, JsonValue], node).get("properties")
+        if not isinstance(properties, Mapping):
+            return ""
+        fields = cast(Mapping[str, JsonValue], properties)
+        if type(segment) is not str or segment not in fields:
+            return ""
+        node = fields[segment]
+    return _admitted_values(_resolve_local(document, node))
 
 
 def _branch_covers_path(

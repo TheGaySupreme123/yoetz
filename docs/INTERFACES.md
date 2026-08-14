@@ -2787,7 +2787,9 @@ facade and are never MCP tools.
   `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
   `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`, and
   `PRESENTATION_INPUT_SCHEMA_BUDGETS`. `ToolDescriptor.input_schema` is the tools/list presentation
-  projection (inlined common shapes, ordinary publish event families, minimal examples);
+  projection (inlined common shapes, ordinary publish event families, minimal examples), preserving
+  every catalogued schema-version branch for each advertised ordinary event family. Every shipped
+  worked example validates against that presentation schema as well as catalog admission;
   `catalog_input_schema` / full catalog request schemas remain admission authority via
   `*.model_validate`. `status` carries `readOnlyHint=true`; `receipt` carries
   `readOnlyHint=false` because it stages an object and appends a `receipt_recorded` event. Every

@@ -35,8 +35,8 @@ _ADMITTED_PAYLOAD_KEYS = (
     "source_refs",
     "status",
 )
-# The one family the catalogue admits at two versions, and the payload key only the later one
-# admits. The presentation schema carries a single branch for the family, pinned to 1.0.0.
+# The one family the catalogue and presentation schema admit at two versions, and the payload key
+# only the later one admits.
 _MULTI_VERSION_FAMILY = "evidence_recorded"
 _LATER_ONLY_PAYLOAD_KEY = "digest_binding"
 # The public message bound the protocol validator enforces.
@@ -108,19 +108,12 @@ def test_a_single_version_family_is_answered_with_its_own_version_and_full_key_l
         assert key in message, key
 
 
-def test_a_later_family_version_is_never_answered_with_the_earlier_key_list() -> None:
-    """A 1.1.0 evidence payload must not be handed the 1.0.0 contract (issue #239).
-
-    The presentation schema pins one branch per family, and that branch is evidence_recorded
-    1.0.0, whose admitted keys omit `digest_binding`. Selecting it on the family name alone told a
-    caller who had correctly sent `digest_binding` that the schema does not admit it. The version
-    the validator read from the catalogue now has to match the branch's frozen version const, so
-    an unanswerable case degrades to the family-free wording instead of answering it wrongly.
-    """
+def test_a_later_family_version_is_answered_with_its_own_key_list() -> None:
+    """A 1.1.0 evidence payload receives the matching advertised contract (issues #239, #246)."""
 
     request = _single_draft_request(_MULTI_VERSION_FAMILY)
     example_version = cast(str, request["event_drafts"][0]["schema"]["version"])
-    assert example_version != "1.0.0", "the presentation branch pins 1.0.0; pick a later example"
+    assert example_version != "1.0.0", "pick a later-version worked example"
     assert _LATER_ONLY_PAYLOAD_KEY in request["event_drafts"][0]["payload"]
     request["event_drafts"][0]["payload"]["zzz_unknown"] = "x"
 
@@ -129,13 +122,9 @@ def test_a_later_family_version_is_never_answered_with_the_earlier_key_list() ->
 
     assert locations[0]["family"] == _MULTI_VERSION_FAMILY
     assert locations[0]["family_version"] == example_version
-    # No key list at all rather than the wrong one: naming 1.0.0's keys would tell the caller to
-    # delete the evidence-integrity key 1.1.0 requires.
-    assert "admitted keys are" not in message
-    assert f"the {_MULTI_VERSION_FAMILY} schema does not admit" not in message
-    # The degraded wording still states the count and still names where the family goes.
-    assert "the payload carries 1 property the event schema does not admit" in message
-    assert "schema.name admits" in message
+    assert f"the {_MULTI_VERSION_FAMILY} schema does not admit" in message
+    assert "admitted keys are" in message
+    assert _LATER_ONLY_PAYLOAD_KEY in message
     assert len(message.encode("utf-8")) <= _MAX_MESSAGE_BYTES
 
 
