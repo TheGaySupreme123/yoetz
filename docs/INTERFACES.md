@@ -111,6 +111,21 @@ These object-rule tokens are projected only from checked-in schema metadata and 
 never from caller-controlled keys or free-form exception text. Unrecognized object rules degrade
 to a bounded generic `INVALID_REQUEST` without inventing field pointers.
 
+For an `extra_forbidden` payload rejection whose unknown key is a known field with exactly one
+legal owning event family among the ordinary `publish_work` families, `safe_details` additionally
+carries a flat bounded repair fact (issue #266): `repair_kind` (always `field_ownership`),
+`repair_field`, `repair_selected_family`, `repair_owning_family`, and `repair_template_uri`
+(always `yoetz://guidance/request-templates.md`), merged into the same ASCII key order. The
+request stays rejected; the field is never moved or reinterpreted. The field name is admitted only
+when it byte-equals a frozen catalogued payload property name (a caller-invented key can never
+match), both family names come from an import-gated registry derived from the frozen `publish_work`
+presentation schema, and ownership is asserted only when it is unique — ambiguous fields (for
+example `statement`, `summary`), draft-envelope keys (`evidence_refs`, `artifact_refs`), fields
+owned by another version of the selected family, and unknown keys all retain the plain
+admitted-key answer. The same fact is repeated as one bounded sentence in the authoring hint and
+as a `Repair:` clause on the compatible text summary channel, because MCP hosts are not required
+to surface `structuredContent`.
+
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
 `expected_frontier`. It names that field and is retryable because validation wrote no durable
