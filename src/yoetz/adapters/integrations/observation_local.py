@@ -1245,6 +1245,42 @@ class LocalObservationStore:
         finally:
             os.close(descriptor)
 
+    @contextlib.contextmanager
+    def advice_delivery_lease(self, workspace: str) -> Generator[bool]:
+        """Nonblocking advice-delivery mutex independent of workspace state.
+
+        The lease serializes selection, stdout emission, and the subsequent
+        delivery commit across concurrent hook processes.  It deliberately
+        uses a separate lock file: a blocked host stdout pipe may delay another
+        advice delivery, but must never block observation ingest or outbox work
+        that needs the workspace-state lock.
+        """
+
+        digest = workspace.removeprefix("hmac-sha256:")
+        if len(digest) != 64:
+            raise ProtocolValueError("invalid_commitment")
+        path = self._root / f".advice-delivery-{digest}.lock"
+        if fcntl is None:  # pragma: no cover - POSIX-only host
+            yield True
+            return
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
     def acknowledge_outbox(
         self, workspace: str, codex_session_id: str, source_identity: str
     ) -> bool:

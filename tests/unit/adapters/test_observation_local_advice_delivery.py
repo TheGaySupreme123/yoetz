@@ -165,7 +165,7 @@ def test_standing_advice_delivered_once_then_suppressed_across_n_envelope_ingest
     )
 
 
-def test_hook_serializes_advice_selection_through_commit(
+def test_hook_serializes_advice_selection_through_commit_without_workspace_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _consented(tmp_path)
@@ -212,7 +212,7 @@ def test_hook_serializes_advice_selection_through_commit(
     monkeypatch.setattr(LocalObservationStore, "commit_advice_delivery", commit)
 
     assert "connect_provider" in _run(tmp_path, "SessionStart", "serialized", source="startup")
-    assert phases == [("peek", True), ("commit", True)]
+    assert phases == [("peek", False), ("commit", False)]
 
 
 def test_standing_advice_never_masks_actionable_advice(

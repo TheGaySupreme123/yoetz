@@ -1222,19 +1222,22 @@ def handle_observe(
 
         stages["drain"] = _elapsed_ms(drain_started, _monotonic())
 
-        # Advice selection and commit are serialized with the bounded stdout write. This keeps
-        # concurrent hook processes from selecting the same identity while preserving the
-        # commit-after-emit invariant: a failed write never suppresses a later delivery.
+        # Advice selection and commit are serialized with the stdout write by a
+        # dedicated delivery lease. The lease is independent of workspace state:
+        # a blocked host pipe delays advice, never observation ingest or outbox work.
+        # Commit remains after emit, so a failed write never suppresses a later delivery.
         pending_delivery: AdviceDelivery | None = None
         delivery_session_id: str | None = None
         delivery_eligible = (
             not additional and resolved_event in ADVICE_SAFE_EVENTS and not skip_advice_loop
         )
         delivery_gate = (
-            store.batched(workspace_commitment) if delivery_eligible else contextlib.nullcontext()
+            store.advice_delivery_lease(workspace_commitment)
+            if delivery_eligible
+            else contextlib.nullcontext(False)
         )
-        with delivery_gate:
-            if delivery_eligible:
+        with delivery_gate as delivery_acquired:
+            if delivery_eligible and delivery_acquired:
                 delivery_session_id = None if mapping is None else mapping.yoetz_session_id
                 delivery = store.peek_advice_for_delivery(
                     workspace_commitment,
