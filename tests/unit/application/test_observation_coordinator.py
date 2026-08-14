@@ -131,6 +131,43 @@ def test_materialize_pre_post_and_unpaired() -> None:
     assert ObservationGapCode.UNPAIRED_EVENT.value in unpaired.gaps
 
 
+def test_successful_routine_reads_stay_observation_only_but_failures_materialize() -> None:
+    task = _task_id()
+    session = f"hmac-sha256:{'ed' * 32}"
+    pre = _envelope(session=session, kind="PreToolUse", identity="hook:read-pre")
+    pre_structural = JsonObject({**pre.structural_payload, "action": "routine_read"})
+    deferred = materialize_observation_envelope(
+        replace(pre, structural_payload=pre_structural), task_id=task
+    )
+    assert deferred.drafts == ()
+    assert deferred.skip_reason == "routine_read_deferred"
+
+    post = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="hook:read-post",
+        exit_status=0,
+    )
+    post_structural = JsonObject({**post.structural_payload, "action": "routine_read"})
+    coalesced = materialize_observation_envelope(
+        replace(post, structural_payload=post_structural), task_id=task
+    )
+    assert coalesced.drafts == ()
+    assert coalesced.skip_reason == "routine_read_coalesced"
+
+    failed = materialize_observation_envelope(
+        replace(
+            post,
+            structural_payload=JsonObject({**post_structural, "exit_status": 1}),
+        ),
+        task_id=task,
+    )
+    assert [item.draft.schema.name for item in failed.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
+
+
 def test_completion_signal_is_evidence_unless_claim_kind_is_explicit() -> None:
     task = _task_id()
     session = f"hmac-sha256:{'ac' * 32}"
@@ -227,6 +264,41 @@ def test_local_outbox_enqueue_ack_and_overflow(tmp_path: Path) -> None:
     assert store.pending_outbox_count(workspace) == 1
     assert store.acknowledge_outbox(workspace, "sess-outbox", envelope.source_identity) is True
     assert store.pending_outbox_count(workspace) == 0
+
+
+def test_frontier_motion_notice_merges_contiguous_appends_and_is_one_shot(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.note_frontier_motion(
+        workspace,
+        "motion-session",
+        from_sequence=7,
+        to_sequence=9,
+        head_digest="sha256:" + "1" * 64,
+        observation_record_count=2,
+    )
+    store.note_frontier_motion(
+        workspace,
+        "motion-session",
+        from_sequence=9,
+        to_sequence=10,
+        head_digest="sha256:" + "2" * 64,
+        observation_record_count=1,
+    )
+
+    reloaded = LocalObservationStore(_state=tmp_path)
+    notice = reloaded.peek_frontier_motion(workspace, "motion-session")
+    assert notice is not None
+    assert (notice.from_sequence, notice.to_sequence, notice.observation_record_count) == (7, 10, 3)
+    assert notice.head_digest == "sha256:" + "2" * 64
+
+    reloaded.commit_frontier_motion_delivery(workspace, "motion-session", "sha256:" + "0" * 64)
+    assert reloaded.peek_frontier_motion(workspace, "motion-session") == notice
+    reloaded.commit_frontier_motion_delivery(workspace, "motion-session", notice.delivery_identity)
+    assert reloaded.peek_frontier_motion(workspace, "motion-session") is None
 
 
 def test_outbox_ack_does_not_clear_source_reported_overflow(tmp_path: Path) -> None:
@@ -366,7 +438,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_reason == ObservationGapCode.MAPPING_MISSING.value
     assert durable.last_attempt_at == attempted_at
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/5"
+        "yoetz.observation-local/6"
     )
 
 

@@ -11,6 +11,12 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- Cooperative writers now receive a one-shot, coalesced notice when the observation writer moves the
+  task frontier, including the bounded sequence range and observation-record count. Successful
+  routine reads remain available in the local observation store but are rate-limited out of the
+  task ledger; failures and conservatively unrecognized commands still materialize normally
+  (issue #244, ADR-022 amendment).
+
 - Consent-based Codex observation activation and durable delivery repair (issues #204 and #205,
   ADR-012 amendment): setup now distinguishes installed hook sources from an active plugin, previews
   the exact selected Codex executable and explicitly selected existing home, repository marketplace,

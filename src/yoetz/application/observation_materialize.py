@@ -284,8 +284,16 @@ def materialize_observation_envelope(
         return MaterializedObservationBatch((), coverage, channel, gaps, "lifecycle_only")
 
     drafts: list[MaterializedObservationDraft] = []
+    routine_read = structural.get("action") == "routine_read"
 
     if kind == "PreToolUse":
+        if routine_read:
+            # The full envelope remains in the observation store. Successful read-only calls are
+            # rate-limited at the task-ledger boundary rather than minting one pending action per
+            # file lookup; a failed PostToolUse still materializes below.
+            return MaterializedObservationBatch(
+                (), coverage, channel, gaps, "routine_read_deferred"
+            )
         if correlation is None:
             return MaterializedObservationBatch(
                 (), coverage, channel, gaps, "missing_tool_identity"
@@ -329,6 +337,10 @@ def materialize_observation_envelope(
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind == "PostToolUse":
+        if routine_read and _exit_status(structural) in {None, 0}:
+            return MaterializedObservationBatch(
+                (), coverage, channel, gaps, "routine_read_coalesced"
+            )
         if unpaired or correlation is None:
             # Standalone structural observation: evidence only; do not invent the action.
             evidence = stable_observation_id(

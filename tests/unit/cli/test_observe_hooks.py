@@ -150,6 +150,38 @@ def test_identical_tool_calls_remain_distinct(tmp_path: Path) -> None:
     assert first.source_identity != second.source_identity
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "tool_input", "expected"),
+    [
+        ("Read", {"path": "ignored"}, True),
+        ("exec_command", {"cmd": "rg -n observation src tests"}, True),
+        ("exec_command", {"cmd": "git status --short"}, True),
+        ("exec_command", {"cmd": "sed -n '1,20p' README.md"}, False),
+        ("exec_command", {"cmd": "sed -i s/a/b/ README.md"}, False),
+        ("exec_command", {"cmd": "rg --pre ./prepare term src"}, False),
+        ("exec_command", {"cmd": "rg term src | tee report.txt"}, False),
+        ("exec_command", {"cmd": "pytest -q"}, False),
+    ],
+)
+def test_routine_read_classification_is_conservative_and_structural(
+    tool_name: str, tool_input: dict[str, str], expected: bool
+) -> None:
+    envelope = map_hook_payload_to_envelope(
+        "PostToolUse",
+        {
+            "session_id": "routine-read",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "exit_status": 0,
+        },
+        session_commitment=f"hmac-sha256:{'11' * 32}",
+        event_ordinal=1,
+        key_material=_KEY,
+    )
+    assert (envelope.structural_payload.get("action") == "routine_read") is expected
+    assert "cmd" not in envelope.structural_payload
+
+
 def test_observe_without_consent_exits_zero_no_spool(tmp_path: Path) -> None:
     stdout = io.BytesIO()
     code = handle_observe(
@@ -164,6 +196,55 @@ def test_observe_without_consent_exits_zero_no_spool(tmp_path: Path) -> None:
     )
     assert code == 0
     assert json.loads(stdout.getvalue().decode()) == {}
+
+
+def test_post_tool_hook_delivers_pending_frontier_motion_once(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "frontier-motion")
+    store.note_frontier_motion(
+        workspace,
+        "frontier-motion",
+        from_sequence=4,
+        to_sequence=6,
+        head_digest="sha256:" + "3" * 64,
+        observation_record_count=2,
+    )
+
+    payload = json.dumps(
+        {"session_id": "frontier-motion", "tool_name": "Read", "exit_status": 0}
+    ).encode()
+    first = io.BytesIO()
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=payload,
+            stdout=first,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    context = json.loads(first.getvalue())["hookSpecificOutput"]["additionalContext"]
+    assert "task frontier moved from 4 to 6" in context
+    assert "observation writer appended 2 ledger record(s)" in context
+    assert "run status before an exact-frontier check" in context
+
+    second = io.BytesIO()
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=payload,
+            stdout=second,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert "task frontier moved" not in second.getvalue().decode()
 
 
 def test_stdout_teardown_failure_exits_zero_and_records_diagnostic(tmp_path: Path) -> None:

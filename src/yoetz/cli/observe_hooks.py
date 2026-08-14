@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import shlex
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -23,6 +24,7 @@ from yoetz.adapters.integrations.observation_local import (
     HOOK_MAPPING_VERSION,
     YOETZ_TOOL_NAMES,
     AdviceDelivery,
+    FrontierMotionNotice,
     LocalObservationStore,
     ObservationOutboxRow,
 )
@@ -122,6 +124,21 @@ _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
 # Never an abort point: the drain and preflight budgets own enforcement.
 _HOOK_TOTAL_BUDGET_SECONDS: Final = 1.0
 _TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
+_ROUTINE_READ_TOOLS: Final = frozenset(
+    {
+        "glob",
+        "grep",
+        "list_files",
+        "read",
+        "read_file",
+        "search",
+        "view_file",
+    }
+)
+_SHELL_TOOLS: Final = frozenset(
+    {"bash", "command", "exec", "exec_command", "local_shell", "run_terminal_cmd", "shell"}
+)
+_READ_ONLY_COMMANDS: Final = frozenset({"head", "ls", "pwd", "rg", "tail", "wc"})
 _STRUCTURAL_ALLOW: Final = frozenset(
     {
         "tool_name",
@@ -229,6 +246,50 @@ def _bool_or_none(value: object) -> bool | None:
     return value if type(value) is bool else None
 
 
+def _routine_read_action(payload: Mapping[str, JsonValue]) -> bool:
+    """Recognize a deliberately narrow, side-effect-free tool invocation.
+
+    The returned bit is structural only; command text remains visible-content input and is never
+    copied into the observation envelope. Ambiguous shell syntax fails closed to ordinary
+    materialization. This is a rate policy, not a general shell-effect analyzer.
+    """
+
+    tool = _token_or_none(payload.get("tool_name"))
+    if tool is None:
+        return False
+    lowered = tool.lower()
+    if lowered in _ROUTINE_READ_TOOLS:
+        return True
+    if lowered not in _SHELL_TOOLS:
+        return False
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, Mapping):
+        return False
+    nested = cast(Mapping[str, JsonValue], tool_input)
+    raw = nested.get("cmd") or nested.get("command")
+    if type(raw) is not str or not raw or len(raw) > 16_384:
+        return False
+    # Multiple commands, redirection, substitution, and pipelines require a real shell parser.
+    # They remain ordinary observations rather than being optimistically labelled read-only.
+    if any(marker in raw for marker in ("\n", "\r", ";", "&", "|", ">", "<", "`", "$(")):
+        return False
+    try:
+        argv = shlex.split(raw, posix=True)
+    except ValueError:
+        return False
+    if not argv:
+        return False
+    command = argv[0].rsplit("/", 1)[-1]
+    if command == "rg" and any(arg == "--pre" or arg.startswith("--pre=") for arg in argv[1:]):
+        # ripgrep's preprocessor is an arbitrary executable, not a read primitive.
+        return False
+    if command in _READ_ONLY_COMMANDS:
+        return True
+    if command == "git" and len(argv) >= 2:
+        return argv[1] in {"diff", "log", "rev-parse", "show", "status"}
+    return False
+
+
 def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> JsonObject:
     fields: dict[str, JsonValue] = {"hook_name": event_name}
     tool_name = _token_or_none(payload.get("tool_name"))
@@ -264,6 +325,9 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         digest = _token_or_none(nested.get("changed_paths_digest"))
         if digest is not None and "changed_paths_digest" not in fields:
             fields["changed_paths_digest"] = digest
+    if event_name in {"PreToolUse", "PostToolUse"} and _routine_read_action(payload):
+        # Service-owned classification overrides an untrusted host-supplied action token.
+        fields["action"] = "routine_read"
     for key in ("exit_status", "duration_ms", "event_ordinal", "attempt"):
         number = _int_or_none(payload.get(key))
         if number is not None:
@@ -544,6 +608,16 @@ def _cached_recommendation_context(*, _state: Path | None) -> str:
         f"for approval; if approved run 'yoetz recommend accept {item.id}', "
         f"otherwise 'yoetz recommend decline {item.id}'."
     )[:_MAX_ADVICE_CONTEXT]
+
+
+def _frontier_motion_context(notice: FrontierMotionNotice) -> str:
+    return (
+        "Yoetz: task frontier moved from "
+        f"{notice.from_sequence} to {notice.to_sequence} when the Yoetz observation writer "
+        f"appended {notice.observation_record_count} ledger record(s). "
+        "Held publish frontiers remain valid across observation-only motion; "
+        "run status before an exact-frontier check."
+    )
 
 
 async def _try_service_ingest(
@@ -1227,6 +1301,7 @@ def handle_observe(
         # a blocked host pipe delays advice, never observation ingest or outbox work.
         # Commit remains after emit, so a failed write never suppresses a later delivery.
         pending_delivery: AdviceDelivery | None = None
+        pending_frontier_notice: FrontierMotionNotice | None = None
         delivery_session_id: str | None = None
         delivery_eligible = (
             not additional and resolved_event in ADVICE_SAFE_EVENTS and not skip_advice_loop
@@ -1239,6 +1314,12 @@ def handle_observe(
         with delivery_gate as delivery_acquired:
             if delivery_eligible and delivery_acquired:
                 delivery_session_id = None if mapping is None else mapping.yoetz_session_id
+                if resolved_event == "PostToolUse":
+                    pending_frontier_notice = store.peek_frontier_motion(
+                        workspace_commitment, codex_session_id
+                    )
+                    if pending_frontier_notice is not None:
+                        additional = _frontier_motion_context(pending_frontier_notice)
                 delivery = store.peek_advice_for_delivery(
                     workspace_commitment,
                     yoetz_session_id=delivery_session_id,
@@ -1246,7 +1327,9 @@ def handle_observe(
                     session_commitment=session_commitment,
                 )
                 if delivery is not None:
-                    additional = delivery.text[:_MAX_ADVICE_CONTEXT]
+                    additional = " ".join(part for part in (additional, delivery.text) if part)[
+                        :_MAX_ADVICE_CONTEXT
+                    ]
                     pending_delivery = delivery
 
             # Release recommendations are read from one bounded local cache only.
@@ -1270,6 +1353,13 @@ def handle_observe(
                         pending_delivery.delivery_identity,
                         yoetz_session_id=delivery_session_id,
                         session_commitment=session_commitment,
+                    )
+            if emitted and pending_frontier_notice is not None:
+                with contextlib.suppress(BaseException):
+                    store.commit_frontier_motion_delivery(
+                        workspace_commitment,
+                        codex_session_id,
+                        pending_frontier_notice.delivery_identity,
                     )
         _record_pass_timing(
             resolved_event,

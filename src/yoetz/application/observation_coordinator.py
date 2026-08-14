@@ -113,6 +113,7 @@ from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
     AppendCommand,
     AppendEntry,
+    AppendResult,
     OperationKind,
     ProjectionView,
 )
@@ -488,7 +489,7 @@ class ObservationCoordinator:
                         legacy_writer_id=mapping.yoetz_writer_id,
                     )
                     if claim is not None:
-                        operation_id, materialization_digest = claim
+                        operation_id, materialization_digest, append_result = claim
                         store.record_logical_identity_claim(
                             workspace=workspace,
                             logical_identity=canonical_logical_identity(envelope),
@@ -498,6 +499,18 @@ class ObservationCoordinator:
                             mapping_version=envelope.cursor.mapping_version,
                             materialized_at=timestamp_from_datetime(self.clock.now_utc()),
                         )
+                        if append_result is not None and append_result.outcome == "accepted":
+                            await self._local(
+                                partial(
+                                    self.local.note_frontier_motion,
+                                    workspace,
+                                    codex_session_id,
+                                    from_sequence=append_result.subject_frontier.sequence,
+                                    to_sequence=append_result.result_frontier.sequence,
+                                    head_digest=append_result.result_frontier.head_digest,
+                                    observation_record_count=len(append_result.accepted),
+                                )
+                            )
 
                 stage = "verification"
                 await self._enqueue_verification(
@@ -633,7 +646,7 @@ class ObservationCoordinator:
         batch: MaterializedObservationBatch,
         *,
         legacy_writer_id: str | None = None,
-    ) -> tuple[str, str] | None:
+    ) -> tuple[str, str, AppendResult | None] | None:
         writer_id = runtime.writer_id
         if writer_id is None:
             return None
@@ -650,7 +663,7 @@ class ObservationCoordinator:
         operation_id = self._stable_operation_id(digest)
         existing = await runtime.ledger.lookup_operation(writer_id, operation_id)
         if existing is not None:
-            return operation_id, digest
+            return operation_id, digest, None
         if legacy_writer_id is not None and legacy_writer_id != writer_id:
             legacy_digest = observation_operation_digest(
                 task_id=runtime.task_id,
@@ -664,7 +677,7 @@ class ObservationCoordinator:
                 await runtime.ledger.lookup_operation(legacy_writer_id, legacy_operation_id)
                 is not None
             ):
-                return legacy_operation_id, legacy_digest
+                return legacy_operation_id, legacy_digest, None
 
         author = observation_author()
         refs: list[ObjectRef] = []
@@ -722,8 +735,8 @@ class ObservationCoordinator:
             tuple(refs),
             command,
         )
-        await run_prepared_append(runtime.ledger, mutation)
-        return operation_id, digest
+        append_result = await run_prepared_append(runtime.ledger, mutation)
+        return operation_id, digest, append_result
 
     async def _materialize_approved_check(
         self,

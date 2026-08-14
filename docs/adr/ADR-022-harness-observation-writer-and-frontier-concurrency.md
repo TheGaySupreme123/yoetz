@@ -1,10 +1,11 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), acknowledged for issues #214–#223.
+**Amended:** 2026-08-14 for moderator-approved issue #244.
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/adapters/memory/ledger.py`,
 `src/yoetz/application/publish_work.py`, and `src/yoetz/service/ready_composition.py`.
-**Relates to:** ADR-009, ADR-010, ADR-020, and issues #214, #216, #217, and #223.
+**Relates to:** ADR-009, ADR-010, ADR-020, and issues #214, #216, #217, #223, and #244.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -70,6 +71,22 @@ unsupported claims and unbounded duplicate findings.
    configuration and availability remain visible through observation advice before a check and
    through the check coverage vector and receipt limitations after one.
 
+9. Successful routine reads are rate-limited at the task-ledger boundary. The hook adapter labels
+   only a closed set of read tools and conservatively parsed single read-only shell commands as
+   `routine_read`; shell composition, redirection, mutation flags, unknown commands, and other
+   ambiguity fail closed to ordinary materialization. The complete hook envelope remains in the
+   bounded local observation store, but its pre-event and successful post-event do not mint
+   individual task-ledger records. A failed post-event still materializes action and result records,
+   and edits, checks, tests, lifecycle events, and other non-routine observations are unchanged.
+
+10. Every newly accepted observation-authored append records one bounded pending frontier-motion
+    notice for the originating Codex session. Contiguous undelivered appends coalesce their
+    from/to sequences and record count. A later advice-safe `PostToolUse` hook surfaces that the
+    motion was hook-observed, explains that held cooperative publish frontiers remain admissible
+    only across observation-authored motion, and directs exact-frontier operations to refresh
+    status. The notice is removed only after its bytes reach the hook consumer. It grants no
+    authority, changes no optimistic-concurrency predicate, and adds no MCP operation.
+
 ## Security and privacy consequences
 
 The observation writer id is derivable from public task/session identifiers, but derivation grants
@@ -87,4 +104,7 @@ own action, not unrelated third-party authorship.
 Cooperative work can retain a frontier across observation-only delivery, while real cooperative
 concurrency still conflicts. Check cases make progress by temporarily applying back-pressure to the
 outbox rather than weakening verdict binding. Observation can contribute evidence and bounded
-advice without impersonating the agent or minting the same standing finding indefinitely.
+advice without impersonating the agent or minting the same standing finding indefinitely. Routine
+reads retain their local observation evidence without producing an unbounded task-ledger trail, and
+cooperative writers learn about meaningful observation-authored frontier motion before their next
+state-sensitive operation.
