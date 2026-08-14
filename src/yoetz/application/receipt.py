@@ -74,6 +74,7 @@ from yoetz.protocol.coverage import (
     PublicationChannel,
     coverage_for_channel,
     coverage_to_json,
+    weakest,
 )
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
@@ -309,6 +310,7 @@ def _context(
     assert type(projection) is ProjectionState
     assert type(case) is DeterministicCase
     applicable: CheckRecordedPayload | None = None
+    finding_states = _finding_states(projection)
     gaps = list(case.gaps)
     latest = projection.latest_tested_state
     check_record: LedgerRecord | None = None
@@ -370,6 +372,28 @@ def _context(
         for code in applicable.coverage.known_gaps:
             if not any(gap.code == code for gap in gaps):
                 gaps.append(CaseGap(f"check_coverage:{code}", code, ()))
+    coverage = case_coverage(case)
+    if applicable is not None:
+        coverage = weakest(coverage, applicable.coverage)
+    # Findings are historical material, not merely presentation rows. Observation advice can
+    # retain a finding stamped while delivery was stale after the current projection and latest
+    # check have recovered. Fold every retained row before constructing the context so the
+    # builder's corruption guard remains strict while the application supplies the honest weakest
+    # coverage the receipt document already promises.
+    for state in finding_states:
+        record = projection.findings[state.finding_id]
+        assert record.payload is not None
+        coverage = weakest(coverage, record.payload.coverage)
+
+    # ReceiptBuildContext requires exact equality between Coverage.known_gaps and CaseGap codes.
+    # Check-derived codes were materialized above; a code introduced only by a retained finding
+    # receives one task-global structural marker so many historical findings cannot exhaust the
+    # receipt's bounded 64-gap surface.
+    represented_codes = {gap.code for gap in gaps}
+    for code in coverage.known_gaps:
+        if code not in represented_codes:
+            gaps.append(CaseGap(f"retained_finding_coverage:{code}", code, ()))
+            represented_codes.add(code)
     ordered_gaps = tuple(
         sorted(
             gaps,
@@ -379,45 +403,19 @@ def _context(
             ),
         )
     )
-    coverage = case_coverage(case)
     codes = tuple(sorted({gap.code for gap in ordered_gaps}, key=str.encode))
     if codes != coverage.known_gaps:
         freshness = coverage.ledger_freshness
         if codes and freshness is LedgerFreshness.CURRENT:
             freshness = LedgerFreshness.PARTIAL
         coverage = replace(coverage, ledger_freshness=freshness, known_gaps=codes)
-    if applicable is not None:
-        from yoetz.protocol.coverage import weakest
-
-        coverage = weakest(coverage, applicable.coverage)
-        # ReceiptBuildContext requires exact equality between coverage.known_gaps and CaseGap codes.
-        extra_codes = set(coverage.known_gaps) - {gap.code for gap in ordered_gaps}
-        if extra_codes:
-            extended = list(ordered_gaps)
-            for code in sorted(extra_codes, key=str.encode):
-                extended.append(CaseGap(f"check_coverage:{code}", code, ()))
-            ordered_gaps = tuple(
-                sorted(
-                    extended,
-                    key=lambda gap: (
-                        gap.marker.encode("ascii"),
-                        tuple(ref.encode("ascii") for ref in gap.subject_refs),
-                    ),
-                )
-            )
-        codes = tuple(sorted({gap.code for gap in ordered_gaps}, key=str.encode))
-        if codes != coverage.known_gaps:
-            freshness = coverage.ledger_freshness
-            if codes and freshness is LedgerFreshness.CURRENT:
-                freshness = LedgerFreshness.PARTIAL
-            coverage = replace(coverage, ledger_freshness=freshness, known_gaps=codes)
     return ReceiptBuildContext(
         projection,
         frontier,
         case.availability,
         coverage,
         ordered_gaps,
-        _finding_states(projection),
+        finding_states,
         applicable,
     )
 

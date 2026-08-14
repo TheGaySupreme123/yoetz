@@ -20,10 +20,24 @@ from builders.start_application import (
 )
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import PrivacyCoordinator
+from yoetz.application.observation_materialize import observation_author
 from yoetz.application.service import Application, VerificationPolicy
 from yoetz.application.start import StartInternalResult
-from yoetz.domain.events import RuntimeProfile
-from yoetz.domain.findings import SemanticDispatchKind, SemanticProvenance
+from yoetz.domain.events import (
+    EventDraft,
+    EventSchema,
+    RuntimeProfile,
+    encode_payload,
+    media_type_for,
+)
+from yoetz.domain.findings import (
+    FINDING_KIND_TRAITS,
+    Finding,
+    FindingKind,
+    FindingOrigin,
+    SemanticDispatchKind,
+    SemanticProvenance,
+)
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -38,15 +52,31 @@ from yoetz.domain.privacy import (
     ReceiptTransformations,
 )
 from yoetz.domain.receipts import PolicyVersionEntry, ReceiptVersionSlice, SchemaVersionEntry
-from yoetz.domain.values import Frontier, session_id
+from yoetz.domain.values import (
+    Frontier,
+    event_id,
+    finding_id,
+    session_id,
+    timestamp_from_datetime,
+)
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
-from yoetz.ports.ledger import CheckCommitResult
+from yoetz.ports.ledger import AppendCommand, AppendEntry, CheckCommitResult, OperationKind
+from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.ports.semantic import SamplingParams, SemanticJudgment
 from yoetz.protocol.canonical import JsonValue, canonical_encode
-from yoetz.protocol.coverage import CheckType
+from yoetz.protocol.coverage import (
+    ArtifactObservation,
+    AuthorshipAssurance,
+    CheckType,
+    Coverage,
+    EvidenceImmutability,
+    LedgerFreshness,
+    PublicationChannel,
+    coverage_for_channel,
+)
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
@@ -902,6 +932,139 @@ async def test_receipt_build_context_is_complete() -> None:
     # the human wording rather than the wire enum spelling (spaces, not underscores).
     assert "unresolved findings remain" in text_receipt.human_text
     assert text_receipt.conclusion == receipt.conclusion
+
+
+async def test_receipt_folds_retained_observation_finding_coverage_after_recovery() -> None:
+    """Regression for #259.
+
+    Observation advice records its own finding coverage inside the finding payload while the
+    accepted engine-derived envelope remains current. A later healthy check can therefore have
+    stronger current coverage without erasing the historical ``cursor_stale`` limitation carried
+    by the retained finding. Receipt construction must weaken to that history, not classify the
+    valid state as ``STORAGE_CORRUPT``.
+    """
+
+    app, runtime, _ = _build_app(seed_offset=16)
+    started = await app.start(start_request(2500, title="Recovered observation coverage"))
+    start_frontier = Frontier(int(started.frontier.sequence), started.frontier.head_digest)
+    ledger, objects = next(iter(runtime.resources.values()))
+    records = tuple(
+        [
+            record
+            async for record in ledger.load_events(
+                started.session_id, through=start_frontier.sequence
+            )
+        ]
+    )
+    assert records
+
+    retained_coverage = Coverage(
+        publication_channels=(PublicationChannel.ENGINE_DERIVED,),
+        authorship_assurance=AuthorshipAssurance.HARNESS_OBSERVED,
+        artifact_observation=ArtifactObservation.HOOK_OBSERVED,
+        evidence_immutability=EvidenceImmutability.METADATA_ONLY,
+        ledger_freshness=LedgerFreshness.PARTIAL,
+        check_types=(CheckType.DETERMINISTIC,),
+        known_gaps=("cursor_stale",),
+    )
+    kind = FindingKind.LEDGER_STALE_OR_INCOMPLETE
+    retained = Finding(
+        finding_id(protocol_id("fnd_", 2501)),
+        kind,
+        FindingOrigin.DETERMINISTIC,
+        FINDING_KIND_TRAITS[kind][0],
+        "Observation delivery was stale.",
+        "Observation delivery later recovered; retain this historical limitation.",
+        (records[0].event_id,),
+        "work-integrity",
+        "0.1.0",
+        start_frontier,
+        retained_coverage,
+        None,
+    )
+    payload = canonical_encode(encode_payload(retained))
+    now = app.clock.now_utc()
+    metadata = ObjectMetadata(
+        ObjectKind.EVENT_PAYLOAD,
+        media_type_for("finding_recorded"),
+        started.task_id,
+        now,
+    )
+    staged = await objects.stage(ObjectSource(data=payload, declared_size=len(payload)), metadata)
+    payload_ref = await objects.finalize(staged)
+    appended = await ledger.append_batch(
+        AppendCommand(
+            started.task_id,
+            started.session_id,
+            started.writer_id,
+            protocol_id("req_", 2502),
+            OperationKind.PUBLISH_WORK,
+            _DIGEST,
+            start_frontier.sequence,
+            (
+                AppendEntry(
+                    EventDraft(
+                        event_id(protocol_id("evt_", 2503)),
+                        EventSchema("finding_recorded", "1.0.0"),
+                        timestamp_from_datetime(now),
+                        (),
+                        retained,
+                        (),
+                        (),
+                    ),
+                    observation_author(),
+                    payload_ref,
+                    payload_ref.commitment,
+                    metadata.media_type,
+                    payload_ref.plaintext_size,
+                    PublicationChannel.ENGINE_DERIVED,
+                    coverage_for_channel(PublicationChannel.ENGINE_DERIVED),
+                    "projected",
+                ),
+            ),
+        )
+    )
+
+    checked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2504)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(appended.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(checked) is CheckCommitResult
+    assert checked.findings == ()
+    assert "cursor_stale" not in checked.coverage.known_gaps
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2505)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+
+    assert FINDING_KIND_TRAITS[kind][1] is False
+    assert receipt.conclusion == "insufficient_coverage"
+    assert receipt.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+    assert "cursor_stale" in receipt.coverage.known_gaps
+    document = cast(Mapping[str, JsonValue], receipt.document)
+    findings = cast(tuple[Mapping[str, JsonValue], ...], document["findings"])
+    assert any(item["finding_id"] == retained.finding_id for item in findings)
+    gaps = cast(tuple[Mapping[str, JsonValue], ...], document["gaps"])
+    assert sum(item["code"] == "cursor_stale" for item in gaps) == 1
 
 
 async def test_successful_check_contributes_to_receipt_at_resulting_head() -> None:
