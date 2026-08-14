@@ -2863,8 +2863,10 @@ facade and are never MCP tools.
   "verified", "proved", "authenticated", or "complete" except where the surrounding sentence states
   the exact sufficient coverage.
 - `mcp/resources.py`: exposes the packaged harness-neutral guidance documents as MCP resources under
-  stable `yoetz://guidance/<name>` URIs, so a host with no first-party integration can still fetch
-  the publication policy, coverage rules, and schema-valid request templates on demand. Resources
+  stable `yoetz://guidance/<name>` URIs for hosts that return the resource text. Initialize
+  `instructions` always carry `agent-instructions.md`. A conformant `resources/read` payload does
+  not mean the host delivered those bytes to the model; an empty body is not a fetch. First-party
+  skill install places the same files on disk as `references/<name>.md` beside the skill. Resources
   are static reviewed product bytes read through `importlib.resources` and digest-checked against
   the resource manifest; the registry
   is read-only, closed, and contains no ledger, task, projection, or user content. It is therefore

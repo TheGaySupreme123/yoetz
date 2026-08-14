@@ -12,10 +12,15 @@ Yoetz is a local work ledger and deterministic checker. It records only what par
 ## Step 0: read the guidance before the first call
 
 Read these with the MCP `resources/read` request for the exact URI. They are served by the `yoetz`
-server itself, so they resolve without any repository checkout. After install they are also on disk
-beside this file as `references/workflow.md`, `references/coverage-and-receipts.md`,
-`references/publication-policy.md`, `references/request-templates.md`, and
-`references/agent-instructions.md`.
+server. Initialize `instructions` already include `agent-instructions.md`. After install the same
+files are also on disk beside this file as `references/workflow.md`,
+`references/coverage-and-receipts.md`, `references/publication-policy.md`,
+`references/request-templates.md`, and `references/agent-instructions.md`.
+
+If a `resources/read` result has no text, do not proceed and do not treat the read as success.
+Open the matching `references/<name>.md` beside this file and continue from that copy. Do not call
+`start` on an empty guidance body. An empty resource body is not a reason to read Yoetz product
+source.
 
 - Before the first `start`: `yoetz://guidance/workflow.md` (the ten steps, cadence, resume behavior) and `yoetz://guidance/coverage-and-receipts.md` (coverage, findings, receipt wording).
 - Before the first `publish_work`: `yoetz://guidance/publication-policy.md` (what is material and safe to publish).
