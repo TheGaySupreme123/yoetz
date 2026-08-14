@@ -2392,6 +2392,25 @@ quarantined-at time behind the trusted-clock epoch fence; an operator can drop i
 (evictions and reclaims counted separately), first/last receipt times, and
 `quarantine_detail_evicted`.
 
+Routine-read materialization follows ADR-022's rate policy. A service-owned structural
+`action=routine_read` label is derived only for the closed direct-read tool set or a conservatively
+parsed, single read-only shell command; host-supplied action text cannot select it. Path-qualified
+executables, Git `--output` / `--ext-diff`, explicit `success=false` or `denied=true`, and other
+ambiguous shell input stay ordinary observations. Both the pre-event and a successful or
+status-unknown post-event remain in the bounded local observation store but do not append
+task-ledger events. A failed post-event materializes normally.
+
+The local observation state also owns a sparse, one-shot `FrontierMotionNotice` per Codex session:
+`from_sequence`, `to_sequence`, final `head_digest`, and exact accepted observation-record count.
+A newly accepted observation append creates it. Idempotent replay of a completed append
+reconciles a missing pending notice from that append's committed frontier metadata; a still-pending
+notice is coalesced rather than duplicated. The mapping is capped and drops ended-session entries
+before serialization; a malformed stored value is ignored as empty. Contiguous pending notices
+coalesce, and an advice-safe `PostToolUse` hook consumes the exact notice only after emitting its
+bounded agent context. This context is informational: it neither weakens exact-frontier checks
+nor expands the ADR-022 predicate that permits a cooperative publish to retain a stale frontier
+across observation-authored records.
+
 `hook_observed` (publication channel and artifact-observation class) and `harness_observed`
 authorship require real observation evidence under an active consented observation arm — never a
 trigger-only hook, consent marker, empty status, or degraded/stopped source alone.

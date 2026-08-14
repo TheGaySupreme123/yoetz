@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
 import time
 import uuid
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -38,7 +40,9 @@ from yoetz.domain.observation import (
     observation_ingest_request_to_json,
 )
 from yoetz.domain.values import JsonObject, Timestamp, finding_id
+from yoetz.ports.ledger import CheckPhase, OperationKind, OperationRecord, OperationState
 from yoetz.ports.runtime import TaskRuntime
+from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
@@ -132,6 +136,67 @@ def test_materialize_pre_post_and_unpaired() -> None:
     assert ObservationGapCode.UNPAIRED_EVENT.value in unpaired.gaps
 
 
+def test_successful_routine_reads_stay_observation_only_but_failures_materialize() -> None:
+    task = _task_id()
+    session = f"hmac-sha256:{'ed' * 32}"
+    pre = _envelope(session=session, kind="PreToolUse", identity="hook:read-pre")
+    pre_structural = JsonObject({**pre.structural_payload, "action": "routine_read"})
+    deferred = materialize_observation_envelope(
+        replace(pre, structural_payload=pre_structural), task_id=task
+    )
+    assert deferred.drafts == ()
+    assert deferred.skip_reason == "routine_read_deferred"
+
+    post = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="hook:read-post",
+        exit_status=0,
+    )
+    post_structural = JsonObject({**post.structural_payload, "action": "routine_read"})
+    coalesced = materialize_observation_envelope(
+        replace(post, structural_payload=post_structural), task_id=task
+    )
+    assert coalesced.drafts == ()
+    assert coalesced.skip_reason == "routine_read_coalesced"
+
+    failed = materialize_observation_envelope(
+        replace(
+            post,
+            structural_payload=JsonObject({**post_structural, "exit_status": 1}),
+        ),
+        task_id=task,
+    )
+    assert [item.draft.schema.name for item in failed.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
+
+    denied = materialize_observation_envelope(
+        replace(
+            post,
+            structural_payload=JsonObject({**post_structural, "denied": True}),
+        ),
+        task_id=task,
+    )
+    assert [item.draft.schema.name for item in denied.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
+
+    marked_failed = materialize_observation_envelope(
+        replace(
+            post,
+            structural_payload=JsonObject({**post_structural, "success": False}),
+        ),
+        task_id=task,
+    )
+    assert [item.draft.schema.name for item in marked_failed.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
+
+
 def test_completion_signal_is_evidence_unless_claim_kind_is_explicit() -> None:
     task = _task_id()
     session = f"hmac-sha256:{'ac' * 32}"
@@ -214,6 +279,93 @@ async def test_live_upgrade_finds_materialization_under_legacy_writer(tmp_path: 
     ]
 
 
+@pytest.mark.anyio
+async def test_existing_operation_reconstructs_frontier_motion_metadata(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    task_id = _task_id()
+    session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    writer_id = observation_writer_id(task_id, session_id)
+    envelope = _envelope(session=f"hmac-sha256:{'af' * 32}", identity="hook:replay-motion")
+    batch = materialize_observation_envelope(envelope, task_id=task_id)
+    canonical = canonical_encode(
+        {
+            "accepted": (
+                {
+                    "entry_digest": "sha256:" + "a" * 64,
+                    "event_id": PREFIX_BY_KIND[IdKind.EVENT] + str(uuid.uuid4()),
+                    "ingestion_sequence": "4",
+                    "projection_status": "projected",
+                    "writer_sequence": "1",
+                },
+            ),
+            "result_frontier": {"head_digest": "sha256:" + "c" * 64, "sequence": "5"},
+            "subject_frontier": {"head_digest": "sha256:" + "b" * 64, "sequence": "3"},
+            "warnings": (),
+        }
+    )
+    existing = OperationRecord(
+        writer_id,
+        PREFIX_BY_KIND[IdKind.REQUEST] + str(uuid.uuid4()),
+        OperationKind.PUBLISH_WORK,
+        "sha256:" + "d" * 64,
+        OperationState.COMPLETE,
+        CheckPhase.TERMINAL,
+        None,
+        None,
+        None,
+        None,
+        None,
+        canonical,
+        "sha256:" + hashlib.sha256(canonical).hexdigest(),
+        None,
+        None,
+        datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    class _Ledger:
+        async def lookup_operation(self, looked_up_writer: str, operation_id: str):
+            del looked_up_writer, operation_id
+            return existing
+
+    class _Clock:
+        def now_utc(self) -> Timestamp:
+            return Timestamp("2026-01-01T00:00:00.000Z")
+
+    class _Ids:
+        def new(self, kind: IdKind) -> str:
+            return PREFIX_BY_KIND[kind] + str(uuid.uuid4())
+
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=_Ids(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+    )
+    runtime = SimpleNamespace(
+        task_id=task_id,
+        session_id=session_id,
+        writer_id=writer_id,
+        ledger=_Ledger(),
+    )
+
+    recovered = await coordinator._append_materialized(  # pyright: ignore[reportPrivateUsage]
+        cast(TaskRuntime, runtime),
+        envelope,
+        batch,
+    )
+
+    assert recovered is not None
+    _operation_id, _digest, append_result = recovered
+    assert append_result is not None
+    assert append_result.outcome == "replayed"
+    assert append_result.subject_frontier.sequence == 3
+    assert append_result.result_frontier.sequence == 5
+    assert append_result.result_frontier.head_digest == "sha256:" + "c" * 64
+    assert len(append_result.accepted) == 1
+
+
 def test_local_outbox_enqueue_ack_and_overflow(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -228,6 +380,107 @@ def test_local_outbox_enqueue_ack_and_overflow(tmp_path: Path) -> None:
     assert store.pending_outbox_count(workspace) == 1
     assert store.acknowledge_outbox(workspace, "sess-outbox", envelope.source_identity) is True
     assert store.pending_outbox_count(workspace) == 0
+
+
+def test_frontier_motion_notice_merges_contiguous_appends_and_is_one_shot(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.note_frontier_motion(
+        workspace,
+        "motion-session",
+        from_sequence=7,
+        to_sequence=9,
+        head_digest="sha256:" + "1" * 64,
+        observation_record_count=2,
+    )
+    store.note_frontier_motion(
+        workspace,
+        "motion-session",
+        from_sequence=9,
+        to_sequence=10,
+        head_digest="sha256:" + "2" * 64,
+        observation_record_count=1,
+    )
+
+    reloaded = LocalObservationStore(_state=tmp_path)
+    notice = reloaded.peek_frontier_motion(workspace, "motion-session")
+    assert notice is not None
+    assert (notice.from_sequence, notice.to_sequence, notice.observation_record_count) == (7, 10, 3)
+    assert notice.head_digest == "sha256:" + "2" * 64
+
+    reloaded.commit_frontier_motion_delivery(workspace, "motion-session", "sha256:" + "0" * 64)
+    assert reloaded.peek_frontier_motion(workspace, "motion-session") == notice
+    reloaded.commit_frontier_motion_delivery(workspace, "motion-session", notice.delivery_identity)
+    assert reloaded.peek_frontier_motion(workspace, "motion-session") is None
+
+
+def test_frontier_motion_notices_ignore_malformed_and_prune_ended_sessions(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "live-session")
+    store.note_frontier_motion(
+        workspace,
+        "live-session",
+        from_sequence=1,
+        to_sequence=2,
+        head_digest="sha256:" + "4" * 64,
+        observation_record_count=1,
+    )
+    state_path = store._workspace_path(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    raw["frontier_motion_notices"] = []
+    state_path.write_text(json.dumps(raw), encoding="utf-8")
+    assert (
+        LocalObservationStore(_state=tmp_path).peek_frontier_motion(workspace, "live-session")
+        is None
+    )
+
+    store = LocalObservationStore(_state=tmp_path)
+    store.grant_consent(workspace)
+    ended = store.bind_codex_session(workspace, "ended-session")
+    store.note_frontier_motion(
+        workspace,
+        "ended-session",
+        from_sequence=2,
+        to_sequence=3,
+        head_digest="sha256:" + "5" * 64,
+        observation_record_count=1,
+    )
+    store.note_session_end(workspace, ended)
+    assert store.peek_frontier_motion(workspace, "ended-session") is None
+
+
+def test_frontier_motion_notices_are_capped(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    digest = "sha256:" + "6" * 64
+    over_cap = 257
+    for index in range(over_cap):
+        store.note_frontier_motion(
+            workspace,
+            f"session-{index}",
+            from_sequence=index + 1,
+            to_sequence=index + 2,
+            head_digest=digest,
+            observation_record_count=1,
+        )
+    reloaded = LocalObservationStore(_state=tmp_path)
+    surviving = [
+        session
+        for index in range(over_cap)
+        if (session := f"session-{index}")
+        and reloaded.peek_frontier_motion(workspace, session) is not None
+    ]
+    assert len(surviving) == over_cap - 1
+    assert "session-0" not in surviving
+    assert "session-256" in surviving
 
 
 def test_outbox_ack_does_not_clear_source_reported_overflow(tmp_path: Path) -> None:
@@ -367,7 +620,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_reason == ObservationGapCode.MAPPING_MISSING.value
     assert durable.last_attempt_at == attempted_at
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/5"
+        "yoetz.observation-local/6"
     )
 
 

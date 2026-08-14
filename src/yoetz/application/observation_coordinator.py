@@ -11,7 +11,7 @@ from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 from yoetz.adapters.approved_checks import ApprovedCheckRunner, ApprovedCheckStatus
 from yoetz.adapters.git_subject_state import (
@@ -100,6 +100,7 @@ from yoetz.domain.values import (
     action_id,
     event_id,
     evidence_id,
+    frontier_from_json,
     object_id,
     result_id,
     timestamp_from_datetime,
@@ -111,9 +112,14 @@ from yoetz.observability.privacy import redact_sensitive_content
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
+    AcceptedEventSummary,
     AppendCommand,
     AppendEntry,
+    AppendResult,
+    AppendWarning,
     OperationKind,
+    OperationRecord,
+    OperationState,
     ProjectionView,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
@@ -153,6 +159,52 @@ def _materialized_advice_items(items: Sequence[AdviceItem]) -> tuple[AdviceItem,
         for item in items
         if item.origin == "deterministic" and item.rule_code in _ADVICE_FINDING_KIND_BY_RULE
     )
+
+
+def _append_result_from_committed(record: object) -> AppendResult | None:
+    """Rebuild frontier metadata from a completed append so retry can note motion."""
+
+    if type(record) is not OperationRecord:
+        return None
+    if record.state is not OperationState.COMPLETE or record.result_canonical is None:
+        return None
+    try:
+        parsed = strict_json_parse(record.result_canonical)
+    except ProtocolValueError, TypeError, ValueError:
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+    result_map = cast(Mapping[str, object], parsed)
+    accepted_raw = result_map.get("accepted")
+    if not isinstance(accepted_raw, list | tuple) or not accepted_raw:
+        return None
+    try:
+        accepted = tuple(
+            AcceptedEventSummary(
+                cast(str, item["event_id"]),
+                int(cast(str, item["ingestion_sequence"])),
+                int(cast(str, item["writer_sequence"])),
+                cast(str, item["entry_digest"]),
+                cast(
+                    Literal["projected", "unknown_unprojected"],
+                    item["projection_status"],
+                ),
+            )
+            for item in cast(tuple[Mapping[str, object], ...], accepted_raw)
+        )
+        warnings_raw = result_map.get("warnings") or ()
+        warnings = tuple(
+            AppendWarning(cast(str, value)) for value in cast(tuple[object, ...], warnings_raw)
+        )
+        return AppendResult(
+            "replayed",
+            accepted,
+            frontier_from_json(result_map["subject_frontier"]),
+            frontier_from_json(result_map["result_frontier"]),
+            warnings,
+        )
+    except KeyError, ProtocolValueError, TypeError, ValueError:
+        return None
 
 
 __all__ = [
@@ -488,7 +540,7 @@ class ObservationCoordinator:
                         legacy_writer_id=mapping.yoetz_writer_id,
                     )
                     if claim is not None:
-                        operation_id, materialization_digest = claim
+                        operation_id, materialization_digest, append_result = claim
                         store.record_logical_identity_claim(
                             workspace=workspace,
                             logical_identity=canonical_logical_identity(envelope),
@@ -498,6 +550,18 @@ class ObservationCoordinator:
                             mapping_version=envelope.cursor.mapping_version,
                             materialized_at=timestamp_from_datetime(self.clock.now_utc()),
                         )
+                        if append_result is not None:
+                            await self._local(
+                                partial(
+                                    self.local.note_frontier_motion,
+                                    workspace,
+                                    codex_session_id,
+                                    from_sequence=append_result.subject_frontier.sequence,
+                                    to_sequence=append_result.result_frontier.sequence,
+                                    head_digest=append_result.result_frontier.head_digest,
+                                    observation_record_count=len(append_result.accepted),
+                                )
+                            )
 
                 stage = "verification"
                 await self._enqueue_verification(
@@ -633,7 +697,7 @@ class ObservationCoordinator:
         batch: MaterializedObservationBatch,
         *,
         legacy_writer_id: str | None = None,
-    ) -> tuple[str, str] | None:
+    ) -> tuple[str, str, AppendResult | None] | None:
         writer_id = runtime.writer_id
         if writer_id is None:
             return None
@@ -650,7 +714,7 @@ class ObservationCoordinator:
         operation_id = self._stable_operation_id(digest)
         existing = await runtime.ledger.lookup_operation(writer_id, operation_id)
         if existing is not None:
-            return operation_id, digest
+            return operation_id, digest, _append_result_from_committed(existing)
         if legacy_writer_id is not None and legacy_writer_id != writer_id:
             legacy_digest = observation_operation_digest(
                 task_id=runtime.task_id,
@@ -660,11 +724,15 @@ class ObservationCoordinator:
                 draft_roles=tuple(item.role for item in batch.drafts),
             )
             legacy_operation_id = self._stable_operation_id(legacy_digest)
-            if (
-                await runtime.ledger.lookup_operation(legacy_writer_id, legacy_operation_id)
-                is not None
-            ):
-                return legacy_operation_id, legacy_digest
+            legacy_existing = await runtime.ledger.lookup_operation(
+                legacy_writer_id, legacy_operation_id
+            )
+            if legacy_existing is not None:
+                return (
+                    legacy_operation_id,
+                    legacy_digest,
+                    _append_result_from_committed(legacy_existing),
+                )
 
         author = observation_author()
         refs: list[ObjectRef] = []
@@ -722,8 +790,8 @@ class ObservationCoordinator:
             tuple(refs),
             command,
         )
-        await run_prepared_append(runtime.ledger, mutation)
-        return operation_id, digest
+        append_result = await run_prepared_append(runtime.ledger, mutation)
+        return operation_id, digest, append_result
 
     async def _materialize_approved_check(
         self,

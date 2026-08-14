@@ -44,7 +44,13 @@ from yoetz.domain.observation import (
     observation_envelope_to_json,
     workspace_commitment_from_path,
 )
-from yoetz.domain.values import JsonObject, JsonValue, Timestamp, timestamp_from_datetime
+from yoetz.domain.values import (
+    JsonObject,
+    JsonValue,
+    Timestamp,
+    timestamp_from_datetime,
+    validate_sha256_digest,
+)
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 
@@ -56,6 +62,7 @@ except ImportError:  # pragma: no cover - the Yoetz service is hosted on POSIX
 __all__ = [
     "HOOK_MAPPING_VERSION",
     "AdviceDelivery",
+    "FrontierMotionNotice",
     "LocalObservationConsent",
     "LocalObservationStore",
     "ObservationOutboxRow",
@@ -85,6 +92,7 @@ _MAX_QUARANTINE_AGE_DAYS: Final = 14
 # graph per workspace forever.
 _MAX_STATE_CACHE_ENTRIES: Final = 8
 _MAX_HOOK_SEQUENCES: Final = 256
+_MAX_FRONTIER_MOTION_NOTICES: Final = 256
 _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 # Wall/monotonic drift tolerated before persisted monotonic samples are treated
 # as belonging to a different boot epoch (and therefore fenced off).
@@ -276,6 +284,40 @@ class AdviceDelivery:
 
 
 @dataclass(frozen=True, slots=True)
+class FrontierMotionNotice:
+    """One bounded, one-shot notice that the observation writer moved a task frontier."""
+
+    from_sequence: int
+    to_sequence: int
+    head_digest: str
+    observation_record_count: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.from_sequence) is not int
+            or type(self.to_sequence) is not int
+            or type(self.observation_record_count) is not int
+            or not 0 <= self.from_sequence < self.to_sequence <= _MAX_SAFE_INTEGER
+            or not 1 <= self.observation_record_count <= self.to_sequence - self.from_sequence
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        validate_sha256_digest(self.head_digest)
+
+    @property
+    def delivery_identity(self) -> str:
+        return canonical_digest(
+            JsonObject(
+                {
+                    "from_sequence": self.from_sequence,
+                    "head_digest": self.head_digest,
+                    "observation_record_count": self.observation_record_count,
+                    "to_sequence": self.to_sequence,
+                }
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class LocalObservationConsent:
     workspace_commitment: str
     granted_at: Timestamp
@@ -350,6 +392,7 @@ class _WorkspaceState:
     last_advice_suppression: str | None = None
     session_advice: dict[str, AdviceSnapshot] | None = None
     session_advice_suppression: dict[str, str] | None = None
+    frontier_motion_notices: dict[str, FrontierMotionNotice] | None = None
     open_pre: dict[str, str] | None = None
     stream_cursors: dict[str, ObservationCursor] | None = None
     stream_partials: dict[str, bytes] | None = None
@@ -418,6 +461,8 @@ class _WorkspaceState:
             self.session_advice = {}
         if self.session_advice_suppression is None:
             self.session_advice_suppression = {}
+        if self.frontier_motion_notices is None:
+            self.frontier_motion_notices = {}
 
 
 def _cursor_key(source: ObservationSource, session_commitment: str) -> str:
@@ -434,6 +479,26 @@ def _load_session_advice(raw: object) -> dict[str, AdviceSnapshot]:
         try:
             result[key] = advice_snapshot_from_json(
                 JsonObject(cast(Mapping[str, JsonValue], value))
+            )
+        except ProtocolValueError, TypeError, ValueError:
+            continue
+    return result
+
+
+def _load_frontier_motion_notices(raw: object) -> dict[str, FrontierMotionNotice]:
+    if not isinstance(raw, Mapping):
+        return {}
+    result: dict[str, FrontierMotionNotice] = {}
+    for key, value in cast(Mapping[str, JsonValue], raw).items():
+        if type(key) is not str or not isinstance(value, Mapping):
+            continue
+        notice = cast(Mapping[str, JsonValue], value)
+        try:
+            result[key] = FrontierMotionNotice(
+                cast(int, notice.get("from_sequence")),
+                cast(int, notice.get("to_sequence")),
+                cast(str, notice.get("head_digest")),
+                cast(int, notice.get("observation_record_count")),
             )
         except ProtocolValueError, TypeError, ValueError:
             continue
@@ -513,6 +578,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         unsupported_events=set(state.unsupported_events or ()),
         session_advice=dict(state.session_advice or {}),
         session_advice_suppression=dict(state.session_advice_suppression or {}),
+        frontier_motion_notices=dict(state.frontier_motion_notices or {}),
         open_pre=dict(state.open_pre or {}),
         stream_cursors=dict(state.stream_cursors or {}),
         stream_partials=dict(state.stream_partials or {}),
@@ -999,6 +1065,61 @@ class LocalObservationStore:
                 if state.last_advice_suppression == delivery_identity:
                     return
                 state.last_advice_suppression = delivery_identity
+            self._save(workspace, state)
+
+    def note_frontier_motion(
+        self,
+        workspace: str,
+        codex_session_id: str,
+        *,
+        from_sequence: int,
+        to_sequence: int,
+        head_digest: str,
+        observation_record_count: int,
+    ) -> None:
+        """Merge contiguous observation appends into one pending agent notice."""
+
+        candidate = FrontierMotionNotice(
+            from_sequence,
+            to_sequence,
+            head_digest,
+            observation_record_count,
+        )
+        with self._lock:
+            state = self._load(workspace)
+            assert state.frontier_motion_notices is not None
+            prior = state.frontier_motion_notices.get(codex_session_id)
+            if prior is not None and prior.to_sequence == candidate.from_sequence:
+                candidate = FrontierMotionNotice(
+                    prior.from_sequence,
+                    candidate.to_sequence,
+                    candidate.head_digest,
+                    prior.observation_record_count + candidate.observation_record_count,
+                )
+            elif prior is not None and candidate.to_sequence <= prior.to_sequence:
+                return
+            state.frontier_motion_notices[codex_session_id] = candidate
+            self._save(workspace, state)
+
+    def peek_frontier_motion(
+        self, workspace: str, codex_session_id: str
+    ) -> FrontierMotionNotice | None:
+        with self._lock:
+            state = self._load(workspace)
+            return (state.frontier_motion_notices or {}).get(codex_session_id)
+
+    def commit_frontier_motion_delivery(
+        self, workspace: str, codex_session_id: str, delivery_identity: str
+    ) -> None:
+        """Remove exactly the notice whose context bytes reached the hook consumer."""
+
+        with self._lock:
+            state = self._load(workspace)
+            notices = state.frontier_motion_notices or {}
+            current = notices.get(codex_session_id)
+            if current is None or current.delivery_identity != delivery_identity:
+                return
+            del notices[codex_session_id]
             self._save(workspace, state)
 
     def advice_snapshot_for(self, workspace: str) -> AdviceSnapshot | None:
@@ -1985,6 +2106,21 @@ class LocalObservationStore:
         if len(kept) != len(state.quarantine):
             state.quarantine[:] = kept
 
+    def _prune_frontier_motion_notices(self, state: _WorkspaceState) -> None:
+        """Drop ended-session notices and cap the per-workspace mapping."""
+
+        notices = state.frontier_motion_notices
+        if not notices:
+            return
+        ended = state.ended_sessions or set()
+        bindings = state.codex_session_bindings or {}
+        for session_id in tuple(notices):
+            commitment = bindings.get(session_id)
+            if commitment is not None and commitment in ended:
+                del notices[session_id]
+        while len(notices) > _MAX_FRONTIER_MOTION_NOTICES:
+            del notices[next(iter(notices))]
+
     def _save(
         self,
         workspace_commitment: str,
@@ -2005,8 +2141,14 @@ class LocalObservationStore:
         _ensure_dir(directory)
         path = self._workspace_path(workspace_commitment)
         quarantined_before = len(state.quarantine or ())
+        notices_before = len(state.frontier_motion_notices or ())
         self._prune_expired_quarantine(state)
-        if projected is not None and len(state.quarantine or ()) == quarantined_before:
+        self._prune_frontier_motion_notices(state)
+        if (
+            projected is not None
+            and len(state.quarantine or ()) == quarantined_before
+            and len(state.frontier_motion_notices or ()) == notices_before
+        ):
             payload = projected
         else:
             payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
@@ -2264,10 +2406,11 @@ class LocalObservationStore:
                 }
             )
         payload: dict[str, JsonValue] = {
-            # /5 adds terminal corruption-session tracking. /3 added quarantined_at per
+            # /6 adds one-shot task-frontier motion notices. /5 adds terminal
+            # corruption-session tracking. /3 added quarantined_at per
             # quarantine entry and the reclaimed counter. Readers tolerate both directions:
             # unknown keys are ignored and missing keys default safely.
-            "schema": "yoetz.observation-local/5",
+            "schema": "yoetz.observation-local/6",
             "workspace_commitment": workspace,
             "consent": consent_json,
             "session_workspaces": JsonObject(
@@ -2416,6 +2559,23 @@ class LocalObservationStore:
         if state.storage_corrupt_sessions:
             payload["storage_corrupt_sessions"] = tuple(
                 sorted(state.storage_corrupt_sessions, key=str.encode)
+            )
+        if state.frontier_motion_notices:
+            payload["frontier_motion_notices"] = JsonObject(
+                {
+                    key: JsonObject(
+                        {
+                            "from_sequence": notice.from_sequence,
+                            "head_digest": notice.head_digest,
+                            "observation_record_count": notice.observation_record_count,
+                            "to_sequence": notice.to_sequence,
+                        }
+                    )
+                    for key, notice in sorted(
+                        state.frontier_motion_notices.items(),
+                        key=lambda item: item[0].encode(),
+                    )
+                }
             )
         return payload
 
@@ -2657,6 +2817,7 @@ class LocalObservationStore:
         quarantine_reclaimed_count = (
             raw_quarantine_reclaimed_count if type(raw_quarantine_reclaimed_count) is int else 0
         )
+        frontier_motion_notices = _load_frontier_motion_notices(raw.get("frontier_motion_notices"))
         return _WorkspaceState(
             consent=consent,
             session_workspaces=session_workspaces,
@@ -2680,6 +2841,7 @@ class LocalObservationStore:
                 ).items()
                 if type(key) is str and type(value) is str
             },
+            frontier_motion_notices=frontier_motion_notices,
             open_pre=open_pre,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,

@@ -160,6 +160,14 @@ def _exit_status(payload: Mapping[str, JsonValue]) -> int | None:
     return None
 
 
+def _explicit_post_failure(payload: Mapping[str, JsonValue]) -> bool:
+    """True when a post-event is an explicit failure or denial, not status-unknown."""
+
+    if _exit_status(payload) not in {None, 0}:
+        return True
+    return payload.get("success") is False or payload.get("denied") is True
+
+
 def _action_kind(tool: str | None) -> ActionKind:
     if tool is None:
         return ActionKind.OTHER
@@ -284,8 +292,16 @@ def materialize_observation_envelope(
         return MaterializedObservationBatch((), coverage, channel, gaps, "lifecycle_only")
 
     drafts: list[MaterializedObservationDraft] = []
+    routine_read = structural.get("action") == "routine_read"
 
     if kind == "PreToolUse":
+        if routine_read:
+            # The full envelope remains in the observation store. Successful read-only calls are
+            # rate-limited at the task-ledger boundary rather than minting one pending action per
+            # file lookup; a failed PostToolUse still materializes below.
+            return MaterializedObservationBatch(
+                (), coverage, channel, gaps, "routine_read_deferred"
+            )
         if correlation is None:
             return MaterializedObservationBatch(
                 (), coverage, channel, gaps, "missing_tool_identity"
@@ -329,6 +345,10 @@ def materialize_observation_envelope(
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind == "PostToolUse":
+        if routine_read and not _explicit_post_failure(structural):
+            return MaterializedObservationBatch(
+                (), coverage, channel, gaps, "routine_read_coalesced"
+            )
         if unpaired or correlation is None:
             # Standalone structural observation: evidence only; do not invent the action.
             evidence = stable_observation_id(
