@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import Final, Literal, cast
@@ -79,6 +79,7 @@ from yoetz.protocol.coverage import (
     EvidenceImmutability,
     LedgerFreshness,
     PublicationChannel,
+    coverage_for_channel,
     coverage_from_json,
     coverage_to_json,
     weakest,
@@ -103,6 +104,7 @@ __all__ = [
     "PolicyPack",
     "UnavailableCapturedObject",
     "build_deterministic_case",
+    "case_coverage",
     "deterministic_case_from_json",
     "deterministic_case_to_json",
     "finding_basis_from_json",
@@ -1620,6 +1622,37 @@ def build_deterministic_case(
         history=history,
         history_availability="available",
         history_omitted_before_count=history_omitted_before_count,
+    )
+
+
+def case_coverage(case: DeterministicCase, *, semantic: bool = False) -> Coverage:
+    """Fold every frozen material dependency and explicit case gap conservatively."""
+
+    ordered = tuple(case.coverage_by_ref[key] for key in sorted(case.coverage_by_ref, key=str))
+    if ordered:
+        result = ordered[0]
+        for coverage in ordered[1:]:
+            result = weakest(result, coverage)
+    else:
+        result = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
+    gaps = set(result.known_gaps)
+    gaps.update(gap.code for gap in case.gaps)
+    channels = set(result.publication_channels)
+    channels.add(PublicationChannel.ENGINE_DERIVED)
+    checks = set(result.check_types)
+    checks.discard(CheckType.NONE)
+    checks.add(CheckType.DETERMINISTIC)
+    if semantic:
+        checks.add(CheckType.SEMANTIC_MODEL_DERIVED)
+    freshness = result.ledger_freshness
+    if gaps and freshness is LedgerFreshness.CURRENT:
+        freshness = LedgerFreshness.PARTIAL
+    return replace(
+        result,
+        publication_channels=tuple(sorted(channels, key=lambda value: value.value.encode("ascii"))),
+        ledger_freshness=freshness,
+        check_types=tuple(sorted(checks, key=lambda value: value.value.encode("ascii"))),
+        known_gaps=tuple(sorted(gaps, key=str.encode)),
     )
 
 

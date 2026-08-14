@@ -77,7 +77,7 @@ from yoetz.protocol.coverage import (
     PublicationChannel,
     coverage_for_channel,
 )
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
     FrontierModel,
@@ -958,6 +958,13 @@ async def test_receipt_folds_retained_observation_finding_coverage_after_recover
     )
     assert records
 
+    retained_gap_codes = tuple(
+        sorted(
+            {"cursor_stale", *(f"retained_capacity_{index:03d}" for index in range(62))},
+            key=str.encode,
+        )
+    )
+    assert len(retained_gap_codes) == 63
     retained_coverage = Coverage(
         publication_channels=(PublicationChannel.ENGINE_DERIVED,),
         authorship_assurance=AuthorshipAssurance.HARNESS_OBSERVED,
@@ -965,7 +972,7 @@ async def test_receipt_folds_retained_observation_finding_coverage_after_recover
         evidence_immutability=EvidenceImmutability.METADATA_ONLY,
         ledger_freshness=LedgerFreshness.PARTIAL,
         check_types=(CheckType.DETERMINISTIC,),
-        known_gaps=("cursor_stale",),
+        known_gaps=retained_gap_codes,
     )
     kind = FindingKind.LEDGER_STALE_OR_INCOMPLETE
     retained = Finding(
@@ -1059,12 +1066,47 @@ async def test_receipt_folds_retained_observation_finding_coverage_after_recover
     assert FINDING_KIND_TRAITS[kind][1] is False
     assert receipt.conclusion == "insufficient_coverage"
     assert receipt.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+    # The retained 63-code set plus semantic_review_not_requested exercises the exact public
+    # boundary through real receipt construction and JSON projection, not only admission math.
+    assert len(receipt.coverage.known_gaps) == 64
     assert "cursor_stale" in receipt.coverage.known_gaps
     document = cast(Mapping[str, JsonValue], receipt.document)
     findings = cast(tuple[Mapping[str, JsonValue], ...], document["findings"])
     assert any(item["finding_id"] == retained.finding_id for item in findings)
     gaps = cast(tuple[Mapping[str, JsonValue], ...], document["gaps"])
     assert sum(item["code"] == "cursor_stale" for item in gaps) == 1
+
+
+async def test_legacy_receipt_coverage_overflow_is_not_invalid_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An internal 65-code fold is capacity exhaustion, not caller-malformed input."""
+
+    app, _runtime, _ = _build_app(seed_offset=26)
+    started = await app.start(start_request(2600, title="Legacy receipt coverage overflow"))
+
+    def overflow(*_args: object, **_kwargs: object) -> object:
+        raise ProtocolValueError("invalid_known_gap")
+
+    monkeypatch.setattr("yoetz.application.receipt._context", overflow)
+    with pytest.raises(PublicOperationError) as caught:
+        await app.receipt(
+            ReceiptRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", 2601)),
+                    "task_id": started.task_id,
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(started.frontier),
+                    "format": "json",
+                    "include": "standard",
+                    "redaction_profile": "full_local",
+                }
+            )
+        )
+    assert caught.value.code is PublicErrorCode.LIMIT_EXCEEDED
+    assert caught.value.retryable is False
+    assert "capacity" in caught.value.message.lower()
 
 
 async def test_successful_check_contributes_to_receipt_at_resulting_head() -> None:

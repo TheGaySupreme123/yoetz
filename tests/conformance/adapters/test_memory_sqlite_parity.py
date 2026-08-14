@@ -23,16 +23,25 @@ from yoetz.domain.events import (
     ClaimRecordedPayload,
     EvidenceRecordedPayload,
     FindingRecordedPayload,
+    encode_payload,
 )
 from yoetz.domain.findings import CheckVerdict, Finding, RankedFindings
-from yoetz.domain.values import Actor, ActorType, Frontier, actor_id, finding_id
+from yoetz.domain.values import (
+    Actor,
+    ActorType,
+    Frontier,
+    actor_id,
+    finding_id,
+)
 from yoetz.kernel.deterministic_checks import (
     CaseAvailabilityFacts,
     UnavailableCapturedObject,
 )
 from yoetz.kernel.projections import ProjectionState
+from yoetz.kernel.receipt_capacity import receipt_gap_codes
 from yoetz.ports.ledger import (
     AppendCommand,
+    AppendEntry,
     CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
@@ -44,10 +53,13 @@ from yoetz.ports.ledger import (
     ProjectionView,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
+from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.coverage import (
     AuthorshipAssurance,
     PublicationChannel,
     coverage_for_channel,
+    coverage_from_json,
+    coverage_to_json,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
@@ -414,6 +426,156 @@ async def test_supported_failures_match_by_code_and_shape() -> None:
     assert reservation_failures[0].code is reservation_failures[1].code
     assert reservation_failures[0].code is PublicErrorCode.STORAGE_CORRUPT
     assert dict(reservation_failures[0].safe_details) == dict(reservation_failures[1].safe_details)
+
+
+async def _capacity_finding_entry(
+    command: AppendCommand,
+    objects: MemoryObjects,
+    *,
+    event_number: int,
+    finding_number: int,
+    subject_event: str,
+    known_gaps: tuple[str, ...],
+) -> AppendEntry:
+    entry = next(
+        item for item in command.entries if type(item.draft.payload) is FindingRecordedPayload
+    )
+    finding = cast(Finding, entry.draft.payload)
+    payload = replace(
+        finding,
+        finding_id=finding_id(uuid_id("fnd", finding_number)),
+        subject_refs=(subject_event,),
+        coverage=replace(finding.coverage, known_gaps=known_gaps),
+    )
+    payload_bytes = canonical_encode(encode_payload(payload))
+    staged = await objects.stage(
+        ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)),
+        entry.payload_object.metadata,
+    )
+    payload_ref = await objects.finalize(staged)
+    return replace(
+        entry,
+        draft=replace(
+            entry.draft,
+            event_id=uuid_id("evt", event_number),
+            causal_parents=(),
+            payload=payload,
+        ),
+        payload_object=payload_ref,
+        payload_commitment=payload_ref.commitment,
+        media_type=payload_ref.metadata.media_type,
+        plaintext_size=payload_ref.plaintext_size,
+    )
+
+
+@pytest.mark.anyio
+async def test_receipt_coverage_capacity_is_atomic_and_backend_identical() -> None:
+    """Exactly 64 is durable; a 65th distinct retained gap commits nothing."""
+
+    records = replay_records("all-event-families")
+    base_command, objects = command_from_records(records)
+    memory = memory_for(base_command, objects)
+    sqlite = sqlite_for(base_command, objects, apsw.Connection(":memory:"))
+
+    for ledger in (memory, sqlite):
+        base = await ledger.append_batch(base_command)
+        state = await ledger.load_projection(
+            base_command.session_id, ProjectionView.CANDIDATE_FINDINGS
+        )
+        assert state is not None and type(state.state) is ProjectionState
+        accepted = tuple([row async for row in ledger.load_events(base_command.session_id)])
+        baseline = receipt_gap_codes(state.state, accepted)
+        additions = tuple(f"capacity_{index:03d}" for index in range(64 - len(baseline)))
+        assert not set(additions) & set(baseline)
+
+        boundary_entry = await _capacity_finding_entry(
+            base_command,
+            objects,
+            event_number=90_001,
+            finding_number=90_002,
+            subject_event=records[0].event_id,
+            known_gaps=additions,
+        )
+        boundary_command = replace(
+            base_command,
+            operation_id=uuid_id("req", 90_003),
+            request_digest="sha256:" + "3" * 64,
+            expected_frontier=base.result_frontier.sequence,
+            entries=(boundary_entry,),
+        )
+        boundary = await ledger.append_batch(boundary_command)
+        boundary_state = await ledger.load_projection(
+            base_command.session_id, ProjectionView.CANDIDATE_FINDINGS
+        )
+        assert boundary_state is not None and type(boundary_state.state) is ProjectionState
+        boundary_records = tuple([row async for row in ledger.load_events(base_command.session_id)])
+        exact = receipt_gap_codes(boundary_state.state, boundary_records)
+        assert len(exact) == 64
+        assert exact == tuple(sorted(set(exact), key=str.encode))
+        boundary_coverage = replace(
+            cast(Finding, boundary_entry.draft.payload).coverage,
+            known_gaps=exact,
+        )
+        assert coverage_from_json(coverage_to_json(boundary_coverage)) == boundary_coverage
+
+        overflow_entry = await _capacity_finding_entry(
+            base_command,
+            objects,
+            event_number=90_004,
+            finding_number=90_005,
+            subject_event=records[1].event_id,
+            known_gaps=("overflow_gap",),
+        )
+        overflow_command = replace(
+            base_command,
+            operation_id=uuid_id("req", 90_006),
+            request_digest="sha256:" + "6" * 64,
+            expected_frontier=boundary.result_frontier.sequence,
+            entries=(overflow_entry,),
+        )
+        before_ids = tuple(row.event_id for row in boundary_records)
+        with pytest.raises(PublicOperationError) as caught:
+            await ledger.append_batch(overflow_command)
+        assert caught.value.code is PublicErrorCode.LIMIT_EXCEEDED
+        assert caught.value.retryable is False
+        assert dict(caught.value.safe_details) == {
+            "component": "receipt_coverage",
+            "count": 65,
+            "limit": 64,
+        }
+        assert (
+            await ledger.lookup_operation(overflow_command.writer_id, overflow_command.operation_id)
+            is None
+        )
+        after = tuple([row async for row in ledger.load_events(base_command.session_id)])
+        assert tuple(row.event_id for row in after) == before_ids
+        assert await ledger.load_frontier() == boundary.result_frontier
+
+        duplicate_entry = await _capacity_finding_entry(
+            base_command,
+            objects,
+            event_number=90_007,
+            finding_number=90_008,
+            subject_event=records[1].event_id,
+            known_gaps=(additions[0],),
+        )
+        duplicate_command = replace(
+            base_command,
+            operation_id=uuid_id("req", 90_009),
+            request_digest="sha256:" + "9" * 64,
+            expected_frontier=boundary.result_frontier.sequence,
+            entries=(duplicate_entry,),
+        )
+        duplicate = await ledger.append_batch(duplicate_command)
+        duplicate_state = await ledger.load_projection(
+            base_command.session_id, ProjectionView.CANDIDATE_FINDINGS
+        )
+        assert duplicate_state is not None and type(duplicate_state.state) is ProjectionState
+        duplicate_records = tuple(
+            [row async for row in ledger.load_events(base_command.session_id)]
+        )
+        assert receipt_gap_codes(duplicate_state.state, duplicate_records) == exact
+        assert duplicate.result_frontier.sequence == boundary.result_frontier.sequence + 1
 
 
 @pytest.mark.anyio

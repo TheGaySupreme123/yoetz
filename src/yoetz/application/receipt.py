@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol, cast
 
-from yoetz.application.check import case_coverage, semantic_coverage_gap_code
+from yoetz.application.check import semantic_coverage_gap_code
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import (
     CheckRecordedPayload,
@@ -17,7 +17,6 @@ from yoetz.domain.events import (
     encode_payload,
     media_type_for,
 )
-from yoetz.domain.findings import Finding, rank_key
 from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
     ReceiptDocument,
@@ -38,12 +37,13 @@ from yoetz.domain.values import (
     task_id,
     timestamp_from_datetime,
 )
-from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case
+from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case, case_coverage
 from yoetz.kernel.receipt_builder import (
     ReceiptBuildContext,
     ReceiptFindingState,
     build_receipt,
 )
+from yoetz.kernel.receipt_capacity import current_receipt_findings
 from yoetz.kernel.reducers import (
     invalidates_recorded_check,
     is_material_event_family,
@@ -269,33 +269,15 @@ async def _records_through(runtime: TaskRuntime, frontier: Frontier) -> tuple[Le
     return records
 
 
-def _issue_key(finding: Finding) -> tuple[object, ...]:
-    return (
-        finding.origin,
-        finding.policy_id,
-        finding.policy_version,
-        finding.kind,
-        finding.subject_refs,
-    )
-
-
 def _finding_states(projection: object) -> tuple[ReceiptFindingState, ...]:
     from yoetz.kernel.projections import ProjectionState
 
     assert type(projection) is ProjectionState
-    newest: dict[tuple[object, ...], tuple[int, Finding]] = {}
-    for record in projection.findings.values():
-        if record.payload is None:
-            continue
-        key = _issue_key(record.payload)
-        candidate = (record.source_frontier, record.payload)
-        prior = newest.get(key)
-        if prior is None or candidate[0] > prior[0]:
-            newest[key] = candidate
-    findings = tuple(sorted((item[1] for item in newest.values()), key=rank_key))
     # Resolution is proof-based. Conservatively unresolved is always safe; the shared projection
     # proof can only weaken a receipt if unavailable, never strengthen it from a disposition.
-    return tuple(ReceiptFindingState(item.finding_id, False) for item in findings)
+    return tuple(
+        ReceiptFindingState(item.finding_id, False) for item in current_receipt_findings(projection)
+    )
 
 
 def _context(
@@ -570,6 +552,13 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
                 request.include,
             )
         except ValueError as exc:
+            if isinstance(exc, ProtocolValueError) and exc.reason_code == "invalid_known_gap":
+                # A legacy task may predate append-time receipt-capacity admission. Its exact
+                # retained union is a representational limit, never a malformed receipt request.
+                raise _error(
+                    PublicErrorCode.LIMIT_EXCEEDED,
+                    "The receipt coverage capacity is exceeded.",
+                ) from exc
             # Remaining case/receipt construction failures are a storage or projection
             # inconsistency. Finding citations that name events outside the accepted prefix
             # are represented as missing_ref gaps inside build_deterministic_case and must

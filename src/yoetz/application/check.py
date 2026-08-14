@@ -47,6 +47,7 @@ from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     DeterministicCase,
     FindingBasisRef,
+    case_coverage,
     finding_basis_from_json,
     finding_basis_to_json,
 )
@@ -82,13 +83,8 @@ from yoetz.protocol.canonical import (
     strict_json_parse,
 )
 from yoetz.protocol.coverage import (
-    CheckType,
-    Coverage,
     LedgerFreshness,
-    PublicationChannel,
-    coverage_for_channel,
     coverage_to_json,
-    weakest,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
@@ -903,37 +899,6 @@ async def _publish_deterministic_result(
         result_ref,
     )
     return FrozenCase(frozen.case, lease)
-
-
-def case_coverage(case: DeterministicCase, *, semantic: bool = False) -> Coverage:
-    """Fold every frozen material dependency and explicit case gap conservatively."""
-
-    ordered = tuple(case.coverage_by_ref[key] for key in sorted(case.coverage_by_ref, key=str))
-    if ordered:
-        result = ordered[0]
-        for coverage in ordered[1:]:
-            result = weakest(result, coverage)
-    else:
-        result = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
-    gaps = set(result.known_gaps)
-    gaps.update(gap.code for gap in case.gaps)
-    channels = set(result.publication_channels)
-    channels.add(PublicationChannel.ENGINE_DERIVED)
-    checks = set(result.check_types)
-    checks.discard(CheckType.NONE)
-    checks.add(CheckType.DETERMINISTIC)
-    if semantic:
-        checks.add(CheckType.SEMANTIC_MODEL_DERIVED)
-    freshness = result.ledger_freshness
-    if gaps and freshness is LedgerFreshness.CURRENT:
-        freshness = LedgerFreshness.PARTIAL
-    return replace(
-        result,
-        publication_channels=tuple(sorted(channels, key=lambda value: value.value.encode("ascii"))),
-        ledger_freshness=freshness,
-        check_types=tuple(sorted(checks, key=lambda value: value.value.encode("ascii"))),
-        known_gaps=tuple(sorted(gaps, key=str.encode)),
-    )
 
 
 def _policy_identity(kind: FindingKind) -> tuple[str, str]:
