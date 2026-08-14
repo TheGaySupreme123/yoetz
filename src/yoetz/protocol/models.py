@@ -2533,6 +2533,21 @@ class StatusHistoryItemModel(_ClosedModel):
     occurred_at: TimestampWire
     # Trusted-local service acceptance time bound into the entry digest.
     accepted_at: TimestampWire
+    # Exact comparison of the two recorded clocks; this does not verify caller time.
+    occurred_at_consistency: Annotated[
+        Literal[
+            "within_forward_skew_allowance",
+            "ahead_of_forward_skew_allowance",
+        ],
+        Field(
+            description=(
+                "Exact comparison of caller-asserted occurred_at with service accepted_at. "
+                "Caller time through five seconds ahead is within_forward_skew_allowance; "
+                "larger forward drift is ahead_of_forward_skew_allowance. This does not verify "
+                "caller time or affect ingestion-sequence ordering."
+            )
+        ),
+    ]
     projection_status: Literal["projected", "unknown_unprojected"]
     summary_code: Literal[
         "action_recorded",
@@ -3574,6 +3589,7 @@ _STATUS_HISTORY_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_le
         "event_id",
         "ingestion_sequence",
         "occurred_at",
+        "occurred_at_consistency",
         "projection_status",
         "publication_channel",
         "schema_name",
@@ -3917,7 +3933,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 776:
+    if len(result) != 777:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

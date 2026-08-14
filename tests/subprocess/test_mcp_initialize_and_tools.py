@@ -117,7 +117,9 @@ async def test_static_inventory_is_exact_and_verified() -> None:
     assert [str(resource.uri) for resource in resources] == [
         item.uri for item in GUIDANCE_RESOURCES
     ]
-    agent = read_guidance_resource("yoetz://guidance/agent-instructions.md").decode("utf-8").rstrip()
+    agent = (
+        read_guidance_resource("yoetz://guidance/agent-instructions.md").decode("utf-8").rstrip()
+    )
     workflow = read_guidance_resource("yoetz://guidance/workflow.md").decode("utf-8").rstrip()
     coverage = (
         read_guidance_resource("yoetz://guidance/coverage-and-receipts.md").decode("utf-8").rstrip()

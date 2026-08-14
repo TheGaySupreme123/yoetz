@@ -751,6 +751,9 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         compact = cast(dict[str, JsonValue], definitions["compact_item"])
         compact_properties = cast(dict[str, JsonValue], compact["properties"])
         compact_required = cast(list[JsonValue], compact["required"])
+        history = cast(dict[str, JsonValue], definitions["history_item"])
+        history_properties = cast(dict[str, JsonValue], history["properties"])
+        history_required = cast(list[JsonValue], history["required"])
         readiness = cast(dict[str, JsonValue], definitions["closure_readiness"])
         readiness_properties = cast(dict[str, JsonValue], readiness["properties"])
         readiness_required = cast(list[JsonValue], readiness["required"])
@@ -770,6 +773,22 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         ],
         "type": "string",
     }
+    history_properties["occurred_at_consistency"] = {
+        "description": (
+            "Exact comparison of caller-asserted occurred_at with service accepted_at. Caller "
+            "time through five seconds ahead is within_forward_skew_allowance; larger forward "
+            "drift is ahead_of_forward_skew_allowance. This does not verify caller time or "
+            "affect ingestion-sequence ordering."
+        ),
+        "enum": [
+            "within_forward_skew_allowance",
+            "ahead_of_forward_skew_allowance",
+        ],
+        "type": "string",
+    }
+    if "occurred_at_consistency" not in history_required:
+        accepted_at_index = history_required.index("accepted_at")
+        history_required.insert(accepted_at_index + 1, "occurred_at_consistency")
     nullable_count: dict[str, JsonValue] = {
         "oneOf": [
             {"$ref": "#/$defs/canonical_uint"},

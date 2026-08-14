@@ -48,7 +48,7 @@ def test_step_zero_stops_on_an_empty_guidance_read() -> None:
 
     text = _skill_text()
     collapsed = " ".join(text.split())
-    assert "resolve without any repository checkout" not in text
+    assert "resolve without any repository checkout" not in collapsed
     assert "If a `resources/read` result has no text, do not proceed" in collapsed
     assert "do not treat the read as success" in collapsed
     assert "`references/<name>.md`" in collapsed

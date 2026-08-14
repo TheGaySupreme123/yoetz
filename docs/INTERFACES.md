@@ -880,11 +880,16 @@ deciding between the two, shared by the receipt and by compact status coverage.
   `availability` is the current `CaseAvailabilityFacts`, `coverage` is the weakest material fold,
   `gaps` is the exact sorted typed `CaseGap` tuple after check/semantic/availability accounting, and
   `applicable_check` is the exact readable `CheckRecordedPayload` that still applies to this
-  material state or `None`. A check applies when no event appended after the check's own record
-  supersedes it under `kernel/reducers.invalidates_recorded_check`: the check's atomic result
-  events — the `finding_recorded` records it returned and its `check_recorded` — land with it and
-  never revoke it (a deterministic candidate that re-derives a live recorded finding with the same
-  kind, policy, and subject refs keeps that finding's ID and is cited in `returned_finding_ids`
+  material state or `None`. The application folds coverage from the frozen current case, the
+  applicable check, and every retained current finding row. When a historical finding contributes
+  a gap absent from the recovered current case/check, that code remains in top-level coverage and
+  is represented once by the task-global internal marker `retained_finding_coverage:<code>`; the
+  finding's own coverage remains unchanged. A check applies when no event appended after the
+  check's own record supersedes it under `kernel/reducers.invalidates_recorded_check`: the atomic
+  check-result events — the `finding_recorded` records it returned and its `check_recorded` — land
+  with it and never revoke it (a deterministic candidate that re-derives a live recorded finding
+  with the same kind, policy, and subject refs keeps that finding's ID and is cited in
+  `returned_finding_ids`
   without a duplicate `finding_recorded` event); an immaterial advance — `receipt_recorded`, `session_opened`,
   `session_resumed` — never revokes it; and a readable `response_recorded` answering a finding the
   check itself returned never revokes it, though the context then carries the
@@ -1125,8 +1130,11 @@ or `none`, and recorded waiver expiry is never evaluated against wall clock for 
 filtering, or resolution. Evidence strength is exact, availability concerns only declared captured
 content (never a path/URL probe), and freshness is the weaker source-envelope/projection freshness
 capped at `redacted_gap` for unavailable captured content. History is accepted-envelope metadata
-including caller-asserted `occurred_at` and digest-bound service `accepted_at` (ordering remains
-ingestion sequence; caller time is never a sort or filter key);
+including caller-asserted `occurred_at`, digest-bound service `accepted_at`, and the exact
+`occurred_at_consistency` comparison. The comparison is `within_forward_skew_allowance` through
+five seconds ahead of acceptance and `ahead_of_forward_skew_allowance` beyond it; it verifies no
+outside clock. Ordering remains ingestion sequence and caller time is never a sort or filter key.
+New check cases carry both clocks and this classification in their bounded frozen timelines;
 versions is one verified runtime manifest; compact uses exact structural counters and bounded
 summaries.
 
