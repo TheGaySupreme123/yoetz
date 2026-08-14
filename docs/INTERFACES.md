@@ -2303,9 +2303,13 @@ Shared closed types:
   session snapshot when one exists, otherwise from the current Codex session's retained envelopes.
   The workspace-wide snapshot is not a fallback for task-scoped work. Deliberately workspace-
   standing machine conditions remain deliverable from that workspace snapshot at the documented
-  session-boundary cadence. The agent-visible context carries only the bounded rule, action, and
-  evidence token; deciding whether the advice belongs to the current target never requires
-  inspecting Yoetz storage.
+  session-boundary cadence (`SessionStart` and `Stop`). The agent-visible context carries only
+  the bounded rule, action, and evidence token; deciding whether the advice belongs to the
+  current target never requires inspecting Yoetz storage. Hook stdout is event-specific:
+  `SessionStart` / `PostToolUse` / `UserPromptSubmit` emit `hookSpecificOutput.additionalContext`;
+  `Stop` emits `decision: block` plus `reason` (Codex has no Stop `hookSpecificOutput`, and
+  `stop_hook_active` plus delivery identity are the loop guard); `SessionEnd` always emits `{}`
+  because the host discards its stdout and a peek/commit there would consume undelivered advice.
 
 Independent verification support (local control, not MCP):
 
@@ -2337,8 +2341,9 @@ Independent verification support (local control, not MCP):
   discovers pending work at startup, drains one serialized check per workspace through the
   enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest
   never executes approved checks inside the hook RPC budget. Pure-ingress hook handlers declare
-  `"async": true` and never block a host tool call; handlers that return advice context stay
-  synchronous with a declared 10-second budget, and `SessionEnd` keeps the host-clamped 3 seconds.
+  `"async": true` and never block a host tool call; handlers that return `additionalContext` or a
+  Stop `decision: block` stay synchronous with a declared 10-second budget, and `SessionEnd`
+  keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
 
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
 The normalized locator is authenticated encrypted content; plaintext keeps only commitment and

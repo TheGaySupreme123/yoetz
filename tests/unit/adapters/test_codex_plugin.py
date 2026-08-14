@@ -199,8 +199,10 @@ def test_observe_hook_execution_modes_never_block_tool_calls() -> None:
     call and had both hooks SIGKILLed at the deadline. The contract is now:
     handlers that always emit ``{}`` declare ``"async": true`` (Codex ignores
     the field on hosts that predate it), handlers that return
-    ``additionalContext`` stay synchronous at 10s, and SessionEnd stays inside
-    the host's hard 3s clamp so it never draws a per-session warning.
+    ``additionalContext`` or a Stop ``decision: block`` stay synchronous at 10s,
+    and SessionEnd stays inside the host's hard 3s clamp so it never draws a
+    per-session warning. SessionEnd is not advice-safe (#222): the host
+    discards its stdout.
     """
 
     from yoetz.cli.observe_hooks import ADVICE_SAFE_EVENTS, SUPPORTED_HOOK_EVENTS
@@ -217,22 +219,25 @@ def test_observe_hook_execution_modes_never_block_tool_calls() -> None:
         "SubagentStop",
     )
     # The async split's real invariant: async iff the handler never returns
-    # additionalContext, i.e. iff the event is outside ADVICE_SAFE_EVENTS and
-    # outside the cue-only UserPromptSubmit. If someone adds an event to
-    # ADVICE_SAFE_EVENTS while it is still declared async here, Codex would
-    # silently defer its advice to the next turn boundary.
-    assert set(pure_ingress) == SUPPORTED_HOOK_EVENTS - ADVICE_SAFE_EVENTS - {"UserPromptSubmit"}
+    # host-consumed advice or a Stop decision. SessionEnd is sync only because
+    # Codex downgrades async SessionEnd; it is not advice-safe. If someone adds
+    # an event to ADVICE_SAFE_EVENTS while it is still declared async here,
+    # Codex would silently drop its advice or decision.
+    assert set(pure_ingress) == (
+        SUPPORTED_HOOK_EVENTS - ADVICE_SAFE_EVENTS - {"UserPromptSubmit", "SessionEnd"}
+    )
     for event in pure_ingress:
         handler = _observe_handler(parsed, event)
         assert handler.get("async") is True, f"{event} observe must not block the session"
         assert handler["timeout"] == 10, f"{event} needs an explicit modest timeout"
     for event in ("SessionStart", "PostToolUse", "Stop"):
         handler = _observe_handler(parsed, event)
-        assert "async" not in handler, f"{event} returns additionalContext; async drops it"
+        assert "async" not in handler, f"{event} returns advice or a Stop decision; async drops it"
         assert handler["timeout"] == 10, f"{event} declared timeout must be meetable"
     session_end = _observe_handler(parsed, "SessionEnd")
     assert "async" not in session_end, "Codex downgrades async SessionEnd with a warning"
     assert session_end["timeout"] == 3, "Codex hard-clamps SessionEnd timeouts above 3s"
+    assert "SessionEnd" not in ADVICE_SAFE_EVENTS
 
 
 def test_install_refuses_when_tested_set_empty(tmp_path: Path) -> None:
