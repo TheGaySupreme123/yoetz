@@ -997,6 +997,40 @@ async def _try_auto_start(
                 await client.close()
 
 
+def _note_dropped_event_gap(
+    store: LocalObservationStore,
+    payload: Mapping[str, JsonValue],
+    workspace: str | None,
+) -> None:
+    """Record a coverage gap for an event dropped before the local pass ran.
+
+    Mirrors the binding order of the main pass: the explicit workspace
+    argument first, then the Codex-session→workspace map. A silently missing
+    event is the one outcome this subsystem must not produce, so any drop
+    must be visible to ``observe status`` and coverage wording.
+    """
+
+    commitment: str | None = None
+    if workspace is not None:
+        try:
+            locator = str(Path(workspace).expanduser().resolve(strict=False))
+            candidate = store.workspace_commitment(locator)
+            consent = store.consent_for(candidate)
+            if consent is not None and consent.active:
+                commitment = candidate
+        except Exception:
+            commitment = None
+    if commitment is None:
+        codex_session_id = validate_codex_session_id(payload.get("session_id"))
+        commitment = store.find_workspace_for_codex_session(codex_session_id)
+    if commitment is None:
+        return
+    consent = store.consent_for(commitment)
+    if consent is None or not consent.active:
+        return
+    store.note_coverage_gap(commitment, ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
+
+
 def handle_observe(
     *,
     event_name: str,
@@ -1014,7 +1048,9 @@ def handle_observe(
 
     ``skip_service`` keeps the hook fully local: capture, binding, and outbox
     enqueue still run, but no service connection is ever opened (auto-attach,
-    mapped-session status, and outbox drains are all skipped).
+    mapped-session status, and outbox drains are all skipped). Advisory output
+    that needs no service still runs — an unattached SessionStart binding emits
+    the static "call start to attach a task" context either way (issue #280).
 
     ``_entry_monotonic`` is the console shim's pre-import sample; without it the
     recorded import stage reads zero rather than guessing.
@@ -1057,8 +1093,18 @@ def handle_observe(
         resolved_event = raw_event
         try:
             capture_enabled = store.runtime_enabled()
+        except TimeoutError:
+            # Store-lock contention says nothing about the gate itself.
+            # Fall back to the missing-marker default (enabled) instead of
+            # discarding the event; consent still gates every ingest below.
+            _stderr_line("hook_observe_degraded: runtime_gate_contended")
+            record_hook_diagnostic("runtime_gate_contended", resolved_event, _state=_state)
+            capture_enabled = True
         except Exception:
+            _stderr_line("hook_observe_degraded: runtime_gate_unsafe")
             record_hook_diagnostic("runtime_gate_unsafe", resolved_event, _state=_state)
+            with contextlib.suppress(Exception):
+                _note_dropped_event_gap(store, payload, workspace)
             _stdout_json({}, stdout)
             return 0
         if not capture_enabled:
@@ -1123,9 +1169,12 @@ def handle_observe(
             )
             gap_codes: list[str] = []
 
-            # Pair pre/post via correlation_id when present.
-            correlation = _token_or_none(payload.get("correlation_id")) or _token_or_none(
-                payload.get("tool_call_id")
+            # Prefer the host's canonical tool-use identity, while retaining
+            # compatibility with earlier tool-call and correlation aliases.
+            correlation = (
+                _token_or_none(payload.get("tool_use_id"))
+                or _token_or_none(payload.get("tool_call_id"))
+                or _token_or_none(payload.get("correlation_id"))
             )
             if correlation is not None and _is_pre_event(resolved_event):
                 store.note_open_pre(workspace_commitment, correlation, resolved_event)
@@ -1238,6 +1287,7 @@ def handle_observe(
         # skip_service so local-only callers (e.g. the setup readiness probe)
         # never create or attach real ledger tasks.
         additional = ""
+        attach_advisory_only = False
         mapping: LifecycleMapping | None = load_mapping(codex_session_id, _state=_state)
         drain_started = _monotonic()
         if resolved_event == "SessionStart":
@@ -1253,18 +1303,22 @@ def handle_observe(
                 with acquire_session_lock(codex_session_id, _state=_state) as owned:
                     if owned:
                         mapping = load_mapping(codex_session_id, _state=_state)
-                        if mapping is None and not skip_advice_loop and not skip_service:
+                        if mapping is None and not skip_advice_loop:
+                            if not skip_service:
 
-                            async def _attach() -> LifecycleMapping | None:
-                                return await _try_auto_start(codex_session_id, _state=_state)
+                                async def _attach() -> LifecycleMapping | None:
+                                    return await _try_auto_start(codex_session_id, _state=_state)
 
-                            mapping = cast(LifecycleMapping | None, _resolve_runner()(_attach))
+                                mapping = cast(LifecycleMapping | None, _resolve_runner()(_attach))
                             if mapping is None:
+                                # Static advisory for the unattached binding: it needs no
+                                # service, so local-only mode still emits it (issue #280).
                                 additional = (
                                     "Yoetz observation is consented for this workspace; "
                                     "no ledger task is mapped yet (observation-derived binding "
                                     "only). Call start to attach a task."
                                 )
+                                attach_advisory_only = True
                             else:
                                 additional = _active_context(mapping, mapping.last_frontier)
                         elif mapping is not None and not skip_service:
@@ -1396,8 +1450,12 @@ def handle_observe(
         # continued this turn. Blocking again would loop; leave advice for a
         # later turn or SessionStart instead of consuming it here.
         stop_already_active = payload.get("stop_hook_active") is True
+        # Task/receipt context always wins this shared channel outright, with one exception:
+        # the static attach advisory carries no advice of its own, so pending advice joins it
+        # (the delivery text is appended below) instead of being silently starved at the very
+        # SessionStart that bootstraps an unmapped session (issues #241, #280).
         delivery_eligible = (
-            not additional
+            (not additional or attach_advisory_only)
             and resolved_event in ADVICE_SAFE_EVENTS
             and not skip_advice_loop
             and not stop_already_active

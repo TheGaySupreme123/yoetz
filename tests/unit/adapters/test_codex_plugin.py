@@ -11,6 +11,7 @@ import pytest
 from yoetz.adapters.integrations import codex_plugin as plugin_mod
 from yoetz.adapters.integrations.codex_plugin import (
     PluginHookPresence,
+    codex_supports_async_hooks,
     inspect_plugin,
     install_plugin,
     parse_hooks_json,
@@ -192,13 +193,13 @@ def _observe_handler(parsed: Mapping[str, object], event: str) -> dict[str, obje
     raise AssertionError(f"no observe handler declared for {event}")
 
 
-def test_observe_hook_execution_modes_never_block_tool_calls() -> None:
-    """#209: pure-ingress handlers are async; advice handlers get a meetable timeout.
+def test_observe_hook_execution_modes_use_async_only_on_capable_hosts() -> None:
+    """#209/#271: capable hosts use async; advice handlers remain synchronous.
 
     Sync PreToolUse/PostToolUse at an unmeetable 3s added ~6s to every tool
     call and had both hooks SIGKILLed at the deadline. The contract is now:
-    handlers that always emit ``{}`` declare ``"async": true`` (Codex ignores
-    the field on hosts that predate it), handlers that return
+    handlers that always emit ``{}`` declare ``"async": true`` only when the
+    exact host can register it, handlers that return
     ``additionalContext`` or a Stop ``decision: block`` stay synchronous at 10s,
     and SessionEnd stays inside the host's hard 3s clamp so it never draws a
     per-session warning. SessionEnd is not advice-safe (#222): the host
@@ -208,7 +209,11 @@ def test_observe_hook_execution_modes_never_block_tool_calls() -> None:
     from yoetz.cli.observe_hooks import ADVICE_SAFE_EVENTS, SUPPORTED_HOOK_EVENTS
 
     parsed = dict(
-        parse_hooks_json(render_plugin_tree(resource_source=_resources())["hooks/hooks.json"])
+        parse_hooks_json(
+            render_plugin_tree(resource_source=_resources(), codex_version="0.148.0-alpha.6")[
+                "hooks/hooks.json"
+            ]
+        )
     )
     pure_ingress = (
         "PreToolUse",
@@ -238,6 +243,52 @@ def test_observe_hook_execution_modes_never_block_tool_calls() -> None:
     assert "async" not in session_end, "Codex downgrades async SessionEnd with a warning"
     assert session_end["timeout"] == 3, "Codex hard-clamps SessionEnd timeouts above 3s"
     assert "SessionEnd" not in ADVICE_SAFE_EVENTS
+
+
+@pytest.mark.parametrize(
+    ("version", "supported"),
+    [
+        (None, False),
+        ("", False),
+        ("0.147.0", False),
+        ("0.148.0-alpha.5", False),
+        ("0.148.0-alpha.6", True),
+        ("0.148.0a6", True),
+        ("0.148.0-alpha.19", True),
+        ("0.148.0-beta.1", True),
+        ("0.148.0", True),
+        ("1.0.0", True),
+        ("0.148", False),
+        ("0.148.0/not-a-version", False),
+        ("9" * 129, False),
+    ],
+)
+def test_async_hook_capability_fails_closed(version: str | None, supported: bool) -> None:
+    assert codex_supports_async_hooks(version) is supported
+
+
+@pytest.mark.parametrize("version", [None, "0.146.0", "0.147.0", "not-a-version"])
+def test_unsupported_or_unknown_hosts_keep_all_ingress_handlers_synchronous(
+    version: str | None,
+) -> None:
+    parsed = dict(
+        parse_hooks_json(
+            render_plugin_tree(resource_source=_resources(), codex_version=version)[
+                "hooks/hooks.json"
+            ]
+        )
+    )
+    for event in (
+        "PreToolUse",
+        "PermissionRequest",
+        "PreCompact",
+        "PostCompact",
+        "SubagentStart",
+        "SubagentStop",
+    ):
+        handler = _observe_handler(parsed, event)
+        assert "async" not in handler
+        assert handler["timeout"] == 10
 
 
 def test_install_refuses_when_tested_set_empty(tmp_path: Path) -> None:

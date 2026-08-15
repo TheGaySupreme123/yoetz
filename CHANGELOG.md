@@ -11,6 +11,18 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- MCP success summaries now preserve the canonical frontier head digest and, for generic
+  operations such as `start`, returned task/session/writer identifiers after strict shape
+  validation. The bounded text fallback can therefore seed the next request even when a host drops
+  `structuredContent` (issue #279).
+
+- Local-only SessionStart observation now emits the static attach advisory without opening a
+  service connection, and pending standing advice shares that bootstrap context instead of being
+  starved (issue #280).
+
+- Observation sweeps that raise now retain the exception's bounded reason and origin in owner-only
+  diagnostics; only the actual sweep deadline emits `sweep_deadline_exceeded` (issue #278).
+
 - `publish_work` rejections for a payload field placed on the wrong event family now name the
   field's one legal owning family (issue #266). When an `extra_forbidden` key byte-equals a frozen
   catalogued payload property with exactly one owner among the ordinary publish families — the
@@ -556,6 +568,16 @@ carried them; they are listed because each one describes the behavior that now s
   session where every check returned `blocked_by_policy` / `route_semantic_ceiling` with nothing
   connecting the two. `yoetz privacy setup` now names the mismatch and the command that fixes it,
   and the terminal interface reports the agent-route verdict as its own readiness line.
+- Ordinary store-lock contention discarded hook events as `runtime_gate_unsafe`: the runtime-gate
+  read serialized on the interprocess store lock, whose two-second acquisition timeout is routinely
+  exceeded by a concurrent hook's batched local pass, and the guard treated the resulting
+  `TimeoutError` as an unsafe gate — dropping the event before capture with no stderr line and no
+  workspace gap, on a workspace every health surface reported as covered. The gate is now read
+  lock-free through a single descriptor (it is an owner-only marker replaced only atomically), a
+  contended read is reported as `runtime_gate_contended` and falls back to the missing-marker
+  default instead of discarding the event, and a genuinely unsafe gate still fails closed but says
+  so on stderr and records an `observation_storage_corrupt` coverage gap for the bound workspace so
+  `observe status` can see the drop (issue #273).
 
 ### Security
 

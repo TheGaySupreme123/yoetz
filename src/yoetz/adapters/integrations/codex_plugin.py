@@ -11,6 +11,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Final, cast
 
+from packaging.version import InvalidVersion, Version
+
 from yoetz import __version__
 from yoetz.adapters.integrations.codex_skill import (
     SkillResourceSource,
@@ -39,6 +41,7 @@ __all__ = [
     "PLUGIN_ROOT",
     "PluginHookPresence",
     "PluginInspection",
+    "codex_supports_async_hooks",
     "inspect_plugin",
     "install_plugin",
     "render_plugin_install_tree",
@@ -51,6 +54,10 @@ _MARKER_SCHEMA: Final = "yoetz.codex-plugin-install/1"
 _PLUGIN_ROOT: Final = ".agents/plugins/yoetz"
 PLUGIN_ROOT: Final = _PLUGIN_ROOT
 _SOURCE_FILE_LIMIT: Final = 262_144
+# openai/codex#37533 first shipped in this prerelease. Unknown or malformed
+# versions deliberately stay on the slower synchronous path: dropping an
+# observation handler is worse than adding bounded hook latency.
+_ASYNC_HOOKS_MIN_VERSION: Final = Version("0.148.0-alpha.6")
 
 
 class PluginHookPresence(str, Enum):  # noqa: UP042 - exact structural enum
@@ -97,7 +104,26 @@ def _sha(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
-def _hooks_json() -> bytes:
+def codex_supports_async_hooks(codex_version: str | None) -> bool:
+    """Return whether one exact Codex version can register async command hooks.
+
+    This is a narrow host-capability check, not the exact-version evidence table
+    used by JSONL import. It fails closed because unsupported hosts discard, rather
+    than synchronously downgrade, most handlers carrying ``"async": true``.
+    """
+
+    if type(codex_version) is not str or len(codex_version) > 128:
+        return False
+    try:
+        parsed = Version(codex_version)
+        return len(parsed.release) == 3 and parsed >= _ASYNC_HOOKS_MIN_VERSION
+    except InvalidVersion:
+        return False
+
+
+def _hooks_json(*, codex_version: str | None = None) -> bytes:
+    async_hooks = codex_supports_async_hooks(codex_version)
+
     def _command(
         event: str, *, command: str, timeout: int, status: str, run_async: bool = False
     ) -> dict[str, JsonValue]:
@@ -107,17 +133,16 @@ def _hooks_json() -> bytes:
             "timeout": timeout,
             "statusMessage": status,
         }
-        if run_async:
-            # Codex ignores unknown handler fields, so older hosts that predate
-            # "async" parse this unchanged and simply run the handler sync.
+        if run_async and async_hooks:
             handler["async"] = True
         return {"hooks": [handler]}
 
     # Project-scoped observe binds cwd ('.') via local resolve + consent commitment.
     #
-    # Execution-mode split (#209): handlers that only ingest and always emit {}
-    # run "async": true so they never sit in a tool call's critical path — an
-    # async Codex hook cannot apply control effects, which these never need.
+    # Execution-mode split (#209, #271): handlers that only ingest and always emit
+    # {} use async only when the exact probed host can register async command
+    # hooks. Older stable hosts discard such handlers instead of downgrading them,
+    # so unknown and unsupported versions keep the bounded synchronous form.
     # Handlers that return additionalContext (SessionStart advice/attach,
     # PostToolUse advice) or a Stop ``decision: block`` stay synchronous with a
     # timeout the handler can actually meet; Codex's own default would be 600s,
@@ -285,13 +310,17 @@ def _mcp_json() -> bytes:
     return canonical_encode(body) + b"\n"
 
 
-def render_plugin_tree(*, resource_source: SkillResourceSource | None = None) -> dict[str, bytes]:
+def render_plugin_tree(
+    *,
+    resource_source: SkillResourceSource | None = None,
+    codex_version: str | None = None,
+) -> dict[str, bytes]:
     """Render the plugin file tree as an in-memory path → bytes mapping."""
 
     skill_members = load_packaged_skill_members(resource_source)
     members: dict[str, bytes] = {
         ".codex-plugin/plugin.json": _plugin_json(),
-        "hooks/hooks.json": _hooks_json(),
+        "hooks/hooks.json": _hooks_json(codex_version=codex_version),
         ".mcp.json": _mcp_json(),
     }
     for relative_path, data in skill_members.items():
@@ -300,11 +329,16 @@ def render_plugin_tree(*, resource_source: SkillResourceSource | None = None) ->
 
 
 def render_plugin_install_tree(
-    *, resource_source: SkillResourceSource | None = None
+    *,
+    resource_source: SkillResourceSource | None = None,
+    codex_version: str | None = None,
 ) -> dict[str, bytes]:
     """Render the complete installed tree, including the deterministic ownership marker."""
 
-    members = render_plugin_tree(resource_source=resource_source)
+    members = render_plugin_tree(
+        resource_source=resource_source,
+        codex_version=codex_version,
+    )
     return {**members, _MARKER_NAME: _build_marker(members)}
 
 
@@ -405,6 +439,7 @@ def install_plugin(
     replace_modified: bool = False,
     resource_source: SkillResourceSource | None = None,
     allow_untested: bool = False,
+    codex_version: str | None = None,
 ) -> PluginInspection:
     """Install the rendered plugin tree under the trusted-project plugin root.
 
@@ -420,7 +455,10 @@ def install_plugin(
     root = _validated_project(target)
     parent = _validated_plugin_parent(root, create=True)
     destination = parent / "yoetz"
-    members = render_plugin_tree(resource_source=resource_source)
+    members = render_plugin_tree(
+        resource_source=resource_source,
+        codex_version=codex_version,
+    )
     marker = _build_marker(members)
     if destination.exists():
         if destination.is_symlink() or not destination.is_dir():
@@ -472,13 +510,18 @@ def install_plugin(
     finally:
         if stage.exists():
             shutil.rmtree(stage, ignore_errors=True)
-    return inspect_plugin(target, resource_source=resource_source)
+    return inspect_plugin(
+        target,
+        resource_source=resource_source,
+        codex_version=codex_version,
+    )
 
 
 def inspect_plugin(
     target: IntegrationTarget,
     *,
     resource_source: SkillResourceSource | None = None,
+    codex_version: str | None = None,
 ) -> PluginInspection:
     """Classify plugin/hook presence without inferring Codex trust from files."""
 
@@ -511,7 +554,10 @@ def inspect_plugin(
             None,
             (trust_note, "destination_unsafe"),
         )
-    members = render_plugin_tree(resource_source=resource_source)
+    members = render_plugin_tree(
+        resource_source=resource_source,
+        codex_version=codex_version,
+    )
     expected_marker = _build_marker(members)
     marker_path = destination / _MARKER_NAME
     marker_valid = marker_path.is_file() and marker_path.read_bytes() == expected_marker

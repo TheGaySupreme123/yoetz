@@ -1549,21 +1549,30 @@ class ServiceDaemon:
 
         try:
             return await asyncio.wait_for(guarded(), timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS)
-        except TimeoutError:
+        except TimeoutError as exc:
             # ``asyncio.TimeoutError`` is the builtin ``TimeoutError``, so any socket or OS
             # timeout raised inside the sweep lands here too and must not be reported as the
             # deadline. The flag above is the discriminator.
-            reason = "sweep_failed" if raised_inside else "sweep_deadline_exceeded"
-            record_bounded_event_without_raising(
+            if raised_inside:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="service.daemon",
+                    operation="observation_sweep_failed",
+                )
+            else:
+                record_bounded_event_without_raising(
+                    component="service.daemon",
+                    operation="observation_sweep_failed",
+                    reason="sweep_deadline_exceeded",
+                )
+        except Exception as exc:
+            # The sweep raised on its own: keep the exception's bounded identity (reason and
+            # origin) rather than collapsing every distinct fault into one ``sweep_failed``
+            # token (issue #278).
+            record_unexpected_exception_without_raising(
+                exc,
                 component="service.daemon",
                 operation="observation_sweep_failed",
-                reason=reason,
-            )
-        except Exception:
-            record_bounded_event_without_raising(
-                component="service.daemon",
-                operation="observation_sweep_failed",
-                reason="sweep_failed",
             )
         return None
 
