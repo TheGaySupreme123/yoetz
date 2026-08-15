@@ -251,6 +251,69 @@ def test_provider_not_ready() -> None:
     assert "provider_not_ready" in rules
 
 
+def test_registry_lag_alone_does_not_emit_provider_not_ready() -> None:
+    """A structurally usable provider absent from the lazy registry is not "not ready" (#265).
+
+    Registry activation is repository-scoped and re-established automatically at
+    dispatch, so a configured provider missing from the connected set proves
+    nothing the operator can act on with connect_provider.
+    """
+
+    rules = _rules(
+        ObservationAdviceContext(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            composition=ObservationCompositionFact(
+                semantic_configured=True,
+                semantic_ready=True,
+                provider_factory_ids=("fireworks",),
+                connected_provider_ids=(),
+            ),
+        )
+    )
+    assert "provider_not_ready" not in rules
+
+
+def test_provider_not_ready_requires_semantic_to_be_configured() -> None:
+    """With semantic disabled, connect_provider advice has no action to recommend (#265)."""
+
+    rules = _rules(
+        ObservationAdviceContext(
+            envelopes=(),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            composition=ObservationCompositionFact(
+                semantic_configured=False,
+                semantic_ready=False,
+                provider_factory_ids=("fireworks",),
+                connected_provider_ids=(),
+            ),
+        )
+    )
+    assert "provider_not_ready" not in rules
+
+
+def test_provider_not_ready_names_the_unusable_configured_provider() -> None:
+    """The structural condition keeps naming the configured provider as evidence."""
+
+    context = ObservationAdviceContext(
+        envelopes=(),
+        lifecycle=ObservationLifecycle.ACTIVE,
+        gaps=(),
+        composition=ObservationCompositionFact(
+            semantic_configured=True,
+            semantic_ready=False,
+            provider_factory_ids=("fireworks",),
+            connected_provider_ids=(),
+        ),
+    )
+    candidates = observation_advice_findings(context)
+    item = next(item for item in candidates if item.rule_code == "provider_not_ready")
+    assert item.evidence_refs == ("fireworks",)
+    assert item.next_action == "connect_provider"
+
+
 def test_semantic_claim_without_attempt() -> None:
     envelopes = (
         _envelope(

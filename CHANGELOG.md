@@ -410,6 +410,14 @@ carried them; they are listed because each one describes the behavior that now s
   `workflow.md` and `coverage-and-receipts.md` so those Step 0 documents arrive without depending
   on `resources/read`. `docs/INTERFACES.md` no longer states that unprofiled hosts can fetch those
   documents unconditionally (issue #203).
+- Codex Step 0 never named `resources/list`, but agents still called `list_mcp_resources` first
+  and treated `Unexpected response type` as a missing server. The skill and initialize
+  `agent-instructions.md` now say not to list: the five `yoetz://guidance/` URIs are the
+  complete catalog, and a list failure is not a reason to stop or to read product source
+  (issue #173). The served list payload stays spec-correct. `rmcp 3.0.0` (Codex
+  `0.148.0-alpha.6`'s pin) decodes that payload as `ListResourcesResult` for every
+  optional-field subset, so this does not strip list fields and does not claim a host-side
+  decode fix.
 - A Stop hook that selected advice completed in ~1.4s with exit 0, then Codex marked it Failed
   with `hook returned invalid stop hook JSON output`. Stop has no `hookSpecificOutput`; the
   event-agnostic emitter was writing `additionalContext` onto a wire type that only admits
@@ -472,6 +480,19 @@ carried them; they are listed because each one describes the behavior that now s
   on (`connect_provider`)
   travel only on session-boundary events, falling through to the next actionable item on
   per-tool-call hooks rather than masking it (issue #241).
+- The Stop hook advised `connect_provider` right after the same mapped session completed a
+  successful external semantic dispatch: READY composition froze `semantic_ready=False` and an
+  empty connected-provider snapshot into the observation advice fact, so the standing
+  `provider_not_ready` condition fired for every semantic-configured installation regardless of
+  live state. The fact is now recomputed on every advice build from current machine facts —
+  endpoint bound, provider factory available, and exact configured-credential presence in the
+  vault — and absence from the lazily filled connected registry no longer triggers the advice on
+  its own, because repository-scoped activation is re-established automatically at dispatch and
+  is not an operator action. A genuinely missing credential still surfaces at the bounded #241
+  cadence, credential revocation puts the condition back into the advice snapshot from current
+  evidence — delivery of the byte-identical text then follows the documented #241 cadence
+  (session boundaries; repeats within one session scope only after different advice intervened) —
+  and repository-scoped dispatch authority remains resolved per check (issue #265).
 - Every workspace exec call paid 3.5–7.5 seconds of synchronous observe-hook overhead — process
   startup importing the full CLI graph (~325 ms per hook) and, dominating on a lived-in store,
   10–18 full serialize-and-fsync cycles of the workspace state file per hook. The hook entry now
