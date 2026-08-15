@@ -30,6 +30,7 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
     observation_ingest_result_to_json,
 )
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
 _KEY = b"k" * 32
 
@@ -371,6 +372,44 @@ def test_unsafe_runtime_gate_records_workspace_gap_when_consented(tmp_path: Path
     assert ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value in status.gaps
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO gate regression is POSIX-only")
+def test_runtime_gate_fifo_fails_closed_without_blocking(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    store.set_runtime_enabled(True)
+    gate = tmp_path / "observation/runtime-gate.json"
+    gate.unlink()
+    os.mkfifo(gate, mode=0o600)
+
+    started = time.monotonic()
+    with pytest.raises(PublicOperationError) as caught:
+        store.runtime_enabled()
+
+    assert caught.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert time.monotonic() - started < 1.0
+
+
+def test_unsafe_runtime_gate_falls_back_to_session_mapped_workspace(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    mapped_locator = tmp_path / "mapped-project"
+    stale_locator = tmp_path / "stale-project"
+    mapped = store.workspace_commitment(str(mapped_locator.resolve()))
+    store.grant_consent(mapped)
+    store.bind_codex_session(mapped, "unsafe-gate-mapped")
+    gate = tmp_path / "observation/runtime-gate.json"
+    gate.write_text("not-json", encoding="utf-8")
+
+    handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps({"session_id": "unsafe-gate-mapped", "tool_name": "shell"}).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(stale_locator),
+        _state=tmp_path,
+    )
+
+    status = store.status(ObservationStatusQuery(mapped))
+    assert ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value in status.gaps
+
+
 def test_runtime_gate_read_is_lock_free_under_store_contention(tmp_path: Path) -> None:
     """Holding the interprocess store lock must not block or fail the gate read (#273)."""
 
@@ -494,6 +533,51 @@ def test_observe_ingests_when_consented_and_pairs_pre_post(tmp_path: Path) -> No
         ).ObservationStatusQuery(workspace)
     )
     assert status.source_coverage[ObservationSource.CODEX_HOOK] is True
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in status.gaps
+
+
+def test_tool_call_id_pairs_when_legacy_correlation_ids_differ(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    assert (
+        handle_observe(
+            event_name="PreToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": "pair-alias",
+                    "tool_name": "shell",
+                    "correlation_id": "pre",
+                    "tool_call_id": "shared",
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": "pair-alias",
+                    "tool_name": "shell",
+                    "tool_call_id": "shared",
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    status = store.status(ObservationStatusQuery(workspace))
     assert ObservationGapCode.UNPAIRED_EVENT.value not in status.gaps
 
 

@@ -715,7 +715,7 @@ class LocalObservationStore:
         """
 
         path = self._root / _RUNTIME_GATE_NAME
-        flags = os.O_RDONLY | os.O_CLOEXEC
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
@@ -749,6 +749,12 @@ class LocalObservationStore:
                 chunks.append(chunk)
                 remaining -= len(chunk)
             raw = b"".join(chunks)
+            if len(raw) > _MAX_RUNTIME_GATE_BYTES:
+                raise _error(
+                    PublicErrorCode.STORAGE_UNSAFE,
+                    "Observation runtime gate is unsafe.",
+                    retryable=False,
+                )
         except OSError as exc:
             raise _error(
                 PublicErrorCode.STORAGE_UNSAFE,
