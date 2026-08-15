@@ -140,8 +140,8 @@ When you attempt a requested item, copy its exact `value` string — unnormalize
 into `attempted_items` on the `action_recorded` event that attempted it, whether or not the
 attempt succeeded. A requested item with no matching attempted entry is reported as never
 attempted, so dropping the field to satisfy a validator silently erases the attempt record.
-Two structural payload rules travel with the same events: `decision_recorded.authority` is a
-structural actor id (never approval prose — that belongs in `rationale`), and `action_kind` is
+Two more structural payload rules travel on their own families: `decision_recorded.authority`
+is a structural actor id (never approval prose — that belongs in `rationale`), and `action_kind` is
 the closed enum `command`, `edit`, `research`, `review`, `other`, where source or file
 modification is `edit`.
 

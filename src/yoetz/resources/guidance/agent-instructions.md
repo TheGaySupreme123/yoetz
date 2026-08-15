@@ -37,7 +37,7 @@ For `check` mode: use `semantic_if_configured` for most material implementation/
 
 # A recorded finding stays recorded
 
-`respond` records your disposition and links your evidence; it does not erase the historical finding. A readable response identifying that finding removes it from the unresolved count, but does not close an independent coverage gap. Publish exactly the first time — an exact `attempted_items` entry on `action_recorded` for every requested item, evidence for every claim — because a finding cannot be un-fired. `attempted_items` belongs to `action_recorded.payload` alone, never a claim, and each entry copies the obligation's `requested_items` `value` string exactly. Repairing the record is still worth doing: it stops the next check from minting a duplicate and shows the reader what you did.
+`respond` records your disposition and links your evidence; it does not erase the historical finding. A readable response identifying that finding removes it from the unresolved count, but does not close an independent coverage gap. Publish exactly the first time — an exact `attempted_items` entry on `action_recorded` for every requested item you attempted, evidence for every claim — because a finding cannot be un-fired. `attempted_items` belongs to `action_recorded.payload` alone, never a claim, and each entry copies the obligation's `requested_items` `value` string exactly. Repairing the record is still worth doing: it stops the next check from minting a duplicate and shows the reader what you did.
 
 # Semantic review runs on authority the user already gave
 
