@@ -13,6 +13,7 @@ import dataclasses
 import errno
 import os
 import re
+import stat
 import threading
 import time
 from collections.abc import Callable, Generator, Mapping
@@ -703,23 +704,35 @@ class LocalObservationStore:
             _atomic_write(self._root / _RUNTIME_GATE_NAME, payload)
 
     def runtime_enabled(self) -> bool:
-        """Return the current service-synchronized capture gate, failing closed."""
+        """Return the current service-synchronized capture gate, failing closed.
+
+        Deliberately lock-free: the marker is a tiny owner-only file that
+        :meth:`set_runtime_enabled` only ever replaces atomically, and every
+        hook event begins with this read. Serializing it on the interprocess
+        store lock converted ordinary batch contention into gate failures
+        that discarded events (#273). Reading through one descriptor keeps
+        the safety checks and the payload bound to a single inode instead.
+        """
 
         path = self._root / _RUNTIME_GATE_NAME
-        with self._lock:
-            try:
-                facts = path.lstat()
-            except FileNotFoundError:
-                return True
-            except OSError as exc:
-                raise _error(
-                    PublicErrorCode.STORAGE_UNSAFE,
-                    "Observation runtime gate is unavailable.",
-                    retryable=False,
-                ) from exc
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            message = (
+                "Observation runtime gate is unsafe."
+                if exc.errno == errno.ELOOP
+                else "Observation runtime gate is unavailable."
+            )
+            raise _error(PublicErrorCode.STORAGE_UNSAFE, message, retryable=False) from exc
+        try:
+            facts = os.fstat(descriptor)
             if (
-                path.is_symlink()
-                or not path.is_file()
+                not stat.S_ISREG(facts.st_mode)
                 or facts.st_uid != os.geteuid()
                 or facts.st_mode & 0o077
                 or facts.st_size <= 0
@@ -730,27 +743,46 @@ class LocalObservationStore:
                     "Observation runtime gate is unsafe.",
                     retryable=False,
                 )
-            try:
-                raw = path.read_bytes()
-                parsed = strict_json_parse(raw)
-            except (OSError, ProtocolValueError) as exc:
+            chunks: list[bytes] = []
+            remaining = _MAX_RUNTIME_GATE_BYTES + 1
+            while remaining > 0 and (chunk := os.read(descriptor, remaining)):
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            if len(raw) > _MAX_RUNTIME_GATE_BYTES:
                 raise _error(
                     PublicErrorCode.STORAGE_UNSAFE,
-                    "Observation runtime gate is invalid.",
-                    retryable=False,
-                ) from exc
-            if (
-                not isinstance(parsed, Mapping)
-                or set(parsed) != {"schema", "enabled"}
-                or parsed.get("schema") != _RUNTIME_GATE_SCHEMA
-                or type(parsed.get("enabled")) is not bool
-            ):
-                raise _error(
-                    PublicErrorCode.STORAGE_UNSAFE,
-                    "Observation runtime gate is invalid.",
+                    "Observation runtime gate is unsafe.",
                     retryable=False,
                 )
-            return cast(bool, parsed["enabled"])
+        except OSError as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation runtime gate is invalid.",
+                retryable=False,
+            ) from exc
+        finally:
+            os.close(descriptor)
+        try:
+            parsed = strict_json_parse(raw)
+        except ProtocolValueError as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation runtime gate is invalid.",
+                retryable=False,
+            ) from exc
+        if (
+            not isinstance(parsed, Mapping)
+            or set(parsed) != {"schema", "enabled"}
+            or parsed.get("schema") != _RUNTIME_GATE_SCHEMA
+            or type(parsed.get("enabled")) is not bool
+        ):
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation runtime gate is invalid.",
+                retryable=False,
+            )
+        return cast(bool, parsed["enabled"])
 
     def workspace_commitment(self, path: str) -> str:
         return workspace_commitment_from_path(self.key_material(), path)

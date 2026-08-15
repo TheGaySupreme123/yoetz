@@ -6,6 +6,8 @@ import asyncio
 import io
 import json
 import os
+import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
@@ -29,6 +31,7 @@ from yoetz.domain.observation import (
     observation_ingest_result_to_json,
 )
 from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
 _KEY = b"k" * 32
 
@@ -329,7 +332,9 @@ def test_runtime_disabled_skips_capture_but_session_start_surfaces_cached_recomm
     assert not workspace_state.exists() or not list(workspace_state.glob("*.json"))
 
 
-def test_unsafe_runtime_gate_fails_closed_with_distinct_diagnostic(tmp_path: Path) -> None:
+def test_unsafe_runtime_gate_fails_closed_with_distinct_diagnostic(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     store = LocalObservationStore(_state=tmp_path)
     store.set_runtime_enabled(True)
     gate = tmp_path / "observation/runtime-gate.json"
@@ -343,9 +348,123 @@ def test_unsafe_runtime_gate_fails_closed_with_distinct_diagnostic(tmp_path: Pat
         _state=tmp_path,
     )
     assert json.loads(stdout.getvalue()) == {}
+    assert "hook_observe_degraded: runtime_gate_unsafe" in capsys.readouterr().err
     diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
     assert '"reason":"runtime_gate_unsafe"' in diagnostics
     assert store.pending_workspaces() == ()
+
+
+def test_unsafe_runtime_gate_records_workspace_gap_when_consented(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    gate = tmp_path / "observation/runtime-gate.json"
+    gate.write_text("not-json", encoding="utf-8")
+    stdout = io.BytesIO()
+    handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps({"session_id": "unsafe-gate-gap", "tool_name": "shell"}).encode(),
+        stdout=stdout,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+    )
+    assert json.loads(stdout.getvalue()) == {}
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value in status.gaps
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO gate regression is POSIX-only")
+def test_runtime_gate_fifo_fails_closed_without_blocking(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    store.set_runtime_enabled(True)
+    gate = tmp_path / "observation/runtime-gate.json"
+    gate.unlink()
+    os.mkfifo(gate, mode=0o600)
+
+    started = time.monotonic()
+    with pytest.raises(PublicOperationError) as caught:
+        store.runtime_enabled()
+
+    assert caught.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert time.monotonic() - started < 1.0
+
+
+def test_unsafe_runtime_gate_falls_back_to_session_mapped_workspace(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    mapped_locator = tmp_path / "mapped-project"
+    stale_locator = tmp_path / "stale-project"
+    mapped = store.workspace_commitment(str(mapped_locator.resolve()))
+    store.grant_consent(mapped)
+    store.bind_codex_session(mapped, "unsafe-gate-mapped")
+    gate = tmp_path / "observation/runtime-gate.json"
+    gate.write_text("not-json", encoding="utf-8")
+
+    handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps({"session_id": "unsafe-gate-mapped", "tool_name": "shell"}).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(stale_locator),
+        _state=tmp_path,
+    )
+
+    status = store.status(ObservationStatusQuery(mapped))
+    assert ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value in status.gaps
+
+
+def test_runtime_gate_read_is_lock_free_under_store_contention(tmp_path: Path) -> None:
+    """Holding the interprocess store lock must not block or fail the gate read (#273)."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    store.set_runtime_enabled(True)
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def _hold() -> None:
+        with store._lock:  # pyright: ignore[reportPrivateUsage]
+            acquired.set()
+            release.wait(timeout=10.0)
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    try:
+        assert acquired.wait(timeout=5.0)
+        started = time.monotonic()
+        assert store.runtime_enabled() is True
+        assert time.monotonic() - started < 1.0
+    finally:
+        release.set()
+        holder.join()
+
+
+def test_store_lock_contention_at_gate_does_not_discard_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    def _contended(self: LocalObservationStore) -> bool:
+        raise TimeoutError("observation_store_lock_timeout")
+
+    monkeypatch.setattr(LocalObservationStore, "runtime_enabled", _contended)
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {"session_id": "contended-gate", "tool_name": "shell", "event_ordinal": 1}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    assert "hook_observe_degraded: runtime_gate_contended" in capsys.readouterr().err
+    diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"runtime_gate_contended"' in diagnostics
+    assert '"reason":"runtime_gate_unsafe"' not in diagnostics
+    assert store.pending_workspaces() == (workspace,)
 
 
 def test_service_unavailable_never_spools_visible_plaintext(tmp_path: Path) -> None:

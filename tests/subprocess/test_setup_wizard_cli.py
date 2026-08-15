@@ -129,8 +129,8 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
         }
 
     class _FakePluginService:
-        def preview(self, target: object) -> object:
-            del target
+        def preview(self, target: object, *, codex_version: str | None = None) -> object:
+            del target, codex_version
             from yoetz.adapters.integrations.codex_plugin import PluginHookPresence
             from yoetz.application.codex_plugin import CodexPluginPreview
 
@@ -142,8 +142,8 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
                 notes=("codex_hook_trust_not_observable_from_installation_state",),
             )
 
-        def inspect(self, target: object) -> object:
-            del target
+        def inspect(self, target: object, *, codex_version: str | None = None) -> object:
+            del target, codex_version
             from yoetz.adapters.integrations.codex_plugin import (
                 PluginHookPresence,
                 PluginInspection,

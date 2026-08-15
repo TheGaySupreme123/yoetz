@@ -126,6 +126,14 @@ admitted-key answer. The same fact is repeated as one bounded sentence in the au
 as a `Repair:` clause on the compatible text summary channel, because MCP hosts are not required
 to surface `structuredContent`.
 
+Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
+drop `structuredContent`. A successful projection includes the first valid returned frontier's
+`sequence` and canonical `head_digest` when both are present. Generic successful operations also
+include any returned, kind-valid `task_id`, `session_id`, and `writer_id`; in particular, the
+`start` text alone carries the identifiers and frontier needed to author the next request.
+Caller-controlled prose, malformed identifiers, and malformed digests are never admitted to this
+text channel.
+
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
 `expected_frontier`. It names that field and is retryable because validation wrote no durable
@@ -1458,7 +1466,9 @@ or paths. The daemon's control-plane watchdog samples event-loop lag from a plai
 appends `control_plane_saturation_entered`/`_persists`/`_cleared` records (component
 `service.daemon`) with those counts at a bounded cadence, so a starved control plane is diagnosed
 while it is happening rather than never (#238); sweep failures append
-`observation_sweep_failed`. The same `correlation_id` is attached to the raised
+`observation_sweep_failed`. A sweep-raised exception uses the unexpected-exception recorder so
+its bounded reason and origin survive; only an actual sweep deadline records
+`sweep_deadline_exceeded`. The same `correlation_id` is attached to the raised
 `ControlError` (and to the reduced publish acceptance envelope when that path is taken) so the
 agent-facing public error and the durable sink share one identity. The MCP bridge reuses a
 service-supplied id rather than minting a second one; only bridge-local failures without a
@@ -2415,9 +2425,10 @@ Independent verification support (local control, not MCP):
   discovers pending work at startup, drains one serialized check per workspace through the
   enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest
   never executes approved checks inside the hook RPC budget. Pure-ingress hook handlers declare
-  `"async": true` and never block a host tool call; handlers that return `additionalContext` or a
-  Stop `decision: block` stay synchronous with a declared 10-second budget, and `SessionEnd`
-  keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
+  `"async": true` only when the exact probed Codex version supports registration; older or unknown
+  hosts run them synchronously with the declared 10-second budget so no event is dropped. Handlers
+  that return `additionalContext` or a Stop `decision: block` stay synchronous with the same bound,
+  and `SessionEnd` keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
 
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
 The normalized locator is authenticated encrypted content; plaintext keeps only commitment and
@@ -2631,6 +2642,12 @@ pathname rollback that could race a concurrent replacement.
 installed and enabled and its installed-version cache tree to match the managed source bytes;
 marketplace/config presence alone remains `installed_not_activated`. This is standing trust for
 future sessions, not proof that a session loaded a hook or delivered observation evidence.
+The managed hook tree is selected from the exact activation probe version. Pure-ingress command
+hooks use `"async": true` only from Codex `0.148.0-alpha.6`; older, missing, malformed, or
+oversized versions use the bounded synchronous form because affected Codex hosts otherwise discard
+the handlers. The version-specific source marker and cache bytes are included in the existing
+preview/source digests, and apply refuses a variant transition until the intended managed source
+tree is installed.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
 `HarnessMcpPort` methods are `status_registration`, `observe_registration`, `preview_registration`,
 and `apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
 from yoetz.protocol.errors import PublicErrorCode
+from yoetz.protocol.ids import IdKind, is_valid_id
 
 __all__ = [
     "render_safe_compact_summary",
@@ -29,6 +30,8 @@ _CORRELATION_ID: Final = re.compile(
     r"^err_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.ASCII,
 )
+# Closed shape for the frontier head: either the genesis sentinel or a canonical digest.
+_HEAD_DIGEST: Final = re.compile(r"^(?:genesis|sha256:[0-9a-f]{64})$", re.ASCII)
 
 
 def _mapping(value: object) -> Mapping[str, JsonValue]:
@@ -59,15 +62,47 @@ def _safe_count(value: object) -> str:
     return "unavailable"
 
 
-def _sequence(envelope: Mapping[str, JsonValue]) -> str:
+def _frontier_clause(envelope: Mapping[str, JsonValue]) -> str:
+    """Render sequence plus head digest so the text channel alone can seed the next frontier.
+
+    The text summary is the documented authoring fallback when a host drops structured
+    content, and ``publish_work`` needs ``expected_frontier.head_digest``, not only the
+    sequence, so a summary that carried the sequence alone could not construct the next
+    request (issue #279).
+    """
+
     for key in ("result_frontier", "subject_frontier", "head_frontier", "frontier"):
         frontier = envelope.get(key)
         if isinstance(frontier, Mapping):
             typed_frontier = cast(Mapping[str, JsonValue], frontier)
             sequence = _safe_count(typed_frontier.get("sequence"))
             if sequence != "unavailable":
-                return sequence
-    return "unavailable"
+                head = typed_frontier.get("head_digest")
+                if type(head) is str and _HEAD_DIGEST.fullmatch(head) is not None:
+                    return f"frontier: {sequence}; head_digest: {head}"
+                return f"frontier: {sequence}"
+    return "frontier: unavailable"
+
+
+def _identity_clause(envelope: Mapping[str, JsonValue]) -> str:
+    """Render the returned identifiers the next request must echo, when present (issue #279).
+
+    Each value is re-gated against the strict public-id validator, so this projector admits
+    the operation's own minted identifiers and nothing else.
+    """
+
+    parts: list[str] = []
+    for label, key, kind in (
+        ("task", "task_id", IdKind.TASK),
+        ("session", "session_id", IdKind.SESSION),
+        ("writer", "writer_id", IdKind.WRITER),
+    ):
+        value = envelope.get(key)
+        if is_valid_id(kind, value):
+            parts.append(f"{label}: {cast(str, value)}")
+    if not parts:
+        return ""
+    return "; ".join(parts) + "; "
 
 
 def _item_count(value: object) -> str:
@@ -151,11 +186,11 @@ def summary_for_check(envelope: object) -> str:
         return _bounded(
             f"Semantic review not requested; deterministic-only check verdict: {verdict}; "
             f"findings returned: {findings}; suppressed: {suppressed}; "
-            f"semantic status/reason: {status}/{reason}; frontier: {_sequence(source)}."
+            f"semantic status/reason: {status}/{reason}; {_frontier_clause(source)}."
         )
     return _bounded(
         f"Check verdict: {verdict}; findings returned: {findings}; suppressed: {suppressed}; "
-        f"semantic status/reason: {status}/{reason}; frontier: {_sequence(source)}."
+        f"semantic status/reason: {status}/{reason}; {_frontier_clause(source)}."
     )
 
 
@@ -184,7 +219,7 @@ def summary_for_status(envelope: object) -> str:
     freshness, obligations, findings = _compact_status_fields(source)
     gaps = _item_count(source.get("gaps"))
     return _bounded(
-        f"Status view: {view}; frontier: {_sequence(source)}; freshness: {freshness}; "
+        f"Status view: {view}; {_frontier_clause(source)}; freshness: {freshness}; "
         f"open obligations: {obligations}; unresolved findings: {findings}; reported gaps: {gaps}."
     )
 
@@ -199,20 +234,21 @@ def summary_for_receipt(envelope: object) -> str:
         limitations = _item_count(typed_coverage.get("known_gaps"))
     suppressed = _safe_count(source.get("suppressed_finding_count"))
     return _bounded(
-        f"Receipt conclusion: {conclusion}; frontier: {_sequence(source)}; "
+        f"Receipt conclusion: {conclusion}; {_frontier_clause(source)}; "
         f"coverage limitations: {limitations}; suppressed findings: {suppressed}."
     )
 
 
 def _summary_for_other_success(source: Mapping[str, JsonValue]) -> str:
     outcome = _safe_token(source.get("outcome"), fallback="recorded")
+    identity = _identity_clause(source)
     accepted = source.get("accepted_events")
     if accepted is not None:
         return _bounded(
             f"Operation outcome: {outcome}; accepted events: {_item_count(accepted)}; "
-            f"frontier: {_sequence(source)}."
+            f"{identity}{_frontier_clause(source)}."
         )
-    return _bounded(f"Operation outcome: {outcome}; frontier: {_sequence(source)}.")
+    return _bounded(f"Operation outcome: {outcome}; {identity}{_frontier_clause(source)}.")
 
 
 def render_safe_compact_summary(envelope: object) -> str:
