@@ -12,6 +12,10 @@ Yoetz is a local work ledger and deterministic checker. It records only what par
 
 Yoetz is not an enforcement system, observer, authorship proof, transcript recorder, or orchestrator. A clean check does not mean the underlying work is correct.
 
+# Guidance catalog
+
+Do not call `resources/list` to find Yoetz guidance. The five `yoetz://guidance/` URIs under Read more are the complete catalog. A list failure is not a missing server and is not a reason to read product source. Read the named URI, or open the matching installed `references/<name>.md` copy.
+
 # How often to call each operation
 
 - `start` — once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; do not start a second task and do not send bare `task_id`.

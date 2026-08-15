@@ -75,3 +75,14 @@ def test_intake_cue_is_self_contained() -> None:
     cue = intake_cue_text().encode("utf-8")
     for sentence in _CUE_SENTENCES:
         assert sentence in cue, f"trimmed out of the delivered cue: {sentence!r}"
+
+
+def test_agent_instructions_say_not_to_list_resources() -> None:
+    """Initialize instructions arrive before the first host list call (issue #173)."""
+
+    text = _CANONICAL.read_text(encoding="utf-8")
+    collapsed = " ".join(text.split())
+    assert "Do not call `resources/list` to find Yoetz guidance" in collapsed
+    assert "A list failure is not a missing server" in collapsed
+    assert "not a reason to read product source" in collapsed
+    assert collapsed.index("# Guidance catalog") > collapsed.index("# What Yoetz is not")

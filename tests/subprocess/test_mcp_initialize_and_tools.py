@@ -132,6 +132,7 @@ async def test_static_inventory_is_exact_and_verified() -> None:
     assert BRIDGE_RUNTIME.instructions.startswith(agent)
     assert BRIDGE_RUNTIME.instructions.startswith(f"{agent}\n\n{workflow}\n\n{coverage}\n\n")
     assert "Route profile: policy." in BRIDGE_RUNTIME.instructions
+    assert "Do not call `resources/list` to find Yoetz guidance" in BRIDGE_RUNTIME.instructions
 
 
 def test_raw_initialize_lists_exact_capabilities_tools_and_resources() -> None:
