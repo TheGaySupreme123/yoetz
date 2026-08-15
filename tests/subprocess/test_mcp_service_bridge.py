@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from typing import cast
 
 import pytest
+from mcp import types
 from pydantic import BaseModel
 
 import yoetz.mcp.server as bridge
@@ -289,7 +290,9 @@ async def test_read_guidance_returns_full_text_without_the_service_client(
     expected = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
     assert result.isError is False
     assert result.content
-    assert result.content[0].text == expected
+    block = result.content[0]
+    assert isinstance(block, types.TextContent)
+    assert block.text == expected
     assert result.structuredContent is not None
     assert result.structuredContent["ok"] is True
     assert result.structuredContent["uri"] == "yoetz://guidance/workflow.md"
@@ -311,7 +314,10 @@ async def test_read_guidance_rejects_unknown_uri_without_echoing_it() -> None:
     assert result.structuredContent["error"]["code"] == "INVALID_REQUEST"
     rendered = json.dumps(result.structuredContent)
     assert unknown not in rendered
-    assert unknown not in (result.content[0].text if result.content else "")
+    if result.content:
+        block = result.content[0]
+        assert isinstance(block, types.TextContent)
+        assert unknown not in block.text
     await bridge.close_bridge_runtime(runtime)
 
 

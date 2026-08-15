@@ -487,7 +487,7 @@ async def test_mcp_read_guidance_returns_full_document_text(tmp_path: Path) -> N
             assert result.content
             assert result.content[0].type == "text"
             assert result.content[0].text == resource.text
-            assert len(cast(str, result.content[0].text)) == len(resource.text)
+            assert len(result.content[0].text) == len(resource.text)
     _record_pass(
         tmp_path,
         case_id="MCP-G1-READ-GUIDANCE",
