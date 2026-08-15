@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import Final, Literal, cast
@@ -79,6 +79,7 @@ from yoetz.protocol.coverage import (
     EvidenceImmutability,
     LedgerFreshness,
     PublicationChannel,
+    coverage_for_channel,
     coverage_from_json,
     coverage_to_json,
     weakest,
@@ -103,6 +104,8 @@ __all__ = [
     "PolicyPack",
     "UnavailableCapturedObject",
     "build_deterministic_case",
+    "case_coverage",
+    "healthy_storage_availability",
     "deterministic_case_from_json",
     "deterministic_case_to_json",
     "finding_basis_from_json",
@@ -1227,14 +1230,13 @@ def _build_replay_index(records: tuple[LedgerRecord, ...]) -> ReplayIndex:
     return index
 
 
-def _validate_availability(
+def _expected_unavailable_events(
     projection: ProjectionState,
     records_by_event: Mapping[EventId, LedgerRecord],
-    index: ReplayIndex,
     redacted_events: frozenset[EventId],
-    redacted_objects: frozenset[ObjectId],
-    availability: CaseAvailabilityFacts,
-) -> None:
+) -> tuple[EventId, ...]:
+    """Return the exact source events a readable case must declare unavailable."""
+
     expected_unavailable: set[EventId] = set()
     for record in _projection_records(projection):
         if record.payload is not None:
@@ -1252,7 +1254,20 @@ def _validate_availability(
         if accepted.redaction not in {RedactionState.PRESENT, RedactionState.KEY_UNAVAILABLE}:
             raise _invalid_case()
         expected_unavailable.add(record.source_event_id)
-    if availability.unavailable_event_ids != _sorted_unique(expected_unavailable):
+    return _sorted_unique(expected_unavailable)
+
+
+def _validate_availability(
+    projection: ProjectionState,
+    records_by_event: Mapping[EventId, LedgerRecord],
+    index: ReplayIndex,
+    redacted_events: frozenset[EventId],
+    redacted_objects: frozenset[ObjectId],
+    availability: CaseAvailabilityFacts,
+) -> None:
+    if availability.unavailable_event_ids != _expected_unavailable_events(
+        projection, records_by_event, redacted_events
+    ):
         raise _invalid_case()
 
     for unavailable in availability.unavailable_captured_objects:
@@ -1620,6 +1635,69 @@ def build_deterministic_case(
         history=history,
         history_availability="available",
         history_omitted_before_count=history_omitted_before_count,
+    )
+
+
+def healthy_storage_availability(
+    projection: ProjectionState, records: Iterable[LedgerRecord]
+) -> CaseAvailabilityFacts:
+    """Return the availability facts this state carries when object storage is healthy.
+
+    ``build_deterministic_case`` requires ``unavailable_event_ids`` to equal the payload rows
+    the projection itself already records as unreadable, so an empty fact set is only correct
+    for a fully readable state. Callers that must freeze a case without touching the object
+    store — append-time receipt-capacity admission in particular — derive the facts here
+    instead of asserting emptiness. No captured object is reported missing: a healthy store
+    resolves every reference it holds.
+    """
+
+    accepted_prefix = tuple(records)
+    records_by_event = {record.event_id: record for record in accepted_prefix}
+    index = _build_replay_index(accepted_prefix)
+    redacted: set[EventId] = set()
+    for marker in projection.coverage_gaps:
+        gap = _projection_gap(marker, index)
+        if gap.code == "redacted_event":
+            redacted.add(event_id(gap.subject_refs[0]))
+    for record in accepted_prefix:
+        if type(record) is AcceptedEvent and record.redaction in {
+            RedactionState.LOGICALLY_REDACTED,
+            RedactionState.ERASED_CLAIMED,
+        }:
+            redacted.add(record.event_id)
+    return CaseAvailabilityFacts(
+        _expected_unavailable_events(projection, records_by_event, frozenset(redacted)), ()
+    )
+
+
+def case_coverage(case: DeterministicCase, *, semantic: bool = False) -> Coverage:
+    """Fold every frozen material dependency and explicit case gap conservatively."""
+
+    ordered = tuple(case.coverage_by_ref[key] for key in sorted(case.coverage_by_ref, key=str))
+    if ordered:
+        result = ordered[0]
+        for coverage in ordered[1:]:
+            result = weakest(result, coverage)
+    else:
+        result = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
+    gaps = set(result.known_gaps)
+    gaps.update(gap.code for gap in case.gaps)
+    channels = set(result.publication_channels)
+    channels.add(PublicationChannel.ENGINE_DERIVED)
+    checks = set(result.check_types)
+    checks.discard(CheckType.NONE)
+    checks.add(CheckType.DETERMINISTIC)
+    if semantic:
+        checks.add(CheckType.SEMANTIC_MODEL_DERIVED)
+    freshness = result.ledger_freshness
+    if gaps and freshness is LedgerFreshness.CURRENT:
+        freshness = LedgerFreshness.PARTIAL
+    return replace(
+        result,
+        publication_channels=tuple(sorted(channels, key=lambda value: value.value.encode("ascii"))),
+        ledger_freshness=freshness,
+        check_types=tuple(sorted(checks, key=lambda value: value.value.encode("ascii"))),
+        known_gaps=tuple(sorted(gaps, key=str.encode)),
     )
 
 

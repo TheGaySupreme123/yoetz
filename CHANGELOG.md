@@ -11,6 +11,21 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- `publish_work` rejections for a payload field placed on the wrong event family now name the
+  field's one legal owning family (issue #266). When an `extra_forbidden` key byte-equals a frozen
+  catalogued payload property with exactly one owner among the ordinary publish families — the
+  2026-08-14 dogfood case was `attempted_items` on `claim_recorded`, owned solely by
+  `action_recorded` — the error carries a flat `repair_*` fact in `safe_details`, one bounded
+  ownership sentence in the authoring hint, and a `Repair:` clause on the compatible text summary.
+  The request stays rejected, nothing is moved or reinterpreted, caller-invented keys are never
+  echoed, and ambiguous or envelope-owned fields keep the plain admitted-key answer from issue
+  #240. Agent-facing guidance now teaches the same ownership before the first call (issue #264):
+  the skill, workflow, and agent instructions name `action_recorded` as the sole owner of
+  `attempted_items`; the request templates show the `requested_items` → `attempted_items`
+  exact-value pairing, call `decision_recorded.authority` a structural actor id, and name the
+  closed `action_kind` enum with `edit` for source changes; and the model-visible `publish_work`
+  description front-loads all three rules for hosts that degrade schema metadata.
+
 - Cooperative writers now receive a one-shot, coalesced notice when the observation writer moves the
   task frontier, including the bounded sequence range and observation-record count. The notice map
   is capped, drops ended-session entries, and is reconstructed on retry from a completed append's

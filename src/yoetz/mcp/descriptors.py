@@ -386,6 +386,9 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                             # action_kind "command" additionally requires command.
                             "command": "pytest -q",
                             "description": "Ran the focused test slice for the touched module.",
+                            # Each entry copies one obligation requested_items value byte-for-byte;
+                            # only action_recorded admits attempted_items (issue #264).
+                            "attempted_items": ["pytest -q"],
                         },
                     ),
                     _example_draft(
@@ -934,7 +937,9 @@ def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> No
             raise RuntimeError("mcp_event_draft_projection_invalid")
         payload["type"] = "object"
         payload["description"] = (
-            "Fields depend on schema.name; use the matching event family template."
+            "Fields depend on schema.name; use the matching event family template. "
+            "attempted_items is admitted only by action_recorded, authority is an actor id, and "
+            "action_kind admits command, edit, research, review, and other."
         )
     elif name == "check-request":
         scope = properties.get("scope")
@@ -1268,7 +1273,13 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "publish_work",
         "Publish recorded work",
         "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. It has no information about work outside that batch. Each draft "
+        "range and coverage. It has no information about work outside that batch. Field ownership "
+        "is exact: attempted_items is admitted only by the action_recorded payload — copy each "
+        "attempted obligation requested_items value string exactly, and never place the field on "
+        "claim_recorded. decision_recorded authority is a structural actor id such as "
+        "harness:cli, never approval prose; the approval story belongs in rationale. action_kind "
+        "is a closed enum of command, edit, research, review, and other; a source or file change "
+        "is edit, and command additionally requires the command field. Each draft "
         "occurred_at is a caller-asserted RFC 3339 UTC time with millisecond precision: use the "
         "best real time available and do not copy the illustrative example timestamp. Ledger order "
         "follows ingestion sequence; receipt freshness is frontier-bound. Service accepted_at is "
@@ -1451,7 +1462,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
-                "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
+                "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
                 "check": "sha256:3a81f3a6d3e0f714680e221e8dc5fa90d0131629386b03d75bc55d21ab618ee1",
                 "respond": "sha256:b71f8e0a70e6740a07fafbf77bf1a94a7f452e2f8ebdfefe95dd23381d31dd17",
                 "status": "sha256:419abcdbcc8ddd833318c23a8a1b17e60e65031f89758401d2716090170d434e",
@@ -1462,7 +1473,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
-                "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
+                "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
                 "check": "sha256:91b090140843ef3f50bbdf02a42dc78fc418b1968dca8685018698cf276f4557",
                 "respond": "sha256:b71f8e0a70e6740a07fafbf77bf1a94a7f452e2f8ebdfefe95dd23381d31dd17",
                 "status": "sha256:419abcdbcc8ddd833318c23a8a1b17e60e65031f89758401d2716090170d434e",
@@ -1474,8 +1485,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:0c9351ae1ca918b20a1ac171ee65625fd437d1207c317d1c4d6429ce5f94af18",
-        "strict": "sha256:b69ed08dec479a20e79300bee313406376b957663190482c5c27add1dcea5caf",
+        "policy": "sha256:018c818cdc4dc17537a841bdd5cc1aa31cb60f5ce08b5d99a13273ee92ac41ba",
+        "strict": "sha256:cfca483f8d4a2aa1afc5a597982ec3e59590e6a5f5d4390629dde34db0f0768b",
     }
 )
 

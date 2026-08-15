@@ -111,6 +111,21 @@ These object-rule tokens are projected only from checked-in schema metadata and 
 never from caller-controlled keys or free-form exception text. Unrecognized object rules degrade
 to a bounded generic `INVALID_REQUEST` without inventing field pointers.
 
+For an `extra_forbidden` payload rejection whose unknown key is a known field with exactly one
+legal owning event family among the ordinary `publish_work` families, `safe_details` additionally
+carries a flat bounded repair fact (issue #266): `repair_kind` (always `field_ownership`),
+`repair_field`, `repair_selected_family`, `repair_owning_family`, and `repair_template_uri`
+(always `yoetz://guidance/request-templates.md`), merged into the same ASCII key order. The
+request stays rejected; the field is never moved or reinterpreted. The field name is admitted only
+when it byte-equals a frozen catalogued payload property name (a caller-invented key can never
+match), both family names come from an import-gated registry derived from the frozen `publish_work`
+presentation schema, and ownership is asserted only when it is unique — ambiguous fields (for
+example `statement`, `summary`), draft-envelope keys (`evidence_refs`, `artifact_refs`), fields
+owned by another version of the selected family, and unknown keys all retain the plain
+admitted-key answer. The same fact is repeated as one bounded sentence in the authoring hint and
+as a `Repair:` clause on the compatible text summary channel, because MCP hosts are not required
+to surface `structuredContent`.
+
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
 `expected_frontier`. It names that field and is retryable because validation wrote no durable
@@ -317,6 +332,20 @@ constructor validation is left-to-right in declared field order. The two helpers
 `Coverage`/`PublicationChannel` inputs and map wrong runtime types to `invalid_coverage_value`
 rather than accepting spoofed `__class__` or duck-typed objects.
 No arithmetic averaging exists anywhere.
+
+`known_gaps` remains an exact sorted-unique set with a 64-code wire bound. The ledger append
+boundary owns the corresponding task-global receipt-capacity invariant: before committing a
+proposed batch, it freezes the healthy-storage deterministic case for the proposed projection and
+unions its gap codes with the applicable check coverage, receipt applicability gaps, and every
+current retained finding coverage selected by the receipt successor rule. Exactly 64 distinct
+codes is admitted; a 65th distinct code rejects the whole batch atomically as `LIMIT_EXCEEDED`
+with `component=receipt_coverage`, `count`, and `limit=64`. Duplicate codes do not consume extra
+capacity, and comparison/order is ASCII byte order. No event, operation result, writer advance, or
+projection change from the rejected batch becomes durable. This admission failure reports a
+representational capacity limit, never caller-malformed `INVALID_REQUEST`, and it never truncates
+or lexically selects material gap identities. `weakest`, codecs, schemas, and receipt validation
+therefore retain their exact 64-code rule; append admission prevents a newly accepted healthy
+task state from requiring an unrepresentable receipt fold.
 
 ## 6. Actor and client types (`protocol/models.py` boundary; `domain/values.py` internal)
 
