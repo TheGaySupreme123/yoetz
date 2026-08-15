@@ -6,7 +6,6 @@ import hashlib
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol, cast
 
-from yoetz.application.check import semantic_coverage_gap_code
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import (
     CheckRecordedPayload,
@@ -24,6 +23,7 @@ from yoetz.domain.receipts import (
     receipt_document_from_json,
     receipt_document_to_json,
     render_receipt_compact,
+    semantic_coverage_gap_code,
 )
 from yoetz.domain.values import (
     Actor,

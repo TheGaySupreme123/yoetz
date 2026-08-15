@@ -27,7 +27,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
-    SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
+    semantic_coverage_gap_code,
 )
 from yoetz.domain.values import (
     REPOSITORY_GRANT_CONTINUATION_KIND,
@@ -401,21 +401,6 @@ class FinalSemanticEvaluation:
             # ledger has already closed. Bind it to the one status that keeps the job open.
             if self.status is not SemanticStatus.AWAITING_HUMAN:
                 raise _invalid("semantic_continuation_invalid")
-
-
-def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -> str | None:
-    """Map a terminal semantic outcome to the receipt/check structural gap code, or None."""
-
-    validate_semantic_outcome(status, reason)
-    if status is SemanticStatus.SUCCEEDED:
-        return None
-    if status is SemanticStatus.NOT_REQUESTED:
-        return SEMANTIC_REVIEW_NOT_REQUESTED_GAP
-    if status is SemanticStatus.BLOCKED_BY_POLICY:
-        return OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP
-    if status is SemanticStatus.NOT_CONFIGURED:
-        return SEMANTIC_REVIEW_NOT_CONFIGURED_GAP
-    return SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP
 
 
 # Gaps that record a semantic review the task actually attempted and did not get. They are the
