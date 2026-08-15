@@ -26,7 +26,7 @@ __all__ = [
 ]
 
 OBSERVATION_ADVICE_POLICY_ID: Final = "observation-advice"
-OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.1"
+OBSERVATION_ADVICE_POLICY_VERSION: Final = "0.1.2"
 
 OBSERVATION_ADVICE_FACT_CODES: Final = frozenset(
     {
@@ -142,6 +142,10 @@ class ObservationInspectFact:
 
 @dataclass(frozen=True, slots=True)
 class ObservationCompositionFact:
+    # semantic_ready is the structural usability of the configured semantic
+    # path — endpoint bound, factory available, configured credential present.
+    # It claims nothing about repository-scoped dispatch authority, which is
+    # resolved per check (#265).
     semantic_configured: bool
     semantic_ready: bool
     provider_factory_ids: tuple[str, ...]
@@ -521,22 +525,28 @@ def _observation_gaps(
 def _provider_not_ready(
     composition: ObservationCompositionFact | None,
 ) -> list[ObservationAdviceCandidate]:
+    # connect_provider is a standing machine action, so it must rest on facts
+    # that establish the operator has something to connect: semantic wanted
+    # but the configured path is structurally unusable. Absence from the
+    # connected registry is not such a fact — activation is lazy and
+    # repository-scoped, re-established automatically on dispatch (#265) —
+    # so registry lag only names evidence, it never triggers the advice.
     if composition is None:
+        return []
+    if not composition.semantic_configured or composition.semantic_ready:
         return []
     configured = set(composition.provider_factory_ids)
     connected = set(composition.connected_provider_ids)
     missing = configured - connected
-    if missing or (composition.semantic_configured and not composition.semantic_ready):
-        return [
-            _candidate(
-                FindingKind.MATERIAL_LIMITATION_OMITTED,
-                "provider_not_ready",
-                "connect_provider",
-                tuple(sorted(missing or {"semantic:not_ready"}, key=_ascii)),
-                "provider-not-ready",
-            )
-        ]
-    return []
+    return [
+        _candidate(
+            FindingKind.MATERIAL_LIMITATION_OMITTED,
+            "provider_not_ready",
+            "connect_provider",
+            tuple(sorted(missing or {"semantic:not_ready"}, key=_ascii)),
+            "provider-not-ready",
+        )
+    ]
 
 
 def _semantic_without_attempt(

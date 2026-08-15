@@ -122,6 +122,7 @@ outbox rather than weakening verdict binding. Observation can contribute evidenc
 advice without impersonating the agent or minting the same standing finding indefinitely. Routine
 reads retain their local observation evidence without producing an unbounded task-ledger trail, and
 cooperative writers learn about meaningful observation-authored frontier motion before their next
-state-sensitive operation. Observation-advice policy `0.1.1` applies the condition-scoped identity
-to new materialization. Historical duplicate findings remain append-only evidence; this change does
+state-sensitive operation. Observation-advice policy `0.1.2` applies the condition-scoped identity
+to new materialization (`0.1.1` first introduced it; `0.1.2` rebased the standing
+`provider_not_ready` condition onto per-build structural machine facts for issue #265). Historical duplicate findings remain append-only evidence; this change does
 not erase or rewrite an existing task ledger.
