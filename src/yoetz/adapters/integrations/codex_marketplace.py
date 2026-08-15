@@ -58,6 +58,7 @@ _PLUGIN_ADD_TIMEOUT_SECONDS: Final = 30.0
 _MAX_PLUGIN_OUTPUT_BYTES: Final = 262_144
 _MAX_EXECUTABLE_BYTES: Final = 256 * 1024 * 1024
 _ACTIVATION_LOCK: Final = ".yoetz-marketplace-activation.lock"
+_ASYNC_PLUGIN_VARIANT_VERSION: Final = "0.148.0-alpha.6"
 _PLUGIN_ADD_COMMAND: Final = ("plugin", "add", _PLUGIN_ID, "--json")
 _PLUGIN_LIST_COMMAND: Final = ("plugin", "list", "--marketplace", _MARKETPLACE_NAME, "--json")
 _VERSION_RE: Final = re.compile(
@@ -444,14 +445,28 @@ def _cache_version_path(root: Path, version: str) -> Path:
     return root / version
 
 
-def _source_cache_members(target: IntegrationTarget) -> dict[str, bytes]:
+def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> dict[str, bytes]:
     project = _validated_project(target)
     source = project / ".agents/plugins/yoetz"
-    expected = render_plugin_install_tree()
-    inspection = inspect_plugin(target)
+    expected = render_plugin_install_tree(codex_version=codex_version)
+    inspection = inspect_plugin(target, codex_version=codex_version)
     if inspection.presence is PluginHookPresence.ABSENT:
         return expected
     if inspection.presence is not PluginHookPresence.INSTALLED:
+        # Setup previews activation before it replaces a previously managed tree.
+        # Admit only the other byte-exact renderer variant here, then bind the
+        # preview to the intended version-specific bytes. Apply still requires
+        # that intended tree at its first source fence before any mutation.
+        alternate_versions = (
+            (None, _ASYNC_PLUGIN_VARIANT_VERSION)
+            if codex_version != _ASYNC_PLUGIN_VARIANT_VERSION
+            else (None,)
+        )
+        if any(
+            inspect_plugin(target, codex_version=alternate).presence is PluginHookPresence.INSTALLED
+            for alternate in alternate_versions
+        ):
+            return expected
         raise _error(IntegrationReason.PARTIAL_INSTALL)
     actual_paths: set[str] = set()
     for candidate in source.rglob("*"):
@@ -615,12 +630,15 @@ def inspect_activation(
     if codex_home is not None and _codex_root(codex_home) != binary.codex_home:
         raise _error(IntegrationReason.PREVIEW_STALE)
     project, home, marketplace_path, config_path = _paths(target, binary.codex_home)
-    installed = inspect_plugin(target).presence is PluginHookPresence.INSTALLED
+    installed = (
+        inspect_plugin(target, codex_version=binary.codex_version).presence
+        is PluginHookPresence.INSTALLED
+    )
     plugin_cached = False
     cache_foreign = False
     if installed:
         try:
-            cache_members = _source_cache_members(target)
+            cache_members = _source_cache_members(target, codex_version=binary.codex_version)
             local_digest = _installed_cache_digest(
                 _cache_version_path(_cache_root(home), __version__), cache_members
             )
@@ -734,10 +752,10 @@ def _sha(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
-def _plugin_source_digest() -> str:
+def _plugin_source_digest(*, codex_version: str) -> str:
     rows = [
         {"path": path, "digest": _sha(payload), "size": len(payload)}
-        for path, payload in sorted(render_plugin_install_tree().items())
+        for path, payload in sorted(render_plugin_install_tree(codex_version=codex_version).items())
     ]
     return _sha(canonical_encode(cast(JsonValue, {"managed_files": rows})))
 
@@ -769,8 +787,8 @@ def _activation_plan(
     config_bytes, config = _load_config(config_path)
     config_before = config_bytes if config_path.exists() else None
     block = _activation_block(project, config)
-    plugin_source_digest = _plugin_source_digest()
-    cache_members = _source_cache_members(target)
+    plugin_source_digest = _plugin_source_digest(codex_version=binary.codex_version)
+    cache_members = _source_cache_members(target, codex_version=binary.codex_version)
     plugin_install_digest = _members_digest(cache_members)
     plugin_cache_root = _cache_root(home)
     plugin_install_path = _cache_version_path(plugin_cache_root, __version__)
@@ -956,12 +974,17 @@ def _assert_plugin_source(
     target: IntegrationTarget,
     expected_digest: str,
     expected_members: Mapping[str, bytes],
+    *,
+    codex_version: str,
 ) -> None:
-    if _plugin_source_digest() != expected_digest:
+    if _plugin_source_digest(codex_version=codex_version) != expected_digest:
         raise _error(IntegrationReason.PREVIEW_STALE)
-    if inspect_plugin(target).presence is not PluginHookPresence.INSTALLED:
+    if (
+        inspect_plugin(target, codex_version=codex_version).presence
+        is not PluginHookPresence.INSTALLED
+    ):
         raise _error(IntegrationReason.PARTIAL_INSTALL)
-    if _source_cache_members(target) != dict(expected_members):
+    if _source_cache_members(target, codex_version=codex_version) != dict(expected_members):
         raise _error(IntegrationReason.PREVIEW_STALE)
 
 
@@ -1049,17 +1072,32 @@ def apply_activation(
         preview = plan.preview
         if approved_digest != preview.preview_digest:
             raise _error(IntegrationReason.PREVIEW_STALE)
-        _assert_plugin_source(target, preview.plugin_source_digest, plan.cache_members)
+        _assert_plugin_source(
+            target,
+            preview.plugin_source_digest,
+            plan.cache_members,
+            codex_version=plan.binary.codex_version,
+        )
         project, _home, marketplace_path, config_path = _paths(target, binary.codex_home)
         marketplace_changed = plan.marketplace_before != preview.marketplace_bytes
         config_changed = plan.config_before != plan.config_after
         if marketplace_changed:
-            _assert_plugin_source(target, preview.plugin_source_digest, plan.cache_members)
+            _assert_plugin_source(
+                target,
+                preview.plugin_source_digest,
+                plan.cache_members,
+                codex_version=plan.binary.codex_version,
+            )
             _assert_snapshot(marketplace_path, plan.marketplace_before)
             _atomic_write(marketplace_path, preview.marketplace_bytes)
         try:
             if config_changed:
-                _assert_plugin_source(target, preview.plugin_source_digest, plan.cache_members)
+                _assert_plugin_source(
+                    target,
+                    preview.plugin_source_digest,
+                    plan.cache_members,
+                    codex_version=plan.binary.codex_version,
+                )
                 _assert_snapshot(config_path, plan.config_before)
                 _atomic_write(config_path, plan.config_after)
             inventory_installed, inventory_version = _plugin_inventory(
@@ -1071,7 +1109,12 @@ def apply_activation(
             elif plan.cache_before is not None:
                 raise _error(IntegrationReason.DESTINATION_CONFLICT)
             else:
-                _assert_plugin_source(target, preview.plugin_source_digest, plan.cache_members)
+                _assert_plugin_source(
+                    target,
+                    preview.plugin_source_digest,
+                    plan.cache_members,
+                    codex_version=plan.binary.codex_version,
+                )
                 _assert_binary_probe(plan.binary, _run=_run)
                 add_result = _run_json_command(
                     plan.binary,
@@ -1087,7 +1130,12 @@ def apply_activation(
                     raise _error(IntegrationReason.WRITE_FAILED)
             _assert_snapshot(config_path, plan.config_after)
             _assert_snapshot(marketplace_path, preview.marketplace_bytes)
-            _assert_plugin_source(target, preview.plugin_source_digest, plan.cache_members)
+            _assert_plugin_source(
+                target,
+                preview.plugin_source_digest,
+                plan.cache_members,
+                codex_version=plan.binary.codex_version,
+            )
         except IntegrationError:
             # Preserve already-approved partial state for an honest retry. Pathname
             # verify-then-rollback cannot exclude a non-cooperating concurrent replacement.

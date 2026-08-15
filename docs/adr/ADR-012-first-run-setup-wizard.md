@@ -155,6 +155,22 @@ exactly those contracts and connects the steps without weakening any existing tr
    authorizes a standing Codex trust change for future sessions in that exact Codex home; it does
    not prove that a later session loaded a hook or delivered an observation.
 
+   **Amended 2026-08-15 — version-gated async observation hooks (issue #271).** Codex releases
+   before `0.148.0-alpha.6` recognize `"async": true` but discard non-`SessionEnd` command
+   handlers that declare it; they do not downgrade those handlers to synchronous execution. The
+   managed plugin renderer therefore emits async pure-ingress handlers only when the exact probed
+   Codex version parses as SemVer/PEP 440 and is at least `0.148.0-alpha.6`. Missing, malformed,
+   oversized, and older versions fail closed to the bounded synchronous form so observation is
+   slower rather than absent. Advice-bearing handlers and `SessionEnd` remain synchronous on every
+   version.
+
+   The selected version also binds the rendered source marker, activation preview's managed-source
+   and intended-cache digests, and every apply-time source re-render. Setup may preview a transition
+   from either byte-exact managed hook variant, but apply requires the intended variant before its
+   first mutation; arbitrary or modified trees remain refused. Crossing the capability boundary
+   consequently requires the ordinary digest-bound plugin refresh and activation approval. The
+   committed/unprobed plugin tree is the conservative synchronous variant.
+
 The short `yoetz --set --fireworks --model MODEL` and `yoetz --set --grok --model MODEL` paths are
 provider-only entries into the same setup ceremonies. They derive internal provider bindings and
 always collect the API key through hidden TTY
