@@ -444,6 +444,131 @@ def test_unpaired_post_records_gap(tmp_path: Path) -> None:
     assert ObservationGapCode.UNPAIRED_EVENT.value in status.gaps
 
 
+def _codex_0146_payload(event: str, tool_use_id: str, **extra: object) -> dict[str, object]:
+    """A hook payload using only the field names the Codex 0.146.0 binary emits.
+
+    The key set mirrors the wire-type table embedded in the shipped binary
+    (#274): ``tool_use_id``, not ``tool_call_id``/``correlation_id``. Tests
+    that feed our own key names back to us cannot catch a contract mismatch.
+    """
+
+    payload: dict[str, object] = {
+        "session_id": "01a006a4-1111-4111-8111-000000000001",
+        "turn_id": "turn-3",
+        "agent_type": "main",
+        "transcript_path": "/Users/dev/.codex/sessions/rollout-2026-08-15.jsonl",
+        "cwd": "/Users/dev/project",
+        "hook_event_name": event,
+        "model": "gpt-5.3-codex",
+        "permission_mode": "on-request",
+        "trigger": "model",
+        "tool_name": "shell",
+        "tool_input": {"command": ["bash", "-lc", "pytest -q"]},
+        "tool_use_id": tool_use_id,
+    }
+    payload.update(extra)
+    return payload
+
+
+def test_codex_field_names_materialize_linked_action_and_result(tmp_path: Path) -> None:
+    import uuid
+
+    from yoetz.application.observation_materialize import materialize_observation_envelope
+    from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
+
+    store = LocalObservationStore(_state=tmp_path)
+    session = store.session_commitment("codex-conformance")
+    task = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
+
+    pre = map_hook_payload_to_envelope(
+        "PreToolUse",
+        _codex_0146_payload("PreToolUse", "call_p8H2mKfQ"),
+        session_commitment=session,
+        event_ordinal=1,
+        key_material=store.key_material(),
+    )
+    # The host tool-call id survives ingress under the canonical structural key.
+    assert pre.structural_payload.get("tool_call_id") == "call_p8H2mKfQ"
+    pre_batch = materialize_observation_envelope(pre, task_id=task)
+    assert pre_batch.skip_reason is None
+    assert [item.draft.schema.name for item in pre_batch.drafts] == ["action_recorded"]
+
+    post = map_hook_payload_to_envelope(
+        "PostToolUse",
+        _codex_0146_payload(
+            "PostToolUse", "call_p8H2mKfQ", tool_response={"output": "ok"}, exit_status=0
+        ),
+        session_commitment=session,
+        event_ordinal=2,
+        key_material=store.key_material(),
+    )
+    post_batch = materialize_observation_envelope(post, task_id=task)
+    assert post_batch.skip_reason is None
+    assert [item.draft.schema.name for item in post_batch.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in post_batch.gaps
+
+
+def test_codex_delivery_pairs_pre_post_end_to_end(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    for event in ("PreToolUse", "PostToolUse"):
+        # No event_name argument: the event resolves from ``hook_event_name``,
+        # exactly as a real Codex delivery arrives.
+        code = handle_observe(
+            event_name=None,
+            stdin_bytes=json.dumps(_codex_0146_payload(event, "call_e2e_1")).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        assert code == 0
+    status = store.status(ObservationStatusQuery(workspace))
+    assert status.source_coverage[ObservationSource.CODEX_HOOK] is True
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in status.gaps
+    assert store.has_open_pre(workspace, "call_e2e_1") is False
+
+
+def test_unpaired_event_gap_resolves_after_pairing_recovers(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    handle_observe(
+        event_name=None,
+        stdin_bytes=json.dumps(_codex_0146_payload("PostToolUse", "call_orphan")).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+    for event in ("PreToolUse", "PostToolUse"):
+        handle_observe(
+            event_name=None,
+            stdin_bytes=json.dumps(_codex_0146_payload(event, "call_recovered")).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+    # A completed pre→post pair is live evidence pairing works now; the latched
+    # gap no longer describes the workspace (#274).
+    assert (
+        ObservationGapCode.UNPAIRED_EVENT.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
 def test_yoetz_tool_still_ingests_but_skips_advice_loop(tmp_path: Path) -> None:
     from yoetz.domain.observation import AdviceSnapshot
     from yoetz.domain.values import finding_id

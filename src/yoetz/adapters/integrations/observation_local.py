@@ -911,6 +911,9 @@ class LocalObservationStore:
             raw = state.open_pre.pop(correlation_id, None)
             if raw is None:
                 return None
+            # A post consuming its open pre is live proof pairing works now;
+            # a latched unpaired_event no longer describes this workspace (#274).
+            self._resolve_gap_state(state, ObservationGapCode.UNPAIRED_EVENT.value)
             self._save(workspace, state)
             return raw.split(_OPEN_PRE_SEPARATOR, 1)[0]
 

@@ -328,6 +328,14 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         token = _token_or_none(payload.get(key))
         if token is not None and key in _STRUCTURAL_ALLOW:
             fields[key] = token
+    if "tool_call_id" not in fields:
+        # Codex names the host tool-call id ``tool_use_id``. Normalize it to the
+        # canonical structural key here: the wire schema enumerates structural
+        # fields, so the identity must land under ``tool_call_id`` or it is
+        # discarded at the boundary and unrecoverable downstream (#274).
+        token = _token_or_none(payload.get("tool_use_id"))
+        if token is not None:
+            fields["tool_call_id"] = token
     # Nested tool_input / tool_response never contribute prose — only structural scalars.
     tool_input = payload.get("tool_input")
     if isinstance(tool_input, Mapping):
@@ -375,12 +383,14 @@ def _source_identity(
 ) -> str:
     host_ids: dict[str, JsonValue] = {"event_ordinal": event_ordinal}
     for key in (
+        "tool_use_id",
         "tool_call_id",
         "correlation_id",
         "event_id",
         "id",
         "parent_tool_call_id",
         "subagent_id",
+        "turn_id",
     ):
         token = _token_or_none(payload.get(key))
         if token is not None:
@@ -1094,9 +1104,12 @@ def handle_observe(
             )
             gap_codes: list[str] = []
 
-            # Pair pre/post via correlation_id when present.
-            correlation = _token_or_none(payload.get("correlation_id")) or _token_or_none(
-                payload.get("tool_call_id")
+            # Pair pre/post via the host tool-call id when present. Codex names
+            # it ``tool_use_id``; older spellings stay as fallbacks (#274).
+            correlation = (
+                _token_or_none(payload.get("tool_use_id"))
+                or _token_or_none(payload.get("correlation_id"))
+                or _token_or_none(payload.get("tool_call_id"))
             )
             if correlation is not None and _is_pre_event(resolved_event):
                 store.note_open_pre(workspace_commitment, correlation, resolved_event)
