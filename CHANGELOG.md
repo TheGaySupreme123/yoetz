@@ -395,6 +395,12 @@ carried them; they are listed because each one describes the behavior that now s
   `workflow.md` and `coverage-and-receipts.md` so those Step 0 documents arrive without depending
   on `resources/read`. `docs/INTERFACES.md` no longer states that unprofiled hosts can fetch those
   documents unconditionally (issue #203).
+- Codex Step 0 never named `resources/list`, but agents still called `list_mcp_resources` first
+  and treated `Unexpected response type` as a missing server. The skill and initialize
+  `agent-instructions.md` now say not to list: the five `yoetz://guidance/` URIs are the
+  complete catalog, and a list failure is not a reason to stop or to read product source
+  (issue #173). The served list payload stays spec-correct; this does not claim a host-side
+  decode fix.
 - A Stop hook that selected advice completed in ~1.4s with exit 0, then Codex marked it Failed
   with `hook returned invalid stop hook JSON output`. Stop has no `hookSpecificOutput`; the
   event-agnostic emitter was writing `additionalContext` onto a wire type that only admits

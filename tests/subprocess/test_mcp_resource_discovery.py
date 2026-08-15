@@ -4,7 +4,8 @@ The 2026-07-27 Codex dogfood recorded
 ``codex_core::tools::router: resources/list failed for 'yoetz': Unexpected response type`` and the
 postmortem attributed it to Yoetz. These cases pin the served wire shape against the MCP schema so
 that claim can be settled from evidence rather than inferred, and so a future regression in the
-payload is caught here rather than in a dogfood.
+payload is caught here rather than in a dogfood. Issue #173 later reproduced the same host error
+against this conformant payload; Step 0 must not treat a list failure as a missing server.
 
 `resources/templates/list` returning method-not-found is correct: no templates are declared, so the
 capability is not advertised. That is asserted rather than "fixed".
