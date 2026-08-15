@@ -13,8 +13,8 @@ import pytest
 from pydantic import BaseModel
 
 import yoetz.mcp.server as bridge
-from yoetz.mcp.resources import read_resource
 from yoetz.config.models import LoggingConfig
+from yoetz.mcp.resources import read_resource
 from yoetz.observability.logging import LogMode, configure_logging
 from yoetz.ports.control import ControlError
 from yoetz.protocol.canonical import JsonValue
