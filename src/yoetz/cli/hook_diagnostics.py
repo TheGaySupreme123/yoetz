@@ -56,6 +56,7 @@ _REASONS: Final = frozenset(
         "drain_budget_exhausted",
         "drain_lease_contended",
         "drain_preflight_failed",
+        "runtime_gate_contended",
         "runtime_gate_unsafe",
         "stdout_write_failed",
         # Observability only: the end-to-end hook budget is a contract, not an

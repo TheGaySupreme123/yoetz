@@ -968,6 +968,40 @@ async def _try_auto_start(
                 await client.close()
 
 
+def _note_dropped_event_gap(
+    store: LocalObservationStore,
+    payload: Mapping[str, JsonValue],
+    workspace: str | None,
+) -> None:
+    """Record a coverage gap for an event dropped before the local pass ran.
+
+    Mirrors the binding order of the main pass: the explicit workspace
+    argument first, then the Codex-session→workspace map. A silently missing
+    event is the one outcome this subsystem must not produce, so any drop
+    must be visible to ``observe status`` and coverage wording.
+    """
+
+    commitment: str | None = None
+    if workspace is not None:
+        try:
+            locator = str(Path(workspace).expanduser().resolve(strict=False))
+            candidate = store.workspace_commitment(locator)
+            consent = store.consent_for(candidate)
+            if consent is not None and consent.active:
+                commitment = candidate
+        except Exception:
+            commitment = None
+    if commitment is None:
+        codex_session_id = validate_codex_session_id(payload.get("session_id"))
+        commitment = store.find_workspace_for_codex_session(codex_session_id)
+    if commitment is None:
+        return
+    consent = store.consent_for(commitment)
+    if consent is None or not consent.active:
+        return
+    store.note_coverage_gap(commitment, ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
+
+
 def handle_observe(
     *,
     event_name: str,
@@ -1028,8 +1062,18 @@ def handle_observe(
         resolved_event = raw_event
         try:
             capture_enabled = store.runtime_enabled()
+        except TimeoutError:
+            # Store-lock contention says nothing about the gate itself.
+            # Fall back to the missing-marker default (enabled) instead of
+            # discarding the event; consent still gates every ingest below.
+            _stderr_line("hook_observe_degraded: runtime_gate_contended")
+            record_hook_diagnostic("runtime_gate_contended", resolved_event, _state=_state)
+            capture_enabled = True
         except Exception:
+            _stderr_line("hook_observe_degraded: runtime_gate_unsafe")
             record_hook_diagnostic("runtime_gate_unsafe", resolved_event, _state=_state)
+            with contextlib.suppress(Exception):
+                _note_dropped_event_gap(store, payload, workspace)
             _stdout_json({}, stdout)
             return 0
         if not capture_enabled:
@@ -1094,9 +1138,12 @@ def handle_observe(
             )
             gap_codes: list[str] = []
 
-            # Pair pre/post via correlation_id when present.
-            correlation = _token_or_none(payload.get("correlation_id")) or _token_or_none(
-                payload.get("tool_call_id")
+            # Prefer the host's canonical tool-use identity, while retaining
+            # compatibility with earlier tool-call and correlation aliases.
+            correlation = (
+                _token_or_none(payload.get("tool_use_id"))
+                or _token_or_none(payload.get("tool_call_id"))
+                or _token_or_none(payload.get("correlation_id"))
             )
             if correlation is not None and _is_pre_event(resolved_event):
                 store.note_open_pre(workspace_commitment, correlation, resolved_event)
