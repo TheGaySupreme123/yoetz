@@ -11,6 +11,14 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- The idle relock clock now counts harness observation rows resolved by the ready sweep as
+  activity, so a live workspace whose hooks keep delivering events is never relocked underneath
+  an open task session — however long the run — while a workspace that truly goes quiet still
+  relocks one full window after its spool runs dry. The default idle-relock interval is now 3600
+  seconds (was 900, shorter than one legitimate implementation phase under the prescribed publish
+  cadence), and the process-idle stop is now 7200 seconds so the in-process soft relock — which
+  re-readies on the next ordinary call — always comes before the full process stop (issue #291).
+
 - MCP success summaries now preserve the canonical frontier head digest and, for generic
   operations such as `start`, returned task/session/writer identifiers after strict shape
   validation. The bounded text fallback can therefore seed the next request even when a host drops
