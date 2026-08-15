@@ -431,6 +431,7 @@ async def test_mcp_resources_list_read_all(tmp_path: Path) -> None:
             assert isinstance(block, types.TextResourceContents)
             packaged = read_resource(resource.uri)
             assert block.text.encode("utf-8") == packaged
+            assert block.mimeType == resource.media_type
             digests.append(f"sha256:{hashlib.sha256(packaged).hexdigest()}")
         digest = canonical_digest({"resources": cast(JsonValue, digests)})
     _record_pass(

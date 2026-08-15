@@ -190,6 +190,8 @@ the control error also carries `sequence`, `head_digest`, and `count` in `accept
 
 MCP resource discovery: `resources/list` serves the five `yoetz://guidance/*.md` entries and
 validates against the MCP `ListResourcesResult` schema (`tests/subprocess/test_mcp_resource_discovery.py`).
+`resources/read` advertises the same registry `media_type` that `resources/list` serves as
+`mimeType`; it does not hardcode a markdown type.
 `resources/templates/list` answers method-not-found because no templates are declared and the
 capability is not advertised — that pairing is conformant and is asserted, not "fixed". Guidance
 must not present MCP resource-template discovery as a recovery path. The static
@@ -2883,7 +2885,8 @@ facade and are never MCP tools.
   skill install places the same files on disk as `references/<name>.md` beside the skill. Resources
   are static reviewed product bytes read through `importlib.resources` and digest-checked against
   the resource manifest; the registry
-  is read-only, closed, and contains no ledger, task, projection, or user content. It is therefore
+  is read-only, closed, and contains no ledger, task, projection, or user content. `resources/list`
+  and `resources/read` both take `media_type` from that registry. It is therefore
   not a `LocalDisclosureSink` and creates no disclosure receipt.
 - `cli/app.py`: Typer client surface with the six operations and registered support/service/privacy
   command trees; ordinary `--json`/stdin never carry unlock, credential, or reauthentication bytes.
