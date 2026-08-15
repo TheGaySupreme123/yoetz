@@ -191,8 +191,12 @@ the control error also carries `sequence`, `head_digest`, and `count` in `accept
 MCP resource discovery: `resources/list` serves the five `yoetz://guidance/*.md` entries and
 validates against the MCP `ListResourcesResult` schema (`tests/subprocess/test_mcp_resource_discovery.py`).
 A schema-valid list payload does not mean every host delivered it: some Codex builds reject
-`resources/list` with `Unexpected response type`. Step 0 therefore names exact URIs and does not
-use list as a discovery step. A list failure is not a missing server.
+`resources/list` with `Unexpected response type`. That error is not a missing Yoetz field:
+`rmcp 3.0.0` (the crate Codex `0.148.0-alpha.6` pins) decodes the live list payload as
+`ServerResult::ListResourcesResult` for the full registry shape and for the
+`title` / `annotations` / `size` / minimal (`uri`+`name`) subsets. Stripping optional
+resource fields therefore cannot change the typed variant. Step 0 names exact URIs and does
+not use list as a discovery step. A list failure is not a missing server.
 `resources/templates/list` answers method-not-found because no templates are declared and the
 capability is not advertised — that pairing is conformant and is asserted, not "fixed". Guidance
 must not present MCP resource-template discovery as a recovery path. The static
