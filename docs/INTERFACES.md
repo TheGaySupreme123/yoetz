@@ -316,6 +316,20 @@ constructor validation is left-to-right in declared field order. The two helpers
 rather than accepting spoofed `__class__` or duck-typed objects.
 No arithmetic averaging exists anywhere.
 
+`known_gaps` remains an exact sorted-unique set with a 64-code wire bound. The ledger append
+boundary owns the corresponding task-global receipt-capacity invariant: before committing a
+proposed batch, it freezes the healthy-storage deterministic case for the proposed projection and
+unions its gap codes with the applicable check coverage, receipt applicability gaps, and every
+current retained finding coverage selected by the receipt successor rule. Exactly 64 distinct
+codes is admitted; a 65th distinct code rejects the whole batch atomically as `LIMIT_EXCEEDED`
+with `component=receipt_coverage`, `count`, and `limit=64`. Duplicate codes do not consume extra
+capacity, and comparison/order is ASCII byte order. No event, operation result, writer advance, or
+projection change from the rejected batch becomes durable. This admission failure reports a
+representational capacity limit, never caller-malformed `INVALID_REQUEST`, and it never truncates
+or lexically selects material gap identities. `weakest`, codecs, schemas, and receipt validation
+therefore retain their exact 64-code rule; append admission prevents a newly accepted healthy
+task state from requiring an unrepresentable receipt fold.
+
 ## 6. Actor and client types (`protocol/models.py` boundary; `domain/values.py` internal)
 
 - `ActorType`: `human`, `harness`, `logical_agent`, `model_backed_worker`, `delegated_subagent`,

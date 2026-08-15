@@ -8,6 +8,7 @@ import platform
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Final, Literal, cast
 
 from yoetz.domain.events import (
@@ -86,6 +87,10 @@ from yoetz.kernel.projections import (
     empty_projection_state,
     projection_digest,
     unresolved_finding_count,
+)
+from yoetz.kernel.receipt_capacity import (
+    ReceiptCoverageCapacityExceeded,
+    validate_receipt_coverage_capacity,
 )
 from yoetz.kernel.reducers import invalidates_recorded_check, replay
 from yoetz.ports.clock import ClockPort
@@ -195,6 +200,10 @@ type _SummaryCode = Literal[
 ]
 
 
+class _ErrorComponent(StrEnum):
+    RECEIPT_COVERAGE = "receipt_coverage"
+
+
 def _error(
     code: PublicErrorCode,
     *,
@@ -202,6 +211,9 @@ def _error(
     reason_code: str | None = None,
     sequence: int | None = None,
     head_digest: str | None = None,
+    component: _ErrorComponent | None = None,
+    count: int | None = None,
+    limit: int | None = None,
 ) -> PublicOperationError:
     details: dict[str, str | int] = {}
     if reason_code is not None:
@@ -210,6 +222,12 @@ def _error(
         details["sequence"] = sequence
     if head_digest is not None:
         details["head_digest"] = head_digest
+    if component is not None:
+        details["component"] = component
+    if count is not None:
+        details["count"] = count
+    if limit is not None:
+        details["limit"] = limit
     return PublicOperationError(code, code.value.lower(), retryable, safe_details=details)
 
 
@@ -1306,6 +1324,15 @@ class MemoryLedgerAdapter:
                 ) from exc
             except ValueError as exc:
                 raise _error(PublicErrorCode.EVENT_INVALID) from exc
+            try:
+                validate_receipt_coverage_capacity(projection, proposed)
+            except ReceiptCoverageCapacityExceeded as exc:
+                raise _error(
+                    PublicErrorCode.LIMIT_EXCEEDED,
+                    component=_ErrorComponent.RECEIPT_COVERAGE,
+                    count=exc.count,
+                    limit=exc.limit,
+                ) from exc
             result_frontier = Frontier(projection.frontier, projection.head_digest)
             warnings = (
                 (AppendWarning.UNKNOWN_EVENT_SCHEMA_PRESERVED,)
