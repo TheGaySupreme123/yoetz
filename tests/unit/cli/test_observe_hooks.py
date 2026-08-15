@@ -28,6 +28,7 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
     observation_ingest_result_to_json,
 )
+from yoetz.protocol.canonical import JsonValue
 
 _KEY = b"k" * 32
 
@@ -417,6 +418,51 @@ def test_observe_ingests_when_consented_and_pairs_pre_post(tmp_path: Path) -> No
     assert ObservationGapCode.UNPAIRED_EVENT.value not in status.gaps
 
 
+def test_tool_call_id_pairs_when_legacy_correlation_ids_differ(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    assert (
+        handle_observe(
+            event_name="PreToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": "pair-alias",
+                    "tool_name": "shell",
+                    "correlation_id": "pre",
+                    "tool_call_id": "shared",
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": "pair-alias",
+                    "tool_name": "shell",
+                    "tool_call_id": "shared",
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.UNPAIRED_EVENT.value not in status.gaps
+
+
 def test_unpaired_post_records_gap(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -444,7 +490,7 @@ def test_unpaired_post_records_gap(tmp_path: Path) -> None:
     assert ObservationGapCode.UNPAIRED_EVENT.value in status.gaps
 
 
-def _codex_0146_payload(event: str, tool_use_id: str, **extra: object) -> dict[str, object]:
+def _codex_0146_payload(event: str, tool_use_id: str, **extra: JsonValue) -> dict[str, JsonValue]:
     """A hook payload using only the field names the Codex 0.146.0 binary emits.
 
     The key set mirrors the wire-type table embedded in the shipped binary
@@ -452,12 +498,12 @@ def _codex_0146_payload(event: str, tool_use_id: str, **extra: object) -> dict[s
     that feed our own key names back to us cannot catch a contract mismatch.
     """
 
-    payload: dict[str, object] = {
+    payload: dict[str, JsonValue] = {
         "session_id": "01a006a4-1111-4111-8111-000000000001",
         "turn_id": "turn-3",
         "agent_type": "main",
-        "transcript_path": "/Users/dev/.codex/sessions/rollout-2026-08-15.jsonl",
-        "cwd": "/Users/dev/project",
+        "transcript_path": "/workspace/.codex/sessions/rollout-2026-08-15.jsonl",
+        "cwd": "/workspace/project",
         "hook_event_name": event,
         "model": "gpt-5.3-codex",
         "permission_mode": "on-request",
@@ -468,6 +514,25 @@ def _codex_0146_payload(event: str, tool_use_id: str, **extra: object) -> dict[s
     }
     payload.update(extra)
     return payload
+
+
+def test_codex_tool_use_id_wins_over_legacy_tool_call_id(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    payload = _codex_0146_payload(
+        "PreToolUse",
+        "call_current",
+        tool_call_id="call_legacy_conflict",
+    )
+
+    envelope = map_hook_payload_to_envelope(
+        "PreToolUse",
+        payload,
+        session_commitment=store.session_commitment("codex-precedence"),
+        event_ordinal=1,
+        key_material=store.key_material(),
+    )
+
+    assert envelope.structural_payload.get("tool_call_id") == "call_current"
 
 
 def test_codex_field_names_materialize_linked_action_and_result(tmp_path: Path) -> None:
