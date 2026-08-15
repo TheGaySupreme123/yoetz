@@ -18,10 +18,10 @@ files are also on disk beside this file as `references/workflow.md`,
 `references/coverage-and-receipts.md`, `references/publication-policy.md`,
 `references/request-templates.md`, and `references/agent-instructions.md`.
 
-If a `resources/read` result has no text, do not proceed and do not treat the read as success.
-Open the matching `references/<name>.md` beside this file and continue from that copy. Do not call
-`start` on an empty guidance body. An empty resource body is not a reason to read Yoetz product
-source.
+If a `resources/read` result has no text, call `read_guidance` with the same URI. If that result
+also has no text, open the matching `references/<name>.md` beside this file and continue from that
+copy. Do not call `start` on an empty guidance body. An empty resource body is not a reason to
+read Yoetz product source.
 
 - Before the first `start`: `yoetz://guidance/workflow.md` (the ten steps, cadence, resume behavior) and `yoetz://guidance/coverage-and-receipts.md` (coverage, findings, receipt wording). Both are already in initialize `instructions`; re-read them if that text is not in context.
 - Before the first `publish_work`: `yoetz://guidance/publication-policy.md` (what is material and safe to publish).
@@ -251,4 +251,11 @@ Using Yoetz is itself a state change. A run that started a task, advanced the le
 
 ## Compatibility
 
-Use only the six registered Yoetz MCP tools and their current schemas. Every tool request's `client` is exactly `{kind, version, integration}`; do not send `client.id` or any other client field. Fields backed by canonical integers stay JSON strings on the wire: send frontier `sequence` and pagination `limit` as strings such as `"10"`, never JSON numbers. Compatibility is exact and evidence-bound in the adjacent `manifest.json`; an empty profile set means this Yoetz skill advertises no tested harness version or hook.
+Use the six Yoetz workflow operations (`start`, `publish_work`, `check`, `respond`, `status`,
+`receipt`) and the read-only `read_guidance` tool, with their current schemas. Workflow requests
+still send `client` as exactly `{kind, version, integration}`; do not send `client.id` or any
+other client field. `read_guidance` is not a ledger operation and takes only a registered
+guidance URI. Fields backed by canonical integers stay JSON strings on the wire: send frontier
+`sequence` and pagination `limit` as strings such as `"10"`, never JSON numbers. Compatibility is
+exact and evidence-bound in the adjacent `manifest.json`; an empty profile set means this Yoetz
+skill advertises no tested harness version or hook.

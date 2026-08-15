@@ -1329,7 +1329,8 @@ lifecycle, observation-control, and CLI/UI-only methods. The privacy subset is e
 `privacy_get_setup|privacy_get_effective|privacy_propose_policy|privacy_tighten_policy|
 privacy_pending_list|privacy_receipts_list|privacy_receipts_get`. The observation subset is exactly
 `observation_ingest|observation_status|observation_pause|observation_resume|observation_revoke`
-(local CLI/UI only; never MCP tools — the public MCP surface remains six tools).
+(local CLI/UI only; never MCP tools — the public MCP surface remains the six workflow tools
+plus read-only `read_guidance`).
 It has no privacy decision, unlock, secret, credential, key-handle, decrypted-object,
 operation-body arbitrary-path, or policy-loosening field or method. The versioned handshake locator
 below is the sole narrow path-bearing exception. `service_status` is available while locked;
@@ -1388,7 +1389,7 @@ includes its initial attempt, spawn, and polling; an accepted but silent existin
 reported unavailable rather than causing a second daemon to be spawned. The MCP bridge supplies a
 **30-second** call deadline for `start`, `publish_work`, `respond`, `status`, and `receipt`, and a
 **300-second** deadline for `check`; these use the existing private `deadline_ms` envelope field and
-do not change the public six-tool schemas. A timed-out write has an unknown outcome: the bridge
+do not change the public workflow-tool schemas. A timed-out write has an unknown outcome: the bridge
 must preserve its retryable failure shape, say that it may already have committed, and direct the
 caller to retry with the same `request_id` (and operation status where applicable). A timed-out
 read may simply be repeated.
@@ -2286,7 +2287,7 @@ do not share allocation, cursor, consent, or advice state, and import never earn
 ### Live Codex observation and advice
 
 `ObservationPort` is the local-control boundary for first-party Codex live observation. It is not
-an MCP tool and does not extend the six-tool public workflow. Methods are:
+an MCP tool and does not extend the six-operation public workflow. Methods are:
 
 - `ingest(envelope: ObservationEnvelope) -> ObservationIngestResult`;
 - `status(query: ObservationStatusQuery) -> ObservationStatus`;
@@ -2843,12 +2844,14 @@ facade and are never MCP tools.
 - `service/human_control.py`, `service/secret_ingress.py`, `cli/unlock.py`, and
   `cli/privacy_control.py`: server ceremony/secret consumers plus the separately trusted foreground
   TTY helpers; no ordinary approval flag/token or server import in the helper graph.
-- `mcp/server.py`: low-level `Server("yoetz")`, generated six-tool registry, dispatch,
-  prevalidated fallbacks (`LAST_RESORT_INTERNAL_ERROR_RESULT`), the initialize `instructions`
-  string, a read-only guidance resource registry, and one `ServiceClient`; it owns no
-  runtime/application/provider/key state.
-- `mcp/descriptors.py`: the one owner of every agent-read string on the MCP surface — the six tool
-  names, descriptions, and annotations, plus the `instructions` text. All are loaded from the
+- `mcp/server.py`: low-level `Server("yoetz")`, generated seven-tool registry (six workflow
+  operations plus read-only `read_guidance`), dispatch, prevalidated fallbacks
+  (`LAST_RESORT_INTERNAL_ERROR_RESULT`), the initialize `instructions` string, a read-only
+  guidance resource registry, and one `ServiceClient`; it owns no runtime/application/provider/key
+  state. `read_guidance` does not use the service client.
+- `mcp/descriptors.py`: the one owner of every agent-read string on the MCP surface — the six
+  workflow tool names, `read_guidance`, descriptions, and annotations, plus the `instructions`
+  text. All are loaded from the
   packaged `guidance/` resources and verified against the resource manifest before use; none is
   composed at runtime from user, task, provider, or environment values. Shared values are
   `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
@@ -2861,7 +2864,7 @@ facade and are never MCP tools.
   every catalogued schema-version branch for each advertised ordinary event family. Every shipped
   worked example validates against that presentation schema as well as catalog admission;
   `catalog_input_schema` / full catalog request schemas remain admission authority via
-  `*.model_validate`. `status` carries `readOnlyHint=true`; `receipt` carries
+  `*.model_validate`. `status` and `read_guidance` carry `readOnlyHint=true`; `receipt` carries
   `readOnlyHint=false` because it stages an object and appends a `receipt_recorded` event. Every
   tool carries an explicit `idempotentHint=true`. Policy `check` carries `openWorldHint=true`;
   strict `check` carries `openWorldHint=false` and names the external-semantic ceiling. The hint is

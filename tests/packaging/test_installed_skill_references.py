@@ -49,8 +49,8 @@ def test_step_zero_stops_on_an_empty_guidance_read() -> None:
     text = _skill_text()
     collapsed = " ".join(text.split())
     assert "resolve without any repository checkout" not in collapsed
-    assert "If a `resources/read` result has no text, do not proceed" in collapsed
-    assert "do not treat the read as success" in collapsed
+    assert "If a `resources/read` result has no text, call `read_guidance`" in collapsed
+    assert "with the same URI" in collapsed
     assert "`references/<name>.md`" in collapsed
     assert "Do not call `start` on an empty guidance body" in collapsed
     assert "`agent-instructions.md`, `workflow.md`, and `coverage-and-receipts.md`" in collapsed

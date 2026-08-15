@@ -151,6 +151,17 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
                 "max_encoded_bytes": 6_000,
             }
         ),
+        "read-guidance-request": MappingProxyType(
+            {
+                "max_oneof_nodes": 0,
+                "max_oneof_branches": 0,
+                "max_ref_nodes": 0,
+                "max_conditional_nodes": 0,
+                "max_defs_count": 4,
+                "max_defs_nest_depth": 1,
+                "max_encoded_bytes": 2_000,
+            }
+        ),
     }
 )
 
@@ -285,6 +296,11 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                 "limit": "10",
                 "actor": dict(_EXAMPLE_ACTOR),
                 "client": dict(_EXAMPLE_CLIENT),
+            },
+        ),
+        "read-guidance-request": (
+            {
+                "uri": "yoetz://guidance/workflow.md",
             },
         ),
         # One worked draft per ordinary publishable family. The plan example alone left agents
@@ -1374,6 +1390,18 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         read_only=False,
         idempotent=True,
     ),
+    _descriptor(
+        "read_guidance",
+        "Read guidance",
+        "Read one registered Yoetz guidance document and return the full markdown as tool "
+        "text. The request names one registered guidance URI such as "
+        "yoetz://guidance/workflow.md. The result is the document text, not a 512-byte "
+        "summary. This tool is not a ledger operation and does not write the ledger. Extra "
+        "argument keys are rejected. An unknown URI is rejected without echoing the "
+        "requested value. Guidance: yoetz://guidance/agent-instructions.md.",
+        read_only=True,
+        idempotent=True,
+    ),
 )
 
 _STRICT_CHECK_DESCRIPTION_SUFFIX: Final = (
@@ -1428,6 +1456,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "respond": "sha256:b71f8e0a70e6740a07fafbf77bf1a94a7f452e2f8ebdfefe95dd23381d31dd17",
                 "status": "sha256:419abcdbcc8ddd833318c23a8a1b17e60e65031f89758401d2716090170d434e",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
+                "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
         ),
         "strict": MappingProxyType(
@@ -1438,14 +1467,15 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "respond": "sha256:b71f8e0a70e6740a07fafbf77bf1a94a7f452e2f8ebdfefe95dd23381d31dd17",
                 "status": "sha256:419abcdbcc8ddd833318c23a8a1b17e60e65031f89758401d2716090170d434e",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
+                "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
         ),
     }
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:a898c7eb19bd86578ba57e3d5d7c0225072b2087107cca74658b9194bc390133",
-        "strict": "sha256:f2508ff90497b3cf2c7a49d1119ae9f2a5de57e462a6f3007f2f409b1eff77b7",
+        "policy": "sha256:0c9351ae1ca918b20a1ac171ee65625fd437d1207c317d1c4d6429ce5f94af18",
+        "strict": "sha256:b69ed08dec479a20e79300bee313406376b957663190482c5c27add1dcea5caf",
     }
 )
 
@@ -1472,7 +1502,15 @@ def _presentation_description_strings(schema: Mapping[str, JsonValue]) -> tuple[
 def _lint_descriptor_sets() -> None:
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         names = tuple(descriptor.name for descriptor in descriptors)
-        if names != ("start", "publish_work", "check", "respond", "status", "receipt"):
+        if names != (
+            "start",
+            "publish_work",
+            "check",
+            "respond",
+            "status",
+            "receipt",
+            "read_guidance",
+        ):
             raise RuntimeError("descriptor_registry_invalid")
         if len(set(names)) != len(names):
             raise RuntimeError("descriptor_registry_invalid")
