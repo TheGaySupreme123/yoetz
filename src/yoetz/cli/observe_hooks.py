@@ -319,7 +319,6 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         fields["tool_name"] = tool_name
     for key in (
         "correlation_id",
-        "tool_call_id",
         "parent_tool_call_id",
         "permission_decision",
         "permission_kind",
@@ -336,6 +335,16 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         token = _token_or_none(payload.get(key))
         if token is not None and key in _STRUCTURAL_ALLOW:
             fields[key] = token
+    # Codex names the host tool-call id ``tool_use_id``. Normalize it to the
+    # canonical structural key here, with the host spelling taking precedence
+    # over legacy aliases exactly as it does in the pairing path. The wire
+    # schema enumerates structural fields, so the identity must land under
+    # ``tool_call_id`` or it is discarded at the boundary (#274).
+    tool_call_id = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+        payload.get("tool_call_id")
+    )
+    if tool_call_id is not None:
+        fields["tool_call_id"] = tool_call_id
     # Nested tool_input / tool_response never contribute prose — only structural scalars.
     tool_input = payload.get("tool_input")
     if isinstance(tool_input, Mapping):
@@ -383,12 +392,14 @@ def _source_identity(
 ) -> str:
     host_ids: dict[str, JsonValue] = {"event_ordinal": event_ordinal}
     for key in (
+        "tool_use_id",
         "tool_call_id",
         "correlation_id",
         "event_id",
         "id",
         "parent_tool_call_id",
         "subagent_id",
+        "turn_id",
     ):
         token = _token_or_none(payload.get(key))
         if token is not None:
@@ -1033,7 +1044,7 @@ def _note_dropped_event_gap(
 
 def handle_observe(
     *,
-    event_name: str,
+    event_name: str | None,
     stdin_bytes: bytes | None = None,
     stdout: BinaryIO | None = None,
     workspace: str | None = None,
@@ -1078,7 +1089,9 @@ def handle_observe(
             emitted = raw_stdout_json(value, stream)
             if not emitted:
                 with contextlib.suppress(BaseException):
-                    record_hook_diagnostic("stdout_write_failed", event_name, _state=_state)
+                    record_hook_diagnostic(
+                        "stdout_write_failed", event_name or "unknown_event", _state=_state
+                    )
             if stream is None and sys.stdout is sys.__stdout__:
                 with contextlib.suppress(BaseException):
                     sys.stdout.flush()

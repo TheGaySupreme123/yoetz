@@ -146,7 +146,10 @@ def _tool_name(payload: Mapping[str, JsonValue]) -> str | None:
 
 
 def _correlation(payload: Mapping[str, JsonValue]) -> str | None:
-    for key in ("tool_call_id", "correlation_id", "parent_tool_call_id"):
+    # Codex spells the host tool-call id ``tool_use_id``; ingress normalizes it
+    # to ``tool_call_id``, but read the host spelling first too so a payload
+    # that reaches this seam un-normalized still correlates (#274).
+    for key in ("tool_use_id", "tool_call_id", "correlation_id", "parent_tool_call_id"):
         value = payload.get(key)
         if type(value) is str and value:
             return value
