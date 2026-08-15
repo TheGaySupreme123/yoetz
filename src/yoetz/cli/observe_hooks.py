@@ -886,20 +886,21 @@ async def _drain_outbox_leased(
                 # the same session would deliver it out of order (#272), so the
                 # session retires for the pass whatever the retryable reason.
                 skipped_sessions.add(row.codex_session_id)
-                if decision.reason == ObservationGapCode.MAPPING_MISSING.value and (
-                    store.codex_session_ended(workspace_commitment, row.codex_session_id)
-                ):
+                if decision.reason == ObservationGapCode.MAPPING_MISSING.value:
                     # The session ended while unmapped: nothing will ever map it, so
-                    # its rows would otherwise retry forever and hold outbox capacity
-                    # until live workspaces overflow (#275).
+                    # its rows would otherwise retry forever. Terminalization takes
+                    # the lifecycle lock so a concurrent attach that is still
+                    # persisting its mapping wins this race (#275, #283 review).
+                    moved = 0
                     with contextlib.suppress(Exception):
-                        store.quarantine_outbox_session(
+                        moved = store.quarantine_ended_unmapped_session(
                             workspace_commitment,
                             row.codex_session_id,
                             decision.reason,
                         )
-                    consecutive_unavailable = 0
-                    continue
+                    if moved:
+                        consecutive_unavailable = 0
+                        continue
                 if decision.reason is not None:
                     # Stamp the retired siblings with the shared cause so
                     # `observe status` never reports them as not_attempted.

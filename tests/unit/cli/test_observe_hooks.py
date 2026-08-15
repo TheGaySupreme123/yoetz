@@ -12,6 +12,7 @@ from typing import cast
 
 import pytest
 
+from yoetz.adapters.integrations.codex_lifecycle import acquire_session_lock
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.recommendations import RecommendationState, store_recommendation_state
 from yoetz.cli import observe_hooks as observe_hooks_module
@@ -854,6 +855,19 @@ async def test_drain_quarantines_mapping_missing_rows_of_an_ended_session(tmp_pa
 
     async def connect(_kind: object):
         return Client()
+
+    with acquire_session_lock("ended", _state=tmp_path) as owned:
+        assert owned is True
+        await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+            store,
+            workspace_commitment=workspace,
+            codex_session_id="ended",
+            connect=connect,  # type: ignore[arg-type]
+            _state=tmp_path,
+        )
+
+    assert len(store.list_pending_outbox_rows(workspace)) == 2
+    assert store.quarantined_count(workspace) == 0
 
     await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
         store,

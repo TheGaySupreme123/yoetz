@@ -256,27 +256,22 @@ class ObservationOutboxSweeper:
                         # session may be delivered this pass -- stepping over it is exactly the
                         # reorder that strands earlier rows behind the ingest cursor (#272).
                         retired_sessions.add(session_key)
-                        if decision.reason == ObservationGapCode.MAPPING_MISSING.value and (
-                            await self._off_loop(
-                                partial(
-                                    self.local.codex_session_ended,
-                                    workspace,
-                                    row.codex_session_id,
-                                )
-                            )
-                        ):
+                        if decision.reason == ObservationGapCode.MAPPING_MISSING.value:
                             # The session ended while unmapped: nothing will ever map it,
-                            # so its rows would otherwise retry forever and hold outbox
-                            # capacity until live workspaces overflow (#275).
-                            quarantined += await self._off_loop(
+                            # unless a concurrent attach currently owns its lifecycle
+                            # lock. Terminalize atomically with that lock so an attach
+                            # already in flight wins this race (#275, #283 review).
+                            moved = await self._off_loop(
                                 partial(
-                                    self.local.quarantine_outbox_session,
+                                    self.local.quarantine_ended_unmapped_session,
                                     workspace,
                                     row.codex_session_id,
                                     decision.reason,
                                 )
                             )
-                            continue
+                            if moved:
+                                quarantined += moved
+                                continue
                         retry_pending += 1
                         if decision.reason is not None:
                             await self._off_loop(

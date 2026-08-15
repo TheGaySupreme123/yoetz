@@ -53,8 +53,9 @@ describes behavior intended for the first release rather than a change from a pr
   silently deleting it. `[observation].enabled` is a typed local configuration gate that defaults
   on; per-workspace observation consent remains independently required.
   Observation drains preserve FIFO within each session lane, retire a lane after its head fails,
-  quarantine ended unmapped sessions, and stop a service sweep after one workspace-global
-  rejection. Turn-boundary auto-attach retries are bounded and diagnostically visible. Transient
+  quarantine ended unmapped sessions only after fencing against a concurrent attach, and stop a
+  service sweep after one workspace-global rejection. Turn-boundary auto-attach retries are
+  bounded and diagnostically visible. Transient
   ready-application activation failures after a successful soft unlock remain retryable for three
   attempts, and MCP now preserves the daemon's retryability in `VAULT_LOCKED` guidance.
   Observation hooks no longer block the session (#209/#210/#211): pure-ingress handlers are

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from yoetz.adapters.integrations.codex_lifecycle import acquire_session_lock
 from yoetz.adapters.integrations.observation_local import (
     LocalObservationStore,
     ObservationOutboxRow,
@@ -530,7 +531,16 @@ async def test_mapping_missing_for_an_ended_session_is_terminally_quarantined(
     outcomes[live_envelope.source_identity] = mapping_missing
     store.note_session_end(workspace, ended)
 
-    summary = await ObservationOutboxSweeper(store, _Coordinator(outcomes)).sweep()
+    coordinator = _Coordinator(outcomes)
+    with acquire_session_lock("ended-session", _state=tmp_path) as owned:
+        assert owned is True
+        contested = await ObservationOutboxSweeper(store, coordinator).sweep()
+
+    assert contested.quarantined == 0
+    assert contested.retry_pending == 2
+    assert len(store.list_pending_outbox_rows(workspace)) == 3
+
+    summary = await ObservationOutboxSweeper(store, coordinator).sweep()
 
     assert summary.quarantined == 2
     assert summary.retry_pending == 1

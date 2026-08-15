@@ -2442,7 +2442,8 @@ idempotently. Stream cursor advancement occurs only after outbox insertion. Sess
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
 across workspace sessions under a nonblocking per-workspace lease; within one pass a
 `mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),
-and an ended unmapped session is terminally quarantined because no future mapping can deliver it.
+and an ended unmapped session is terminally quarantined because no future mapping can deliver it,
+but only after atomically acquiring its lifecycle lock so an attach already in flight wins.
 Turn-boundary hooks retry auto-attach under a bounded budget and record a payload-free diagnostic
 when no mapping results. Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
 A `service_unavailable` rejection retires that session's lane for the pass while other sessions
