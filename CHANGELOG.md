@@ -11,6 +11,18 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- MCP success summaries now preserve the canonical frontier head digest and, for generic
+  operations such as `start`, returned task/session/writer identifiers after strict shape
+  validation. The bounded text fallback can therefore seed the next request even when a host drops
+  `structuredContent` (issue #279).
+
+- Local-only SessionStart observation now emits the static attach advisory without opening a
+  service connection, and pending standing advice shares that bootstrap context instead of being
+  starved (issue #280).
+
+- Observation sweeps that raise now retain the exception's bounded reason and origin in owner-only
+  diagnostics; only the actual sweep deadline emits `sweep_deadline_exceeded` (issue #278).
+
 - `publish_work` rejections for a payload field placed on the wrong event family now name the
   field's one legal owning family (issue #266). When an `extra_forbidden` key byte-equals a frozen
   catalogued payload property with exactly one owner among the ordinary publish families — the
