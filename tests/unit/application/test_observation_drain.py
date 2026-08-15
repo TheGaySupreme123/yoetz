@@ -200,30 +200,31 @@ async def test_sweep_routes_rows_persists_attempts_and_marks_success(tmp_path: P
     )
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
-    session = store.bind_codex_session(workspace, "sweep-session")
-    accepted = _envelope(session, "hook:accepted", 1)
-    retry = _envelope(session, "hook:retry", 2)
-    permanent = _envelope(session, "hook:permanent", 3)
-    failed = _envelope(session, "hook:failed", 4)
-    for envelope in (accepted, retry, permanent, failed):
-        store.enqueue_outbox(workspace, "sweep-session", envelope)
+    # One session per outcome: a retryable rejection retires its whole session lane for the
+    # pass (#272), so mixed routings can only all be observed across separate lanes.
+    envelopes: dict[str, ObservationEnvelope] = {}
+    for name in ("accepted", "retry", "permanent", "failed"):
+        session = store.bind_codex_session(workspace, f"session-{name}")
+        envelope = _envelope(session, f"hook:{name}", 1)
+        envelopes[name] = envelope
+        store.enqueue_outbox(workspace, f"session-{name}", envelope)
 
     coordinator = _Coordinator(
         {
-            accepted.source_identity: ObservationIngestResult(
+            envelopes["accepted"].source_identity: ObservationIngestResult(
                 ObservationIngestDisposition.DUPLICATE, "duplicate", None
             ),
-            retry.source_identity: ObservationIngestResult(
+            envelopes["retry"].source_identity: ObservationIngestResult(
                 ObservationIngestDisposition.REJECTED,
                 ObservationGapCode.MAPPING_MISSING.value,
                 None,
             ),
-            permanent.source_identity: ObservationIngestResult(
+            envelopes["permanent"].source_identity: ObservationIngestResult(
                 ObservationIngestDisposition.REJECTED,
                 ObservationGapCode.CONSENT_REVOKED.value,
                 None,
             ),
-            failed.source_identity: RuntimeError("transport detail must not persist"),
+            envelopes["failed"].source_identity: RuntimeError("transport detail must not persist"),
         }
     )
     summary = await ObservationOutboxSweeper(store, coordinator).sweep()
@@ -241,8 +242,8 @@ async def test_sweep_routes_rows_persists_attempts_and_marks_success(tmp_path: P
     assert store.quarantined_count(workspace) == 1
     pending = store.list_pending_outbox_rows(workspace)
     assert [row.envelope.source_identity for row in pending] == [
-        retry.source_identity,
-        failed.source_identity,
+        envelopes["retry"].source_identity,
+        envelopes["failed"].source_identity,
     ]
     assert [row.attempts for row in pending] == [1, 1]
     assert [row.last_reason for row in pending] == [
@@ -350,13 +351,16 @@ async def test_repeated_limit_one_sweeps_are_fair_across_sessions(tmp_path: Path
 
 
 @pytest.mark.anyio
-async def test_repeated_sweeps_advance_beyond_retryable_limit_prefix(tmp_path: Path) -> None:
+async def test_head_retry_retires_lane_and_stamps_backlog_with_shared_cause(
+    tmp_path: Path,
+) -> None:
+    """A retryable head probes once per sweep; siblings are stamped, never stepped over (#272)."""
+
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
     session = store.bind_codex_session(workspace, "long-session")
     outcomes: dict[str, ObservationIngestResult | Exception] = {}
-    final_identity = "hook:long:65"
     for ordinal in range(1, 66):
         identity = f"hook:long:{ordinal}"
         envelope = _envelope(session, identity, ordinal)
@@ -370,16 +374,145 @@ async def test_repeated_sweeps_advance_beyond_retryable_limit_prefix(tmp_path: P
     sweeper = ObservationOutboxSweeper(store, coordinator, limit=64)
 
     await sweeper.sweep()
-    assert final_identity not in {
-        row.envelope.source_identity
-        for row in store.list_pending_outbox_rows(workspace)
-        if row.attempts > 0
-    }
+    rows = store.list_pending_outbox_rows(workspace)
+    assert [row.attempts for row in rows] == [1] + [0] * 64
+    assert all(row.last_reason == ObservationGapCode.MAPPING_MISSING.value for row in rows)
+
     await sweeper.sweep()
-    assert final_identity in {
-        row.envelope.source_identity
-        for row in store.list_pending_outbox_rows(workspace)
-        if row.attempts > 0
+    rows = store.list_pending_outbox_rows(workspace)
+    assert [row.attempts for row in rows] == [2] + [0] * 64
+    assert len(coordinator.calls) == 2
+
+
+@pytest.mark.anyio
+async def test_sweep_delivers_a_session_fifo_despite_attempt_skew(tmp_path: Path) -> None:
+    """Recovered rows with high attempts must still go before newer rows of the same session.
+
+    Sorting a lane by attempts once delivered a session's fresh rows first; the ingest cursor
+    then advanced past the older rows and every one of them was destroyed as a terminal
+    ``cursor_stale`` quarantine — the exact loss of issue #272.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "recovered-session")
+    outcomes: dict[str, ObservationIngestResult | Exception] = {}
+    for ordinal in (1, 2, 3):
+        envelope = _envelope(session, f"hook:recovered:{ordinal}", ordinal)
+        store.enqueue_outbox(workspace, "recovered-session", envelope)
+        outcomes[envelope.source_identity] = ObservationIngestResult(
+            ObservationIngestDisposition.ACCEPTED, None, envelope.cursor
+        )
+    # The opening rows failed earlier passes (e.g. mapping_missing) and carry more attempts
+    # than the youngest row, exactly the shape of a session that started before its mapping.
+    for row in store.list_pending_outbox_rows(workspace)[:2]:
+        assert (
+            store.bump_outbox_row_attempt(
+                workspace, row, reason=ObservationGapCode.MAPPING_MISSING.value
+            )
+            is not None
+        )
+
+    class _OrderRecorder:
+        def __init__(self) -> None:
+            self.positions: list[int] = []
+
+        async def ingest_request(
+            self, request: ObservationIngestRequest
+        ) -> ObservationIngestResult:
+            self.positions.append(request.envelope.cursor.event_position)
+            return outcomes[request.envelope.source_identity]  # type: ignore[return-value]
+
+    coordinator = _OrderRecorder()
+    summary = await ObservationOutboxSweeper(store, coordinator).sweep()
+
+    assert coordinator.positions == [1, 2, 3]
+    assert summary.acknowledged == 3
+    assert store.pending_outbox_count(workspace) == 0
+
+
+@pytest.mark.anyio
+async def test_head_retry_never_steps_over_to_a_later_row_of_the_same_session(
+    tmp_path: Path,
+) -> None:
+    """A lane whose head fails retryably sits out the pass; other lanes keep draining (#272)."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    stuck = store.bind_codex_session(workspace, "stuck-session")
+    healthy = store.bind_codex_session(workspace, "healthy-session")
+    outcomes: dict[str, ObservationIngestResult | Exception] = {}
+    for ordinal in (1, 2):
+        envelope = _envelope(stuck, f"hook:stuck:{ordinal}", ordinal)
+        store.enqueue_outbox(workspace, "stuck-session", envelope)
+        outcomes[envelope.source_identity] = ObservationIngestResult(
+            ObservationIngestDisposition.REJECTED,
+            ObservationGapCode.SERVICE_UNAVAILABLE.value,
+            None,
+        )
+    healthy_envelope = _envelope(healthy, "hook:healthy", 1)
+    store.enqueue_outbox(workspace, "healthy-session", healthy_envelope)
+    outcomes[healthy_envelope.source_identity] = ObservationIngestResult(
+        ObservationIngestDisposition.ACCEPTED, None, healthy_envelope.cursor
+    )
+
+    coordinator = _Coordinator(outcomes)
+    summary = await ObservationOutboxSweeper(store, coordinator).sweep()
+
+    assert coordinator.calls.count("stuck-session") == 1
+    assert coordinator.calls.count("healthy-session") == 1
+    assert summary.attempted == 2
+    assert summary.acknowledged == 1
+    assert summary.retry_pending == 1
+    stuck_rows = store.list_pending_outbox_rows(workspace, codex_session_id="stuck-session")
+    assert [row.attempts for row in stuck_rows] == [1, 0]
+    assert [row.last_reason for row in stuck_rows] == [
+        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+    ]
+
+
+@pytest.mark.anyio
+async def test_mapping_missing_for_an_ended_session_is_terminally_quarantined(
+    tmp_path: Path,
+) -> None:
+    """Rows of a session that ended unmapped can never deliver; retire them loudly (#275).
+
+    A live unmapped session keeps its rows pending: a later ``start`` (or the hook-side
+    auto-attach re-attempt) can still map it.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    ended = store.bind_codex_session(workspace, "ended-session")
+    live = store.bind_codex_session(workspace, "live-session")
+    mapping_missing = ObservationIngestResult(
+        ObservationIngestDisposition.REJECTED,
+        ObservationGapCode.MAPPING_MISSING.value,
+        None,
+    )
+    outcomes: dict[str, ObservationIngestResult | Exception] = {}
+    for ordinal in (1, 2):
+        envelope = _envelope(ended, f"hook:ended:{ordinal}", ordinal)
+        store.enqueue_outbox(workspace, "ended-session", envelope)
+        outcomes[envelope.source_identity] = mapping_missing
+    live_envelope = _envelope(live, "hook:live", 1)
+    store.enqueue_outbox(workspace, "live-session", live_envelope)
+    outcomes[live_envelope.source_identity] = mapping_missing
+    store.note_session_end(workspace, ended)
+
+    summary = await ObservationOutboxSweeper(store, _Coordinator(outcomes)).sweep()
+
+    assert summary.quarantined == 2
+    assert summary.retry_pending == 1
+    remaining = store.list_pending_outbox_rows(workspace)
+    assert [row.codex_session_id for row in remaining] == ["live-session"]
+    assert store.quarantined_count(workspace) == 2
+    assert {entry[2] for entry in store.list_quarantine(workspace)} == {
+        ObservationGapCode.MAPPING_MISSING.value
     }
 
 

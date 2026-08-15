@@ -852,6 +852,23 @@ class LocalObservationStore:
             self._save(workspace_commitment, state)
         return session
 
+    def codex_session_ended(self, workspace_commitment: str, codex_session_id: str) -> bool:
+        """Whether the bound Codex session is marked ended for its current generation.
+
+        Drain routing consults this for ``mapping_missing`` rejections: pending outbox rows
+        of a session that ended while unmapped can never deliver -- no future ``start`` will
+        map an ended session -- so they get a terminal state instead of retrying forever and
+        holding outbox capacity (#275). A restarted session clears the mark via
+        ``begin_session_generation``.
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            assert state.ended_sessions is not None
+            session = state.codex_session_bindings.get(codex_session_id)
+            return session is not None and session in state.ended_sessions
+
     def find_workspace_for_codex_session(self, codex_session_id: str) -> str | None:
         with self._lock:
             for workspace, state in self._iter_workspaces():

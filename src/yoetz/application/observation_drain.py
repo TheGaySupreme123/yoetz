@@ -191,15 +191,26 @@ class ObservationOutboxSweeper:
                 entered = True
                 if not owned:
                     continue
-                pending_rows = frozenset(
-                    await self._off_loop(partial(self.local.list_pending_outbox_rows, workspace))
-                )
+                # The authoritative FIFO queues, re-read under the lease. A selected row is
+                # attempted only while it is still the head of its session's queue: anything
+                # else means another drain moved the outbox between selection and the lease,
+                # and delivering it could jump an earlier pending sibling (#272).
+                lane_queues: dict[str, list[ObservationOutboxRow]] = {}
+                for pending_row in await self._off_loop(
+                    partial(self.local.list_pending_outbox_rows, workspace)
+                ):
+                    lane_queues.setdefault(pending_row.codex_session_id, []).append(pending_row)
                 for selected_workspace, row in rows:
-                    if selected_workspace != workspace or row not in pending_rows:
+                    if selected_workspace != workspace:
                         continue
                     session_key = (workspace, row.codex_session_id)
                     if session_key in retired_sessions:
                         continue
+                    queue = lane_queues.get(row.codex_session_id)
+                    if not queue or queue[0] != row:
+                        retired_sessions.add(session_key)
+                        continue
+                    queue.pop(0)
                     attempted += 1
                     request = ObservationIngestRequest(
                         codex_session_id=row.codex_session_id,
@@ -223,6 +234,9 @@ class ObservationOutboxSweeper:
                         )
                     )
                     if attempted_row is None:
+                        # The row changed under the lease -- the lane's true order is no longer
+                        # what this pass selected, so it sits out the rest of the pass.
+                        retired_sessions.add(session_key)
                         continue
                     if decision.reason is not None:
                         reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
@@ -231,7 +245,41 @@ class ObservationOutboxSweeper:
                         )
 
                     if decision.action is ObservationDrainAction.RETRY:
+                        # The head of this lane stays pending, so no later row of the same
+                        # session may be delivered this pass -- stepping over it is exactly the
+                        # reorder that strands earlier rows behind the ingest cursor (#272).
+                        retired_sessions.add(session_key)
+                        if decision.reason == ObservationGapCode.MAPPING_MISSING.value and (
+                            await self._off_loop(
+                                partial(
+                                    self.local.codex_session_ended,
+                                    workspace,
+                                    row.codex_session_id,
+                                )
+                            )
+                        ):
+                            # The session ended while unmapped: nothing will ever map it,
+                            # so its rows would otherwise retry forever and hold outbox
+                            # capacity until live workspaces overflow (#275).
+                            quarantined += await self._off_loop(
+                                partial(
+                                    self.local.quarantine_outbox_session,
+                                    workspace,
+                                    row.codex_session_id,
+                                    decision.reason,
+                                )
+                            )
+                            continue
                         retry_pending += 1
+                        if decision.reason is not None:
+                            await self._off_loop(
+                                partial(
+                                    self.local.note_outbox_session_reason,
+                                    workspace,
+                                    row.codex_session_id,
+                                    decision.reason,
+                                )
+                            )
                         continue
                     if decision.action is ObservationDrainAction.QUARANTINE:
                         if decision.reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value:
@@ -274,15 +322,14 @@ class ObservationOutboxSweeper:
         )
 
     def _fair_pending_rows(self) -> tuple[tuple[str, ObservationOutboxRow], ...]:
+        # Fairness may reorder *lanes*, never rows *within* a lane: each session's rows keep
+        # strict outbox (FIFO) order. Sorting a lane by attempts once delivered a session's
+        # newer rows ahead of its older, more-attempted ones, which advanced the ingest cursor
+        # past the older rows and destroyed them as terminal cursor_stale quarantine (#272).
         lanes: dict[tuple[str, str], list[ObservationOutboxRow]] = {}
         for workspace in self.local.pending_workspaces():
-            indexed_by_session: dict[str, list[tuple[int, ObservationOutboxRow]]] = {}
-            for index, row in enumerate(self.local.list_pending_outbox_rows(workspace)):
-                indexed_by_session.setdefault(row.codex_session_id, []).append((index, row))
-            for session, rows in indexed_by_session.items():
-                lanes[(workspace, session)] = [
-                    row for _, row in sorted(rows, key=lambda item: (item[1].attempts, item[0]))
-                ]
+            for row in self.local.list_pending_outbox_rows(workspace):
+                lanes.setdefault((workspace, row.codex_session_id), []).append(row)
         selected_per_lane = {lane: 0 for lane in lanes}
         selected: list[tuple[str, ObservationOutboxRow]] = []
         while lanes and len(selected) < self.limit:

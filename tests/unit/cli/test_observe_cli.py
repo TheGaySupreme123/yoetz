@@ -127,6 +127,9 @@ def test_status_surfaces_quarantine_depth_and_reclaim_empties_it(
     )
     payload = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
     assert payload["quarantine_count"] == 2
+    # Per-reason depth (#272): a destroyed-and-replaced event is visible as its
+    # cause, not hidden inside one opaque number.
+    assert payload["quarantine_causes"] == {"consent_revoked": 2}
     assert payload["quarantine_evicted_count"] == 0
 
     assert (
@@ -134,6 +137,7 @@ def test_status_surfaces_quarantine_depth_and_reclaim_empties_it(
     )
     text = capsys.readouterr().out  # type: ignore[attr-defined]
     assert "quarantine: 2" in text
+    assert "cause: consent_revoked=2" in text
     assert (
         "reclaim by changing to the selected workspace and running "
         "'yoetz observe reclaim --workspace .'"
