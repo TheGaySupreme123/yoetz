@@ -1463,6 +1463,110 @@ async def test_soft_lock_auto_ready_reopens_on_next_ordinary_dispatch(
 
 
 @pytest.mark.anyio
+async def test_transient_activation_failure_keeps_soft_reready_eligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A succeeded soft unlock whose activation fails transiently must stay retryable (#276).
+
+    One event-loop-lag blip during ready activation used to demote the service to a terminal
+    LOCKED(unlock_failed) that nothing ever reconsidered; the very next dispatch must retry
+    and succeed instead.
+    """
+
+    application = _Application()
+    vault = _PassphraseVault()
+    secret = b"correct horse battery staple!!"
+    vault.expect_secret(secret)
+    failures = {"remaining": 1}
+
+    async def factory(service_generation: int, vault_generation: int) -> _Application:
+        del service_generation, vault_generation
+        if failures["remaining"] > 0:
+            failures["remaining"] -= 1
+            raise RuntimeError("transient saturation")
+        return application
+
+    _patch_auto_unlock_store(monkeypatch, secret)
+    daemon = _soft_lock_daemon(tmp_path, factory=factory, vault=vault)
+    await daemon.start()
+    daemon._state_reason = "idle_relock"  # pyright: ignore[reportPrivateUsage]
+
+    rejected = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert rejected.outcome == "error"
+    assert isinstance(rejected.body, ControlError)
+    assert rejected.body.reason == "vault_locked"
+    assert rejected.body.retryable is True, "a transient activation failure must say retryable"
+    assert daemon.status().state is ServiceState.LOCKED
+    assert daemon.status().state_reason == "idle_relock", (
+        "the soft-lock reason survives so the next dispatch re-attempts auto-ready"
+    )
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert result.outcome == "ok"
+    assert daemon.status().state is ServiceState.READY
+    assert daemon.status().state_reason == "none"
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_repeated_activation_failures_degrade_to_terminal_unlock_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transient-failure allowance is bounded; a persistent fault still goes terminal."""
+
+    application = _Application()
+    vault = _PassphraseVault()
+    secret = b"correct horse battery staple!!"
+    vault.expect_secret(secret)
+
+    async def factory(service_generation: int, vault_generation: int) -> _Application:
+        del service_generation, vault_generation
+        raise RuntimeError("persistent activation fault")
+
+    _patch_auto_unlock_store(monkeypatch, secret)
+    daemon = _soft_lock_daemon(tmp_path, factory=factory, vault=vault)
+    await daemon.start()
+    daemon._state_reason = "idle_relock"  # pyright: ignore[reportPrivateUsage]
+    limit = daemon_module._SOFT_REREADY_ACTIVATION_RETRY_LIMIT  # pyright: ignore[reportPrivateUsage]
+
+    for _attempt in range(limit):
+        rejected = await daemon.dispatch(
+            ControlClientKind.MCP_BRIDGE,
+            _request(daemon, ControlMethod.START, _start_body()),
+        )
+        assert rejected.outcome == "error"
+        assert isinstance(rejected.body, ControlError)
+        assert rejected.body.retryable is True
+        assert daemon.status().state_reason == "idle_relock"
+
+    exhausted = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert exhausted.outcome == "error"
+    assert isinstance(exhausted.body, ControlError)
+    assert daemon.status().state_reason == "unlock_failed"
+
+    final_unlocks = vault.unlock_count
+    terminal = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert terminal.outcome == "error"
+    assert isinstance(terminal.body, ControlError)
+    assert terminal.body.retryable is False, "a terminal lock must not claim to be retryable"
+    assert vault.unlock_count == final_unlocks, "terminal state stops burning unlock attempts"
+    assert application.start_calls == 0
+    await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_explicit_lock_does_not_auto_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

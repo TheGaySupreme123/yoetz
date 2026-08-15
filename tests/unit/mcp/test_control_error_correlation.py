@@ -175,3 +175,43 @@ def test_bridge_does_not_re_record_when_service_id_is_present(
     assert (
         lookup_diagnostic_records("err_cccccccc-cccc-4ccc-8ccc-cccccccccccc", root=tmp_path) == ()
     )
+
+
+def test_vault_locked_message_and_retryable_follow_the_daemon_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retryable soft/transient lock must not be described as a terminal hard lock (#276).
+
+    The daemon distinguishes a soft lock (heals on the next attempt) from a hard lock or
+    missing setup (needs a ceremony) via ``retryable``. Discarding that flag once told an
+    agent to abandon evidence and receipts a single retry would have recorded.
+    """
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+
+    transient = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        ControlError("vault_locked", retryable=True),
+        request_id=_REQUEST,
+        operation="publish_work",
+    )
+    structured = cast(dict[str, object], transient.structuredContent)
+    error = cast(dict[str, object], structured["error"])
+    assert error["code"] == PublicErrorCode.VAULT_LOCKED.value
+    assert error["retryable"] is True
+    message = cast(str, error["message"])
+    assert "Retry this operation" in message
+    assert "hard lock or missing setup" not in message
+
+    terminal = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        ControlError("vault_locked", retryable=False),
+        request_id=_REQUEST,
+        operation="publish_work",
+    )
+    structured = cast(dict[str, object], terminal.structuredContent)
+    error = cast(dict[str, object], structured["error"])
+    assert error["code"] == PublicErrorCode.VAULT_LOCKED.value
+    assert error["retryable"] is False
+    message = cast(str, error["message"])
+    assert "hard lock or missing setup" in message
