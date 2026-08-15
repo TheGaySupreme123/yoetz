@@ -1556,8 +1556,12 @@ does not authenticate the current envelope reports `auto_unlock_stale`; structur
 or entry failures use the two other `auto_unlock_*` reasons. None reveals entry bytes, paths, or
 credential/policy state.
 After a soft lock (`idle_relock`, `user_session_locked`, `system_suspend`), the
-service may re-read the same scoped entry (or retry OS keyring) once before denying ordinary
-control with `vault_locked`. `explicit_lock`, `monitor_lost`, and hard `auto_unlock_*` /
+service may re-read the same scoped entry (or retry OS keyring) before denying ordinary
+control with `vault_locked`. When the credential succeeds but ready-application activation fails,
+the service preserves the soft-lock reason for up to three consecutive attempts so a later dispatch
+can retry; a fourth consecutive activation failure becomes terminal `unlock_failed`.
+The resulting `VAULT_LOCKED` error is retryable only while this automatic recovery path remains
+eligible. `explicit_lock`, `monitor_lost`, and hard `auto_unlock_*` /
 `passphrase_required` reasons do not take that path. The trusted unlock helper may submit the scoped entry through the
 confidential unlock ceremony without a TTY prompt when the entry is present.
 `ServiceStatus.state_reason=human_authority_unavailable` has exactly two valid combinations:
@@ -2438,9 +2442,11 @@ idempotently. Stream cursor advancement occurs only after outbox insertion. Sess
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
 across workspace sessions under a nonblocking per-workspace lease; within one pass a
 `mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),
-and workspace-global rejections (`vault_locked`, disabled, paused) end the pass. A
-`service_unavailable` rejection is row-scoped: later rows are still attempted, and the pass yields
-after three consecutive such rejections. Local observation-store acquisition is capped at two
+and an ended unmapped session is terminally quarantined because no future mapping can deliver it.
+Turn-boundary hooks retry auto-attach under a bounded budget and record a payload-free diagnostic
+when no mapping results. Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
+A `service_unavailable` rejection retires that session's lane for the pass while other sessions
+remain eligible; no later row may step over a failed lane head. Local observation-store acquisition is capped at two
 seconds for both the process-local reentrant lock and the cross-process flock. Coordinator and
 sweeper calls use separate bounded executors, so cancellation cannot strand an exit-blocking flock
 wait or exhaust the shared default executor. `observation_storage_corrupt` is terminal for its Codex

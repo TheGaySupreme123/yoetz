@@ -900,6 +900,8 @@ def test_unmapped_session_reattempts_auto_attach_on_turn_events_only(
     )
     assert code == 0
     assert calls == ["late-attach"]
+    diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"auto_attach_retry_failed"' in diagnostics
 
     code = handle_observe(
         event_name="PostToolUse",
@@ -918,6 +920,38 @@ def test_unmapped_session_reattempts_auto_attach_on_turn_events_only(
     )
     assert code == 0
     assert calls == ["late-attach"], "tool-call storms must never re-attempt auto-attach"
+
+
+def test_auto_attach_retry_exception_records_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    async def fail_auto_start(codex_session_id: str, *, _state: Path | None) -> object | None:
+        del codex_session_id, _state
+        raise TimeoutError("bounded auto-attach timeout")
+
+    monkeypatch.setattr(observe_hooks_module, "_try_auto_start", fail_auto_start)
+
+    async def connect(_kind: object):
+        return _InstantAckClient()
+
+    code = handle_observe(
+        event_name="UserPromptSubmit",
+        stdin_bytes=json.dumps(
+            {"session_id": "late-attach-timeout", "hook_event_name": "UserPromptSubmit"}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert diagnostics.count('"reason":"auto_attach_retry_failed"') == 1
 
 
 def test_session_reason_stamping_preserves_a_rows_observed_cause(tmp_path: Path) -> None:

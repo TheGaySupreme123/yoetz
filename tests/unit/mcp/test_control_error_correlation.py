@@ -215,3 +215,4 @@ def test_vault_locked_message_and_retryable_follow_the_daemon_flag(
     assert error["retryable"] is False
     message = cast(str, error["message"])
     assert "hard lock or missing setup" in message
+    assert "Retry this operation" not in message

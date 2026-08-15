@@ -115,6 +115,32 @@ def test_route_unknown_rejection_reason_to_safe_retry_fallback() -> None:
     assert decision.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
 
 
+@pytest.mark.anyio
+async def test_workspace_global_retry_reason_stops_after_first_lane(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    outcomes: dict[str, ObservationIngestResult | Exception] = {}
+    for session_id in ("locked-a", "locked-b"):
+        session = store.bind_codex_session(workspace, session_id)
+        envelope = _envelope(session, f"hook:{session_id}", 1)
+        store.enqueue_outbox(workspace, session_id, envelope)
+        outcomes[envelope.source_identity] = ObservationIngestResult(
+            ObservationIngestDisposition.REJECTED,
+            ObservationGapCode.VAULT_LOCKED.value,
+            None,
+        )
+    coordinator = _Coordinator(outcomes)
+
+    summary = await ObservationOutboxSweeper(store, coordinator).sweep()
+
+    assert summary.attempted == 1
+    assert summary.retry_pending == 1
+    assert summary.reasons == ((ObservationGapCode.VAULT_LOCKED.value, 1),)
+    assert len(coordinator.calls) == 1
+    assert len(store.list_pending_outbox_rows(workspace)) == 2
+
+
 def test_bulk_quarantine_records_terminal_reason_and_returns_rows_moved(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))

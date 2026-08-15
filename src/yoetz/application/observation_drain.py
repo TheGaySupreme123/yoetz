@@ -48,6 +48,13 @@ RETRYABLE_OBSERVATION_REJECTIONS: Final = frozenset(
         "paused",
     }
 )
+_WORKSPACE_GLOBAL_STOP_REASONS: Final = frozenset(
+    {
+        ObservationGapCode.VAULT_LOCKED.value,
+        "observation_disabled",
+        "paused",
+    }
+)
 SAFE_OBSERVATION_REJECTION_REASONS: Final = frozenset(
     {item.value for item in ObservationGapCode} | RETRYABLE_OBSERVATION_REJECTIONS | {"duplicate"}
 )
@@ -280,6 +287,12 @@ class ObservationOutboxSweeper:
                                     decision.reason,
                                 )
                             )
+                        if decision.reason in _WORKSPACE_GLOBAL_STOP_REASONS:
+                            # This condition cannot heal for another lane in the
+                            # same workspace during this pass. Preserve the
+                            # attempted lane's bookkeeping, then stop before
+                            # issuing redundant coordinator calls (#283 review).
+                            break
                         continue
                     if decision.action is ObservationDrainAction.QUARANTINE:
                         if decision.reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value:

@@ -1333,10 +1333,19 @@ def handle_observe(
                                 timeout=_AUTO_ATTACH_RETRY_BUDGET_SECONDS,
                             )
 
-                        with contextlib.suppress(Exception):
+                        try:
                             mapping = cast(
                                 LifecycleMapping | None, _resolve_runner()(_attach_retry)
                             )
+                        except Exception:
+                            record_hook_diagnostic(
+                                "auto_attach_retry_failed", resolved_event, _state=_state
+                            )
+                        else:
+                            if mapping is None:
+                                record_hook_diagnostic(
+                                    "auto_attach_retry_failed", resolved_event, _state=_state
+                                )
 
         if not skip_service and resolved_event != "SessionStart":
             # Every later mapped hook drains the complete session outbox, so the
