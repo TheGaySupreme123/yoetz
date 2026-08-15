@@ -18,6 +18,11 @@ files are also on disk beside this file as `references/workflow.md`,
 `references/coverage-and-receipts.md`, `references/publication-policy.md`,
 `references/request-templates.md`, and `references/agent-instructions.md`.
 
+Do not call `resources/list` or `list_mcp_resources` to discover those documents. Some Codex
+builds fail that call with `Unexpected response type` even when the server list payload is
+spec-correct. The five URIs below are the complete catalog. A list failure is not a missing
+server, not a reason to stop, and not a reason to read product source.
+
 If a `resources/read` result has no text, call `read_guidance` with the same URI. If that result
 also has no text, open the matching `references/<name>.md` beside this file and continue from that
 copy. Do not call `start` on an empty guidance body. An empty resource body is not a reason to

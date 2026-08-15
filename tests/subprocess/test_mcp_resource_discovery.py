@@ -4,7 +4,11 @@ The 2026-07-27 Codex dogfood recorded
 ``codex_core::tools::router: resources/list failed for 'yoetz': Unexpected response type`` and the
 postmortem attributed it to Yoetz. These cases pin the served wire shape against the MCP schema so
 that claim can be settled from evidence rather than inferred, and so a future regression in the
-payload is caught here rather than in a dogfood.
+payload is caught here rather than in a dogfood. Issue #173 later reproduced the same host error
+against this conformant payload; Step 0 must not treat a list failure as a missing server.
+The Codex ``0.148.0-alpha.6`` ``rmcp 3.0.0`` pin decodes this same payload as
+``ServerResult::ListResourcesResult`` for the full shape and for the title / annotations /
+size / minimal subsets, so optional-field stripping is not a Yoetz-side fix.
 
 `resources/templates/list` returning method-not-found is correct: no templates are declared, so the
 capability is not advertised. That is asserted rather than "fixed".
@@ -82,6 +86,21 @@ def test_resources_list_returns_a_result_not_an_error(responses: list[dict[str, 
     listed = _by_id(responses, 3)
     assert "error" not in listed, listed.get("error")
     assert "resources" in listed["result"]
+
+
+def test_resources_list_result_is_not_a_tool_result_shape(
+    responses: list[dict[str, Any]],
+) -> None:
+    """Codex maps a non-ListResourcesResult ServerResult to Unexpected response type.
+
+    The live payload must stay a list result (``resources`` only) so a host that
+    decodes ``rmcp``'s untagged ``ServerResult`` can still select that variant.
+    """
+
+    result = _by_id(responses, 3)["result"]
+    assert set(result) == {"resources"}
+    assert "content" not in result
+    assert "structuredContent" not in result
 
 
 def test_the_served_payload_validates_against_the_mcp_schema(

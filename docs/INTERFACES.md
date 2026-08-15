@@ -190,6 +190,13 @@ the control error also carries `sequence`, `head_digest`, and `count` in `accept
 
 MCP resource discovery: `resources/list` serves the five `yoetz://guidance/*.md` entries and
 validates against the MCP `ListResourcesResult` schema (`tests/subprocess/test_mcp_resource_discovery.py`).
+A schema-valid list payload does not mean every host delivered it: some Codex builds reject
+`resources/list` with `Unexpected response type`. That error is not a missing Yoetz field:
+`rmcp 3.0.0` (the crate Codex `0.148.0-alpha.6` pins) decodes the live list payload as
+`ServerResult::ListResourcesResult` for the full registry shape and for the
+`title` / `annotations` / `size` / minimal (`uri`+`name`) subsets. Stripping optional
+resource fields therefore cannot change the typed variant. Step 0 names exact URIs and does
+not use list as a discovery step. A list failure is not a missing server.
 `resources/read` advertises the same registry `media_type` that `resources/list` serves as
 `mimeType`; it does not hardcode a markdown type.
 `resources/templates/list` answers method-not-found because no templates are declared and the
@@ -2881,7 +2888,9 @@ facade and are never MCP tools.
   stable `yoetz://guidance/<name>` URIs for hosts that return the resource text. Initialize
   `instructions` always carry `agent-instructions.md`, `workflow.md`, and
   `coverage-and-receipts.md`. A conformant `resources/read` payload does
-  not mean the host delivered those bytes to the model; an empty body is not a fetch. First-party
+  not mean the host delivered those bytes to the model; an empty body is not a fetch. A
+  schema-valid `resources/list` payload likewise does not mean the host accepted the list; some
+  Codex builds reject it with `Unexpected response type`. First-party
   skill install places the same files on disk as `references/<name>.md` beside the skill. Resources
   are static reviewed product bytes read through `importlib.resources` and digest-checked against
   the resource manifest; the registry

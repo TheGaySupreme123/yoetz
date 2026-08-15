@@ -57,6 +57,17 @@ def test_step_zero_stops_on_an_empty_guidance_read() -> None:
     assert "Both are already in initialize `instructions`" in collapsed
 
 
+def test_step_zero_does_not_use_resources_list_for_discovery() -> None:
+    """A failed resources/list is not a missing server (issue #173)."""
+
+    text = _skill_text()
+    collapsed = " ".join(text.split())
+    assert "Do not call `resources/list` or `list_mcp_resources`" in collapsed
+    assert "The five URIs below are the complete catalog" in collapsed
+    assert "A list failure is not a missing server" in collapsed
+    assert "not a reason to read product source" in collapsed
+
+
 def test_every_yoetz_uri_the_skill_names_is_a_registered_readable_resource() -> None:
     registered = {resource.uri for resource in GUIDANCE_RESOURCES}
     named = set(_YOETZ_URI.findall(_skill_text()))
