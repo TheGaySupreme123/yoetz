@@ -1094,7 +1094,9 @@ def test_protocol_models_public_exports_are_closed() -> None:
         ProviderJudgmentInsufficientModel ProviderJudgmentModel
         ProviderJudgmentNoDiscrepancyModel
         ReceiptFormat ReceiptInclude ReceiptRedactionProfile
-        ReceiptRequest ReceiptRequestModel ReceiptResult ReceiptResultModel RespondRequest
+        ReceiptRequest ReceiptRequestModel ReceiptResult ReceiptResultModel
+        REGISTERED_GUIDANCE_URIS ReadGuidanceRequest ReadGuidanceRequestModel
+        ReadGuidanceResult ReadGuidanceResultModel RespondRequest
         RespondRequestModel RespondResult RespondResultModel SemanticReason SemanticStatus
         StartRequest StartRequestModel StartResult StartResultModel StatusRequest
         StatusRequestModel StatusResult StatusResultModel SubjectStateRefModel
