@@ -47,6 +47,15 @@ _READY = ObservationCompositionFact(
     provider_factory_ids=(),
     connected_provider_ids=(),
 )
+# Structurally usable configured provider that has not (yet) appeared in the
+# lazily-filled connected registry — the shape a fresh per-build fact takes
+# right after a successful mapped-session dispatch or before the first one (#265).
+_USABLE = ObservationCompositionFact(
+    semantic_configured=True,
+    semantic_ready=True,
+    provider_factory_ids=("fireworks",),
+    connected_provider_ids=(),
+)
 
 
 def _envelope(
@@ -271,6 +280,77 @@ def test_standing_advice_reaches_the_agent_only_at_session_boundaries(
     assert "resolve_failed_command" in failed
     _run(tmp_path, "PostToolUse", "cadence", tool_name="shell", exit_status=0, correlation_id="c1")
     assert "connect_provider" in _run(tmp_path, "Stop", "cadence")
+
+
+def test_usable_provider_receives_no_connect_provider_at_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A structurally usable provider never triggers connect_provider at Stop (#265).
+
+    The hook itself succeeds on every event — ``_run`` asserts exit code 0 — so
+    an empty text is an advice-content verdict, not a delivery failure. This is
+    the shape of the incident session: semantic dispatch had just succeeded,
+    yet the frozen READY snapshot advised reconnecting the provider.
+    """
+
+    _consented(tmp_path)
+    _compose(monkeypatch, _USABLE)
+
+    started = _run(tmp_path, "SessionStart", "usable", source="startup")
+    _run(tmp_path, "PostToolUse", "usable", tool_name="shell", exit_status=0)
+    stopped = _run(tmp_path, "Stop", "usable")
+
+    assert "connect_provider" not in started
+    assert "connect_provider" not in stopped
+    assert stopped == ""
+
+
+def test_credential_revocation_resurfaces_connect_provider_from_current_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past usability never suppresses advice once current facts say not-ready (#265).
+
+    The advice source is per-build, so a provider that was usable (no advice)
+    and is then revoked must be advised again at the next standing boundary.
+    """
+
+    _consented(tmp_path)
+    _compose(monkeypatch, _USABLE)
+    assert _run(tmp_path, "Stop", "revoked") == ""
+
+    _compose(monkeypatch, _STANDING)
+    assert "connect_provider" in _run(tmp_path, "Stop", "revoked")
+
+
+def test_delivered_then_retired_condition_resurfaces_at_the_documented_cadence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retire-and-return keeps the #241 identity contract, and the honest bound with it (#265).
+
+    A condition that was already delivered, retired on live facts, and then
+    returned renders byte-identical text, so within the same session scope it
+    stays suppressed exactly like any repeat (#241). The current evidence is
+    still in the workspace snapshot, and the next session boundary delivers it.
+    """
+
+    store, workspace = _consented(tmp_path)
+    _compose(monkeypatch, _STANDING)
+    assert "connect_provider" in _run(tmp_path, "Stop", "flap")
+
+    _compose(monkeypatch, _USABLE)
+    assert _run(tmp_path, "Stop", "flap") == ""
+
+    _compose(monkeypatch, _STANDING)
+    # Same scope, identical text: the #241 dedup holds even across the retire.
+    assert _run(tmp_path, "Stop", "flap") == ""
+    snapshot = store.advice_snapshot_for(workspace)
+    assert snapshot is not None
+    assert any(item.rule_code == "provider_not_ready" for item in snapshot.ranked_items), (
+        "the resurfaced condition must be present as current evidence even while "
+        "its delivery is deduplicated"
+    )
+    # A fresh session scope hears about the still-true condition again.
+    assert "connect_provider" in _run(tmp_path, "SessionStart", "flap-next", source="startup")
 
 
 def test_changed_advice_is_still_delivered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

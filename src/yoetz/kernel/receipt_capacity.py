@@ -9,8 +9,8 @@ from yoetz.domain.events import CheckRecordedPayload, LedgerRecord
 from yoetz.domain.findings import Finding, rank_key
 from yoetz.domain.receipts import CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP
 from yoetz.kernel.deterministic_checks import (
-    CaseAvailabilityFacts,
     build_deterministic_case,
+    healthy_storage_availability,
 )
 from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.reducers import invalidates_recorded_check, is_material_event_family
@@ -76,7 +76,9 @@ def receipt_gap_codes(
 
     if type(projection) is not ProjectionState or type(records) is not tuple:
         raise ValueError("receipt_coverage_capacity_invalid")
-    case = build_deterministic_case(projection, records, CaseAvailabilityFacts())
+    case = build_deterministic_case(
+        projection, records, healthy_storage_availability(projection, records)
+    )
     codes = {gap.code for gap in case.gaps}
     for coverage in case.coverage_by_ref.values():
         codes.update(coverage.known_gaps)

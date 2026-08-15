@@ -24,8 +24,14 @@ from yoetz.adapters.sqlite.migrations import CATALOG_MIGRATIONS, Migration, init
 from yoetz.application.service import ClientProjectionContext, ControlProjectionBinding
 from yoetz.config.models import YoetzConfig
 from yoetz.config.write import fireworks_provider
+from yoetz.domain.observation import ObservationLifecycle
 from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind
 from yoetz.domain.values import JsonObject
+from yoetz.kernel.policies.observation_advice import (
+    ObservationAdviceContext,
+    ObservationCompositionFact,
+    observation_advice_findings,
+)
 from yoetz.ports.control import (
     ControlCallRequest,
     ControlClientKind,
@@ -1495,6 +1501,131 @@ async def test_ready_composition_reports_exact_configured_credential_presence(
         other_config = YoetzConfig(profile="local-openai", provider=other_provider)
         app = await application_factory(other_config)(1, vault.generation)
         assert app.provider_credential_connected is False
+    finally:
+        if app is not None:
+            await app.close()
+        await vault.close()
+        memory.close()
+        await lifecycle.close()
+
+
+@pytest.mark.anyio
+async def test_observation_provider_fact_tracks_live_credential_within_one_generation(
+    tmp_path: Path,
+) -> None:
+    """The standing-advice provider fact follows the vault, not the READY snapshot (#265).
+
+    The incident session was advised connect_provider at Stop right after a
+    successful semantic dispatch because the advice fact froze
+    ``semantic_ready=False`` at composition. The fact source must observe a
+    credential stored or discarded mid-generation without recomposition, and
+    must not fire the advice from registry lag alone.
+    """
+
+    tmp_path.chmod(0o700)
+    clock = _Clock()
+    memory = LocalSecretMemory()
+    lifecycle = ServiceLifecycle(
+        clock,
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "d" * 64,
+        instance_id=_INSTANCE_ID,
+    )
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.LOCKED)
+    vault = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "e" * 64,
+    )
+    initialize = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(initialize, "sha256:" + "f" * 64)
+    provider = fireworks_provider(model="accounts/fireworks/models/minimax-m3")
+    config = YoetzConfig(profile="local-openai", provider=provider)
+    factory = build_ready_application_factory(
+        lifecycle=lifecycle,
+        vault=vault,
+        config=config,
+        paths=_Paths(tmp_path),
+        clock=clock,
+        secret_memory=memory,
+        diagnostics=_Diagnostics(),
+    )
+
+    def provider_rules(fact: object) -> set[str]:
+        assert type(fact) is ObservationCompositionFact
+        return {
+            item.rule_code
+            for item in observation_advice_findings(
+                ObservationAdviceContext(
+                    envelopes=(),
+                    lifecycle=ObservationLifecycle.ACTIVE,
+                    gaps=(),
+                    composition=fact,
+                )
+            )
+        }
+
+    app = None
+    try:
+        context = await factory.context_provider(1, vault.generation)
+        assert context.rediscover_pending_verification is not None
+        coordinator: object = getattr(context.rediscover_pending_verification, "__self__")
+        builder_composition: object = getattr(coordinator, "advice_context_builder").composition
+        assert callable(builder_composition), "the advice provider fact must be sourced per build"
+        composition = cast(
+            Callable[[], Awaitable[ObservationCompositionFact | None]], builder_composition
+        )
+        app = await factory.open(context)
+
+        # Genuinely missing credential: the advice stays visible.
+        fact = await composition()
+        assert type(fact) is ObservationCompositionFact
+        assert fact.semantic_configured is True
+        assert fact.semantic_ready is False
+        assert "provider_not_ready" in provider_rules(fact)
+
+        # Credential ceremony lands mid-generation: the next build sees it and
+        # the connect_provider recommendation becomes inapplicable, even though
+        # the lazy connected registry has still never listed the provider.
+        credential_binding = provider_credential_profile_binding(
+            provider.provider_id,
+            provider.model,
+            provider.endpoint_profile_id,
+            provider.endpoint_profile_version,
+        )
+        proof = HumanAuthorizationProof(
+            "provider-proof-mid-generation",
+            "provider_credential_set",
+            credential_binding.target_digest("set"),
+            1,
+            vault.generation,
+            None,
+            1.0,
+            60.0,
+        )
+        credential = memory.capture(
+            SecretPurpose.PROVIDER_CREDENTIAL,
+            bytearray(b"test-provider-token-mid-generation"),
+        )
+        await vault.store_provider_credential("set", credential_binding, credential, proof, 2.0)
+
+        connected = await composition()
+        assert type(connected) is ObservationCompositionFact
+        assert connected.semantic_ready is True
+        assert "fireworks" not in connected.connected_provider_ids
+        assert provider_rules(connected) == set()
+
+        # Revocation resurfaces the advice from current evidence.
+        await vault.discard_provider_credential(credential_binding)
+        revoked = await composition()
+        assert type(revoked) is ObservationCompositionFact
+        assert revoked.semantic_ready is False
+        assert "provider_not_ready" in provider_rules(revoked)
     finally:
         if app is not None:
             await app.close()

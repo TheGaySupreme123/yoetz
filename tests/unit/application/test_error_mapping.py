@@ -147,6 +147,7 @@ _MODULE_CODE_INVENTORY: dict[str, frozenset[PublicErrorCode]] = {
             PublicErrorCode.FRONTIER_CONFLICT,
             PublicErrorCode.IDEMPOTENCY_CONFLICT,
             PublicErrorCode.INVALID_REQUEST,
+            PublicErrorCode.LIMIT_EXCEEDED,
             PublicErrorCode.OPERATION_PENDING,
             PublicErrorCode.SESSION_CONFLICT,
             PublicErrorCode.STORAGE_CORRUPT,
