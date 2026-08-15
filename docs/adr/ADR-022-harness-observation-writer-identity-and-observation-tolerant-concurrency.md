@@ -1,7 +1,8 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-08-14 for moderator-approved issue #244 and the reopened issue #216 recurrence.
+**Amended:** 2026-08-16 for maintainer-approved issue #224; 2026-08-14 for moderator-approved issue
+#244 and the reopened issue #216 recurrence.
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/adapters/memory/ledger.py`,
 `src/yoetz/application/publish_work.py`, `src/yoetz/kernel/policies/observation_advice.py`, and
@@ -72,10 +73,12 @@ unsupported claims and unbounded duplicate findings.
    changes do not append another `finding_recorded` event. The current observation snapshot and
    coverage/gap state retain the changing evidence context without growing the durable finding set.
 
-7. A provenance-dispute response disposition is deferred to issue #224. This change removes the
-   false observation-authored claim premise but does not add a fourth `ResponseDisposition`, change
-   response schemas, migrate SQL constraints, or weaken the rule that a recorded finding remains
-   historically visible.
+7. `provenance_disputed` is the fourth `ResponseDisposition`. It records that the responder
+   contests the finding's authorship or provenance premise, requires a non-empty reason, and may
+   carry evidence, but is not scored as an evidence-free rejection by either deterministic policy
+   pack. It never resolves or erases the finding. The compact `unresolved_finding_count` retains its
+   established unanswered-finding meaning, so any readable response—including a provenance
+   dispute—decrements that counter without changing the receipt finding's `resolved=false` state.
 
 8. Standing provider-readiness advice is not converted into a `material_limitation_omitted`
    finding. That finding kind remains actionable for an omission in the work account. Provider

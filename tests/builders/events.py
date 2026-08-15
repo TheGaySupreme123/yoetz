@@ -253,7 +253,7 @@ def _validate_conditional_shape(family: EventFamily, fields: dict[str, JsonValue
         has_reason = "reason" in fields
         has_scope = "waiver_scope" in fields
         has_expiry = "waiver_expiry" in fields
-        if disposition in {"rejected", "waived"} and not has_reason:
+        if disposition in {"provenance_disputed", "rejected", "waived"} and not has_reason:
             raise ValueError("response_reason_required")
         if disposition == "waived":
             if not has_scope:

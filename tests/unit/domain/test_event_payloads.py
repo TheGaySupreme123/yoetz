@@ -752,6 +752,20 @@ def test_family_specific_payload_invariants_fail_closed() -> None:
             waiver_scope=None,
         ),
     )
+    _assert_reason(
+        "response_fields_invalid",
+        lambda: replace(
+            response,
+            disposition=ResponseDisposition.PROVENANCE_DISPUTED,
+            reason=None,
+        ),
+    )
+    disputed = replace(
+        response,
+        disposition=ResponseDisposition.PROVENANCE_DISPUTED,
+        reason="The finding attributes a claim to the wrong author.",
+    )
+    assert disputed.waiver_scope is None
     revised = cast(PlanRevisedPayload, _decode_row(_ROW_BY_FAMILY["plan_revised"]))
     change = ObligationChange(
         obligation_id=revised.obligation_changes[0].obligation_id,

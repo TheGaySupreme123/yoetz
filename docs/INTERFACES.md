@@ -467,12 +467,14 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   revision restates the effective current declaration: omission clears an earlier reason, and a
   present reason is valid only when applying the revision leaves zero effective obligation refs.
 - `response_recorded`: `finding_id`, `finding_frontier`, `disposition`
-  (`acknowledged`|`rejected`|`waived`), optional `reason`, optional `waiver_scope`, `waiver_expiry`,
-  `evidence_refs`.
+  (`acknowledged`|`provenance_disputed`|`rejected`|`waived`), optional `reason`, optional
+  `waiver_scope`, `waiver_expiry`, `evidence_refs`. `provenance_disputed` contests the finding's
+  authorship or provenance premise without rejecting its conclusion or resolving it.
 - `SubjectStateRef`: optional `tree_digest`, `diff_digest`, `described_state` — binds evidence
   and claims to repository/artifact state for freshness checks.
 
-`reason` MAY be omitted for `acknowledged` and MUST be non-empty for `rejected` or `waived`.
+`reason` MAY be omitted for `acknowledged` and MUST be non-empty for `provenance_disputed`,
+`rejected`, or `waived`.
 Waiver-only fields are forbidden on other dispositions. `finding_frontier` is always the full
 domain `Frontier`, even when the public request supplied only its canonical sequence string.
 
@@ -481,7 +483,8 @@ already present on the response. The nominal enum is owned by `domain/findings.p
 subject/obligation/project waivers are deferred. A waiver
 is accepted only from an interactive `local_cli` request constrained as a human and explicitly
 confirmed at the prompt; MCP, importer, noninteractive CLI, and model-backed actors may acknowledge
-or reject with evidence but may not waive. `waiver_expiry` may further narrow that one-finding
+or dispute provenance, and may reject with evidence, but may not waive. `waiver_expiry` may further
+narrow that one-finding
 scope. This is authorization policy, not a caller-asserted actor upgrade.
 `ResponseDisposition` is likewise nominally owned by `domain/findings.py` and reused by event and
 receipt records.
@@ -576,7 +579,8 @@ summary, detail, subject_refs: tuple[event/obligation/claim ids], policy_id, pol
 subject_frontier, coverage: Coverage, provenance: SemanticProvenance | None)`.
 
 `FindingOrigin` is the nominal enum `deterministic|semantic_model_derived` and
-`ResponseDisposition` is the nominal enum `acknowledged|rejected|waived`; both are owned here.
+`ResponseDisposition` is the nominal enum
+`acknowledged|provenance_disputed|rejected|waived`; both are owned here.
 `domain/findings.py` also solely owns the finalized, receipt-bound `SemanticProvenance` and its
 schema-shaped `SamplingParams`, `TokenUsage`, `CostFields`, `SemanticDispatchKind`, and
 `SemanticFailureClass` values
@@ -2770,8 +2774,9 @@ per operation: `start`, `publish_work`, `check`, `respond`, `status`, `receipt`,
 Every `status` success carries `closure_readiness(open_obligation_count,
 unresolved_finding_count, declared_obligation_count, no_obligations_reason,
 blocking_conditions)` beside `import_status`, on every view. `unresolved_finding_count` counts
-recorded findings with no recorded response, whatever the response's disposition; a rejection or
-waiver answers the finding on the record and its own quality surfaces as a later finding. The compact singleton carries the same
+recorded findings with no recorded response, whatever the response's disposition; a rejection,
+waiver, or provenance dispute answers the finding on the record and its own quality surfaces as a
+later finding. The compact singleton carries the same
 two completion-scope fields beside its current plan locator and counters. Its
 `blocking_conditions` are exactly
 `obligations_open|findings_unresolved|no_plan_published|no_obligations_declared|projection_stale|

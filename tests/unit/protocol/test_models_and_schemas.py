@@ -1448,6 +1448,13 @@ def test_operation_cross_field_matrix() -> None:
         models.StatusResultModel.model_validate(wrong_candidate_omission)
 
     models.RespondResultModel.model_validate(_respond_result_wire())
+    disputed = _respond_result_wire()
+    disputed_response = cast(dict[str, JsonValue], disputed["response"])
+    disputed_response["disposition"] = "provenance_disputed"
+    models.RespondResultModel.model_validate(disputed)
+    del disputed_response["reason"]
+    with pytest.raises(ValidationError):
+        models.RespondResultModel.model_validate(disputed)
     waived = _respond_result_wire()
     waived_response = cast(dict[str, JsonValue], waived["response"])
     waived_response["disposition"] = "waived"

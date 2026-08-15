@@ -505,7 +505,10 @@ class ReceiptResponse:
         if self.disposition is ResponseDisposition.ACKNOWLEDGED:
             if self.waiver_scope is not None or self.waiver_expiry is not None:
                 raise ProtocolValueError(invalid)
-        elif self.disposition is ResponseDisposition.REJECTED:
+        elif self.disposition in {
+            ResponseDisposition.PROVENANCE_DISPUTED,
+            ResponseDisposition.REJECTED,
+        }:
             if (
                 self.reason is None
                 or self.waiver_scope is not None

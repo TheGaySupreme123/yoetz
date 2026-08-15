@@ -468,7 +468,10 @@ def _response_recorded(draw: st.DrawFn) -> ResponseRecordedPayload:
     waiver_expiry: Timestamp | None = None
     if disposition is ResponseDisposition.ACKNOWLEDGED:
         reason = draw(st.none() | _short_text(1, 32))
-    elif disposition is ResponseDisposition.REJECTED:
+    elif disposition in {
+        ResponseDisposition.PROVENANCE_DISPUTED,
+        ResponseDisposition.REJECTED,
+    }:
         reason = draw(_short_text(1, 32))
     else:
         reason = draw(_short_text(1, 32))

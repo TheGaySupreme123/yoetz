@@ -335,9 +335,11 @@ def _respond_requests(draw: st.DrawFn) -> tuple[dict[str, JsonValue], str | None
         "expected_frontier": draw(_frontier_wire()),
         "finding_frontier": draw(_frontier_wire()),
     }
-    disposition = draw(st.sampled_from(("acknowledged", "rejected", "waived")))
+    disposition = draw(
+        st.sampled_from(("acknowledged", "provenance_disputed", "rejected", "waived"))
+    )
     fields: dict[str, JsonValue] = {"disposition": disposition}
-    if disposition in {"rejected", "waived"}:
+    if disposition in {"provenance_disputed", "rejected", "waived"}:
         fields["reason"] = draw(_short_text(1, 32))
     elif draw(st.booleans()):
         fields["reason"] = draw(_short_text(1, 32))

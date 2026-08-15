@@ -119,7 +119,8 @@ claim, dispute with evidence, or state an unresolved limitation. Then recheck af
 A response never deletes the original challenge. That is the point — the record keeps the
 disagreement visible.
 
-No disposition resolves a finding. `acknowledged`, `rejected`, and `waived` each record what was
+No disposition resolves a finding. `acknowledged`, `provenance_disputed`, `rejected`, and `waived`
+each record what was
 decided and what evidence was attached; none of them clears the finding for receipt purposes. Every
 actionable finding recorded in a task keeps the receipt conclusion at `unresolved_findings_remain`,
 even after later checks return no findings at all.
