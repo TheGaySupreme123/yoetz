@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -55,9 +54,6 @@ _MARKER_SCHEMA: Final = "yoetz.codex-plugin-install/1"
 _PLUGIN_ROOT: Final = ".agents/plugins/yoetz"
 PLUGIN_ROOT: Final = _PLUGIN_ROOT
 _SOURCE_FILE_LIMIT: Final = 262_144
-_CODEX_VERSION_RE: Final = re.compile(
-    r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", re.ASCII
-)
 # openai/codex#37533 first shipped in this prerelease. Unknown or malformed
 # versions deliberately stay on the slower synchronous path: dropping an
 # observation handler is worse than adding bounded hook latency.
@@ -116,14 +112,11 @@ def codex_supports_async_hooks(codex_version: str | None) -> bool:
     than synchronously downgrade, most handlers carrying ``"async": true``.
     """
 
-    if (
-        type(codex_version) is not str
-        or len(codex_version) > 128
-        or _CODEX_VERSION_RE.fullmatch(codex_version) is None
-    ):
+    if type(codex_version) is not str or len(codex_version) > 128:
         return False
     try:
-        return Version(codex_version) >= _ASYNC_HOOKS_MIN_VERSION
+        parsed = Version(codex_version)
+        return len(parsed.release) == 3 and parsed >= _ASYNC_HOOKS_MIN_VERSION
     except InvalidVersion:
         return False
 

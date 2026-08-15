@@ -253,6 +253,7 @@ def test_observe_hook_execution_modes_use_async_only_on_capable_hosts() -> None:
         ("0.147.0", False),
         ("0.148.0-alpha.5", False),
         ("0.148.0-alpha.6", True),
+        ("0.148.0a6", True),
         ("0.148.0-alpha.19", True),
         ("0.148.0-beta.1", True),
         ("0.148.0", True),

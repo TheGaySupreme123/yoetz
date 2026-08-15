@@ -926,7 +926,8 @@ class YoetzRuntime:
 
         try:
             inspection = inspect_plugin(
-                IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root))
+                IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root)),
+                codex_version=harnesses[0].reported_version if detected else None,
             )
             presence = str(inspection.presence.value)
             trust_observable = bool(inspection.trust_observable)
