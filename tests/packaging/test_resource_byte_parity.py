@@ -27,12 +27,12 @@ import pytest
 _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 _VERIFY_SCRIPT: Final = _REPO_ROOT / "scripts" / "verify_resource_manifest.py"
 _BUILD_TIMEOUT: Final = 120
-_EXPECTED_TOTAL: Final = 96
+_EXPECTED_TOTAL: Final = 98
 _EXPECTED_KIND_COUNTS: Final = {
     "canonical_vector": 9,
     "guidance": 5,
     "migration": 9,
-    "json_schema": 70,
+    "json_schema": 72,
     "skill": 1,
     "compatibility_manifest": 1,
     "runtime_support": 1,

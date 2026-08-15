@@ -13,6 +13,7 @@ import pytest
 from pydantic import BaseModel
 
 import yoetz.mcp.server as bridge
+from yoetz.mcp.resources import read_resource
 from yoetz.config.models import LoggingConfig
 from yoetz.observability.logging import LogMode, configure_logging
 from yoetz.ports.control import ControlError
@@ -253,6 +254,12 @@ async def test_exact_six_dispatchers_use_one_ordinary_client(
         "status",
         "receipt",
     ]
+    guidance = await bridge.dispatch_read_guidance(
+        {"uri": "yoetz://guidance/workflow.md"},
+        runtime,
+    )
+    assert guidance.isError is False
+    assert client.calls[-1][0] == "receipt"
     assert client.deadlines == [
         ("start", 30_000),
         ("publish_work", 30_000),
@@ -264,6 +271,63 @@ async def test_exact_six_dispatchers_use_one_ordinary_client(
     assert client.closed is False
     await bridge.close_bridge_runtime(runtime)
     assert client.closed is True
+
+
+@pytest.mark.anyio
+async def test_read_guidance_returns_full_text_without_the_service_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient()
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_read_guidance(
+        {"uri": "yoetz://guidance/workflow.md"},
+        runtime,
+    )
+
+    expected = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
+    assert result.isError is False
+    assert result.content
+    assert result.content[0].text == expected
+    assert result.structuredContent is not None
+    assert result.structuredContent["ok"] is True
+    assert result.structuredContent["uri"] == "yoetz://guidance/workflow.md"
+    assert result.structuredContent["text"] == expected
+    assert client.calls == []
+    assert runtime._slot.client is None  # pyright: ignore[reportPrivateUsage]
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_read_guidance_rejects_unknown_uri_without_echoing_it() -> None:
+    runtime = bridge.build_bridge_runtime()
+    unknown = "yoetz://guidance/not-a-real-document.md"
+
+    result = await bridge.dispatch_read_guidance({"uri": unknown}, runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "INVALID_REQUEST"
+    rendered = json.dumps(result.structuredContent)
+    assert unknown not in rendered
+    assert unknown not in (result.content[0].text if result.content else "")
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_read_guidance_rejects_extra_argument_keys() -> None:
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_read_guidance(
+        {"uri": "yoetz://guidance/workflow.md", "request_id": "req_extra"},
+        runtime,
+    )
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "INVALID_REQUEST"
+    await bridge.close_bridge_runtime(runtime)
 
 
 @pytest.mark.anyio

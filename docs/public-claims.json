@@ -96,7 +96,7 @@
     },
     {
       "claim_id": "ops.six_operation_parity",
-      "statement": "Yoetz exposes exactly six workflow operations (start, publish_work, check, respond, status, receipt) with identical request/result contracts across the CLI and MCP surfaces; import, review, backup, restore, migrate, version, and harness integration are CLI support commands, never additional MCP tools.",
+      "statement": "Yoetz exposes exactly six workflow operations (start, publish_work, check, respond, status, receipt) with identical request/result contracts across the CLI and MCP surfaces; MCP also registers one read-only guidance tool that is not a ledger operation. Import, review, backup, restore, migrate, version, and harness integration are CLI support commands, never additional workflow operations.",
       "scope": {
         "operations": [
           "start",
@@ -112,7 +112,8 @@
         ]
       },
       "limitations": [
-        "support_commands_are_not_workflow_operations"
+        "support_commands_are_not_workflow_operations",
+        "read_guidance_is_not_a_workflow_operation"
       ],
       "surfaces": [
         "README.md",

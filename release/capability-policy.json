@@ -43,7 +43,7 @@
       "capability_family": "mcp_protocol_conformance",
       "external_version": "1.28.1",
       "platform": "linux_x86_64",
-      "requirement_id": "mcp_tools_list_exact_six"
+      "requirement_id": "mcp_tools_list_exact"
     },
     {
       "capability_family": "mcp_protocol_conformance",
@@ -56,6 +56,12 @@
       "external_version": "1.28.1",
       "platform": "linux_x86_64",
       "requirement_id": "mcp_tools_call_all_six_dispatch"
+    },
+    {
+      "capability_family": "mcp_protocol_conformance",
+      "external_version": "1.28.1",
+      "platform": "linux_x86_64",
+      "requirement_id": "mcp_read_guidance_full_text"
     },
     {
       "capability_family": "mcp_protocol_conformance",

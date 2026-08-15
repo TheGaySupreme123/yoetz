@@ -94,6 +94,11 @@ __all__ = [
     "ReceiptRequestModel",
     "ReceiptResult",
     "ReceiptResultModel",
+    "REGISTERED_GUIDANCE_URIS",
+    "ReadGuidanceRequest",
+    "ReadGuidanceRequestModel",
+    "ReadGuidanceResult",
+    "ReadGuidanceResultModel",
     "RespondRequest",
     "RespondRequestModel",
     "RespondResult",
@@ -1320,6 +1325,63 @@ class ReceiptRequestModel(PublicRequestModel):
     def _validate_receipt_request(self) -> ReceiptRequestModel:
         _validate_model_against_schema(self, "receipt-request")
         return self
+
+
+REGISTERED_GUIDANCE_URIS: Final[tuple[str, ...]] = (
+    "yoetz://guidance/agent-instructions.md",
+    "yoetz://guidance/workflow.md",
+    "yoetz://guidance/publication-policy.md",
+    "yoetz://guidance/coverage-and-receipts.md",
+    "yoetz://guidance/request-templates.md",
+)
+type GuidanceResourceUri = Literal[
+    "yoetz://guidance/agent-instructions.md",
+    "yoetz://guidance/workflow.md",
+    "yoetz://guidance/publication-policy.md",
+    "yoetz://guidance/coverage-and-receipts.md",
+    "yoetz://guidance/request-templates.md",
+]
+_MAX_GUIDANCE_DOCUMENT_CHARS: Final = 65_536
+
+
+class ReadGuidanceRequestModel(_ClosedModel):
+    """Request to read one registered Yoetz guidance document as tool text."""
+
+    uri: GuidanceResourceUri = Field(
+        description="One registered URI such as yoetz://guidance/workflow.md."
+    )
+
+    @model_validator(mode="after")
+    def _validate_read_guidance_request(self) -> ReadGuidanceRequestModel:
+        _validate_model_against_schema(self, "read-guidance-request")
+        return self
+
+
+class ReadGuidanceSuccessModel(_ClosedModel):
+    """Registered guidance document returned as tool text."""
+
+    ok: Literal[True]
+    uri: GuidanceResourceUri
+    media_type: Literal["text/markdown"]
+    byte_count: Annotated[int, Field(ge=0, le=_MAX_GUIDANCE_DOCUMENT_CHARS)]
+    text: Annotated[str, Field(min_length=0, max_length=_MAX_GUIDANCE_DOCUMENT_CHARS)]
+
+    @model_validator(mode="after")
+    def _validate_read_guidance_success(self) -> ReadGuidanceSuccessModel:
+        encoded = self.text.encode("utf-8")
+        if len(encoded) != self.byte_count:
+            raise ValueError("guidance_byte_count_mismatch")
+        _validate_model_against_schema(self, "read-guidance-result")
+        return self
+
+
+type ReadGuidanceResultBranch = Annotated[
+    ReadGuidanceSuccessModel | OperationFailureModel, Field(discriminator="ok")
+]
+
+
+class ReadGuidanceResultModel(PublicResultModel[ReadGuidanceResultBranch]):
+    pass
 
 
 def _require_unique(values: tuple[object, ...], *, limit: int) -> None:
@@ -3060,6 +3122,8 @@ StatusRequest = StatusRequestModel
 StatusResult = StatusResultModel
 ReceiptRequest = ReceiptRequestModel
 ReceiptResult = ReceiptResultModel
+ReadGuidanceRequest = ReadGuidanceRequestModel
+ReadGuidanceResult = ReadGuidanceResultModel
 
 _PUBLIC_MODEL_SCHEMA: Final[Mapping[type[object], str]] = MappingProxyType(
     {
@@ -3075,6 +3139,8 @@ _PUBLIC_MODEL_SCHEMA: Final[Mapping[type[object], str]] = MappingProxyType(
         StatusResultModel: "status-result",
         ReceiptRequestModel: "receipt-request",
         ReceiptResultModel: "receipt-result",
+        ReadGuidanceRequestModel: "read-guidance-request",
+        ReadGuidanceResultModel: "read-guidance-result",
     }
 )
 

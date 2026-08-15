@@ -1,7 +1,8 @@
 """Deterministic public JSON Schema generator and parity checker for the Yoetz protocol.
 
 Generates and verifies the reviewable JSON Schema files for the public six-operation
-request/result models, shared common values, durable event payloads, configuration, findings,
+request/result models, the read-only guidance tool, shared common values, durable event
+payloads, configuration, findings,
 receipts, privacy, local-control, and version-report contracts. This is a repository maintainer
 tool, not runtime code: installed users never run it. It never imports application, adapter, CLI,
 MCP, provider, key, storage, or package-resource modules; model discovery is an explicit ordered
@@ -741,6 +742,43 @@ def _plan_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+def _read_guidance_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Build the closed read-guidance result: document text or the shared public error."""
+
+    from yoetz.protocol.models import REGISTERED_GUIDANCE_URIS
+
+    raw: dict[str, object] = {
+        "$defs": {
+            "guidance_resource_uri": {
+                "enum": list(REGISTERED_GUIDANCE_URIS),
+                "type": "string",
+            },
+            "success": {
+                "additionalProperties": False,
+                "properties": {
+                    "byte_count": {"maximum": 65536, "minimum": 0, "type": "integer"},
+                    "media_type": {"const": "text/markdown", "type": "string"},
+                    "ok": {"const": True, "type": "boolean"},
+                    "text": {"maxLength": 65536, "minLength": 0, "type": "string"},
+                    "uri": {"$ref": "#/$defs/guidance_resource_uri"},
+                },
+                "required": ["byte_count", "media_type", "ok", "text", "uri"],
+                "type": "object",
+            },
+        },
+        "oneOf": [
+            {"$ref": "#/$defs/success"},
+            {
+                "$ref": (
+                    f"{SCHEMA_NAMESPACE}common/operation-result-1.0.0.schema.json"
+                    "#/$defs/failure_result"
+                )
+            },
+        ],
+    }
+    return _normalize(raw, entry)
+
+
 def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Extend the reviewed status result with the model-owned completion-scope leaves."""
 
@@ -1296,6 +1334,30 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "operations/read-guidance-request-1.0.0.schema.json",
+        "read-guidance-request",
+        "1.0.0",
+        "request_result",
+        "MCP input",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["ReadGuidanceRequestModel"]
+            ).ReadGuidanceRequestModel
+        ),
+    ),
+    _RegistryEntry(
+        "operations/read-guidance-result-1.0.0.schema.json",
+        "read-guidance-result",
+        "1.0.0",
+        "request_result",
+        "MCP output",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["ReadGuidanceResultModel"]
+            ).ReadGuidanceResultModel
+        ),
+    ),
+    _RegistryEntry(
         "operations/receipt-request-1.0.0.schema.json",
         "receipt-request",
         "1.0.0",
@@ -1715,6 +1777,8 @@ def build_schema_documents(
             normalized = _opaque_unknown_event_draft_schema(entry)
         elif entry.relative_path == "operations/start-result-1.0.0.schema.json":
             normalized = _start_result_schema(entry)
+        elif entry.relative_path == "operations/read-guidance-result-1.0.0.schema.json":
+            normalized = _read_guidance_result_schema(entry)
         elif entry.relative_path == "operations/status-result-1.0.0.schema.json":
             normalized = _status_result_schema(entry)
         elif entry.relative_path == "version/version-manifest-1.0.0.schema.json":

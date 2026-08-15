@@ -1,4 +1,4 @@
-"""Six-tool MCP stdio bridge to the ordinary local Yoetz service."""
+"""MCP stdio bridge: six workflow tools plus read-only guidance, over the ordinary local service."""
 
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ from yoetz.mcp.errors import (
     tool_error_envelope,
 )
 from yoetz.mcp.resources import (
+    GUIDANCE_RESOURCES,
     GuidanceResource,
     GuidanceResourceError,
 )
@@ -64,6 +65,7 @@ from yoetz.protocol.models import (
     CheckResult,
     PublishWorkRequest,
     PublishWorkResult,
+    ReadGuidanceResult,
     ReceiptRequest,
     ReceiptResult,
     RespondRequest,
@@ -84,6 +86,7 @@ __all__ = [
     "close_bridge_runtime",
     "dispatch_check",
     "dispatch_publish_work",
+    "dispatch_read_guidance",
     "dispatch_receipt",
     "dispatch_respond",
     "dispatch_start",
@@ -103,7 +106,10 @@ _SERVER_NAME: Final = "yoetz"
 _WORKFLOW_RPC_DEADLINE_MS: Final = 30_000
 _SEMANTIC_CHECK_RPC_DEADLINE_MS: Final = 300_000
 _REGISTERED_TOOL_NAMES: Final = frozenset(
-    {"start", "publish_work", "check", "respond", "status", "receipt"}
+    {"start", "publish_work", "check", "respond", "status", "receipt", "read_guidance"}
+)
+_GUIDANCE_BY_URI: Final = MappingProxyType(
+    {resource.uri: resource for resource in GUIDANCE_RESOURCES}
 )
 # Reconnecting only helps when the connection itself is the problem. A projection failure is
 # answered by the live service and reconnecting around it drops the session for nothing, so both
@@ -996,8 +1002,56 @@ async def dispatch_receipt(
     )
 
 
+async def dispatch_read_guidance(
+    arguments: Mapping[str, object], runtime: BridgeRuntime = BRIDGE_RUNTIME
+) -> types.CallToolResult:
+    """Return one registered guidance document as tool text. Does not touch the service."""
+
+    _ = runtime
+    extra_keys = sorted(str(key) for key in arguments if key != "uri")
+    if extra_keys:
+        return structured_error_result(
+            PublicErrorCode.INVALID_REQUEST,
+            "read_guidance rejects extra argument keys.",
+            safe_details={"argument_count": len(arguments)},
+            operation="read_guidance",
+        )
+    raw_uri = arguments.get("uri")
+    if type(raw_uri) is not str or not raw_uri:
+        return structured_error_result(
+            PublicErrorCode.INVALID_REQUEST,
+            "read_guidance requires a registered guidance URI.",
+            safe_details={"argument_count": len(arguments)},
+            operation="read_guidance",
+        )
+    resource = _GUIDANCE_BY_URI.get(raw_uri)
+    if resource is None:
+        return structured_error_result(
+            PublicErrorCode.INVALID_REQUEST,
+            "read_guidance rejects an unknown guidance URI.",
+            safe_details={"argument_count": len(arguments)},
+            operation="read_guidance",
+        )
+    text = resource.text
+    result = ReadGuidanceResult.model_validate(
+        {
+            "ok": True,
+            "uri": resource.uri,
+            "media_type": resource.media_type,
+            "byte_count": len(text.encode("utf-8")),
+            "text": text,
+        }
+    )
+    wire = public_model_to_wire(result)
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)],
+        structuredContent=cast(dict[str, object], wire),
+        isError=False,
+    )
+
+
 async def list_tools(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.Tool]:
-    """Return the exact reviewed six-tool inventory in stable order."""
+    """Return the exact reviewed tool inventory in stable order."""
 
     return [
         types.Tool(
@@ -1037,6 +1091,7 @@ async def call_tool(
         "respond": dispatch_respond,
         "status": dispatch_status,
         "receipt": dispatch_receipt,
+        "read_guidance": dispatch_read_guidance,
     }.get(name)
     if dispatcher is None:
         raise McpError(

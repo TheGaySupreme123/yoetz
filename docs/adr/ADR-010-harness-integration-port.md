@@ -82,17 +82,18 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    exactly when an agent most needs to know Yoetz is unavailable rather than invent a session. A
    resource URI is a key into a frozen table, never a path.
 
-6. **`mcp/descriptors.py` owns every agent-read string** — the six tool names, descriptions, and
-   annotations, plus `instructions` — loaded from verified packaged resources, never composed at
-   runtime, and bound by the same honesty lint as the guidance ("verified", "proved",
-   "authenticated", "complete" rejected unless the sentence states the exact sufficient coverage).
-   `status` carries `readOnlyHint=true`; `receipt` carries `readOnlyHint=false` because it stages a
-   receipt object and appends a `receipt_recorded` event. Every tool carries an explicit
-   `idempotentHint=true`. Nothing carries `destructiveHint`, because no Yoetz operation deletes
-   recorded evidence. Observation does **not** add a seventh MCP tool: live observation is local
-   CLI/service control through `ObservationPort` (ingest/status/pause/resume/revoke), and advice
-   surfaces through existing nonblocking hooks plus ordinary `status` / findings / coverage
-   machinery.
+6. **`mcp/descriptors.py` owns every agent-read string** — the six workflow tool names, the
+   read-only `read_guidance` tool, descriptions, and annotations, plus `instructions` — loaded from
+   verified packaged resources, never composed at runtime, and bound by the same honesty lint as
+   the guidance ("verified", "proved", "authenticated", "complete" rejected unless the sentence
+   states the exact sufficient coverage). `status` and `read_guidance` carry `readOnlyHint=true`;
+   `receipt` carries `readOnlyHint=false` because it stages a receipt object and appends a
+   `receipt_recorded` event. Every tool carries an explicit `idempotentHint=true`. Nothing carries
+   `destructiveHint`, because no Yoetz operation deletes recorded evidence. `read_guidance` is
+   guidance transport only: it is not a ledger operation and does not use the service client.
+   Observation does **not** add a workflow tool: live observation is local CLI/service control
+   through `ObservationPort` (ingest/status/pause/resume/revoke), and advice surfaces through
+   existing nonblocking hooks plus ordinary `status` / findings / coverage machinery.
 
 7. **`ClientInfoModel.kind` gains `cooperative_agent`**, the transport-neutral honest identity for
    any harness without a first-party integration, valid with `cooperative_mcp` or `local_cli`.
@@ -207,15 +208,16 @@ Bundle migration `0004` owns durable inspection snapshots, workspace→Yoetz-ses
 session-scoped current advice; migration `0003` is immutable. Deterministic advice consumes this
 evidence offline and materializes through existing `finding_recorded`; ordinary
 `status(view="advice")` loads only the advice for the routed workspace and Yoetz session, and safe
-hook context surfaces the same bounded finding/evidence identities. The MCP registry remains exactly
-six tools.
+hook context surfaces the same bounded finding/evidence identities. The MCP registry remains the
+six workflow tools plus read-only `read_guidance`. Observation is not a seventh workflow tool.
 
 A fork can make Yoetz first-party on another harness by writing one adapter and one profile. It
 edits no port, no registry, no guidance, and no schema. That is the property this ADR exists to
 guarantee, and it follows from the ports/adapters pattern the rest of the tree already uses.
 
-Any MCP host works on day one with no integration, no skill, and no configuration: six tools, the
-tier-0 instructions, and five fetchable guidance documents. The request-template resource keeps
+Any MCP host works on day one with no integration, no skill, and no configuration: six workflow
+tools, `read_guidance`, the tier-0 instructions, and five fetchable guidance documents. The
+request-template resource keeps
 all six requests and all nine ordinary publication families authorable when a host drops schema
 metadata; the catalog schema remains admission authority. The host earns `cooperative_mcp` with
 `self_asserted` authorship and `published_only` artifact observation — the weakest honest coverage,

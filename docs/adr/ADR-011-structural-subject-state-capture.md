@@ -27,7 +27,8 @@ whether two material actions referred to the same repository state.
    unavailable result. `GitSubjectStateAdapter` is the only v0.1 implementation.
 2. **Capture is a client-local support capability, not a seventh workflow operation.** The CLI
    exposes `yoetz state capture`; it performs no ledger write and may be used by a harness before a
-   normal `publish_work` call. MCP still exposes exactly six tools.
+   normal `publish_work` call. MCP still exposes the six workflow tools plus read-only
+   `read_guidance`; capture is not an MCP tool.
 3. **The adapter reads only enough local Git/worktree state to hash it.** It emits no source bytes,
    diff, filename, absolute/relative path, branch, remote, author, commit message, environment, or
    command output. Intermediate Git output and file bytes are streamed into bounded hashers and
