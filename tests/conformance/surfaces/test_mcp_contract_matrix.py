@@ -348,7 +348,9 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         f"{base_instructions.rstrip()}\n\n{workflow.rstrip()}\n\n{coverage.rstrip()}\n\n"
     )
     assert "Route profile: policy." in server_instructions()
-    assert "Do not call `resources/list` to find Yoetz guidance" in server_instructions()
+    assert "Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance" in (
+        server_instructions()
+    )
     strict_instructions = server_instructions("strict")
     assert "Route profile: strict." in strict_instructions
     assert "This route will not request external semantic review" in strict_instructions
