@@ -49,9 +49,11 @@ class CodexPluginService:
 
     __slots__ = ()
 
-    def preview(self, target: IntegrationTarget) -> CodexPluginPreview:
-        inspection = inspect_plugin(target)
-        planned = len(render_plugin_tree())
+    def preview(
+        self, target: IntegrationTarget, *, codex_version: str | None = None
+    ) -> CodexPluginPreview:
+        inspection = inspect_plugin(target, codex_version=codex_version)
+        planned = len(render_plugin_tree(codex_version=codex_version))
         if planned > _MAX_PREVIEW_FILES:
             planned = _MAX_PREVIEW_FILES
         return CodexPluginPreview(
@@ -62,8 +64,10 @@ class CodexPluginService:
             notes=inspection.notes,
         )
 
-    def inspect(self, target: IntegrationTarget) -> PluginInspection:
-        return inspect_plugin(target)
+    def inspect(
+        self, target: IntegrationTarget, *, codex_version: str | None = None
+    ) -> PluginInspection:
+        return inspect_plugin(target, codex_version=codex_version)
 
     def install(
         self,
@@ -71,6 +75,7 @@ class CodexPluginService:
         *,
         replace_modified: bool = False,
         allow_untested: bool = False,
+        codex_version: str | None = None,
     ) -> PluginInspection:
         """Install via the adapter installer; never rewrite plugin files here."""
 
@@ -79,6 +84,7 @@ class CodexPluginService:
                 target,
                 replace_modified=replace_modified,
                 allow_untested=allow_untested,
+                codex_version=codex_version,
             )
         except IntegrationError:
             raise

@@ -1093,6 +1093,7 @@ async def _codex_integration_step(
     activation_state_before = (
         activation_plan.inspection.state.value if activation_plan is not None else "unknown"
     )
+    plugin_codex_version = activation_plan.codex_version if activation_plan is not None else None
     activation_unavailable: dict[str, JsonValue] = {
         "outcome": "skipped",
         "reason": activation_unavailable_reason,
@@ -1124,13 +1125,13 @@ async def _codex_integration_step(
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
-    plugin_preview = plugin_service.preview(project)
+    plugin_preview = plugin_service.preview(project, codex_version=plugin_codex_version)
     check_policy = _check_policy_preview(workspace)
     already_registered = mcp_preview.action is McpRegistrationAction.NOOP
     foreign = mcp_preview.state_before is McpRegistrationState.FOREIGN_PRESENT
 
     if foreign:
-        inspection = plugin_service.inspect(project)
+        inspection = plugin_service.inspect(project, codex_version=plugin_codex_version)
         return {
             "outcome": "skipped",
             "reason": "foreign_entry_present",
@@ -1284,7 +1285,11 @@ async def _codex_integration_step(
     # 2) Install and verify structural plugin/hook sources (even when MCP is registered).
     plugin_report: dict[str, JsonValue]
     try:
-        inspection = plugin_service.install(project, allow_untested=True)
+        inspection = plugin_service.install(
+            project,
+            allow_untested=True,
+            codex_version=plugin_codex_version,
+        )
         plugin_report = {
             "outcome": "installed",
             "presence": inspection.presence.value,
