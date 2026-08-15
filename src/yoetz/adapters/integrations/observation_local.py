@@ -620,6 +620,7 @@ class LocalObservationStore:
         _wall: Callable[[], float] | None = None,
     ) -> None:
         self._root = observation_dir(_state=_state)
+        self._state_root = self._root.parent
         self._lock = _InterprocessStoreLock(self._root / ".store.lock")
         self._monotonic = _monotonic
         self._wall = _wall
@@ -883,6 +884,46 @@ class LocalObservationStore:
             state.codex_session_bindings[codex_session_id] = session
             self._save(workspace_commitment, state)
         return session
+
+    def codex_session_ended(self, workspace_commitment: str, codex_session_id: str) -> bool:
+        """Whether the bound Codex session is marked ended for its current generation.
+
+        Drain routing consults this for ``mapping_missing`` rejections: pending outbox rows
+        of a session that ended while unmapped can never deliver -- no future ``start`` will
+        map an ended session -- so they get a terminal state instead of retrying forever and
+        holding outbox capacity (#275). A restarted session clears the mark via
+        ``begin_session_generation``.
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            assert state.ended_sessions is not None
+            session = state.codex_session_bindings.get(codex_session_id)
+            return session is not None and session in state.ended_sessions
+
+    def quarantine_ended_unmapped_session(
+        self,
+        workspace: str,
+        codex_session_id: str,
+        reason: str,
+    ) -> int:
+        """Quarantine an ended unmapped lane only when no attach owns its lifecycle lock.
+
+        A concurrent turn-boundary attach must win over terminalization: it may have
+        received mapping_missing before persisting the mapping. Acquiring the same
+        lifecycle lock closes that race; a contended lock leaves every row pending for
+        the next pass, while an uncontended ended session is terminal (#275).
+        """
+
+        if not self.codex_session_ended(workspace, codex_session_id):
+            return 0
+        from yoetz.adapters.integrations.codex_lifecycle import acquire_session_lock
+
+        with acquire_session_lock(codex_session_id, _state=self._state_root) as owned:
+            if not owned or not self.codex_session_ended(workspace, codex_session_id):
+                return 0
+            return self.quarantine_outbox_session(workspace, codex_session_id, reason)
 
     def find_workspace_for_codex_session(self, codex_session_id: str) -> str | None:
         with self._lock:

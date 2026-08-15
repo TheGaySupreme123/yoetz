@@ -14,6 +14,7 @@ from typing import cast
 
 import pytest
 
+from yoetz.adapters.integrations.codex_lifecycle import acquire_session_lock
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.recommendations import RecommendationState, store_recommendation_state
 from yoetz.cli import observe_hooks as observe_hooks_module
@@ -988,6 +989,149 @@ async def test_drain_probes_a_mapping_missing_session_once_per_pass(tmp_path: Pa
     assert all(row.last_reason == ObservationGapCode.MAPPING_MISSING.value for row in remaining)
 
 
+@pytest.mark.anyio
+async def test_drain_quarantines_mapping_missing_rows_of_an_ended_session(tmp_path: Path) -> None:
+    """A session that ended unmapped has no future; its rows retire terminally (#275)."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    ended_commitment = store.bind_codex_session(workspace, "ended")
+    for ordinal in (1, 2):
+        store.enqueue_outbox(
+            workspace, "ended", _drain_envelope(store, "ended", "hook:ended", ordinal)
+        )
+    store.note_session_end(workspace, ended_commitment)
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.MAPPING_MISSING.value,
+                    None,
+                )
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    with acquire_session_lock("ended", _state=tmp_path) as owned:
+        assert owned is True
+        await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+            store,
+            workspace_commitment=workspace,
+            codex_session_id="ended",
+            connect=connect,  # type: ignore[arg-type]
+            _state=tmp_path,
+        )
+
+    assert len(store.list_pending_outbox_rows(workspace)) == 2
+    assert store.quarantined_count(workspace) == 0
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="ended",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+    assert store.list_pending_outbox_rows(workspace) == ()
+    assert store.quarantined_count(workspace) == 2
+    assert {entry[2] for entry in store.list_quarantine(workspace)} == {
+        ObservationGapCode.MAPPING_MISSING.value
+    }
+
+
+def test_unmapped_session_reattempts_auto_attach_on_turn_events_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missed SessionStart attach is retried on turn-boundary events, never per tool call (#275)."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    calls: list[str] = []
+
+    async def fake_auto_start(codex_session_id: str, *, _state: Path | None) -> object | None:
+        calls.append(codex_session_id)
+        return None
+
+    monkeypatch.setattr(observe_hooks_module, "_try_auto_start", fake_auto_start)
+
+    async def connect(_kind: object):
+        return _InstantAckClient()
+
+    code = handle_observe(
+        event_name="UserPromptSubmit",
+        stdin_bytes=json.dumps(
+            {"session_id": "late-attach", "hook_event_name": "UserPromptSubmit"}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+    assert code == 0
+    assert calls == ["late-attach"]
+    diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"auto_attach_retry_failed"' in diagnostics
+
+    code = handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "late-attach",
+                "tool_name": "shell",
+                "correlation_id": "attach-1",
+                "exit_status": 0,
+            }
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+    assert code == 0
+    assert calls == ["late-attach"], "tool-call storms must never re-attempt auto-attach"
+
+
+def test_auto_attach_retry_exception_records_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    async def fail_auto_start(codex_session_id: str, *, _state: Path | None) -> object | None:
+        del codex_session_id, _state
+        raise TimeoutError("bounded auto-attach timeout")
+
+    monkeypatch.setattr(observe_hooks_module, "_try_auto_start", fail_auto_start)
+
+    async def connect(_kind: object):
+        return _InstantAckClient()
+
+    code = handle_observe(
+        event_name="UserPromptSubmit",
+        stdin_bytes=json.dumps(
+            {"session_id": "late-attach-timeout", "hook_event_name": "UserPromptSubmit"}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert diagnostics.count('"reason":"auto_attach_retry_failed"') == 1
+
+
 def test_session_reason_stamping_preserves_a_rows_observed_cause(tmp_path: Path) -> None:
     """Skipped siblings inherit the cause without rewriting a prior real attempt."""
 
@@ -1025,23 +1169,32 @@ def test_session_reason_stamping_preserves_a_rows_observed_cause(tmp_path: Path)
 
 
 @pytest.mark.anyio
-async def test_drain_treats_service_unavailable_as_row_scoped_with_a_cap(tmp_path: Path) -> None:
-    """One poisoned row must not wedge the workspace drain forever.
+async def test_drain_service_unavailable_retires_its_session_but_not_the_workspace(
+    tmp_path: Path,
+) -> None:
+    """One poisoned session must not wedge the workspace drain — nor be reordered.
 
     service_unavailable is the catch-all for row-scoped failures (bundle
-    contention, one malformed envelope), so healthy rows behind it still
-    deliver; only a consecutive run of them yields the pass.
+    contention, one malformed envelope). Other sessions keep delivering, but
+    the failed row stays the head of its own lane: delivering a later row of
+    the same session would advance the ingest cursor past it and destroy it
+    as terminal cursor_stale (#272).
     """
 
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
-    store.bind_codex_session(workspace, "mixed")
-    for ordinal in range(1, 6):
+    store.bind_codex_session(workspace, "poisoned")
+    store.bind_codex_session(workspace, "healthy")
+    for ordinal in (1, 2):
         store.enqueue_outbox(
-            workspace, "mixed", _drain_envelope(store, "mixed", "hook:mixed", ordinal)
+            workspace, "poisoned", _drain_envelope(store, "poisoned", "hook:poisoned", ordinal)
         )
-    poisoned = store.list_pending_outbox_rows(workspace)[0].envelope.source_identity
+        store.enqueue_outbox(
+            workspace, "healthy", _drain_envelope(store, "healthy", "hook:healthy", ordinal)
+        )
+    poisoned_head = store.list_pending_outbox_rows(workspace, codex_session_id="poisoned")[0]
+    poisoned = poisoned_head.envelope.source_identity
 
     attempts: list[str] = []
 
@@ -1071,13 +1224,19 @@ async def test_drain_treats_service_unavailable_as_row_scoped_with_a_cap(tmp_pat
     await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
         store,
         workspace_commitment=workspace,
-        codex_session_id="mixed",
+        codex_session_id="poisoned",
         connect=connect,  # type: ignore[arg-type]
         _state=tmp_path,
     )
-    assert len(attempts) == 4, "hook drains are capped while preserving cursor order"
+    assert attempts.count(poisoned) == 1, "the failed head is probed once, never stepped over"
+    assert len(attempts) == 3, "the healthy session still delivers fully"
     remaining = store.list_pending_outbox_rows(workspace)
-    assert [row.envelope.cursor.event_position for row in remaining] == [1, 5]
+    assert [row.codex_session_id for row in remaining] == ["poisoned", "poisoned"]
+    assert [row.envelope.cursor.event_position for row in remaining] == [1, 2]
+    assert [row.last_reason for row in remaining] == [
+        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+    ]
 
 
 @pytest.mark.anyio

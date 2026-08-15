@@ -56,6 +56,7 @@ _REASONS: Final = frozenset(
         "drain_budget_exhausted",
         "drain_lease_contended",
         "drain_preflight_failed",
+        "auto_attach_retry_failed",
         "runtime_gate_contended",
         "runtime_gate_unsafe",
         "stdout_write_failed",

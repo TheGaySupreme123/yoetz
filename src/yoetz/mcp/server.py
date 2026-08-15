@@ -379,9 +379,19 @@ def _control_error_result(
     # a failure the service already correlated.
     service_correlation_id = error.correlation_id
     if error.reason == "vault_locked":
-        return structured_error_result(
-            PublicErrorCode.VAULT_LOCKED,
-            (
+        # The daemon's retryable flag distinguishes a soft lock or transient re-unlock
+        # failure (heals on a later attempt) from a hard lock or missing setup (needs a
+        # trusted ceremony). Asserting the terminal cause for a transient one told agents
+        # to abandon evidence and receipts that a single retry would have recorded (#276).
+        if error.retryable:
+            message = (
+                "The local service vault is soft-locked or a transient unlock attempt just "
+                "failed; it re-opens automatically. Retry this operation shortly. If the "
+                "error persists, on a local terminal run `yoetz service unlock` or "
+                "`yoetz service auto-unlock repair`. Never send secrets over MCP."
+            )
+        else:
+            message = (
                 "The local service vault is locked or uninitialized. After trusted setup with "
                 "platform auto-unlock, soft locks (idle/session) re-open automatically; this "
                 "error means a hard lock or missing setup. On a local terminal run "
@@ -389,7 +399,11 @@ def _control_error_result(
                 "or `yoetz service auto-unlock repair` if that entry is stale. If still "
                 "uninitialized, run `yoetz setup` or prepare `vault_initialize` via "
                 "`yoetz consent catalog` / `prepare` (ADR-015). Never send secrets over MCP."
-            ),
+            )
+        return structured_error_result(
+            PublicErrorCode.VAULT_LOCKED,
+            message,
+            retryable=error.retryable,
             request_id=request_id,
             correlation_id=service_correlation_id,
             operation=operation,

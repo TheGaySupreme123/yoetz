@@ -124,6 +124,14 @@ _DRAIN_MAX_CONSECUTIVE_UNAVAILABLE: Final = 3
 # 69-schema catalog), and 1.0s leaves margin for daemon contention without
 # letting a dead daemon consume the whole drain budget.
 _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
+# SessionStart is the primary auto-attach point, but the daemon often spawns on
+# demand and may miss a session's opening moments; without a later re-attempt an
+# unmapped session stayed unmapped for its whole life and its outbox retried as
+# mapping_missing forever (#275). Low-frequency, once-per-turn events only --
+# never the PreToolUse/PostToolUse storm -- under a budget that keeps even the
+# Codex 3s SessionEnd clamp honest (attach 1.0 + connect preflight 1.0 + drain).
+_AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop", "SessionEnd"})
+_AUTO_ATTACH_RETRY_BUDGET_SECONDS: Final = 1.0
 # End-to-end observability contract for one hook pass, process start included.
 # Never an abort point: the drain and preflight budgets own enforcement.
 _HOOK_TOTAL_BUDGET_SECONDS: Final = 1.0
@@ -797,12 +805,15 @@ async def _drain_outbox_leased(
     # - vault_locked / observation_disabled / paused are workspace-global and
     #   cannot heal mid-pass, so they end the pass;
     # - service_unavailable is the catch-all for row-scoped and transient
-    #   failures (bundle contention, one malformed envelope, a dropped reply),
-    #   so it must NOT poison other rows — but a run of them in a row means
-    #   the service is genuinely struggling, so the pass yields after a few.
+    #   failures (bundle contention, one malformed envelope, a dropped reply).
+    #   It must not poison other *sessions*, but it still retires its own
+    #   session for the pass: the failed row stays pending at the head of its
+    #   lane, and delivering a later row of the same session would advance the
+    #   ingest cursor past it and destroy it as terminal cursor_stale (#272).
+    #   A run of them across sessions means the service is genuinely
+    #   struggling, so the pass yields after a few.
     # Re-attempting every row of a permanently-undeliverable backlog burned
     # the whole drain budget per hook forever — the recurrence tax of #211.
-    session_scoped_stop = ObservationGapCode.MAPPING_MISSING.value
     global_stop = frozenset(
         {
             ObservationGapCode.VAULT_LOCKED.value,
@@ -869,14 +880,28 @@ async def _drain_outbox_leased(
             if decision.reason is not None:
                 record_hook_diagnostic(decision.reason, event_name, _state=_state)
             if decision.action is ObservationDrainAction.RETRY:
-                if decision.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value:
-                    consecutive_unavailable += 1
-                    if consecutive_unavailable >= _DRAIN_MAX_CONSECUTIVE_UNAVAILABLE:
-                        break
-                    continue
-                consecutive_unavailable = 0
-                if decision.reason == session_scoped_stop:
-                    skipped_sessions.add(row.codex_session_id)
+                if decision.reason in global_stop:
+                    break
+                # The lane's head row stays pending; skipping to a later row of
+                # the same session would deliver it out of order (#272), so the
+                # session retires for the pass whatever the retryable reason.
+                skipped_sessions.add(row.codex_session_id)
+                if decision.reason == ObservationGapCode.MAPPING_MISSING.value:
+                    # The session ended while unmapped: nothing will ever map it, so
+                    # its rows would otherwise retry forever. Terminalization takes
+                    # the lifecycle lock so a concurrent attach that is still
+                    # persisting its mapping wins this race (#275, #283 review).
+                    moved = 0
+                    with contextlib.suppress(Exception):
+                        moved = store.quarantine_ended_unmapped_session(
+                            workspace_commitment,
+                            row.codex_session_id,
+                            decision.reason,
+                        )
+                    if moved:
+                        consecutive_unavailable = 0
+                        continue
+                if decision.reason is not None:
                     # Stamp the retired siblings with the shared cause so
                     # `observe status` never reports them as not_attempted.
                     with contextlib.suppress(Exception):
@@ -885,8 +910,12 @@ async def _drain_outbox_leased(
                             row.codex_session_id,
                             decision.reason,
                         )
-                elif decision.reason in global_stop:
-                    break
+                if decision.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value:
+                    consecutive_unavailable += 1
+                    if consecutive_unavailable >= _DRAIN_MAX_CONSECUTIVE_UNAVAILABLE:
+                        break
+                else:
+                    consecutive_unavailable = 0
                 continue
             consecutive_unavailable = 0
     finally:
@@ -1335,6 +1364,43 @@ def handle_observe(
 
                             with contextlib.suppress(Exception):
                                 _resolve_runner()(_drain)
+
+        if (
+            not skip_service
+            and not skip_advice_loop
+            and mapping is None
+            and resolved_event in _AUTO_ATTACH_RETRY_EVENTS
+        ):
+            # Re-attempt auto-attach for a session that started while the service was
+            # unreachable, so one missed SessionStart no longer costs the session's whole
+            # record (#275). Bounded, and placed before the drain below so a fresh mapping
+            # delivers this session's backlog in the same pass.
+            with acquire_session_lock(codex_session_id, _state=_state) as owned:
+                if owned:
+                    mapping = load_mapping(codex_session_id, _state=_state)
+                    if mapping is None:
+
+                        async def _attach_retry() -> LifecycleMapping | None:
+                            import asyncio
+
+                            return await asyncio.wait_for(
+                                _try_auto_start(codex_session_id, _state=_state),
+                                timeout=_AUTO_ATTACH_RETRY_BUDGET_SECONDS,
+                            )
+
+                        try:
+                            mapping = cast(
+                                LifecycleMapping | None, _resolve_runner()(_attach_retry)
+                            )
+                        except Exception:
+                            record_hook_diagnostic(
+                                "auto_attach_retry_failed", resolved_event, _state=_state
+                            )
+                        else:
+                            if mapping is None:
+                                record_hook_diagnostic(
+                                    "auto_attach_retry_failed", resolved_event, _state=_state
+                                )
 
         if not skip_service and resolved_event != "SessionStart":
             # Every later mapped hook drains the complete session outbox, so the
