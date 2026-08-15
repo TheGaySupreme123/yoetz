@@ -968,6 +968,33 @@ async def _try_auto_start(
                 await client.close()
 
 
+def _note_dropped_event_gap(
+    store: LocalObservationStore,
+    payload: Mapping[str, JsonValue],
+    workspace: str | None,
+) -> None:
+    """Record a coverage gap for an event dropped before the local pass ran.
+
+    Mirrors the binding order of the main pass: the explicit workspace
+    argument first, then the Codex-session→workspace map. A silently missing
+    event is the one outcome this subsystem must not produce, so any drop
+    must be visible to ``observe status`` and coverage wording.
+    """
+
+    if workspace is not None:
+        locator = str(Path(workspace).expanduser().resolve(strict=False))
+        commitment: str | None = store.workspace_commitment(locator)
+    else:
+        codex_session_id = validate_codex_session_id(payload.get("session_id"))
+        commitment = store.find_workspace_for_codex_session(codex_session_id)
+    if commitment is None:
+        return
+    consent = store.consent_for(commitment)
+    if consent is None or not consent.active:
+        return
+    store.note_coverage_gap(commitment, ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
+
+
 def handle_observe(
     *,
     event_name: str,
@@ -1028,8 +1055,18 @@ def handle_observe(
         resolved_event = raw_event
         try:
             capture_enabled = store.runtime_enabled()
+        except TimeoutError:
+            # Store-lock contention says nothing about the gate itself.
+            # Fall back to the missing-marker default (enabled) instead of
+            # discarding the event; consent still gates every ingest below.
+            _stderr_line("hook_observe_degraded: runtime_gate_contended")
+            record_hook_diagnostic("runtime_gate_contended", resolved_event, _state=_state)
+            capture_enabled = True
         except Exception:
+            _stderr_line("hook_observe_degraded: runtime_gate_unsafe")
             record_hook_diagnostic("runtime_gate_unsafe", resolved_event, _state=_state)
+            with contextlib.suppress(Exception):
+                _note_dropped_event_gap(store, payload, workspace)
             _stdout_json({}, stdout)
             return 0
         if not capture_enabled:
