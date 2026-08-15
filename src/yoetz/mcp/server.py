@@ -1144,7 +1144,8 @@ async def read_resource(uri: object) -> list[ReadResourceContents]:
         payload = read_guidance_resource(str(uri)).decode("utf-8", errors="strict")
     except GuidanceResourceError as exc:
         raise ValueError("guidance_resource_unavailable") from exc
-    return [ReadResourceContents(content=payload, mime_type="text/markdown")]
+    resource = _GUIDANCE_BY_URI[str(uri)]
+    return [ReadResourceContents(content=payload, mime_type=resource.media_type)]
 
 
 def _build_server(runtime: BridgeRuntime) -> Server[object]:

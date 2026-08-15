@@ -150,3 +150,10 @@ def test_each_listed_resource_can_actually_be_read(responses: list[dict[str, Any
         assert "error" not in response, response.get("error")
         contents = response["result"]["contents"]
         assert contents and contents[0]["text"].strip(), index
+        uri = contents[0]["uri"]
+        resource = next(item for item in GUIDANCE_RESOURCES if item.uri == uri)
+        listed = next(
+            item for item in _by_id(responses, 3)["result"]["resources"] if item["uri"] == uri
+        )
+        assert contents[0]["mimeType"] == resource.media_type
+        assert contents[0]["mimeType"] == listed["mimeType"]

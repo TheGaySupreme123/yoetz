@@ -395,8 +395,10 @@ carried them; they are listed because each one describes the behavior that now s
   if that tool result is also empty. Initialize `instructions` also append `workflow.md` and
   `coverage-and-receipts.md` so those Step 0 documents arrive without depending on
   `resources/read`. MCP registers `read_guidance` as a seventh, read-only tool that returns the
-  full guidance document as tool text and is not a ledger operation. `docs/INTERFACES.md` no
-  longer states that unprofiled hosts can fetch those documents unconditionally (issue #203).
+  full guidance document as tool text and is not a ledger operation. `resources/read` now
+  advertises each registry `media_type` instead of hardcoding `text/markdown`.
+  `docs/INTERFACES.md` no longer states that unprofiled hosts can fetch those documents
+  unconditionally (issue #203).
 - A Stop hook that selected advice completed in ~1.4s with exit 0, then Codex marked it Failed
   with `hook returned invalid stop hook JSON output`. Stop has no `hookSpecificOutput`; the
   event-agnostic emitter was writing `additionalContext` onto a wire type that only admits
