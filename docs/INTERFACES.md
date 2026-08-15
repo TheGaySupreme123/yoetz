@@ -2338,7 +2338,10 @@ Shared closed types:
   session snapshot when one exists, otherwise from the current Codex session's retained envelopes.
   The workspace-wide snapshot is not a fallback for task-scoped work. Deliberately workspace-
   standing machine conditions remain deliverable from that workspace snapshot at the documented
-  session-boundary cadence (`SessionStart` and `Stop`). The agent-visible context carries only
+  session-boundary cadence (`SessionStart` and `Stop`), and they rest on structural machine facts
+  recomputed at advice build time (configured endpoint, provider factory availability, exact
+  configured-credential presence) — never on a READY-time snapshot or on absence from the lazily
+  activated provider registry, and never as a claim of repository-scoped dispatch authority (#265). The agent-visible context carries only
   the bounded rule, action, and evidence token; deciding whether the advice belongs to the
   current target never requires inspecting Yoetz storage. Hook stdout is event-specific:
   `SessionStart` / `PostToolUse` / `UserPromptSubmit` emit `hookSpecificOutput.additionalContext`;
