@@ -37,7 +37,7 @@ For `check` mode: use `semantic_if_configured` for most material implementation/
 
 # A recorded finding stays recorded
 
-`respond` records your disposition and links your evidence; it does not erase the historical finding. A readable response identifying that finding removes it from the unresolved count, but does not close an independent coverage gap. Publish exactly the first time — an exact `attempted_items` entry for every requested item, evidence for every claim — because a finding cannot be un-fired. Repairing the record is still worth doing: it stops the next check from minting a duplicate and shows the reader what you did.
+`respond` records your disposition and links your evidence; it does not erase the historical finding. A readable response identifying that finding removes it from the unresolved count, but does not close an independent coverage gap. Publish exactly the first time — an exact `attempted_items` entry on `action_recorded` for every requested item you attempted, evidence for every claim — because a finding cannot be un-fired. `attempted_items` belongs to `action_recorded.payload` alone, never a claim, and each entry copies the obligation's `requested_items` `value` string exactly. Repairing the record is still worth doing: it stops the next check from minting a duplicate and shows the reader what you did.
 
 # Semantic review runs on authority the user already gave
 
@@ -125,6 +125,8 @@ On `OPERATION_PENDING`, read `status` with `view=operation` once and replay the 
 # Canonical request values
 
 Fields backed by canonical integers stay JSON strings on the wire. In particular, send frontier `sequence` and pagination `limit` as strings such as `"10"`, never JSON numbers.
+
+Some payload fields are structural identifiers or closed enums, not prose. `decision_recorded.authority` names the actor who exercised the authority as an actor id (`^[A-Za-z0-9._:-]{1,128}$`); the approval story belongs in `rationale`. `action_kind` admits exactly `command`, `edit`, `research`, `review`, and `other` — a source or file modification is `edit`.
 
 # Word conclusions honestly
 

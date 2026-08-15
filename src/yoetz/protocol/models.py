@@ -1094,6 +1094,10 @@ def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
                             "schema_name": exc.family,
                             "schema_version": exc.family_version,
                             "count": exc.unknown_count or None,
+                            # Frozen schema vocabulary, never a caller-invented key: the validator
+                            # admits it only when it byte-equals a catalogued payload property
+                            # name, so MCP can name the field's one legal owner (issue #266).
+                            "misplaced_field": exc.misplaced_field,
                         },
                     }
                 ],

@@ -126,6 +126,25 @@ public error names the mismatched schema field names only — never their values
 resolution pair lives in the `publish_work` tool input schema `examples` entry. Complete request
 bodies remain available at `yoetz://guidance/request-templates.md` if a host drops schema examples.
 
+## Requested items and attempt accounting
+
+<a id="attempt-accounting"></a>
+
+An obligation's `requested_items` entries are objects; each entry's `value` is the exact item
+string the obligation asks for. Attempt accounting for those items lives in exactly one place:
+`attempted_items` on `action_recorded.payload`. No other family admits the field — a claim in
+particular never carries it; claims link evidence with `supporting_refs` and obligations with
+`obligation_refs`.
+
+When you attempt a requested item, copy its exact `value` string — unnormalized, unparaphrased —
+into `attempted_items` on the `action_recorded` event that attempted it, whether or not the
+attempt succeeded. A requested item with no matching attempted entry is reported as never
+attempted, so dropping the field to satisfy a validator silently erases the attempt record.
+Two more structural payload rules travel on their own families: `decision_recorded.authority`
+is a structural actor id (never approval prose — that belongs in `rationale`), and `action_kind` is
+the closed enum `command`, `edit`, `research`, `review`, `other`, where source or file
+modification is `edit`.
+
 ## Subject state and freshness
 
 Bind change-sensitive evidence to the exact subject state or frontier it concerns. If a material dependency changed or its state is unknown, mark the evidence stale or limited. Absence of visible source is not evidence that nothing changed.
@@ -201,7 +220,7 @@ Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, o
 
 ### Code change
 
-Publish one obligation for the behavior, one material implementation result, a bounded changed-symbol digest or excerpt, and focused test evidence. Do not publish the repository or every edit.
+Publish one obligation for the behavior, one material implementation result, a bounded changed-symbol digest or excerpt, and focused test evidence. The implementing action uses `action_kind: edit` and carries the exact `attempted_items` values for the requested items it attempted. Do not publish the repository or every edit.
 
 ### Research
 

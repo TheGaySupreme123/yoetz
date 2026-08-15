@@ -791,6 +791,9 @@ class SchemaInstanceInvalid(ProtocolValueError):
     version, and a bounded cardinality. No caller-supplied key or value is admitted through any of
     them — ``family_version`` in particular is read from the catalogue entry the failing schema's
     own ``$id`` names, never from the instance's ``schema.version``.
+    ``misplaced_field`` names one rejected key only when it byte-equals a payload property name
+    some catalogued event family declares, so the token that travels is frozen schema vocabulary
+    and never a caller-invented key (issue #266).
     """
 
     __slots__ = (
@@ -798,6 +801,7 @@ class SchemaInstanceInvalid(ProtocolValueError):
         "family",
         "family_version",
         "location_reasons",
+        "misplaced_field",
         "reason",
         "unknown_count",
     )
@@ -808,6 +812,7 @@ class SchemaInstanceInvalid(ProtocolValueError):
     family: str | None
     family_version: str | None
     unknown_count: int
+    misplaced_field: str | None
 
     def __init__(
         self,
@@ -818,6 +823,7 @@ class SchemaInstanceInvalid(ProtocolValueError):
         family: str | None = None,
         family_version: str | None = None,
         unknown_count: int = 0,
+        misplaced_field: str | None = None,
     ) -> None:
         if type(absolute_path) is not tuple:
             raise TypeError("schema_instance_path_invalid")
@@ -851,12 +857,18 @@ class SchemaInstanceInvalid(ProtocolValueError):
             or not 0 <= unknown_count <= _UNKNOWN_PROPERTY_COUNT_OVERFLOW
         ):
             raise TypeError("schema_instance_unknown_count_invalid")
+        if misplaced_field is not None and (
+            type(misplaced_field) is not str
+            or EVENT_FAMILY_NAME_PATTERN.fullmatch(misplaced_field) is None
+        ):
+            raise TypeError("schema_instance_misplaced_field_invalid")
         self.absolute_path = absolute_path
         self.location_reasons = location_reasons
         self.reason = reason
         self.family = family
         self.family_version = family_version
         self.unknown_count = unknown_count
+        self.misplaced_field = misplaced_field
         super().__init__("schema_instance_invalid")
 
 
@@ -887,6 +899,7 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
                 family=identity[0] if identity is not None else None,
                 family_version=identity[1] if identity is not None else None,
                 unknown_count=_unknown_property_count(best) if reason is not None else 0,
+                misplaced_field=_misplaced_known_field(best) if reason is not None else None,
             ) from None
         # Root-level object rules (dependentRequired, if/then anyOf required) report an empty
         # instance path. Project only schema-named fields so MCP can name the corrective pair.
@@ -1188,6 +1201,94 @@ def _unknown_property_count(error: ValidationError) -> int:
     unknown = {key for key in cast(Mapping[object, object], instance) if key not in declared}
     count = len(unknown)
     return count if count <= MAX_UNKNOWN_PROPERTY_COUNT else _UNKNOWN_PROPERTY_COUNT_OVERFLOW
+
+
+def _event_payload_field_vocabulary() -> frozenset[str]:
+    """Return every payload property name any catalogued event family declares.
+
+    The vocabulary is frozen schema content read from the catalogue documents themselves, so
+    membership in it is what makes naming a rejected key safe: a key outside it never travels.
+    """
+
+    state = _load_catalog_state()
+    catalog = state.catalog
+    names: set[str] = set()
+    for schema_id, document in catalog.by_id.items():
+        if document.schema_name.replace("-", "_") not in catalog.event_schema_versions:
+            continue
+        plain = state.plain_by_id.get(schema_id)
+        if not isinstance(plain, Mapping):
+            continue
+        properties = cast(Mapping[str, JsonValue], plain).get("properties")
+        if isinstance(properties, Mapping):
+            names.update(
+                key for key in cast(Mapping[object, object], properties) if type(key) is str
+            )
+    return frozenset(names)
+
+
+def _event_draft_structural_property_names() -> frozenset[str]:
+    """Return every property name the event-draft documents declare outside family payloads.
+
+    A rejected payload key that the draft envelope itself admits (``evidence_refs``,
+    ``artifact_refs``) is misplaced across levels, not across families, so naming another
+    family's payload as its owner would send the caller the wrong way (issue #266).
+    """
+
+    state = _load_catalog_state()
+    names: set[str] = set()
+
+    def collect(node: JsonValue) -> None:
+        if isinstance(node, Mapping):
+            source = cast(Mapping[str, JsonValue], node)
+            properties = source.get("properties")
+            if isinstance(properties, Mapping):
+                names.update(
+                    key for key in cast(Mapping[object, object], properties) if type(key) is str
+                )
+            for value in source.values():
+                collect(value)
+        elif isinstance(node, list):
+            for value in cast(list[JsonValue], node):
+                collect(value)
+
+    for schema_id, document in state.catalog.by_id.items():
+        if not document.schema_name.endswith("event-draft"):
+            continue
+        plain = state.plain_by_id.get(schema_id)
+        if plain is not None:
+            # Family payloads are external ``$ref`` targets, so this walk only ever sees the
+            # envelope and schema-identity properties the draft documents declare themselves.
+            collect(plain)
+    return frozenset(names)
+
+
+def _misplaced_known_field(error: ValidationError) -> str | None:
+    """Name the ASCII-first rejected key that some other catalogued family declares, or None.
+
+    The rejected key names are caller-controlled and normally never leave the validator (issue
+    #240). A key is admitted through this projection only when it byte-equals a payload property
+    name declared by a catalogued event schema, so the token that travels is drawn from the frozen
+    schema vocabulary — a caller-invented key can never match it. Keys the draft envelope itself
+    declares are skipped: they are misplaced across levels, not families. Selection is
+    deterministic: string keys are considered in ascending ASCII order (issue #266).
+    """
+
+    instance = error.instance
+    schema = error.schema
+    if not isinstance(instance, Mapping) or not isinstance(schema, Mapping):
+        return None
+    properties = cast(Mapping[str, JsonValue], schema).get("properties")
+    declared: set[object] = (
+        set(cast(Mapping[object, object], properties)) if isinstance(properties, Mapping) else set()
+    )
+    vocabulary = _event_payload_field_vocabulary() - _event_draft_structural_property_names()
+    for key in sorted(key for key in cast(Mapping[object, object], instance) if type(key) is str):
+        if key in declared or key not in vocabulary:
+            continue
+        if EVENT_FAMILY_NAME_PATTERN.fullmatch(key) is not None:
+            return key
+    return None
 
 
 def _selected_family_for(error: ValidationError) -> tuple[str, str] | None:

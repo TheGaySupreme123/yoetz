@@ -299,11 +299,12 @@ async def test_mcp_stdio_six_tool_dispatch_without_claiming_codex_activation(
 
 
 def _rejected_tool_arguments() -> dict[str, tuple[str, dict[str, JsonValue]]]:
-    """Three rejections real dogfood sessions produced, in their own shapes.
+    """Four rejections real dogfood sessions produced, in their own shapes.
 
     `envelope` puts the family value on a guessed top-level key (2026-08-03); `payload_key` sends
-    a key the family does not admit (2026-08-13, issue #240); `scope` sends half a scope. All three
-    were rejected safely before, and all three left the agent with nothing to author from.
+    a key the family does not admit (2026-08-13, issue #240); `scope` sends half a scope;
+    `misplaced_field` puts `attempted_items` on the claim payload (2026-08-14, issue #266). All
+    four were rejected safely before, and all four left the agent with nothing to author from.
     """
 
     valid = _schema_valid_tool_arguments()
@@ -327,10 +328,28 @@ def _rejected_tool_arguments() -> dict[str, tuple[str, dict[str, JsonValue]]]:
         **valid["check"],
         "scope": cast(JsonValue, {"obligation_ids": []}),
     }
+    misplaced_draft = dict(cast(Mapping[str, JsonValue], drafts[0]))
+    misplaced_draft["schema"] = cast(JsonValue, {"name": "claim_recorded", "version": "1.0.0"})
+    misplaced_draft["payload"] = cast(
+        JsonValue,
+        {
+            "claim_id": "clm_00000000-0000-4000-8000-000000000001",
+            "claim_kind": "completion",
+            "statement": "Requested work is complete.",
+            "supporting_refs": ["evd_00000000-0000-4000-8000-000000000001"],
+            "attempted_items": ["pytest -q"],
+        },
+    )
+    misplaced_publish: dict[str, JsonValue] = {
+        **valid["publish_work"],
+        "event_drafts": [cast(JsonValue, misplaced_draft)],
+        "dry_run": True,
+    }
     return {
         "envelope": ("publish_work", publish),
         "payload_key": ("publish_work", unknown_key_publish),
         "scope": ("check", check),
+        "misplaced_field": ("publish_work", misplaced_publish),
     }
 
 
@@ -346,6 +365,8 @@ async def test_rejected_arguments_carry_corrective_text_over_the_wire(tmp_path: 
     evidence_root = capability_evidence_output_root(tmp_path)
     arguments = _rejected_tool_arguments()
     messages: dict[str, str] = {}
+    details_by_label: dict[str, dict[str, object]] = {}
+    text_by_label: dict[str, str] = {}
     params = _serve_parameters(tmp_path)
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
@@ -360,6 +381,9 @@ async def test_rejected_arguments_carry_corrective_text_over_the_wire(tmp_path: 
                 # reached: the durability caveat rides beside it, never in place of it (#239).
                 assert error["code"] in _REJECTION_CODES
                 messages[label] = cast(str, error["message"])
+                details_by_label[label] = cast(dict[str, object], error.get("safe_details") or {})
+                first_content = result.content[0]
+                text_by_label[label] = cast(str, getattr(first_content, "text", ""))
 
     # The draft envelope: which key carries the family, and what else the envelope must carry.
     assert "schema.name admits" in messages["envelope"]
@@ -376,6 +400,23 @@ async def test_rejected_arguments_carry_corrective_text_over_the_wire(tmp_path: 
     # Check scope: the missing peer and the omit-the-whole-object alternative.
     assert "claim_ids" in messages["scope"]
     assert "omit scope for the whole case" in messages["scope"]
+    # The misplaced known field: strict rejection retained, and the one legal owning family named
+    # in the message, in the structured repair fact, and on the compatible text channel (#266).
+    assert "does not admit" in messages["misplaced_field"]
+    assert (
+        "attempted_items is admitted only by the action_recorded payload"
+        in messages["misplaced_field"]
+    )
+    misplaced_details = details_by_label["misplaced_field"]
+    assert misplaced_details["repair_kind"] == "field_ownership"
+    assert misplaced_details["repair_field"] == "attempted_items"
+    assert misplaced_details["repair_selected_family"] == "claim_recorded"
+    assert misplaced_details["repair_owning_family"] == "action_recorded"
+    assert misplaced_details["repair_template_uri"] == "yoetz://guidance/request-templates.md"
+    assert (
+        "Repair: attempted_items is admitted only by the action_recorded payload"
+        in text_by_label["misplaced_field"]
+    )
 
     context = runtime_capability_context(
         fixture_digest=bytes_digest(b"mcp-stdio-corrective-authoring"),
