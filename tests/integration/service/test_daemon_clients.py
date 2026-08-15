@@ -1687,24 +1687,31 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("stall", "expected"),
-    [(False, "sweep_failed"), (True, "sweep_deadline_exceeded")],
-)
+@pytest.mark.parametrize("stall", [False, True])
 async def test_only_the_deadline_reports_sweep_deadline_exceeded(
-    monkeypatch: pytest.MonkeyPatch, stall: bool, expected: str
+    monkeypatch: pytest.MonkeyPatch, stall: bool
 ) -> None:
     """asyncio.TimeoutError is TimeoutError: a socket timeout inside a sweep is not the deadline."""
 
-    reasons: list[str] = []
+    bounded_reasons: list[str] = []
+    recorded_exceptions: list[BaseException] = []
 
-    def record(*, component: str, operation: str, reason: str) -> str:
+    def record_bounded(*, component: str, operation: str, reason: str) -> str:
         assert component == "service.daemon"
         assert operation == "observation_sweep_failed"
-        reasons.append(reason)
+        bounded_reasons.append(reason)
         return "err_00000000-0000-4000-8000-000000000000"
 
-    monkeypatch.setattr(daemon_module, "record_bounded_event_without_raising", record)
+    def record_exception(exc: BaseException, *, component: str, operation: str) -> str:
+        assert component == "service.daemon"
+        assert operation == "observation_sweep_failed"
+        recorded_exceptions.append(exc)
+        return "err_00000000-0000-4000-8000-000000000001"
+
+    monkeypatch.setattr(daemon_module, "record_bounded_event_without_raising", record_bounded)
+    monkeypatch.setattr(
+        daemon_module, "record_unexpected_exception_without_raising", record_exception
+    )
     monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_DEADLINE_SECONDS", 0.05)
 
     async def sweep() -> ObservationDrainSummary:
@@ -1718,7 +1725,44 @@ async def test_only_the_deadline_reports_sweep_deadline_exceeded(
     summary = await daemon._bounded_observation_sweep(sweep)  # pyright: ignore[reportPrivateUsage]
 
     assert summary is None
-    assert reasons == [expected]
+    if stall:
+        # Only the real deadline is a non-exception operating state.
+        assert bounded_reasons == ["sweep_deadline_exceeded"]
+        assert recorded_exceptions == []
+    else:
+        # The sweep's own exception keeps its identity instead of a generic token (issue #278).
+        assert bounded_reasons == []
+        assert len(recorded_exceptions) == 1
+        assert isinstance(recorded_exceptions[0], TimeoutError)
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_ordinary_sweep_exception_keeps_its_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raised sweep records the exception itself, not a generic token (issue #278)."""
+
+    recorded: list[tuple[BaseException, str, str]] = []
+
+    def record_exception(exc: BaseException, *, component: str, operation: str) -> str:
+        recorded.append((exc, component, operation))
+        return "err_00000000-0000-4000-8000-000000000002"
+
+    monkeypatch.setattr(
+        daemon_module, "record_unexpected_exception_without_raising", record_exception
+    )
+
+    async def sweep() -> ObservationDrainSummary:
+        raise RuntimeError("sweep exploded")
+
+    daemon, _application, _vault, _listener = _daemon()
+    summary = await daemon._bounded_observation_sweep(sweep)  # pyright: ignore[reportPrivateUsage]
+    assert summary is None
+    assert len(recorded) == 1
+    exc, component, operation = recorded[0]
+    assert isinstance(exc, RuntimeError)
+    assert (component, operation) == ("service.daemon", "observation_sweep_failed")
     await daemon.close()
 
 

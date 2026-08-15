@@ -126,6 +126,14 @@ admitted-key answer. The same fact is repeated as one bounded sentence in the au
 as a `Repair:` clause on the compatible text summary channel, because MCP hosts are not required
 to surface `structuredContent`.
 
+Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
+drop `structuredContent`. A successful projection includes the first valid returned frontier's
+`sequence` and canonical `head_digest` when both are present. Generic successful operations also
+include any returned, kind-valid `task_id`, `session_id`, and `writer_id`; in particular, the
+`start` text alone carries the identifiers and frontier needed to author the next request.
+Caller-controlled prose, malformed identifiers, and malformed digests are never admitted to this
+text channel.
+
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
 `expected_frontier`. It names that field and is retryable because validation wrote no durable
@@ -1458,7 +1466,9 @@ or paths. The daemon's control-plane watchdog samples event-loop lag from a plai
 appends `control_plane_saturation_entered`/`_persists`/`_cleared` records (component
 `service.daemon`) with those counts at a bounded cadence, so a starved control plane is diagnosed
 while it is happening rather than never (#238); sweep failures append
-`observation_sweep_failed`. The same `correlation_id` is attached to the raised
+`observation_sweep_failed`. A sweep-raised exception uses the unexpected-exception recorder so
+its bounded reason and origin survive; only an actual sweep deadline records
+`sweep_deadline_exceeded`. The same `correlation_id` is attached to the raised
 `ControlError` (and to the reduced publish acceptance envelope when that path is taken) so the
 agent-facing public error and the durable sink share one identity. The MCP bridge reuses a
 service-supplied id rather than minting a second one; only bridge-local failures without a

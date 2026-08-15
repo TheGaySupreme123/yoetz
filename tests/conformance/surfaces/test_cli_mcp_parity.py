@@ -19,7 +19,8 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
     summary = render_safe_compact_summary(check)
     assert summary == (
         "Check verdict: incomplete_check; findings returned: 1; suppressed: 3; semantic "
-        "status/reason: not_configured/provider_not_configured; frontier: 7."
+        "status/reason: not_configured/provider_not_configured; frontier: 7; "
+        "head_digest: sha256:" + "0" * 64 + "."
     )
     assert secret not in summary
     assert len(summary.encode("ascii")) <= 512

@@ -713,6 +713,25 @@ def test_unmapped_session_start_still_delivers_workspace_standing_advice(
     assert "resolve_failed_command" not in started
 
 
+def test_unmapped_session_start_joins_attach_advisory_with_standing_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attach advisory and pending advice share the channel, neither starves the other.
+
+    The advisory is a static bootstrap instruction with no advice content of its own
+    (issue #280); standing advice must still reach the agent at the same SessionStart
+    (issue #241), so the delivery text is appended after the advisory.
+    """
+
+    _consented(tmp_path)
+    _compose(monkeypatch, _STANDING)
+
+    started = _run(tmp_path, "SessionStart", "joined", source="startup")
+    assert "Call start to attach a task." in started
+    assert "connect_provider" in started
+    assert started.index("Call start to attach a task.") < started.index("connect_provider")
+
+
 def test_delivery_in_task_a_does_not_suppress_same_condition_in_task_b(
     tmp_path: Path,
 ) -> None:

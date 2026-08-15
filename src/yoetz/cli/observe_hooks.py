@@ -1019,7 +1019,9 @@ def handle_observe(
 
     ``skip_service`` keeps the hook fully local: capture, binding, and outbox
     enqueue still run, but no service connection is ever opened (auto-attach,
-    mapped-session status, and outbox drains are all skipped).
+    mapped-session status, and outbox drains are all skipped). Advisory output
+    that needs no service still runs — an unattached SessionStart binding emits
+    the static "call start to attach a task" context either way (issue #280).
 
     ``_entry_monotonic`` is the console shim's pre-import sample; without it the
     recorded import stage reads zero rather than guessing.
@@ -1256,6 +1258,7 @@ def handle_observe(
         # skip_service so local-only callers (e.g. the setup readiness probe)
         # never create or attach real ledger tasks.
         additional = ""
+        attach_advisory_only = False
         mapping: LifecycleMapping | None = load_mapping(codex_session_id, _state=_state)
         drain_started = _monotonic()
         if resolved_event == "SessionStart":
@@ -1271,18 +1274,22 @@ def handle_observe(
                 with acquire_session_lock(codex_session_id, _state=_state) as owned:
                     if owned:
                         mapping = load_mapping(codex_session_id, _state=_state)
-                        if mapping is None and not skip_advice_loop and not skip_service:
+                        if mapping is None and not skip_advice_loop:
+                            if not skip_service:
 
-                            async def _attach() -> LifecycleMapping | None:
-                                return await _try_auto_start(codex_session_id, _state=_state)
+                                async def _attach() -> LifecycleMapping | None:
+                                    return await _try_auto_start(codex_session_id, _state=_state)
 
-                            mapping = cast(LifecycleMapping | None, _resolve_runner()(_attach))
+                                mapping = cast(LifecycleMapping | None, _resolve_runner()(_attach))
                             if mapping is None:
+                                # Static advisory for the unattached binding: it needs no
+                                # service, so local-only mode still emits it (issue #280).
                                 additional = (
                                     "Yoetz observation is consented for this workspace; "
                                     "no ledger task is mapped yet (observation-derived binding "
                                     "only). Call start to attach a task."
                                 )
+                                attach_advisory_only = True
                             else:
                                 additional = _active_context(mapping, mapping.last_frontier)
                         elif mapping is not None and not skip_service:
@@ -1377,8 +1384,12 @@ def handle_observe(
         # continued this turn. Blocking again would loop; leave advice for a
         # later turn or SessionStart instead of consuming it here.
         stop_already_active = payload.get("stop_hook_active") is True
+        # Task/receipt context always wins this shared channel outright, with one exception:
+        # the static attach advisory carries no advice of its own, so pending advice joins it
+        # (the delivery text is appended below) instead of being silently starved at the very
+        # SessionStart that bootstraps an unmapped session (issues #241, #280).
         delivery_eligible = (
-            not additional
+            (not additional or attach_advisory_only)
             and resolved_event in ADVICE_SAFE_EVENTS
             and not skip_advice_loop
             and not stop_already_active
