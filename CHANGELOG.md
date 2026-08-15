@@ -405,11 +405,15 @@ carried them; they are listed because each one describes the behavior that now s
 ### Fixed
 
 - Codex Step 0 treated an empty MCP `resources/read` as success and advertised that guidance URIs
-  "resolve without any repository checkout". The skill now stops on an empty body and opens the
-  matching installed `references/<name>.md` copy. Initialize `instructions` also append
-  `workflow.md` and `coverage-and-receipts.md` so those Step 0 documents arrive without depending
-  on `resources/read`. `docs/INTERFACES.md` no longer states that unprofiled hosts can fetch those
-  documents unconditionally (issue #203).
+  "resolve without any repository checkout". The skill now stops on an empty body, calls
+  `read_guidance` with the same URI, and opens the matching installed `references/<name>.md` copy
+  if that tool result is also empty. Initialize `instructions` also append `workflow.md` and
+  `coverage-and-receipts.md` so those Step 0 documents arrive without depending on
+  `resources/read`. MCP registers `read_guidance` as a seventh, read-only tool that returns the
+  full guidance document as tool text and is not a ledger operation. `resources/read` now
+  advertises each registry `media_type` instead of hardcoding `text/markdown`.
+  `docs/INTERFACES.md` no longer states that unprofiled hosts can fetch those documents
+  unconditionally (issue #203).
 - Codex Step 0 never named `resources/list`, but agents still called `list_mcp_resources` first
   and treated `Unexpected response type` as a missing server. The skill and initialize
   `agent-instructions.md` now say not to list: the five `yoetz://guidance/` URIs are the
@@ -480,19 +484,6 @@ carried them; they are listed because each one describes the behavior that now s
   on (`connect_provider`)
   travel only on session-boundary events, falling through to the next actionable item on
   per-tool-call hooks rather than masking it (issue #241).
-- The Stop hook advised `connect_provider` right after the same mapped session completed a
-  successful external semantic dispatch: READY composition froze `semantic_ready=False` and an
-  empty connected-provider snapshot into the observation advice fact, so the standing
-  `provider_not_ready` condition fired for every semantic-configured installation regardless of
-  live state. The fact is now recomputed on every advice build from current machine facts —
-  endpoint bound, provider factory available, and exact configured-credential presence in the
-  vault — and absence from the lazily filled connected registry no longer triggers the advice on
-  its own, because repository-scoped activation is re-established automatically at dispatch and
-  is not an operator action. A genuinely missing credential still surfaces at the bounded #241
-  cadence, credential revocation puts the condition back into the advice snapshot from current
-  evidence — delivery of the byte-identical text then follows the documented #241 cadence
-  (session boundaries; repeats within one session scope only after different advice intervened) —
-  and repository-scoped dispatch authority remains resolved per check (issue #265).
 - Every workspace exec call paid 3.5–7.5 seconds of synchronous observe-hook overhead — process
   startup importing the full CLI graph (~325 ms per hook) and, dominating on a lived-in store,
   10–18 full serialize-and-fsync cycles of the workspace state file per hook. The hook entry now

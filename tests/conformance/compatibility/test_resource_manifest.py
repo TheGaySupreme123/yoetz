@@ -37,9 +37,9 @@ _EXPECTED_RESOURCE_COUNTS = {
     "guidance_resources": "5",
     "migrations": "9",
     "runtime_support_resources": "1",
-    "schema_resources": "70",
+    "schema_resources": "72",
     "skill_resources": "2",
-    "total": "96",
+    "total": "98",
 }
 
 
@@ -56,7 +56,7 @@ def test_root_resource_bytes_match_manifest() -> None:
 
     manifest = build_version_manifest()
     assert dict(manifest.resource_counts) == _EXPECTED_RESOURCE_COUNTS
-    assert len(manifest.resources) == 96
+    assert len(manifest.resources) == 98
 
     for resource in manifest.resources:
         installed = read_verified_resource(resource.name)
@@ -113,7 +113,7 @@ def test_missing_extra_duplicate_and_traversal_cases_fail(
 
     load_resource_manifest = _load_resource_manifest_fn()
     entries, doc = _baseline_entries()
-    assert len(entries) == 96
+    assert len(entries) == 98
 
     # missing -- dropping the last entry breaks the exact inventory count.
     _install_synthetic_manifest(monkeypatch, doc, entries[:-1])
@@ -158,7 +158,7 @@ def test_public_resource_list_matches_release_artifact() -> None:
     entries = cast(tuple[Any, ...], manifest.entries)
 
     kinds = [cast(str, entry.kind) for entry in entries]
-    assert kinds.count("json_schema") == 70
+    assert kinds.count("json_schema") == 72
     assert kinds.count("canonical_vector") == 9
     assert kinds.count("migration") == 9
     assert kinds.count("guidance") == 5
@@ -170,11 +170,11 @@ def test_public_resource_list_matches_release_artifact() -> None:
         cast(str, entry.logical_name) for entry in entries if entry.kind == "json_schema"
     }
     assert "schemas/manifest.json" in schema_paths
-    # 69 JSON Schema documents plus the one schema inventory manifest.
-    assert len(schema_paths) - 1 == 69
+    # 71 JSON Schema documents plus the one schema inventory manifest.
+    assert len(schema_paths) - 1 == 71
 
     names = [cast(str, entry.logical_name) for entry in entries]
-    assert len(names) == 96
+    assert len(names) == 98
     assert names == sorted(set(names), key=lambda item: item.encode("ascii"))
 
     version_manifest = build_version_manifest()

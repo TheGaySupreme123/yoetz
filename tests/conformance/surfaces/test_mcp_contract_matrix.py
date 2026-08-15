@@ -39,13 +39,30 @@ from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import SAFE_DETAIL_KEYS, PublicErrorCode
 from yoetz.protocol.models import (
     FRONTIER_LEAVES,
+    REGISTERED_GUIDANCE_URIS,
     PublishWorkRequest,
     StartRequest,
     StatusRequest,
 )
 from yoetz.protocol.schemas import validate_schema_instance
 
-_EXPECTED_TOOL_NAMES = ("start", "publish_work", "check", "respond", "status", "receipt")
+_EXPECTED_TOOL_NAMES = (
+    "start",
+    "publish_work",
+    "check",
+    "respond",
+    "status",
+    "receipt",
+    "read_guidance",
+)
+_WORKFLOW_TOOL_NAMES = (
+    "start",
+    "publish_work",
+    "check",
+    "respond",
+    "status",
+    "receipt",
+)
 _EXPECTED_RESOURCE_URIS = (
     "yoetz://guidance/agent-instructions.md",
     "yoetz://guidance/workflow.md",
@@ -62,8 +79,9 @@ _FORBIDDEN_DESCRIPTOR_CLAIMS = re.compile(
 def test_fallback_error_object_is_admitted() -> None:
     fallback = build_last_resort_internal_error_result()
 
-    for operation in _EXPECTED_TOOL_NAMES:
+    for operation in _WORKFLOW_TOOL_NAMES:
         validate_schema_instance(f"{operation.replace('_', '-')}-result", "1.0.0", fallback)
+    validate_schema_instance("read-guidance-result", "1.0.0", fallback)
 
 
 def test_public_error_and_validation_summaries_are_sanitized() -> None:
@@ -258,8 +276,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:5cc3730bdb21692a99f89542c99b660981060862d4fa233240dd5400ba38bdc5",
-        "strict": "sha256:199fd3ce3b8f06344cc1052dbce656d888c352582022000612d9735d021b8e64",
+        "policy": "sha256:018c818cdc4dc17537a841bdd5cc1aa31cb60f5ce08b5d99a13273ee92ac41ba",
+        "strict": "sha256:cfca483f8d4a2aa1afc5a597982ec3e59590e6a5f5d4390629dde34db0f0768b",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -288,7 +306,10 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         "unique and already in ascending ASCII order" in descriptor_for("publish_work").description
     )
     for descriptors in TOOL_DESCRIPTORS.values():
-        assert {item.name for item in descriptors if item.annotations.read_only} == {"status"}
+        assert {item.name for item in descriptors if item.annotations.read_only} == {
+            "status",
+            "read_guidance",
+        }
         assert all(not item.annotations.destructive for item in descriptors)
         assert all(item.annotations.idempotent for item in descriptors)
         assert all(
@@ -327,7 +348,9 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         f"{base_instructions.rstrip()}\n\n{workflow.rstrip()}\n\n{coverage.rstrip()}\n\n"
     )
     assert "Route profile: policy." in server_instructions()
-    assert "Do not call `resources/list` to find Yoetz guidance" in server_instructions()
+    assert "Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance" in (
+        server_instructions()
+    )
     strict_instructions = server_instructions("strict")
     assert "Route profile: strict." in strict_instructions
     assert "This route will not request external semantic review" in strict_instructions
@@ -489,3 +512,18 @@ def test_presentation_input_schema_is_projection_of_catalog_shape() -> None:
         assert set(presented_properties) == set(catalog_properties)
         # tools/list may attach examples; catalog admission schemas do not require them.
         assert "examples" not in catalog
+
+
+def test_read_guidance_uri_literal_matches_registered_resources() -> None:
+    assert REGISTERED_GUIDANCE_URIS == tuple(item.uri for item in GUIDANCE_RESOURCES)
+
+
+def test_read_guidance_descriptor_is_read_only_and_names_a_guidance_uri() -> None:
+    descriptor = descriptor_for("read_guidance")
+    assert descriptor.annotations.read_only is True
+    assert descriptor.annotations.idempotent is True
+    assert descriptor.annotations.destructive is False
+    assert descriptor.annotations.open_world is False
+    assert "yoetz://guidance/" in descriptor.description
+    assert "512-byte summary" in descriptor.description
+    assert "not a ledger operation" in descriptor.description

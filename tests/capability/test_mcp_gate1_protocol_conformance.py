@@ -57,6 +57,7 @@ _DEGRADED_CODES = frozenset(
 )
 
 _TOOL_NAMES = tuple(item.name for item in TOOL_DESCRIPTORS["policy"])
+_WORKFLOW_TOOL_NAMES = ("start", "publish_work", "check", "respond", "status", "receipt")
 
 
 def _id(kind: str, seed: int) -> str:
@@ -386,13 +387,13 @@ async def test_mcp_capability_declaration_exact(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_mcp_tools_list_exact_six(tmp_path: Path) -> None:
+async def test_mcp_tools_list_exact(tmp_path: Path) -> None:
     """This gate proves protocol conformance and conduit behavior only; it says nothing about model activation."""
 
     async with _sdk_session(tmp_path) as (session, _initialize):
         listed = await session.list_tools()
         assert [tool.name for tool in listed.tools] == list(_TOOL_NAMES)
-        assert len(listed.tools) == 6
+        assert len(listed.tools) == 7
         for tool, descriptor in zip(listed.tools, TOOL_DESCRIPTORS["policy"], strict=True):
             assert tool.description == descriptor.description
             assert tool.inputSchema == _plain_json(descriptor.input_schema)
@@ -406,10 +407,10 @@ async def test_mcp_tools_list_exact_six(tmp_path: Path) -> None:
     _record_pass(
         tmp_path,
         case_id="MCP-G1-TOOLS-LIST",
-        requirement_id="mcp_tools_list_exact_six",
-        observation="tools_list_exact_six",
-        fixture=b"gate1-tools-list-exact-six",
-        value=6,
+        requirement_id="mcp_tools_list_exact",
+        observation="tools_list_exact",
+        fixture=b"gate1-tools-list-exact",
+        value=7,
     )
 
 
@@ -430,6 +431,7 @@ async def test_mcp_resources_list_read_all(tmp_path: Path) -> None:
             assert isinstance(block, types.TextResourceContents)
             packaged = read_resource(resource.uri)
             assert block.text.encode("utf-8") == packaged
+            assert block.mimeType == resource.media_type
             digests.append(f"sha256:{hashlib.sha256(packaged).hexdigest()}")
         digest = canonical_digest({"resources": cast(JsonValue, digests)})
     _record_pass(
@@ -444,12 +446,12 @@ async def test_mcp_resources_list_read_all(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_mcp_tools_call_all_six_dispatch(tmp_path: Path) -> None:
-    """All six names reach their handlers and return the common structured validation boundary."""
+    """All six workflow names reach their handlers and return the common structured validation boundary."""
 
     arguments = _schema_valid_tool_arguments()
     async with _sdk_session(tmp_path) as (session, _initialize):
         shapes: list[str] = []
-        for name in _TOOL_NAMES:
+        for name in _WORKFLOW_TOOL_NAMES:
             request_id = arguments[name]["request_id"]
             result = await session.call_tool(name, {"request_id": request_id})
             structured = _assert_tool_result_shape(result)
@@ -464,6 +466,34 @@ async def test_mcp_tools_call_all_six_dispatch(tmp_path: Path) -> None:
         requirement_id="mcp_tools_call_all_six_dispatch",
         observation="tools_call_all_six_dispatch",
         fixture=b"gate1-tools-dispatch-all-six",
+        value=True,
+    )
+
+
+@pytest.mark.anyio
+async def test_mcp_read_guidance_returns_full_document_text(tmp_path: Path) -> None:
+    """read_guidance returns the registered document as tool text, not a 512-byte summary."""
+
+    async with _sdk_session(tmp_path) as (session, _initialize):
+        for resource in GUIDANCE_RESOURCES:
+            result = await session.call_tool("read_guidance", {"uri": resource.uri})
+            assert result.isError is False
+            assert result.structuredContent is not None
+            structured = cast(dict[str, object], result.structuredContent)
+            assert structured["ok"] is True
+            assert structured["uri"] == resource.uri
+            assert structured["media_type"] == resource.media_type
+            assert structured["text"] == resource.text
+            assert result.content
+            assert result.content[0].type == "text"
+            assert result.content[0].text == resource.text
+            assert len(result.content[0].text) == len(resource.text)
+    _record_pass(
+        tmp_path,
+        case_id="MCP-G1-READ-GUIDANCE",
+        requirement_id="mcp_read_guidance_full_text",
+        observation="read_guidance_full_text",
+        fixture=b"gate1-read-guidance-full-text",
         value=True,
     )
 

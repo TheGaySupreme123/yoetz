@@ -1,4 +1,4 @@
-"""Raw MCP negotiation and exact static six-tool/resource inventory."""
+"""Raw MCP negotiation and exact static tool/resource inventory."""
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ async def test_static_inventory_is_exact_and_verified() -> None:
 
     descriptors = TOOL_DESCRIPTORS["policy"]
     assert [tool.name for tool in tools] == [item.name for item in descriptors]
-    assert len(tools) == 6
+    assert len(tools) == 7
     for tool, descriptor in zip(tools, descriptors, strict=True):
         assert tool.inputSchema == _plain_json(descriptor.input_schema)
         assert tool.outputSchema == _plain_json(descriptor.output_schema)
@@ -132,7 +132,9 @@ async def test_static_inventory_is_exact_and_verified() -> None:
     assert BRIDGE_RUNTIME.instructions.startswith(agent)
     assert BRIDGE_RUNTIME.instructions.startswith(f"{agent}\n\n{workflow}\n\n{coverage}\n\n")
     assert "Route profile: policy." in BRIDGE_RUNTIME.instructions
-    assert "Do not call `resources/list` to find Yoetz guidance" in BRIDGE_RUNTIME.instructions
+    assert "Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance" in (
+        BRIDGE_RUNTIME.instructions
+    )
 
 
 def test_raw_initialize_lists_exact_capabilities_tools_and_resources() -> None:

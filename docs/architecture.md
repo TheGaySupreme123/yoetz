@@ -134,8 +134,8 @@ shapes remain readable but cannot bypass the repository/authority-digest gate.
 ## Harness integration
 
 Yoetz works with any MCP host with no integration, no installed skill, and no configuration: the
-host gets the six operations, a short always-delivered instruction set, and the same guidance
-documents every harness ships, fetchable on demand.
+host gets the six operations, read-only `read_guidance`, a short always-delivered instruction set,
+and the same guidance documents every harness ships, fetchable on demand.
 
 Codex is the first harness with a first-party integration because its skill surface delivers that
 guidance natively. The guidance itself is harness-neutral, owned once under [`guidance/`](../guidance/),

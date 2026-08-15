@@ -36,7 +36,8 @@ from yoetz.protocol.errors import PublicErrorCode
 
 _TEST_REVISION = bytes_digest(Path(__file__).read_bytes())
 _VERSION = "0.139.0"
-_EXPECTED = ("start", "publish_work", "check", "respond", "status", "receipt")
+_WORKFLOW_TOOLS = ("start", "publish_work", "check", "respond", "status", "receipt")
+_EXPECTED = (*_WORKFLOW_TOOLS, "read_guidance")
 _DEGRADED_CODES = frozenset(
     {
         PublicErrorCode.INVALID_REQUEST.value,
@@ -256,7 +257,7 @@ async def test_mcp_stdio_six_tool_dispatch_without_claiming_codex_activation(
             await session.initialize()
             listed = await session.list_tools()
             assert tuple(tool.name for tool in listed.tools) == _EXPECTED
-            for name in _EXPECTED:
+            for name in _WORKFLOW_TOOLS:
                 result = await session.call_tool(
                     name,
                     {"request_id": arguments[name]["request_id"]},

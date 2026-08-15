@@ -277,7 +277,9 @@ that evidence.
   tools and resources only. `mcp/descriptors.py` owns every agent-read string, loads it from verified
   packaged resources with no runtime composition or fallback, and is bound by the guidance wording
   lint. An unprofiled host therefore earns `cooperative_mcp`/`self_asserted`/`published_only` — the
-  weakest honest coverage — rather than a warned-about degraded mode.
+  weakest honest coverage — rather than a warned-about degraded mode. When a host returns an empty
+  `resources/read` body, MCP also registers `read_guidance` so the same document can arrive as
+  tool text (issue #203).
 - **F-017:** `ClientInfoModel.kind` gains the transport-neutral `cooperative_agent` value so every
   harness has exactly one honest identity and no unprofiled host must misreport itself as
   `codex_cli` or `test_client`. `kind` is provenance only: assurance derives from the integration

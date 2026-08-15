@@ -55,7 +55,9 @@ the exact sufficient coverage that justifies it.
 ## Six public workflow operations
 
 Yoetz exposes exactly six mutating/reading workflow operations, as both MCP tools and CLI
-commands (`start`, `publish-work`, `check`, `respond`, `status`, `receipt`):
+commands (`start`, `publish-work`, `check`, `respond`, `status`, `receipt`). MCP also registers
+read-only `read_guidance`, which returns one packaged guidance document as tool text and is not a
+ledger operation:
 
 | Operation | Mutating | Intent |
 |---|---|---|

@@ -82,7 +82,20 @@ def test_agent_instructions_say_not_to_list_resources() -> None:
 
     text = _CANONICAL.read_text(encoding="utf-8")
     collapsed = " ".join(text.split())
-    assert "Do not call `resources/list` to find Yoetz guidance" in collapsed
+    assert (
+        "Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance" in collapsed
+    )
     assert "A list failure is not a missing server" in collapsed
     assert "not a reason to read product source" in collapsed
+    assert "call `read_guidance` with the same URI" in collapsed
+    assert "Only if that result is also empty" in collapsed
     assert collapsed.index("# Guidance catalog") > collapsed.index("# What Yoetz is not")
+    read_more = text.split("# Read more", 1)[1]
+    for uri in (
+        "yoetz://guidance/agent-instructions.md",
+        "yoetz://guidance/workflow.md",
+        "yoetz://guidance/publication-policy.md",
+        "yoetz://guidance/coverage-and-receipts.md",
+        "yoetz://guidance/request-templates.md",
+    ):
+        assert f"`{uri}`" in read_more

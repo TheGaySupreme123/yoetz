@@ -14,7 +14,7 @@ Yoetz is not an enforcement system, observer, authorship proof, transcript recor
 
 # Guidance catalog
 
-Do not call `resources/list` to find Yoetz guidance. The five `yoetz://guidance/` URIs under Read more are the complete catalog. A list failure is not a missing server and is not a reason to read product source. Read the named URI, or open the matching installed `references/<name>.md` copy.
+Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance. The five `yoetz://guidance/` URIs under Read more are the complete catalog. A list failure is not a missing server and is not a reason to read product source. Read the named URI. If that body is empty, call `read_guidance` with the same URI. Only if that result is also empty, open the matching installed `references/<name>.md` copy.
 
 # How often to call each operation
 
@@ -203,6 +203,7 @@ upgrade unless the user separately instructs you to do so.
 
 # Read more
 
+- `yoetz://guidance/agent-instructions.md` - this document; re-read it if the initialize copy is not in context.
 - `yoetz://guidance/workflow.md` - read before your first `start`: the cooperative workflow, cadence, resume behavior, and final response.
 - `yoetz://guidance/coverage-and-receipts.md` - read before your first `check`: coverage, findings, freshness, and receipt wording.
 - `yoetz://guidance/publication-policy.md` - read before your first `publish_work`: what is material and safe to publish.
