@@ -4,7 +4,17 @@ from dataclasses import replace
 
 import pytest
 
-from builders.policy_cases import BASE_COVERAGE, clm, make_case, record
+from builders.policy_cases import (
+    BASE_COVERAGE,
+    FRONTIER,
+    clm,
+    evd,
+    evidence_record,
+    evt,
+    fnd,
+    make_case,
+    record,
+)
 from yoetz.application.check import (
     CheckScope,
     FinalSemanticEvaluation,
@@ -13,8 +23,21 @@ from yoetz.application.check import (
     case_coverage,
     run_deterministic_policies,
 )
-from yoetz.domain.events import ClaimKind, ClaimRecordedPayload
-from yoetz.domain.findings import CheckVerdict
+from yoetz.domain.events import (
+    ClaimKind,
+    ClaimRecordedPayload,
+    EvidenceKind,
+    EvidenceRecordedPayload,
+    ResponseDisposition,
+    ResponseRecordedPayload,
+)
+from yoetz.domain.findings import (
+    CheckVerdict,
+    Finding,
+    FindingKind,
+    FindingOrigin,
+    WaiverScope,
+)
 from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
@@ -23,10 +46,11 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
-from yoetz.domain.values import EventId
+from yoetz.domain.values import EventId, object_id, timestamp_from_string
 from yoetz.kernel.deterministic_checks import CaseGap, DeterministicCase
 from yoetz.kernel.projections import LatestTestedState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
+from yoetz.protocol.coverage import EvidenceImmutability
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
@@ -70,6 +94,105 @@ def test_deterministic_packs_account_and_rank_actual_kernel_findings() -> None:
     assert ranked.verdict is CheckVerdict.ACTION_REQUIRED
     assert ranked.findings
     assert coverage != BASE_COVERAGE
+
+
+def _finding_response_case(
+    disposition: ResponseDisposition,
+    *,
+    stale: bool,
+    work_only_gap: bool = False,
+) -> DeterministicCase:
+    finding = Finding(
+        finding_id=fnd(1),
+        kind=FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
+        origin=FindingOrigin.DETERMINISTIC,
+        priority=1,
+        summary="A completion claim covers an obligation that remains open.",
+        detail="Resolve the open obligation.",
+        subject_refs=(evt(99),),
+        policy_id="work-integrity",
+        policy_version="0.1.0",
+        subject_frontier=FRONTIER,
+        coverage=BASE_COVERAGE,
+        provenance=None,
+    )
+    response_frontier = replace(FRONTIER, sequence=FRONTIER.sequence - 1) if stale else FRONTIER
+    response = ResponseRecordedPayload(
+        finding_id=fnd(1),
+        finding_frontier=response_frontier,
+        disposition=disposition,
+        reason="The finding is not applicable.",
+        waiver_scope=(
+            WaiverScope.FINDING_ONLY if disposition is ResponseDisposition.WAIVED else None
+        ),
+        evidence_refs=(evd(1),) if work_only_gap else (),
+    )
+    evidence = EvidenceRecordedPayload(
+        evidence_id=evd(1),
+        evidence_kind=EvidenceKind.TEST_RESULT,
+        strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        observed_at=timestamp_from_string("2026-01-01T00:00:00.000Z"),
+        captured_object_id=object_id("obj_10000000-0000-4000-8000-000000000001"),
+        content_digest="sha256:" + "1" * 64,
+    )
+    return make_case(
+        evidence={evd(1): evidence_record(evidence, 1)} if work_only_gap else None,
+        findings={fnd(1): record(finding, 2)},
+        responses={fnd(1): record(response, 3)},
+        extra_refs=(evt(99),),
+        coverage_overrides=(
+            {
+                evd(1): replace(
+                    BASE_COVERAGE,
+                    known_gaps=("evidence_digest_subject_legacy_unknown",),
+                )
+            }
+            if work_only_gap
+            else None
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    (ResponseDisposition.REJECTED, ResponseDisposition.WAIVED),
+)
+@pytest.mark.parametrize(
+    ("stale", "expected_kind"),
+    (
+        (False, FindingKind.QUESTIONABLE_FINDING_REJECTION),
+        (True, FindingKind.WEAK_OR_STALE_RESPONSE),
+    ),
+)
+def test_finding_response_penalty_has_one_policy_owner(
+    disposition: ResponseDisposition,
+    stale: bool,
+    expected_kind: FindingKind,
+) -> None:
+    assessments, executions = run_deterministic_policies(
+        _finding_response_case(disposition, stale=stale),
+        CheckScope((), ()),
+        ("research-evidence/0.1.0", "work-integrity/0.1.0"),
+    )
+
+    assert tuple(item.candidate.kind for item in assessments) == (expected_kind,)
+    assert all(item.outcome == "run" and item.reason == "completed" for item in executions)
+
+
+def test_response_with_work_only_evidence_gap_is_not_dropped() -> None:
+    assessments, _executions = run_deterministic_policies(
+        _finding_response_case(
+            ResponseDisposition.REJECTED,
+            stale=False,
+            work_only_gap=True,
+        ),
+        CheckScope((), ()),
+        ("research-evidence/0.1.0", "work-integrity/0.1.0"),
+    )
+
+    assert tuple(item.candidate.kind for item in assessments) == (
+        FindingKind.WEAK_OR_STALE_RESPONSE,
+    )
 
 
 def test_direct_scope_excludes_pack_without_selected_root() -> None:

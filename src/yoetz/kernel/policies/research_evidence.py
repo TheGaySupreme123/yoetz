@@ -32,6 +32,10 @@ from yoetz.kernel.deterministic_checks import (
     policy_public_root,
     policy_source_availability,
 )
+from yoetz.kernel.policies.response_support import (
+    BASE_RESPONSE_INADMISSIBLE_GAPS,
+    response_support_admissible,
+)
 
 __all__ = [
     "RESEARCH_EVIDENCE_FACT_CODES",
@@ -66,16 +70,7 @@ _RULE_ORDER: Final = (
     FindingKind.MATERIAL_LIMITATION_OMITTED,
     FindingKind.QUESTIONABLE_FINDING_REJECTION,
 )
-_MATERIAL_GAPS: Final = frozenset(
-    {
-        "redacted_event",
-        "redacted_object",
-        "event_payload_unavailable",
-        "captured_object_unavailable",
-        "missing_ref",
-        "unknown_event",
-    }
-)
+_MATERIAL_GAPS: Final = BASE_RESPONSE_INADMISSIBLE_GAPS
 
 
 def _ascii(value: str) -> bytes:
@@ -147,25 +142,15 @@ def _exact_state_mismatch(
     return False
 
 
-def _coverage_admissible(case: DeterministicCase, ref: FindingBasisRef) -> bool:
-    coverage = case.coverage_by_ref.get(ref)
-    return coverage is not None and not _MATERIAL_GAPS & set(coverage.known_gaps)
-
-
 def _response_support_admissible(
     case: DeterministicCase,
     refs: tuple[EvidenceId | ResultId, ...],
 ) -> bool:
-    for ref in refs:
-        if ref not in case.allowed_ids or not _coverage_admissible(case, ref):
-            continue
-        if ref.startswith("evd_"):
-            record = case.projection.evidence.get(EvidenceId(ref))
-        else:
-            record = case.projection.results.get(ResultId(ref))
-        if record is not None and record.payload is not None:
-            return True
-    return False
+    return response_support_admissible(
+        case,
+        refs,
+        inadmissible_gaps=_MATERIAL_GAPS,
+    )
 
 
 def _support_mismatch_findings(case: DeterministicCase) -> list[DeterministicAssessment]:

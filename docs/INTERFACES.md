@@ -614,9 +614,17 @@ Work-integrity finding kinds (`FindingKind`):
 `failed_work_omitted`, `claim_without_admissible_evidence`, `result_without_action`,
 `action_without_result`,
 `stale_evidence_for_changed_state`, `contradictory_claims_unresolved`,
-`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow rejection/waiver).
+`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a stale rejection/waiver or a current
+response whose support is insufficient only under work-integrity, including responses to
+semantic-model-derived findings).
 Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
-`material_limitation_omitted`, `questionable_finding_rejection`.
+`material_limitation_omitted`, `questionable_finding_rejection` (flags a current hollow
+rejection/waiver of a deterministic finding).
+
+Those two response predicates are disjoint: research-evidence owns insufficient support for a
+current deterministic finding response under its evidence criteria, while work-integrity owns stale
+responses, insufficient support for current semantic-model-derived finding responses, and stricter
+work-integrity-only evidence exclusions. A response cannot mint both kinds or fall between them.
 
 The ownership partition is exhaustive and disjoint: the first ten kinds belong to the built-in
 `work-integrity/0.1.0` pack, and the latter four belong to the built-in

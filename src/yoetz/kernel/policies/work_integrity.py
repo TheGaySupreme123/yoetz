@@ -12,7 +12,7 @@ from yoetz.domain.events import (
     ResponseDisposition,
     ResultOutcome,
 )
-from yoetz.domain.findings import FindingKind
+from yoetz.domain.findings import FindingKind, FindingOrigin
 from yoetz.domain.values import (
     EvidenceId,
     ObligationId,
@@ -33,6 +33,10 @@ from yoetz.kernel.deterministic_checks import (
     policy_source_availability,
 )
 from yoetz.kernel.plan_scope import current_plan_scope
+from yoetz.kernel.policies.response_support import (
+    BASE_RESPONSE_INADMISSIBLE_GAPS,
+    response_support_admissible,
+)
 
 __all__ = [
     "WORK_INTEGRITY_FACT_CODES",
@@ -90,6 +94,9 @@ _RULE_ORDER: Final = (
     FindingKind.LEDGER_STALE_OR_INCOMPLETE,
     FindingKind.WEAK_OR_STALE_RESPONSE,
 )
+_WORK_RESPONSE_INADMISSIBLE_GAPS: Final = BASE_RESPONSE_INADMISSIBLE_GAPS | {
+    "evidence_digest_subject_legacy_unknown"
+}
 
 
 def _ascii(value: str) -> bytes:
@@ -108,15 +115,7 @@ def _coverage_admissible(case: DeterministicCase, ref: FindingBasisRef) -> bool:
     coverage = case.coverage_by_ref.get(ref)
     if coverage is None:
         return False
-    return not {
-        "redacted_event",
-        "redacted_object",
-        "event_payload_unavailable",
-        "captured_object_unavailable",
-        "missing_ref",
-        "unknown_event",
-        "evidence_digest_subject_legacy_unknown",
-    } & set(coverage.known_gaps)
+    return not _WORK_RESPONSE_INADMISSIBLE_GAPS & set(coverage.known_gaps)
 
 
 def _claim_support_is_admissible(
@@ -201,16 +200,11 @@ def _response_support_admissible(
     case: DeterministicCase,
     refs: tuple[EvidenceId | ResultId, ...],
 ) -> bool:
-    for ref in refs:
-        if ref not in case.allowed_ids or not _coverage_admissible(case, ref):
-            continue
-        if ref.startswith("evd_"):
-            record = case.projection.evidence.get(EvidenceId(ref))
-        else:
-            record = case.projection.results.get(ResultId(ref))
-        if record is not None and record.payload is not None:
-            return True
-    return False
+    return response_support_admissible(
+        case,
+        refs,
+        inadmissible_gaps=_WORK_RESPONSE_INADMISSIBLE_GAPS,
+    )
 
 
 def _completion_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
@@ -575,7 +569,18 @@ def _response_findings(case: DeterministicCase) -> list[DeterministicAssessment]
         # older than that subject answers something the finding was never about.
         stale = response.finding_frontier.sequence < finding.subject_frontier.sequence
         insufficient = not _response_support_admissible(case, response.evidence_refs)
-        if not stale and not insufficient:
+        # Research evidence owns a current rejection of a deterministic finding when its support
+        # predicate is insufficient. Work integrity owns stale responses, semantic-finding
+        # responses, and stricter work-only coverage exclusions, so no condition is dropped.
+        research_insufficient = not response_support_admissible(
+            case,
+            response.evidence_refs,
+            inadmissible_gaps=BASE_RESPONSE_INADMISSIBLE_GAPS,
+        )
+        if not stale and (
+            not insufficient
+            or (finding.origin is FindingOrigin.DETERMINISTIC and research_insufficient)
+        ):
             continue
         if any(ref not in case.allowed_ids for ref in finding.subject_refs):
             continue

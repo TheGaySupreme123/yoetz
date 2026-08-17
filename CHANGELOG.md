@@ -422,6 +422,10 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- An evidence-free rejection or waiver of a current deterministic finding now produces only
+  `questionable_finding_rejection`. `weak_or_stale_response` remains the sole owner for stale
+  responses and for unsupported current responses to semantic findings, preventing one response
+  from minting two actionable findings (issue #285).
 - Codex Step 0 treated an empty MCP `resources/read` as success and advertised that guidance URIs
   "resolve without any repository checkout". The skill now stops on an empty body, calls
   `read_guidance` with the same URI, and opens the matching installed `references/<name>.md` copy
