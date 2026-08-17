@@ -444,6 +444,37 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- The end-to-end hook budget was smaller than the budgets enforced inside a single pass, so
+  `hook_budget_exceeded` fired on healthy hooks — 253 of 833 diagnostics on one workspace — and
+  carried no signal about the regressions it was added for. The total is now derived from the
+  connect preflight and drain budgets plus a local-stage allowance rather than being an
+  independent constant, and events that may retry auto-attach carry that enforced budget too. A
+  test asserts the derivation so the parts can no longer drift past the whole (issue #288).
+
+- `stream_partials` was the only unbounded collection in the observation state file and was
+  absent from the eviction ladder, so two entries could hold 41% of a file at 95% of its hard
+  1 MiB cap while overflow evicted envelopes and outbox rows around them. A partial is a
+  read-cache — the reader rereads the tail from the committed cursor whenever it is missing — so
+  it is now bounded per entry, dropped with an explicit gap instead of raising (which previously
+  stalled the stream while retaining the partial that caused the stall), and shed first in the
+  `_save` eviction ladder, ahead of any durable row. The per-entry bound is the reader's own read
+  chunk and may not fall below it: the reader assembles a source line longer than one chunk by
+  holding its prefix, so a smaller bound would drop that prefix every pass and freeze the cursor
+  for that session. Oversized partials persisted before this
+  change are dropped on the next save; the condition projects as `source_lag` on status until a
+  reconcile catches up (issue #289).
+
+- The `store` stage of every hook pass cost ~500 ms on a full state file and the diagnostic could
+  not say where it went. Canonical JSON validation and escaping walked every string one character
+  at a time in Python, which was ~70× the stdlib cost on the same bytes; both hot loops now take a
+  single C-level scan and fall back to the original logic only when a string actually contains an
+  escape or an invalid codepoint, so output and error identity are unchanged. Measured against a
+  live 1 MiB state file, one parse, hydrate, encode, and write fell from ~275 ms to ~55 ms — parse
+  ~82→13 ms and encode ~155→24 ms. Timing rows now also
+  break `store` into `store_hydrate`, `store_encode`, and `store_write` so any remaining cost is
+  attributable, and a latency fence bounds the codec against the stdlib on a realistically-sized
+  document (issue #290).
+
 - An evidence-free rejection or waiver of a current deterministic finding minted two actionable
   findings, `questionable_finding_rejection` and `weak_or_stale_response`, doubling the response
   burden at every level. `check` now collapses that overlap when it composes the built-in packs,

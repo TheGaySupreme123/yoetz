@@ -410,6 +410,20 @@ class SessionStreamReader:
             with path.open("rb") as handle:
                 handle.seek(byte_position + len(self.partial_line))
                 chunk = handle.read(to_read)
+                data = self.partial_line + chunk
+                if b"\n" not in data:
+                    # A live JSONL writer can leave a legal line unterminated across hook passes.
+                    # Read ahead only when the ordinary chunk contains no delimiter, and never
+                    # beyond the profile's admitted line bound plus its terminator. This lets a
+                    # previously dropped read-cache tail recover as soon as the newline arrives
+                    # without making every routine reconcile scan a full maximum-sized line.
+                    unread = max(0, size - (byte_position + len(data)))
+                    read_ahead = min(
+                        unread,
+                        max(0, self.profile.max_line_bytes + 1 - len(data)),
+                    )
+                    if read_ahead:
+                        data += handle.read(read_ahead)
         except OSError:
             gaps.add(ObservationGapCode.SOURCE_LAG.value)
             return SessionStreamAdvance(
@@ -422,7 +436,6 @@ class SessionStreamReader:
                 rotated,
             )
 
-        data = self.partial_line + chunk
         if not data:
             cursor = ObservationCursor(
                 source_generation=generation,

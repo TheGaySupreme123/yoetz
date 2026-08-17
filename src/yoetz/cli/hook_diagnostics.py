@@ -65,7 +65,21 @@ _REASONS: Final = frozenset(
         "hook_budget_exceeded",
     }
 )
-_STAGES: Final = frozenset({"advice", "drain", "import", "store", "total"})
+_STAGES: Final = frozenset(
+    {
+        "advice",
+        "drain",
+        "import",
+        "store",
+        # Store sub-stage attribution (#290): parse+hydrate of the state file,
+        # canonical encode of every size projection and save, and the fsync'd
+        # atomic write. The remainder of 'store' is mutation time.
+        "store_encode",
+        "store_hydrate",
+        "store_write",
+        "total",
+    }
+)
 _MAX_STAGE_MS: Final = 3_600_000
 _thread_lock = Lock()
 

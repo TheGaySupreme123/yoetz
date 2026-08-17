@@ -134,7 +134,16 @@ _AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop", "Sessi
 _AUTO_ATTACH_RETRY_BUDGET_SECONDS: Final = 1.0
 # End-to-end observability contract for one hook pass, process start included.
 # Never an abort point: the drain and preflight budgets own enforcement.
-_HOOK_TOTAL_BUDGET_SECONDS: Final = 1.0
+# Derived from the enforced budgets nested inside one pass plus an allowance
+# for the local stages (import, store, advice), so the parts can never again
+# drift past the whole and turn hook_budget_exceeded into noise (#288). The
+# allowance covers the measured local cost on a full 1 MiB store with margin.
+_HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS: Final = 1.0
+_HOOK_TOTAL_BUDGET_SECONDS: Final = (
+    _HOOK_CONNECT_PREFLIGHT_SECONDS
+    + _HOOK_DRAIN_BUDGET_SECONDS
+    + _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS
+)
 _TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
 _ROUTINE_READ_TOOLS: Final = frozenset(
     {
@@ -612,6 +621,20 @@ def _elapsed_ms(started: float, finished: float) -> int:
     return max(0, int((finished - started) * 1000))
 
 
+def _hook_total_budget_seconds(event: str) -> float:
+    """Return the end-to-end budget for one pass of *event*.
+
+    Events that may legitimately retry auto-attach (and SessionStart, the
+    primary attach point) carry that enforced budget on top of the base sum;
+    the high-frequency PreToolUse/PostToolUse storm never attaches and keeps
+    the tighter contract (#288).
+    """
+
+    if event == "SessionStart" or event in _AUTO_ATTACH_RETRY_EVENTS:
+        return _HOOK_TOTAL_BUDGET_SECONDS + _AUTO_ATTACH_RETRY_BUDGET_SECONDS
+    return _HOOK_TOTAL_BUDGET_SECONDS
+
+
 def _record_pass_timing(
     event: str,
     *,
@@ -630,7 +653,7 @@ def _record_pass_timing(
 
     with contextlib.suppress(BaseException):
         total_ms = _elapsed_ms(entry_started, monotonic())
-        over = total_ms > int(_HOOK_TOTAL_BUDGET_SECONDS * 1000)
+        over = total_ms > int(_hook_total_budget_seconds(event) * 1000)
         if not over and event not in _TIMING_REPORT_EVENTS:
             return
         if over:
@@ -1528,6 +1551,16 @@ def handle_observe(
                         codex_session_id,
                         pending_frontier_notice.delivery_identity,
                     )
+        # Attribute the whole pass's store work (#290), folded in last because
+        # the store keeps saving after the 'store' stage window closes: the
+        # drain saves once per delivered row and advice commits its own. A
+        # snapshot taken at that window would have hidden exactly the rows the
+        # 1300ms drains were made of. These are store-wide accumulations, not a
+        # partition of 'store' — store_hydrate also covers the consent probe
+        # that runs before the window opens.
+        with contextlib.suppress(BaseException):
+            for name, spent in store.stage_timings_ms.items():
+                stages[f"store_{name}"] = max(0, int(spent))
         _record_pass_timing(
             resolved_event,
             entry_started=entry_started,
