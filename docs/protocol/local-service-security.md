@@ -89,9 +89,13 @@ or same-UID identity substitutes for that missing capability.
 ## Idle, session, suspend, and explicit relock
 
 The service relocks on an explicit `service lock`, an advertised platform session-lock or
-system-suspend event, and on idle timeout. The default idle-relock interval is 900 seconds and
-applies only when there are no connected clients, in-flight requests, queued commits, leases, or
-provider calls for the complete interval — a long-running operation is never counted as idle. Wake
+system-suspend event, and on idle timeout. The default idle-relock interval is 3600 seconds and
+applies only when there are no connected clients, in-flight requests, queued commits, leases,
+provider calls, or harness observation rows resolved by the ready sweep for the complete
+interval — a long-running operation is never counted as idle, and neither is a workspace whose
+harness hooks keep delivering observation rows. A resolved row is a same-user authenticated write
+of the same trust class as an admitted control call; each row resets the clock at most once, and
+retrying rows never count, so a wedged row cannot hold the vault unlocked. Wake
 or session unlock never itself changes the service back to `ready`. After idle, session-lock, or
 suspend soft locks, the trusted service may re-apply the same scoped platform
 auto-unlock entry (passphrase mode) or OS-keyring load that restart uses, on the next ordinary
@@ -106,7 +110,7 @@ exact, foreground `idle_relock_policy_change` ceremony over the human-control ch
 either a fresh OS user-presence assertion or, in passphrase mode, the distinct
 `security_reauthentication` purpose. No ordinary command, configuration value, or MCP call can
 weaken this. The resulting exception applies only to the current service generation — restart
-always restores the 900-second default — and disabling idle relock never disables explicit,
+always restores the 3600-second default — and disabling idle relock never disables explicit,
 session-lock, suspend, or monitor-loss relock.
 
 ## Forbidden secret surfaces
@@ -169,7 +173,7 @@ policy — it is not a logging or support-bundle mode that exists today.
 | Fresh install stays locked with setup required | `human_authority_unavailable` | Keyring works but presence evidence is missing/stale/unavailable | Not keyring corruption; not a bug |
 | Existing vault reachable without presence prompt | (no error — `ready`, activation fenced) | Existing keyring data may load for local work | Not full external authority |
 | Vault locked after restart | (expected) | No valid scoped auto-unlock entry was available; keyring mode loads at restart when usable | MCP cannot unlock it for you |
-| Idle-relocked mid-session | (expected) | Default 900s idle timer elapsed with no active work; next ordinary call re-applies scoped auto-unlock when provisioned | Not a crash; not a permanent lock when auto-unlock is healthy |
+| Idle-relocked mid-session | (expected) | Default 3600s idle timer elapsed with no active work — no control calls and no observation rows resolved; next ordinary call re-applies scoped auto-unlock when provisioned | Not a crash; not a permanent lock when auto-unlock is healthy |
 | Hard-locked after soft lock | `passphrase_required` / `auto_unlock_*` / `keyring_locked` / `explicit_lock` | Auto-unlock missing, stale, keyring load refused, or human locked the service | Run `yoetz service unlock` or `yoetz service auto-unlock repair` on a local terminal |
 | Locked after losing the session monitor | `monitor_lost` | The session-event source became unavailable, so session-lock relock can no longer apply to this process | Run `yoetz service unlock` on a local terminal; `session_monitor` stays `lost` in status until restart |
 

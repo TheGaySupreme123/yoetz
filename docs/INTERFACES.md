@@ -1542,10 +1542,10 @@ admission, resolves bounded shielded commits, closes provider/runtime handles, i
 generations, then reports `locked`. Resume never implies ready.
 
 `ServiceLifecycle.change_idle_relock_policy(proposed, proof)` is the only idle-policy mutation
-path. `IdleRelockPolicy` defaults to 900 seconds, accepts finite `60..86400`, and may use its
+path. `IdleRelockPolicy` defaults to 3600 seconds, accepts finite `60..86400`, and may use its
 internal `seconds=None` disabled state only after this method atomically consumes the exact
 vault-minted proof. The exception is scoped to the current service generation, is not persisted,
-and restart restores 900 seconds. Explicit, session-lock, suspend, and monitor-loss relock remain
+and restart restores 3600 seconds. Explicit, session-lock, suspend, and monitor-loss relock remain
 enabled when idle relock is disabled.
 
 Shared lifecycle/control values are `ServiceInstance`, `Admission`, `SessionSecurityEvent`
