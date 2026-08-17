@@ -1894,6 +1894,98 @@ async def test_sweep_resolved_rows_defer_idle_relock_until_the_spool_runs_dry(
 
 
 @pytest.mark.anyio
+async def test_retrying_observation_rows_never_defer_idle_relock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only resolution is liveness. A wedged or poisoned row re-appears in every single sweep,
+    so counting retries would let one such row hold the vault unlocked forever. Same timing as
+    the sibling test above, which stays READY because its rows acknowledge (#291)."""
+
+    class _MutableClock:
+        monotonic = 10.0
+
+        def now_utc(self) -> datetime:
+            return datetime(2026, 7, 19, tzinfo=UTC)
+
+        def monotonic_seconds(self) -> float:
+            return self.monotonic
+
+    clock = _MutableClock()
+    sweeps = 0
+
+    async def sweep() -> ObservationDrainSummary:
+        nonlocal sweeps
+        sweeps += 1
+        return ObservationDrainSummary(
+            attempted=1,
+            acknowledged=0,
+            retry_pending=1,
+            quarantined=0,
+            reasons=(),
+        )
+
+    application = _Application()
+    application.observation_sweep = sweep  # pyright: ignore[reportAttributeAccessIssue]
+    vault = _Vault()
+    vault.ready = False
+    ready_close_relay = daemon_module._ReadyCloseRelay()  # pyright: ignore[reportPrivateUsage]
+    lifecycle = ServiceLifecycle(
+        clock,  # pyright: ignore[reportArgumentType]
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+        close_ready_composition=ready_close_relay,
+    )
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+            ready_close_relay=ready_close_relay,
+        )
+    )
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INTERVAL_SECONDS", 0.005)
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS", 0.005)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    await daemon.activate_ready_application(7, 3)
+    monitor = asyncio.create_task(lifecycle.run_idle_monitor(poll_seconds=0.001))
+
+    # Rows really are flowing through the sweep — the retries just must not count.
+    for _ in range(400):
+        await asyncio.sleep(0.005)
+        if sweeps >= 3:
+            break
+    assert sweeps >= 3
+    assert daemon.status().state is ServiceState.READY
+
+    clock.monotonic += 3_601.0
+    for _ in range(400):
+        await asyncio.sleep(0.005)
+        if daemon.status().state is ServiceState.LOCKED:
+            break
+    assert daemon.status().state is ServiceState.LOCKED
+    assert daemon.status().state_reason == "idle_relock"
+    assert not vault.ready
+
+    monitor.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await monitor
+    await daemon.close()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("stall", [False, True])
 async def test_only_the_deadline_reports_sweep_deadline_exceeded(
     monkeypatch: pytest.MonkeyPatch, stall: bool

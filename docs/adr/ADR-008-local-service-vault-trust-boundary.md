@@ -39,13 +39,15 @@ on-demand connector treats as still-starting rather than unavailable (#235). It 
 while locked so a human can inspect structural status and initiate the dedicated unlock flow. Only `ready` admits workflows,
 maintenance, imports, payload access, or egress.
 
-Authenticated local connections and admitted work hold a process-idle lease. Once both counts stay
-zero for 7,200 seconds, the daemon performs its bounded stop and exits. The process-idle stop is
-deliberately longer than the default idle relock so the cheap in-process soft lock — which
-re-readies on the next ordinary admission — is always the first containment reached. A later
-fixed on-demand launcher start advances the generation and reconnects to the singleton winner. A passphrase-backed
-successor first tries its exact bundle-scoped auto-unlock entry when one was explicitly provisioned;
-otherwise it remains locked until a local-human unlock.
+Authenticated local connections, admitted work, and harness observation rows resolved by the ready
+sweep hold a process-idle lease. Once no connection or admission is outstanding and no row has
+resolved for 7,200 seconds, the daemon performs its bounded stop and exits. The process-idle stop
+is deliberately longer than the default idle relock so the cheap in-process soft lock — which
+re-readies on the next ordinary admission — is always the first containment reached, and a live
+workspace that holds off the relock holds off the stop with it rather than reaching the harsher
+containment first. A later fixed on-demand launcher start advances the generation and reconnects to
+the singleton winner. A passphrase-backed successor first tries its exact bundle-scoped auto-unlock
+entry when one was explicitly provisioned; otherwise it remains locked until a local-human unlock.
 
 On a pristine first install, keyring storage usability alone does not select immutable keyring
 mode. Before creating a staging artifact, IVK, keyring entry, or mode marker, the service requires

@@ -275,6 +275,35 @@ async def test_note_activity_renews_the_idle_window_indefinitely() -> None:
 
 
 @pytest.mark.anyio
+async def test_note_activity_also_holds_the_process_idle_lease() -> None:
+    """Quiescent activity evidence must defer the process stop, not only the relock.
+
+    The relock check is skipped entirely once the process-idle deadline passes, so if activity
+    renewed only the relock clock a live hook-fed workspace would still lose its daemon at
+    ``IDLE_STOP_SECONDS`` — trading the cheap soft lock that re-readies on the next ordinary call
+    for a full respawn, which is the containment ordering #291 exists to preserve.
+    """
+
+    clock = _Clock()
+    lifecycle = _lifecycle(clock, idle_stop_seconds=5.0)
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.READY, vault_generation=1)
+    monitor = asyncio.create_task(lifecycle.run_idle_monitor(poll_seconds=0.001))
+    # Four sub-deadline steps total far more than the 5 s stop: only a renewed process clock
+    # can keep the daemon alive across them.
+    for _ in range(4):
+        clock.monotonic += 4.0
+        await lifecycle.note_activity()
+        await asyncio.sleep(0.005)
+        assert lifecycle.state is ServiceState.READY
+        assert not monitor.done()
+
+    clock.monotonic += 6.0
+    await asyncio.wait_for(monitor, timeout=1.0)
+    assert lifecycle.state is ServiceState.DRAINING
+
+
+@pytest.mark.anyio
 async def test_connected_client_prevents_idle_relock() -> None:
     clock = _Clock()
     lifecycle = _lifecycle(clock)
