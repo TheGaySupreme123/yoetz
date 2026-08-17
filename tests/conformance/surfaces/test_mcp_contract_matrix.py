@@ -276,8 +276,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:487cbc3b438c16512e79c3d195b71cac9fa8a71c81a5a9f21aff80f0de93bd4c",
-        "strict": "sha256:48f1bf7dd90c28b6f48b0c9c005e48128cd7ecbe5e7ba62ce34b21dd33ecfc40",
+        "policy": "sha256:6759a95082b5eac9741fa86508e7f310d3490954c1fcb626078390510a84da15",
+        "strict": "sha256:2cdacc504bdf3f4344cd6d20ef6e0974857dbf02f66da2010605ec3840c1c5b2",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -358,6 +358,26 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     with pytest.raises(KeyError, match="unregistered_tool_descriptor") as captured:
         descriptor_for("secret-tool")
     assert "secret-tool" not in str(captured.value)
+
+
+def test_respond_agent_surface_names_every_admitted_disposition() -> None:
+    """The advertised respond text is the only place an MCP caller learns the per-disposition
+    field rules: ``_mcp_presentation_schema`` drops respond-request's ``allOf`` before advertising
+    it. A disposition added to the enum without a rule here is an undiscoverable wire value."""
+
+    descriptor = descriptor_for("respond")
+    schema = cast(dict[str, Any], dict(descriptor.input_schema))
+    disposition = cast(dict[str, Any], cast(dict[str, Any], schema["properties"])["disposition"])
+    admitted = tuple(cast(list[str], disposition["enum"]))
+    assert admitted == ("acknowledged", "provenance_disputed", "rejected", "waived")
+    assert "allOf" not in schema
+    rules = cast(str, disposition["description"]).lower()
+    for value in admitted:
+        assert value in rules, f"{value} has no advertised field rule"
+    assert "requires reason" in rules
+    # The tool description is the first text a caller reads, and it is digest-pinned.
+    assert "provenance dispute" in descriptor.description
+    assert "provenance_disputed" in descriptor.description
 
 
 def test_guidance_resources_are_exact_and_static() -> None:

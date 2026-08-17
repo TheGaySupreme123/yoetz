@@ -952,8 +952,10 @@ def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> No
         disposition = properties.get("disposition")
         if isinstance(disposition, dict):
             disposition["description"] = (
-                "Acknowledged accepts no waiver fields. Rejected requires reason and accepts no "
-                "waiver fields. Waived requires reason and waiver_scope."
+                "Acknowledged accepts no waiver fields. Provenance_disputed contests the "
+                "finding's authorship or provenance premise rather than its conclusion; it "
+                "requires reason and accepts no waiver fields. Rejected requires reason and "
+                "accepts no waiver fields. Waived requires reason and waiver_scope."
             )
         finding_frontier = properties.get("finding_frontier")
         if isinstance(finding_frontier, dict):
@@ -1357,13 +1359,14 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "respond",
         "Respond to a finding",
         "Records an acknowledgement, provenance dispute, or rejection for one finding at the "
-        "result "
-        "frontier of the check that returned it, not its subject_frontier. It does not resolve "
-        "other findings or establish that underlying work changed. Waiver is reserved for an "
-        "authorized local-CLI human and is not an agent option. A readable response removes that "
-        "finding from unanswered_finding_count without reducing receipt_blocking_finding_count, "
-        "erasing its historical record, or closing an independent coverage gap. Call it once per "
-        "finding; a "
+        "result frontier of the check that returned it, not its subject_frontier. It does not "
+        "resolve other findings or establish that underlying work changed. "
+        "A provenance_disputed response contests the finding's authorship or provenance premise "
+        "rather than its conclusion, requires a reason, and never resolves the finding. "
+        "Bounded waiver is reserved for an authorized local-CLI human and is not an agent option. "
+        "A readable response removes that finding from unanswered_finding_count without reducing "
+        "receipt_blocking_finding_count, erasing its historical record, or closing an independent "
+        "coverage gap. Call it once per finding; a "
         "readable response identifying a finding that check returned is not material change and "
         "needs no recheck, while a redacted or unreadable response does. Guidance: "
         "yoetz://guidance/publication-policy.md.",
@@ -1469,7 +1472,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
                 "check": "sha256:3a81f3a6d3e0f714680e221e8dc5fa90d0131629386b03d75bc55d21ab618ee1",
-                "respond": "sha256:cbc5c0a0e232485f62afcdcb5e17958414a961b96da6050b4d3570ab9f0b815f",
+                "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
                 "status": "sha256:bcd91efb3b8f96d3198dbf3c0991ec8efb745c19b02c15349ff2bcdc08dfc250",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
@@ -1480,7 +1483,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
                 "check": "sha256:91b090140843ef3f50bbdf02a42dc78fc418b1968dca8685018698cf276f4557",
-                "respond": "sha256:cbc5c0a0e232485f62afcdcb5e17958414a961b96da6050b4d3570ab9f0b815f",
+                "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
                 "status": "sha256:bcd91efb3b8f96d3198dbf3c0991ec8efb745c19b02c15349ff2bcdc08dfc250",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
@@ -1490,8 +1493,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:487cbc3b438c16512e79c3d195b71cac9fa8a71c81a5a9f21aff80f0de93bd4c",
-        "strict": "sha256:48f1bf7dd90c28b6f48b0c9c005e48128cd7ecbe5e7ba62ce34b21dd33ecfc40",
+        "policy": "sha256:6759a95082b5eac9741fa86508e7f310d3490954c1fcb626078390510a84da15",
+        "strict": "sha256:2cdacc504bdf3f4344cd6d20ef6e0974857dbf02f66da2010605ec3840c1c5b2",
     }
 )
 

@@ -11,6 +11,13 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- `provenance_disputed` is a fourth `respond` disposition. It records that the responder contests
+  the finding's authorship or provenance premise rather than its conclusion, requires a reason, may
+  carry evidence, and is not scored as an evidence-free rejection by either deterministic policy
+  pack. Like every other disposition it never resolves or erases the finding. The MCP `respond`
+  surface advertises it in both the tool description and the `disposition` field rules, so a caller
+  reading only the advertised schema learns the rule (issue #224).
+
 - Status compact/readiness projections now distinguish `unanswered_finding_count` from
   `receipt_blocking_finding_count`. Responses clear the former; current actionable receipt findings
   remain in the latter for every disposition. The paired `findings_unanswered` and
