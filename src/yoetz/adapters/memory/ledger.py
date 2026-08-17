@@ -1006,6 +1006,13 @@ def _projection_items(
                 for obligation in scope_refs
             )
         )
+        item_coverage = compact_status_coverage(records, projection)
+        # The scalar and the coverage beside it are two derivations of one fact: the projection
+        # folds events, the coverage re-folds the applicable check over the newest record's
+        # envelope. An import-channel envelope reads `partial` where the projection reads
+        # `current`, so reporting the projection scalar raw lets the headline read cleaner than
+        # the coverage it summarizes. Report the weaker of the two (issue #307).
+        item_freshness = min(projection.freshness, item_coverage.ledger_freshness)
         return (
             StatusCompactItemModel(
                 task_id=task,
@@ -1023,10 +1030,8 @@ def _projection_items(
                 receipt_blocking_finding_count=str(receipt_blocking_count),
                 open_obligations=open_obligations[:10],
                 unanswered_findings=unanswered_findings[:10],
-                freshness=projection.freshness.value,
-                coverage=CoverageModel.model_validate(
-                    coverage_to_json(compact_status_coverage(records, projection))
-                ),
+                freshness=item_freshness.value,
+                coverage=CoverageModel.model_validate(coverage_to_json(item_coverage)),
                 gaps=_status_gap_codes(projection.coverage_gaps),
             ),
         )

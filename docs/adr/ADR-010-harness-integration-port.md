@@ -213,9 +213,11 @@ records a private workspace commitment, structural outbox/quarantine evidence, a
 identities—never raw task content or a raw path in logs/status/SQLite.
 
 Hook `PostToolUse` and stream `item.completed` for one host call normalize before materialization to
-the same semantic kind, correlation identity, roles, operation digest, and ledger IDs. A durable
-logical-identity claim merges source coverage and prevents duplicate action/result appends while
-allowing later encrypted content references. Cursor advancement is coupled to durable outbox
+the same semantic kind, correlation identity, roles, operation digest, and ledger IDs. The canonical
+host-call identity remains the content and ledger-dedup key; the durable claim identity additionally
+binds the materialization version and exact draft-role tuple. Thus distinct phases such as
+`PreToolUse` action and paired `PostToolUse` action/result never contend, while hook/stream copies of
+the same phase merge source coverage and prevent duplicate appends (issue #309). Cursor advancement is coupled to durable outbox
 insertion; overflow leaves later stream input replayable. Unsupported visible future events retain
 an opaque envelope, encrypted visible payload when available, and an explicit gap. Session stop is
 source-generation fenced, pending work drains fairly across mapped sessions, and quarantine is bounded by
@@ -225,6 +227,8 @@ operator reclaims counted separately.
 
 An observation route that encounters bundle `STORAGE_CORRUPT` records the exact terminal
 `observation_storage_corrupt` gap and quarantines that Codex session's pending delivery backlog.
+An identity-claim conflict is instead envelope-scoped `dedup_conflict`: it quarantines that row and
+does not arm the generation latch (issue #309).
 The READY-generation coordinator suppresses further recovery attempts for that Codex session so a
 poisoned mapped task cannot starve healthy sessions or ordinary control. The suppression is not a
 durable claim that repair is impossible: composing a new READY generation clears it and permits one

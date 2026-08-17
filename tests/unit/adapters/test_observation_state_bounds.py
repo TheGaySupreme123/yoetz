@@ -257,6 +257,65 @@ def test_dropped_unterminated_long_line_recovers_when_newline_arrives(tmp_path: 
     )
 
 
+def _force_envelope_eviction(
+    store: LocalObservationStore,
+    workspace: str,
+    session: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    for ordinal in range(1, 12):
+        store.ingest(_envelope(session=session, identity=f"hook:evict:{ordinal}", ordinal=ordinal))
+    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    # Below the current size, so the next save must shed durable envelopes.
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", state_path.stat().st_size - 1_024)
+    store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
+
+
+def test_truncation_gap_clears_once_the_store_stops_shedding_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#310: the eviction gap had no resolution path and latched forever."""
+
+    store, workspace, session = _consented_store(tmp_path)
+    _force_envelope_eviction(store, workspace, session, monkeypatch, tmp_path)
+    truncated = ObservationGapCode.TRUNCATED_PAYLOAD.value
+    assert truncated in store.status(ObservationStatusQuery(workspace)).gaps
+
+    # Still pressed against the bound: landing merely under it proves nothing.
+    store.note_coverage_gap(workspace, ObservationGapCode.SOURCE_LAG.value)
+    assert truncated in store.status(ObservationStatusQuery(workspace)).gaps
+
+    # Pressure gone: the next save lands with headroom and sheds nothing.
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 1_048_576)
+    store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
+    assert truncated not in store.status(ObservationStatusQuery(workspace)).gaps
+
+    # Cleared, not erased: the loss stays in history with the moment it happened.
+    persisted = _state_json(tmp_path)
+    history = cast(dict[str, dict[str, object]], persisted["gap_history"])
+    assert history[truncated]["active"] is False
+    assert history[truncated]["first_seen"]
+    reopened = LocalObservationStore(_state=tmp_path)
+    assert truncated not in reopened.status(ObservationStatusQuery(workspace)).gaps
+
+
+def test_renewed_shedding_reopens_the_truncation_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Clearing is a live signal, not a one-way retirement."""
+
+    store, workspace, session = _consented_store(tmp_path)
+    truncated = ObservationGapCode.TRUNCATED_PAYLOAD.value
+    _force_envelope_eviction(store, workspace, session, monkeypatch, tmp_path)
+    monkeypatch.setattr(local_mod, "_MAX_STATE_BYTES", 1_048_576)
+    store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
+    assert truncated not in store.status(ObservationStatusQuery(workspace)).gaps
+
+    _force_envelope_eviction(store, workspace, session, monkeypatch, tmp_path)
+    assert truncated in store.status(ObservationStatusQuery(workspace)).gaps
+
+
 def test_store_stage_timings_attribute_hydrate_encode_write(tmp_path: Path) -> None:
     """The store accounts its hydrate/encode/write cost for hook timing rows (#290)."""
 
@@ -264,8 +323,15 @@ def test_store_stage_timings_attribute_hydrate_encode_write(tmp_path: Path) -> N
     seeded.ingest(_envelope(session=session, identity="hook:timed", ordinal=1))
 
     store = LocalObservationStore(_state=tmp_path)
-    assert store.stage_timings_ms == {"hydrate": 0.0, "encode": 0.0, "write": 0.0}
+    assert store.stage_timings_ms == {
+        "hydrate": 0.0,
+        "encode": 0.0,
+        "lock_wait": 0.0,
+        "write": 0.0,
+    }
     store.note_coverage_gap(workspace, ObservationGapCode.SERVICE_UNAVAILABLE.value)
     assert store.stage_timings_ms["hydrate"] > 0.0
     assert store.stage_timings_ms["encode"] > 0.0
     assert store.stage_timings_ms["write"] > 0.0
+    # Uncontended acquisition still registers as time spent on the lock (#310).
+    assert store.stage_timings_ms["lock_wait"] > 0.0

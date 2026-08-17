@@ -822,6 +822,13 @@ deciding between the two, shared by the receipt and by compact status coverage.
   `freshness` folds staleness under the same supersession rule as
   `kernel/reducers.invalidates_recorded_check`: a readable `response_recorded` answering a finding
   in `latest_tested_state.returned_finding_ids` never by itself marks the ledger stale.
+  `freshness` is a function of carried state alone, never of which event is being folded. Its
+  precedence is unchanged — genesis, `redacted_*` markers, `unknown_event:`/`missing_ref:` markers,
+  supersession — and below those it reports `latest_tested_state.coverage.ledger_freshness`, so a
+  check that recorded `partial` holds the scalar at `partial` for as long as it is the retained
+  check. Only supersession, a redaction removing that check, or a later check replacing it moves
+  the scalar off that value. The scalar therefore cannot read cleaner than the coverage of the
+  very check reported beside it (issue #307).
   `CurrentPlanScope` and `current_plan_scope`, owned by `kernel/plan_scope.py`, are the one shared
   readable-plan-chain derivation consumed by status, check, and receipt: effective obligation refs,
   their declared count, and the current `no_obligations_reason`. A revision applies its obligation
@@ -1199,7 +1206,11 @@ five seconds ahead of acceptance and `ahead_of_forward_skew_allowance` beyond it
 outside clock. Ordering remains ingestion sequence and caller time is never a sort or filter key.
 New check cases carry both clocks and this classification in their bounded frozen timelines;
 versions is one verified runtime manifest; compact uses exact structural counters and bounded
-summaries.
+summaries. The compact singleton's `freshness` follows the same weaker-of-two rule as the evidence
+view: it is the weaker of the projection scalar and the `ledger_freshness` of the applicable-check
+coverage reported in the same item, so the summary line an agent reads can never claim the ledger
+is cleaner than the coverage vector beside it. `StatusCompactItemModel` rejects the inverse
+(issue #307).
 
 Finding response does not resolve. The issue key is `(origin, policy_id, policy_version, kind,
 complete canonical subject_refs)`. A later same-key row supersedes the old and starts unresolved.
@@ -2464,8 +2475,13 @@ Unrecognized visible events accept an opaque stable envelope plus encrypted cont
 `unsupported_event`; unknown semantics never infer success.
 
 Canonical normalization precedes materialization. Equivalent hook/stream host calls share logical
-identity, roles, operation digest, and stable ledger IDs. The logical-identity repository merges a
-two-bit source mask; duplicates retry incomplete content/store/ledger/verification/advice work
+identity, roles, operation digest, and stable ledger IDs. That canonical logical identity remains
+the content and ledger-dedup key. The durable repository claim is separately domain-scoped by the
+materialization mapping version and exact draft-role tuple, so phases of one host call with
+different materializations (for example pre-action versus paired action/result) cannot collide,
+while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
+The claim stores the source-independent materialization version, never the hook/stream cursor
+version (issue #309). Duplicates retry incomplete content/store/ledger/verification/advice work
 idempotently. Stream cursor advancement occurs only after outbox insertion. Session end is
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
 across workspace sessions under a nonblocking per-workspace lease; within one pass a
@@ -2473,14 +2489,30 @@ across workspace sessions under a nonblocking per-workspace lease; within one pa
 and an ended unmapped session is terminally quarantined because no future mapping can deliver it,
 but only after atomically acquiring its lifecycle lock so an attach already in flight wins.
 Turn-boundary hooks retry auto-attach under a bounded budget and record a payload-free diagnostic
-when no mapping results. Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
+when no mapping results. A status read against a mapping whose Yoetz session or writer was replaced
+classifies `SESSION_CONFLICT` and `SESSION_NOT_FOUND` as `mapping_stale`, not service unavailability:
+the hook preserves the mapping, tells the agent to call `start` again, and accepts only that
+successful `start` result as authority for replacement ids. `OPERATION_PENDING`, `BUNDLE_BUSY`, and
+`FRONTIER_CONFLICT` are transient status reads; vault and repository-privacy failures retain their
+distinct recovery advisories. The closed public-error table is exhaustive so a new code cannot
+silently inherit an unrelated advisory (issue #308). `observe status` retains the current and rotated
+hook-diagnostic history, but pairs every all-time reason count with `first_seen`, `last_seen`, and a
+count in the closed one-hour `window_seconds`; timings likewise date the all-time maximum and report
+a separate recent maximum. Unreadable or future timestamps remain retained but are never classified
+as recent, so a fixed historical failure cannot masquerade as live degradation (issue #310).
+Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
 A `service_unavailable` rejection retires that session's lane for the pass while other sessions
 remain eligible; no later row may step over a failed lane head. Local observation-store acquisition is capped at two
-seconds for both the process-local reentrant lock and the cross-process flock. Coordinator and
+seconds for both the process-local reentrant lock and the cross-process flock. Hook timing rows
+attribute that queueing as `store_lock_wait`, cover the previously unwindowed resolve/deliver
+regions, and name any remaining wall-time difference as `unattributed`; nested store sub-stages are
+reported separately from the end-to-end partition (issues #310 and #311). A conflicting
+logical-identity claim rejects and quarantines only its own envelope as `dedup_conflict`; it does
+not establish bundle corruption or arm the session latch (issue #309). Coordinator and
 sweeper calls use separate bounded executors, so cancellation cannot strand an exit-blocking flock
 wait or exhaust the shared default executor. `observation_storage_corrupt` is terminal for its Codex
-session in the current READY generation: the coordinator remembers that session after the first
-bundle `STORAGE_CORRUPT`, later ingests are rejected without reopening the bundle, and the sweeper
+session in the current READY generation: the coordinator remembers that session only after a
+bundle-level `STORAGE_CORRUPT`, later ingests are rejected without reopening the bundle, and the sweeper
 atomically moves that session's pending backlog to quarantine while healthy lanes continue. A new
 READY generation clears the in-memory suppression and permits one recovery probe. A successful
 probe removes that session from the local corruption set and resolves the workspace corruption gap
@@ -2489,7 +2521,10 @@ budget, and by a 14-day age measured from a store-authored
 quarantined-at time behind the trusted-clock epoch fence; an operator can drop it explicitly with
 `yoetz observe reclaim`. Every drop — cap, age, or reclaim — retains aggregate commitment, count
 (evictions and reclaims counted separately), first/last receipt times, and
-`quarantine_detail_evicted`.
+`quarantine_detail_evicted`. The `truncated_payload` gap is live rather than permanent: a later
+save resolves its active flag only when that save evicts nothing and leaves one-eighth of the state
+budget free. Merely landing under the cap cannot clear the same loss it just recorded; the durable
+gap history remains after recovery, and renewed shedding reactivates it (issue #310).
 
 Routine-read materialization follows ADR-022's rate policy. A service-owned structural
 `action=routine_read` label is derived only for the closed direct-read tool set or a conservatively

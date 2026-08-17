@@ -145,6 +145,10 @@ _HOOK_TOTAL_BUDGET_SECONDS: Final = (
     + _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS
 )
 _TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
+# The stages that partition one pass end to end, in order. 'advice' is nested
+# inside 'store' and every 'store_*' accumulator spans the whole pass, so
+# neither belongs in a sum against the total.
+_PASS_PARTITION_STAGES: Final = ("import", "resolve", "store", "drain", "deliver")
 _ROUTINE_READ_TOOLS: Final = frozenset(
     {
         "glob",
@@ -658,7 +662,21 @@ def _record_pass_timing(
             return
         if over:
             record_hook_diagnostic("hook_budget_exceeded", event, _state=_state)
-        record_hook_timing(event, ms=total_ms, stages={**stages, "total": total_ms}, _state=_state)
+        # What the partition does not cover is reported as its own term rather
+        # than left for a reader to derive by knowing which stages nest. A row
+        # whose stages sum to half its total said nothing about the other half
+        # (#310/#311); now it names it.
+        attributed = sum(stages.get(name, 0) for name in _PASS_PARTITION_STAGES)
+        record_hook_timing(
+            event,
+            ms=total_ms,
+            stages={
+                **stages,
+                "total": total_ms,
+                "unattributed": max(0, total_ms - attributed),
+            },
+            _state=_state,
+        )
 
 
 def _cached_recommendation_context(*, _state: Path | None) -> str:
@@ -1094,7 +1112,8 @@ def handle_observe(
     stages: dict[str, int] = {}
     try:
         store = LocalObservationStore(_state=_state)
-        stages["import"] = _elapsed_ms(entry_started, _monotonic())
+        resolve_started = _monotonic()
+        stages["import"] = _elapsed_ms(entry_started, resolve_started)
         raw_stdout_json = hook_io.stdout_json
 
         def _resolve_runner() -> AsyncRunner:
@@ -1192,6 +1211,11 @@ def handle_observe(
 
         assert workspace_commitment is not None
         store_started = _monotonic()
+        # Payload parse, runtime gate, workspace resolution and the consent
+        # probe ran between 'import' and here, unwindowed. Three of those calls
+        # take the store lock, so a contended pass spent real time in a region
+        # no stage could name (#310/#311).
+        stages["resolve"] = _elapsed_ms(resolve_started, store_started)
         # One flush for the whole local pass. The batch is closed before any
         # service RPC so an outbox acknowledgement can never become durable
         # ahead of the ingest it acknowledges, and it never spans a network
@@ -1332,6 +1356,11 @@ def handle_observe(
                 # SessionStart-only status/attach helpers: they drag protocol.models
                 # and service.client, which no other event needs (#242).
                 from yoetz.cli.hooks import (
+                    _LOCKED_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _PRIVACY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _RETRY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _STALE_MAPPING_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _UNAVAILABLE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _active_context,  # pyright: ignore[reportPrivateUsage]
                     _read_status,  # pyright: ignore[reportPrivateUsage]
                 )
@@ -1374,16 +1403,25 @@ def handle_observe(
                                 store_mapping(updated, _state=_state)
                                 mapping = updated
                                 additional = _active_context(updated, updated.last_frontier)
+                            elif kind == "stale":
+                                # The service answered: only the stored mapping is stale
+                                # (re-started elsewhere). Repair flows through the agent's
+                                # own start via handle_post_tool_use; meanwhile the static
+                                # advisory must not starve pending advice (issue #308).
+                                additional = _STALE_MAPPING_CONTEXT
+                                attach_advisory_only = True
+                                with contextlib.suppress(Exception):
+                                    record_hook_diagnostic(
+                                        "mapping_stale", resolved_event, _state=_state
+                                    )
                             elif kind == "locked":
-                                additional = (
-                                    "Yoetz vault is locked for this mapped session; "
-                                    "no live receipt can be promised."
-                                )
+                                additional = _LOCKED_CONTEXT
+                            elif kind == "retry":
+                                additional = _RETRY_CONTEXT
+                            elif kind == "privacy":
+                                additional = _PRIVACY_CONTEXT
                             else:
-                                additional = (
-                                    "Yoetz service is unavailable for this mapped session; "
-                                    "no live receipt can be promised."
-                                )
+                                additional = _UNAVAILABLE_CONTEXT
                         if not skip_service:
 
                             async def _drain() -> None:
@@ -1473,7 +1511,8 @@ def handle_observe(
                 ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
             )
 
-        stages["drain"] = _elapsed_ms(drain_started, _monotonic())
+        deliver_started = _monotonic()
+        stages["drain"] = _elapsed_ms(drain_started, deliver_started)
 
         # Advice selection and commit are serialized with the stdout write by a
         # dedicated delivery lease. The lease is independent of workspace state:
@@ -1551,6 +1590,10 @@ def handle_observe(
                         codex_session_id,
                         pending_frontier_notice.delivery_identity,
                     )
+        # Advice selection, the lease, the stdout write itself and both delivery
+        # commits sit past the 'drain' window; a blocked host pipe or a
+        # contended commit was previously invisible (#310/#311).
+        stages["deliver"] = _elapsed_ms(deliver_started, _monotonic())
         # Attribute the whole pass's store work (#290), folded in last because
         # the store keeps saving after the 'store' stage window closes: the
         # drain saves once per delivered row and advice commits its own. A
