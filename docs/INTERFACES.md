@@ -2940,10 +2940,15 @@ facade and are never MCP tools.
   composed at runtime from user, task, provider, or environment values. Shared values are
   `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
   `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
-  `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`, and
-  `PRESENTATION_INPUT_SCHEMA_BUDGETS`. Initialize `instructions` concatenate the packaged
-  `agent-instructions.md`, `workflow.md`, and `coverage-and-receipts.md` documents in that order,
-  then the route-profile suffix. `ToolDescriptor.input_schema` is the tools/list presentation
+  `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`,
+  `PRESENTATION_INPUT_SCHEMA_BUDGETS`, `SERVER_INSTRUCTIONS_BUDGET`, `ADVERTISED_SURFACE_BUDGET`,
+  and `advertised_surface_metrics()`. Initialize `instructions` carry the packaged
+  `agent-instructions.md` document and then the route-profile suffix; every other guidance document
+  is fetched on demand through `resources/read` or `read_guidance`. A host may charge the
+  `instructions` string once per advertised tool — Codex copies it into every tool `description` —
+  so `SERVER_INSTRUCTIONS_BUDGET` bounds that string per route profile and
+  `ADVERTISED_SURFACE_BUDGET` bounds the aggregate of instructions-per-tool plus every description
+  plus every advertised input schema (issue #300). `ToolDescriptor.input_schema` is the tools/list presentation
   projection (inlined common shapes, ordinary publish event families, minimal examples), preserving
   every catalogued schema-version branch for each advertised ordinary event family. Every shipped
   worked example validates against that presentation schema as well as catalog admission;
@@ -2961,8 +2966,9 @@ facade and are never MCP tools.
   the exact sufficient coverage.
 - `mcp/resources.py`: exposes the packaged harness-neutral guidance documents as MCP resources under
   stable `yoetz://guidance/<name>` URIs for hosts that return the resource text. Initialize
-  `instructions` always carry `agent-instructions.md`, `workflow.md`, and
-  `coverage-and-receipts.md`. A conformant `resources/read` payload does
+  `instructions` always carry `agent-instructions.md`, whose catalog paragraph names the other four
+  URIs and the `resources/read` → `read_guidance` → installed-copy chain that reaches them. A
+  conformant `resources/read` payload does
   not mean the host delivered those bytes to the model; an empty body is not a fetch. A
   schema-valid `resources/list` payload likewise does not mean the host accepted the list; some
   Codex builds reject it with `Unexpected response type`. First-party
