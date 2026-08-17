@@ -34,6 +34,14 @@ uv run pytest <path-to-touched-tests>
 Use Ruff and the pinned npm Pyright (`npx --no-install pyright`) from repository metadata. Prefer the
 smallest relevant test slice.
 
+For any packaged-resource inventory change, use the owning fixed-point command instead of running
+its dependent generators individually:
+
+```text
+uv run python scripts/sync_resource_ripple.py --write
+uv run python scripts/sync_resource_ripple.py --check
+```
+
 ## Hard rules
 
 - Do not weaken the honesty rules in [`CONTRIBUTING.md`](CONTRIBUTING.md). Coverage-bounded wording,
