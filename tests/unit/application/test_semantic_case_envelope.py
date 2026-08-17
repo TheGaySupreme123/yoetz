@@ -14,7 +14,12 @@ from typing import cast
 import pytest
 
 from builders.large_semantic_cases import large_case
-from yoetz.application.check import CheckScope, allocate_findings, run_deterministic_policies
+from yoetz.application.check import (
+    CheckScope,
+    allocate_findings,
+    prior_finding_ids,
+    run_deterministic_policies,
+)
 from yoetz.application.semantic_case import (
     REVIEW_PACKET_ITEM_ID,
     SemanticCaseTooLarge,
@@ -57,7 +62,11 @@ def _findings_for(case: DeterministicCase) -> tuple[Finding, ...]:
         CheckScope((), ()),
         ("research-evidence/0.1.0", "work-integrity/0.1.0"),
     )
-    return allocate_findings(_Ids(), tuple(item.candidate for item in assessments))
+    return allocate_findings(
+        _Ids(),
+        tuple(item.candidate for item in assessments),
+        prior_finding_ids(case.projection),
+    )
 
 
 def _semantic(profile: ReviewContextProfile, **kwargs: int) -> SemanticCase:

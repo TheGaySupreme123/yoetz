@@ -351,9 +351,12 @@ def build_semantic_case(
     sections = frozenset(selection.sections)
     frontier_refs = frozenset(str(ref) for ref in frozen_case.allowed_ids)
     local_check_refs = frozenset(str(item.finding_id) for item in findings)
-    if frontier_refs & local_check_refs:
-        # Local check IDs must not collide with frontier material.
-        local_check_refs = frozenset(ref for ref in local_check_refs if ref not in frontier_refs)
+    # A recheck re-derives a live recorded finding under its recorded id (issue #186), so the same
+    # fnd_ ref is both frozen ledger material and one of this run's findings. It is this check's
+    # own finding: the packet names it as assessment.finding_ref and post-validation resolves any
+    # cited fnd_ against this run's findings. Own the overlap locally so the two sets stay a
+    # partition of `allowed` and the assessment survives the boundary fence (issue #304).
+    frontier_refs = frontier_refs - local_check_refs
     allowed = frontier_refs | local_check_refs
     projection = frozen_case.projection
 

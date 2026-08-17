@@ -80,9 +80,9 @@ A non-succeeding `semantic_status` is a coverage gap, not a failure to retry awa
 
 - `not_configured`, `blocked_by_policy`, and `human_denied` will not change without owner action: take the first answer.
 - `unavailable` and `timeout` are the only statuses retried inside a job, and only for a transport-unavailable, provider-timeout, or rate-limited reason. By the time you see one, that job already spent its own attempt budget.
-- `refused`, `invalid`, and `failed` are not retried inside the job at all, so a fresh request is a fresh gamble rather than a continuation.
+- `refused`, `invalid`, and `failed` are not retried inside the job at all, so a fresh request is a fresh gamble rather than a continuation. Their first answer is already terminal: fall back to `deterministic_only` immediately rather than spending a second job to confirm.
 
-When a second job in one session again returns no judgment, stop requesting semantic review: run `deterministic_only` and say in the final answer that semantic review was requested and did not run, naming the recorded `semantic_status` and `semantic_reason`. A terminal reason such as `retry_budget_exhausted` describes the retry outcome, not the initiating cause; do not present it as a diagnosis. That fallback check carries the earlier attempt's gap forward next to `semantic_review_not_requested`, so the receipt still shows the environment refused rather than that you never asked.
+For `unavailable` and `timeout`, when a second job in one session again returns no judgment, stop requesting semantic review: run `deterministic_only` and say in the final answer that semantic review was requested and did not run, naming the recorded `semantic_status` and `semantic_reason`. A terminal reason such as `retry_budget_exhausted` describes the retry outcome, not the initiating cause; do not present it as a diagnosis. Likewise `coordinator_failure` names a fault inside yoetz itself, not in the work under review or in the provider: it is not retryable inside the job and is never a diagnosis of the work. That fallback check carries the earlier attempt's gap forward next to `semantic_review_not_requested`, so the receipt still shows the environment refused rather than that you never asked.
 
 ## Prose the reviewer will not see whole
 
