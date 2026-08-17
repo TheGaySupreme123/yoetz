@@ -266,11 +266,14 @@ that evidence.
   and retains already-kept evidence. `AdviceSnapshot` surfaces via nonblocking hooks and ordinary
   `status`. Batch `ImporterPort` JSONL import stays a separate support surface. Existing v0.1 data
   remains readable; migrations may add only observation consent/cursor/dedup/advice state.
-- **F-016:** Any MCP host is supported with no integration. Initialize `instructions` begin with
-  `guidance/agent-instructions.md` verbatim and append `workflow.md` and
-  `coverage-and-receipts.md` so those Step 0 documents reach every host without depending on
-  `resources/read`; the string must still carry every rule whose absence would cause harm, because
-  it is the only tier guaranteed to arrive. The five guidance documents remain exposed as read-only
+- **F-016:** Any MCP host is supported with no integration. Initialize `instructions` carry
+  `guidance/agent-instructions.md` as the only inlined guidance document, followed by the generated
+  route-profile suffix; its catalog paragraph names the other four URIs and the `resources/read` →
+  `read_guidance` → installed-copy chain that reaches them.
+  The string must still carry every rule whose absence would cause harm, because it is the only
+  tier guaranteed to arrive — but naming a path served by an equally unconditional tool satisfies
+  that, and the string is bounded because at least one host charges it once per advertised tool
+  (issue #300). The five guidance documents remain exposed as read-only
   `yoetz://guidance/<name>` resources. The templates keep all six operations and all nine ordinary
   publication families authorable when a host drops schema metadata, without changing catalog
   admission authority. MCP declares

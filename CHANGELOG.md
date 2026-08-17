@@ -454,6 +454,18 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- The MCP initialize `instructions` string had no size bound and had grown to 41 KB by inlining
+  three guidance documents. Codex copies that string into the `description` of every advertised
+  tool, so it was charged seven times on every turn of every session — roughly 288 KB of advertised
+  surface, six-sevenths of it duplicate, which a dogfood session hit as a truncation warning.
+  `instructions` now carry `agent-instructions.md` alone; `workflow.md` and
+  `coverage-and-receipts.md` are reached through the catalog paragraph that document already
+  carries, and through the `read_guidance` tool that has served them since the same issue the
+  inlining was working around. The packaged Codex skill no longer claims the two documents are
+  already in context. `SERVER_INSTRUCTIONS_BUDGET` and `ADVERTISED_SURFACE_BUDGET` now bound the
+  instructions block and the aggregate advertised surface, asserted alongside the per-schema
+  budgets, so the next oversized guidance edit fails CI instead of a live session (issue #300).
+
 - Correlated Codex `PreToolUse` and `PostToolUse` phases no longer claim one SQLite logical identity
   with incompatible operation digests. The canonical host-call identity remains the content and
   ledger-dedup key, while the durable claim key is additionally scoped by the materialization
@@ -513,9 +525,7 @@ carried them; they are listed because each one describes the behavior that now s
 - Codex Step 0 treated an empty MCP `resources/read` as success and advertised that guidance URIs
   "resolve without any repository checkout". The skill now stops on an empty body, calls
   `read_guidance` with the same URI, and opens the matching installed `references/<name>.md` copy
-  if that tool result is also empty. Initialize `instructions` also append `workflow.md` and
-  `coverage-and-receipts.md` so those Step 0 documents arrive without depending on
-  `resources/read`. MCP registers `read_guidance` as a seventh, read-only tool that returns the
+  if that tool result is also empty. MCP registers `read_guidance` as a seventh, read-only tool that returns the
   full guidance document as tool text and is not a ledger operation. `resources/read` now
   advertises each registry `media_type` instead of hardcoding `text/markdown`.
   `docs/INTERFACES.md` no longer states that unprofiled hosts can fetch those documents

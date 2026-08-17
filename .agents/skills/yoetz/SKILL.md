@@ -13,7 +13,7 @@ Yoetz is a local work ledger and deterministic checker. It records only what par
 
 Read these with the MCP `resources/read` request for the exact URI when they are not already in
 context. They are served by the `yoetz` server. Initialize `instructions` already include
-`agent-instructions.md`, `workflow.md`, and `coverage-and-receipts.md`. After install the same
+`agent-instructions.md`; every other document below is fetched on demand. After install the same
 files are also on disk beside this file as `references/workflow.md`,
 `references/coverage-and-receipts.md`, `references/publication-policy.md`,
 `references/request-templates.md`, and `references/agent-instructions.md`.
@@ -28,7 +28,7 @@ also has no text, open the matching `references/<name>.md` beside this file and 
 copy. Do not call `start` on an empty guidance body. An empty resource body is not a reason to
 read Yoetz product source.
 
-- Before the first `start`: `yoetz://guidance/workflow.md` (the ten steps, cadence, resume behavior) and `yoetz://guidance/coverage-and-receipts.md` (coverage, findings, receipt wording). Both are already in initialize `instructions`; re-read them if that text is not in context.
+- Before the first `start`: `yoetz://guidance/workflow.md` (the ten steps, cadence, resume behavior) and `yoetz://guidance/coverage-and-receipts.md` (coverage, findings, receipt wording). Neither is in initialize `instructions`; read both before the first `start`, and call `read_guidance` with the same URI if the `resources/read` body is empty.
 - Before the first `publish_work`: `yoetz://guidance/publication-policy.md` (what is material and safe to publish).
 - When schema metadata is missing or a request is rejected:
   `yoetz://guidance/request-templates.md` (complete bodies for all six operations and all nine

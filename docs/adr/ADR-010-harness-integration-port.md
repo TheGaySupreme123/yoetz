@@ -67,14 +67,17 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    across neighboring host versions.
 
 4. **Three delivery tiers, with tier 0 self-sufficient.** Tier 0 is the MCP initialize
-   `instructions` string. It begins with `guidance/agent-instructions.md` verbatim (the safety
-   floor) and appends `workflow.md` and `coverage-and-receipts.md` so the Step 0 documents required
-   before the first `start` and `check` do not depend on `resources/read`. That string reaches every
+   `instructions` string, and it carries `guidance/agent-instructions.md` verbatim — the safety
+   floor, including the catalog paragraph that names every other document and the
+   `resources/read` → `read_guidance` → installed-copy recovery chain. That string reaches every
    host unconditionally. Tier 1 exposes the five documents as `yoetz://guidance/<name>` MCP
    resources for hosts that return the resource text. Tier 2 installs them on disk for a first-party
    harness. Because tier 0 is the only tier guaranteed to arrive, it must carry every rule whose
-   absence would cause harm, rather than summarizing and deferring. `publication-policy.md` and
-   `request-templates.md` remain resource/disk-only.
+   absence would cause harm, rather than summarizing and deferring — but "carry the rule" is
+   satisfied by naming a reachable path, and tier 0 is also charged per advertised tool by at
+   least one host, so it is bounded (see the 2026-08-17 amendment). `workflow.md`,
+   `coverage-and-receipts.md`, `publication-policy.md`, and `request-templates.md` are
+   resource/disk/`read_guidance`-only.
 
 5. **MCP declares tools and resources only.** No prompts, sampling, roots, completions, or resource
    subscribe/listChanged. Resources are static reviewed product documents: they reach no service,
@@ -144,7 +147,39 @@ adding a harness is still one `HarnessId` value plus adapters, with no shared-ty
 `coverage-and-receipts.md` so those Step 0 documents arrive on the transport-independent channel
 when a host yields an empty `resources/read`. MCP resources remain the on-demand copies for hosts
 that return the text; first-party disk copies remain the empty-read recovery path. This does not
-add a seventh tool.
+add a seventh tool. *(Superseded by the 2026-08-17 amendment below; the seventh tool it declined
+to add was added days later by `read_guidance`, which made the append unnecessary.)*
+
+**Amendment (2026-08-17, issue #300): tier 0 is bounded, and the inlined set is one document.**
+`INITIALIZE_GUIDANCE_URIS` is back to `agent-instructions.md` alone.
+
+The `instructions` string is sent once, but a host may render it anywhere. Codex copies it verbatim
+into the `description` of every advertised tool, so tier 0 is charged once per tool on every turn
+of every session — seven copies today. Under the 2026-08-14 append that was 41 KB × 7 ≈ 288 KB of
+advertised surface, six-sevenths of it duplicate. A dogfood session found it as a truncation
+warning, not a test.
+
+Two things changed since that append. `read_guidance` (a plain `tools/call`, immune to the empty
+`resources/read` that motivated #203) now serves every guidance document, and it is advertised in
+`tools/list` — the same unconditional channel as `instructions`, so the recovery path is itself
+tier 0. And `agent-instructions.md` carries the catalog paragraph naming all five URIs and the
+`resources/read` → `read_guidance` → `references/<name>.md` chain. A document that is named by a
+tier-0 string and fetchable by a tier-0 tool is reachable without being inlined; Decision 4's
+"carry every rule whose absence would cause harm" is met by the safety floor plus that path, not by
+concatenation.
+
+The reason this reversal is safe where the original inlining was needed is the tool, not optimism
+about hosts — so the packaged `SKILL.md` no longer claims the two documents are already in context.
+That claim, left stale, would be worse than the #203 bug it patched: it licenses skipping a fetch
+the agent has not made.
+
+Tier 0 is now bounded rather than merely trimmed. `SERVER_INSTRUCTIONS_BUDGET` caps the instructions
+block per route profile, and `ADVERTISED_SURFACE_BUDGET` caps instructions-charged-per-tool plus
+every description plus every advertised input schema. Both are asserted in
+`tests/conformance/surfaces/test_mcp_contract_matrix.py`, beside the per-schema budgets that have
+bounded the adjacent surface since #128. Per-item budgets cannot catch this class of growth: every
+item can sit inside its own bound while the total doubles. Anyone inlining a document here again
+will fail CI rather than a live session.
 
 **Amendment (2026-08-14, issue #222):** Codex hook stdout is event-specific. `SessionStart`,
 `PostToolUse`, and `UserPromptSubmit` keep `hookSpecificOutput.additionalContext`. `Stop` and

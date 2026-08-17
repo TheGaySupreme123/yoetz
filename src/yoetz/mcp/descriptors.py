@@ -21,15 +21,18 @@ from yoetz.protocol.schemas import (
 )
 
 __all__ = [
+    "ADVERTISED_SURFACE_BUDGET",
     "INITIALIZE_GUIDANCE_URIS",
     "ORDINARY_MCP_PUBLISH_EVENT_FAMILIES",
     "PRESENTATION_INPUT_SCHEMA_BUDGETS",
+    "SERVER_INSTRUCTIONS_BUDGET",
     "McpRouteProfile",
     "TOOL_DESCRIPTOR_DIGESTS",
     "TOOL_DESCRIPTOR_SET_DIGEST",
     "TOOL_DESCRIPTORS",
     "ToolAnnotations",
     "ToolDescriptor",
+    "advertised_surface_metrics",
     "descriptor_for",
     "ordinary_publish_families_in_presentation",
     "presentation_schema_metrics",
@@ -39,11 +42,12 @@ __all__ = [
 type McpRouteProfile = Literal["policy", "strict"]
 
 _SCHEMA_VERSION: Final = "1.0.0"
-INITIALIZE_GUIDANCE_URIS: Final[tuple[str, ...]] = (
-    "yoetz://guidance/agent-instructions.md",
-    "yoetz://guidance/workflow.md",
-    "yoetz://guidance/coverage-and-receipts.md",
-)
+# Exactly the entry document. Every other guidance document is fetched on demand: the catalog
+# section of agent-instructions.md names the `resources/read` -> `read_guidance` -> installed
+# `references/<name>.md` chain, and `read_guidance` (a plain tool call) survives the empty
+# resource-read failure that motivated inlining workflow.md and coverage-and-receipts.md here.
+# Keep this tuple at one entry; see ADVERTISED_SURFACE_BUDGET for why length is load-bearing.
+INITIALIZE_GUIDANCE_URIS: Final[tuple[str, ...]] = ("yoetz://guidance/agent-instructions.md",)
 _GUIDANCE_URI: Final = re.compile(r"yoetz://guidance/[a-z0-9.-]+\.md", re.ASCII)
 _FORBIDDEN_CLAIMS: Final = re.compile(
     r"\b(?:authenticated|enforces?|gates?|observes?|proved|proves?|verified)\b",
@@ -164,6 +168,52 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
         ),
     }
 )
+
+# Reviewed budget for the initialize instructions block, per route profile.
+#
+# The MCP server sends `instructions` once, but a host is free to render it wherever it likes.
+# Codex copies it verbatim into the `description` of every advertised tool, so this one string is
+# charged once per tool on every turn of every session. Nothing bounded it before, and it grew to
+# 41 KB (three inlined guidance documents) before a dogfood session noticed. The advertised input
+# schemas have been bounded since #128; this is the same guardrail for the adjacent text.
+SERVER_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
+    {"max_encoded_bytes": 20_000}
+)
+
+# Reviewed budget for everything one host renders into the model's context to advertise Yoetz:
+# the instructions block charged once per tool, plus every tool description, plus every advertised
+# input schema. Per-item budgets cannot catch this — each item can sit inside its own bound while
+# the total still doubles. `instructions_copies_per_tool` is descriptive, not a knob: it records the
+# worst observed host behavior, one full copy of the instructions block charged to each of the
+# seven advertised tools, which is what the total is computed against.
+ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
+    {"instructions_copies_per_tool": 1, "max_encoded_bytes": 200_000}
+)
+
+
+def advertised_surface_metrics(profile: McpRouteProfile = "policy") -> dict[str, int]:
+    """Return the byte cost of one route profile's complete advertised MCP surface.
+
+    ``replicated_encoded_bytes`` charges the instructions block once per advertised tool, which is
+    what a host that inlines `instructions` into each tool description actually spends.
+    """
+
+    if profile not in TOOL_DESCRIPTORS:
+        raise ValueError("mcp_route_profile_invalid")
+    descriptors = TOOL_DESCRIPTORS[profile]
+    instructions_bytes = len(server_instructions(profile).encode("utf-8"))
+    description_bytes = sum(len(item.description.encode("utf-8")) for item in descriptors)
+    schema_bytes = sum(
+        presentation_schema_metrics(item.input_schema)["encoded_bytes"] for item in descriptors
+    )
+    copies = len(descriptors) * ADVERTISED_SURFACE_BUDGET["instructions_copies_per_tool"]
+    return {
+        "tool_count": len(descriptors),
+        "instructions_encoded_bytes": instructions_bytes,
+        "description_encoded_bytes": description_bytes,
+        "schema_encoded_bytes": schema_bytes,
+        "replicated_encoded_bytes": instructions_bytes * copies + description_bytes + schema_bytes,
+    }
 
 
 def _example_id(kind: str, seed: int) -> str:
