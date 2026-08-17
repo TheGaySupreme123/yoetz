@@ -328,25 +328,26 @@ def _cli_binding(rpc_seed: int, facts: object) -> ControlProjectionBinding:
     )
 
 
-async def test_respond_request_result_parity() -> None:
+@pytest.mark.parametrize("disposition", ("acknowledged", "provenance_disputed"))
+async def test_respond_request_result_parity(disposition: str) -> None:
     """The same finding response, projected for CLI and MCP-bridge surfaces, carries the same
     public response fields everywhere; only the trusted per-surface disclosure sink differs."""
 
     app, _runtime, projection = _build_app(seed_offset=1)
     started, checked, _obligation = await _bootstrap_finding(app, seed=100)
     finding = checked.findings[0]
-    ack_wire: dict[str, JsonValue] = {
+    response_wire: dict[str, JsonValue] = {
         **_request_base(protocol_id("req_", 110)),
         "session_id": started.session_id,
         "writer_id": started.writer_id,
         "expected_frontier": _frontier(checked.result_frontier),
         "finding_id": finding.finding_id,
         "finding_frontier": _frontier(checked.result_frontier),
-        "disposition": "acknowledged",
+        "disposition": disposition,
         "reason": "Addressed by follow-up work already tracked elsewhere.",
     }
-    responded = await app.respond(RespondRequest.model_validate(ack_wire))
-    facts = await app.projection_binding_facts(ControlMethod.RESPOND, ack_wire, responded)
+    responded = await app.respond(RespondRequest.model_validate(response_wire))
+    facts = await app.projection_binding_facts(ControlMethod.RESPOND, response_wire, responded)
 
     cli_context = ClientProjectionContext(
         ControlClientKind.CLI, ProjectionRenderMode.HUMAN_READABLE, True
@@ -368,7 +369,7 @@ async def test_respond_request_result_parity() -> None:
     cli_body = cli_projected.root.model_dump(mode="json", exclude={"privacy_projection"})
     mcp_body = mcp_projected.root.model_dump(mode="json", exclude={"privacy_projection"})
     assert cli_body == mcp_body
-    assert cli_projected.root.response.disposition == "acknowledged"
+    assert cli_projected.root.response.disposition == disposition
     assert cli_projected.root.privacy_projection.sink == "local_human_view"
     assert mcp_projected.root.privacy_projection.sink == "agent_context"
     assert len(projection.candidates) == 2

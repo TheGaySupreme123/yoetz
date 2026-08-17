@@ -467,12 +467,14 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   revision restates the effective current declaration: omission clears an earlier reason, and a
   present reason is valid only when applying the revision leaves zero effective obligation refs.
 - `response_recorded`: `finding_id`, `finding_frontier`, `disposition`
-  (`acknowledged`|`rejected`|`waived`), optional `reason`, optional `waiver_scope`, `waiver_expiry`,
-  `evidence_refs`.
+  (`acknowledged`|`provenance_disputed`|`rejected`|`waived`), optional `reason`, optional
+  `waiver_scope`, `waiver_expiry`, `evidence_refs`. `provenance_disputed` contests the finding's
+  authorship or provenance premise without rejecting its conclusion or resolving it.
 - `SubjectStateRef`: optional `tree_digest`, `diff_digest`, `described_state` — binds evidence
   and claims to repository/artifact state for freshness checks.
 
-`reason` MAY be omitted for `acknowledged` and MUST be non-empty for `rejected` or `waived`.
+`reason` MAY be omitted for `acknowledged` and MUST be non-empty for `provenance_disputed`,
+`rejected`, or `waived`.
 Waiver-only fields are forbidden on other dispositions. `finding_frontier` is always the full
 domain `Frontier`, even when the public request supplied only its canonical sequence string.
 
@@ -481,7 +483,8 @@ already present on the response. The nominal enum is owned by `domain/findings.p
 subject/obligation/project waivers are deferred. A waiver
 is accepted only from an interactive `local_cli` request constrained as a human and explicitly
 confirmed at the prompt; MCP, importer, noninteractive CLI, and model-backed actors may acknowledge
-or reject with evidence but may not waive. `waiver_expiry` may further narrow that one-finding
+or dispute provenance, and may reject with evidence, but may not waive. `waiver_expiry` may further
+narrow that one-finding
 scope. This is authorization policy, not a caller-asserted actor upgrade.
 `ResponseDisposition` is likewise nominally owned by `domain/findings.py` and reused by event and
 receipt records.
@@ -576,7 +579,8 @@ summary, detail, subject_refs: tuple[event/obligation/claim ids], policy_id, pol
 subject_frontier, coverage: Coverage, provenance: SemanticProvenance | None)`.
 
 `FindingOrigin` is the nominal enum `deterministic|semantic_model_derived` and
-`ResponseDisposition` is the nominal enum `acknowledged|rejected|waived`; both are owned here.
+`ResponseDisposition` is the nominal enum
+`acknowledged|provenance_disputed|rejected|waived`; both are owned here.
 `domain/findings.py` also solely owns the finalized, receipt-bound `SemanticProvenance` and its
 schema-shaped `SamplingParams`, `TokenUsage`, `CostFields`, `SemanticDispatchKind`, and
 `SemanticFailureClass` values
@@ -614,9 +618,22 @@ Work-integrity finding kinds (`FindingKind`):
 `failed_work_omitted`, `claim_without_admissible_evidence`, `result_without_action`,
 `action_without_result`,
 `stale_evidence_for_changed_state`, `contradictory_claims_unresolved`,
-`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow rejection/waiver).
+`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow or stale rejection/waiver).
 Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
-`material_limitation_omitted`, `questionable_finding_rejection`.
+`material_limitation_omitted`, `questionable_finding_rejection` (flags a current hollow
+rejection/waiver of a deterministic finding).
+
+Those two response predicates overlap on one case: a current rejection or waiver of a
+deterministic finding whose support is inadmissible under both packs' evidence criteria. Each pack
+is a closed rule table that cannot observe the other, so both still report it. The check
+composition layer resolves the overlap, dropping `weak_or_stale_response` only when
+`questionable_finding_rejection` was actually produced for the same finding and response event in
+the same run, so one response yields one actionable finding.
+
+The collapse is keyed on the assessment research-evidence really emitted, not on re-deriving its
+predicate. When that pack is deselected via `policy_packs`, excluded by scope, skipped as
+materially unavailable, or fails, `weak_or_stale_response` stands, so a hollow rejection is never
+lost to a pack that did not run. Selecting a single pack therefore yields that pack's own view.
 
 The ownership partition is exhaustive and disjoint: the first ten kinds belong to the built-in
 `work-integrity/0.1.0` pack, and the latter four belong to the built-in
@@ -1542,10 +1559,10 @@ admission, resolves bounded shielded commits, closes provider/runtime handles, i
 generations, then reports `locked`. Resume never implies ready.
 
 `ServiceLifecycle.change_idle_relock_policy(proposed, proof)` is the only idle-policy mutation
-path. `IdleRelockPolicy` defaults to 900 seconds, accepts finite `60..86400`, and may use its
+path. `IdleRelockPolicy` defaults to 3600 seconds, accepts finite `60..86400`, and may use its
 internal `seconds=None` disabled state only after this method atomically consumes the exact
 vault-minted proof. The exception is scoped to the current service generation, is not persisted,
-and restart restores 900 seconds. Explicit, session-lock, suspend, and monitor-loss relock remain
+and restart restores 3600 seconds. Explicit, session-lock, suspend, and monitor-loss relock remain
 enabled when idle relock is disabled.
 
 Shared lifecycle/control values are `ServiceInstance`, `Admission`, `SessionSecurityEvent`
@@ -2768,23 +2785,28 @@ per operation: `start`, `publish_work`, `check`, `respond`, `status`, `receipt`,
 `PublicOperationError`.
 
 Every `status` success carries `closure_readiness(open_obligation_count,
-unresolved_finding_count, declared_obligation_count, no_obligations_reason,
-blocking_conditions)` beside `import_status`, on every view. `unresolved_finding_count` counts
-recorded findings with no recorded response, whatever the response's disposition; a rejection or
-waiver answers the finding on the record and its own quality surfaces as a later finding. The compact singleton carries the same
-two completion-scope fields beside its current plan locator and counters. Its
-`blocking_conditions` are exactly
-`obligations_open|findings_unresolved|no_plan_published|no_obligations_declared|projection_stale|
-coverage_gaps_declared|readiness_unknown`. It is derived per request from the compact projection:
-reading it records
-nothing, creates no verdict or IDs, and never strengthens coverage. It exists so a check or receipt
-is not spent before the record can support a conclusion.
+unanswered_finding_count, receipt_blocking_finding_count, declared_obligation_count,
+no_obligations_reason, blocking_conditions)` beside `import_status`, on every view.
+`unanswered_finding_count` counts recorded findings with no recorded response, whatever a later
+response's disposition; a rejection, waiver, or provenance dispute answers the finding on the
+record and its own quality surfaces as a later finding. `receipt_blocking_finding_count` selects the
+newest readable finding per receipt issue key and counts the actionable ones. It never decreases
+merely because a response was recorded: every receipt finding state remains `resolved=false`.
+The compact singleton carries the same two completion-scope fields beside its current plan locator,
+both counters, and an `unanswered_findings` preview. Its `blocking_conditions` are exactly
+`obligations_open|findings_unanswered|receipt_findings_unresolved|no_plan_published|
+no_obligations_declared|projection_stale|coverage_gaps_declared|readiness_unknown`. It is derived
+per request from the compact projection: reading it records nothing, creates no verdict or IDs, and
+never strengthens coverage. `findings_unanswered` identifies response work still to do;
+`receipt_findings_unresolved` is a persistent conclusion bound, not an instruction to respond
+again. Once every readable finding is answered, the latter condition remains and tells the caller
+that a receipt may be requested but cannot conclude `no_unresolved_deterministic_findings`.
 
 No plan yields `no_plan_published`. A readable effective plan with declared count zero and no reason
 yields `no_obligations_declared`; the same count with a typed reason clears that blocker while the
 reason remains visible. A positive declared count has no completion-scope blocker when all effective
 obligations are resolved. Compact omits its singleton when the task title is unreadable. Readiness
-never fills an unreadable scope or count with zeros: all three counts and the reason are then `null`,
+never fills an unreadable scope or count with zeros: all four counts and the reason are then `null`,
 and `blocking_conditions` is exactly `("readiness_unknown",)`. Unknown is a bounded state, not a
 default. Existing stale, unknown-event, missing-reference, redaction, and coverage-gap blockers
 remain conservative.

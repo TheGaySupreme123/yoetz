@@ -53,7 +53,7 @@ _EXPECTATIONS: tuple[tuple[str, str, bool], ...] = (
     # are populated by the sweep workflow (an open obligation, and the finding ``check`` raised).
     ("status/compact", "/page/items", True),
     ("status/compact", "/page/items/0/open_obligations", True),
-    ("status/compact", "/page/items/0/unresolved_findings", True),
+    ("status/compact", "/page/items/0/unanswered_findings", True),
     ("status/assignment", "/page/items", True),
     ("status/evidence", "/page/items", True),
     ("status/findings", "/page/items", True),

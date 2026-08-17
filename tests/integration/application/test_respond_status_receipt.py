@@ -59,6 +59,7 @@ from yoetz.domain.values import (
     session_id,
     timestamp_from_datetime,
 )
+from yoetz.mcp.summaries import summary_for_status
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import AppendCommand, AppendEntry, CheckCommitResult, OperationKind
@@ -1455,8 +1456,22 @@ async def test_check_respond_recheck_reaches_a_fixed_point() -> None:
     item = compact.items[0]
     # The acknowledged finding is answered on the record and the recheck's own bookkeeping is not
     # material change, so nothing demands another cycle.
-    assert item.unresolved_finding_count == "0"
+    assert item.unanswered_finding_count == "0"
+    assert int(item.receipt_blocking_finding_count) > 0
+    assert status.closure_readiness.blocking_conditions == (
+        "receipt_findings_unresolved",
+        "no_plan_published",
+    )
     assert item.freshness != "stale_after_material_change"
+
+    # The MCP text fallback stands in for this exact result when a host drops structured content,
+    # so it must report the singleton's own counters and freshness, not the newest record
+    # envelope's coverage, which reads `current` at this same frontier.
+    summary = summary_for_status(status.as_json())
+    assert f"freshness: {item.freshness}" in summary
+    assert status.coverage.ledger_freshness.value != item.freshness
+    assert "unanswered findings: 0" in summary
+    assert f"receipt-blocking findings: {item.receipt_blocking_finding_count}" in summary
 
 
 def _receipt_wire(

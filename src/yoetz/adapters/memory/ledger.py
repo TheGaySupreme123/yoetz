@@ -86,10 +86,11 @@ from yoetz.kernel.projections import (
     ProjectionState,
     empty_projection_state,
     projection_digest,
-    unresolved_finding_count,
+    unanswered_finding_count,
 )
 from yoetz.kernel.receipt_capacity import (
     ReceiptCoverageCapacityExceeded,
+    receipt_blocking_finding_count,
     validate_receipt_coverage_capacity,
 )
 from yoetz.kernel.reducers import invalidates_recorded_check, replay
@@ -971,7 +972,7 @@ def _projection_items(
                 and record.payload.status.value == "open"
             )
         )
-        unresolved_findings = tuple(
+        unanswered_findings = tuple(
             StatusCompactFindingModel(
                 finding_id=finding.finding_id,
                 kind=finding.kind.value,
@@ -988,7 +989,8 @@ def _projection_items(
                 key=rank_key,
             )
         )
-        unresolved_count = unresolved_finding_count(projection)
+        unanswered_count = unanswered_finding_count(projection)
+        receipt_blocking_count = receipt_blocking_finding_count(projection)
         declared_count = (
             None
             if scope_refs is None
@@ -1017,9 +1019,10 @@ def _projection_items(
                     else scope.no_obligations_reason.value
                 ),
                 open_obligation_count=None if open_count is None else str(open_count),
-                unresolved_finding_count=str(unresolved_count),
+                unanswered_finding_count=str(unanswered_count),
+                receipt_blocking_finding_count=str(receipt_blocking_count),
                 open_obligations=open_obligations[:10],
-                unresolved_findings=unresolved_findings[:10],
+                unanswered_findings=unanswered_findings[:10],
                 freshness=projection.freshness.value,
                 coverage=CoverageModel.model_validate(
                     coverage_to_json(compact_status_coverage(records, projection))

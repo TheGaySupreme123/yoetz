@@ -127,6 +127,7 @@ class WaiverScope(str, Enum):  # noqa: UP042 - exact wire enum base
 
 class ResponseDisposition(str, Enum):  # noqa: UP042 - exact wire enum base
     ACKNOWLEDGED = "acknowledged"
+    PROVENANCE_DISPUTED = "provenance_disputed"
     REJECTED = "rejected"
     WAIVED = "waived"
 

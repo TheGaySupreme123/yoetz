@@ -952,8 +952,10 @@ def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> No
         disposition = properties.get("disposition")
         if isinstance(disposition, dict):
             disposition["description"] = (
-                "Acknowledged accepts no waiver fields. Rejected requires reason and accepts no "
-                "waiver fields. Waived requires reason and waiver_scope."
+                "Acknowledged accepts no waiver fields. Provenance_disputed contests the "
+                "finding's authorship or provenance premise rather than its conclusion; it "
+                "requires reason and accepts no waiver fields. Rejected requires reason and "
+                "accepts no waiver fields. Waived requires reason and waiver_scope."
             )
         finding_frontier = properties.get("finding_frontier")
         if isinstance(finding_frontier, dict):
@@ -1356,11 +1358,15 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "respond",
         "Respond to a finding",
-        "Records an acknowledgement, rejection, or bounded waiver for one finding at the result "
-        "frontier of the check that returned it, not its subject_frontier. It does not resolve "
-        "other findings or establish that underlying work changed. "
-        "A readable response removes that finding from the unresolved count without erasing its "
-        "historical record or closing an independent coverage gap. Call it once per finding; a "
+        "Records an acknowledgement, provenance dispute, or rejection for one finding at the "
+        "result frontier of the check that returned it, not its subject_frontier. It does not "
+        "resolve other findings or establish that underlying work changed. "
+        "A provenance_disputed response contests the finding's authorship or provenance premise "
+        "rather than its conclusion, requires a reason, and never resolves the finding. "
+        "Bounded waiver is reserved for an authorized local-CLI human and is not an agent option. "
+        "A readable response removes that finding from unanswered_finding_count without reducing "
+        "receipt_blocking_finding_count, erasing its historical record, or closing an independent "
+        "coverage gap. Call it once per finding; a "
         "readable response identifying a finding that check returned is not material change and "
         "needs no recheck, while a redacted or unreadable response does. Guidance: "
         "yoetz://guidance/publication-policy.md.",
@@ -1380,9 +1386,11 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "view=operation takes filter.operation_request_id and returns that operation's stored "
         "result for recovery without resending the body. view=findings reads recorded findings; "
         "view=candidate_findings returns unrecorded deterministic candidates without verdicts or "
-        "IDs. Read closure_readiness on any result before spending a check or a receipt: it names "
-        "the open obligations, unresolved findings, and declared gaps that currently bound a "
-        "conclusion. Call it after a resume, a compaction, or a delegate handoff, and before a "
+        "IDs. Read closure_readiness on any result before spending a check or a receipt: "
+        "unanswered_finding_count names response work, while receipt_blocking_finding_count names "
+        "actionable findings that permanently prevent a clean receipt. findings_unanswered should "
+        "be acted on; receipt_findings_unresolved must not trigger another response loop. Call it "
+        "after a resume, a compaction, or a delegate handoff, and before a "
         "completion claim, rather than between routine tool calls. Guidance: "
         "yoetz://guidance/workflow.md.",
         read_only=True,
@@ -1464,8 +1472,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
                 "check": "sha256:3a81f3a6d3e0f714680e221e8dc5fa90d0131629386b03d75bc55d21ab618ee1",
-                "respond": "sha256:b71f8e0a70e6740a07fafbf77bf1a94a7f452e2f8ebdfefe95dd23381d31dd17",
-                "status": "sha256:419abcdbcc8ddd833318c23a8a1b17e60e65031f89758401d2716090170d434e",
+                "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
+                "status": "sha256:bcd91efb3b8f96d3198dbf3c0991ec8efb745c19b02c15349ff2bcdc08dfc250",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1475,8 +1483,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
                 "check": "sha256:91b090140843ef3f50bbdf02a42dc78fc418b1968dca8685018698cf276f4557",
-                "respond": "sha256:b71f8e0a70e6740a07fafbf77bf1a94a7f452e2f8ebdfefe95dd23381d31dd17",
-                "status": "sha256:419abcdbcc8ddd833318c23a8a1b17e60e65031f89758401d2716090170d434e",
+                "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
+                "status": "sha256:bcd91efb3b8f96d3198dbf3c0991ec8efb745c19b02c15349ff2bcdc08dfc250",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1485,8 +1493,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:018c818cdc4dc17537a841bdd5cc1aa31cb60f5ce08b5d99a13273ee92ac41ba",
-        "strict": "sha256:cfca483f8d4a2aa1afc5a597982ec3e59590e6a5f5d4390629dde34db0f0768b",
+        "policy": "sha256:6759a95082b5eac9741fa86508e7f310d3490954c1fcb626078390510a84da15",
+        "strict": "sha256:2cdacc504bdf3f4344cd6d20ef6e0974857dbf02f66da2010605ec3840c1c5b2",
     }
 )
 

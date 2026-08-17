@@ -194,33 +194,72 @@ def summary_for_check(envelope: object) -> str:
     )
 
 
-def _compact_status_fields(source: Mapping[str, JsonValue]) -> tuple[str, str, str]:
+def _first_page_item(source: Mapping[str, JsonValue]) -> Mapping[str, JsonValue] | None:
     page = source.get("page")
     if not isinstance(page, Mapping):
-        return "unavailable", "unavailable", "unavailable"
-    typed_page = cast(Mapping[str, JsonValue], page)
-    items = typed_page.get("items")
+        return None
+    items = cast(Mapping[str, JsonValue], page).get("items")
     if not isinstance(items, list | tuple) or not items:
-        return "unavailable", "unavailable", "unavailable"
+        return None
     item = items[0]
     if not isinstance(item, Mapping):
-        return "unavailable", "unavailable", "unavailable"
-    typed_item = cast(Mapping[str, JsonValue], item)
+        return None
+    return cast(Mapping[str, JsonValue], item)
+
+
+def _status_freshness(
+    source: Mapping[str, JsonValue], view: str, item: Mapping[str, JsonValue] | None
+) -> str:
+    """Report the compact singleton's own freshness, and the envelope's coverage otherwise.
+
+    The compact item carries the projection's ledger freshness (``partial`` or
+    ``stale_after_material_change`` after material change); the result's ``coverage`` carries the
+    newest record envelope's, which is routinely ``current`` at exactly that frontier. This summary
+    is the documented fallback when a host drops structured content, so it must never read stronger
+    than the view it stands in for. Only ``compact`` items carry a ledger freshness — an
+    ``evidence`` row's ``freshness`` describes that evidence, not the ledger.
+    """
+
+    if view == "compact" and item is not None:
+        freshness = _safe_token(item.get("freshness"))
+        if freshness != "unavailable":
+            return freshness
+    coverage = source.get("coverage")
+    if isinstance(coverage, Mapping):
+        return _safe_token(cast(Mapping[str, JsonValue], coverage).get("ledger_freshness"))
+    return "unavailable"
+
+
+def _compact_status_fields(source: Mapping[str, JsonValue], view: str) -> tuple[str, str, str, str]:
+    item = _first_page_item(source)
+    readiness = source.get("closure_readiness")
+    if isinstance(readiness, Mapping):
+        typed_readiness = cast(Mapping[str, JsonValue], readiness)
+        return (
+            _status_freshness(source, view, item),
+            _safe_count(typed_readiness.get("open_obligation_count")),
+            _safe_count(typed_readiness.get("unanswered_finding_count")),
+            _safe_count(typed_readiness.get("receipt_blocking_finding_count")),
+        )
+    if item is None:
+        return "unavailable", "unavailable", "unavailable", "unavailable"
     return (
-        _safe_token(typed_item.get("freshness")),
-        _safe_count(typed_item.get("open_obligation_count")),
-        _safe_count(typed_item.get("unresolved_finding_count")),
+        _safe_token(item.get("freshness")),
+        _safe_count(item.get("open_obligation_count")),
+        _safe_count(item.get("unanswered_finding_count")),
+        _safe_count(item.get("receipt_blocking_finding_count")),
     )
 
 
 def summary_for_status(envelope: object) -> str:
     source = _mapping(envelope)
     view = _safe_token(source.get("view"))
-    freshness, obligations, findings = _compact_status_fields(source)
+    freshness, obligations, unanswered, receipt_blocking = _compact_status_fields(source, view)
     gaps = _item_count(source.get("gaps"))
     return _bounded(
         f"Status view: {view}; {_frontier_clause(source)}; freshness: {freshness}; "
-        f"open obligations: {obligations}; unresolved findings: {findings}; reported gaps: {gaps}."
+        f"open obligations: {obligations}; unanswered findings: {unanswered}; "
+        f"receipt-blocking findings: {receipt_blocking}; reported gaps: {gaps}."
     )
 
 

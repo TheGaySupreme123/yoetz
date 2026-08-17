@@ -40,7 +40,8 @@ def _internal() -> StartInternalResult:
         compact=StartCompactViewModel.model_validate(
             {
                 "open_obligation_count": "0",
-                "unresolved_finding_count": "0",
+                "unanswered_finding_count": "0",
+                "receipt_blocking_finding_count": "0",
                 "ledger_freshness": "current",
                 "coverage": {
                     "publication_channels": ["cooperative_mcp"],

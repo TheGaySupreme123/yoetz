@@ -32,7 +32,12 @@ from yoetz.domain.values import (
     obligation_id,
     timestamp_from_string,
 )
-from yoetz.kernel.projections import ProjectionRecord, empty_projection_state
+from yoetz.kernel.projections import (
+    ProjectionRecord,
+    empty_projection_state,
+    unanswered_finding_count,
+)
+from yoetz.kernel.receipt_capacity import receipt_blocking_finding_count
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.coverage import (
     ArtifactObservation,
@@ -101,8 +106,11 @@ def _response(disposition: ResponseDisposition) -> ResponseRecordedPayload:
     )
 
 
-def _projection(response: ResponseRecordedPayload | None):
-    finding = _finding(FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED)
+def _projection(
+    response: ResponseRecordedPayload | None,
+    kind: FindingKind = FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED,
+):
+    finding = _finding(kind)
     findings = {
         _FINDING_ID: ProjectionRecord(
             payload=finding,
@@ -133,15 +141,24 @@ def _projection(response: ResponseRecordedPayload | None):
 
 @pytest.mark.parametrize("disposition", tuple(ResponseDisposition))
 def test_no_disposition_marks_a_finding_resolved(disposition: ResponseDisposition) -> None:
-    states = _finding_states(_projection(_response(disposition)))
+    projection = _projection(_response(disposition))
+    states = _finding_states(projection)
     assert [state.resolved for state in states] == [False], (
         f"{disposition.value} resolved the finding; the agent guidance promises it does not"
     )
+    assert unanswered_finding_count(projection) == 0
+    assert receipt_blocking_finding_count(projection) == 1
 
 
 def test_an_unanswered_finding_is_also_unresolved() -> None:
     states = _finding_states(_projection(None))
     assert [state.resolved for state in states] == [False]
+
+
+def test_non_actionable_finding_is_unanswered_but_does_not_block_a_clean_receipt() -> None:
+    projection = _projection(None, FindingKind.LEDGER_STALE_OR_INCOMPLETE)
+    assert unanswered_finding_count(projection) == 1
+    assert receipt_blocking_finding_count(projection) == 0
 
 
 def test_the_finding_kind_the_dogfood_hit_is_actionable() -> None:

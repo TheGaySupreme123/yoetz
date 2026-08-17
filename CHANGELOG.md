@@ -11,6 +11,28 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- `provenance_disputed` is a fourth `respond` disposition. It records that the responder contests
+  the finding's authorship or provenance premise rather than its conclusion, requires a reason, may
+  carry evidence, and is not scored as an evidence-free rejection by either deterministic policy
+  pack. Like every other disposition it never resolves or erases the finding. The MCP `respond`
+  surface advertises it in both the tool description and the `disposition` field rules, so a caller
+  reading only the advertised schema learns the rule (issue #224).
+
+- Status compact/readiness projections now distinguish `unanswered_finding_count` from
+  `receipt_blocking_finding_count`. Responses clear the former; current actionable receipt findings
+  remain in the latter for every disposition. The paired `findings_unanswered` and
+  `receipt_findings_unresolved` conditions tell agents whether to respond or proceed to an honestly
+  unresolved receipt, and agent guidance no longer offers the human-only `waived` disposition
+  (issues #286 and #287).
+
+- The idle relock clock now counts harness observation rows resolved by the ready sweep as
+  activity, so a live workspace whose hooks keep delivering events is never relocked underneath
+  an open task session — however long the run — while a workspace that truly goes quiet still
+  relocks one full window after its spool runs dry. The default idle-relock interval is now 3600
+  seconds (was 900, shorter than one legitimate implementation phase under the prescribed publish
+  cadence), and the process-idle stop is now 7200 seconds so the in-process soft relock — which
+  re-readies on the next ordinary call — always comes before the full process stop (issue #291).
+
 - MCP success summaries now preserve the canonical frontier head digest and, for generic
   operations such as `start`, returned task/session/writer identifiers after strict shape
   validation. The bounded text fallback can therefore seed the next request even when a host drops
@@ -222,10 +244,10 @@ describes behavior intended for the first release rather than a change from a pr
   discovery/registration adapters.
 
 - `closure_readiness` on every `status` success (`open_obligation_count`,
-  `unresolved_finding_count`, `blocking_conditions`), so an agent can see what currently bounds a
+  finding counters, `blocking_conditions`), so an agent can see what currently bounds a
   completion conclusion before spending a `check` or `receipt` rather than learning it afterwards
   from an insufficient receipt. Derived per request: it records nothing, creates no verdict or IDs,
-  and never strengthens coverage. When the compact singleton is unreadable both counts are `null`
+  and never strengthens coverage. When the compact singleton is unreadable all counts are `null`
   and the only condition is `readiness_unknown` — unknown is reported as unknown, never as zero.
 
 - A worked `publish_work` example per ordinary publishable event family, so agents no longer
@@ -453,6 +475,13 @@ carried them; they are listed because each one describes the behavior that now s
   attributable, and a latency fence bounds the codec against the stdlib on a realistically-sized
   document (issue #290).
 
+- An evidence-free rejection or waiver of a current deterministic finding minted two actionable
+  findings, `questionable_finding_rejection` and `weak_or_stale_response`, doubling the response
+  burden at every level. `check` now collapses that overlap when it composes the built-in packs,
+  keeping only `questionable_finding_rejection`. `weak_or_stale_response` still stands on its own
+  for stale responses, for unsupported current responses to semantic findings, for stricter
+  work-integrity-only evidence exclusions, and whenever the research-evidence pack did not run
+  (issue #285).
 - Codex Step 0 treated an empty MCP `resources/read` as success and advertised that guidance URIs
   "resolve without any repository checkout". The skill now stops on an empty body, calls
   `read_guidance` with the same URI, and opens the matching installed `references/<name>.md` copy
