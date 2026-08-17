@@ -52,6 +52,27 @@ The pinned toolchain is Ruff for lint/format and the official npm-distributed Py
 (`npx --no-install pyright`) in strict mode for type checking; Node/npm are contributor and CI
 prerequisites only, never an end-user runtime requirement.
 
+### Packaged resource ripple
+
+Resource inventory changes feed the package manifest, version-manifest schema, schema inventory,
+runtime-support digest, and packaged byte mirrors. Do not run those generators in a hand-selected
+order — a wrong order leaves a stale artifact that is still internally byte-consistent, so no byte
+parity check can see it. After adding, removing, or changing a packaged resource inventory entry
+(or any file one of those entries points at), run:
+
+```text
+uv run python scripts/sync_resource_ripple.py --write
+uv run python scripts/sync_resource_ripple.py --check
+```
+
+The write command repeats the complete dependency sequence until the owned bytes reach a fixed
+point, then runs the same read-only checks as CI. Those checks include building the installed
+version manifest and validating it against the generated version-manifest schema, which is what
+catches a stale cardinality constant locally instead of in CI. When the number of inventory entries
+changes, review and update the single `REVIEWED_RESOURCE_COUNT` tripwire in `src/yoetz/version.py`
+before running it; every per-kind count and generated cardinality is derived from the manifest
+entries.
+
 ## Making a change
 
 - Make the smallest change that satisfies the decision and its tests.
@@ -105,7 +126,8 @@ Silence, ignoring a thread, or "will do later" without maintainer agreement is n
 
 - Don't open a PR without a linked issue and duplicate search.
 - Don't hand-edit a generated or frozen artifact (a lock file, a generated schema mirror, a release
-  manifest) — regenerate it through its owning script.
+  manifest) — regenerate it through its owning script. For the resource/schema graph, the owning
+  entrypoint is `scripts/sync_resource_ripple.py`.
 - Don't invent a second formatter, linter, or type-checker configuration; the pinned tools in
   `pyproject.toml` and the development-only `package.json` are the only ones this project uses.
 - Don't add a new distribution surface without design-gate acknowledgement. The end-user install

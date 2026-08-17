@@ -2576,6 +2576,13 @@ class StatusFindingItemModel(_ClosedModel):
                 and value.category is not DataCategory.FINDING_SUMMARY
             ):
                 raise ValueError("finding_omission_category_invalid")
+        if self.disposition == "provenance_disputed" and (
+            self.reason is None
+            or self.resolved
+            or self.waiver_scope is not None
+            or self.waiver_expiry is not None
+        ):
+            raise ValueError("provenance_disputed_finding_state_invalid")
         return self
 
 

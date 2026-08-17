@@ -160,7 +160,6 @@ def test_json_version_resource_digest_matches_the_source_manifest(
 
     assert manifest["resource_manifest_digest"] == source_manifest["resource_set_digest"]
     assert manifest["resource_counts"]["total"] == str(len(source_manifest["entries"]))
-    assert len(source_manifest["entries"]) == 99
 
 
 def test_default_json_reports_resource_summary_without_enumerating_entries(
@@ -169,19 +168,13 @@ def test_default_json_reports_resource_summary_without_enumerating_entries(
     completed = _run(installed_candidate, ["version", "--json"])
     manifest = json.loads(completed.stdout)
     assert manifest["resources"] == []
-    assert manifest["resource_counts"]["total"] == "99"
+    assert manifest["resource_counts"]["total"] == str(len(_source_resource_manifest()["entries"]))
 
 
 def test_explicit_resources_flag_enumerates_all_reviewed_identities(
     installed_candidate: InstalledCandidate,
 ) -> None:
-    """Per spec: explicit ``--resources`` enumerates every reviewed identity.
-
-    KNOWN CONFLICT: ``yoetz.cli.app.version_command`` currently accepts only ``--json`` and has no
-    ``--resources`` option, and ``src/yoetz/cli/app.py`` is outside this cluster's editable scope.
-    This test encodes the spec's required behavior and is expected to fail until that CLI option is
-    implemented; it must not be papered over with a weaker assertion.
-    """
+    """Per spec: explicit ``--resources`` enumerates every reviewed identity."""
 
     completed = _run(installed_candidate, ["version", "--json", "--resources"])
     assert completed.returncode == 0, (
@@ -190,7 +183,7 @@ def test_explicit_resources_flag_enumerates_all_reviewed_identities(
     )
     manifest = json.loads(completed.stdout)
     source_manifest = _source_resource_manifest()
-    assert len(manifest["resources"]) == 99
+    assert len(manifest["resources"]) == len(source_manifest["entries"])
     reported_names = {entry["name"] for entry in manifest["resources"]}
     expected_names = {entry["logical_name"] for entry in source_manifest["entries"]}
     assert reported_names == expected_names

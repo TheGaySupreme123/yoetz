@@ -1,8 +1,8 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-08-16 for maintainer-approved issue #224; 2026-08-14 for moderator-approved issue
-#244 and the reopened issue #216 recurrence.
+**Amended:** 2026-08-16 for maintainer-approved issue #224; 2026-08-14 for moderator-approved
+issue #244 and the reopened issue #216 recurrence.
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/adapters/memory/ledger.py`,
 `src/yoetz/application/publish_work.py`, `src/yoetz/kernel/policies/observation_advice.py`, and

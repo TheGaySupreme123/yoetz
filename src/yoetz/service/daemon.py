@@ -1498,6 +1498,7 @@ class ServiceDaemon:
             summary: ObservationDrainSummary | None = None
             if observation_sweep is not None:
                 summary = await self._bounded_observation_sweep(observation_sweep)
+                await self._note_sweep_liveness(summary)
             if recommendation_refresh is not None:
                 try:
                     await asyncio.wait_for(
@@ -1526,8 +1527,25 @@ class ServiceDaemon:
                     # loop before the next immediate bulk-drain pass.
                     await asyncio.sleep(_OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS)
                 summary = await self._bounded_observation_sweep(observation_sweep)
+                await self._note_sweep_liveness(summary)
         except asyncio.CancelledError:
             raise
+
+    async def _note_sweep_liveness(self, summary: ObservationDrainSummary | None) -> None:
+        """Count resolved outbox rows as activity for the idle relock clock.
+
+        A resolved row is a same-user authenticated write the live workspace just produced —
+        the same trust class as an admitted control call, which already resets the clock. A
+        harness that follows the prescribed publish cadence can legitimately go far longer than
+        the idle interval between control calls while its hooks keep writing rows, and relocking
+        underneath that live session costs the run its check and receipt (#291). Only resolution
+        counts: each row acknowledges or quarantines at most once, so an abandoned backlog
+        extends the unlock by one bounded drain, while a retrying row re-appears every sweep and
+        counting it would let one wedged row hold the vault unlocked forever.
+        """
+
+        if summary is not None and summary.acknowledged + summary.quarantined > 0:
+            await self._composition.lifecycle.note_activity()
 
     async def _bounded_observation_sweep(
         self, observation_sweep: Callable[[], Awaitable[ObservationDrainSummary]]

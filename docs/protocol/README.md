@@ -135,13 +135,13 @@ Findings originate from one of two engines: `deterministic` policy evaluation or
 `semantic_model_derived` advisory review. Each carries `priority` 1–3, a bounded
 `summary`/`detail`, `subject_refs`, the policy ID/version that produced it, the frozen
 `subject_frontier` it was evaluated at, and a `Coverage` vector. `check` returns a sparse,
-capped, ranked set (`MAX_FINDINGS_DEFAULT = 3`, up to `MAX_FINDINGS_LIMIT = 10`). A finding's
-status is `open` until a `respond` records `acknowledged`, `provenance_disputed`, `rejected`, or
-`waived`; a provenance dispute contests the finding's authorship/premise without resolving it. A waiver is
-scoped, has an expiry, and requires an explicit interactive human confirmation — it is not
-available to an MCP caller, importer, or noninteractive client. A response is history, never
-deletion: the original finding remains in the ledger. Any material change or a new response
-requires a recheck before a receipt can rely on the updated disposition.
+capped, ranked set (`MAX_FINDINGS_DEFAULT = 3`, up to `MAX_FINDINGS_LIMIT = 10`). A finding is
+unanswered until `respond` records `acknowledged`, `provenance_disputed`, `rejected`, or `waived`.
+No disposition resolves the finding: a provenance dispute contests its authorship/provenance
+premise, while a waiver is scoped, has an expiry, and requires explicit interactive human
+confirmation. Waiver is unavailable to an MCP caller, importer, or noninteractive client. A
+response is history, never deletion: the original finding remains in the ledger. Any material
+change or a new response requires a recheck before a receipt can rely on the updated disposition.
 
 `Coverage` has six dimensions: `publication_channels` (a set drawn from `cooperative_mcp`,
 `local_cli`, `codex_jsonl_import`, `hook_observed`, `engine_derived`, `human_import`),

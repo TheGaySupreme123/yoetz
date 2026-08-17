@@ -618,9 +618,22 @@ Work-integrity finding kinds (`FindingKind`):
 `failed_work_omitted`, `claim_without_admissible_evidence`, `result_without_action`,
 `action_without_result`,
 `stale_evidence_for_changed_state`, `contradictory_claims_unresolved`,
-`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow rejection/waiver).
+`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow or stale rejection/waiver).
 Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
-`material_limitation_omitted`, `questionable_finding_rejection`.
+`material_limitation_omitted`, `questionable_finding_rejection` (flags a current hollow
+rejection/waiver of a deterministic finding).
+
+Those two response predicates overlap on one case: a current rejection or waiver of a
+deterministic finding whose support is inadmissible under both packs' evidence criteria. Each pack
+is a closed rule table that cannot observe the other, so both still report it. The check
+composition layer resolves the overlap, dropping `weak_or_stale_response` only when
+`questionable_finding_rejection` was actually produced for the same finding and response event in
+the same run, so one response yields one actionable finding.
+
+The collapse is keyed on the assessment research-evidence really emitted, not on re-deriving its
+predicate. When that pack is deselected via `policy_packs`, excluded by scope, skipped as
+materially unavailable, or fails, `weak_or_stale_response` stands, so a hollow rejection is never
+lost to a pack that did not run. Selecting a single pack therefore yields that pack's own view.
 
 The ownership partition is exhaustive and disjoint: the first ten kinds belong to the built-in
 `work-integrity/0.1.0` pack, and the latter four belong to the built-in
@@ -1546,10 +1559,10 @@ admission, resolves bounded shielded commits, closes provider/runtime handles, i
 generations, then reports `locked`. Resume never implies ready.
 
 `ServiceLifecycle.change_idle_relock_policy(proposed, proof)` is the only idle-policy mutation
-path. `IdleRelockPolicy` defaults to 900 seconds, accepts finite `60..86400`, and may use its
+path. `IdleRelockPolicy` defaults to 3600 seconds, accepts finite `60..86400`, and may use its
 internal `seconds=None` disabled state only after this method atomically consumes the exact
 vault-minted proof. The exception is scoped to the current service generation, is not persisted,
-and restart restores 900 seconds. Explicit, session-lock, suspend, and monitor-loss relock remain
+and restart restores 3600 seconds. Explicit, session-lock, suspend, and monitor-loss relock remain
 enabled when idle relock is disabled.
 
 Shared lifecycle/control values are `ServiceInstance`, `Admission`, `SessionSecurityEvent`
