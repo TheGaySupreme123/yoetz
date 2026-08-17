@@ -1168,7 +1168,7 @@ class YoetzRuntime:
             subject_id=session.task_id,
             title=title,
             state=str(getattr(compact, "ledger_freshness", "unknown")),
-            open_findings=int(getattr(compact, "unresolved_finding_count", 0)),
+            open_findings=int(getattr(compact, "unanswered_finding_count", 0)),
             last_check="not run in this session",
             updated=str(getattr(session.frontier, "sequence", "")),
         )

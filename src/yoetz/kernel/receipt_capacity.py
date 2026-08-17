@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from yoetz.domain.events import CheckRecordedPayload, LedgerRecord
-from yoetz.domain.findings import Finding, rank_key
+from yoetz.domain.findings import FINDING_KIND_TRAITS, Finding, rank_key
 from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
     semantic_coverage_gap_code,
@@ -22,6 +22,7 @@ from yoetz.protocol.coverage import MAX_KNOWN_GAPS
 __all__ = [
     "ReceiptCoverageCapacityExceeded",
     "current_receipt_findings",
+    "receipt_blocking_finding_count",
     "receipt_gap_codes",
     "validate_receipt_coverage_capacity",
 ]
@@ -69,6 +70,19 @@ def current_receipt_findings(projection: ProjectionState) -> tuple[Finding, ...]
         if prior is None or candidate[0] > prior[0]:
             newest[key] = candidate
     return tuple(sorted((item[1] for item in newest.values()), key=rank_key))
+
+
+def receipt_blocking_finding_count(projection: ProjectionState) -> int:
+    """Count current actionable findings that prevent a clean receipt conclusion.
+
+    Responses record a disposition but never resolve a finding for receipt purposes. Non-actionable
+    findings remain visible and can contribute coverage gaps, but they do not by themselves select
+    ``unresolved_findings_remain``.
+    """
+
+    return sum(
+        FINDING_KIND_TRAITS[finding.kind][1] for finding in current_receipt_findings(projection)
+    )
 
 
 def receipt_gap_codes(

@@ -451,8 +451,10 @@ erases the finding.
 
 ## `receipt`
 
-Read `status.closure_readiness` before requesting a receipt. Keep the final claim no stronger than
-the returned coverage, freshness, unresolved findings, and limitations.
+Read `status.closure_readiness` before requesting a receipt. Respond while
+`findings_unanswered` is present. A remaining `receipt_findings_unresolved` condition is a permanent
+conclusion bound, not a reason to respond again; request the receipt and keep the final claim no
+stronger than its conclusion, coverage, freshness, receipt-blocking findings, and limitations.
 
 ```json
 {

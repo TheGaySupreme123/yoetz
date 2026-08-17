@@ -86,6 +86,7 @@ from yoetz.protocol.models import (
 __all__ = ["StartInternalResult", "execute_start", "start_projection_wire"]
 
 _START_RESULT_MEDIA_TYPE = "application/vnd.yoetz.start_result+json"
+_LEGACY_RECEIPT_BLOCKING_COUNT_UNKNOWN = "legacy_receipt_blocking_count_unknown"
 _ENGINE_ACTOR_ID = "yoetz.engine"
 
 
@@ -507,7 +508,8 @@ async def _build_result(
             "gaps": list(item.gaps),
             "ledger_freshness": item.freshness,
             "open_obligation_count": item.open_obligation_count,
-            "unresolved_finding_count": item.unresolved_finding_count,
+            "unanswered_finding_count": item.unanswered_finding_count,
+            "receipt_blocking_finding_count": item.receipt_blocking_finding_count,
         }
     )
     versions = StartVersionSliceModel.model_validate(
@@ -557,6 +559,33 @@ async def _publish_result(
     )
 
 
+def _decode_compact(value: object, outcome: object) -> StartCompactViewModel:
+    if not isinstance(value, Mapping):
+        raise ProtocolValueError("invalid_start_internal_result")
+    compact = dict(cast(Mapping[str, object], value))
+    legacy_count = compact.pop("unresolved_finding_count", None)
+    if legacy_count is not None:
+        if "unanswered_finding_count" in compact or "receipt_blocking_finding_count" in compact:
+            raise ProtocolValueError("invalid_start_internal_result")
+        compact["unanswered_finding_count"] = legacy_count
+        if outcome == "created":
+            # A create result is frozen at the first lifecycle event, before any finding can exist.
+            compact["receipt_blocking_finding_count"] = "0"
+        else:
+            # An old attach result retained only the unanswered count. Responded actionable
+            # findings cannot be reconstructed from that durable object, so preserve the replay
+            # with an explicit unknown rather than manufacturing zero or declaring corruption.
+            compact["receipt_blocking_finding_count"] = None
+            gaps = compact.get("gaps")
+            if not isinstance(gaps, list | tuple):
+                raise ProtocolValueError("invalid_start_internal_result")
+            compact["gaps"] = sorted(
+                {*cast(list[str] | tuple[str, ...], gaps), _LEGACY_RECEIPT_BLOCKING_COUNT_UNKNOWN},
+                key=str.encode,
+            )
+    return StartCompactViewModel.model_validate(compact)
+
+
 def _decode_result(canonical: bytes) -> StartInternalResult:
     try:
         value = strict_json_parse(canonical)
@@ -598,7 +627,7 @@ def _decode_result(canonical: bytes) -> StartInternalResult:
             session_id=cast(str, source["session_id"]),
             writer_id=cast(str, source["writer_id"]),
             frontier=FrontierModel.model_validate(source["frontier"]),
-            compact=StartCompactViewModel.model_validate(source["compact"]),
+            compact=_decode_compact(source["compact"], outcome),
             versions=StartVersionSliceModel.model_validate(source["versions"]),
         )
     except (ProtocolValueError, TypeError, ValueError) as exc:

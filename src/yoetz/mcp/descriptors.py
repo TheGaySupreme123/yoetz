@@ -1358,13 +1358,15 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "respond",
         "Respond to a finding",
-        "Records an acknowledgement, provenance dispute, rejection, or bounded waiver for one "
-        "finding at the result frontier of the check that returned it, not its subject_frontier. "
-        "It does not resolve other findings or establish that underlying work changed. "
+        "Records an acknowledgement, provenance dispute, or rejection for one finding at the "
+        "result frontier of the check that returned it, not its subject_frontier. It does not "
+        "resolve other findings or establish that underlying work changed. "
         "A provenance_disputed response contests the finding's authorship or provenance premise "
         "rather than its conclusion, requires a reason, and never resolves the finding. "
-        "A readable response removes that finding from the unresolved count without erasing its "
-        "historical record or closing an independent coverage gap. Call it once per finding; a "
+        "Bounded waiver is reserved for an authorized local-CLI human and is not an agent option. "
+        "A readable response removes that finding from unanswered_finding_count without reducing "
+        "receipt_blocking_finding_count, erasing its historical record, or closing an independent "
+        "coverage gap. Call it once per finding; a "
         "readable response identifying a finding that check returned is not material change and "
         "needs no recheck, while a redacted or unreadable response does. Guidance: "
         "yoetz://guidance/publication-policy.md.",
@@ -1384,9 +1386,11 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "view=operation takes filter.operation_request_id and returns that operation's stored "
         "result for recovery without resending the body. view=findings reads recorded findings; "
         "view=candidate_findings returns unrecorded deterministic candidates without verdicts or "
-        "IDs. Read closure_readiness on any result before spending a check or a receipt: it names "
-        "the open obligations, unresolved findings, and declared gaps that currently bound a "
-        "conclusion. Call it after a resume, a compaction, or a delegate handoff, and before a "
+        "IDs. Read closure_readiness on any result before spending a check or a receipt: "
+        "unanswered_finding_count names response work, while receipt_blocking_finding_count names "
+        "actionable findings that permanently prevent a clean receipt. findings_unanswered should "
+        "be acted on; receipt_findings_unresolved must not trigger another response loop. Call it "
+        "after a resume, a compaction, or a delegate handoff, and before a "
         "completion claim, rather than between routine tool calls. Guidance: "
         "yoetz://guidance/workflow.md.",
         read_only=True,
@@ -1468,8 +1472,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
                 "check": "sha256:3a81f3a6d3e0f714680e221e8dc5fa90d0131629386b03d75bc55d21ab618ee1",
-                "respond": "sha256:a528e8b169f9c61de2788f7b9b49c2c1806ef7559a0de30cf93757445e0687b7",
-                "status": "sha256:419abcdbcc8ddd833318c23a8a1b17e60e65031f89758401d2716090170d434e",
+                "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
+                "status": "sha256:bcd91efb3b8f96d3198dbf3c0991ec8efb745c19b02c15349ff2bcdc08dfc250",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1479,8 +1483,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
                 "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
                 "check": "sha256:91b090140843ef3f50bbdf02a42dc78fc418b1968dca8685018698cf276f4557",
-                "respond": "sha256:a528e8b169f9c61de2788f7b9b49c2c1806ef7559a0de30cf93757445e0687b7",
-                "status": "sha256:419abcdbcc8ddd833318c23a8a1b17e60e65031f89758401d2716090170d434e",
+                "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
+                "status": "sha256:bcd91efb3b8f96d3198dbf3c0991ec8efb745c19b02c15349ff2bcdc08dfc250",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1489,8 +1493,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:26514a8a721e5334fd895e94cfc7ecc96d924c6f0dcb50848642b2350b88e1f3",
-        "strict": "sha256:8e494380f54d6ab4ee872a17197f57eeb237d8c80133efe1223e150e62ec44ed",
+        "policy": "sha256:6759a95082b5eac9741fa86508e7f310d3490954c1fcb626078390510a84da15",
+        "strict": "sha256:2cdacc504bdf3f4344cd6d20ef6e0974857dbf02f66da2010605ec3840c1c5b2",
     }
 )
 

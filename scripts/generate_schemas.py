@@ -703,12 +703,29 @@ def _start_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         required.append("next_request_template")
     compact_view = cast(dict[str, JsonValue], definitions["compact_view"])
     compact_properties = cast(dict[str, JsonValue], compact_view["properties"])
+    compact_required = cast(list[JsonValue], compact_view["required"])
     compact_properties["open_obligation_count"] = {
         "oneOf": [
             {"$ref": "#/$defs/safe_count"},
             {"type": "null"},
         ]
     }
+    legacy_unanswered = compact_properties.pop("unresolved_finding_count", None)
+    if legacy_unanswered is not None:
+        compact_properties["unanswered_finding_count"] = legacy_unanswered
+    compact_properties["receipt_blocking_finding_count"] = {
+        "oneOf": [
+            {"$ref": "#/$defs/safe_count"},
+            {"type": "null"},
+        ]
+    }
+    if "unresolved_finding_count" in compact_required:
+        compact_required[compact_required.index("unresolved_finding_count")] = (
+            "unanswered_finding_count"
+        )
+    if "receipt_blocking_finding_count" not in compact_required:
+        unanswered_index = compact_required.index("unanswered_finding_count")
+        compact_required.insert(unanswered_index + 1, "receipt_blocking_finding_count")
     return document
 
 
@@ -885,8 +902,35 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     compact_properties["declared_obligation_count"] = nullable_count
     compact_properties["no_obligations_reason"] = nullable_reason
     compact_properties["open_obligation_count"] = nullable_count
+    legacy_unanswered_count = compact_properties.pop("unresolved_finding_count", None)
+    if legacy_unanswered_count is not None:
+        compact_properties["unanswered_finding_count"] = legacy_unanswered_count
+    compact_properties["receipt_blocking_finding_count"] = {"$ref": "#/$defs/canonical_uint"}
+    legacy_unanswered_items = compact_properties.pop("unresolved_findings", None)
+    if legacy_unanswered_items is not None:
+        compact_properties["unanswered_findings"] = legacy_unanswered_items
+    if "unresolved_finding_count" in compact_required:
+        compact_required[compact_required.index("unresolved_finding_count")] = (
+            "unanswered_finding_count"
+        )
+    if "receipt_blocking_finding_count" not in compact_required:
+        unanswered_index = compact_required.index("unanswered_finding_count")
+        compact_required.insert(unanswered_index + 1, "receipt_blocking_finding_count")
+    if "unresolved_findings" in compact_required:
+        compact_required[compact_required.index("unresolved_findings")] = "unanswered_findings"
     readiness_properties["declared_obligation_count"] = nullable_count
     readiness_properties["no_obligations_reason"] = nullable_reason
+    legacy_readiness_count = readiness_properties.pop("unresolved_finding_count", None)
+    if legacy_readiness_count is not None:
+        readiness_properties["unanswered_finding_count"] = legacy_readiness_count
+    readiness_properties["receipt_blocking_finding_count"] = nullable_count
+    if "unresolved_finding_count" in readiness_required:
+        readiness_required[readiness_required.index("unresolved_finding_count")] = (
+            "unanswered_finding_count"
+        )
+    if "receipt_blocking_finding_count" not in readiness_required:
+        unanswered_index = readiness_required.index("unanswered_finding_count")
+        readiness_required.insert(unanswered_index + 1, "receipt_blocking_finding_count")
     for required, names in (
         (compact_required, ("declared_obligation_count", "no_obligations_reason")),
         (readiness_required, ("declared_obligation_count", "no_obligations_reason")),
@@ -894,8 +938,15 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         for name in names:
             if name not in required:
                 required.append(name)
-    if "no_obligations_declared" not in blocker_values:
-        blocker_values.append("no_obligations_declared")
+    if "findings_unresolved" in blocker_values:
+        blocker_values.remove("findings_unresolved")
+    for blocker in (
+        "findings_unanswered",
+        "receipt_findings_unresolved",
+        "no_obligations_declared",
+    ):
+        if blocker not in blocker_values:
+            blocker_values.append(blocker)
     return document
 
 

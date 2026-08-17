@@ -76,9 +76,10 @@ unsupported claims and unbounded duplicate findings.
 7. `provenance_disputed` is the fourth `ResponseDisposition`. It records that the responder
    contests the finding's authorship or provenance premise, requires a non-empty reason, and may
    carry evidence, but is not scored as an evidence-free rejection by either deterministic policy
-   pack. It never resolves or erases the finding. The compact `unresolved_finding_count` retains its
-   established unanswered-finding meaning, so any readable response—including a provenance
-   dispute—decrements that counter without changing the receipt finding's `resolved=false` state.
+   pack. It never resolves or erases the finding. Public compact/readiness projections expose two
+   distinct counters: `unanswered_finding_count` decreases after any readable response, including a
+   provenance dispute, while `receipt_blocking_finding_count` continues to count current actionable
+   findings whose receipt state remains `resolved=false` for every disposition.
 
 8. Standing provider-readiness advice is not converted into a `material_limitation_omitted`
    finding. That finding kind remains actionable for an omission in the work account. Provider
