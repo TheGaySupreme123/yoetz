@@ -125,6 +125,7 @@ _MAX_RUNTIME_GATE_BYTES: Final = 256
 _OPEN_PRE_SEPARATOR: Final = "|"
 _LOCAL_OUTBOX_OVERFLOW_GAP: Final = "_local_outbox_overflow"
 _LOCAL_STREAM_PARTIAL_DROPPED_GAP: Final = "_local_stream_partial_dropped"
+_LEGACY_STREAM_PARTIAL_DROPPED_SESSION: Final = "_legacy_unknown"
 _STORE_LOCK_TIMEOUT_SECONDS: Final = 2.0
 _STORE_LOCK_POLL_SECONDS: Final = 0.01
 
@@ -415,6 +416,7 @@ class _WorkspaceState:
     open_pre: dict[str, str] | None = None
     stream_cursors: dict[str, ObservationCursor] | None = None
     stream_partials: dict[str, bytes] | None = None
+    stream_partial_dropped_sessions: set[str] | None = None
     hook_sequences: dict[str, int] | None = None
     last_stream_reconcile_mono_ms: int | None = None
     last_hook_receipt_mono_ms: int | None = None
@@ -460,6 +462,8 @@ class _WorkspaceState:
             self.stream_cursors = {}
         if self.stream_partials is None:
             self.stream_partials = {}
+        if self.stream_partial_dropped_sessions is None:
+            self.stream_partial_dropped_sessions = set()
         if self.hook_sequences is None:
             self.hook_sequences = {}
         if self.pending_outbox is None:
@@ -601,6 +605,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         open_pre=dict(state.open_pre or {}),
         stream_cursors=dict(state.stream_cursors or {}),
         stream_partials=dict(state.stream_partials or {}),
+        stream_partial_dropped_sessions=set(state.stream_partial_dropped_sessions or ()),
         hook_sequences=dict(state.hook_sequences or {}),
         pending_outbox=list(state.pending_outbox or ()),
         quarantine=list(state.quarantine or ()),
@@ -857,6 +862,11 @@ class LocalObservationStore:
             state.session_generations[session_commitment] = generation
             state.ended_session_generations.pop(session_commitment, None)
             state.ended_sessions.discard(session_commitment)
+            assert state.stream_partial_dropped_sessions is not None
+            state.stream_partial_dropped_sessions.discard(session_commitment)
+            state.stream_partial_dropped_sessions.discard(_LEGACY_STREAM_PARTIAL_DROPPED_SESSION)
+            if not state.stream_partial_dropped_sessions:
+                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
             self._save(workspace_commitment, state)
             return generation
 
@@ -893,6 +903,10 @@ class LocalObservationStore:
             state.session_workspaces.setdefault(session_commitment, workspace_commitment)
             state.ended_sessions.add(session_commitment)
             state.ended_session_generations[session_commitment] = observed
+            assert state.stream_partial_dropped_sessions is not None
+            state.stream_partial_dropped_sessions.discard(session_commitment)
+            if not state.stream_partial_dropped_sessions:
+                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
             self._save(workspace_commitment, state)
 
     def bind_codex_session(self, workspace_commitment: str, codex_session_id: str) -> str:
@@ -1335,6 +1349,7 @@ class LocalObservationStore:
         with self._lock:
             state = self._load(workspace)
             assert state.stream_partials is not None
+            assert state.stream_partial_dropped_sessions is not None
             if len(partial) > _MAX_STREAM_PARTIAL_BYTES:
                 # An oversized tail drops with an explicit gap instead of
                 # pinning megabytes of read-cache in the state file: the
@@ -1342,12 +1357,15 @@ class LocalObservationStore:
                 # reconcile (#289). Raising here instead stalled the stream
                 # forever while retaining the partial that caused the stall.
                 state.stream_partials.pop(session_commitment, None)
+                state.stream_partial_dropped_sessions.add(session_commitment)
                 self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
             elif partial:
                 state.stream_partials[session_commitment] = partial
-                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+                state.stream_partial_dropped_sessions.discard(session_commitment)
             else:
                 state.stream_partials.pop(session_commitment, None)
+                state.stream_partial_dropped_sessions.discard(session_commitment)
+            if not state.stream_partial_dropped_sessions:
                 self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
             self._save(workspace, state)
 
@@ -2246,12 +2264,15 @@ class LocalObservationStore:
         """Enforce the per-entry partial bound on states persisted before #289."""
 
         partials = state.stream_partials
+        dropped_sessions = state.stream_partial_dropped_sessions
         assert partials is not None
+        assert dropped_sessions is not None
         oversized = [
             key for key, value in partials.items() if len(value) > _MAX_STREAM_PARTIAL_BYTES
         ]
         for key in oversized:
             del partials[key]
+            dropped_sessions.add(key)
             self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
         return bool(oversized)
 
@@ -2289,13 +2310,16 @@ class LocalObservationStore:
         else:
             payload = self._encode_state(workspace_commitment, state)
         partials = state.stream_partials
+        dropped_sessions = state.stream_partial_dropped_sessions
         assert partials is not None
+        assert dropped_sessions is not None
         while partials and len(payload) > _MAX_STATE_BYTES:
             # Shed the read-cache before any durable row: a dropped partial
             # is reread from the committed cursor on the next reconcile,
             # while an evicted envelope is a lost observation (#289).
             largest = max(partials, key=lambda key: (len(partials[key]), key.encode()))
             del partials[largest]
+            dropped_sessions.add(largest)
             self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
             payload = self._encode_state(workspace_commitment, state)
         if len(payload) > _MAX_STATE_BYTES:
@@ -2561,11 +2585,12 @@ class LocalObservationStore:
                 }
             )
         payload: dict[str, JsonValue] = {
-            # /6 adds one-shot task-frontier motion notices. /5 adds terminal
+            # /7 attributes dropped stream-partial gaps per session. /6 adds one-shot
+            # task-frontier motion notices. /5 adds terminal
             # corruption-session tracking. /3 added quarantined_at per
             # quarantine entry and the reclaimed counter. Readers tolerate both directions:
             # unknown keys are ignored and missing keys default safely.
-            "schema": "yoetz.observation-local/6",
+            "schema": "yoetz.observation-local/7",
             "workspace_commitment": workspace,
             "consent": consent_json,
             "session_workspaces": JsonObject(
@@ -2732,6 +2757,10 @@ class LocalObservationStore:
                     )
                 }
             )
+        if state.stream_partial_dropped_sessions:
+            payload["stream_partial_dropped_sessions"] = tuple(
+                sorted(state.stream_partial_dropped_sessions, key=str.encode)
+            )
         return payload
 
     def _state_from_json(self, raw: Mapping[str, JsonValue]) -> _WorkspaceState:
@@ -2813,6 +2842,23 @@ class LocalObservationStore:
                 )
             except ValueError, OSError:
                 continue
+        dropped_sessions_raw = raw.get("stream_partial_dropped_sessions")
+        stream_partial_dropped_sessions: set[str]
+        if isinstance(dropped_sessions_raw, (list, tuple)):
+            stream_partial_dropped_sessions = {
+                value
+                for value in cast(tuple[JsonValue, ...] | list[JsonValue], dropped_sessions_raw)
+                if type(value) is str and value
+            }
+        else:
+            legacy_gap = gap_history.get(_LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+            stream_partial_dropped_sessions = (
+                set(stream_cursors) | set(session_workspaces)
+                if legacy_gap is not None and legacy_gap.active
+                else set[str]()
+            )
+            if legacy_gap is not None and legacy_gap.active and not stream_partial_dropped_sessions:
+                stream_partial_dropped_sessions.add(_LEGACY_STREAM_PARTIAL_DROPPED_SESSION)
         hook_sequences: dict[str, int] = {}
         for key, value in cast(Mapping[str, JsonValue], raw.get("hook_sequences") or {}).items():
             if type(value) is int and not isinstance(value, bool) and value >= 0:
@@ -3000,6 +3046,7 @@ class LocalObservationStore:
             open_pre=open_pre,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,
+            stream_partial_dropped_sessions=stream_partial_dropped_sessions,
             hook_sequences=hook_sequences,
             last_stream_reconcile_mono_ms=last_reconcile,
             last_hook_receipt_mono_ms=last_hook_mono,

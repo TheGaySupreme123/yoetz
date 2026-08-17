@@ -105,6 +105,28 @@ def test_recovered_stream_partial_resolves_the_dropped_gap(tmp_path: Path) -> No
     assert ObservationGapCode.SOURCE_LAG.value not in gaps
 
 
+def test_recovering_one_session_does_not_clear_another_dropped_partial(tmp_path: Path) -> None:
+    """The workspace lag remains until every affected session recovers."""
+
+    store, workspace, first = _consented_store(tmp_path)
+    second = store.bind_codex_session(workspace, "sess-partials-2")
+    store.set_stream_partial(workspace, first, b"a" * (_MAX_PARTIAL + 1))
+    store.set_stream_partial(workspace, second, b"b" * (_MAX_PARTIAL + 1))
+
+    store.set_stream_partial(workspace, second, b"recovered")
+
+    gaps = store.status(ObservationStatusQuery(workspace)).gaps
+    assert ObservationGapCode.SOURCE_LAG.value in gaps
+    persisted = _state_json(tmp_path)
+    assert persisted["stream_partial_dropped_sessions"] == [first]
+
+    store.set_stream_partial(workspace, first, b"recovered")
+    assert (
+        ObservationGapCode.SOURCE_LAG.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
 def test_save_sheds_stream_partials_before_envelopes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -194,6 +216,45 @@ def test_stream_drains_a_source_line_longer_than_one_read_chunk(tmp_path: Path) 
 
     assert cursor.byte_position == source.stat().st_size
     assert store.get_stream_partial(workspace, session) == b""
+
+
+def test_dropped_unterminated_long_line_recovers_when_newline_arrives(tmp_path: Path) -> None:
+    """A legal long live line is reread and drained after its terminator appears."""
+
+    store, workspace, session = _consented_store(tmp_path)
+    source = tmp_path / "rollout.jsonl"
+    chunk = stream_mod._MAX_READ_CHUNK  # pyright: ignore[reportPrivateUsage]
+    long_line = json.dumps({"type": "message", "payload": "z" * (chunk + 40_000)}).encode()
+    source.write_bytes(long_line)
+    cursor = ObservationCursor(1, 0, 0, f"hmac-sha256:{'00' * 32}", STREAM_MAPPING_VERSION)
+
+    first = SessionStreamReader(
+        session_commitment=session,
+        profile=default_stream_profile(),
+        cursor=cursor,
+        key_material=store.key_material(),
+    ).advance(source)
+    assert len(first.partial_line) > _MAX_PARTIAL
+    store.set_stream_partial(workspace, session, first.partial_line)
+    assert store.get_stream_partial(workspace, session) == b""
+
+    source.write_bytes(long_line + b"\n")
+    second = SessionStreamReader(
+        session_commitment=session,
+        profile=default_stream_profile(),
+        cursor=cursor,
+        key_material=store.key_material(),
+        partial_line=store.get_stream_partial(workspace, session),
+    ).advance(source)
+    store.set_stream_cursor(workspace, session, second.cursor)
+    store.set_stream_partial(workspace, session, second.partial_line)
+
+    assert second.cursor.byte_position == source.stat().st_size
+    assert second.partial_line == b""
+    assert (
+        ObservationGapCode.SOURCE_LAG.value
+        not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
 
 
 def test_store_stage_timings_attribute_hydrate_encode_write(tmp_path: Path) -> None:
