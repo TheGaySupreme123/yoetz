@@ -34,12 +34,14 @@ from yoetz.application.observation_advice import (
 )
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.application.observation_materialize import (
+    MATERIALIZATION_MAPPING_VERSION,
     MaterializedObservationBatch,
     approved_check_author,
     canonical_logical_identity,
     materialize_observation_envelope,
     media_type_for_schema,
     observation_author,
+    observation_claim_identity,
     observation_operation_digest,
     observation_writer_id,
     stable_observation_id,
@@ -541,15 +543,24 @@ class ObservationCoordinator:
                     )
                     if claim is not None:
                         operation_id, materialization_digest, append_result = claim
+                        # The claim key is role-scoped so the phases of one host
+                        # call (pre action, paired result, permission, subagent)
+                        # never contend, and the recorded mapping version is the
+                        # source-independent materialization one so hook/stream
+                        # copies of a phase can union their source masks.
+                        stage = "identity_claim"
                         store.record_logical_identity_claim(
                             workspace=workspace,
-                            logical_identity=canonical_logical_identity(envelope),
+                            logical_identity=observation_claim_identity(
+                                envelope, tuple(item.role for item in batch.drafts)
+                            ),
                             materialization_digest=materialization_digest,
                             operation_id=operation_id,
                             source_mask=1 if envelope.source.value == "codex_hook" else 2,
-                            mapping_version=envelope.cursor.mapping_version,
+                            mapping_version=MATERIALIZATION_MAPPING_VERSION,
                             materialized_at=timestamp_from_datetime(self.clock.now_utc()),
                         )
+                        stage = "ledger_append"
                         if append_result is not None:
                             await self._local(
                                 partial(
@@ -585,6 +596,12 @@ class ObservationCoordinator:
                 if exc.code is PublicErrorCode.VAULT_LOCKED:
                     return _reject(ObservationGapCode.VAULT_LOCKED.value)
                 if exc.code is PublicErrorCode.STORAGE_CORRUPT:
+                    if stage == "identity_claim":
+                        # A conflicting logical-identity claim poisons one
+                        # envelope, not the bundle. ADR-010 scopes the
+                        # generation latch to bundle corruption, so reject just
+                        # this envelope and keep the session observable.
+                        return _reject(ObservationGapCode.DEDUP_CONFLICT.value)
                     self._storage_corrupt_sessions.add(codex_session_id)
                     return _reject(ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
                 if exc.code in {

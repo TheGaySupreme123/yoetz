@@ -2458,6 +2458,12 @@ class StatusCompactItemModel(_ClosedModel):
             raise ValueError("task_omission_category_invalid")
         if len(self.open_obligations) > 10 or len(self.unanswered_findings) > 10:
             raise ValueError("compact_item_limit")
+        # One item carries two statements of freshness: this scalar, which an agent reads off the
+        # summary line, and the coverage vector it stands in for. The scalar may report the
+        # weaker fact but never the cleaner one, or the summary line tells the reader the ledger
+        # is clean while the coverage beside it records the gaps (issue #307).
+        if LedgerFreshness(self.freshness) > self.coverage.ledger_freshness:
+            raise ValueError("compact_freshness_above_coverage")
         _require_unique(self.gaps, limit=64)
         unknown = self.declared_obligation_count is None or self.open_obligation_count is None
         if unknown and (

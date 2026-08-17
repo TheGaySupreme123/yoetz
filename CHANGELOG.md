@@ -11,6 +11,16 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- A `status` item's `freshness` scalar no longer contradicts the `coverage.ledger_freshness` in the
+  same item. A check that declared a coverage gap records `partial` freshness, but the projection
+  reported that only while folding the check itself and reverted to `current` on the next event of
+  any family — a receipt or a re-attach was enough — while the item's coverage kept the gaps. The
+  projection scalar is now derived from the retained check rather than from whichever event is being
+  folded, so it holds `partial` for as long as that check governs, and the compact item reports the
+  weaker of the scalar and its own coverage the way the evidence view already did. An agent reading
+  the summary line is no longer told the ledger is clean while the structured coverage records the
+  gaps (issue #307).
+
 - `provenance_disputed` is a fourth `respond` disposition. It records that the responder contests
   the finding's authorship or provenance premise rather than its conclusion, requires a reason, may
   carry evidence, and is not scored as an evidence-free rejection by either deterministic policy
@@ -444,6 +454,36 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- The MCP initialize `instructions` string had no size bound and had grown to 41 KB by inlining
+  three guidance documents. Codex copies that string into the `description` of every advertised
+  tool, so it was charged seven times on every turn of every session — roughly 288 KB of advertised
+  surface, six-sevenths of it duplicate, which a dogfood session hit as a truncation warning.
+  `instructions` now carry `agent-instructions.md` alone; `workflow.md` and
+  `coverage-and-receipts.md` are reached through the catalog paragraph that document already
+  carries, and through the `read_guidance` tool that has served them since the same issue the
+  inlining was working around. The packaged Codex skill no longer claims the two documents are
+  already in context. `SERVER_INSTRUCTIONS_BUDGET` and `ADVERTISED_SURFACE_BUDGET` now bound the
+  instructions block and the aggregate advertised surface, asserted alongside the per-schema
+  budgets, so the next oversized guidance edit fails CI instead of a live session (issue #300).
+
+- Correlated Codex `PreToolUse` and `PostToolUse` phases no longer claim one SQLite logical identity
+  with incompatible operation digests. The canonical host-call identity remains the content and
+  ledger-dedup key, while the durable claim key is additionally scoped by the materialization
+  version and exact draft-role tuple; pre-action and paired-result phases therefore cannot collide,
+  and hook/stream copies of the same paired phase still merge to `source_mask == 3`. Claims record
+  the source-independent materialization version rather than the source cursor version. A genuine
+  claim conflict now quarantines only that envelope as `dedup_conflict`; only bundle corruption arms
+  the READY-generation session latch (issue #309).
+
+- A Codex hook with a stale lifecycle mapping treated the daemon's `SESSION_CONFLICT` or
+  `SESSION_NOT_FOUND` response as proof that the service was unavailable, then repeated that false
+  advisory forever because it retained the old session and writer ids. Status errors now pass
+  through an exhaustive classification: stale mappings tell the agent to call `start` again while
+  explicitly preserving service health, transient reads request a later status read, privacy and
+  vault conditions name their actual recovery paths, and only genuine degradation says the service
+  is unavailable. The stale advisory remains advice-safe and the agent's successful `start` result
+  is still the only source of a replacement mapping (issue #308).
+
 - The end-to-end hook budget was smaller than the budgets enforced inside a single pass, so
   `hook_budget_exceeded` fired on healthy hooks — 253 of 833 diagnostics on one workspace — and
   carried no signal about the regressions it was added for. The total is now derived from the
@@ -485,9 +525,7 @@ carried them; they are listed because each one describes the behavior that now s
 - Codex Step 0 treated an empty MCP `resources/read` as success and advertised that guidance URIs
   "resolve without any repository checkout". The skill now stops on an empty body, calls
   `read_guidance` with the same URI, and opens the matching installed `references/<name>.md` copy
-  if that tool result is also empty. Initialize `instructions` also append `workflow.md` and
-  `coverage-and-receipts.md` so those Step 0 documents arrive without depending on
-  `resources/read`. MCP registers `read_guidance` as a seventh, read-only tool that returns the
+  if that tool result is also empty. MCP registers `read_guidance` as a seventh, read-only tool that returns the
   full guidance document as tool text and is not a ledger operation. `resources/read` now
   advertises each registry `media_type` instead of hardcoding `text/markdown`.
   `docs/INTERFACES.md` no longer states that unprofiled hosts can fetch those documents
@@ -638,6 +676,31 @@ carried them; they are listed because each one describes the behavior that now s
   default instead of discarding the event, and a genuinely unsafe gate still fails closed but says
   so on stderr and records an `observation_storage_corrupt` coverage gap for the bound workspace so
   `observe status` can see the drop (issue #273).
+
+- `hook_diagnostics` in `observe status` was an all-time tally with no recency, so a failure that
+  was diagnosed and fixed days earlier read exactly like one happening now: one machine reported
+  `runtime_gate_unsafe: 97` for two days after issue #273's fix ended it, and a `max_ms` of 60001
+  from a single pre-fix pass alongside a healthy median of 789 ms. Every count is now paired with
+  a count over the last `window_seconds`, every reason carries `first_seen`/`last_seen`, and the
+  all-time `max_ms` carries the `max_ts` it happened at next to a `recent_max_ms` for the live
+  window. Nothing is discarded — a stale failure is dated rather than dropped — and a row whose
+  timestamp cannot be read is never counted as recent (issue #310).
+
+- The `truncated_payload` coverage gap had note call sites and no resolution path, so one
+  size-pressure eviction reported the workspace as currently losing observations forever. A save
+  that sheds nothing and lands with a headroom margin under the state bound now clears the active
+  flag; merely landing under the bound does not, because that is the state an eviction itself
+  leaves behind. Renewed shedding reopens it, and `gap_history` keeps the sighting either way
+  (issue #310).
+
+- Hook timing rows attributed as little as 14% of the pass they measured, so `hook_budget_exceeded`
+  could not distinguish real work from queueing. Time spent acquiring the interprocess store lock
+  is now reported as `store_lock_wait` wherever in the pass it occurs, including on the timeout
+  path; the two formerly unwindowed regions — workspace resolution and the consent probe before
+  the store window, advice selection and the stdout write after the drain window — are reported as
+  `resolve` and `deliver`; and whatever the partition still misses is reported as `unattributed`
+  rather than left for a reader to derive. A contended pass that spent 707 of 711 ms queueing
+  previously showed `store: 4` and nothing else (issues #310 and #311).
 
 ### Security
 

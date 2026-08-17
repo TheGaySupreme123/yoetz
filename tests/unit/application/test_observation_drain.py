@@ -95,6 +95,16 @@ def _envelope(session: str, identity: str, ordinal: int) -> ObservationEnvelope:
             ),
             ObservationDrainAction.QUARANTINE,
         ),
+        (
+            # A logical-identity claim conflict quarantines exactly one row
+            # (issue #309); only observation_storage_corrupt retires a session.
+            ObservationIngestResult(
+                ObservationIngestDisposition.REJECTED,
+                ObservationGapCode.DEDUP_CONFLICT.value,
+                None,
+            ),
+            ObservationDrainAction.QUARANTINE,
+        ),
     ],
 )
 def test_route_observation_ingest_is_pure(
@@ -785,3 +795,39 @@ async def test_sweep_uses_its_own_pool_and_releases_it_on_close(tmp_path: Path) 
 
     sweeper.close()
     assert sweeper._executor is None  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.anyio
+async def test_sweep_quarantines_single_row_on_dedup_conflict_and_lane_continues(
+    tmp_path: Path,
+) -> None:
+    """Issue #309: a per-envelope claim conflict must not retire the session."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "session-claim-conflict")
+    conflicted = _envelope(session, "hook:conflicted", 1)
+    healthy = _envelope(session, "hook:healthy", 2)
+    store.enqueue_outbox(workspace, "session-claim-conflict", conflicted)
+    store.enqueue_outbox(workspace, "session-claim-conflict", healthy)
+
+    coordinator = _Coordinator(
+        {
+            conflicted.source_identity: ObservationIngestResult(
+                ObservationIngestDisposition.REJECTED,
+                ObservationGapCode.DEDUP_CONFLICT.value,
+                None,
+            ),
+            healthy.source_identity: ObservationIngestResult(
+                ObservationIngestDisposition.ACCEPTED, None, healthy.cursor
+            ),
+        }
+    )
+    summary = await ObservationOutboxSweeper(store, coordinator).sweep()
+
+    assert summary.attempted == 2
+    assert summary.quarantined == 1
+    assert summary.acknowledged == 1
+    assert store.quarantined_count(workspace) == 1
+    assert store.list_pending_outbox_rows(workspace) == ()
