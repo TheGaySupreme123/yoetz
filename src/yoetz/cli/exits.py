@@ -134,13 +134,13 @@ def ceremony_refusal_message(reason: str) -> str | None:
 REMEDIATION_MESSAGES: Final = MappingProxyType(
     {
         "support_resource_set_mismatch": (
-            "the runtime support document describes a different resource set; regenerate "
-            "resources with 'python scripts/verify_resource_manifest.py --sync', refresh "
-            "support/runtime-support.json, then sync again"
+            "the runtime support document describes a different resource set; in a source "
+            "checkout run 'python scripts/sync_resource_ripple.py --write', which owns that "
+            "regeneration order"
         ),
         "support_digest_mismatch": (
-            "support/runtime-support.json is not self-consistent; regenerate its manifest_digest "
-            "and then run 'python scripts/verify_resource_manifest.py --sync'"
+            "support/runtime-support.json is not self-consistent; in a source checkout run "
+            "'python scripts/sync_resource_ripple.py --write' to rebuild its digests"
         ),
         "resource_digest_mismatch": (
             "an installed resource does not match the reviewed manifest; reinstall Yoetz from a "
@@ -148,15 +148,16 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
         ),
         "manifest_digest_mismatch": (
             "the installed resource manifest is not self-consistent; reinstall Yoetz from a "
-            "verified artifact, or regenerate it with 'python scripts/verify_resource_manifest.py --sync'"
+            "verified artifact, or in a source checkout run "
+            "'python scripts/sync_resource_ripple.py --write'"
         ),
         "resource_missing": (
             "a reviewed installed resource is absent; reinstall Yoetz from a verified artifact"
         ),
         "resource_counts_invalid": (
-            "the compiled resource counts do not match the reviewed manifest; regenerate the "
-            "resource tree through 'python scripts/verify_resource_manifest.py --sync' after "
-            "an intentional inventory change"
+            "the compiled resource counts do not match the reviewed manifest; after an "
+            "intentional inventory change, update REVIEWED_RESOURCE_COUNT and run "
+            "'python scripts/sync_resource_ripple.py --write' in a source checkout"
         ),
         "trusted_console_required": (
             "this ceremony needs a foreground terminal Yoetz owns (stdin and stderr on the same "

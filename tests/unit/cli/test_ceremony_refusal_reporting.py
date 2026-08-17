@@ -147,8 +147,24 @@ def test_resource_count_remediation_names_the_owning_sync_script() -> None:
     message = remediation_message("resource_counts_invalid")
 
     assert message is not None
-    assert "scripts/verify_resource_manifest.py --sync" in message
+    assert "scripts/sync_resource_ripple.py --write" in message
+    assert "REVIEWED_RESOURCE_COUNT" in message
     assert "update the compiled count" not in message
+
+
+def test_resource_remediation_never_names_a_single_step_of_the_ripple() -> None:
+    """A dependent generator alone reproduces the mis-ordered regeneration these tokens report."""
+
+    for reason in (
+        "manifest_digest_mismatch",
+        "resource_counts_invalid",
+        "support_digest_mismatch",
+        "support_resource_set_mismatch",
+    ):
+        message = remediation_message(reason)
+        assert message is not None, reason
+        assert "verify_resource_manifest.py" not in message, reason
+        assert "generate_schemas.py" not in message, reason
 
 
 def test_secret_rejected_names_the_credential_and_the_retry() -> None:

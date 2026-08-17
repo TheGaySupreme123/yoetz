@@ -56,7 +56,9 @@ prerequisites only, never an end-user runtime requirement.
 
 Resource inventory changes feed the package manifest, version-manifest schema, schema inventory,
 runtime-support digest, and packaged byte mirrors. Do not run those generators in a hand-selected
-order. After adding, removing, or changing a packaged resource inventory entry, run:
+order — a wrong order leaves a stale artifact that is still internally byte-consistent, so no byte
+parity check can see it. After adding, removing, or changing a packaged resource inventory entry
+(or any file one of those entries points at), run:
 
 ```text
 uv run python scripts/sync_resource_ripple.py --write
@@ -64,9 +66,12 @@ uv run python scripts/sync_resource_ripple.py --check
 ```
 
 The write command repeats the complete dependency sequence until the owned bytes reach a fixed
-point, then runs the same read-only checks as CI. When the number of inventory entries changes,
-review and update the single `REVIEWED_RESOURCE_COUNT` tripwire in `src/yoetz/version.py` before
-running it; every per-kind count and generated cardinality is derived from the manifest entries.
+point, then runs the same read-only checks as CI. Those checks include building the installed
+version manifest and validating it against the generated version-manifest schema, which is what
+catches a stale cardinality constant locally instead of in CI. When the number of inventory entries
+changes, review and update the single `REVIEWED_RESOURCE_COUNT` tripwire in `src/yoetz/version.py`
+before running it; every per-kind count and generated cardinality is derived from the manifest
+entries.
 
 ## Making a change
 

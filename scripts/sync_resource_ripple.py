@@ -27,6 +27,20 @@ _OWNED_FILES: Final = (
     "skills/codex/yoetz/manifest.json",
     "support/runtime-support.json",
 )
+_SEMANTIC_CHECK_SOURCE: Final = """\
+import json
+import pathlib
+
+from jsonschema import Draft202012Validator
+
+from yoetz.version import build_version_manifest, version_manifest_json
+
+schema = json.loads(
+    pathlib.Path("schemas/version/version-manifest-1.0.0.schema.json").read_bytes()
+)
+document = json.loads(version_manifest_json(build_version_manifest(), include_resources=True))
+Draft202012Validator(schema).validate(document)
+"""
 
 
 def _iter_owned_files(repo_root: Path) -> Iterator[Path]:
@@ -113,22 +127,60 @@ def _preflight(repo_root: Path) -> bool:
     return False
 
 
+def _installed_manifest_agrees_with_schema(repo_root: Path) -> bool:
+    """Prove the installed manifest still satisfies the generated version-manifest schema.
+
+    Both sub-checks below are byte comparisons against artifacts that a mis-ordered regeneration
+    leaves internally self-consistent, so neither notices a stale cardinality constant or a stale
+    runtime-support digest. Building the manifest exercises the support/resource-set binding and
+    validating it against the on-disk schema exercises the generated cardinalities, which is the
+    drift that previously escaped local verification and failed only in CI.
+    """
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _SEMANTIC_CHECK_SOURCE],
+        cwd=repo_root,
+        env=_child_environment(repo_root),
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if completed.returncode == 0:
+        return True
+    print("sync_resource_ripple: FAIL (installed_manifest_disagrees_with_schema)", file=sys.stderr)
+    if completed.stderr:
+        print(completed.stderr.rstrip(), file=sys.stderr)
+    return False
+
+
 def _check(repo_root: Path) -> bool:
-    return _run(repo_root, "generate_schemas.py", "--check") and _run(
-        repo_root, "verify_resource_manifest.py", "--check"
+    return (
+        _run(repo_root, "generate_schemas.py", "--check")
+        and _run(repo_root, "verify_resource_manifest.py", "--check")
+        and _installed_manifest_agrees_with_schema(repo_root)
     )
 
 
 def _write_pass(repo_root: Path) -> bool:
     steps = (
+        # Mirror the reviewed sources into the package tree and recompute the resource-set digest.
         ("verify_resource_manifest.py", "--sync"),
+        # Rebind the runtime-support digests to that resource-set digest. This must precede the
+        # version-manifest regeneration below: build_version_manifest() fails closed with
+        # support_resource_set_mismatch while runtime-support still carries the previous digest.
+        ("sync_service_status_schema.py",),
+        # Mirror the refreshed runtime-support bytes. The resource-set digest is unchanged here
+        # because runtime_support content is deliberately excluded from that digest.
+        ("verify_resource_manifest.py", "--sync"),
+        # Regenerate the version-manifest cardinalities from the now-consistent installed manifest.
         (
             "generate_schemas.py",
             "--write",
             "--only",
             _VERSION_MANIFEST_SCHEMA,
         ),
-        ("sync_service_status_schema.py",),
+        # Mirror the regenerated schema bytes and schema inventory. The resource-set digest moves
+        # when they change, which the next pass rebinds into runtime-support.
         ("verify_resource_manifest.py", "--sync"),
     )
     for script_name, *arguments in steps:
