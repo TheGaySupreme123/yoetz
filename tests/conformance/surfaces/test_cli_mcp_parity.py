@@ -51,6 +51,22 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
     )
     assert secret not in status_summary
 
+    # A real compact status carries closure_readiness beside the singleton. The readiness counters
+    # win, but the summary must keep reporting the singleton's own (weaker) projection freshness
+    # rather than the result envelope's newest-record coverage, which is routinely `current` at
+    # exactly the frontier where the projection is already `partial`.
+    status["coverage"] = {"ledger_freshness": "current"}
+    status["closure_readiness"] = {
+        "open_obligation_count": "2",
+        "unanswered_finding_count": "0",
+        "receipt_blocking_finding_count": "3",
+    }
+    assert render_safe_compact_summary(status) == (
+        "Status view: compact; frontier: 9; freshness: stale_after_material_change; open "
+        "obligations: 2; unanswered findings: 0; receipt-blocking findings: 3; "
+        "reported gaps: 2."
+    )
+
     status["view"] = "findings"
     status["page"] = {"items": [], "next_cursor": None}
     status["coverage"] = {"ledger_freshness": "current"}
@@ -61,6 +77,15 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
     }
     assert render_safe_compact_summary(status) == (
         "Status view: findings; frontier: 9; freshness: current; open obligations: 0; "
+        "unanswered findings: 0; receipt-blocking findings: 2; reported gaps: 2."
+    )
+
+    # An evidence row's `freshness` describes that evidence, not the ledger, so it must never be
+    # promoted into the ledger-freshness slot of the summary.
+    status["view"] = "evidence"
+    status["page"] = {"items": [{"freshness": "stale_after_material_change"}], "next_cursor": None}
+    assert render_safe_compact_summary(status) == (
+        "Status view: evidence; frontier: 9; freshness: current; open obligations: 0; "
         "unanswered findings: 0; receipt-blocking findings: 2; reported gaps: 2."
     )
 

@@ -32,6 +32,12 @@ def _token(value: object) -> str:
     return str(value)
 
 
+def _count(value: str | None) -> str:
+    """Render an unknown readiness count as unknown, never as a bare ``None`` or a zero."""
+
+    return "unavailable" if value is None else value
+
+
 def _projected_text(value: str | OmittedContentModel | None) -> str:
     if value is None:
         return "none"
@@ -89,9 +95,12 @@ def render_human_status(result: StatusSuccessModel) -> str:
     lines = [
         f"Frontier: {result.head_frontier.sequence}",
         f"Freshness: {_token(result.coverage.ledger_freshness)}",
-        f"Open obligations: {result.closure_readiness.open_obligation_count}",
-        f"Unanswered findings: {result.closure_readiness.unanswered_finding_count}",
-        (f"Receipt-blocking findings: {result.closure_readiness.receipt_blocking_finding_count}"),
+        f"Open obligations: {_count(result.closure_readiness.open_obligation_count)}",
+        f"Unanswered findings: {_count(result.closure_readiness.unanswered_finding_count)}",
+        (
+            "Receipt-blocking findings: "
+            f"{_count(result.closure_readiness.receipt_blocking_finding_count)}"
+        ),
     ]
     if isinstance(result.page, StatusOperationPageModel):
         lines.extend((f"Operation: {result.page.operation_request_id} ({result.page.state})",))

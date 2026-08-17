@@ -400,6 +400,42 @@ async def test_legacy_attached_result_replays_with_explicit_unknown_receipt_coun
     assert len(runtime.provisions) == provisions_before_replay
 
 
+async def test_legacy_created_result_replays_with_an_exact_zero_receipt_count() -> None:
+    """A create result is frozen at the first lifecycle event of a brand-new task ledger, so no
+    finding can have existed at its frontier. Zero is derived, not invented, and carries no gap."""
+
+    app, runtime, _, catalog = start_composition()
+    request = start_request(707)
+    created = await execute_start(app, request)
+    provisions_before_replay = len(runtime.provisions)
+
+    memory_catalog = cast(MemoryStartCatalogAdapter, catalog.delegate)
+    state = memory_catalog._state  # pyright: ignore[reportPrivateUsage]
+    key, record = next(
+        (key, record)
+        for key, record in state.operations.items()
+        if record.operation_id == request.request_id
+    )
+    legacy = created.as_wire()
+    compact = cast(dict[str, JsonValue], legacy["compact"])
+    compact["unresolved_finding_count"] = compact.pop("unanswered_finding_count")
+    compact.pop("receipt_blocking_finding_count")
+    canonical = canonical_encode(legacy)
+    state.operations[key] = replace(
+        record,
+        terminal_result_canonical=canonical,
+        terminal_result_digest=f"sha256:{hashlib.sha256(canonical).hexdigest()}",
+    )
+
+    replayed = await execute_start(app, request)
+
+    assert replayed.outcome == "created"
+    assert replayed.compact.receipt_blocking_finding_count == "0"
+    assert "legacy_receipt_blocking_count_unknown" not in replayed.compact.gaps
+    assert replayed == created
+    assert len(runtime.provisions) == provisions_before_replay
+
+
 async def test_matching_refs_attach_and_same_title_without_refs_stays_distinct() -> None:
     app, runtime, _, _ = start_composition()
     created = await execute_start(app, start_request(710, refs=True))

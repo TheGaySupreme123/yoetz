@@ -818,6 +818,30 @@ def test_human_status_renders_operation_continuation_and_exact_trusted_command()
     assert f"Replay request ID: {operation_request_id}" in rendered
 
 
+def test_human_status_reports_unknown_readiness_counts_as_unavailable() -> None:
+    """An unreadable compact singleton must not render as ``None`` or as a clean zero."""
+
+    from yoetz.cli.render import render_human_status
+
+    models = _models_module()
+    result = _status_result_wire()
+    result["closure_readiness"] = {
+        "declared_obligation_count": None,
+        "no_obligations_reason": None,
+        "open_obligation_count": None,
+        "unanswered_finding_count": None,
+        "receipt_blocking_finding_count": None,
+        "blocking_conditions": ["readiness_unknown"],
+    }
+    parsed = models.StatusResultModel.model_validate(result)
+    assert type(parsed.root) is models.StatusSuccessModel
+    rendered = render_human_status(parsed.root)
+    assert "None" not in rendered
+    assert "Open obligations: unavailable" in rendered
+    assert "Unanswered findings: unavailable" in rendered
+    assert "Receipt-blocking findings: unavailable" in rendered
+
+
 def _respond_result_wire() -> dict[str, JsonValue]:
     return {
         "protocol_version": "0.1",
@@ -1369,6 +1393,33 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
                 "blocking_conditions": [],
             }
         )
+
+
+def test_start_compact_ties_an_unknown_receipt_count_to_its_declared_gap() -> None:
+    """The null receipt-blocking count exists only for a legacy replay, and only when the replay
+    also declares the gap. Neither half is allowed to appear without the other."""
+
+    models = _models_module()
+    model = models.StartCompactViewModel
+    base = cast(dict[str, JsonValue], _start_result_wire()["compact"])
+
+    known = model.model_validate(base)
+    assert known.receipt_blocking_finding_count == "0"
+    assert known.gaps == ()
+
+    legacy = model.model_validate(
+        {
+            **base,
+            "receipt_blocking_finding_count": None,
+            "gaps": ["legacy_receipt_blocking_count_unknown"],
+        }
+    )
+    assert legacy.receipt_blocking_finding_count is None
+
+    with pytest.raises(ValidationError):
+        model.model_validate({**base, "receipt_blocking_finding_count": None})
+    with pytest.raises(ValidationError):
+        model.model_validate({**base, "gaps": ["legacy_receipt_blocking_count_unknown"]})
 
 
 def test_compact_scope_counts_preserve_known_no_plan_and_unknown_plan() -> None:
