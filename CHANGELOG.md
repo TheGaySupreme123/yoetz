@@ -454,6 +454,15 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- A Codex hook with a stale lifecycle mapping treated the daemon's `SESSION_CONFLICT` or
+  `SESSION_NOT_FOUND` response as proof that the service was unavailable, then repeated that false
+  advisory forever because it retained the old session and writer ids. Status errors now pass
+  through an exhaustive classification: stale mappings tell the agent to call `start` again while
+  explicitly preserving service health, transient reads request a later status read, privacy and
+  vault conditions name their actual recovery paths, and only genuine degradation says the service
+  is unavailable. The stale advisory remains advice-safe and the agent's successful `start` result
+  is still the only source of a replacement mapping (issue #308).
+
 - The end-to-end hook budget was smaller than the budgets enforced inside a single pass, so
   `hook_budget_exceeded` fired on healthy hooks — 253 of 833 diagnostics on one workspace — and
   carried no signal about the regressions it was added for. The total is now derived from the
@@ -648,6 +657,31 @@ carried them; they are listed because each one describes the behavior that now s
   default instead of discarding the event, and a genuinely unsafe gate still fails closed but says
   so on stderr and records an `observation_storage_corrupt` coverage gap for the bound workspace so
   `observe status` can see the drop (issue #273).
+
+- `hook_diagnostics` in `observe status` was an all-time tally with no recency, so a failure that
+  was diagnosed and fixed days earlier read exactly like one happening now: one machine reported
+  `runtime_gate_unsafe: 97` for two days after issue #273's fix ended it, and a `max_ms` of 60001
+  from a single pre-fix pass alongside a healthy median of 789 ms. Every count is now paired with
+  a count over the last `window_seconds`, every reason carries `first_seen`/`last_seen`, and the
+  all-time `max_ms` carries the `max_ts` it happened at next to a `recent_max_ms` for the live
+  window. Nothing is discarded — a stale failure is dated rather than dropped — and a row whose
+  timestamp cannot be read is never counted as recent (issue #310).
+
+- The `truncated_payload` coverage gap had note call sites and no resolution path, so one
+  size-pressure eviction reported the workspace as currently losing observations forever. A save
+  that sheds nothing and lands with a headroom margin under the state bound now clears the active
+  flag; merely landing under the bound does not, because that is the state an eviction itself
+  leaves behind. Renewed shedding reopens it, and `gap_history` keeps the sighting either way
+  (issue #310).
+
+- Hook timing rows attributed as little as 14% of the pass they measured, so `hook_budget_exceeded`
+  could not distinguish real work from queueing. Time spent acquiring the interprocess store lock
+  is now reported as `store_lock_wait` wherever in the pass it occurs, including on the timeout
+  path; the two formerly unwindowed regions — workspace resolution and the consent probe before
+  the store window, advice selection and the stdout write after the drain window — are reported as
+  `resolve` and `deliver`; and whatever the partition still misses is reported as `unattributed`
+  rather than left for a reader to derive. A contended pass that spent 707 of 711 ms queueing
+  previously showed `store: 4` and nothing else (issues #310 and #311).
 
 ### Security
 
