@@ -201,11 +201,45 @@ CREATE TABLE p2_query_response_evidence_refs (
         REFERENCES p2_query_responses(finding_id, valid_from_seq)
 ) STRICT, WITHOUT ROWID;
 
-INSERT INTO p2_query_findings SELECT * FROM p1_query_findings;
-INSERT INTO p2_query_finding_subject_refs SELECT * FROM p1_query_finding_subject_refs;
-INSERT INTO p2_query_finding_order SELECT * FROM p1_query_finding_order;
-INSERT INTO p2_query_responses SELECT * FROM p1_query_responses;
-INSERT INTO p2_query_response_evidence_refs SELECT * FROM p1_query_response_evidence_refs;
+INSERT INTO p2_query_findings (
+    finding_id, valid_from_seq, valid_to_seq, source_event_id, source_frontier,
+    issue_key_canonical, kind, origin, policy_id, policy_version, subject_frontier_seq,
+    subject_frontier_digest, priority, actionable, artifact_ordinal, immutability_ordinal,
+    freshness_ordinal, authorship_ordinal, real_check_present, known_gap_count, origin_ordinal,
+    coverage_canonical, disposition, response_event_id, resolved, tombstone
+) SELECT
+    finding_id, valid_from_seq, valid_to_seq, source_event_id, source_frontier,
+    issue_key_canonical, kind, origin, policy_id, policy_version, subject_frontier_seq,
+    subject_frontier_digest, priority, actionable, artifact_ordinal, immutability_ordinal,
+    freshness_ordinal, authorship_ordinal, real_check_present, known_gap_count, origin_ordinal,
+    coverage_canonical, disposition, response_event_id, resolved, tombstone
+FROM p1_query_findings;
+
+INSERT INTO p2_query_finding_subject_refs (finding_id, valid_from_seq, subject_ref)
+SELECT finding_id, valid_from_seq, subject_ref FROM p1_query_finding_subject_refs;
+
+INSERT INTO p2_query_finding_order (
+    finding_id, valid_from_seq, valid_to_seq, origin_filter, priority_filter,
+    disposition_filter, resolution_filter, rank_priority, rank_actionable_sort,
+    rank_artifact_sort, rank_immutability_sort, rank_freshness_sort, rank_authorship_sort,
+    rank_real_check_sort, rank_known_gap_count, rank_origin_ordinal
+) SELECT
+    finding_id, valid_from_seq, valid_to_seq, origin_filter, priority_filter,
+    disposition_filter, resolution_filter, rank_priority, rank_actionable_sort,
+    rank_artifact_sort, rank_immutability_sort, rank_freshness_sort, rank_authorship_sort,
+    rank_real_check_sort, rank_known_gap_count, rank_origin_ordinal
+FROM p1_query_finding_order;
+
+INSERT INTO p2_query_responses (
+    finding_id, valid_from_seq, valid_to_seq, response_event_id, source_frontier,
+    disposition, waiver_scope, waiver_expiry, tombstone
+) SELECT
+    finding_id, valid_from_seq, valid_to_seq, response_event_id, source_frontier,
+    disposition, waiver_scope, waiver_expiry, tombstone
+FROM p1_query_responses;
+
+INSERT INTO p2_query_response_evidence_refs (finding_id, valid_from_seq, evidence_ref)
+SELECT finding_id, valid_from_seq, evidence_ref FROM p1_query_response_evidence_refs;
 
 CREATE INDEX p2_query_findings_issue
 ON p2_query_findings(

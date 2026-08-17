@@ -794,6 +794,10 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         history_required = cast(list[JsonValue], history["required"])
         finding_item = cast(dict[str, JsonValue], definitions["finding_item"])
         finding_properties = cast(dict[str, JsonValue], finding_item["properties"])
+        finding_rules_value = finding_item.setdefault("allOf", [])
+        if not isinstance(finding_rules_value, list):
+            raise TypeError("finding_item allOf must be an array")
+        finding_rules = cast(list[JsonValue], finding_rules_value)
         readiness = cast(dict[str, JsonValue], definitions["closure_readiness"])
         readiness_properties = cast(dict[str, JsonValue], readiness["properties"])
         readiness_required = cast(list[JsonValue], readiness["required"])
@@ -823,6 +827,33 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         ],
         "type": "string",
     }
+    if not any(
+        isinstance(rule, dict)
+        and isinstance(rule.get("if"), dict)
+        and isinstance(cast(dict[str, JsonValue], rule["if"]).get("properties"), dict)
+        and cast(
+            dict[str, JsonValue],
+            cast(dict[str, JsonValue], rule["if"])["properties"],
+        ).get("disposition")
+        == {"const": "provenance_disputed"}
+        for rule in finding_rules
+    ):
+        finding_rules.append(
+            {
+                "if": {
+                    "properties": {"disposition": {"const": "provenance_disputed"}},
+                    "required": ["disposition"],
+                },
+                "then": {
+                    "properties": {
+                        "reason": {"not": {"type": "null"}},
+                        "resolved": {"const": False},
+                        "waiver_expiry": {"type": "null"},
+                        "waiver_scope": {"type": "null"},
+                    }
+                },
+            }
+        )
     history_properties["occurred_at_consistency"] = {
         "description": (
             "Exact comparison of caller-asserted occurred_at with service accepted_at. Caller "
@@ -1044,6 +1075,8 @@ def _status_request_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         findings_filter = cast(dict[str, JsonValue], definitions["findings_filter"])
         properties = cast(dict[str, JsonValue], findings_filter["properties"])
         disposition = cast(dict[str, JsonValue], properties["disposition"])
+        if not isinstance(disposition, dict):
+            raise TypeError("disposition must be an object")
     except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
         raise SchemaGenerationError(
             "status_request_schema_template_invalid", entries=(entry.relative_path,)

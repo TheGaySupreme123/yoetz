@@ -174,13 +174,7 @@ def test_default_json_reports_resource_summary_without_enumerating_entries(
 def test_explicit_resources_flag_enumerates_all_reviewed_identities(
     installed_candidate: InstalledCandidate,
 ) -> None:
-    """Per spec: explicit ``--resources`` enumerates every reviewed identity.
-
-    KNOWN CONFLICT: ``yoetz.cli.app.version_command`` currently accepts only ``--json`` and has no
-    ``--resources`` option, and ``src/yoetz/cli/app.py`` is outside this cluster's editable scope.
-    This test encodes the spec's required behavior and is expected to fail until that CLI option is
-    implemented; it must not be papered over with a weaker assertion.
-    """
+    """Per spec: explicit ``--resources`` enumerates every reviewed identity."""
 
     completed = _run(installed_candidate, ["version", "--json", "--resources"])
     assert completed.returncode == 0, (
