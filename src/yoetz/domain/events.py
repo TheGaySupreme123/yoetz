@@ -1400,7 +1400,11 @@ class ResponseRecordedPayload:
             "evidence_refs",
             _evidence_result_tuple(self.evidence_refs, field="evidence_refs"),
         )
-        if disposition in {ResponseDisposition.REJECTED, ResponseDisposition.WAIVED}:
+        if disposition in {
+            ResponseDisposition.PROVENANCE_DISPUTED,
+            ResponseDisposition.REJECTED,
+            ResponseDisposition.WAIVED,
+        }:
             if self.reason is None:
                 raise ProtocolValueError("response_fields_invalid")
         if disposition is ResponseDisposition.WAIVED:

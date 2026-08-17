@@ -780,7 +780,7 @@ def _read_guidance_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 
 
 def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Extend the reviewed status result with the model-owned completion-scope leaves."""
+    """Extend the reviewed status result with model-owned completion and disposition leaves."""
 
     source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
     try:
@@ -792,6 +792,12 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         history = cast(dict[str, JsonValue], definitions["history_item"])
         history_properties = cast(dict[str, JsonValue], history["properties"])
         history_required = cast(list[JsonValue], history["required"])
+        finding_item = cast(dict[str, JsonValue], definitions["finding_item"])
+        finding_properties = cast(dict[str, JsonValue], finding_item["properties"])
+        finding_rules_value = finding_item.setdefault("allOf", [])
+        if not isinstance(finding_rules_value, list):
+            raise TypeError("finding_item allOf must be an array")
+        finding_rules = cast(list[JsonValue], finding_rules_value)
         readiness = cast(dict[str, JsonValue], definitions["closure_readiness"])
         readiness_properties = cast(dict[str, JsonValue], readiness["properties"])
         readiness_required = cast(list[JsonValue], readiness["required"])
@@ -811,6 +817,43 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         ],
         "type": "string",
     }
+    finding_properties["disposition"] = {
+        "enum": [
+            "acknowledged",
+            "none",
+            "provenance_disputed",
+            "rejected",
+            "waived",
+        ],
+        "type": "string",
+    }
+    if not any(
+        isinstance(rule, dict)
+        and isinstance(rule.get("if"), dict)
+        and isinstance(cast(dict[str, JsonValue], rule["if"]).get("properties"), dict)
+        and cast(
+            dict[str, JsonValue],
+            cast(dict[str, JsonValue], rule["if"])["properties"],
+        ).get("disposition")
+        == {"const": "provenance_disputed"}
+        for rule in finding_rules
+    ):
+        finding_rules.append(
+            {
+                "if": {
+                    "properties": {"disposition": {"const": "provenance_disputed"}},
+                    "required": ["disposition"],
+                },
+                "then": {
+                    "properties": {
+                        "reason": {"not": {"type": "null"}},
+                        "resolved": {"const": False},
+                        "waiver_expiry": {"type": "null"},
+                        "waiver_scope": {"type": "null"},
+                    }
+                },
+            }
+        )
     history_properties["occurred_at_consistency"] = {
         "description": (
             "Exact comparison of caller-asserted occurred_at with service accepted_at. Caller "
@@ -853,6 +896,198 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
                 required.append(name)
     if "no_obligations_declared" not in blocker_values:
         blocker_values.append("no_obligations_declared")
+    return document
+
+
+def _receipt_document_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend the reviewed receipt document with the model-owned response disposition."""
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        response = cast(dict[str, JsonValue], definitions["receipt_response"])
+        response_properties = cast(dict[str, JsonValue], response["properties"])
+        disposition = cast(dict[str, JsonValue], response_properties["disposition"])
+        rules = cast(list[JsonValue], response["allOf"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "receipt_document_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+
+    disposition["enum"] = ["acknowledged", "provenance_disputed", "rejected", "waived"]
+    has_provenance_rule = False
+    for rule_value in rules:
+        if not isinstance(rule_value, dict):
+            continue
+        condition = rule_value.get("if")
+        if not isinstance(condition, dict):
+            continue
+        properties = condition.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        disposition_condition = properties.get("disposition")
+        if isinstance(disposition_condition, dict) and disposition_condition.get("const") == (
+            "provenance_disputed"
+        ):
+            has_provenance_rule = True
+            break
+    if not has_provenance_rule:
+        rules.insert(
+            1,
+            {
+                "if": {
+                    "properties": {"disposition": {"const": "provenance_disputed"}},
+                    "required": ["disposition"],
+                },
+                "then": {
+                    "not": {
+                        "anyOf": [
+                            {"required": ["waiver_scope"]},
+                            {"required": ["waiver_expiry"]},
+                        ]
+                    },
+                    "required": ["reason"],
+                },
+            },
+        )
+    return document
+
+
+def _response_recorded_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend the reviewed response event with the model-owned response disposition."""
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        properties = cast(dict[str, JsonValue], document["properties"])
+        disposition = cast(dict[str, JsonValue], properties["disposition"])
+        rules = cast(list[JsonValue], document["oneOf"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "response_recorded_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+
+    disposition["enum"] = ["acknowledged", "provenance_disputed", "rejected", "waived"]
+    if not any(
+        isinstance(rule, dict)
+        and isinstance(rule.get("properties"), dict)
+        and cast(dict[str, JsonValue], rule["properties"]).get("disposition")
+        == {"const": "provenance_disputed"}
+        for rule in rules
+    ):
+        rules.insert(
+            1,
+            {
+                "not": {
+                    "anyOf": [
+                        {"required": ["waiver_scope"]},
+                        {"required": ["waiver_expiry"]},
+                    ]
+                },
+                "properties": {"disposition": {"const": "provenance_disputed"}},
+                "required": ["reason"],
+            },
+        )
+    return document
+
+
+def _insert_provenance_dispute_condition(rules: list[JsonValue]) -> None:
+    """Add the shared reason-required, waiver-forbidden branch once."""
+
+    for rule_value in rules:
+        if not isinstance(rule_value, dict):
+            continue
+        condition = rule_value.get("if")
+        if not isinstance(condition, dict):
+            continue
+        properties = condition.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        disposition = properties.get("disposition")
+        if isinstance(disposition, dict) and disposition.get("const") == "provenance_disputed":
+            return
+    rules.insert(
+        1,
+        {
+            "if": {
+                "properties": {"disposition": {"const": "provenance_disputed"}},
+                "required": ["disposition"],
+            },
+            "then": {
+                "not": {
+                    "anyOf": [
+                        {"required": ["waiver_scope"]},
+                        {"required": ["waiver_expiry"]},
+                    ]
+                },
+                "required": ["reason"],
+            },
+        },
+    )
+
+
+def _respond_request_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend the reviewed respond request with the model-owned response disposition."""
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        properties = cast(dict[str, JsonValue], document["properties"])
+        disposition = cast(dict[str, JsonValue], properties["disposition"])
+        rules = cast(list[JsonValue], document["allOf"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "respond_request_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+    disposition["enum"] = ["acknowledged", "provenance_disputed", "rejected", "waived"]
+    _insert_provenance_dispute_condition(rules)
+    return document
+
+
+def _respond_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend the reviewed respond result with the model-owned response disposition."""
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        response = cast(dict[str, JsonValue], definitions["response"])
+        properties = cast(dict[str, JsonValue], response["properties"])
+        disposition = cast(dict[str, JsonValue], properties["disposition"])
+        rules = cast(list[JsonValue], response["allOf"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "respond_result_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+    disposition["enum"] = ["acknowledged", "provenance_disputed", "rejected", "waived"]
+    _insert_provenance_dispute_condition(rules)
+    return document
+
+
+def _status_request_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Extend the reviewed status filter with the model-owned response disposition."""
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        definitions = cast(dict[str, JsonValue], document["$defs"])
+        findings_filter = cast(dict[str, JsonValue], definitions["findings_filter"])
+        properties = cast(dict[str, JsonValue], findings_filter["properties"])
+        disposition = cast(dict[str, JsonValue], properties["disposition"])
+        if not isinstance(disposition, dict):
+            raise TypeError("disposition must be an object")
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "status_request_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+    disposition["enum"] = [
+        "acknowledged",
+        "none",
+        "provenance_disputed",
+        "rejected",
+        "waived",
+    ]
     return document
 
 
@@ -1773,14 +2008,24 @@ def build_schema_documents(
             normalized = _event_draft_schema(entry)
         elif entry.relative_path == "events/evidence-recorded-1.1.0.schema.json":
             normalized = _evidence_payload_schema(entry)
+        elif entry.relative_path == "events/response-recorded-1.0.0.schema.json":
+            normalized = _response_recorded_schema(entry)
         elif entry.relative_path == "events/opaque-unknown-event-draft-1.0.0.schema.json":
             normalized = _opaque_unknown_event_draft_schema(entry)
         elif entry.relative_path == "operations/start-result-1.0.0.schema.json":
             normalized = _start_result_schema(entry)
         elif entry.relative_path == "operations/read-guidance-result-1.0.0.schema.json":
             normalized = _read_guidance_result_schema(entry)
+        elif entry.relative_path == "operations/respond-request-1.0.0.schema.json":
+            normalized = _respond_request_schema(entry)
+        elif entry.relative_path == "operations/respond-result-1.0.0.schema.json":
+            normalized = _respond_result_schema(entry)
+        elif entry.relative_path == "operations/status-request-1.0.0.schema.json":
+            normalized = _status_request_schema(entry)
         elif entry.relative_path == "operations/status-result-1.0.0.schema.json":
             normalized = _status_result_schema(entry)
+        elif entry.relative_path == "receipts/receipt-document-1.0.0.schema.json":
+            normalized = _receipt_document_schema(entry)
         elif entry.relative_path == "version/version-manifest-1.0.0.schema.json":
             normalized = _version_manifest_schema(entry)
         else:

@@ -647,7 +647,11 @@ def _apply_profile(
                         )
                     ] += 1
                 transformed_responses.append(replace(response, reason=None))
-            else:
+            elif response.disposition in {
+                ResponseDisposition.PROVENANCE_DISPUTED,
+                ResponseDisposition.REJECTED,
+                ResponseDisposition.WAIVED,
+            }:
                 counts[
                     (
                         ReceiptRedactionCategory.FINDING_DETAIL,

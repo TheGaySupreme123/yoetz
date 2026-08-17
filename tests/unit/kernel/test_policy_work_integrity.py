@@ -428,6 +428,22 @@ def test_weak_or_stale_response_and_supported_rejection_nontrigger() -> None:
     assert FindingKind.WEAK_OR_STALE_RESPONSE in _kinds(work_only_gap)
 
 
+def test_provenance_dispute_does_not_trigger_weak_response_penalty() -> None:
+    finding = _recorded_finding()
+    dispute = ResponseRecordedPayload(
+        finding_id=fnd(1),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.PROVENANCE_DISPUTED,
+        reason="The finding attributes the underlying claim to this agent, but it came from a harness.",
+    )
+    case = make_case(
+        findings={fnd(1): record(finding, 1)},
+        responses={fnd(1): record(dispute, 2)},
+        extra_refs=(evt(99),),
+    )
+    assert FindingKind.WEAK_OR_STALE_RESPONSE not in _kinds(case)
+
+
 def test_supported_rejection_at_the_findings_own_frontier_is_not_stale() -> None:
     """respond requires a frontier that already carries the finding_recorded event, so the
     frontier that validates necessarily follows the subject the check tested. Only a response

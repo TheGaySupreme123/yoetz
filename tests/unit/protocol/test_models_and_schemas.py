@@ -1447,7 +1447,63 @@ def test_operation_cross_field_matrix() -> None:
     with pytest.raises(ValidationError):
         models.StatusResultModel.model_validate(wrong_candidate_omission)
 
+    disputed_status = _status_result_wire()
+    disputed_status["view"] = "findings"
+    disputed_item: dict[str, JsonValue] = {
+        "finding_id": _test_id("fnd_"),
+        "kind": "action_without_result",
+        "origin": "deterministic",
+        "priority": 1,
+        "summary": "A disputed finding.",
+        "detail": "The finding provenance is disputed.",
+        "subject_refs": [_test_id("act_")],
+        "policy_id": "work-integrity",
+        "policy_version": "0.1.0",
+        "subject_frontier": {"sequence": "0", "head_digest": "genesis"},
+        "coverage": _coverage_wire(),
+        "provenance": None,
+        "disposition": "provenance_disputed",
+        "resolved": False,
+        "response_event_id": _test_id("evt_"),
+        "reason": "The finding was attributed to the wrong writer.",
+        "waiver_scope": None,
+        "waiver_expiry": None,
+    }
+    disputed_status["page"] = {"items": [disputed_item], "next_cursor": None}
+    models.StatusResultModel.model_validate(disputed_status)
+    validate_schema_instance("status-result", "1.0.0", disputed_status)
+    for field, invalid_value in (
+        ("reason", None),
+        ("resolved", True),
+        ("waiver_scope", "finding_only"),
+        ("waiver_expiry", "2026-08-17T12:34:56.789Z"),
+    ):
+        invalid_status = cast(
+            dict[str, JsonValue], strict_json_parse(canonical_encode(disputed_status))
+        )
+        invalid_page = cast(dict[str, JsonValue], invalid_status["page"])
+        invalid_items = cast(list[JsonValue], invalid_page["items"])
+        invalid_item = cast(dict[str, JsonValue], invalid_items[0])
+        invalid_item[field] = invalid_value
+        with pytest.raises(ProtocolValueError):
+            validate_schema_instance("status-result", "1.0.0", invalid_status)
+        with pytest.raises(ValidationError):
+            models.StatusResultModel.model_validate(invalid_status)
+
     models.RespondResultModel.model_validate(_respond_result_wire())
+    disputed = _respond_result_wire()
+    disputed_response = cast(dict[str, JsonValue], disputed["response"])
+    disputed_response["disposition"] = "provenance_disputed"
+    models.RespondResultModel.model_validate(disputed)
+    del disputed_response["reason"]
+    with pytest.raises(ValidationError):
+        models.RespondResultModel.model_validate(disputed)
+    disputed_waiver = _respond_result_wire()
+    disputed_waiver_response = cast(dict[str, JsonValue], disputed_waiver["response"])
+    disputed_waiver_response["disposition"] = "provenance_disputed"
+    disputed_waiver_response["waiver_scope"] = "finding_only"
+    with pytest.raises(ValidationError):
+        models.RespondResultModel.model_validate(disputed_waiver)
     waived = _respond_result_wire()
     waived_response = cast(dict[str, JsonValue], waived["response"])
     waived_response["disposition"] = "waived"

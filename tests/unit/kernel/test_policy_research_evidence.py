@@ -225,3 +225,19 @@ def test_questionable_finding_rejection_and_supported_nontrigger() -> None:
         extra_refs=(evt(99),),
     )
     assert FindingKind.QUESTIONABLE_FINDING_REJECTION not in _kinds(near)
+
+
+def test_provenance_dispute_does_not_trigger_rejection_penalty() -> None:
+    finding = _recorded_finding()
+    dispute = ResponseRecordedPayload(
+        finding_id=fnd(1),
+        finding_frontier=FRONTIER,
+        disposition=ResponseDisposition.PROVENANCE_DISPUTED,
+        reason="The finding attributes the underlying claim to this agent, but it came from a harness.",
+    )
+    case = make_case(
+        findings={fnd(1): record(finding, 1)},
+        responses={fnd(1): record(dispute, 2)},
+        extra_refs=(evt(99),),
+    )
+    assert FindingKind.QUESTIONABLE_FINDING_REJECTION not in _kinds(case)

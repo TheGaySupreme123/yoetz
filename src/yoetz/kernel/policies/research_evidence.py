@@ -279,6 +279,8 @@ def _rejection_findings(case: DeterministicCase) -> list[DeterministicAssessment
         finding_record = case.projection.findings.get(finding_id)
         if (
             response is None
+            # A provenance dispute contests the finding's authorship/premise. It is not an
+            # evidence-free rejection of the finding's conclusion and is not scored here.
             or response.disposition
             not in {ResponseDisposition.REJECTED, ResponseDisposition.WAIVED}
             or finding_record is None

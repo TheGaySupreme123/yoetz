@@ -32,7 +32,11 @@ from yoetz.domain.values import (
     obligation_id,
     timestamp_from_string,
 )
-from yoetz.kernel.projections import ProjectionRecord, empty_projection_state
+from yoetz.kernel.projections import (
+    ProjectionRecord,
+    empty_projection_state,
+    unresolved_finding_count,
+)
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.coverage import (
     ArtifactObservation,
@@ -133,10 +137,12 @@ def _projection(response: ResponseRecordedPayload | None):
 
 @pytest.mark.parametrize("disposition", tuple(ResponseDisposition))
 def test_no_disposition_marks_a_finding_resolved(disposition: ResponseDisposition) -> None:
-    states = _finding_states(_projection(_response(disposition)))
+    projection = _projection(_response(disposition))
+    states = _finding_states(projection)
     assert [state.resolved for state in states] == [False], (
         f"{disposition.value} resolved the finding; the agent guidance promises it does not"
     )
+    assert unresolved_finding_count(projection) == 0
 
 
 def test_an_unanswered_finding_is_also_unresolved() -> None:

@@ -1073,7 +1073,7 @@ class ObligationsProjectionFilter:
 class FindingsProjectionFilter:
     origin: Literal["deterministic", "semantic_model_derived"] | None
     priority: int | None
-    disposition: Literal["none", "acknowledged", "rejected", "waived"] | None
+    disposition: Literal["none", "acknowledged", "provenance_disputed", "rejected", "waived"] | None
     include_resolved: bool | None
 
     def __post_init__(self) -> None:
@@ -1088,7 +1088,8 @@ class FindingsProjectionFilter:
             raise _invalid()
         if self.disposition is not None and (
             type(self.disposition) is not str
-            or self.disposition not in {"none", "acknowledged", "rejected", "waived"}
+            or self.disposition
+            not in {"none", "acknowledged", "provenance_disputed", "rejected", "waived"}
         ):
             raise _invalid()
         if self.include_resolved is not None and type(self.include_resolved) is not bool:
