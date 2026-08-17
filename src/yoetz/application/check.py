@@ -52,6 +52,10 @@ from yoetz.kernel.deterministic_checks import (
     finding_basis_to_json,
 )
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
+from yoetz.kernel.policies.response_support import (
+    RESEARCH_REJECTION_PRESENT_FACT,
+    WORK_RESPONSE_PRESENT_FACT,
+)
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
@@ -689,6 +693,48 @@ def _scope_execution(
     return None
 
 
+def _response_identity(
+    assessment: DeterministicAssessment,
+    fact_code: str,
+) -> tuple[FindingBasisRef, ...] | None:
+    """Return the (finding, response event, admissible evidence) refs a response rule reported."""
+
+    for fact in assessment.basis.observed_facts:
+        if fact.fact_code == fact_code:
+            return fact.subject_refs
+    return None
+
+
+def _collapse_response_overlap(
+    assessments: tuple[DeterministicAssessment, ...],
+) -> tuple[DeterministicAssessment, ...]:
+    """Drop the work-integrity response finding when research-evidence reported the same response.
+
+    A current unsupported rejection or waiver of a deterministic finding satisfies both
+    ``weak_or_stale_response`` and ``questionable_finding_rejection``. Each pack is a closed rule
+    table that cannot see the other, so the collapse belongs here, where it is known which packs
+    actually ran. Keying on the assessment research-evidence really produced -- rather than
+    re-deriving its predicate inside work-integrity -- means a research pack that was deselected,
+    scope-excluded, skipped as unavailable, or that failed leaves the work-integrity finding
+    standing instead of silently losing it.
+    """
+
+    rejected = {
+        identity
+        for item in assessments
+        if item.candidate.kind is FindingKind.QUESTIONABLE_FINDING_REJECTION
+        and (identity := _response_identity(item, RESEARCH_REJECTION_PRESENT_FACT)) is not None
+    }
+    if not rejected:
+        return assessments
+    return tuple(
+        item
+        for item in assessments
+        if item.candidate.kind is not FindingKind.WEAK_OR_STALE_RESPONSE
+        or _response_identity(item, WORK_RESPONSE_PRESENT_FACT) not in rejected
+    )
+
+
 def run_deterministic_policies(
     case: DeterministicCase,
     scope: CheckScope,
@@ -732,7 +778,9 @@ def run_deterministic_policies(
             by_pack[pack] = evaluated
 
     # Finding emission order is intentionally distinct from execution accounting order.
-    assessments = by_pack.get(_WORK_PACK, ()) + by_pack.get(_RESEARCH_PACK, ())
+    assessments = _collapse_response_overlap(
+        by_pack.get(_WORK_PACK, ()) + by_pack.get(_RESEARCH_PACK, ())
+    )
     keys = tuple(
         (item.candidate.policy_id, item.basis.rule_id, item.candidate.subject_refs)
         for item in assessments

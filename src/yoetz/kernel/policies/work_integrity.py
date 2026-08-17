@@ -33,6 +33,11 @@ from yoetz.kernel.deterministic_checks import (
     policy_source_availability,
 )
 from yoetz.kernel.plan_scope import current_plan_scope
+from yoetz.kernel.policies.response_support import (
+    BASE_RESPONSE_INADMISSIBLE_GAPS,
+    WORK_RESPONSE_PRESENT_FACT,
+    response_support_admissible,
+)
 
 __all__ = [
     "WORK_INTEGRITY_FACT_CODES",
@@ -90,6 +95,9 @@ _RULE_ORDER: Final = (
     FindingKind.LEDGER_STALE_OR_INCOMPLETE,
     FindingKind.WEAK_OR_STALE_RESPONSE,
 )
+_WORK_RESPONSE_INADMISSIBLE_GAPS: Final = BASE_RESPONSE_INADMISSIBLE_GAPS | {
+    "evidence_digest_subject_legacy_unknown"
+}
 
 
 def _ascii(value: str) -> bytes:
@@ -108,15 +116,7 @@ def _coverage_admissible(case: DeterministicCase, ref: FindingBasisRef) -> bool:
     coverage = case.coverage_by_ref.get(ref)
     if coverage is None:
         return False
-    return not {
-        "redacted_event",
-        "redacted_object",
-        "event_payload_unavailable",
-        "captured_object_unavailable",
-        "missing_ref",
-        "unknown_event",
-        "evidence_digest_subject_legacy_unknown",
-    } & set(coverage.known_gaps)
+    return not _WORK_RESPONSE_INADMISSIBLE_GAPS & set(coverage.known_gaps)
 
 
 def _claim_support_is_admissible(
@@ -201,16 +201,11 @@ def _response_support_admissible(
     case: DeterministicCase,
     refs: tuple[EvidenceId | ResultId, ...],
 ) -> bool:
-    for ref in refs:
-        if ref not in case.allowed_ids or not _coverage_admissible(case, ref):
-            continue
-        if ref.startswith("evd_"):
-            record = case.projection.evidence.get(EvidenceId(ref))
-        else:
-            record = case.projection.results.get(ResultId(ref))
-        if record is not None and record.payload is not None:
-            return True
-    return False
+    return response_support_admissible(
+        case,
+        refs,
+        inadmissible_gaps=_WORK_RESPONSE_INADMISSIBLE_GAPS,
+    )
 
 
 def _completion_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
@@ -575,6 +570,10 @@ def _response_findings(case: DeterministicCase) -> list[DeterministicAssessment]
         # older than that subject answers something the finding was never about.
         stale = response.finding_frontier.sequence < finding.subject_frontier.sequence
         insufficient = not _response_support_admissible(case, response.evidence_refs)
+        # This pack stays a closed rule table: it never inspects whether another pack would also
+        # report this response. A current unsupported rejection of a deterministic finding overlaps
+        # research-evidence's questionable_finding_rejection, and the composition layer collapses
+        # that overlap once it knows which packs actually ran.
         if not stale and not insufficient:
             continue
         if any(ref not in case.allowed_ids for ref in finding.subject_refs):
@@ -582,7 +581,7 @@ def _response_findings(case: DeterministicCase) -> list[DeterministicAssessment]
         response_event = response_record.source_event_id
         evidence_refs = tuple(ref for ref in response.evidence_refs if ref in case.allowed_ids)
         present_refs = _refs((finding_id, response_event, *evidence_refs))
-        observed: list[FindingFact] = [FindingFact("finding_response_present", present_refs)]
+        observed: list[FindingFact] = [FindingFact(WORK_RESPONSE_PRESENT_FACT, present_refs)]
         missing: list[FindingFact] = []
         if stale:
             observed.append(_fact("response_state_stale", finding_id, response_event))
