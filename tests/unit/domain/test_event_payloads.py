@@ -81,6 +81,7 @@ from yoetz.domain.findings import (
     SamplingParams,
     SemanticDispatchKind,
     SemanticProvenance,
+    WaiverScope,
 )
 from yoetz.domain.values import (
     Actor,
@@ -760,12 +761,22 @@ def test_family_specific_payload_invariants_fail_closed() -> None:
             reason=None,
         ),
     )
+    _assert_reason(
+        "response_fields_invalid",
+        lambda: replace(
+            response,
+            disposition=ResponseDisposition.PROVENANCE_DISPUTED,
+            reason="The finding attributes a claim to the wrong author.",
+            waiver_scope=WaiverScope.FINDING_ONLY,
+        ),
+    )
     disputed = replace(
         response,
         disposition=ResponseDisposition.PROVENANCE_DISPUTED,
         reason="The finding attributes a claim to the wrong author.",
     )
     assert disputed.waiver_scope is None
+    assert disputed.waiver_expiry is None
     revised = cast(PlanRevisedPayload, _decode_row(_ROW_BY_FAMILY["plan_revised"]))
     change = ObligationChange(
         obligation_id=revised.obligation_changes[0].obligation_id,

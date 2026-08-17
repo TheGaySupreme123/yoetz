@@ -1455,6 +1455,12 @@ def test_operation_cross_field_matrix() -> None:
     del disputed_response["reason"]
     with pytest.raises(ValidationError):
         models.RespondResultModel.model_validate(disputed)
+    disputed_waiver = _respond_result_wire()
+    disputed_waiver_response = cast(dict[str, JsonValue], disputed_waiver["response"])
+    disputed_waiver_response["disposition"] = "provenance_disputed"
+    disputed_waiver_response["waiver_scope"] = "finding_only"
+    with pytest.raises(ValidationError):
+        models.RespondResultModel.model_validate(disputed_waiver)
     waived = _respond_result_wire()
     waived_response = cast(dict[str, JsonValue], waived["response"])
     waived_response["disposition"] = "waived"
