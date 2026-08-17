@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Final, NoReturn, cast
 
@@ -115,11 +116,12 @@ def strict_json_parse(data: bytes | bytearray) -> JsonValue:
     def _decode_object_pairs(
         pairs: list[tuple[str, object]],
     ) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, item in pairs:
-            if key in result:
-                raise ProtocolValueError("duplicate_object_key")
-            result[key] = item
+        # dict() collapses duplicate keys, so a length mismatch is exactly the
+        # duplicate case; the C constructor keeps this hook off the profile of
+        # every large-state parse (#290).
+        result: dict[str, object] = dict(pairs)
+        if len(result) != len(pairs):
+            raise ProtocolValueError("duplicate_object_key")
         return result
 
     try:
@@ -324,16 +326,28 @@ def _is_actual_float(value: object) -> bool:
         return False
 
 
+# One C-level scan replaces the per-character Python loops below for the
+# overwhelmingly common plain string; both fall back to the exact original
+# logic when a match is found, so output and error identity never change.
+# The per-character loops dominated hook wall time on a ~1 MiB state (#290).
+_INVALID_STRING_CHARS: Final = re.compile("[\\u0000\\ud800-\\udfff]")
+_ESCAPED_STRING_CHARS: Final = re.compile("[\\u0000-\\u001f\\u0022\\u005c\\ud800-\\udfff]")
+
+
 def _validate_string(value: str) -> None:
-    for character in value:
-        codepoint = ord(character)
-        if codepoint == 0:
-            raise ProtocolValueError("nul_byte_forbidden")
-        if 0xD800 <= codepoint <= 0xDFFF:
-            raise ProtocolValueError("lone_surrogate")
+    matched = _INVALID_STRING_CHARS.search(value)
+    if matched is None:
+        return
+    if matched.group() == "\x00":
+        raise ProtocolValueError("nul_byte_forbidden")
+    raise ProtocolValueError("lone_surrogate")
 
 
 def _encode_string(value: str) -> str:
+    if _ESCAPED_STRING_CHARS.search(value) is None:
+        # Nothing to escape and nothing to reject: the escaped-character
+        # class is a superset of the invalid-character class.
+        return f'"{value}"'
     _validate_string(value)
     parts: list[str] = ['"']
     for character in value:

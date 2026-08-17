@@ -88,6 +88,13 @@ _MAX_QUARANTINE: Final = 512
 # stale are pure per-hook parse/encode tax (#211). Age-expired detail folds
 # into the same aggregate eviction evidence as count/byte-cap evictions.
 _MAX_QUARANTINE_AGE_DAYS: Final = 14
+# A stream partial is a pure read-cache: the unterminated tail of the source
+# JSONL, held so the next reconcile need not reread it. The reader seeks to
+# the committed cursor and rereads the tail whenever the partial is absent,
+# so dropping one costs a bounded reread, never observation loss. It is
+# therefore bounded per entry and shed before any durable row when the state
+# file approaches its cap (#289).
+_MAX_STREAM_PARTIAL_BYTES: Final = 65_536
 # Parse-cache entry bound: hooks touch one workspace, the daemon's sweep loop
 # touches all of them — without a cap the daemon would retain a parsed object
 # graph per workspace forever.
@@ -107,6 +114,7 @@ _MAX_RUNTIME_GATE_BYTES: Final = 256
 # it so such a value can never be mistaken for an event kind.
 _OPEN_PRE_SEPARATOR: Final = "|"
 _LOCAL_OUTBOX_OVERFLOW_GAP: Final = "_local_outbox_overflow"
+_LOCAL_STREAM_PARTIAL_DROPPED_GAP: Final = "_local_stream_partial_dropped"
 _STORE_LOCK_TIMEOUT_SECONDS: Final = 2.0
 _STORE_LOCK_POLL_SECONDS: Final = 0.01
 
@@ -641,6 +649,10 @@ class LocalObservationStore:
         # 10-18 times measured on a lived-in store (#242).
         self._batch: dict[str, _WorkspaceState] = {}
         self._batch_dirty: set[str] = set()
+        # Monotonic milliseconds accumulated per store sub-stage since
+        # construction. Hooks fold these into their pass-timing rows so the
+        # formerly opaque 'store' stage is attributable (#290).
+        self.stage_timings_ms: dict[str, float] = {"hydrate": 0.0, "encode": 0.0, "write": 0.0}
 
     def _now_mono(self) -> float:
         import time
@@ -1308,15 +1320,25 @@ class LocalObservationStore:
             return state.stream_partials.get(session_commitment, b"")
 
     def set_stream_partial(self, workspace: str, session_commitment: str, partial: bytes) -> None:
-        if type(partial) is not bytes or len(partial) > 262_144:
+        if type(partial) is not bytes:
             raise ProtocolValueError("invalid_event_value_type")
         with self._lock:
             state = self._load(workspace)
             assert state.stream_partials is not None
-            if partial:
+            if len(partial) > _MAX_STREAM_PARTIAL_BYTES:
+                # An oversized tail drops with an explicit gap instead of
+                # pinning megabytes of read-cache in the state file: the
+                # reader rereads it from the committed cursor on the next
+                # reconcile (#289). Raising here instead stalled the stream
+                # forever while retaining the partial that caused the stall.
+                state.stream_partials.pop(session_commitment, None)
+                self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+            elif partial:
                 state.stream_partials[session_commitment] = partial
+                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
             else:
                 state.stream_partials.pop(session_commitment, None)
+                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
             self._save(workspace, state)
 
     def note_stream_reconcile(self, workspace: str, *, mono: float | None = None) -> None:
@@ -1377,7 +1399,7 @@ class LocalObservationStore:
             # Resolve before projecting so the size-checked bytes are exactly
             # the bytes _save would otherwise re-encode: one encode, not three.
             self._resolve_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
-            projected = canonical_encode(self._state_to_json(workspace, state)) + b"\n"
+            projected = self._encode_state(workspace, state)
             if len(projected) > _MAX_STATE_BYTES:
                 state.pending_outbox.pop()
                 self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
@@ -2141,13 +2163,17 @@ class LocalObservationStore:
         raw = _read_bytes(path, maximum=_MAX_LEGACY_STATE_BYTES)
         if raw is None:
             return _WorkspaceState()
+        hydrate_started = self._now_mono()
         try:
-            parsed = strict_json_parse(raw)
-        except ProtocolValueError:
-            return _WorkspaceState()
-        if not isinstance(parsed, Mapping):
-            return _WorkspaceState()
-        state = self._state_from_json(cast(Mapping[str, JsonValue], parsed))
+            try:
+                parsed = strict_json_parse(raw)
+            except ProtocolValueError:
+                return _WorkspaceState()
+            if not isinstance(parsed, Mapping):
+                return _WorkspaceState()
+            state = self._state_from_json(cast(Mapping[str, JsonValue], parsed))
+        finally:
+            self.stage_timings_ms["hydrate"] += (self._now_mono() - hydrate_started) * 1000
         # Cache only when the file provably did not change while it was read.
         if before is not None and before == self._stat_key(path):
             self._cache_state(workspace_commitment, before, state)
@@ -2197,6 +2223,28 @@ class LocalObservationStore:
         while len(notices) > _MAX_FRONTIER_MOTION_NOTICES:
             del notices[next(iter(notices))]
 
+    def _encode_state(self, workspace_commitment: str, state: _WorkspaceState) -> bytes:
+        """Encode one state to its on-disk bytes, attributing the cost (#290)."""
+
+        encode_started = self._now_mono()
+        try:
+            return canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+        finally:
+            self.stage_timings_ms["encode"] += (self._now_mono() - encode_started) * 1000
+
+    def _drop_oversized_stream_partials(self, state: _WorkspaceState) -> bool:
+        """Enforce the per-entry partial bound on states persisted before #289."""
+
+        partials = state.stream_partials
+        assert partials is not None
+        oversized = [
+            key for key, value in partials.items() if len(value) > _MAX_STREAM_PARTIAL_BYTES
+        ]
+        for key in oversized:
+            del partials[key]
+            self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+        return bool(oversized)
+
     def _save(
         self,
         workspace_commitment: str,
@@ -2220,14 +2268,26 @@ class LocalObservationStore:
         notices_before = len(state.frontier_motion_notices or ())
         self._prune_expired_quarantine(state)
         self._prune_frontier_motion_notices(state)
+        partials_dropped = self._drop_oversized_stream_partials(state)
         if (
             projected is not None
+            and not partials_dropped
             and len(state.quarantine or ()) == quarantined_before
             and len(state.frontier_motion_notices or ()) == notices_before
         ):
             payload = projected
         else:
-            payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+            payload = self._encode_state(workspace_commitment, state)
+        partials = state.stream_partials
+        assert partials is not None
+        while partials and len(payload) > _MAX_STATE_BYTES:
+            # Shed the read-cache before any durable row: a dropped partial
+            # is reread from the committed cursor on the next reconcile,
+            # while an evicted envelope is a lost observation (#289).
+            largest = max(partials, key=lambda key: (len(partials[key]), key.encode()))
+            del partials[largest]
+            self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+            payload = self._encode_state(workspace_commitment, state)
         if len(payload) > _MAX_STATE_BYTES:
             # Retain authority state and make every observation-detail loss explicit.
             assert state.envelopes is not None
@@ -2235,7 +2295,7 @@ class LocalObservationStore:
                 del state.envelopes[0]
                 assert state.gaps is not None
                 self._note_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
-                payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+                payload = self._encode_state(workspace_commitment, state)
         assert state.pending_outbox is not None
         assert state.quarantine is not None
         assert state.gaps is not None
@@ -2258,18 +2318,20 @@ class LocalObservationStore:
                 )
             self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
             self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
-            payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+            payload = self._encode_state(workspace_commitment, state)
         while state.quarantine and len(payload) > _MAX_STATE_BYTES:
             evicted = state.quarantine.pop(0)
             self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
-            payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+            payload = self._encode_state(workspace_commitment, state)
         if len(payload) > _MAX_STATE_BYTES:
             raise _error(
                 PublicErrorCode.STORAGE_UNSAFE,
                 "Observation state exceeds its safe local bound.",
                 retryable=False,
             )
+        write_started = self._now_mono()
         _atomic_write(path, payload)
+        self.stage_timings_ms["write"] += (self._now_mono() - write_started) * 1000
         key = self._stat_key(path)
         if key is None:
             self._state_cache.pop(workspace_commitment, None)
@@ -2436,8 +2498,15 @@ class LocalObservationStore:
             ObservationGapCode.OUTBOX_OVERFLOW.value,
             ObservationGapCode.OUTBOX_QUARANTINED.value,
             _LOCAL_OUTBOX_OVERFLOW_GAP,
+            _LOCAL_STREAM_PARTIAL_DROPPED_GAP,
         }
         current = {code for code, seen in state.gaps.items() if seen.active} - transient
+        # A dropped stream partial means the source tail is pending a reread:
+        # the stream is observably behind its source until reconcile catches
+        # up, which is exactly SOURCE_LAG on the wire vocabulary (#289).
+        partial_gap = state.gaps.get(_LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+        if partial_gap is not None and partial_gap.active:
+            current.add(ObservationGapCode.SOURCE_LAG.value)
         if state.quarantine:
             current.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
         overflow_gap = state.gaps.get(_LOCAL_OUTBOX_OVERFLOW_GAP)

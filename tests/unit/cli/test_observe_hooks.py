@@ -1978,6 +1978,87 @@ def test_post_tool_use_still_recomputes_advice_for_a_trigger_bearing_envelope(
     assert "resolve_failed_command" in out.getvalue().decode()
 
 
+def test_timing_rows_attribute_the_store_stage(tmp_path: Path) -> None:
+    """Session-boundary timing rows carry hydrate/encode/write sub-stages (#290)."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="Stop",
+        stdin_bytes=json.dumps({"session_id": "attributed", "tool_name": "shell"}).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    rows = [
+        cast(dict[str, object], json.loads(line))
+        for line in (tmp_path / "observation/hook-diagnostics.jsonl").read_text().splitlines()
+    ]
+    timing_rows = [row for row in rows if row.get("kind") == "timing"]
+    assert timing_rows
+    stages = cast(Mapping[str, object], timing_rows[-1]["stages"])
+    assert {"store", "store_hydrate", "store_encode", "store_write"} <= set(stages)
+
+
+def test_hook_total_budget_covers_the_budgets_nested_inside_one_pass() -> None:
+    """The end-to-end contract must be satisfiable by a healthy pass (#288).
+
+    The connect preflight and drain budgets are enforced sequentially inside a
+    single pass, so a total below their sum fires hook_budget_exceeded on
+    passes that are working exactly as designed.
+    """
+
+    module = observe_hooks_module
+    preflight = module._HOOK_CONNECT_PREFLIGHT_SECONDS  # pyright: ignore[reportPrivateUsage]
+    drain = module._HOOK_DRAIN_BUDGET_SECONDS  # pyright: ignore[reportPrivateUsage]
+    end_drain = module._SESSION_END_DRAIN_BUDGET_SECONDS  # pyright: ignore[reportPrivateUsage]
+    allowance = module._HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS  # pyright: ignore[reportPrivateUsage]
+    total = module._HOOK_TOTAL_BUDGET_SECONDS  # pyright: ignore[reportPrivateUsage]
+    attach = module._AUTO_ATTACH_RETRY_BUDGET_SECONDS  # pyright: ignore[reportPrivateUsage]
+    attach_events = module._AUTO_ATTACH_RETRY_EVENTS  # pyright: ignore[reportPrivateUsage]
+    budget_for = module._hook_total_budget_seconds  # pyright: ignore[reportPrivateUsage]
+
+    # Beyond the enforced budgets, a pass pays the local stages (import,
+    # store, advice); the measured cost on a full 1 MiB store is ~0.5s.
+    assert total >= preflight + max(drain, end_drain) + 0.5
+    # Derivation, not coincidence: the total is the sum of its parts.
+    assert total == preflight + drain + allowance
+    # Events that may legitimately retry auto-attach carry that budget too.
+    for event in (*attach_events, "SessionStart"):
+        assert budget_for(event) >= total + attach
+    for event in ("PreToolUse", "PostToolUse"):
+        assert budget_for(event) == total
+
+
+def test_healthy_pass_shapes_fit_under_the_total_budget(tmp_path: Path) -> None:
+    """The two measured healthy drain shapes must not trip the diagnostic (#288)."""
+
+    from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+    from yoetz.cli.observe_hooks import (
+        _record_pass_timing,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    # Cold drain: preflight + drain + encode (~1.3s) on top of a full-store
+    # local pass (~0.55s) — the dominant healthy PreToolUse shape measured in
+    # #288. Under the old 1.0s total every such pass was flagged.
+    for event, total_seconds in (("PreToolUse", 2.1), ("PostToolUse", 1.3)):
+        _record_pass_timing(
+            event,
+            entry_started=0.0,
+            stages={"import": 25, "store": 520},
+            monotonic=lambda total=total_seconds: total,
+            _state=tmp_path,
+        )
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    reasons = dict(cast(Mapping[str, object], summary["reasons"]))
+    assert "hook_budget_exceeded" not in reasons
+
+
 def test_end_to_end_hook_budget_is_recorded_and_exceeding_it_is_diagnosed(
     tmp_path: Path,
 ) -> None:
