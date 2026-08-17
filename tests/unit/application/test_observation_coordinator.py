@@ -2112,3 +2112,284 @@ async def test_control_handlers_accept_ingest_request(tmp_path: Path) -> None:
     )
     result = await handlers[ControlMethod.OBSERVATION_INGEST](body)
     assert result["disposition"] == "accepted"
+
+
+def test_materialization_phases_claim_distinct_role_scoped_identities() -> None:
+    from yoetz.application.observation_materialize import (
+        canonical_logical_identity,
+        observation_claim_identity,
+    )
+
+    session = f"hmac-sha256:{'67' * 32}"
+
+    def _claim(env: ObservationEnvelope) -> str:
+        roles = tuple(
+            item.role for item in materialize_observation_envelope(env, task_id="task_x").drafts
+        )
+        assert roles
+        return observation_claim_identity(env, roles)
+
+    pre = _envelope(session=session, kind="PreToolUse", identity="hook:pre:call-9")
+    post = _envelope(
+        session=session, kind="PostToolUse", identity="hook:post:call-9", exit_status=0
+    )
+    unpaired = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="hook:post-unpaired:call-9",
+        exit_status=0,
+        gaps=(ObservationGapCode.UNPAIRED_EVENT.value,),
+    )
+    stream = replace(
+        _envelope(session=session, kind="item.completed", identity="stream:post:call-9"),
+        source=ObservationSource.CODEX_SESSION_STREAM,
+    )
+
+    # One host call, one canonical identity: the content-dedup key is unchanged.
+    assert len({canonical_logical_identity(env) for env in (pre, post, unpaired, stream)}) == 1
+    # The pre-action, paired-result, and unpaired-evidence phases never contend
+    # for one claim row (issue #309), while cross-source copies of the same
+    # phase still share theirs so the source-mask union stays reachable.
+    assert _claim(pre) != _claim(post)
+    assert _claim(unpaired) != _claim(post)
+    assert _claim(post) == _claim(stream)
+
+
+def _mapped_local(
+    tmp_path: Path, codex_id: str
+) -> tuple[LocalObservationStore, str, str, LifecycleMapping]:
+    local = LocalObservationStore(_state=tmp_path)
+    workspace = local.workspace_commitment(str(tmp_path.resolve()))
+    local.grant_consent(workspace)
+    session = local.bind_codex_session(workspace, codex_id)
+    mapping = LifecycleMapping(
+        mapping_version=1,
+        codex_session_id=codex_id,
+        yoetz_task_id=_task_id(),
+        yoetz_session_id=PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+        yoetz_writer_id=PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+        last_frontier=None,
+    )
+    return local, workspace, session, mapping
+
+
+@pytest.mark.anyio
+async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path: Path) -> None:
+    """Regression for issue #309 against the real SQLite claim repository.
+
+    A Pre/Post pair for one ``tool_call_id`` must both materialize without
+    ``STORAGE_CORRUPT``, and a hook/stream copy of the paired result must merge
+    to ``source_mask == 3``.
+    """
+
+    from types import SimpleNamespace
+
+    import apsw
+
+    from yoetz.application.observation_materialize import (
+        canonical_logical_identity as _identity,
+    )
+    from yoetz.application.observation_materialize import (
+        observation_operation_digest as _digest,
+    )
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "claim-repro-309")
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": mapping.yoetz_task_id, "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=store,
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            del released
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Coordinator(ObservationCoordinator):
+        async def _capture_content(  # type: ignore[override]
+            self, runtime: object, store: object, **kwargs: object
+        ) -> tuple[tuple[str, ...], bool]:
+            del runtime, store, kwargs
+            return ((), False)
+
+        async def _append_materialized(  # type: ignore[override]
+            self,
+            runtime: object,
+            envelope: ObservationEnvelope,
+            batch: object,
+            *,
+            legacy_writer_id: str | None = None,
+        ) -> tuple[str, str, None]:
+            del legacy_writer_id
+            digest = _digest(
+                task_id=runtime.task_id,  # type: ignore[attr-defined]
+                session_id=runtime.session_id,  # type: ignore[attr-defined]
+                writer_id=runtime.writer_id,  # type: ignore[attr-defined]
+                logical_identity=_identity(envelope),
+                draft_roles=tuple(item.role for item in batch.drafts),  # type: ignore[attr-defined]
+            )
+            return self._stable_operation_id(digest), digest, None
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+
+    pre = _envelope(session=session, kind="PreToolUse", identity="hook:pre:call-309", ordinal=1)
+    post = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="hook:post:call-309",
+        ordinal=2,
+        exit_status=0,
+    )
+    stream_post = replace(
+        _envelope(
+            session=session,
+            kind="item.completed",
+            identity="stream:post:call-309",
+            ordinal=3,
+        ),
+        source=ObservationSource.CODEX_SESSION_STREAM,
+    )
+
+    for envelope in (pre, post, stream_post):
+        result = await coordinator.ingest_request(
+            ObservationIngestRequest(codex_session_id="claim-repro-309", envelope=envelope)
+        )
+        assert result.disposition is ObservationIngestDisposition.ACCEPTED, result.reason
+
+    assert not coordinator._storage_corrupt_sessions  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    rows = db.execute(
+        "SELECT source_mask FROM observation_logical_identity ORDER BY source_mask"
+    ).fetchall()
+    # Pre keeps its own hook-only claim; the paired result claim unions hook and
+    # stream coverage into source_mask == 3 (previously dead code, issue #309).
+    assert [row[0] for row in rows] == [1, 3]
+
+
+@pytest.mark.anyio
+async def test_identity_claim_conflict_rejects_one_envelope_without_latching(
+    tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "claim-conflict-309")
+    ingested: list[str] = []
+
+    class _ConflictStore:
+        def grant_consent(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def bind_session(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
+            ingested.append(envelope.source_identity)
+            return ObservationIngestResult(
+                ObservationIngestDisposition.ACCEPTED, None, envelope.cursor
+            )
+
+        def record_logical_identity_claim(self, **kwargs: object) -> None:
+            del kwargs
+            raise PublicOperationError(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation logical identity conflicts.",
+                False,
+            )
+
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=_ConflictStore(),
+    )
+
+    class _RuntimePort:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def route(self, command: object) -> object:
+            del command
+            self.calls += 1
+            return runtime
+
+        async def release(self, released: object) -> None:
+            del released
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Coordinator(ObservationCoordinator):
+        async def _capture_content(  # type: ignore[override]
+            self, runtime: object, store: object, **kwargs: object
+        ) -> tuple[tuple[str, ...], bool]:
+            del runtime, store, kwargs
+            return ((), False)
+
+        async def _append_materialized(  # type: ignore[override]
+            self, *args: object, **kwargs: object
+        ) -> tuple[str, str, None]:
+            del args, kwargs
+            return ("op_" + "0" * 32, "sha256:" + "ab" * 32, None)
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    runtime_port = _RuntimePort()
+    coordinator = _Coordinator(
+        runtime=runtime_port,  # type: ignore[arg-type]
+        local=local,
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+
+    first = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id="claim-conflict-309",
+            envelope=_envelope(session=session, kind="PostToolUse", identity="hook:c1"),
+        )
+    )
+    second = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id="claim-conflict-309",
+            envelope=_envelope(session=session, kind="PostToolUse", identity="hook:c2", ordinal=2),
+        )
+    )
+
+    # A claim conflict rejects only its own envelope as dedup_conflict; the
+    # session is never latched, so the next envelope still reaches the store
+    # (issue #309: one conflict previously quarantined 187 envelopes).
+    assert first.disposition is ObservationIngestDisposition.REJECTED
+    assert first.reason == ObservationGapCode.DEDUP_CONFLICT.value
+    assert second.reason == ObservationGapCode.DEDUP_CONFLICT.value
+    assert runtime_port.calls == 2
+    assert ingested == ["hook:c1", "hook:c2"]
+    assert not coordinator._storage_corrupt_sessions  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001

@@ -454,6 +454,15 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- Correlated Codex `PreToolUse` and `PostToolUse` phases no longer claim one SQLite logical identity
+  with incompatible operation digests. The canonical host-call identity remains the content and
+  ledger-dedup key, while the durable claim key is additionally scoped by the materialization
+  version and exact draft-role tuple; pre-action and paired-result phases therefore cannot collide,
+  and hook/stream copies of the same paired phase still merge to `source_mask == 3`. Claims record
+  the source-independent materialization version rather than the source cursor version. A genuine
+  claim conflict now quarantines only that envelope as `dedup_conflict`; only bundle corruption arms
+  the READY-generation session latch (issue #309).
+
 - A Codex hook with a stale lifecycle mapping treated the daemon's `SESSION_CONFLICT` or
   `SESSION_NOT_FOUND` response as proof that the service was unavailable, then repeated that false
   advisory forever because it retained the old session and writer ids. Status errors now pass
