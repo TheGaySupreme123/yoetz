@@ -501,6 +501,8 @@ def handle_session_start(
             if kind == "stale":
                 from yoetz.cli.hook_diagnostics import record_hook_diagnostic
 
+                # The delegated observation path cannot reacquire the session lock
+                # held here, so this branch owns the resume event's diagnostic.
                 with contextlib.suppress(Exception):
                     record_hook_diagnostic("mapping_stale", "SessionStart", _state=_state)
                 _stdout_json(_context_output("SessionStart", _STALE_MAPPING_CONTEXT), stdout)

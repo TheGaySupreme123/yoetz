@@ -363,7 +363,7 @@ def test_session_start_stale_mapping_is_not_reported_unavailable(
     # handle_post_tool_use, never through hook-side guessing.
     assert load_mapping("codex-stale", _state=tmp_path) is not None
     diagnostics = (tmp_path / "observation" / "hook-diagnostics.jsonl").read_text()
-    assert '"reason":"mapping_stale"' in diagnostics
+    assert diagnostics.count('"reason":"mapping_stale"') == 1
 
 
 def test_session_start_vault_locked_failure_is_locked(tmp_path: Path) -> None:
