@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import Final, cast
@@ -72,16 +73,32 @@ _STAGES: Final = frozenset(
         "drain",
         "import",
         "store",
+        # Formerly unwindowed regions of the pass (#310/#311): workspace
+        # resolution and the consent probe before the store window opens, and
+        # advice selection, the stdout write and both delivery commits after
+        # the drain window closes. Together with 'import' and 'store' they
+        # partition the pass, and 'unattributed' names whatever they miss.
+        "deliver",
+        "resolve",
+        "unattributed",
         # Store sub-stage attribution (#290): parse+hydrate of the state file,
         # canonical encode of every size projection and save, and the fsync'd
-        # atomic write. The remainder of 'store' is mutation time.
+        # atomic write. The remainder of 'store' is mutation time. Lock wait
+        # (#310) is queueing behind another process, not work, and spans the
+        # whole pass rather than partitioning any one window.
         "store_encode",
         "store_hydrate",
+        "store_lock_wait",
         "store_write",
         "total",
     }
 )
 _MAX_STAGE_MS: Final = 3_600_000
+# The retained file spans days, so an all-time tally reports a failure that was
+# diagnosed and fixed two days ago exactly like one happening right now (#310).
+# Every count is therefore paired with a recent-window count, and every extreme
+# with the moment it was observed, so a reader can date what it is looking at.
+_RECENT_WINDOW_SECONDS: Final = 3_600
 _thread_lock = Lock()
 
 
@@ -91,11 +108,27 @@ def _closed(value: object, allowed: frozenset[str], fallback: str) -> str:
     return fallback
 
 
-def _timestamp() -> str:
-    now = datetime.now(UTC)
+def _render(moment: datetime) -> str:
     return (
-        now.replace(microsecond=(now.microsecond // 1000) * 1000).isoformat().replace("+00:00", "Z")
+        moment.astimezone(UTC)
+        .replace(microsecond=(moment.microsecond // 1000) * 1000)
+        .isoformat()
+        .replace("+00:00", "Z")
     )
+
+
+def _timestamp() -> str:
+    return _render(datetime.now(UTC))
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    """Return the recorded moment, or None when the row's stamp is unreadable."""
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def record_hook_diagnostic(
@@ -210,13 +243,78 @@ def record_hook_timing(
     )
 
 
-def hook_diagnostic_summary(*, _state: Path | None = None) -> JsonObject:
-    """Return a bounded structural summary of the current and rotated diagnostics."""
+@dataclass(slots=True)
+class _Recency:
+    """One reason's tally paired with the span of moments it actually covers."""
 
-    root = state_dir() if _state is None else _state
-    directory = root / "observation"
+    count: int = 0
+    recent: int = 0
+    first: datetime | None = None
+    last: datetime | None = None
+
+    def observe(self, moment: datetime | None, *, fresh: bool) -> None:
+        self.count += 1
+        if fresh:
+            self.recent += 1
+        if moment is None:
+            return
+        if self.first is None or moment < self.first:
+            self.first = moment
+        if self.last is None or moment > self.last:
+            self.last = moment
+
+    def as_json(self) -> JsonObject:
+        return JsonObject(
+            {
+                "count": self.count,
+                "first_seen": None if self.first is None else _render(self.first),
+                "last_seen": None if self.last is None else _render(self.last),
+                "recent": self.recent,
+            }
+        )
+
+
+@dataclass(slots=True)
+class _Timings:
+    """Timing rows, kept datable so a one-off extreme is not read as the norm."""
+
+    count: int = 0
+    recent: int = 0
+    last_ms: int | None = None
+    max_ms: int | None = None
+    max_at: datetime | None = None
+    recent_max_ms: int | None = None
+
+    def observe(self, ms: int, moment: datetime | None, *, fresh: bool) -> None:
+        self.count += 1
+        self.last_ms = ms
+        if self.max_ms is None or ms > self.max_ms:
+            self.max_ms = ms
+            self.max_at = moment
+        if not fresh:
+            return
+        self.recent += 1
+        if self.recent_max_ms is None or ms > self.recent_max_ms:
+            self.recent_max_ms = ms
+
+    def as_json(self) -> JsonObject:
+        return JsonObject(
+            {
+                "count": self.count,
+                "last_ms": self.last_ms,
+                "max_ms": self.max_ms,
+                "max_ts": None if self.max_at is None else _render(self.max_at),
+                "recent_count": self.recent,
+                "recent_max_ms": self.recent_max_ms,
+            }
+        )
+
+
+def _read_rows(directory: Path) -> tuple[list[dict[str, str]], list[tuple[int, str]]]:
+    """Return retained failure rows and timing rows, oldest retained file first."""
+
     rows: list[dict[str, str]] = []
-    timings: list[int] = []
+    timings: list[tuple[int, str]] = []
     try:
         ensure_owner_only_dir(directory)
         for path in (
@@ -249,8 +347,9 @@ def hook_diagnostic_summary(*, _state: Path | None = None) -> JsonObject:
                     # Timing rows are a second shape on the same file; they must
                     # never inflate the failure-reason counts.
                     total = row.get("ms")
-                    if row.get("kind") == "timing" and type(total) is int:
-                        timings.append(total)
+                    stamp = row.get("ts")
+                    if row.get("kind") == "timing" and type(total) is int and type(stamp) is str:
+                        timings.append((total, stamp))
                     continue
                 if set(row) != {"event", "reason", "ts"} or any(
                     type(row.get(key)) is not str for key in ("event", "reason", "ts")
@@ -264,32 +363,55 @@ def hook_diagnostic_summary(*, _state: Path | None = None) -> JsonObject:
                     }
                 )
     except OSError, PathSafetyError:
-        return JsonObject(
-            {
-                "count": 0,
-                "last_event": None,
-                "last_reason": None,
-                "reasons": JsonObject({}),
-                "timings": JsonObject({"count": 0, "last_ms": None, "max_ms": None}),
-            }
-        )
-    reasons: dict[str, int] = {}
+        return [], []
+    return rows, timings
+
+
+def hook_diagnostic_summary(
+    *,
+    _state: Path | None = None,
+    _now: datetime | None = None,
+) -> JsonObject:
+    """Return a bounded structural summary of the current and rotated diagnostics.
+
+    Every tally is reported twice — over everything retained, and over the last
+    `window_seconds` — and every count carries the span it covers, so a reader
+    can tell a live failure from one that was fixed days ago (#310).
+    """
+
+    root = state_dir() if _state is None else _state
+    rows, timings = _read_rows(root / "observation")
+    now = datetime.now(UTC) if _now is None else _now.astimezone(UTC)
+    horizon = now - timedelta(seconds=_RECENT_WINDOW_SECONDS)
+    overall = _Recency()
+    reasons: dict[str, _Recency] = {}
     for row in rows:
-        reason = row["reason"]
-        reasons[reason] = reasons.get(reason, 0) + 1
+        moment = _parse_timestamp(row["ts"])
+        # An unreadable stamp is never counted as recent: an undatable row is
+        # exactly the thing this summary must stop presenting as live.
+        fresh = moment is not None and horizon <= moment <= now
+        overall.observe(moment, fresh=fresh)
+        reasons.setdefault(row["reason"], _Recency()).observe(moment, fresh=fresh)
+    timing = _Timings()
+    for total, stamp in timings:
+        moment = _parse_timestamp(stamp)
+        timing.observe(total, moment, fresh=moment is not None and horizon <= moment <= now)
     last = rows[-1] if rows else None
     return JsonObject(
         {
-            "count": len(rows),
+            "count": overall.count,
+            "first_seen": None if overall.first is None else _render(overall.first),
             "last_event": None if last is None else last["event"],
             "last_reason": None if last is None else last["reason"],
-            "reasons": JsonObject(dict(sorted(reasons.items(), key=lambda item: item[0].encode()))),
-            "timings": JsonObject(
+            "last_seen": None if overall.last is None else _render(overall.last),
+            "reasons": JsonObject(
                 {
-                    "count": len(timings),
-                    "last_ms": timings[-1] if timings else None,
-                    "max_ms": max(timings) if timings else None,
+                    name: tally.as_json()
+                    for name, tally in sorted(reasons.items(), key=lambda item: item[0].encode())
                 }
             ),
+            "recent_count": overall.recent,
+            "timings": timing.as_json(),
+            "window_seconds": _RECENT_WINDOW_SECONDS,
         }
     )

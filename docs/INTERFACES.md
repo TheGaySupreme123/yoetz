@@ -2479,11 +2479,18 @@ the hook preserves the mapping, tells the agent to call `start` again, and accep
 successful `start` result as authority for replacement ids. `OPERATION_PENDING`, `BUNDLE_BUSY`, and
 `FRONTIER_CONFLICT` are transient status reads; vault and repository-privacy failures retain their
 distinct recovery advisories. The closed public-error table is exhaustive so a new code cannot
-silently inherit an unrelated advisory (issue #308). Workspace-global rejections (`vault_locked`,
-disabled, paused) end the pass.
+silently inherit an unrelated advisory (issue #308). `observe status` retains the current and rotated
+hook-diagnostic history, but pairs every all-time reason count with `first_seen`, `last_seen`, and a
+count in the closed one-hour `window_seconds`; timings likewise date the all-time maximum and report
+a separate recent maximum. Unreadable or future timestamps remain retained but are never classified
+as recent, so a fixed historical failure cannot masquerade as live degradation (issue #310).
+Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
 A `service_unavailable` rejection retires that session's lane for the pass while other sessions
 remain eligible; no later row may step over a failed lane head. Local observation-store acquisition is capped at two
-seconds for both the process-local reentrant lock and the cross-process flock. Coordinator and
+seconds for both the process-local reentrant lock and the cross-process flock. Hook timing rows
+attribute that queueing as `store_lock_wait`, cover the previously unwindowed resolve/deliver
+regions, and name any remaining wall-time difference as `unattributed`; nested store sub-stages are
+reported separately from the end-to-end partition (issues #310 and #311). Coordinator and
 sweeper calls use separate bounded executors, so cancellation cannot strand an exit-blocking flock
 wait or exhaust the shared default executor. `observation_storage_corrupt` is terminal for its Codex
 session in the current READY generation: the coordinator remembers that session after the first
@@ -2496,7 +2503,10 @@ budget, and by a 14-day age measured from a store-authored
 quarantined-at time behind the trusted-clock epoch fence; an operator can drop it explicitly with
 `yoetz observe reclaim`. Every drop — cap, age, or reclaim — retains aggregate commitment, count
 (evictions and reclaims counted separately), first/last receipt times, and
-`quarantine_detail_evicted`.
+`quarantine_detail_evicted`. The `truncated_payload` gap is live rather than permanent: a later
+save resolves its active flag only when that save evicts nothing and leaves one-eighth of the state
+budget free. Merely landing under the cap cannot clear the same loss it just recorded; the durable
+gap history remains after recovery, and renewed shedding reactivates it (issue #310).
 
 Routine-read materialization follows ADR-022's rate policy. A service-owned structural
 `action=routine_read` label is derived only for the closed direct-read tool set or a conservatively
