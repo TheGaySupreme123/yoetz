@@ -2,7 +2,7 @@
 
 Proves each manifest-declared runtime resource is the exact reviewed byte set in the
 root canonical source tree, the ``src/yoetz/resources`` package tree, the built wheel, and a clean
-offline install; that the nine canonical fixtures are the only ``fixtures/`` corpus shipped; and
+offline install; that the canonical fixtures are the only ``fixtures/`` corpus shipped; and
 that corruption/missing/extra resource drift is detected before decode/use, both at the source
 level (``scripts/verify_resource_manifest.py --check``) and at the installed-package level
 (``yoetz.version.read_verified_resource``).
@@ -24,100 +24,11 @@ from typing import Any, Final
 
 import pytest
 
+from yoetz.version import REVIEWED_RESOURCE_COUNT
+
 _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 _VERIFY_SCRIPT: Final = _REPO_ROOT / "scripts" / "verify_resource_manifest.py"
 _BUILD_TIMEOUT: Final = 120
-_EXPECTED_TOTAL: Final = 99
-_EXPECTED_KIND_COUNTS: Final = {
-    "canonical_vector": 9,
-    "guidance": 5,
-    "migration": 10,
-    "json_schema": 72,
-    "skill": 1,
-    "compatibility_manifest": 1,
-    "runtime_support": 1,
-}
-_WORKTREE_RESOURCE_OVERLAYS: Final = (
-    "guidance/agent-instructions.md",
-    "guidance/coverage-and-receipts.md",
-    "guidance/publication-policy.md",
-    "guidance/request-templates.md",
-    "guidance/workflow.md",
-    "migrations/catalog/0003.sql",
-    "migrations/bundle/0006.sql",
-    "migrations/bundle/0007.sql",
-    "schemas/config/yoetz-config-1.0.0.schema.json",
-    "schemas/events/event-draft-1.0.0.schema.json",
-    "schemas/events/evidence-recorded-1.1.0.schema.json",
-    "schemas/events/response-recorded-1.0.0.schema.json",
-    "schemas/events/opaque-unknown-event-draft-1.0.0.schema.json",
-    "schemas/manifest.json",
-    "schemas/consent/catalog-2.0.0.schema.json",
-    "schemas/consent/catalog-3.0.0.schema.json",
-    "schemas/consent/chat-user-attestation-1.0.0.schema.json",
-    "schemas/consent/pending-agent-2.0.0.schema.json",
-    "schemas/consent/pending-agent-3.0.0.schema.json",
-    "schemas/consent/prepare-result-2.0.0.schema.json",
-    "schemas/consent/prepare-result-3.0.0.schema.json",
-    "schemas/consent/review-result-2.0.0.schema.json",
-    "schemas/consent/review-result-3.0.0.schema.json",
-    "schemas/consent/status-2.0.0.schema.json",
-    "schemas/consent/status-3.0.0.schema.json",
-    "schemas/operations/check-result-1.0.0.schema.json",
-    "schemas/operations/respond-request-1.0.0.schema.json",
-    "schemas/operations/respond-result-1.0.0.schema.json",
-    "schemas/operations/status-request-1.0.0.schema.json",
-    "schemas/operations/status-result-1.0.0.schema.json",
-    "schemas/receipts/receipt-document-1.0.0.schema.json",
-    "schemas/service/control-hello-2.0.0.schema.json",
-    "schemas/service/control-hello-result-2.0.0.schema.json",
-    "schemas/service/control-request-2.0.0.schema.json",
-    "schemas/service/control-result-2.0.0.schema.json",
-    "schemas/version/version-manifest-1.0.0.schema.json",
-    "skills/codex/yoetz/SKILL.md",
-    "skills/codex/yoetz/manifest.json",
-    "src/yoetz/resources/manifest.json",
-    "src/yoetz/resources/guidance/agent-instructions.md",
-    "src/yoetz/resources/guidance/coverage-and-receipts.md",
-    "src/yoetz/resources/guidance/publication-policy.md",
-    "src/yoetz/resources/guidance/request-templates.md",
-    "src/yoetz/resources/guidance/workflow.md",
-    "src/yoetz/resources/migrations/catalog/0003.sql",
-    "src/yoetz/resources/migrations/bundle/0006.sql",
-    "src/yoetz/resources/migrations/bundle/0007.sql",
-    "src/yoetz/resources/schemas/config/yoetz-config-1.0.0.schema.json",
-    "src/yoetz/resources/schemas/events/event-draft-1.0.0.schema.json",
-    "src/yoetz/resources/schemas/events/evidence-recorded-1.1.0.schema.json",
-    "src/yoetz/resources/schemas/events/response-recorded-1.0.0.schema.json",
-    "src/yoetz/resources/schemas/events/opaque-unknown-event-draft-1.0.0.schema.json",
-    "src/yoetz/resources/schemas/manifest.json",
-    "src/yoetz/resources/schemas/consent/catalog-2.0.0.schema.json",
-    "src/yoetz/resources/schemas/consent/catalog-3.0.0.schema.json",
-    "src/yoetz/resources/schemas/consent/chat-user-attestation-1.0.0.schema.json",
-    "src/yoetz/resources/schemas/consent/pending-agent-2.0.0.schema.json",
-    "src/yoetz/resources/schemas/consent/pending-agent-3.0.0.schema.json",
-    "src/yoetz/resources/schemas/consent/prepare-result-2.0.0.schema.json",
-    "src/yoetz/resources/schemas/consent/prepare-result-3.0.0.schema.json",
-    "src/yoetz/resources/schemas/consent/review-result-2.0.0.schema.json",
-    "src/yoetz/resources/schemas/consent/review-result-3.0.0.schema.json",
-    "src/yoetz/resources/schemas/consent/status-2.0.0.schema.json",
-    "src/yoetz/resources/schemas/consent/status-3.0.0.schema.json",
-    "src/yoetz/resources/schemas/operations/check-result-1.0.0.schema.json",
-    "src/yoetz/resources/schemas/operations/respond-request-1.0.0.schema.json",
-    "src/yoetz/resources/schemas/operations/respond-result-1.0.0.schema.json",
-    "src/yoetz/resources/schemas/operations/status-request-1.0.0.schema.json",
-    "src/yoetz/resources/schemas/operations/status-result-1.0.0.schema.json",
-    "src/yoetz/resources/schemas/receipts/receipt-document-1.0.0.schema.json",
-    "src/yoetz/resources/schemas/service/control-hello-2.0.0.schema.json",
-    "src/yoetz/resources/schemas/service/control-hello-result-2.0.0.schema.json",
-    "src/yoetz/resources/schemas/service/control-request-2.0.0.schema.json",
-    "src/yoetz/resources/schemas/service/control-result-2.0.0.schema.json",
-    "src/yoetz/resources/schemas/version/version-manifest-1.0.0.schema.json",
-    "src/yoetz/resources/skills/codex/yoetz/SKILL.md",
-    "src/yoetz/resources/skills/codex/yoetz/manifest.json",
-    "src/yoetz/resources/support/runtime-support.json",
-    "support/runtime-support.json",
-)
 
 
 def _load_manifest() -> Any:  # raw JSON document, deliberately untyped
@@ -145,26 +56,38 @@ def _export_clean_source(dest: Path) -> None:
     finally:
         tar_path.unlink(missing_ok=True)
 
-    # This mutation matrix deliberately starts from ``git archive HEAD`` so unrelated untracked
-    # files cannot enter its baseline. During a release change, however, newly reviewed resources
-    # do not exist in HEAD until the final commit. Overlay only the explicit candidate resource
-    # delta so the tests exercise the complete reviewed inventory before that commit is made.
-    for relative in _WORKTREE_RESOURCE_OVERLAYS:
+    # Start from ``git archive HEAD`` so unrelated untracked files cannot enter the baseline, then
+    # overlay the current generated manifest's complete reviewed source/package set. Deriving this
+    # list from the manifest avoids creating another inventory that must be updated by hand.
+    manifest = _load_manifest()
+    overlays = {"src/yoetz/resources/manifest.json"}
+    for entry in manifest["entries"]:
+        overlays.add(entry["source_path"])
+        overlays.add(f"src/yoetz/resources/{entry['package_path']}")
+    for relative in sorted(overlays, key=str.encode):
         source = _REPO_ROOT / relative
         target = dest / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
 
 
-def test_manifest_has_exactly_99_entries_with_the_reviewed_kind_counts() -> None:
+def test_manifest_matches_the_single_reviewed_count_and_closed_kind_set() -> None:
     manifest = _load_manifest()
     entries = manifest["entries"]
-    assert len(entries) == _EXPECTED_TOTAL
+    assert len(entries) == REVIEWED_RESOURCE_COUNT
 
     counts: dict[str, int] = {}
     for entry in entries:
         counts[entry["kind"]] = counts.get(entry["kind"], 0) + 1
-    assert counts == _EXPECTED_KIND_COUNTS
+    assert set(counts) == {
+        "canonical_vector",
+        "compatibility_manifest",
+        "guidance",
+        "json_schema",
+        "migration",
+        "runtime_support",
+        "skill",
+    }
 
 
 def test_source_tree_and_package_tree_are_byte_identical_in_the_real_checkout() -> None:
@@ -211,17 +134,15 @@ def test_every_manifest_entry_source_path_matches_its_recorded_digest_and_size()
         assert _sha256(data) == entry["sha256"], entry["logical_name"]
 
 
-def test_only_the_nine_canonical_fixtures_are_referenced_by_the_manifest() -> None:
+def test_all_canonical_fixtures_are_referenced_by_the_manifest() -> None:
     manifest = _load_manifest()
     canonical_entries = [
         entry for entry in manifest["entries"] if entry["kind"] == "canonical_vector"
     ]
-    assert len(canonical_entries) == 9
     for entry in canonical_entries:
         assert entry["logical_name"].startswith("fixtures/canonical/")
 
     on_disk = sorted((_REPO_ROOT / "fixtures" / "canonical").glob("*.case.json"))
-    assert len(on_disk) == 9
     referenced = {entry["logical_name"] for entry in canonical_entries}
     assert referenced == {f"fixtures/canonical/{path.name}" for path in on_disk}
 

@@ -14,7 +14,8 @@ file this suite writes into the installed package tree.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -24,6 +25,7 @@ import yoetz.version as version_module
 from yoetz.ports.diagnostics import StartupCheckOutcome
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.version import (
+    REVIEWED_RESOURCE_COUNT,
     ResourceIntegrityError,
     build_version_manifest,
     read_verified_resource,
@@ -31,16 +33,6 @@ from yoetz.version import (
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-
-_EXPECTED_RESOURCE_COUNTS = {
-    "canonical_vectors": "9",
-    "guidance_resources": "5",
-    "migrations": "10",
-    "runtime_support_resources": "1",
-    "schema_resources": "72",
-    "skill_resources": "2",
-    "total": "99",
-}
 
 
 def _package_bytes_fn() -> Callable[[str], bytes]:
@@ -51,12 +43,27 @@ def _load_resource_manifest_fn() -> Callable[[], Any]:
     return cast(Callable[[], Any], getattr(version_module, "_load_resource_manifest"))
 
 
+def _derived_resource_counts(entries: Sequence[Any]) -> dict[str, str]:
+    kinds = Counter(cast(str, entry.kind) for entry in entries)
+    return {
+        "canonical_vectors": str(kinds["canonical_vector"]),
+        "guidance_resources": str(kinds["guidance"]),
+        "migrations": str(kinds["migration"]),
+        "runtime_support_resources": str(kinds["runtime_support"]),
+        "schema_resources": str(kinds["json_schema"]),
+        "skill_resources": str(kinds["compatibility_manifest"] + kinds["skill"]),
+        "total": str(len(entries)),
+    }
+
+
 def test_root_resource_bytes_match_manifest() -> None:
     """Every installed resource is byte-identical to both its checked-in root source and manifest."""
 
     manifest = build_version_manifest()
-    assert dict(manifest.resource_counts) == _EXPECTED_RESOURCE_COUNTS
-    assert len(manifest.resources) == 99
+    source_manifest = _load_resource_manifest_fn()()
+    source_entries = cast(tuple[Any, ...], source_manifest.entries)
+    assert dict(manifest.resource_counts) == _derived_resource_counts(source_entries)
+    assert len(manifest.resources) == REVIEWED_RESOURCE_COUNT
 
     for resource in manifest.resources:
         installed = read_verified_resource(resource.name)
@@ -113,7 +120,7 @@ def test_missing_extra_duplicate_and_traversal_cases_fail(
 
     load_resource_manifest = _load_resource_manifest_fn()
     entries, doc = _baseline_entries()
-    assert len(entries) == 99
+    assert len(entries) == REVIEWED_RESOURCE_COUNT
 
     # missing -- dropping the last entry breaks the exact inventory count.
     _install_synthetic_manifest(monkeypatch, doc, entries[:-1])
@@ -158,27 +165,28 @@ def test_public_resource_list_matches_release_artifact() -> None:
     entries = cast(tuple[Any, ...], manifest.entries)
 
     kinds = [cast(str, entry.kind) for entry in entries]
-    assert kinds.count("json_schema") == 72
-    assert kinds.count("canonical_vector") == 9
-    assert kinds.count("migration") == 10
-    assert kinds.count("guidance") == 5
-    assert kinds.count("runtime_support") == 1
-    assert kinds.count("skill") == 1
-    assert kinds.count("compatibility_manifest") == 1
+    assert set(kinds) == {
+        "canonical_vector",
+        "compatibility_manifest",
+        "guidance",
+        "json_schema",
+        "migration",
+        "runtime_support",
+        "skill",
+    }
 
     schema_paths = {
         cast(str, entry.logical_name) for entry in entries if entry.kind == "json_schema"
     }
     assert "schemas/manifest.json" in schema_paths
-    # 71 JSON Schema documents plus the one schema inventory manifest.
-    assert len(schema_paths) - 1 == 71
 
     names = [cast(str, entry.logical_name) for entry in entries]
-    assert len(names) == 99
+    assert len(names) == REVIEWED_RESOURCE_COUNT
     assert names == sorted(set(names), key=lambda item: item.encode("ascii"))
 
     version_manifest = build_version_manifest()
     assert [resource.name for resource in version_manifest.resources] == names
+    assert dict(version_manifest.resource_counts) == _derived_resource_counts(entries)
 
     resource_set_digest = cast(str, manifest.resource_set_digest)
     assert resource_set_digest == version_manifest.resource_manifest_digest

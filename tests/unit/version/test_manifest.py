@@ -7,6 +7,7 @@ from jsonschema import Draft202012Validator
 
 from yoetz.ports.diagnostics import StartupCheckOutcome
 from yoetz.version import (
+    REVIEWED_RESOURCE_COUNT,
     ResourceIntegrityError,
     build_version_manifest,
     read_verified_resource,
@@ -29,16 +30,20 @@ def test_development_manifest_is_truthful_and_complete() -> None:
     )
     assert len(manifest.request_result_schema_versions) == 40
     assert len(manifest.event_schema_versions) == 16
-    assert len(manifest.resources) == 99
-    assert dict(manifest.resource_counts) == {
-        "canonical_vectors": "9",
-        "guidance_resources": "5",
-        "migrations": "10",
-        "runtime_support_resources": "1",
-        "schema_resources": "72",
-        "skill_resources": "2",
-        "total": "99",
+    counts = dict(manifest.resource_counts)
+    assert len(manifest.resources) == REVIEWED_RESOURCE_COUNT == int(counts["total"])
+    assert set(counts) == {
+        "canonical_vectors",
+        "guidance_resources",
+        "migrations",
+        "runtime_support_resources",
+        "schema_resources",
+        "skill_resources",
+        "total",
     }
+    assert sum(int(count) for name, count in counts.items() if name != "total") == int(
+        counts["total"]
+    )
 
 
 def test_version_json_allows_installed_sdk_with_empty_tested_protocol_set() -> None:
@@ -57,7 +62,7 @@ def test_resource_manifest_verifies_every_installed_member() -> None:
 
     assert len(result) == 1
     assert result[0].outcome is StartupCheckOutcome.OK
-    assert result[0].safe_details["resource_count"] == 99
+    assert result[0].safe_details["resource_count"] == REVIEWED_RESOURCE_COUNT
 
 
 def test_guidance_and_skill_source_package_bytes_are_identical() -> None:

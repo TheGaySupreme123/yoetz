@@ -382,7 +382,22 @@ def test_weak_or_stale_response_and_supported_rejection_nontrigger() -> None:
         responses={fnd(1): record(hollow, 2)},
         extra_refs=(evt(99),),
     )
+    # This pack is a closed rule table and still owns the hollow rejection on its own. The overlap
+    # with research-evidence is collapsed at composition, not by this pack falling silent; see
+    # tests/unit/application/test_verdict_rules.py.
     assert FindingKind.WEAK_OR_STALE_RESPONSE in _kinds(trigger)
+
+    stale = replace(
+        hollow,
+        finding_frontier=replace(FRONTIER, sequence=FRONTIER.sequence - 1),
+    )
+    stale_case = make_case(
+        findings={fnd(1): record(finding, 1)},
+        responses={fnd(1): record(stale, 2)},
+        extra_refs=(evt(99),),
+    )
+    assert FindingKind.WEAK_OR_STALE_RESPONSE in _kinds(stale_case)
+
     evidence = _evidence(1)
     supported = ResponseRecordedPayload(
         finding_id=fnd(1),
@@ -398,6 +413,19 @@ def test_weak_or_stale_response_and_supported_rejection_nontrigger() -> None:
         extra_refs=(evt(99),),
     )
     assert FindingKind.WEAK_OR_STALE_RESPONSE not in _kinds(near)
+
+    legacy_unknown = replace(
+        BASE_COVERAGE,
+        known_gaps=("evidence_digest_subject_legacy_unknown",),
+    )
+    work_only_gap = make_case(
+        evidence={evd(1): evidence_record(evidence, 1)},
+        findings={fnd(1): record(finding, 2)},
+        responses={fnd(1): record(supported, 3)},
+        extra_refs=(evt(99),),
+        coverage_overrides={evd(1): legacy_unknown},
+    )
+    assert FindingKind.WEAK_OR_STALE_RESPONSE in _kinds(work_only_gap)
 
 
 def test_provenance_dispute_does_not_trigger_weak_response_penalty() -> None:

@@ -243,7 +243,7 @@ availability, structured-output interoperability, provider data use, or E-007 ca
    authenticated endpoint is absent. The launcher executes only the current installed
    `python -m yoetz service run`, supplies no caller path/config/provider/secret argument, strips
    secret-shaped inherited environment names, detaches using the reviewed platform process flags,
-   and reconnects to the singleton winner. The service stops after 1,800 seconds of true
+   and reconnects to the singleton winner. The service stops after 7,200 seconds of true
    quiescence; a later MCP tool call may start a generation-fenced successor. A locked successor
    remains locked and still requires local-human unlock.
 

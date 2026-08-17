@@ -11,6 +11,14 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- The idle relock clock now counts harness observation rows resolved by the ready sweep as
+  activity, so a live workspace whose hooks keep delivering events is never relocked underneath
+  an open task session — however long the run — while a workspace that truly goes quiet still
+  relocks one full window after its spool runs dry. The default idle-relock interval is now 3600
+  seconds (was 900, shorter than one legitimate implementation phase under the prescribed publish
+  cadence), and the process-idle stop is now 7200 seconds so the in-process soft relock — which
+  re-readies on the next ordinary call — always comes before the full process stop (issue #291).
+
 - MCP success summaries now preserve the canonical frontier head digest and, for generic
   operations such as `start`, returned task/session/writer identifiers after strict shape
   validation. The bounded text fallback can therefore seed the next request even when a host drops
@@ -422,6 +430,13 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- An evidence-free rejection or waiver of a current deterministic finding minted two actionable
+  findings, `questionable_finding_rejection` and `weak_or_stale_response`, doubling the response
+  burden at every level. `check` now collapses that overlap when it composes the built-in packs,
+  keeping only `questionable_finding_rejection`. `weak_or_stale_response` still stands on its own
+  for stale responses, for unsupported current responses to semantic findings, for stricter
+  work-integrity-only evidence exclusions, and whenever the research-evidence pack did not run
+  (issue #285).
 - Codex Step 0 treated an empty MCP `resources/read` as success and advertised that guidance URIs
   "resolve without any repository checkout". The skill now stops on an empty body, calls
   `read_guidance` with the same URI, and opens the matching installed `references/<name>.md` copy

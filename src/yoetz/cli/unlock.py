@@ -598,7 +598,7 @@ def _render_preview(terminal: _CeremonyTerminal, preview: HumanPreview) -> None:
         terminal.write(
             f"Action: change idle relock for service generation {preview.service_generation}\n"
             f"Current: {preview.current}; proposed: {preview.proposed}\n"
-            "Restart restores the 900-second default. Explicit lock, session lock, suspend, "
+            "Restart restores the 3600-second default. Explicit lock, session lock, suspend, "
             "and monitor loss still relock the service.\n"
         )
     else:
