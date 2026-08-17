@@ -444,6 +444,15 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- A Codex hook with a stale lifecycle mapping treated the daemon's `SESSION_CONFLICT` or
+  `SESSION_NOT_FOUND` response as proof that the service was unavailable, then repeated that false
+  advisory forever because it retained the old session and writer ids. Status errors now pass
+  through an exhaustive classification: stale mappings tell the agent to call `start` again while
+  explicitly preserving service health, transient reads request a later status read, privacy and
+  vault conditions name their actual recovery paths, and only genuine degradation says the service
+  is unavailable. The stale advisory remains advice-safe and the agent's successful `start` result
+  is still the only source of a replacement mapping (issue #308).
+
 - The end-to-end hook budget was smaller than the budgets enforced inside a single pass, so
   `hook_budget_exceeded` fired on healthy hooks — 253 of 833 diagnostics on one workspace — and
   carried no signal about the regressions it was added for. The total is now derived from the

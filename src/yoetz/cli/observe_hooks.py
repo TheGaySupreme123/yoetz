@@ -1356,6 +1356,11 @@ def handle_observe(
                 # SessionStart-only status/attach helpers: they drag protocol.models
                 # and service.client, which no other event needs (#242).
                 from yoetz.cli.hooks import (
+                    _LOCKED_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _PRIVACY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _RETRY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _STALE_MAPPING_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _UNAVAILABLE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _active_context,  # pyright: ignore[reportPrivateUsage]
                     _read_status,  # pyright: ignore[reportPrivateUsage]
                 )
@@ -1398,16 +1403,25 @@ def handle_observe(
                                 store_mapping(updated, _state=_state)
                                 mapping = updated
                                 additional = _active_context(updated, updated.last_frontier)
+                            elif kind == "stale":
+                                # The service answered: only the stored mapping is stale
+                                # (re-started elsewhere). Repair flows through the agent's
+                                # own start via handle_post_tool_use; meanwhile the static
+                                # advisory must not starve pending advice (issue #308).
+                                additional = _STALE_MAPPING_CONTEXT
+                                attach_advisory_only = True
+                                with contextlib.suppress(Exception):
+                                    record_hook_diagnostic(
+                                        "mapping_stale", resolved_event, _state=_state
+                                    )
                             elif kind == "locked":
-                                additional = (
-                                    "Yoetz vault is locked for this mapped session; "
-                                    "no live receipt can be promised."
-                                )
+                                additional = _LOCKED_CONTEXT
+                            elif kind == "retry":
+                                additional = _RETRY_CONTEXT
+                            elif kind == "privacy":
+                                additional = _PRIVACY_CONTEXT
                             else:
-                                additional = (
-                                    "Yoetz service is unavailable for this mapped session; "
-                                    "no live receipt can be promised."
-                                )
+                                additional = _UNAVAILABLE_CONTEXT
                         if not skip_service:
 
                             async def _drain() -> None:

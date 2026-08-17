@@ -871,6 +871,131 @@ def test_skip_service_session_start_never_opens_service_connection(
     assert store.list_pending_outbox(workspace)
 
 
+def test_session_start_stale_mapping_advisory_keeps_advice_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SESSION_CONFLICT status answer means the mapping is stale, not the
+    service down: the observe path must emit the shared stale advisory (#308)
+    and let pending advice join it instead of being starved."""
+
+    import uuid
+
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        load_mapping,
+        mapping_from_start_ids,
+        store_mapping,
+    )
+    from yoetz.adapters.integrations.observation_local import AdviceDelivery
+    from yoetz.cli import hooks as hooks_module
+    from yoetz.domain.observation import AdviceSnapshot
+    from yoetz.protocol.ids import IdKind, new_id
+    from yoetz.protocol.models import OperationFailureModel
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id="stale-observe",
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier="0:genesis",
+        ),
+        _state=tmp_path,
+    )
+    failure = OperationFailureModel.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "ok": False,
+            "error": {
+                "code": "SESSION_CONFLICT",
+                "message": "The requested task attachment conflicts.",
+                "retryable": False,
+                "correlation_id": f"err_{uuid.uuid4()}",
+            },
+        }
+    )
+
+    class _Result:
+        root = failure
+
+    class _Client:
+        async def status(self, request: object, *, deadline_ms: int | None = None) -> object:
+            del request, deadline_ms
+            return _Result()
+
+        async def observation_ingest(self, body: object, *, deadline_ms: int) -> object:
+            del body, deadline_ms
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object) -> _Client:
+        return _Client()
+
+    advice = AdviceDelivery(
+        snapshot=cast(AdviceSnapshot, object()),
+        item=None,
+        delivery_identity="advice-1",
+        text="Standing advice: connect a provider.",
+    )
+    commits: list[str] = []
+
+    def fake_peek(
+        self: LocalObservationStore,
+        workspace_arg: str,
+        *,
+        yoetz_session_id: str | None = None,
+        allow_standing: bool = True,
+        session_commitment: str | None = None,
+    ) -> AdviceDelivery:
+        del self, workspace_arg, yoetz_session_id, allow_standing, session_commitment
+        return advice
+
+    def fake_commit(
+        self: LocalObservationStore,
+        workspace_arg: str,
+        identity: str,
+        *,
+        yoetz_session_id: str | None = None,
+        session_commitment: str | None = None,
+    ) -> None:
+        del self, workspace_arg, yoetz_session_id, session_commitment
+        commits.append(identity)
+
+    monkeypatch.setattr(LocalObservationStore, "peek_advice_for_delivery", fake_peek)
+    monkeypatch.setattr(LocalObservationStore, "commit_advice_delivery", fake_commit)
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "stale-observe", "hook_event_name": "SessionStart", "cwd": "."}
+        ).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+    assert code == 0
+    context = json.loads(out.getvalue().decode())["hookSpecificOutput"]["additionalContext"]
+    stale_text = hooks_module._STALE_MAPPING_CONTEXT  # pyright: ignore[reportPrivateUsage]
+    assert context.startswith(stale_text)
+    assert "unavailable" not in context
+    # The static stale advisory must not starve pending advice (#241, #280 pattern).
+    assert advice.text in context
+    assert commits == ["advice-1"]
+    # The stale mapping survives: repair belongs to the agent's own re-start.
+    assert load_mapping("stale-observe", _state=tmp_path) is not None
+    diagnostics = (tmp_path / "observation" / "hook-diagnostics.jsonl").read_text()
+    assert '"reason":"mapping_stale"' in diagnostics
+
+
 def test_malformed_stdin_exits_zero(tmp_path: Path) -> None:
     code = handle_observe(
         event_name="Stop",

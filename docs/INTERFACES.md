@@ -2473,12 +2473,18 @@ across workspace sessions under a nonblocking per-workspace lease; within one pa
 and an ended unmapped session is terminally quarantined because no future mapping can deliver it,
 but only after atomically acquiring its lifecycle lock so an attach already in flight wins.
 Turn-boundary hooks retry auto-attach under a bounded budget and record a payload-free diagnostic
-when no mapping results. `observe status` retains the current and rotated hook-diagnostic history,
-but pairs every all-time reason count with `first_seen`, `last_seen`, and a count in the closed
-one-hour `window_seconds`; timings likewise date the all-time maximum and report a separate recent
-maximum. Unreadable or future timestamps remain retained but are never classified as recent, so a
-fixed historical failure cannot masquerade as live degradation (issue #310). Workspace-global
-rejections (`vault_locked`, disabled, paused) end the pass.
+when no mapping results. A status read against a mapping whose Yoetz session or writer was replaced
+classifies `SESSION_CONFLICT` and `SESSION_NOT_FOUND` as `mapping_stale`, not service unavailability:
+the hook preserves the mapping, tells the agent to call `start` again, and accepts only that
+successful `start` result as authority for replacement ids. `OPERATION_PENDING`, `BUNDLE_BUSY`, and
+`FRONTIER_CONFLICT` are transient status reads; vault and repository-privacy failures retain their
+distinct recovery advisories. The closed public-error table is exhaustive so a new code cannot
+silently inherit an unrelated advisory (issue #308). `observe status` retains the current and rotated
+hook-diagnostic history, but pairs every all-time reason count with `first_seen`, `last_seen`, and a
+count in the closed one-hour `window_seconds`; timings likewise date the all-time maximum and report
+a separate recent maximum. Unreadable or future timestamps remain retained but are never classified
+as recent, so a fixed historical failure cannot masquerade as live degradation (issue #310).
+Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
 A `service_unavailable` rejection retires that session's lane for the pass while other sessions
 remain eligible; no later row may step over a failed lane head. Local observation-store acquisition is capped at two
 seconds for both the process-local reentrant lock and the cross-process flock. Hook timing rows

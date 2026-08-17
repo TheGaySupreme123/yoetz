@@ -51,6 +51,7 @@ _REASONS: Final = frozenset(
         "service_unavailable",
         "vault_locked",
         "mapping_missing",
+        "mapping_stale",
         "observation_disabled",
         "paused",
         "timeout",
