@@ -444,6 +444,15 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- Correlated Codex `PreToolUse` and `PostToolUse` phases no longer claim one SQLite logical identity
+  with incompatible operation digests. The canonical host-call identity remains the content and
+  ledger-dedup key, while the durable claim key is additionally scoped by the materialization
+  version and exact draft-role tuple; pre-action and paired-result phases therefore cannot collide,
+  and hook/stream copies of the same paired phase still merge to `source_mask == 3`. Claims record
+  the source-independent materialization version rather than the source cursor version. A genuine
+  claim conflict now quarantines only that envelope as `dedup_conflict`; only bundle corruption arms
+  the READY-generation session latch (issue #309).
+
 - The end-to-end hook budget was smaller than the budgets enforced inside a single pass, so
   `hook_budget_exceeded` fired on healthy hooks — 253 of 833 diagnostics on one workspace — and
   carried no signal about the regressions it was added for. The total is now derived from the

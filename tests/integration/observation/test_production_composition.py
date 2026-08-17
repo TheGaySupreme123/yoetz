@@ -35,7 +35,6 @@ from tests.integration.observation.composition_harness import (
     resolve_production_surface,
     run_unified_setup,
     setup_returns_early_when_mcp_registered,
-    try_import,
 )
 
 from yoetz.adapters.approved_checks import (
@@ -335,6 +334,17 @@ async def test_hook_and_stream_copies_materialize_once(tmp_path: Path) -> None:
     try:
         pipeline.auto_attach("dedupe-1")
         pipeline.observe_hook(
+            "PreToolUse",
+            {
+                "session_id": "dedupe-1",
+                "tool_name": "shell",
+                "tool_call_id": "shared-1",
+                "correlation_id": "shared-1",
+                "event_ordinal": 1,
+            },
+            drain=False,
+        )
+        pipeline.observe_hook(
             "PostToolUse",
             {
                 "session_id": "dedupe-1",
@@ -342,7 +352,7 @@ async def test_hook_and_stream_copies_materialize_once(tmp_path: Path) -> None:
                 "exit_status": 1,
                 "tool_call_id": "shared-1",
                 "correlation_id": "shared-1",
-                "event_ordinal": 1,
+                "event_ordinal": 2,
             },
             drain=False,
         )
@@ -388,12 +398,31 @@ async def test_hook_and_stream_copies_materialize_once(tmp_path: Path) -> None:
         # Dual-source envelopes remain distinct by source_identity until coordinator
         # materializes one logical action/result into the ledger.
         assert second_count >= first_count
-        materialize = try_import(
-            "yoetz.application.observation_coordinator", "materialize_observation"
-        ) or try_import("yoetz.service.observation_coordinator", "materialize_observation")
-        if materialize is not None and second_count > first_count + 0:
-            # Keep the contract visible: materialization must collapse copies when used.
-            assert callable(materialize)
+        from yoetz.application.observation_materialize import (
+            canonical_logical_identity,
+            materialize_observation_envelope,
+            observation_claim_identity,
+        )
+
+        hook_post = next(
+            item
+            for item in pipeline.sqlite.list_envelopes(pipeline.workspace)
+            if item.source is ObservationSource.CODEX_HOOK and item.event_kind == "PostToolUse"
+        )
+        # The hook Post and the stream item.completed for one host call must
+        # collapse to one canonical identity, materialize the same paired
+        # action+result roles, and share one role-scoped claim so the
+        # coordinator appends once and unions source coverage (issue #309).
+        assert canonical_logical_identity(hook_post) == canonical_logical_identity(stream_env)
+
+        def _roles(envelope: ObservationEnvelope) -> tuple[str, ...]:
+            batch = materialize_observation_envelope(envelope, task_id=pipeline.task_id)
+            return tuple(item.role for item in batch.drafts)
+
+        assert _roles(hook_post) == _roles(stream_env) == ("action", "result")
+        assert observation_claim_identity(
+            hook_post, _roles(hook_post)
+        ) == observation_claim_identity(stream_env, _roles(stream_env))
     finally:
         pipeline.close()
 

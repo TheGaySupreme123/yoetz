@@ -2464,8 +2464,13 @@ Unrecognized visible events accept an opaque stable envelope plus encrypted cont
 `unsupported_event`; unknown semantics never infer success.
 
 Canonical normalization precedes materialization. Equivalent hook/stream host calls share logical
-identity, roles, operation digest, and stable ledger IDs. The logical-identity repository merges a
-two-bit source mask; duplicates retry incomplete content/store/ledger/verification/advice work
+identity, roles, operation digest, and stable ledger IDs. That canonical logical identity remains
+the content and ledger-dedup key. The durable repository claim is separately domain-scoped by the
+materialization mapping version and exact draft-role tuple, so phases of one host call with
+different materializations (for example pre-action versus paired action/result) cannot collide,
+while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
+The claim stores the source-independent materialization version, never the hook/stream cursor
+version (issue #309). Duplicates retry incomplete content/store/ledger/verification/advice work
 idempotently. Stream cursor advancement occurs only after outbox insertion. Session end is
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
 across workspace sessions under a nonblocking per-workspace lease; within one pass a
@@ -2476,11 +2481,13 @@ Turn-boundary hooks retry auto-attach under a bounded budget and record a payloa
 when no mapping results. Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
 A `service_unavailable` rejection retires that session's lane for the pass while other sessions
 remain eligible; no later row may step over a failed lane head. Local observation-store acquisition is capped at two
-seconds for both the process-local reentrant lock and the cross-process flock. Coordinator and
+seconds for both the process-local reentrant lock and the cross-process flock. A conflicting
+logical-identity claim rejects and quarantines only its own envelope as `dedup_conflict`; it does
+not establish bundle corruption or arm the session latch (issue #309). Coordinator and
 sweeper calls use separate bounded executors, so cancellation cannot strand an exit-blocking flock
 wait or exhaust the shared default executor. `observation_storage_corrupt` is terminal for its Codex
-session in the current READY generation: the coordinator remembers that session after the first
-bundle `STORAGE_CORRUPT`, later ingests are rejected without reopening the bundle, and the sweeper
+session in the current READY generation: the coordinator remembers that session only after a
+bundle-level `STORAGE_CORRUPT`, later ingests are rejected without reopening the bundle, and the sweeper
 atomically moves that session's pending backlog to quarantine while healthy lanes continue. A new
 READY generation clears the in-memory suppression and permits one recovery probe. A successful
 probe removes that session from the local corruption set and resolves the workspace corruption gap

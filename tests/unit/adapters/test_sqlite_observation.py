@@ -21,7 +21,7 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
 )
 from yoetz.domain.values import JsonObject, Timestamp
-from yoetz.protocol.errors import PublicOperationError
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
 _WORKSPACE = "hmac-sha256:" + "1" * 64
 _SESSION = "hmac-sha256:" + "2" * 64
@@ -109,3 +109,47 @@ def test_sqlite_resume_without_consent_fails() -> None:
             await store.resume(ObservationControlCommand(_WORKSPACE))
 
     asyncio.run(run())
+
+
+def test_record_logical_identity_claim_idempotence_union_and_conflict() -> None:
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    logical_identity = "sha256:" + "a" * 64
+    materialization_digest = "sha256:" + "b" * 64
+    operation_id = "op_" + "1" * 32
+    mapping_version = "obs-ledger/1.2.0"
+
+    def record(*, source_mask: int, digest: str = materialization_digest) -> None:
+        store.record_logical_identity_claim(
+            workspace=_WORKSPACE,
+            logical_identity=logical_identity,
+            materialization_digest=digest,
+            operation_id=operation_id,
+            mapping_version=mapping_version,
+            source_mask=source_mask,
+            materialized_at=_TIME,
+        )
+
+    record(source_mask=1)
+    # A replay of the same source is idempotent.
+    record(source_mask=1)
+    # The other source's copy of the same materialization unions coverage.
+    record(source_mask=2)
+    row = db.execute(
+        "SELECT source_mask FROM observation_logical_identity "
+        "WHERE workspace_commitment=? AND logical_identity=?",
+        (_WORKSPACE, logical_identity),
+    ).fetchone()
+    assert row == (3,)
+
+    # A different materialization of the same claim key is corruption.
+    with pytest.raises(PublicOperationError) as conflict:
+        record(source_mask=1, digest="sha256:" + "c" * 64)
+    assert conflict.value.code is PublicErrorCode.STORAGE_CORRUPT
+    assert conflict.value.retryable is False
+
+    # Only the two per-source masks are valid inputs; 3 is a stored union.
+    with pytest.raises(PublicOperationError) as invalid:
+        record(source_mask=3)
+    assert invalid.value.code is PublicErrorCode.INVALID_REQUEST
