@@ -1474,6 +1474,73 @@ async def test_check_respond_recheck_reaches_a_fixed_point() -> None:
     assert f"receipt-blocking findings: {item.receipt_blocking_finding_count}" in summary
 
 
+async def test_status_freshness_scalar_survives_immaterial_events() -> None:
+    """Issue #307: a check that declared coverage gaps recorded ``partial`` freshness. The
+    projection scalar reported that only on the event that recorded the check and reverted to
+    ``current`` on the next event of any family, while the item's own
+    ``coverage.ledger_freshness`` kept the gaps. One item then carried two disagreeing freshness
+    fields, and an agent reading the summary line was told the ledger was clean.
+
+    A receipt and a re-attach change nothing but the frontier and the session id, so the retained
+    check still governs and its recorded freshness must still be what the item reports.
+    """
+
+    app, _runtime, _ = _build_app(seed_offset=27)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=1900)
+
+    # `deterministic_only` declines the semantic review, which is a declared coverage gap, so the
+    # check downgraded its own freshness. This is the precondition the bug needs.
+    assert checked.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+    assert "semantic_review_not_requested" in checked.coverage.known_gaps
+
+    def status_wire(seed: int) -> dict[str, JsonValue]:
+        return {
+            **_request_base(protocol_id("req_", seed)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "view": "compact",
+            "limit": "10",
+        }
+
+    status = await app.status(StatusRequest.model_validate(status_wire(1910)))
+    item = cast(StatusCompactPageModel, status.page).items[0]
+    # Immediately after the check both fields already agreed; the bug was never visible here.
+    assert item.freshness == "partial"
+    assert item.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+
+    # A receipt appends one engine-derived `receipt_recorded`. It is not a material family, so it
+    # cannot supersede the check, and nothing in the ledger changed except the frontier.
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1911)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
+
+    after_receipt = await app.status(StatusRequest.model_validate(status_wire(1912)))
+    item_after = cast(StatusCompactPageModel, after_receipt.page).items[0]
+    # The retained check still carries the gaps, so the scalar still has to report them.
+    assert item_after.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+    assert "semantic_review_not_requested" in item_after.coverage.known_gaps
+    assert item_after.freshness == "partial"
+    assert item_after.freshness == item_after.coverage.ledger_freshness.value
+
+    # The summary line an agent reads is derived from the scalar, so it must not read clean while
+    # the structured coverage beside it records the gaps.
+    summary = summary_for_status(after_receipt.as_json())
+    assert "freshness: partial" in summary
+    assert "freshness: current" not in summary
+
+
 def _receipt_wire(
     request_seed: int,
     *,

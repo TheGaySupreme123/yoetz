@@ -822,6 +822,13 @@ deciding between the two, shared by the receipt and by compact status coverage.
   `freshness` folds staleness under the same supersession rule as
   `kernel/reducers.invalidates_recorded_check`: a readable `response_recorded` answering a finding
   in `latest_tested_state.returned_finding_ids` never by itself marks the ledger stale.
+  `freshness` is a function of carried state alone, never of which event is being folded. Its
+  precedence is unchanged — genesis, `redacted_*` markers, `unknown_event:`/`missing_ref:` markers,
+  supersession — and below those it reports `latest_tested_state.coverage.ledger_freshness`, so a
+  check that recorded `partial` holds the scalar at `partial` for as long as it is the retained
+  check. Only supersession, a redaction removing that check, or a later check replacing it moves
+  the scalar off that value. The scalar therefore cannot read cleaner than the coverage of the
+  very check reported beside it (issue #307).
   `CurrentPlanScope` and `current_plan_scope`, owned by `kernel/plan_scope.py`, are the one shared
   readable-plan-chain derivation consumed by status, check, and receipt: effective obligation refs,
   their declared count, and the current `no_obligations_reason`. A revision applies its obligation
@@ -1199,7 +1206,11 @@ five seconds ahead of acceptance and `ahead_of_forward_skew_allowance` beyond it
 outside clock. Ordering remains ingestion sequence and caller time is never a sort or filter key.
 New check cases carry both clocks and this classification in their bounded frozen timelines;
 versions is one verified runtime manifest; compact uses exact structural counters and bounded
-summaries.
+summaries. The compact singleton's `freshness` follows the same weaker-of-two rule as the evidence
+view: it is the weaker of the projection scalar and the `ledger_freshness` of the applicable-check
+coverage reported in the same item, so the summary line an agent reads can never claim the ledger
+is cleaner than the coverage vector beside it. `StatusCompactItemModel` rejects the inverse
+(issue #307).
 
 Finding response does not resolve. The issue key is `(origin, policy_id, policy_version, kind,
 complete canonical subject_refs)`. A later same-key row supersedes the old and starts unresolved.

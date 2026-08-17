@@ -11,6 +11,16 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- A `status` item's `freshness` scalar no longer contradicts the `coverage.ledger_freshness` in the
+  same item. A check that declared a coverage gap records `partial` freshness, but the projection
+  reported that only while folding the check itself and reverted to `current` on the next event of
+  any family — a receipt or a re-attach was enough — while the item's coverage kept the gaps. The
+  projection scalar is now derived from the retained check rather than from whichever event is being
+  folded, so it holds `partial` for as long as that check governs, and the compact item reports the
+  weaker of the scalar and its own coverage the way the evidence view already did. An agent reading
+  the summary line is no longer told the ledger is clean while the structured coverage records the
+  gaps (issue #307).
+
 - `provenance_disputed` is a fourth `respond` disposition. It records that the responder contests
   the finding's authorship or provenance premise rather than its conclusion, requires a reason, may
   carry evidence, and is not scored as an evidence-free rejection by either deterministic policy
