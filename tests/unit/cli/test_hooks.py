@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     mapping_from_start_ids,
     store_mapping,
 )
+from yoetz.cli import hooks as hooks_module
 from yoetz.cli.hooks import (
     INACTIVE_CONTEXT,
     handle_post_tool_use,
@@ -22,7 +24,9 @@ from yoetz.cli.hooks import (
     intake_cue_text,
 )
 from yoetz.ports.control import ControlClientKind, ControlError
+from yoetz.protocol.errors import PublicErrorCode
 from yoetz.protocol.ids import IdKind, new_id
+from yoetz.protocol.models import OperationFailureModel
 
 
 def _task_ids() -> tuple[str, str, str]:
@@ -277,8 +281,155 @@ def test_session_start_unreachable_service(tmp_path: Path) -> None:
     )
     assert code == 0
     text = json.loads(stdout.getvalue().decode("utf-8"))["hookSpecificOutput"]["additionalContext"]
-    assert "unavailable" in text
-    assert "no live receipt can be promised" in text
+    assert text == hooks_module._UNAVAILABLE_CONTEXT  # pyright: ignore[reportPrivateUsage]
+
+
+def _failure_result(code: PublicErrorCode, *, retryable: bool = False) -> _FakeStatusResult:
+    return _FakeStatusResult(
+        OperationFailureModel.model_validate(
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "ok": False,
+                "error": {
+                    "code": code.value,
+                    "message": "The requested task attachment conflicts.",
+                    "retryable": retryable,
+                    "correlation_id": f"err_{uuid.uuid4()}",
+                },
+            }
+        )
+    )
+
+
+def _session_start_context_for_failure(
+    tmp_path: Path,
+    codex_session_id: str,
+    result: _FakeStatusResult | Exception,
+) -> str:
+    task_id, session_id, writer_id = _task_ids()
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=codex_session_id,
+            yoetz_task_id=task_id,
+            yoetz_session_id=session_id,
+            yoetz_writer_id=writer_id,
+            last_frontier="0:genesis",
+        ),
+        _state=tmp_path,
+    )
+
+    class _Client:
+        async def status(self, request: object, *, deadline_ms: int | None = None) -> object:
+            del request, deadline_ms
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: ControlClientKind) -> _Client:
+        return _Client()
+
+    stdout = io.BytesIO()
+    code = handle_session_start(
+        stdin_bytes=json.dumps({"session_id": codex_session_id, "source": "resume"}).encode(),
+        stdout=stdout,
+        _state=tmp_path,
+        connect=connect,  # pyright: ignore[reportArgumentType]
+    )
+    assert code == 0
+    context = json.loads(stdout.getvalue().decode("utf-8"))["hookSpecificOutput"][
+        "additionalContext"
+    ]
+    assert type(context) is str
+    return context
+
+
+@pytest.mark.parametrize(
+    "code", [PublicErrorCode.SESSION_CONFLICT, PublicErrorCode.SESSION_NOT_FOUND]
+)
+def test_session_start_stale_mapping_is_not_reported_unavailable(
+    tmp_path: Path, code: PublicErrorCode
+) -> None:
+    """SESSION_* means the mapping is stale, not that the service is down (#308)."""
+
+    text = _session_start_context_for_failure(tmp_path, "codex-stale", _failure_result(code))
+    assert text == hooks_module._STALE_MAPPING_CONTEXT  # pyright: ignore[reportPrivateUsage]
+    assert "unavailable" not in text
+    assert "start" in text
+    # The mapping is kept: repair flows through the agent's own re-start via
+    # handle_post_tool_use, never through hook-side guessing.
+    assert load_mapping("codex-stale", _state=tmp_path) is not None
+    diagnostics = (tmp_path / "observation" / "hook-diagnostics.jsonl").read_text()
+    assert '"reason":"mapping_stale"' in diagnostics
+
+
+def test_session_start_vault_locked_failure_is_locked(tmp_path: Path) -> None:
+    text = _session_start_context_for_failure(
+        tmp_path, "codex-locked", _failure_result(PublicErrorCode.VAULT_LOCKED, retryable=True)
+    )
+    assert text == hooks_module._LOCKED_CONTEXT  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        PublicErrorCode.BUNDLE_BUSY,
+        PublicErrorCode.OPERATION_PENDING,
+        PublicErrorCode.FRONTIER_CONFLICT,
+    ],
+)
+def test_session_start_transient_failure_is_retry(tmp_path: Path, code: PublicErrorCode) -> None:
+    text = _session_start_context_for_failure(
+        tmp_path, "codex-busy", _failure_result(code, retryable=True)
+    )
+    assert text == hooks_module._RETRY_CONTEXT  # pyright: ignore[reportPrivateUsage]
+    assert "unavailable" not in text
+
+
+def test_session_start_degraded_service_stays_unavailable(tmp_path: Path) -> None:
+    text = _session_start_context_for_failure(
+        tmp_path,
+        "codex-degraded",
+        _failure_result(PublicErrorCode.SERVICE_UNAVAILABLE, retryable=True),
+    )
+    assert text == hooks_module._UNAVAILABLE_CONTEXT  # pyright: ignore[reportPrivateUsage]
+
+
+def test_session_start_privacy_failure_names_the_ceremony(tmp_path: Path) -> None:
+    text = _session_start_context_for_failure(
+        tmp_path,
+        "codex-privacy",
+        _failure_result(PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED),
+    )
+    assert text == hooks_module._PRIVACY_CONTEXT  # pyright: ignore[reportPrivateUsage]
+
+
+def test_session_start_control_timeout_is_retry(tmp_path: Path) -> None:
+    text = _session_start_context_for_failure(
+        tmp_path, "codex-timeout", ControlError("request_timeout", retryable=True)
+    )
+    assert text == hooks_module._RETRY_CONTEXT  # pyright: ignore[reportPrivateUsage]
+
+
+def test_status_error_class_table_is_exhaustive() -> None:
+    """A new PublicErrorCode member must be classified, never silently collapsed."""
+
+    table = hooks_module._STATUS_ERROR_CLASSES  # pyright: ignore[reportPrivateUsage]
+    assert set(table) == set(PublicErrorCode)
+    assert set(table.values()) <= {"stale", "locked", "retry", "privacy", "unavailable"}
+
+
+def test_control_error_class_table_is_exhaustive() -> None:
+    from yoetz.ports.control import (
+        _CONTROL_ERROR_REASONS,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    table = hooks_module._CONTROL_ERROR_CLASSES  # pyright: ignore[reportPrivateUsage]
+    assert set(table) == _CONTROL_ERROR_REASONS
+    assert set(table.values()) <= {"locked", "retry", "privacy", "unavailable"}
 
 
 def test_session_start_clear_removes_mapping(tmp_path: Path) -> None:
