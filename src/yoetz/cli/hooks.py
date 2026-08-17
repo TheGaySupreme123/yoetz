@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from importlib import resources
 from pathlib import Path
+from types import MappingProxyType
 from typing import BinaryIO, Final, Protocol, cast
 
 from yoetz import __version__
@@ -33,7 +35,7 @@ from yoetz.cli.hook_io import (
 )
 from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.protocol.canonical import JsonValue
-from yoetz.protocol.errors import ProtocolValueError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import OperationFailureModel, StatusRequest
 from yoetz.service.client import connect_service
@@ -73,6 +75,77 @@ _UNAVAILABLE_CONTEXT: Final = (
 )
 _LOCKED_CONTEXT: Final = (
     "Yoetz vault is locked for this mapped session; no live receipt can be promised."
+)
+_STALE_MAPPING_CONTEXT: Final = (
+    "Yoetz task mapping for this session is stale: the task was re-started under new "
+    "session and writer ids. The service itself is healthy. Call start again to re-map "
+    "before further material work."
+)
+_RETRY_CONTEXT: Final = (
+    "Yoetz is busy and could not read status on this attempt; the service is reachable. "
+    "Call status before promising a receipt."
+)
+_PRIVACY_CONTEXT: Final = (
+    "Yoetz cannot read this mapped session until repository privacy authority is "
+    "granted; run 'yoetz --privacy'. No live receipt can be promised until then."
+)
+
+# Hook-side classification of every public error a status read can surface. The
+# daemon answering with SESSION_* means the stored mapping no longer names a live
+# route/writer — the service is healthy, so reporting it "unavailable" was false
+# and absorbing (issue #308). "retry" codes are transient reads that can succeed
+# on the next attempt; only genuinely degraded states remain "unavailable".
+_STATUS_ERROR_CLASSES: Final[Mapping[PublicErrorCode, str]] = MappingProxyType(
+    {
+        PublicErrorCode.SESSION_NOT_FOUND: "stale",
+        PublicErrorCode.SESSION_CONFLICT: "stale",
+        PublicErrorCode.VAULT_LOCKED: "locked",
+        PublicErrorCode.OPERATION_PENDING: "retry",
+        PublicErrorCode.BUNDLE_BUSY: "retry",
+        PublicErrorCode.FRONTIER_CONFLICT: "retry",
+        PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED: "privacy",
+        PublicErrorCode.INVALID_REQUEST: "unavailable",
+        PublicErrorCode.PROTOCOL_VERSION_UNSUPPORTED: "unavailable",
+        PublicErrorCode.IDEMPOTENCY_CONFLICT: "unavailable",
+        PublicErrorCode.REQUEST_IDENTITY_CONFLICT: "unavailable",
+        PublicErrorCode.EVENT_INVALID: "unavailable",
+        PublicErrorCode.LIMIT_EXCEEDED: "unavailable",
+        PublicErrorCode.STORAGE_UNSAFE: "unavailable",
+        PublicErrorCode.STORAGE_CORRUPT: "unavailable",
+        PublicErrorCode.MIGRATION_REQUIRED: "unavailable",
+        PublicErrorCode.SERVICE_UNAVAILABLE: "unavailable",
+        PublicErrorCode.PROVIDER_UNAVAILABLE: "unavailable",
+        PublicErrorCode.PROVIDER_REFUSED: "unavailable",
+        PublicErrorCode.PROVIDER_TIMEOUT: "unavailable",
+        PublicErrorCode.SEMANTIC_RESULT_INVALID: "unavailable",
+        PublicErrorCode.CANCELLED: "unavailable",
+        PublicErrorCode.INTERNAL_ERROR: "unavailable",
+    }
+)
+if set(_STATUS_ERROR_CLASSES) != set(PublicErrorCode):
+    raise RuntimeError("status_error_classes_not_exhaustive")
+
+# Transport-level failures, classified over the closed ControlError reason set.
+# Reasons absent here (a future addition) fall back to "unavailable".
+_CONTROL_ERROR_CLASSES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "vault_locked": "locked",
+        "request_timeout": "retry",
+        "service_draining": "retry",
+        "service_generation_changed": "retry",
+        "read_projection_failed": "retry",
+        "response_projection_failed": "retry",
+        "privacy_projection_unavailable": "retry",
+        "privacy_projection_blocked": "privacy",
+        "service_unavailable": "unavailable",
+        "peer_untrusted": "unavailable",
+        "protocol_mismatch": "unavailable",
+        "frame_invalid": "unavailable",
+        "frame_too_large": "unavailable",
+        "request_cancelled": "unavailable",
+        "method_forbidden": "unavailable",
+        "internal_error": "unavailable",
+    }
 )
 
 
@@ -257,7 +330,10 @@ async def _read_status(
     *,
     connect: ServiceConnector = connect_service,
 ) -> StatusOutcome:
-    """Return (context_kind, updated_mapping_or_none). kind is active|unavailable|locked."""
+    """Return (context_kind, updated_mapping_or_none).
+
+    kind is active|stale|locked|retry|privacy|unavailable.
+    """
 
     client: _StatusClient | None = None
     try:
@@ -266,10 +342,7 @@ async def _read_status(
         result = await connected.status(_status_request(mapping), deadline_ms=_STATUS_DEADLINE_MS)
         branch = getattr(result, "root", result)
         if isinstance(branch, OperationFailureModel):
-            code = branch.error.code.value
-            if code == "VAULT_LOCKED":
-                return "locked", None
-            return "unavailable", None
+            return _STATUS_ERROR_CLASSES.get(branch.error.code, "unavailable"), None
         head = getattr(branch, "head_frontier", None)
         task_id = getattr(branch, "task_id", None)
         session_id = getattr(branch, "session_id", None)
@@ -293,9 +366,7 @@ async def _read_status(
         )
         return "active", updated
     except ControlError as error:
-        if error.reason == "vault_locked":
-            return "locked", None
-        return "unavailable", None
+        return _CONTROL_ERROR_CLASSES.get(error.reason, "unavailable"), None
     except Exception:
         return "unavailable", None
     finally:
@@ -427,8 +498,23 @@ def handle_session_start(
                     stdout,
                 )
                 return 0
+            if kind == "stale":
+                from yoetz.cli.hook_diagnostics import record_hook_diagnostic
+
+                # The delegated observation path cannot reacquire the session lock
+                # held here, so this branch owns the resume event's diagnostic.
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic("mapping_stale", "SessionStart", _state=_state)
+                _stdout_json(_context_output("SessionStart", _STALE_MAPPING_CONTEXT), stdout)
+                return 0
             if kind == "locked":
                 _stdout_json(_context_output("SessionStart", _LOCKED_CONTEXT), stdout)
+                return 0
+            if kind == "retry":
+                _stdout_json(_context_output("SessionStart", _RETRY_CONTEXT), stdout)
+                return 0
+            if kind == "privacy":
+                _stdout_json(_context_output("SessionStart", _PRIVACY_CONTEXT), stdout)
                 return 0
             _stdout_json(_context_output("SessionStart", _UNAVAILABLE_CONTEXT), stdout)
             return 0
