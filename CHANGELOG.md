@@ -422,10 +422,13 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
-- An evidence-free rejection or waiver of a current deterministic finding now produces only
-  `questionable_finding_rejection`. `weak_or_stale_response` remains the sole owner for stale
-  responses and for unsupported current responses to semantic findings, preventing one response
-  from minting two actionable findings (issue #285).
+- An evidence-free rejection or waiver of a current deterministic finding minted two actionable
+  findings, `questionable_finding_rejection` and `weak_or_stale_response`, doubling the response
+  burden at every level. `check` now collapses that overlap when it composes the built-in packs,
+  keeping only `questionable_finding_rejection`. `weak_or_stale_response` still stands on its own
+  for stale responses, for unsupported current responses to semantic findings, for stricter
+  work-integrity-only evidence exclusions, and whenever the research-evidence pack did not run
+  (issue #285).
 - Codex Step 0 treated an empty MCP `resources/read` as success and advertised that guidance URIs
   "resolve without any repository checkout". The skill now stops on an empty body, calls
   `read_guidance` with the same URI, and opens the matching installed `references/<name>.md` copy

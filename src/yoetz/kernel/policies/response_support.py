@@ -5,7 +5,19 @@ from __future__ import annotations
 from yoetz.domain.values import EvidenceId, ResultId
 from yoetz.kernel.deterministic_checks import DeterministicCase
 
-__all__ = ["BASE_RESPONSE_INADMISSIBLE_GAPS", "response_support_admissible"]
+__all__ = [
+    "BASE_RESPONSE_INADMISSIBLE_GAPS",
+    "RESEARCH_REJECTION_PRESENT_FACT",
+    "WORK_RESPONSE_PRESENT_FACT",
+    "response_support_admissible",
+]
+
+# Both packs record the responded-to finding, the response event, and the admissible evidence refs
+# in this fact, in that order and built from the same inputs. The composition layer keys its
+# cross-pack collapse on the pair of facts, so the two names live together here rather than being
+# repeated as bare strings in each pack.
+WORK_RESPONSE_PRESENT_FACT = "finding_response_present"
+RESEARCH_REJECTION_PRESENT_FACT = "finding_rejection_present"
 
 BASE_RESPONSE_INADMISSIBLE_GAPS = frozenset(
     {

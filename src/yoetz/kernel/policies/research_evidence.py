@@ -34,6 +34,7 @@ from yoetz.kernel.deterministic_checks import (
 )
 from yoetz.kernel.policies.response_support import (
     BASE_RESPONSE_INADMISSIBLE_GAPS,
+    RESEARCH_REJECTION_PRESENT_FACT,
     response_support_admissible,
 )
 
@@ -303,7 +304,7 @@ def _rejection_findings(case: DeterministicCase) -> list[DeterministicAssessment
                 RESEARCH_EVIDENCE_POLICY_PACK,
                 FindingKind.QUESTIONABLE_FINDING_REJECTION,
                 finding.subject_refs,
-                (FindingFact("finding_rejection_present", present_refs),),
+                (FindingFact(RESEARCH_REJECTION_PRESENT_FACT, present_refs),),
                 (_fact("rejection_basis_insufficient", finding_id, response_event),),
                 source_availability=(
                     policy_source_availability(case, compared)

@@ -12,7 +12,7 @@ from yoetz.domain.events import (
     ResponseDisposition,
     ResultOutcome,
 )
-from yoetz.domain.findings import FindingKind, FindingOrigin
+from yoetz.domain.findings import FindingKind
 from yoetz.domain.values import (
     EvidenceId,
     ObligationId,
@@ -35,6 +35,7 @@ from yoetz.kernel.deterministic_checks import (
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.policies.response_support import (
     BASE_RESPONSE_INADMISSIBLE_GAPS,
+    WORK_RESPONSE_PRESENT_FACT,
     response_support_admissible,
 )
 
@@ -569,25 +570,18 @@ def _response_findings(case: DeterministicCase) -> list[DeterministicAssessment]
         # older than that subject answers something the finding was never about.
         stale = response.finding_frontier.sequence < finding.subject_frontier.sequence
         insufficient = not _response_support_admissible(case, response.evidence_refs)
-        # Research evidence owns a current rejection of a deterministic finding when its support
-        # predicate is insufficient. Work integrity owns stale responses, semantic-finding
-        # responses, and stricter work-only coverage exclusions, so no condition is dropped.
-        research_insufficient = not response_support_admissible(
-            case,
-            response.evidence_refs,
-            inadmissible_gaps=BASE_RESPONSE_INADMISSIBLE_GAPS,
-        )
-        if not stale and (
-            not insufficient
-            or (finding.origin is FindingOrigin.DETERMINISTIC and research_insufficient)
-        ):
+        # This pack stays a closed rule table: it never inspects whether another pack would also
+        # report this response. A current unsupported rejection of a deterministic finding overlaps
+        # research-evidence's questionable_finding_rejection, and the composition layer collapses
+        # that overlap once it knows which packs actually ran.
+        if not stale and not insufficient:
             continue
         if any(ref not in case.allowed_ids for ref in finding.subject_refs):
             continue
         response_event = response_record.source_event_id
         evidence_refs = tuple(ref for ref in response.evidence_refs if ref in case.allowed_ids)
         present_refs = _refs((finding_id, response_event, *evidence_refs))
-        observed: list[FindingFact] = [FindingFact("finding_response_present", present_refs)]
+        observed: list[FindingFact] = [FindingFact(WORK_RESPONSE_PRESENT_FACT, present_refs)]
         missing: list[FindingFact] = []
         if stale:
             observed.append(_fact("response_state_stale", finding_id, response_event))

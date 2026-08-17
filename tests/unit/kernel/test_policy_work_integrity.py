@@ -369,7 +369,7 @@ def _recorded_finding() -> Finding:
     )
 
 
-def test_weak_or_stale_response_defers_current_deterministic_rejection() -> None:
+def test_weak_or_stale_response_and_supported_rejection_nontrigger() -> None:
     finding = _recorded_finding()
     hollow = ResponseRecordedPayload(
         finding_id=fnd(1),
@@ -382,7 +382,10 @@ def test_weak_or_stale_response_defers_current_deterministic_rejection() -> None
         responses={fnd(1): record(hollow, 2)},
         extra_refs=(evt(99),),
     )
-    assert FindingKind.WEAK_OR_STALE_RESPONSE not in _kinds(trigger)
+    # This pack is a closed rule table and still owns the hollow rejection on its own. The overlap
+    # with research-evidence is collapsed at composition, not by this pack falling silent; see
+    # tests/unit/application/test_verdict_rules.py.
+    assert FindingKind.WEAK_OR_STALE_RESPONSE in _kinds(trigger)
 
     stale = replace(
         hollow,
