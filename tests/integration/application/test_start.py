@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -23,6 +23,7 @@ from builders.start_application import (
     start_composition,
     start_request,
 )
+from yoetz.adapters.memory.start_catalog import MemoryStartCatalogAdapter
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.objects.envelope import decode_object_envelope
 from yoetz.adapters.sqlite.migrations import initialize_bundle, initialize_catalog
@@ -53,7 +54,7 @@ from yoetz.ports.secret_memory import (
     SecretPurpose,
 )
 from yoetz.ports.start_catalog import StartCatalogPort
-from yoetz.protocol.canonical import JsonValue, canonical_digest
+from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 
 if TYPE_CHECKING:
     from yoetz.ports.secret_memory import SecretHandle
@@ -363,6 +364,40 @@ async def test_create_replays_exact_result_without_reopening_runtime() -> None:
     assert runtime.frontier_verifications == 2
     ledger, _ = runtime.resources[created.task_id]
     assert ledger._state.records[0].schema.name == "session_opened"  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_legacy_attached_result_replays_with_explicit_unknown_receipt_count() -> None:
+    app, runtime, _, catalog = start_composition()
+    await execute_start(app, start_request(705, refs=True))
+    request = start_request(706, refs=True)
+    attached = await execute_start(app, request)
+    provisions_before_replay = len(runtime.provisions)
+
+    memory_catalog = cast(MemoryStartCatalogAdapter, catalog.delegate)
+    state = memory_catalog._state  # pyright: ignore[reportPrivateUsage]
+    key, record = next(
+        (key, record)
+        for key, record in state.operations.items()
+        if record.operation_id == request.request_id
+    )
+    legacy = attached.as_wire()
+    compact = cast(dict[str, JsonValue], legacy["compact"])
+    compact["unresolved_finding_count"] = compact.pop("unanswered_finding_count")
+    compact.pop("receipt_blocking_finding_count")
+    canonical = canonical_encode(legacy)
+    state.operations[key] = replace(
+        record,
+        terminal_result_canonical=canonical,
+        terminal_result_digest=f"sha256:{hashlib.sha256(canonical).hexdigest()}",
+    )
+
+    replayed = await execute_start(app, request)
+
+    assert replayed.outcome == "attached"
+    assert replayed.compact.unanswered_finding_count == attached.compact.unanswered_finding_count
+    assert replayed.compact.receipt_blocking_finding_count is None
+    assert "legacy_receipt_blocking_count_unknown" in replayed.compact.gaps
+    assert len(runtime.provisions) == provisions_before_replay
 
 
 async def test_matching_refs_attach_and_same_title_without_refs_stays_distinct() -> None:

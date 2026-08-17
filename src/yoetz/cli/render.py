@@ -12,8 +12,6 @@ from yoetz.protocol.models import (
     OmittedContentModel,
     PublicErrorModel,
     ReceiptSuccessModel,
-    StatusCompactPageModel,
-    StatusFindingsPageModel,
     StatusOperationPageModel,
     StatusSuccessModel,
 )
@@ -91,28 +89,12 @@ def render_human_status(result: StatusSuccessModel) -> str:
     lines = [
         f"Frontier: {result.head_frontier.sequence}",
         f"Freshness: {_token(result.coverage.ledger_freshness)}",
+        f"Open obligations: {result.closure_readiness.open_obligation_count}",
+        f"Unanswered findings: {result.closure_readiness.unanswered_finding_count}",
+        (f"Receipt-blocking findings: {result.closure_readiness.receipt_blocking_finding_count}"),
     ]
-    if isinstance(result.page, StatusCompactPageModel) and result.page.items:
-        item = result.page.items[0]
-        lines.extend(
-            (
-                f"Open obligations: {item.open_obligation_count}",
-                f"Unresolved findings: {item.unresolved_finding_count}",
-            )
-        )
-    elif isinstance(result.page, StatusFindingsPageModel):
-        unresolved = sum(not item.resolved for item in result.page.items)
-        lines.extend(
-            ("Open obligations: unavailable in this view", f"Unresolved findings: {unresolved}")
-        )
-    elif isinstance(result.page, StatusOperationPageModel):
-        lines.extend(
-            (
-                "Open obligations: unavailable in this view",
-                "Unresolved findings: unavailable in this view",
-                f"Operation: {result.page.operation_request_id} ({result.page.state})",
-            )
-        )
+    if isinstance(result.page, StatusOperationPageModel):
+        lines.extend((f"Operation: {result.page.operation_request_id} ({result.page.state})",))
         if result.page.continuation is not None:
             lines.extend(
                 (
@@ -121,13 +103,6 @@ def render_human_status(result: StatusSuccessModel) -> str:
                     f"Replay request ID: {result.page.continuation.replay_request_id}",
                 )
             )
-    else:
-        lines.extend(
-            (
-                "Open obligations: unavailable in this view",
-                "Unresolved findings: unavailable in this view",
-            )
-        )
     gaps = tuple(result.gaps) + tuple(result.coverage.known_gaps)
     lines.append("Gaps: " + (", ".join(dict.fromkeys(gaps)) if gaps else "none"))
     return "\n".join(lines)

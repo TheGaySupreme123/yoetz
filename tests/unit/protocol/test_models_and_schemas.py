@@ -307,12 +307,12 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("publish_work", None): 57,
     ("receipt", None): 155,
     ("respond", None): 53,
-    ("start", None): 64,
-    ("status", None): 46,
+    ("start", None): 65,
+    ("status", None): 47,
     ("status", "advice"): 17,
     ("status", "assignment"): 6,
     ("status", "candidate_findings"): 32,
-    ("status", "compact"): 45,
+    ("status", "compact"): 46,
     ("status", "evidence"): 18,
     ("status", "findings"): 66,
     ("status", "history"): 12,
@@ -548,7 +548,8 @@ def _start_result_wire() -> dict[str, JsonValue]:
         "frontier": frontier,
         "compact": {
             "open_obligation_count": "0",
-            "unresolved_finding_count": "0",
+            "unanswered_finding_count": "0",
+            "receipt_blocking_finding_count": "0",
             "ledger_freshness": "current",
             "coverage": _coverage_wire(),
             "gaps": [],
@@ -733,7 +734,8 @@ def _status_result_wire() -> dict[str, JsonValue]:
             "declared_obligation_count": "0",
             "no_obligations_reason": None,
             "open_obligation_count": "0",
-            "unresolved_finding_count": "0",
+            "unanswered_finding_count": "0",
+            "receipt_blocking_finding_count": "0",
             "blocking_conditions": ["no_obligations_declared"],
         },
         "privacy_projection": _privacy_projection_wire(),
@@ -809,6 +811,8 @@ def test_human_status_renders_operation_continuation_and_exact_trusted_command()
     parsed = models.StatusResultModel.model_validate(result)
     assert type(parsed.root) is models.StatusSuccessModel
     rendered = render_human_status(parsed.root)
+    assert "Unanswered findings: 0" in rendered
+    assert "Receipt-blocking findings: 0" in rendered
     assert "Continuation: repository_privacy_setup" in rendered
     assert "Trusted command: yoetz --privacy" in rendered
     assert f"Replay request ID: {operation_request_id}" in rendered
@@ -1234,12 +1238,40 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
             "declared_obligation_count": None,
             "no_obligations_reason": None,
             "open_obligation_count": None,
-            "unresolved_finding_count": None,
+            "unanswered_finding_count": None,
+            "receipt_blocking_finding_count": None,
             "blocking_conditions": ["readiness_unknown"],
         }
     )
     assert unknown.open_obligation_count is None
     assert unknown.blocking_conditions == ("readiness_unknown",)
+
+    findings = model.model_validate(
+        {
+            "declared_obligation_count": "1",
+            "no_obligations_reason": None,
+            "open_obligation_count": "0",
+            "unanswered_finding_count": "2",
+            "receipt_blocking_finding_count": "1",
+            "blocking_conditions": [
+                "findings_unanswered",
+                "receipt_findings_unresolved",
+            ],
+        }
+    )
+    assert findings.unanswered_finding_count == "2"
+    assert findings.receipt_blocking_finding_count == "1"
+
+    for missing in ("findings_unanswered", "receipt_findings_unresolved"):
+        with pytest.raises(ValidationError):
+            model.model_validate(
+                {
+                    **findings.model_dump(mode="json"),
+                    "blocking_conditions": [
+                        item for item in findings.blocking_conditions if item != missing
+                    ],
+                }
+            )
 
     # Absent counts must declare themselves unknown...
     with pytest.raises(ValidationError):
@@ -1248,7 +1280,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
                 "declared_obligation_count": None,
                 "no_obligations_reason": None,
                 "open_obligation_count": None,
-                "unresolved_finding_count": None,
+                "unanswered_finding_count": None,
+                "receipt_blocking_finding_count": None,
                 "blocking_conditions": [],
             }
         )
@@ -1259,7 +1292,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
                 "declared_obligation_count": "0",
                 "no_obligations_reason": None,
                 "open_obligation_count": "0",
-                "unresolved_finding_count": "0",
+                "unanswered_finding_count": "0",
+                "receipt_blocking_finding_count": "0",
                 "blocking_conditions": ["readiness_unknown"],
             }
         )
@@ -1270,7 +1304,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
                 "declared_obligation_count": "2",
                 "no_obligations_reason": None,
                 "open_obligation_count": "2",
-                "unresolved_finding_count": None,
+                "unanswered_finding_count": None,
+                "receipt_blocking_finding_count": "0",
                 "blocking_conditions": ["readiness_unknown"],
             }
         )
@@ -1281,7 +1316,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
                 "declared_obligation_count": None,
                 "no_obligations_reason": None,
                 "open_obligation_count": None,
-                "unresolved_finding_count": None,
+                "unanswered_finding_count": None,
+                "receipt_blocking_finding_count": None,
                 "blocking_conditions": ["readiness_unknown", "no_plan_published"],
             }
         )
@@ -1291,7 +1327,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
             "declared_obligation_count": "0",
             "no_obligations_reason": None,
             "open_obligation_count": "0",
-            "unresolved_finding_count": "0",
+            "unanswered_finding_count": "0",
+            "receipt_blocking_finding_count": "0",
             "blocking_conditions": ["no_plan_published"],
         }
     )
@@ -1302,7 +1339,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
             "declared_obligation_count": "0",
             "no_obligations_reason": None,
             "open_obligation_count": "0",
-            "unresolved_finding_count": "0",
+            "unanswered_finding_count": "0",
+            "receipt_blocking_finding_count": "0",
             "blocking_conditions": ["no_obligations_declared"],
         }
     )
@@ -1313,7 +1351,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
             "declared_obligation_count": "0",
             "no_obligations_reason": "single_atomic_change",
             "open_obligation_count": "0",
-            "unresolved_finding_count": "0",
+            "unanswered_finding_count": "0",
+            "receipt_blocking_finding_count": "0",
             "blocking_conditions": [],
         }
     )
@@ -1325,7 +1364,8 @@ def test_closure_readiness_never_reports_unknown_state_as_a_clean_record() -> No
                 "declared_obligation_count": "0",
                 "no_obligations_reason": None,
                 "open_obligation_count": "0",
-                "unresolved_finding_count": "0",
+                "unanswered_finding_count": "0",
+                "receipt_blocking_finding_count": "0",
                 "blocking_conditions": [],
             }
         )
@@ -1342,9 +1382,10 @@ def test_compact_scope_counts_preserve_known_no_plan_and_unknown_plan() -> None:
         "declared_obligation_count": "0",
         "no_obligations_reason": None,
         "open_obligation_count": "0",
-        "unresolved_finding_count": "0",
+        "unanswered_finding_count": "0",
+        "receipt_blocking_finding_count": "0",
         "open_obligations": [],
-        "unresolved_findings": [],
+        "unanswered_findings": [],
         "freshness": "current",
         "coverage": _coverage_wire(),
         "gaps": [],
@@ -2015,7 +2056,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 761
+    assert len(derived_patterns) == 764
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -2024,7 +2065,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 777
+    assert len(rules) == 780
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2033,7 +2074,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 761
+    assert len(registry_patterns) == 764
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2433,13 +2474,13 @@ def _expected_nonpublish_content_rules(
         (
             "status",
             "compact",
-            "/page/items/*/unresolved_findings/*/detail",
+            "/page/items/*/unanswered_findings/*/detail",
             finding_summary,
         ),
         (
             "status",
             "compact",
-            "/page/items/*/unresolved_findings/*/summary",
+            "/page/items/*/unanswered_findings/*/summary",
             finding_summary,
         ),
         ("status", "evidence", "/page/items/*/description", evidence_excerpt),
@@ -2675,7 +2716,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_714
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 1_717
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:

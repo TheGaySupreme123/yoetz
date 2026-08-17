@@ -194,33 +194,50 @@ def summary_for_check(envelope: object) -> str:
     )
 
 
-def _compact_status_fields(source: Mapping[str, JsonValue]) -> tuple[str, str, str]:
+def _compact_status_fields(source: Mapping[str, JsonValue]) -> tuple[str, str, str, str]:
+    readiness = source.get("closure_readiness")
+    if isinstance(readiness, Mapping):
+        typed_readiness = cast(Mapping[str, JsonValue], readiness)
+        coverage = source.get("coverage")
+        freshness = (
+            _safe_token(cast(Mapping[str, JsonValue], coverage).get("ledger_freshness"))
+            if isinstance(coverage, Mapping)
+            else "unavailable"
+        )
+        return (
+            freshness,
+            _safe_count(typed_readiness.get("open_obligation_count")),
+            _safe_count(typed_readiness.get("unanswered_finding_count")),
+            _safe_count(typed_readiness.get("receipt_blocking_finding_count")),
+        )
     page = source.get("page")
     if not isinstance(page, Mapping):
-        return "unavailable", "unavailable", "unavailable"
+        return "unavailable", "unavailable", "unavailable", "unavailable"
     typed_page = cast(Mapping[str, JsonValue], page)
     items = typed_page.get("items")
     if not isinstance(items, list | tuple) or not items:
-        return "unavailable", "unavailable", "unavailable"
+        return "unavailable", "unavailable", "unavailable", "unavailable"
     item = items[0]
     if not isinstance(item, Mapping):
-        return "unavailable", "unavailable", "unavailable"
+        return "unavailable", "unavailable", "unavailable", "unavailable"
     typed_item = cast(Mapping[str, JsonValue], item)
     return (
         _safe_token(typed_item.get("freshness")),
         _safe_count(typed_item.get("open_obligation_count")),
-        _safe_count(typed_item.get("unresolved_finding_count")),
+        _safe_count(typed_item.get("unanswered_finding_count")),
+        _safe_count(typed_item.get("receipt_blocking_finding_count")),
     )
 
 
 def summary_for_status(envelope: object) -> str:
     source = _mapping(envelope)
     view = _safe_token(source.get("view"))
-    freshness, obligations, findings = _compact_status_fields(source)
+    freshness, obligations, unanswered, receipt_blocking = _compact_status_fields(source)
     gaps = _item_count(source.get("gaps"))
     return _bounded(
         f"Status view: {view}; {_frontier_clause(source)}; freshness: {freshness}; "
-        f"open obligations: {obligations}; unresolved findings: {findings}; reported gaps: {gaps}."
+        f"open obligations: {obligations}; unanswered findings: {unanswered}; "
+        f"receipt-blocking findings: {receipt_blocking}; reported gaps: {gaps}."
     )
 
 

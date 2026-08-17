@@ -94,7 +94,12 @@ frontiers, and accepted event ids are present only when the operation is a compl
 Before completion, read `declared_obligation_count`, `no_obligations_reason`, and
 `closure_readiness`. An empty readable plan without a typed reason is blocked by
 `no_obligations_declared`; a typed reason clears that readiness blocker but remains visible. If the
-plan scope is unreadable, readiness is unknown rather than zero.
+plan scope is unreadable, readiness is unknown rather than zero. Read the finding counters
+separately: `unanswered_finding_count` is response work still to do, while
+`receipt_blocking_finding_count` is the current actionable finding set that prevents a clean
+receipt even after every response. Accordingly, `findings_unanswered` is remediable;
+`receipt_findings_unresolved` is a persistent conclusion bound and should not trigger another
+response loop.
 
 ### `receipt`
 Projects the honest summary of what was checked, at what coverage, and what remains open. Formats:

@@ -11,6 +11,13 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- Status compact/readiness projections now distinguish `unanswered_finding_count` from
+  `receipt_blocking_finding_count`. Responses clear the former; current actionable receipt findings
+  remain in the latter for every disposition. The paired `findings_unanswered` and
+  `receipt_findings_unresolved` conditions tell agents whether to respond or proceed to an honestly
+  unresolved receipt, and agent guidance no longer offers the human-only `waived` disposition
+  (issues #286 and #287).
+
 - MCP success summaries now preserve the canonical frontier head digest and, for generic
   operations such as `start`, returned task/session/writer identifiers after strict shape
   validation. The bounded text fallback can therefore seed the next request even when a host drops
@@ -222,10 +229,10 @@ describes behavior intended for the first release rather than a change from a pr
   discovery/registration adapters.
 
 - `closure_readiness` on every `status` success (`open_obligation_count`,
-  `unresolved_finding_count`, `blocking_conditions`), so an agent can see what currently bounds a
+  finding counters, `blocking_conditions`), so an agent can see what currently bounds a
   completion conclusion before spending a `check` or `receipt` rather than learning it afterwards
   from an insufficient receipt. Derived per request: it records nothing, creates no verdict or IDs,
-  and never strengthens coverage. When the compact singleton is unreadable both counts are `null`
+  and never strengthens coverage. When the compact singleton is unreadable all counts are `null`
   and the only condition is `readiness_unknown` — unknown is reported as unknown, never as zero.
 
 - A worked `publish_work` example per ordinary publishable event family, so agents no longer

@@ -1455,7 +1455,12 @@ async def test_check_respond_recheck_reaches_a_fixed_point() -> None:
     item = compact.items[0]
     # The acknowledged finding is answered on the record and the recheck's own bookkeeping is not
     # material change, so nothing demands another cycle.
-    assert item.unresolved_finding_count == "0"
+    assert item.unanswered_finding_count == "0"
+    assert int(item.receipt_blocking_finding_count) > 0
+    assert status.closure_readiness.blocking_conditions == (
+        "receipt_findings_unresolved",
+        "no_plan_published",
+    )
     assert item.freshness != "stale_after_material_change"
 
 

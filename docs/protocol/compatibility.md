@@ -97,6 +97,20 @@ admits `null` when current plan scope is unreadable; this prevents a redacted pl
 reported as zero or making the task unattachable. The start result schema remains `1.0.0` under the
 same pre-release correction.
 
+The finding-readiness correction is likewise an explicit pre-release 0.1 contract correction.
+Start and status result schemas remain `1.0.0`: their former
+`unresolved_finding_count` field becomes `unanswered_finding_count`, compact status renames its
+preview to `unanswered_findings`, and both compact surfaces add
+`receipt_blocking_finding_count`. Status readiness replaces `findings_unresolved` with the distinct
+`findings_unanswered` and `receipt_findings_unresolved` conditions. No canonical event byte or
+stored response disposition changes, and the internal SQLite projection column retains its
+generation-1 name; replay derives both public counts from the existing findings and responses. A
+durable pre-correction create result normalizes its receipt-blocking count to zero. A pre-correction
+attach result cannot reconstruct responded actionable findings from its old unanswered-only count,
+so replay returns `receipt_blocking_finding_count: null` with the explicit
+`legacy_receipt_blocking_count_unknown` gap instead of declaring storage corruption or inventing a
+value.
+
 Golden vectors are retained for every released version under `fixtures/`. Reducers, checks, and
 receipts always name the engine/policy version that produced them and never reinterpret old bytes
 under a newer policy silently. Unknown or redacted data always weakens coverage and receipt

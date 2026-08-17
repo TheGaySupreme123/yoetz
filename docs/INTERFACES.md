@@ -2772,24 +2772,28 @@ per operation: `start`, `publish_work`, `check`, `respond`, `status`, `receipt`,
 `PublicOperationError`.
 
 Every `status` success carries `closure_readiness(open_obligation_count,
-unresolved_finding_count, declared_obligation_count, no_obligations_reason,
-blocking_conditions)` beside `import_status`, on every view. `unresolved_finding_count` counts
-recorded findings with no recorded response, whatever the response's disposition; a rejection,
-waiver, or provenance dispute answers the finding on the record and its own quality surfaces as a
-later finding. The compact singleton carries the same
-two completion-scope fields beside its current plan locator and counters. Its
-`blocking_conditions` are exactly
-`obligations_open|findings_unresolved|no_plan_published|no_obligations_declared|projection_stale|
-coverage_gaps_declared|readiness_unknown`. It is derived per request from the compact projection:
-reading it records
-nothing, creates no verdict or IDs, and never strengthens coverage. It exists so a check or receipt
-is not spent before the record can support a conclusion.
+unanswered_finding_count, receipt_blocking_finding_count, declared_obligation_count,
+no_obligations_reason, blocking_conditions)` beside `import_status`, on every view.
+`unanswered_finding_count` counts recorded findings with no recorded response, whatever a later
+response's disposition; a rejection, waiver, or provenance dispute answers the finding on the
+record and its own quality surfaces as a later finding. `receipt_blocking_finding_count` selects the
+newest readable finding per receipt issue key and counts the actionable ones. It never decreases
+merely because a response was recorded: every receipt finding state remains `resolved=false`.
+The compact singleton carries the same two completion-scope fields beside its current plan locator,
+both counters, and an `unanswered_findings` preview. Its `blocking_conditions` are exactly
+`obligations_open|findings_unanswered|receipt_findings_unresolved|no_plan_published|
+no_obligations_declared|projection_stale|coverage_gaps_declared|readiness_unknown`. It is derived
+per request from the compact projection: reading it records nothing, creates no verdict or IDs, and
+never strengthens coverage. `findings_unanswered` identifies response work still to do;
+`receipt_findings_unresolved` is a persistent conclusion bound, not an instruction to respond
+again. Once every readable finding is answered, the latter condition remains and tells the caller
+that a receipt may be requested but cannot conclude `no_unresolved_deterministic_findings`.
 
 No plan yields `no_plan_published`. A readable effective plan with declared count zero and no reason
 yields `no_obligations_declared`; the same count with a typed reason clears that blocker while the
 reason remains visible. A positive declared count has no completion-scope blocker when all effective
 obligations are resolved. Compact omits its singleton when the task title is unreadable. Readiness
-never fills an unreadable scope or count with zeros: all three counts and the reason are then `null`,
+never fills an unreadable scope or count with zeros: all four counts and the reason are then `null`,
 and `blocking_conditions` is exactly `("readiness_unknown",)`. Unknown is a bounded state, not a
 default. Existing stale, unknown-event, missing-reference, redaction, and coverage-gap blockers
 remain conservative.

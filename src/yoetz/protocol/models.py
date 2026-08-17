@@ -1495,7 +1495,8 @@ class StartCompactViewModel(_ClosedModel):
     # Start reuses the same compact projection as status. A redacted/unreadable current plan
     # cannot honestly produce a numeric count, so attach preserves null instead of inventing zero.
     open_obligation_count: CanonicalUInt64Wire | None
-    unresolved_finding_count: CanonicalUInt64Wire
+    unanswered_finding_count: CanonicalUInt64Wire
+    receipt_blocking_finding_count: CanonicalUInt64Wire | None
     ledger_freshness: Literal[
         "current", "partial", "redacted_gap", "stale_after_material_change", "unknown"
     ]
@@ -1506,6 +1507,9 @@ class StartCompactViewModel(_ClosedModel):
     @model_validator(mode="after")
     def _validate_start_compact_sets(self) -> StartCompactViewModel:
         _require_unique(self.gaps, limit=64)
+        legacy_unknown = "legacy_receipt_blocking_count_unknown" in self.gaps
+        if (self.receipt_blocking_finding_count is None) != legacy_unknown:
+            raise ValueError("start_compact_receipt_blocking_count_mismatch")
         return self
 
 
@@ -2437,9 +2441,10 @@ class StatusCompactItemModel(_ClosedModel):
         | None
     )
     open_obligation_count: CanonicalUInt64Wire | None
-    unresolved_finding_count: CanonicalUInt64Wire
+    unanswered_finding_count: CanonicalUInt64Wire
+    receipt_blocking_finding_count: CanonicalUInt64Wire
     open_obligations: tuple[StatusCompactObligationModel, ...]
-    unresolved_findings: tuple[StatusCompactFindingModel, ...]
+    unanswered_findings: tuple[StatusCompactFindingModel, ...]
     freshness: FreshnessWire
     coverage: CoverageModel
     gaps: tuple[CodeWire, ...]
@@ -2451,7 +2456,7 @@ class StatusCompactItemModel(_ClosedModel):
             and self.task_title.category is not DataCategory.TASK_DESCRIPTION
         ):
             raise ValueError("task_omission_category_invalid")
-        if len(self.open_obligations) > 10 or len(self.unresolved_findings) > 10:
+        if len(self.open_obligations) > 10 or len(self.unanswered_findings) > 10:
             raise ValueError("compact_item_limit")
         _require_unique(self.gaps, limit=64)
         unknown = self.declared_obligation_count is None or self.open_obligation_count is None
@@ -2472,6 +2477,8 @@ class StatusCompactItemModel(_ClosedModel):
                 raise ValueError("compact_obligation_count_mismatch")
             if self.no_obligations_reason is not None and declared != 0:
                 raise ValueError("compact_no_obligations_reason_mismatch")
+        if len(self.unanswered_findings) > int(self.unanswered_finding_count):
+            raise ValueError("compact_unanswered_finding_count_mismatch")
         return self
 
 
@@ -2685,11 +2692,13 @@ class StatusClosureReadinessModel(_ClosedModel):
         | None
     )
     open_obligation_count: CanonicalUInt64Wire | None
-    unresolved_finding_count: CanonicalUInt64Wire | None
+    unanswered_finding_count: CanonicalUInt64Wire | None
+    receipt_blocking_finding_count: CanonicalUInt64Wire | None
     blocking_conditions: tuple[
         Literal[
             "obligations_open",
-            "findings_unresolved",
+            "findings_unanswered",
+            "receipt_findings_unresolved",
             "no_plan_published",
             "no_obligations_declared",
             "projection_stale",
@@ -2708,7 +2717,8 @@ class StatusClosureReadinessModel(_ClosedModel):
         counts = (
             self.declared_obligation_count,
             self.open_obligation_count,
-            self.unresolved_finding_count,
+            self.unanswered_finding_count,
+            self.receipt_blocking_finding_count,
         )
         unknown = any(value is None for value in counts)
         if unknown != ("readiness_unknown" in self.blocking_conditions):
@@ -2722,12 +2732,20 @@ class StatusClosureReadinessModel(_ClosedModel):
         if not unknown:
             declared = int(cast(str, self.declared_obligation_count))
             opened = int(cast(str, self.open_obligation_count))
+            unanswered = int(cast(str, self.unanswered_finding_count))
+            receipt_blocking = int(cast(str, self.receipt_blocking_finding_count))
             if opened > declared:
                 raise ValueError("closure_readiness_obligation_count_mismatch")
             if self.no_obligations_reason is not None and declared != 0:
                 raise ValueError("closure_readiness_no_obligations_reason_mismatch")
             if (opened > 0) != ("obligations_open" in self.blocking_conditions):
                 raise ValueError("closure_readiness_open_blocker_mismatch")
+            if (unanswered > 0) != ("findings_unanswered" in self.blocking_conditions):
+                raise ValueError("closure_readiness_unanswered_blocker_mismatch")
+            if (receipt_blocking > 0) != (
+                "receipt_findings_unresolved" in self.blocking_conditions
+            ):
+                raise ValueError("closure_readiness_receipt_blocker_mismatch")
             no_plan = "no_plan_published" in self.blocking_conditions
             expected_empty_scope_blocker = (
                 not no_plan and declared == 0 and self.no_obligations_reason is None
@@ -3309,7 +3327,8 @@ _START_STRUCTURAL_POINTERS: Final = (
         "/compact/gaps/*",
         "/compact/ledger_freshness",
         "/compact/open_obligation_count",
-        "/compact/unresolved_finding_count",
+        "/compact/unanswered_finding_count",
+        "/compact/receipt_blocking_finding_count",
     )
     + _prefix_leaf_patterns("/privacy_projection", _PRIVACY_PROJECTION_LEAVES)
     + _prefix_leaf_patterns("/versions", _BASIC_VERSION_LEAVES)
@@ -3502,7 +3521,8 @@ _STATUS_COMMON_STRUCTURAL_POINTERS: Final = (
             "declared_obligation_count",
             "no_obligations_reason",
             "open_obligation_count",
-            "unresolved_finding_count",
+            "unanswered_finding_count",
+            "receipt_blocking_finding_count",
         ),
     )
 )
@@ -3569,9 +3589,10 @@ _STATUS_COMPACT_STRUCTURAL_POINTERS: Final = (
             "gaps/*",
             "no_obligations_reason",
             "open_obligation_count",
+            "receipt_blocking_finding_count",
             "session_id",
             "task_id",
-            "unresolved_finding_count",
+            "unanswered_finding_count",
         ),
     )
     + _prefix_leaf_patterns("/page/items/*/coverage", _COVERAGE_LEAVES)
@@ -3590,15 +3611,15 @@ _STATUS_COMPACT_STRUCTURAL_POINTERS: Final = (
         _OMITTED_CONTENT_LEAVES,
     )
     + _prefix_leaf_patterns(
-        "/page/items/*/unresolved_findings/*",
+        "/page/items/*/unanswered_findings/*",
         ("finding_id", "kind", "priority"),
     )
     + _prefix_leaf_patterns(
-        "/page/items/*/unresolved_findings/*/detail",
+        "/page/items/*/unanswered_findings/*/detail",
         _OMITTED_CONTENT_LEAVES,
     )
     + _prefix_leaf_patterns(
-        "/page/items/*/unresolved_findings/*/summary",
+        "/page/items/*/unanswered_findings/*/summary",
         _OMITTED_CONTENT_LEAVES,
     )
 )
@@ -3833,12 +3854,12 @@ _STATUS_CONTENT_RULES: Final[tuple[tuple[str, str, DataCategory], ...]] = (
     ("compact", "/page/items/*/task_title", DataCategory.TASK_DESCRIPTION),
     (
         "compact",
-        "/page/items/*/unresolved_findings/*/detail",
+        "/page/items/*/unanswered_findings/*/detail",
         DataCategory.FINDING_SUMMARY,
     ),
     (
         "compact",
-        "/page/items/*/unresolved_findings/*/summary",
+        "/page/items/*/unanswered_findings/*/summary",
         DataCategory.FINDING_SUMMARY,
     ),
     ("evidence", "/page/items/*/description", DataCategory.EVIDENCE_EXCERPT),
@@ -4005,7 +4026,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 777:
+    if len(result) != 780:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 
