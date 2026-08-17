@@ -2005,6 +2005,39 @@ def test_timing_rows_attribute_the_store_stage(tmp_path: Path) -> None:
     assert {"store", "store_hydrate", "store_encode", "store_write"} <= set(stages)
 
 
+def test_timing_rows_partition_the_whole_pass(tmp_path: Path) -> None:
+    """#310/#311: stage sums covered as little as 14% of the reported total."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="Stop",
+        stdin_bytes=json.dumps({"session_id": "partitioned", "tool_name": "shell"}).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    rows = [
+        cast(dict[str, object], json.loads(line))
+        for line in (tmp_path / "observation/hook-diagnostics.jsonl").read_text().splitlines()
+    ]
+    stages = cast(
+        Mapping[str, int], [row for row in rows if row.get("kind") == "timing"][-1]["stages"]
+    )
+    # The formerly unwindowed regions, plus lock queueing wherever it happened.
+    assert {"resolve", "deliver", "store_lock_wait", "unattributed"} <= set(stages)
+    partition = ("import", "resolve", "store", "drain", "deliver")
+    total = stages["total"]
+    assert sum(stages[name] for name in partition) + stages["unattributed"] >= total - 5
+    # Nothing is left unexplained on an uncontended local pass.
+    assert stages["unattributed"] <= max(5, total // 4)
+
+
 def test_hook_total_budget_covers_the_budgets_nested_inside_one_pass() -> None:
     """The end-to-end contract must be satisfiable by a healthy pass (#288).
 
@@ -2092,6 +2125,8 @@ def test_end_to_end_hook_budget_is_recorded_and_exceeding_it_is_diagnosed(
     assert out.getvalue().endswith(b"\n")
     summary = hook_diagnostic_summary(_state=tmp_path)
     reasons = dict(cast(Mapping[str, object], summary["reasons"]))
-    assert reasons.get("hook_budget_exceeded") == 1
+    budget = dict(cast(Mapping[str, object], reasons["hook_budget_exceeded"]))
+    assert budget["count"] == 1
+    assert budget["recent"] == 1
     timings = dict(cast(Mapping[str, object], summary["timings"]))
     assert timings["count"] == 1

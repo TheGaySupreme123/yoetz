@@ -16,7 +16,7 @@ import re
 import stat
 import threading
 import time
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -128,6 +128,9 @@ _LOCAL_STREAM_PARTIAL_DROPPED_GAP: Final = "_local_stream_partial_dropped"
 _LEGACY_STREAM_PARTIAL_DROPPED_SESSION: Final = "_legacy_unknown"
 _STORE_LOCK_TIMEOUT_SECONDS: Final = 2.0
 _STORE_LOCK_POLL_SECONDS: Final = 0.01
+# Fraction of the state bound a save must leave free before an eviction gap is
+# treated as healed (#310).
+_STATE_HEADROOM_DIVISOR: Final = 8
 
 YOETZ_TOOL_NAMES: Final = frozenset(
     {
@@ -163,15 +166,32 @@ _STORE_LOCK_REGISTRY: dict[str, _StoreLockState] = {}
 class _InterprocessStoreLock:
     """Reentrant process-local lock plus POSIX serialization across hook/daemon."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, waits_ms: MutableMapping[str, float] | None = None) -> None:
         self._path = path
+        # Queueing behind another process is real hook wall time that no stage
+        # window could see: the wait lands inside and outside the timed 'store'
+        # window alike, so it accumulates here, once per acquisition, wherever
+        # in the pass it happens (#310/#311). Reentrant acquisitions return
+        # immediately and contribute ~0.
+        self._waits_ms = waits_ms
         key = str(path.absolute())
         with _STORE_LOCK_REGISTRY_GUARD:
             self._state = _STORE_LOCK_REGISTRY.setdefault(key, _StoreLockState())
 
     def __enter__(self) -> _InterprocessStoreLock:
+        started = time.monotonic()
+        try:
+            return self._acquire(started + _STORE_LOCK_TIMEOUT_SECONDS)
+        finally:
+            if self._waits_ms is not None:
+                # Recorded on the timeout path too: a pass that waited two
+                # seconds and then failed spent those seconds queueing.
+                self._waits_ms["lock_wait"] = (
+                    self._waits_ms.get("lock_wait", 0.0) + (time.monotonic() - started) * 1000
+                )
+
+    def _acquire(self, deadline: float) -> _InterprocessStoreLock:
         state = self._state
-        deadline = time.monotonic() + _STORE_LOCK_TIMEOUT_SECONDS
         if not state.thread_lock.acquire(timeout=_STORE_LOCK_TIMEOUT_SECONDS):
             raise TimeoutError("observation_store_lock_timeout")
         if state.depth == 0:
@@ -644,7 +664,20 @@ class LocalObservationStore:
     ) -> None:
         self._root = observation_dir(_state=_state)
         self._state_root = self._root.parent
-        self._lock = _InterprocessStoreLock(self._root / ".store.lock")
+        # Monotonic milliseconds accumulated per store sub-stage since
+        # construction. Hooks fold these into their pass-timing rows so the
+        # formerly opaque 'store' stage is attributable (#290), and so time
+        # spent queueing for the store lock is reported as queueing rather
+        # than as unexplained wall time (#310).
+        self.stage_timings_ms: dict[str, float] = {
+            "hydrate": 0.0,
+            "encode": 0.0,
+            "lock_wait": 0.0,
+            "write": 0.0,
+        }
+        self._lock = _InterprocessStoreLock(
+            self._root / ".store.lock", waits_ms=self.stage_timings_ms
+        )
         self._monotonic = _monotonic
         self._wall = _wall
         # Parse cache keyed by workspace commitment, validated by the state
@@ -664,10 +697,6 @@ class LocalObservationStore:
         # 10-18 times measured on a lived-in store (#242).
         self._batch: dict[str, _WorkspaceState] = {}
         self._batch_dirty: set[str] = set()
-        # Monotonic milliseconds accumulated per store sub-stage since
-        # construction. Hooks fold these into their pass-timing rows so the
-        # formerly opaque 'store' stage is attributable (#290).
-        self.stage_timings_ms: dict[str, float] = {"hydrate": 0.0, "encode": 0.0, "write": 0.0}
 
     def _now_mono(self) -> float:
         import time
@@ -2322,6 +2351,7 @@ class LocalObservationStore:
             dropped_sessions.add(largest)
             self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
             payload = self._encode_state(workspace_commitment, state)
+        truncated = False
         if len(payload) > _MAX_STATE_BYTES:
             # Retain authority state and make every observation-detail loss explicit.
             assert state.envelopes is not None
@@ -2329,6 +2359,7 @@ class LocalObservationStore:
                 del state.envelopes[0]
                 assert state.gaps is not None
                 self._note_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
+                truncated = True
                 payload = self._encode_state(workspace_commitment, state)
         assert state.pending_outbox is not None
         assert state.quarantine is not None
@@ -2363,6 +2394,22 @@ class LocalObservationStore:
                 "Observation state exceeds its safe local bound.",
                 retryable=False,
             )
+        truncation = state.gaps.get(ObservationGapCode.TRUNCATED_PAYLOAD.value)
+        if (
+            not truncated
+            and truncation is not None
+            and truncation.active
+            and len(payload) + _MAX_STATE_BYTES // _STATE_HEADROOM_DIVISOR <= _MAX_STATE_BYTES
+        ):
+            # Landing with a full headroom margin, having shed nothing, is live
+            # proof the store is no longer losing observations to the bound.
+            # Landing merely *under* the bound proves nothing — that is the
+            # state an eviction itself leaves behind, so clearing there would
+            # retire the gap in the same pass that opened it. History stays in
+            # gap_history; only the active flag, which reports live
+            # degradation, is cleared (#310).
+            self._resolve_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
+            payload = self._encode_state(workspace_commitment, state)
         write_started = self._now_mono()
         _atomic_write(path, payload)
         self.stage_timings_ms["write"] += (self._now_mono() - write_started) * 1000
