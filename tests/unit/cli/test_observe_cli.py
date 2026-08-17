@@ -93,7 +93,12 @@ def test_status_separates_undelivered_from_lag_and_reports_ambiguous_activation(
     assert payload["last_successful_drain"] == "never"
     assert payload["mapping_present"] is False
     assert payload["plugin_activation"] == "unknown"
-    assert payload["hook_diagnostics"]["reasons"]["service_unavailable"] == 1
+    unavailable = payload["hook_diagnostics"]["reasons"]["service_unavailable"]
+    assert unavailable["count"] == 1
+    # A live failure reads as live; a stale one is dated instead of tallied (#310).
+    assert unavailable["recent"] == 1
+    assert unavailable["first_seen"] == unavailable["last_seen"]
+    assert payload["hook_diagnostics"]["recent_count"] == 1
 
 
 def test_status_surfaces_quarantine_depth_and_reclaim_empties_it(

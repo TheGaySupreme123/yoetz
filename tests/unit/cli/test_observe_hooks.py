@@ -871,6 +871,131 @@ def test_skip_service_session_start_never_opens_service_connection(
     assert store.list_pending_outbox(workspace)
 
 
+def test_session_start_stale_mapping_advisory_keeps_advice_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SESSION_CONFLICT status answer means the mapping is stale, not the
+    service down: the observe path must emit the shared stale advisory (#308)
+    and let pending advice join it instead of being starved."""
+
+    import uuid
+
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        load_mapping,
+        mapping_from_start_ids,
+        store_mapping,
+    )
+    from yoetz.adapters.integrations.observation_local import AdviceDelivery
+    from yoetz.cli import hooks as hooks_module
+    from yoetz.domain.observation import AdviceSnapshot
+    from yoetz.protocol.ids import IdKind, new_id
+    from yoetz.protocol.models import OperationFailureModel
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id="stale-observe",
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier="0:genesis",
+        ),
+        _state=tmp_path,
+    )
+    failure = OperationFailureModel.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "ok": False,
+            "error": {
+                "code": "SESSION_CONFLICT",
+                "message": "The requested task attachment conflicts.",
+                "retryable": False,
+                "correlation_id": f"err_{uuid.uuid4()}",
+            },
+        }
+    )
+
+    class _Result:
+        root = failure
+
+    class _Client:
+        async def status(self, request: object, *, deadline_ms: int | None = None) -> object:
+            del request, deadline_ms
+            return _Result()
+
+        async def observation_ingest(self, body: object, *, deadline_ms: int) -> object:
+            del body, deadline_ms
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object) -> _Client:
+        return _Client()
+
+    advice = AdviceDelivery(
+        snapshot=cast(AdviceSnapshot, object()),
+        item=None,
+        delivery_identity="advice-1",
+        text="Standing advice: connect a provider.",
+    )
+    commits: list[str] = []
+
+    def fake_peek(
+        self: LocalObservationStore,
+        workspace_arg: str,
+        *,
+        yoetz_session_id: str | None = None,
+        allow_standing: bool = True,
+        session_commitment: str | None = None,
+    ) -> AdviceDelivery:
+        del self, workspace_arg, yoetz_session_id, allow_standing, session_commitment
+        return advice
+
+    def fake_commit(
+        self: LocalObservationStore,
+        workspace_arg: str,
+        identity: str,
+        *,
+        yoetz_session_id: str | None = None,
+        session_commitment: str | None = None,
+    ) -> None:
+        del self, workspace_arg, yoetz_session_id, session_commitment
+        commits.append(identity)
+
+    monkeypatch.setattr(LocalObservationStore, "peek_advice_for_delivery", fake_peek)
+    monkeypatch.setattr(LocalObservationStore, "commit_advice_delivery", fake_commit)
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "stale-observe", "hook_event_name": "SessionStart", "cwd": "."}
+        ).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+    assert code == 0
+    context = json.loads(out.getvalue().decode())["hookSpecificOutput"]["additionalContext"]
+    stale_text = hooks_module._STALE_MAPPING_CONTEXT  # pyright: ignore[reportPrivateUsage]
+    assert context.startswith(stale_text)
+    assert "unavailable" not in context
+    # The static stale advisory must not starve pending advice (#241, #280 pattern).
+    assert advice.text in context
+    assert commits == ["advice-1"]
+    # The stale mapping survives: repair belongs to the agent's own re-start.
+    assert load_mapping("stale-observe", _state=tmp_path) is not None
+    diagnostics = (tmp_path / "observation" / "hook-diagnostics.jsonl").read_text()
+    assert '"reason":"mapping_stale"' in diagnostics
+
+
 def test_malformed_stdin_exits_zero(tmp_path: Path) -> None:
     code = handle_observe(
         event_name="Stop",
@@ -2005,6 +2130,39 @@ def test_timing_rows_attribute_the_store_stage(tmp_path: Path) -> None:
     assert {"store", "store_hydrate", "store_encode", "store_write"} <= set(stages)
 
 
+def test_timing_rows_partition_the_whole_pass(tmp_path: Path) -> None:
+    """#310/#311: stage sums covered as little as 14% of the reported total."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="Stop",
+        stdin_bytes=json.dumps({"session_id": "partitioned", "tool_name": "shell"}).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+    assert code == 0
+    rows = [
+        cast(dict[str, object], json.loads(line))
+        for line in (tmp_path / "observation/hook-diagnostics.jsonl").read_text().splitlines()
+    ]
+    stages = cast(
+        Mapping[str, int], [row for row in rows if row.get("kind") == "timing"][-1]["stages"]
+    )
+    # The formerly unwindowed regions, plus lock queueing wherever it happened.
+    assert {"resolve", "deliver", "store_lock_wait", "unattributed"} <= set(stages)
+    partition = ("import", "resolve", "store", "drain", "deliver")
+    total = stages["total"]
+    assert sum(stages[name] for name in partition) + stages["unattributed"] >= total - 5
+    # Nothing is left unexplained on an uncontended local pass.
+    assert stages["unattributed"] <= max(5, total // 4)
+
+
 def test_hook_total_budget_covers_the_budgets_nested_inside_one_pass() -> None:
     """The end-to-end contract must be satisfiable by a healthy pass (#288).
 
@@ -2092,6 +2250,8 @@ def test_end_to_end_hook_budget_is_recorded_and_exceeding_it_is_diagnosed(
     assert out.getvalue().endswith(b"\n")
     summary = hook_diagnostic_summary(_state=tmp_path)
     reasons = dict(cast(Mapping[str, object], summary["reasons"]))
-    assert reasons.get("hook_budget_exceeded") == 1
+    budget = dict(cast(Mapping[str, object], reasons["hook_budget_exceeded"]))
+    assert budget["count"] == 1
+    assert budget["recent"] == 1
     timings = dict(cast(Mapping[str, object], summary["timings"]))
     assert timings["count"] == 1

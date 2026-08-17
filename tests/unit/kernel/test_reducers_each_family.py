@@ -27,6 +27,7 @@ from yoetz.domain.values import (
     ActorType,
     actor_id,
     event_id,
+    finding_id,
     freeze_json,
     object_id,
     request_id,
@@ -49,6 +50,7 @@ from yoetz.protocol.canonical import entry_digest
 from yoetz.protocol.coverage import (
     AuthorshipAssurance,
     Coverage,
+    LedgerFreshness,
     PublicationChannel,
     coverage_from_json,
 )
@@ -439,3 +441,113 @@ def test_missing_evidence_index_association_is_projection_corruption() -> None:
     )
     with pytest.raises(ValueError, match="projection_corrupt"):
         reduce_event(state, records[7], corrupt)
+
+
+def _check_with_partial_coverage(
+    records: tuple[LedgerRecord, ...],
+    *,
+    returned: tuple[Any, ...] | None = None,
+) -> tuple[LedgerRecord, ...]:
+    """Rewrite the fixture's ``check_recorded`` to the coverage a gap-declaring check records.
+
+    ``application/check.py`` downgrades a check's own ``ledger_freshness`` to ``partial`` when the
+    check declares a coverage gap — a declined semantic review, for instance. No reviewed replay
+    fixture carries such a check, so the projection's handling of one is rewritten here rather
+    than by editing a frozen fixture. ``returned`` overrides the check's returned findings, which
+    is what decides whether the fixture's later response supersedes it.
+    """
+
+    from yoetz.domain.events import encode_payload
+    from yoetz.protocol.canonical import canonical_digest
+
+    rewritten: list[LedgerRecord] = []
+    for record in records:
+        if record.schema.name != "check_recorded":
+            rewritten.append(record)
+            continue
+        accepted = cast(AcceptedEvent, record)
+        payload = cast(Any, accepted.payload)
+        coverage = replace(
+            payload.coverage,
+            ledger_freshness=LedgerFreshness.PARTIAL,
+            known_gaps=("semantic_review_not_requested",),
+        )
+        rewired = replace(payload, coverage=coverage)
+        if returned is not None:
+            rewired = replace(rewired, returned_finding_ids=returned)
+        rewritten.append(
+            replace(
+                accepted,
+                payload=rewired,
+                projection_locator=replace(
+                    accepted.projection_locator,
+                    canonical_payload_digest=canonical_digest(encode_payload(rewired)),
+                ),
+            )
+        )
+    return tuple(rewritten)
+
+
+def test_retained_check_freshness_outlives_the_event_that_recorded_it() -> None:
+    """Issue #307: the projection scalar reported a gap-declaring check's ``partial`` freshness
+    only while folding the check itself and reverted to ``current`` on the next event of any
+    family, while ``latest_tested_state.coverage`` kept the gaps. One status item then carried two
+    disagreeing freshness fields.
+
+    The retained check governs the scalar for as long as it is the retained check, so the scalar
+    is now a function of carried state rather than of which event happens to be folding.
+    """
+
+    records = _check_with_partial_coverage(_records("all-event-families"))
+    families = tuple(record.schema.name for record in records)
+    assert families[10] == "check_recorded"
+    # The response answers a finding the check itself returned, so it never supersedes the check;
+    # the receipt's family is not material at all. Neither may clear the recorded gaps.
+    assert families[11:13] == ("response_recorded", "receipt_recorded")
+
+    at_check = replay(records[:11])
+    assert at_check.latest_tested_state is not None
+    assert at_check.latest_tested_state.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+    assert at_check.freshness is LedgerFreshness.PARTIAL
+
+    for through in (12, 13):
+        later = replay(records[:through])
+        retained = later.latest_tested_state
+        assert retained is not None, f"the check must still be retained at {through}"
+        assert retained.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+        # The scalar and the retained check's own coverage are one fact, so they cannot diverge.
+        assert later.freshness is retained.coverage.ledger_freshness
+
+
+def test_material_change_still_outranks_a_retained_partial_check() -> None:
+    """Carrying the check's freshness must not mask supersession: material work published after a
+    ``partial`` check leaves the ledger stale, which is the stronger statement about the same
+    check and the one the receipt applicability rule already makes.
+
+    The fixture's ``response_recorded`` answers a finding the check returned, which is the one
+    material-family record that deliberately does not supersede. Pointing the check at a different
+    finding makes that same record work the check never covered.
+    """
+
+    records = _check_with_partial_coverage(
+        _records("all-event-families"),
+        returned=(finding_id("fnd_20000002-0000-4000-8000-0000000001ff"),),
+    )
+    assert records[11].schema.name == "response_recorded"
+    superseded = replay(records[:12])
+    assert superseded.freshness is LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE
+    # The retained check is untouched; the scalar reports the newer, stronger fact about it.
+    assert superseded.latest_tested_state is not None
+    assert superseded.latest_tested_state.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+
+
+def test_redacting_a_partial_check_clears_its_carried_freshness() -> None:
+    """A redaction that removes the check removes what the scalar was reporting. The projection
+    drops ``latest_tested_state``, so the carried ``partial`` goes with it and the redaction's own
+    marker governs instead of a value with no surviving check behind it.
+    """
+
+    records = _check_with_partial_coverage(_records("all-event-families"))
+    assert records[13].schema.name == "redaction_recorded"
+    redacted = replay(records[:14])
+    assert redacted.freshness is LedgerFreshness.REDACTED_GAP
