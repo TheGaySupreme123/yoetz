@@ -18,7 +18,10 @@ from collections.abc import Callable
 
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 
-# The regressed implementation measured ~30-70x stdlib; the current one ~5-10x.
+# Measured on this document: the regressed implementation ran 37-48x stdlib,
+# the current one 11-13x. The fence sits above the current ratio with margin
+# and far below the regressed one, so it catches a return to per-character
+# work without flapping on ordinary hardware variance.
 _MAX_STDLIB_RATIO = 20.0
 # Below this absolute cost the ratio is noise-dominated and irrelevant to the
 # hook budget either way.

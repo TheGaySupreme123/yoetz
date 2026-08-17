@@ -94,7 +94,17 @@ _MAX_QUARANTINE_AGE_DAYS: Final = 14
 # so dropping one costs a bounded reread, never observation loss. It is
 # therefore bounded per entry and shed before any durable row when the state
 # file approaches its cap (#289).
-_MAX_STREAM_PARTIAL_BYTES: Final = 65_536
+#
+# The bound is the session reader's own read chunk
+# (``codex_session_stream._MAX_READ_CHUNK``) and may not go below it. The
+# reader assembles a source line across passes by holding its prefix here, so
+# a bound smaller than one chunk makes any line longer than a chunk
+# unassemblable: the hold is dropped, the next pass rereads the identical
+# chunk, and the cursor never advances again for that session. Measured on a
+# real Codex corpus, 648 of 1.54M rollout lines exceed 256 KiB, so the stall
+# is reachable. Not imported, to keep this module free of a cycle with the
+# reader that imports it; ``test_observation_state_bounds`` fences the drift.
+_MAX_STREAM_PARTIAL_BYTES: Final = 262_144
 # Parse-cache entry bound: hooks touch one workspace, the daemon's sweep loop
 # touches all of them — without a cap the daemon would retain a parsed object
 # graph per workspace forever.

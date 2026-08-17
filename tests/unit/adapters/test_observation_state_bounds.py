@@ -8,7 +8,13 @@ from typing import cast
 
 import pytest
 
+import yoetz.adapters.integrations.codex_session_stream as stream_mod
 import yoetz.adapters.integrations.observation_local as local_mod
+from yoetz.adapters.integrations.codex_session_stream import (
+    STREAM_MAPPING_VERSION,
+    SessionStreamReader,
+    default_stream_profile,
+)
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.domain.observation import (
     ObservationCursor,
@@ -136,7 +142,7 @@ def test_legacy_oversized_partial_is_dropped_on_next_save(
 
     store, workspace, session = _consented_store(tmp_path)
     monkeypatch.setattr(local_mod, "_MAX_STREAM_PARTIAL_BYTES", 1 << 30)
-    store.set_stream_partial(workspace, session, b"z" * 100_000)
+    store.set_stream_partial(workspace, session, b"z" * (_MAX_PARTIAL + 1))
     monkeypatch.undo()
 
     reopened = LocalObservationStore(_state=tmp_path)
@@ -145,6 +151,49 @@ def test_legacy_oversized_partial_is_dropped_on_next_save(
     assert reopened.get_stream_partial(workspace, session) == b""
     persisted = _state_json(tmp_path)
     assert _DROPPED_GAP in cast(list[str], persisted["gaps"])
+
+
+def test_partial_bound_is_at_least_the_reader_chunk() -> None:
+    """A bound below one read chunk makes long source lines unassemblable (#289).
+
+    The reader holds a line's prefix here across passes. Below one chunk the
+    hold is dropped, the next pass rereads the identical chunk, and the cursor
+    never advances again for that session.
+    """
+
+    assert _MAX_PARTIAL >= stream_mod._MAX_READ_CHUNK  # pyright: ignore[reportPrivateUsage]
+
+
+def test_stream_drains_a_source_line_longer_than_one_read_chunk(tmp_path: Path) -> None:
+    """A held prefix must survive long enough to assemble the line (#289)."""
+
+    store, workspace, session = _consented_store(tmp_path)
+    source = tmp_path / "rollout.jsonl"
+    chunk = stream_mod._MAX_READ_CHUNK  # pyright: ignore[reportPrivateUsage]
+    long_line = json.dumps({"type": "message", "payload": "z" * (chunk + 40_000)})
+    source.write_bytes(
+        json.dumps({"type": "message", "payload": "first"}).encode()
+        + b"\n"
+        + long_line.encode()
+        + b"\n"
+    )
+
+    cursor = ObservationCursor(1, 0, 0, f"hmac-sha256:{'00' * 32}", STREAM_MAPPING_VERSION)
+    for _ in range(4):
+        reader = SessionStreamReader(
+            session_commitment=session,
+            profile=default_stream_profile(),
+            cursor=cursor,
+            key_material=store.key_material(),
+            partial_line=store.get_stream_partial(workspace, session),
+        )
+        advance = reader.advance(source)
+        cursor = advance.cursor
+        store.set_stream_cursor(workspace, session, cursor)
+        store.set_stream_partial(workspace, session, advance.partial_line)
+
+    assert cursor.byte_position == source.stat().st_size
+    assert store.get_stream_partial(workspace, session) == b""
 
 
 def test_store_stage_timings_attribute_hydrate_encode_write(tmp_path: Path) -> None:

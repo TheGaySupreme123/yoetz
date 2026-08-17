@@ -435,7 +435,10 @@ carried them; they are listed because each one describes the behavior that now s
   read-cache — the reader rereads the tail from the committed cursor whenever it is missing — so
   it is now bounded per entry, dropped with an explicit gap instead of raising (which previously
   stalled the stream while retaining the partial that caused the stall), and shed first in the
-  `_save` eviction ladder, ahead of any durable row. Oversized partials persisted before this
+  `_save` eviction ladder, ahead of any durable row. The per-entry bound is the reader's own read
+  chunk and may not fall below it: the reader assembles a source line longer than one chunk by
+  holding its prefix, so a smaller bound would drop that prefix every pass and freeze the cursor
+  for that session. Oversized partials persisted before this
   change are dropped on the next save; the condition projects as `source_lag` on status until a
   reconcile catches up (issue #289).
 

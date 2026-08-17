@@ -1317,11 +1317,6 @@ def handle_observe(
             stages["advice"] = _elapsed_ms(advice_started, _monotonic())
 
         stages["store"] = _elapsed_ms(store_started, _monotonic())
-        # Attribute the pass's store work (#290). Accumulated store-wide, so
-        # store_hydrate includes the consent-probe parse that runs before the
-        # store stage window opens; the remainder of 'store' is mutation time.
-        for name, spent in store.stage_timings_ms.items():
-            stages[f"store_{name}"] = max(0, int(spent))
 
         # SessionStart: auto-start/attach first, persist mapping, then drain outbox.
         # Every branch below that opens a service connection is gated on
@@ -1556,6 +1551,16 @@ def handle_observe(
                         codex_session_id,
                         pending_frontier_notice.delivery_identity,
                     )
+        # Attribute the whole pass's store work (#290), folded in last because
+        # the store keeps saving after the 'store' stage window closes: the
+        # drain saves once per delivered row and advice commits its own. A
+        # snapshot taken at that window would have hidden exactly the rows the
+        # 1300ms drains were made of. These are store-wide accumulations, not a
+        # partition of 'store' — store_hydrate also covers the consent probe
+        # that runs before the window opens.
+        with contextlib.suppress(BaseException):
+            for name, spent in store.stage_timings_ms.items():
+                stages[f"store_{name}"] = max(0, int(spent))
         _record_pass_timing(
             resolved_event,
             entry_started=entry_started,
