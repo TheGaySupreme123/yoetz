@@ -1,7 +1,8 @@
 # ADR-016 — Human review for non-default actions
 
 **Status:** Working decision; amended 2026-07-31 to require action-bound OS user presence before
-console review; amended 2026-08-09 for agent-attested current-chat authorize (issue #164).
+console review; amended 2026-08-09 for agent-attested current-chat authorize (issue #164); amended
+2026-08-18 for atomic concurrent review claims (issue #344).
 **Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
 `src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`,
 `src/yoetz/protocol/consent.py`, `src/yoetz/protocol/chat_user_authority.py`, and
@@ -40,8 +41,9 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    that actually support agent-chat authorization.
 
 3. **One pending request.** One owner-only request with a 15-minute TTL may exist. The trusted
-   reviewer atomically claims it. Every terminal decision and every post-claim failure is
-   single-shot.
+   reviewer atomically claims it by creating a no-clobber hard-link review marker. Marker creation
+   is the ownership transition; only the winner cleans up the public pending name, while concurrent
+   losers are read-only. Every terminal decision and every post-claim failure is single-shot.
 
 4. **Verified presence before console review.** The fixed `yoetz consent review` command takes no
    authority-bearing arguments. An independently authenticated, action-bound, one-use

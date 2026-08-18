@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event, get_ident
 from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
+import yoetz.service.elevated_bootstrap as elevated_bootstrap
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.schemas import validate_schema_instance
 from yoetz.service.elevated_bootstrap import (
     ElevatedBootstrapError,
+    PendingElevatedConsent,
     catalog_payload,
     claim_pending_for_review,
     complete_review,
@@ -148,6 +152,143 @@ def test_concurrent_review_has_one_winner(tmp_path: Path) -> None:
     assert len(winners) == 1
     assert losers[0] in {"pending_absent", "review_in_progress"}
     complete_review(cast(Any, winners[0]), outcome="cancelled", _state=tmp_path)
+
+
+def test_concurrent_loser_cannot_consume_atomic_review_claim(tmp_path: Path) -> None:
+    prepared = prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    pending = tmp_path / "elevated-bootstrap" / "elevated-bootstrap-pending.json"
+    reviewing = tmp_path / "elevated-bootstrap" / "elevated-bootstrap-reviewing.json"
+    claim_published = Event()
+    release_winner = Event()
+    real_link = os.link
+
+    def pause_winner_after_atomic_claim(source: Any, claim: Any) -> None:
+        real_link(source, claim)
+        claim_published.set()
+        assert release_winner.wait(timeout=5), "winner was not released"
+
+    def claim() -> tuple[str, object]:
+        try:
+            return "ok", claim_pending_for_review(_state=tmp_path)
+        except ElevatedBootstrapError as exc:
+            return "error", exc.reason
+
+    with patch(
+        "yoetz.service.elevated_bootstrap.os.link",
+        side_effect=pause_winner_after_atomic_claim,
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            winner_future = pool.submit(claim)
+            assert claim_published.wait(timeout=5), "winner did not publish its review marker"
+            loser_future = pool.submit(claim)
+            assert not loser_future.done(), "loser bypassed the winner's state lock"
+            assert pending.is_file(), "winner removed the public name before claiming"
+            assert reviewing.is_file(), "winner did not publish the review marker"
+            release_winner.set()
+            winner = winner_future.result(timeout=5)
+            loser = loser_future.result(timeout=5)
+
+    assert loser == ("error", "pending_absent")
+    assert winner == ("ok", prepared)
+    assert not pending.exists()
+    assert reviewing.is_file()
+    complete_review(prepared, outcome="cancelled", _state=tmp_path)
+
+
+def test_public_name_cleanup_cannot_revoke_atomic_review_claim(tmp_path: Path) -> None:
+    prepared = prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    pending = tmp_path / "elevated-bootstrap" / "elevated-bootstrap-pending.json"
+    reviewing = tmp_path / "elevated-bootstrap" / "elevated-bootstrap-reviewing.json"
+    real_link = os.link
+
+    def remove_public_name_after_atomic_claim(source: Any, claim: Any) -> None:
+        real_link(source, claim)
+        Path(source).unlink()
+
+    with patch(
+        "yoetz.service.elevated_bootstrap.os.link",
+        side_effect=remove_public_name_after_atomic_claim,
+    ):
+        claimed = claim_pending_for_review(_state=tmp_path)
+
+    assert claimed == prepared
+    assert not pending.exists()
+    assert reviewing.is_file()
+    complete_review(claimed, outcome="cancelled", _state=tmp_path)
+
+
+def test_expiry_reprepare_cannot_replace_claimed_record(
+    tmp_path: Path,
+) -> None:
+    """The claim transition serializes expiry cleanup and replacement preparation (#344)."""
+
+    claim_loaded = Event()
+    release_claim = Event()
+    replacement_started = Event()
+    claim_thread_id: list[int | None] = [None]
+
+    def clock() -> float:
+        if claim_thread_id[0] == get_ident():
+            return 1_899 if not release_claim.is_set() else 1_901
+        return 1_000 if claim_thread_id[0] is None else 1_901
+
+    real_load = elevated_bootstrap._load_pending_path  # pyright: ignore[reportPrivateUsage]
+
+    def pause_claim_load(
+        path: Path,
+        *,
+        _state: Path | None,
+        expire: bool,
+    ) -> object:
+        loaded = real_load(path, _state=_state, expire=expire)
+        if (
+            claim_thread_id[0] == get_ident()
+            and expire
+            and path.name == "elevated-bootstrap-pending.json"
+            and loaded is not None
+        ):
+            claim_loaded.set()
+            assert release_claim.wait(timeout=5), "claim did not release its state lock"
+        return loaded
+
+    def claim() -> tuple[str, object]:
+        claim_thread_id[0] = get_ident()
+        try:
+            return "ok", claim_pending_for_review(_state=tmp_path)
+        except ElevatedBootstrapError as exc:
+            return "error", exc.reason
+
+    def reprepare() -> tuple[str, object]:
+        replacement_started.set()
+        try:
+            return "ok", prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+        except ElevatedBootstrapError as exc:
+            return "error", exc.reason
+
+    with (
+        patch("yoetz.service.elevated_bootstrap.time.time", side_effect=clock),
+        patch(
+            "yoetz.service.elevated_bootstrap._load_pending_path",
+            side_effect=pause_claim_load,
+        ),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        prepared = prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+        claim_future = pool.submit(claim)
+        assert claim_loaded.wait(timeout=5), "claim did not load the original pending record"
+        replacement_future = pool.submit(reprepare)
+        assert replacement_started.wait(timeout=5), "replacement did not start"
+        assert not replacement_future.done(), "replacement bypassed the claim state lock"
+        release_claim.set()
+        claim_result = claim_future.result(timeout=5)
+        replacement_result = replacement_future.result(timeout=5)
+        replacement_present = load_pending(_state=tmp_path)
+
+    assert claim_result == ("error", "pending_expired")
+    assert replacement_result[0] == "ok"
+    replacement = cast(PendingElevatedConsent, replacement_result[1])
+    assert replacement != prepared
+    assert replacement_present == replacement
 
 
 def test_interrupted_review_marker_blocks_reuse_and_new_prepare(tmp_path: Path) -> None:
