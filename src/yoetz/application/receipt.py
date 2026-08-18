@@ -223,11 +223,30 @@ def _identity(request: ReceiptRequest, versions: ReceiptVersionSlice) -> JsonVal
 
 
 async def _read_object(runtime: TaskRuntime, ref: ObjectRef) -> bytes:
-    chunks = [chunk async for chunk in runtime.objects.open_verified(ref)]
-    data = b"".join(chunks)
+    try:
+        chunks = [chunk async for chunk in runtime.objects.open_verified(ref)]
+        data = b"".join(chunks)
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The stored receipt is invalid.") from exc
     if len(data) != ref.plaintext_size:
         raise _error(PublicErrorCode.STORAGE_CORRUPT, "The receipt object is invalid.")
     return data
+
+
+async def _persist_object(
+    runtime: TaskRuntime, source: ObjectSource, metadata: ObjectMetadata
+) -> ObjectRef:
+    """Stage and finalize one receipt object before the ledger append."""
+
+    try:
+        staged = await runtime.objects.stage(source, metadata)
+        return await runtime.objects.finalize(staged)
+    except OSError as exc:
+        raise _error(
+            PublicErrorCode.STORAGE_UNSAFE,
+            "Receipt object storage is unavailable.",
+            retryable=True,
+        ) from exc
 
 
 async def _preflight(
@@ -589,11 +608,11 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
         document_json = cast(JsonValue, receipt_document_to_json(document))
         document_bytes = canonical_encode(document_json)
         digest = canonical_digest(document_json)
-        receipt_staged = await runtime.objects.stage(
+        receipt_ref = await _persist_object(
+            runtime,
             ObjectSource(data=document_bytes, declared_size=len(document_bytes)),
             ObjectMetadata(ObjectKind.RECEIPT, _RECEIPT_MEDIA_TYPE, runtime.task_id, now),
         )
-        receipt_ref = await runtime.objects.finalize(receipt_staged)
         payload = ReceiptRecordedPayload(
             document.receipt_id,
             frontier,
@@ -618,10 +637,11 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
             runtime.task_id,
             now,
         )
-        payload_staged = await runtime.objects.stage(
-            ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)), payload_metadata
+        payload_ref = await _persist_object(
+            runtime,
+            ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)),
+            payload_metadata,
         )
-        payload_ref = await runtime.objects.finalize(payload_staged)
         coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
         command = AppendCommand(
             runtime.task_id,

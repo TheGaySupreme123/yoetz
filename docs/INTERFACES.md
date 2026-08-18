@@ -1148,7 +1148,11 @@ next step.
 last_ingestion_sequence: int | None, result_object_ref: ObjectRef | None,
 structural_ids: tuple[str, ...])` requires both sequence fields absent or both present and ordered;
 `structural_ids` is sorted unique and has at most `MAX_EVENTS_PER_BATCH + 1` members. Receipt
-replay uses this locator; it never scans an unbounded ledger or rebuilds the receipt.
+replay uses this locator; it never scans an unbounded ledger or rebuilds the receipt. A failed
+verified read of that stored object (tampered envelope, missing file, wrong key slot, or I/O
+while reading) is `STORAGE_CORRUPT` with the stored-receipt-invalid family, never unclassified
+`INTERNAL_ERROR`. Pre-append object `stage`/`finalize` I/O on a fresh receipt is retryable
+`STORAGE_UNSAFE` because nothing has committed.
 
 `freeze_case` uses one closed ordering for both adapters. For an absent operation: (1) a bounded
 prepare snapshot establishes absent idempotency, no pending import, `expected_frontier`, head `F`,

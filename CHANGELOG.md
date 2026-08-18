@@ -464,6 +464,12 @@ carried them; they are listed because each one describes the behavior that now s
   announced task ledger: when a session's mapping moves to a different task, the stale mark is
   discarded rather than silently suppressing the new ledger's motion (issue #322).
 
+- Receipt replay of a completed `request_id` no longer collapses a failed object verification
+  (tampered or missing envelope, wrong key slot, or I/O while reading) into non-retryable
+  `INTERNAL_ERROR`. That path now returns `STORAGE_CORRUPT` with the stored-receipt-invalid
+  family. Pre-append object `stage`/`finalize` I/O on a fresh receipt is retryable
+  `STORAGE_UNSAFE` because nothing has committed (issue #325).
+
 - The MCP initialize `instructions` string had no size bound and had grown to 41 KB by inlining
   three guidance documents. Codex copies that string into the `description` of every advertised
   tool, so it was charged seven times on every turn of every session — roughly 288 KB of advertised
