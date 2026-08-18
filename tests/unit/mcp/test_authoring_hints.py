@@ -366,6 +366,13 @@ def test_publication_policy_documents_obligation_resolution_rule() -> None:
     assert "resolution_evidence_refs" in text
 
 
+def test_request_templates_document_requested_item_kinds() -> None:
+    text = " ".join(read_resource("yoetz://guidance/request-templates.md").decode("utf-8").split())
+
+    assert "`item_kind` admits exactly `change`, `command`, `file`, `source`, or `url`" in text
+    assert "`outcome` is not an admitted `item_kind`" in text
+
+
 def test_every_worked_example_validates_against_its_request_schema() -> None:
     from yoetz.protocol.models import (
         CheckRequestModel,

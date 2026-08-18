@@ -419,6 +419,16 @@ def test_delivery_identity_ignores_evidence_refs_that_are_a_rolling_window() -> 
     )
 
 
+def test_gap_advice_names_the_supported_observation_status_command() -> None:
+    """A coverage gap must not send the recipient to a nonexistent operation (#323)."""
+
+    text = hook_advice_context(_gap_snapshot(3))
+
+    assert "Next: run `yoetz observe status` to inspect coverage" in text
+    assert "wait for drain recovery and disclose the gap if it persists" in text
+    assert "Next: refresh_observation" not in text
+
+
 def test_finding_identity_ignores_evidence_refs_that_are_a_rolling_window() -> None:
     """A standing condition remains one durable finding as its citations move (#216)."""
 

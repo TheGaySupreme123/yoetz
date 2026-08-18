@@ -25,6 +25,14 @@ Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance. The
 - `respond` — once per finding, at the result frontier of the check that returned it — not the finding's `subject_frontier`, which precedes the finding's own record.
 - `receipt` — once at the end, and again only if material state changed after the previous receipt.
 
+# When hook observation coverage is incomplete
+
+A hook advisory that reports incomplete or stale observation coverage is a limitation, not an
+operation to invoke. Inspect the local state with `yoetz observe status`; do not look for an MCP
+tool or CLI command named `refresh_observation`. Observation may recover as the drain catches up.
+If the gap remains at check time, disclose it as a coverage limitation rather than treating it as
+resolved or claiming a clean receipt.
+
 # Never publish
 
 Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, or conversation history; credentials or secrets; whole files, whole repositories, or broad unrelated source. A small problem-local excerpt is permitted only when it is material, in scope, and bound to the relevant state.

@@ -648,10 +648,16 @@ def hook_advice_context(snapshot: AdviceSnapshot, *, item: AdviceItem | None = N
         top = snapshot.ranked_items[0]
     if top is not None:
         ref = top.evidence_refs[0] if top.evidence_refs else "evidence:none"
-        text = (
-            f"Yoetz: {top.summary}. Reason: {top.detail}. "
-            f"Next: {top.recommended_next_action}. Evidence: {ref}."
-        )
+        next_step = top.recommended_next_action
+        if next_step == "refresh_observation":
+            # This token names a coverage condition, not an invocable operation.
+            # Give the hook recipient the supported read-only inspection command
+            # rather than sending it looking for a nonexistent MCP tool or CLI verb.
+            next_step = (
+                "run `yoetz observe status` to inspect coverage; wait for drain recovery "
+                "and disclose the gap if it persists"
+            )
+        text = f"Yoetz: {top.summary}. Reason: {top.detail}. Next: {next_step}. Evidence: {ref}."
     else:
         findings = ",".join(str(entry) for entry in snapshot.ranked_finding_ids[:8])
         text = (

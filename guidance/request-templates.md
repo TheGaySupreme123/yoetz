@@ -50,8 +50,8 @@ attach selector.
 
 ## `publish_work`: plan plus obligation
 
-This is the first material publication. Name the requested outcome and its acceptance evidence;
-do not turn routine file mechanics into obligations.
+This is the first material publication. Put the requested outcome and its acceptance evidence in
+`description` and `acceptance_criteria`; do not turn routine file mechanics into obligations.
 
 ```json
 {
@@ -108,10 +108,15 @@ The two drafts above cover `plan_published` and `obligation_published`. The next
 show the remaining ordinary families. Replace the frontier in each; the genesis values only keep
 each standalone example schema-valid.
 
-`requested_items` declares the material items the obligation asks for; each entry is an object
-whose `value` is the exact item string. When you later attempt an item, copy that exact `value`
-string into `attempted_items` on the `action_recorded` event that attempted it — see the action
-template below. Matching is exact: do not normalize, reorder words, or paraphrase.
+`requested_items` declares the concrete material items the obligation asks for; each entry is an
+object whose `value` is the exact item string. `item_kind` admits exactly `change`, `command`,
+`file`, `source`, or `url`: use `change` for a deliverable change, and the other values for the
+corresponding concrete item. The requested outcome belongs in `description` and
+`acceptance_criteria`; `outcome` is not an admitted `item_kind`.
+
+When you later attempt an item, copy that exact `value` string into `attempted_items` on the
+`action_recorded` event that attempted it — see the action template below. Matching is exact: do
+not normalize, reorder words, or paraphrase.
 
 ### Alternate `plan_published`: explicitly no obligations
 
