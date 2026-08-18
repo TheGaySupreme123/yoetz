@@ -265,6 +265,23 @@ def _mark_stale_wording(source: dict[str, JsonValue]) -> None:
         finding["detail"] = cast(str, finding["detail"]) + _STALE_WORDING_MARKER
 
 
+def _remove_text_contract_stamp(source: dict[str, JsonValue]) -> None:
+    del source["text_contract_digest"]
+
+
+def _use_prior_text_contract(source: dict[str, JsonValue]) -> None:
+    assert source["text_contract_digest"] != "sha256:" + "0" * 64
+    source["text_contract_digest"] = "sha256:" + "0" * 64
+
+
+def _break_policy_executions(source: dict[str, JsonValue]) -> None:
+    source["policy_executions"] = [{"policy_id": "work-integrity"}]
+
+
+def _break_assessments(source: dict[str, JsonValue]) -> None:
+    source["assessments"] = [{}]
+
+
 async def test_pre_stamp_checkpoint_with_old_wording_recomputes_on_the_same_request_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -328,10 +345,38 @@ async def test_broken_checkpoint_content_stays_storage_corrupt(
 
     wedged = await _wedge_check_at_local_ready(monkeypatch)
 
-    def break_policy_executions(source: dict[str, JsonValue]) -> None:
-        source["policy_executions"] = [{"policy_id": "work-integrity"}]
+    await _swap_checkpoint(wedged, _break_policy_executions)
+    wedged.clock.advance(61)
 
-    await _swap_checkpoint(wedged, break_policy_executions)
+    with pytest.raises(PublicOperationError) as corrupt:
+        await wedged.app.check(wedged.request)
+    assert corrupt.value.code is PublicErrorCode.STORAGE_CORRUPT
+    assert corrupt.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    ("stamp_mutator", "content_mutator"),
+    (
+        pytest.param(_remove_text_contract_stamp, _break_policy_executions, id="legacy-policy"),
+        pytest.param(_use_prior_text_contract, _break_policy_executions, id="mismatched-policy"),
+        pytest.param(_remove_text_contract_stamp, _break_assessments, id="legacy-assessments"),
+        pytest.param(_use_prior_text_contract, _break_assessments, id="mismatched-assessments"),
+    ),
+)
+async def test_malformed_superseded_checkpoint_content_stays_storage_corrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    stamp_mutator: Callable[[dict[str, JsonValue]], None],
+    content_mutator: Callable[[dict[str, JsonValue]], None],
+) -> None:
+    """Supersession cannot hide malformed legacy or mismatched-stamp content."""
+
+    wedged = await _wedge_check_at_local_ready(monkeypatch)
+
+    def mutate(source: dict[str, JsonValue]) -> None:
+        stamp_mutator(source)
+        content_mutator(source)
+
+    await _swap_checkpoint(wedged, mutate)
     wedged.clock.advance(61)
 
     with pytest.raises(PublicOperationError) as corrupt:

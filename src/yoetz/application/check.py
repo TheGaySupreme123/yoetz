@@ -593,10 +593,11 @@ async def _load_deterministic_result(
         ):
             raise ValueError("deterministic_result_pointer_invalid")
         await _read_all(prior, runtime)
-        # The bindings above verified, so a missing or different text-contract stamp is not
-        # corruption: the checkpoint was written by different wording code and is superseded.
-        if source.get("text_contract_digest") != DETERMINISTIC_TEXT_CONTRACT_DIGEST:
-            raise _DeterministicCheckpointSuperseded()
+        # Defer supersession until every persisted result field has been decoded and validated.
+        # A stale stamp does not make otherwise malformed checkpoint content safe to ignore.
+        checkpoint_superseded = (
+            source.get("text_contract_digest") != DETERMINISTIC_TEXT_CONTRACT_DIGEST
+        )
         raw_executions = source["policy_executions"]
         raw_assessments = source["assessments"]
         if type(raw_executions) is not list or type(raw_assessments) is not list:
@@ -645,18 +646,37 @@ async def _load_deterministic_result(
                 finding.provenance,
             )
             # A matching contract stamp with drifted text means a wording branch the contract
-            # corpus missed. The bindings still verified, so recompute rather than fail.
-            if (finding.summary, finding.detail) != render_deterministic_finding_text(
+            # corpus missed. Keep validating the finding and basis, but defer recomputation
+            # until every assessment has been checked.
+            rendered_text = render_deterministic_finding_text(
                 finding.kind,
                 finding.subject_refs,
                 basis.coverage_gaps,
                 basis.observed_facts,
-            ):
-                raise _DeterministicCheckpointSuperseded()
+            )
+            if (finding.summary, finding.detail) != rendered_text:
+                checkpoint_superseded = True
+                # Validate the deterministic assessment against the current rendering while
+                # preserving the stored finding's structural fields for Finding validation.
+                candidate = CandidateFinding(
+                    finding.kind,
+                    finding.origin,
+                    finding.priority,
+                    rendered_text[0],
+                    rendered_text[1],
+                    finding.subject_refs,
+                    finding.policy_id,
+                    finding.policy_version,
+                    finding.subject_frontier,
+                    finding.coverage,
+                    finding.provenance,
+                )
             DeterministicAssessment(candidate, basis)
             findings.append(finding)
         if len({item.finding_id for item in findings}) != len(findings):
             raise ValueError("deterministic_result_finding_invalid")
+        if checkpoint_superseded:
+            raise _DeterministicCheckpointSuperseded()
         return _DurableDeterministicResult(tuple(findings), executions)
     except PublicOperationError, _DeterministicCheckpointSuperseded:
         raise
