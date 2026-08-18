@@ -9,9 +9,9 @@ from typing import cast
 
 import pytest
 
-from yoetz.application.receipt import (  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-    _persist_object,
-    _read_object,
+from yoetz.application.receipt import (  # noqa: SLF001
+    _persist_object,  # pyright: ignore[reportPrivateUsage]
+    _read_object,  # pyright: ignore[reportPrivateUsage]
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
 from yoetz.ports.runtime import TaskRuntime
