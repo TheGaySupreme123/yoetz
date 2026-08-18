@@ -44,12 +44,14 @@ from yoetz.domain.values import (
     obligation_id,
 )
 from yoetz.kernel.deterministic_checks import (
+    DETERMINISTIC_TEXT_CONTRACT_DIGEST,
     DeterministicAssessment,
     DeterministicCase,
     FindingBasisRef,
     case_coverage,
     finding_basis_from_json,
     finding_basis_to_json,
+    render_deterministic_finding_text,
 )
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
 from yoetz.kernel.policies.response_support import (
@@ -488,6 +490,36 @@ class _DurableDeterministicResult:
     executions: tuple[CheckPolicyExecution, ...]
 
 
+class _DeterministicCheckpointSuperseded(Exception):
+    """The persisted deterministic result predates the current finding-text contract.
+
+    The checkpoint's bindings verified, so this is not corruption: the same digest-verified
+    frozen case is still available and the deterministic phase recomputes from it instead of
+    failing the request (issue #340).
+    """
+
+
+_DETERMINISTIC_RESULT_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "request_id",
+        "request_digest",
+        "task_id",
+        "session_id",
+        "writer_id",
+        "subject_frontier",
+        "dependency_digest",
+        "text_contract_digest",
+        "prior_resume",
+        "policy_executions",
+        "assessments",
+    }
+)
+# Checkpoints written before the text-contract stamp existed. Their wording generation is
+# unknowable, so they are always superseded, never validated byte-for-byte.
+_LEGACY_DETERMINISTIC_RESULT_KEYS: Final = _DETERMINISTIC_RESULT_KEYS - {"text_contract_digest"}
+
+
 def _object_pointer(ref: ObjectRef) -> dict[str, JsonValue]:
     return {
         "object_id": ref.object_id,
@@ -532,21 +564,10 @@ async def _load_deterministic_result(
         if canonical_encode(parsed) != raw:
             raise ValueError("deterministic_result_noncanonical")
         source = _mapping(parsed)
-        if frozenset(source) != frozenset(
-            {
-                "schema_version",
-                "request_id",
-                "request_digest",
-                "task_id",
-                "session_id",
-                "writer_id",
-                "subject_frontier",
-                "dependency_digest",
-                "prior_resume",
-                "policy_executions",
-                "assessments",
-            }
-        ):
+        if frozenset(source) not in {
+            _DETERMINISTIC_RESULT_KEYS,
+            _LEGACY_DETERMINISTIC_RESULT_KEYS,
+        }:
             raise ValueError("deterministic_result_shape_invalid")
         if (
             source["schema_version"] != "1.0.0"
@@ -572,6 +593,11 @@ async def _load_deterministic_result(
         ):
             raise ValueError("deterministic_result_pointer_invalid")
         await _read_all(prior, runtime)
+        # Defer supersession until every persisted result field has been decoded and validated.
+        # A stale stamp does not make otherwise malformed checkpoint content safe to ignore.
+        checkpoint_superseded = (
+            source.get("text_contract_digest") != DETERMINISTIC_TEXT_CONTRACT_DIGEST
+        )
         raw_executions = source["policy_executions"]
         raw_assessments = source["assessments"]
         if type(raw_executions) is not list or type(raw_assessments) is not list:
@@ -619,12 +645,40 @@ async def _load_deterministic_result(
                 finding.coverage,
                 finding.provenance,
             )
+            # A matching contract stamp with drifted text means a wording branch the contract
+            # corpus missed. Keep validating the finding and basis, but defer recomputation
+            # until every assessment has been checked.
+            rendered_text = render_deterministic_finding_text(
+                finding.kind,
+                finding.subject_refs,
+                basis.coverage_gaps,
+                basis.observed_facts,
+            )
+            if (finding.summary, finding.detail) != rendered_text:
+                checkpoint_superseded = True
+                # Validate the deterministic assessment against the current rendering while
+                # preserving the stored finding's structural fields for Finding validation.
+                candidate = CandidateFinding(
+                    finding.kind,
+                    finding.origin,
+                    finding.priority,
+                    rendered_text[0],
+                    rendered_text[1],
+                    finding.subject_refs,
+                    finding.policy_id,
+                    finding.policy_version,
+                    finding.subject_frontier,
+                    finding.coverage,
+                    finding.provenance,
+                )
             DeterministicAssessment(candidate, basis)
             findings.append(finding)
         if len({item.finding_id for item in findings}) != len(findings):
             raise ValueError("deterministic_result_finding_invalid")
+        if checkpoint_superseded:
+            raise _DeterministicCheckpointSuperseded()
         return _DurableDeterministicResult(tuple(findings), executions)
-    except PublicOperationError:
+    except PublicOperationError, _DeterministicCheckpointSuperseded:
         raise
     except Exception as exc:
         raise PublicOperationError(
@@ -894,6 +948,7 @@ async def _publish_deterministic_result(
                 "writer_id": runtime.writer_id,
                 "subject_frontier": dict(frozen.case.frontier.as_wire().items()),
                 "dependency_digest": frozen.lease.dependency_digest,
+                "text_contract_digest": DETERMINISTIC_TEXT_CONTRACT_DIGEST,
                 "prior_resume": _object_pointer(prior_resume),
                 "policy_executions": tuple(
                     {
@@ -1308,14 +1363,35 @@ async def execute_check_commit(
                 digest,
             )
         else:
-            checkpoint = await _load_deterministic_result(
-                runtime,
-                request,
-                digest,
-                frozen,
-            )
-            deterministic = checkpoint.findings
-            executions = checkpoint.executions
+            try:
+                checkpoint = await _load_deterministic_result(
+                    runtime,
+                    request,
+                    digest,
+                    frozen,
+                )
+            except _DeterministicCheckpointSuperseded:
+                # The checkpoint's bindings verified but its finding wording predates the
+                # current text contract. The frozen case is unchanged and digest-verified, so
+                # the deterministic phase recomputes from it instead of wedging the request
+                # behind a non-retryable STORAGE_CORRUPT (issue #340). The stale checkpoint
+                # keeps serving as the durable case pointer until commit clears it.
+                record_bounded_counts_without_raising(
+                    component="check",
+                    operation="deterministic_checkpoint_superseded",
+                    outcome="recomputed",
+                    request_id=request.request_id,
+                    counts={"superseded_checkpoints": 1},
+                )
+                assessments, executions = run_deterministic_policies(frozen.case, scope, packs)
+                deterministic = allocate_findings(
+                    app.ids,
+                    tuple(item.candidate for item in assessments),
+                    prior_finding_ids(frozen.case.projection),
+                )
+            else:
+                deterministic = checkpoint.findings
+                executions = checkpoint.executions
         semantic_wait = (
             request.mode != "deterministic_only"
             and RuntimeCapability.SEMANTIC in runtime.capabilities

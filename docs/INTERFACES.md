@@ -1136,7 +1136,12 @@ records carry only their listed durable state. `advance_check_phase` binds the d
 local-result/case object when that transition promises recoverability. The pending operation's
 `resume_object_ref` is the sole current row pointer: `CHECK_RESUME` at `reserved`, atomically
 replaced by `DETERMINISTIC_RESULT` at `local_ready` and retained through later nonterminal phases;
-the deterministic envelope authenticates its prior full-case pointer for verified reopen. No
+the deterministic envelope authenticates its prior full-case pointer for verified reopen. The
+deterministic envelope also stamps the kernel's rendered finding-text contract digest
+(`DETERMINISTIC_TEXT_CONTRACT_DIGEST`); on replay, a checkpoint whose bindings verify but whose
+stamp is absent or from different wording is superseded — the deterministic phase recomputes from
+the unchanged frozen case — never `STORAGE_CORRUPT`, so a finding-wording upgrade cannot wedge an
+in-flight check on its own request id. No
 memory-only phase-object map is recovery authority. Every successful phase
 advance, renewal, or reclaim returns a replacement current lease; the prior lease is spent and the
 application reconstructs `FrozenCase` with the unchanged case and replacement lease before the

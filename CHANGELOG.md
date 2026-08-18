@@ -456,6 +456,16 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- A finding-wording change no longer wedges an in-flight check on its own `request_id`. The
+  persisted deterministic-result checkpoint requires byte-equal rendered finding text on replay,
+  so any wording edit made every pre-change checkpoint replay as non-retryable `STORAGE_CORRUPT`
+  ("The deterministic checkpoint is corrupt.") while the continuation kept pointing at the same
+  request. The checkpoint now stamps the kernel's rendered finding-text contract digest; on
+  replay, a checkpoint whose bindings verify but whose stamp is absent (pre-change format) or
+  from different wording is treated as superseded and the deterministic phase recomputes from the
+  unchanged digest-verified frozen case in the same invocation. Genuinely broken checkpoint
+  content still replays as `STORAGE_CORRUPT` (issue #340).
+
 - Frontier-motion notices no longer re-announce already-delivered observation appends when the
   outbox redelivers a committed envelope. The local store keeps a per-session delivered high-water
   `to_sequence` after the hook consumer receives the notice; `note_frontier_motion` drops
