@@ -63,6 +63,7 @@ from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.coverage import coverage_to_json
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
     FrontierModel,
@@ -790,3 +791,64 @@ async def test_receipt_context_uses_same_availability_snapshot() -> None:
     assert canonical_encode(
         cast(JsonValue, status_item.coverage.model_dump(mode="json"))
     ) == canonical_encode(cast(JsonValue, receipt_finding["coverage"]))
+
+
+async def test_receipt_replay_object_verification_failure_is_storage_corrupt() -> None:
+    app, runtime, _projection = _build_app(seed_offset=22)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=2200)
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 2210)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    first = await _receipt(app, receipt_wire)
+    assert first.ok is True
+
+    _task_id, resources = next(iter(runtime.resources.items()))
+    _ledger, objects = resources
+
+    def _failing_open(_ref: object) -> object:
+        raise ValueError("object_verification_failed")
+
+    objects.open_verified = _failing_open  # pyright: ignore[reportAttributeAccessIssue]
+
+    with pytest.raises(PublicOperationError) as caught:
+        await _receipt(app, receipt_wire)
+    assert caught.value.code is PublicErrorCode.STORAGE_CORRUPT
+    assert caught.value.message == "The stored receipt is invalid."
+    assert caught.value.retryable is False
+
+
+async def test_receipt_stage_oserror_is_retryable_storage_unsafe() -> None:
+    app, runtime, _projection = _build_app(seed_offset=23)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=2300)
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 2310)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+
+    _task_id, resources = next(iter(runtime.resources.items()))
+    _ledger, objects = resources
+
+    async def _failing_stage(_source: object, _metadata: object) -> object:
+        raise OSError("No space left on device")
+
+    objects.stage = _failing_stage  # pyright: ignore[reportAttributeAccessIssue]
+
+    with pytest.raises(PublicOperationError) as caught:
+        await _receipt(app, receipt_wire)
+    assert caught.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert caught.value.message == "Receipt object storage is unavailable."
+    assert caught.value.retryable is True
+    assert "No space left on device" not in caught.value.message
