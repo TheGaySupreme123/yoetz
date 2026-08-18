@@ -348,7 +348,7 @@ class SqliteObservationStore:
         try:
             row = self._db.execute(
                 "SELECT codex_session_commitment FROM observation_workspace_session_routes "
-                "WHERE workspace_commitment = ? AND yoetz_session_id = ? AND active = 1",
+                "WHERE workspace_commitment = ? AND yoetz_session_id = ?",
                 (workspace, yoetz_session_id),
             ).fetchone()
         except Exception:
@@ -363,7 +363,7 @@ class SqliteObservationStore:
         try:
             row = self._db.execute(
                 "SELECT workspace_commitment FROM observation_workspace_session_routes "
-                "WHERE yoetz_session_id = ? AND active = 1",
+                "WHERE yoetz_session_id = ?",
                 (yoetz_session_id,),
             ).fetchone()
         except Exception:
@@ -1018,29 +1018,66 @@ class SqliteObservationStore:
         unsupported: set[str] = set()
         if session_commitment is None:
             rows = self._db.execute(
-                "SELECT source, event_kind, gap_codes_json FROM observation_events "
-                "WHERE workspace_commitment = ?",
+                "SELECT session_commitment, source, event_kind, gap_codes_json, "
+                "content_refs_json FROM observation_events "
+                "WHERE workspace_commitment = ? ORDER BY id ASC",
                 (workspace_commitment,),
             ).fetchall()
         else:
             rows = self._db.execute(
-                "SELECT source, event_kind, gap_codes_json FROM observation_events "
-                "WHERE workspace_commitment = ? AND session_commitment = ?",
+                "SELECT session_commitment, source, event_kind, gap_codes_json, "
+                "content_refs_json FROM observation_events "
+                "WHERE workspace_commitment = ? AND session_commitment = ? ORDER BY id ASC",
                 (workspace_commitment, session_commitment),
             ).fetchall()
-        for row in rows:
-            source = ObservationSource(cast(str, row[0]))
+        # Event rows are append-only, but ``gap_codes`` describe the condition
+        # observed at that row rather than an everlasting current state. Keep a
+        # small per-session current projection while retaining all rows for the
+        # operator history. In particular, a later accepted observation is live
+        # evidence that an earlier source-lag/cursor-stale condition healed;
+        # another session's healthy event must never clear this session's gap.
+        current_by_session: dict[str, set[str]] = {}
+        unsupported_by_session: dict[str, set[str]] = {}
+        for row in cast("Iterable[tuple[object, ...]]", rows):
+            row_session = row[0]
+            source = ObservationSource(cast(str, row[1]))
+            event_kind = cast(str, row[2])
+            if type(row_session) is not str:
+                continue
+            session_current = current_by_session.setdefault(row_session, set())
+            session_unsupported = unsupported_by_session.setdefault(row_session, set())
             coverage[source] = True
-            event_kind = cast(str, row[1])
-            gap_blob = row[2]
+            gap_codes: set[str] = set()
+            gap_blob = row[3]
             if type(gap_blob) is bytes:
                 parsed = strict_json_parse(gap_blob)
                 if type(parsed) is list:
-                    for item in cast(list[object], parsed):
-                        if type(item) is str:
-                            gaps.add(item)
-                            if item == ObservationGapCode.UNSUPPORTED_EVENT.value:
-                                unsupported.add(event_kind)
+                    gap_codes = {item for item in cast(list[object], parsed) if type(item) is str}
+            # A synthetic observation_gap row records the failure itself and
+            # must not be mistaken for recovery. Any accepted envelope after
+            # it advances the session's source and clears only the transient
+            # conditions whose healing the observation authority can prove.
+            if event_kind != "observation_gap":
+                session_current.discard(ObservationGapCode.SOURCE_LAG.value)
+                session_current.discard(ObservationGapCode.CURSOR_STALE.value)
+                refs_blob = row[4]
+                if type(refs_blob) is bytes:
+                    refs = strict_json_parse(refs_blob)
+                    if type(refs) is list and refs:
+                        session_current.discard(
+                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                        )
+            session_current.update(gap_codes)
+            if ObservationGapCode.UNSUPPORTED_EVENT.value in gap_codes:
+                session_unsupported.add(event_kind)
+        if session_commitment is None:
+            for session_current in current_by_session.values():
+                gaps.update(session_current)
+            for session_unsupported in unsupported_by_session.values():
+                unsupported.update(session_unsupported)
+        else:
+            gaps.update(current_by_session.get(session_commitment, ()))
+            unsupported.update(unsupported_by_session.get(session_commitment, ()))
         if consent is None:
             lifecycle = ObservationLifecycle.STOPPED
         elif consent[0] is not None:
@@ -1048,6 +1085,8 @@ class SqliteObservationStore:
         elif consent[1]:
             lifecycle = ObservationLifecycle.STOPPED
         elif not any(coverage.values()):
+            lifecycle = ObservationLifecycle.DEGRADED
+        elif gaps or unsupported:
             lifecycle = ObservationLifecycle.DEGRADED
         else:
             lifecycle = ObservationLifecycle.ACTIVE

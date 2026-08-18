@@ -220,7 +220,61 @@ def test_session_scoped_envelopes_and_status_exclude_other_sessions() -> None:
     asyncio.run(run())
 
 
-def test_codex_session_commitment_for_session_reads_active_route() -> None:
+def test_session_status_clears_current_gap_without_clearing_other_sessions() -> None:
+    """Historical gap rows remain append-only while current health recovers per session."""
+
+    async def run() -> None:
+        store = _store()
+        store.grant_consent(_WORKSPACE, _TIME)
+        store.bind_session(_WORKSPACE, _SESSION)
+        store.bind_session(_WORKSPACE, _SESSION_B)
+        degraded_a = await store.ingest(
+            _session_envelope(
+                _SESSION,
+                "hook:degraded-a-current",
+                1,
+                gaps=(ObservationGapCode.SOURCE_LAG.value,),
+            )
+        )
+        degraded_b = await store.ingest(
+            _session_envelope(
+                _SESSION_B,
+                "hook:degraded-b-current",
+                1,
+                gaps=(ObservationGapCode.SOURCE_LAG.value,),
+            )
+        )
+        assert degraded_a.disposition is ObservationIngestDisposition.ACCEPTED
+        assert degraded_b.disposition is ObservationIngestDisposition.ACCEPTED
+
+        recovered_b = await store.ingest(
+            _session_envelope(_SESSION_B, "hook:recovered-b-current", 2)
+        )
+        assert recovered_b.disposition is ObservationIngestDisposition.ACCEPTED
+        status_a = await store.status_for_session(_WORKSPACE, _SESSION)
+        status_b = await store.status_for_session(_WORKSPACE, _SESSION_B)
+        assert ObservationGapCode.SOURCE_LAG.value in status_a.gaps
+        assert ObservationGapCode.SOURCE_LAG.value not in status_b.gaps
+        aggregate = await store.status(ObservationStatusQuery(_WORKSPACE))
+        assert ObservationGapCode.SOURCE_LAG.value in aggregate.gaps
+
+        recovered_a = await store.ingest(_session_envelope(_SESSION, "hook:recovered-a-current", 2))
+        assert recovered_a.disposition is ObservationIngestDisposition.ACCEPTED
+        assert (
+            ObservationGapCode.SOURCE_LAG.value
+            not in (await store.status_for_session(_WORKSPACE, _SESSION)).gaps
+        )
+        assert (
+            ObservationGapCode.SOURCE_LAG.value
+            not in (await store.status(ObservationStatusQuery(_WORKSPACE))).gaps
+        )
+        # Recovery changes only the current projection; all observations remain.
+        assert len(store.list_envelopes(_WORKSPACE)) == 4
+
+    asyncio.run(run())
+
+
+def test_codex_session_commitment_for_session_recovers_historical_route() -> None:
     store = _store()
     store.grant_consent(_WORKSPACE, _TIME)
     store.record_workspace_session_route(
@@ -231,6 +285,16 @@ def test_codex_session_commitment_for_session_reads_active_route() -> None:
         codex_session_commitment=_SESSION,
         bound_at=_TIME,
     )
+    # Binding a newer session marks the older route inactive, but the durable
+    # route still identifies the older task and must remain usable for recovery.
+    store.record_workspace_session_route(
+        workspace=_WORKSPACE,
+        yoetz_session_id="ses_10000000-0000-4000-8000-000000000002",
+        yoetz_task_id="tsk_10000000-0000-4000-8000-000000000002",
+        yoetz_writer_id="wtr_10000000-0000-4000-8000-000000000002",
+        codex_session_commitment=_SESSION_B,
+        bound_at=_TIME,
+    )
     assert (
         store.codex_session_commitment_for_session(
             workspace=_WORKSPACE,
@@ -239,9 +303,12 @@ def test_codex_session_commitment_for_session_reads_active_route() -> None:
         == _SESSION
     )
     assert (
+        store.workspace_for_yoetz_session("ses_10000000-0000-4000-8000-000000000001") == _WORKSPACE
+    )
+    assert (
         store.codex_session_commitment_for_session(
             workspace=_WORKSPACE,
             yoetz_session_id="ses_10000000-0000-4000-8000-000000000002",
         )
-        is None
+        == _SESSION_B
     )

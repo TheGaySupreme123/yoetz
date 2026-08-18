@@ -293,6 +293,30 @@ def test_hook_observed_unknown_with_exit_status_remains_limiting() -> None:
     assert FindingKind.MATERIAL_LIMITATION_OMITTED in _kinds(case)
 
 
+def test_historical_hook_observed_unknown_without_capability_gap_remains_limiting() -> None:
+    """Historical rows lack the new cause marker and retain old limitation semantics."""
+
+    claim = ClaimRecordedPayload(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Complete",
+        supporting_refs=(),
+    )
+    case = make_case(
+        results={res(1): record(_observed_unknown_result(1), 1)},
+        claims={clm(1): record(claim, 2)},
+        # The channel alone is not enough to prove this is a newly materialized
+        # outcome-less row; historical coverage has no cause-specific gap.
+        coverage_overrides={res(1): coverage_for_channel(PublicationChannel.HOOK_OBSERVED)},  # type: ignore[dict-item]
+    )
+    result = run_deterministic_policies(case, RESEARCH_EVIDENCE_POLICY_PACK)
+    assert any(
+        item.candidate.kind is FindingKind.MATERIAL_LIMITATION_OMITTED
+        and res(1) in item.basis.supporting_refs
+        for item in result.assessments
+    )
+
+
 def test_outcome_less_observation_result_cannot_support_a_completion_claim() -> None:
     """#350: exempting the finding storm never upgrades the record — citing an
     outcome-less observed result as completion support still mismatches."""

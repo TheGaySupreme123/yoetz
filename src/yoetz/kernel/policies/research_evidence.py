@@ -73,6 +73,7 @@ _RULE_ORDER: Final = (
     FindingKind.QUESTIONABLE_FINDING_REJECTION,
 )
 _MATERIAL_GAPS: Final = BASE_RESPONSE_INADMISSIBLE_GAPS
+_HOST_OUTCOME_UNAVAILABLE_GAP: Final = "host_outcome_unavailable"
 
 
 def _ascii(value: str) -> bytes:
@@ -241,8 +242,13 @@ def _observation_outcome_unavailable(case: DeterministicCase, ref: FindingBasisR
     if record.payload.exit_status is not None:
         return False
     coverage = case.coverage_by_ref.get(ref)
-    return coverage is not None and PublicationChannel.HOOK_OBSERVED in set(
-        coverage.publication_channels
+    # Only newly materialized rows carry the explicit capability gap. Historical
+    # rows have the same outcome/channel shape but no durable cause marker, so
+    # retaining the old limiting finding is the only honest compatibility path.
+    return (
+        coverage is not None
+        and _HOST_OUTCOME_UNAVAILABLE_GAP in coverage.known_gaps
+        and PublicationChannel.HOOK_OBSERVED in set(coverage.publication_channels)
     )
 
 

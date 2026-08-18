@@ -281,6 +281,29 @@ def test_routine_read_coalescing_respects_result_status_failures() -> None:
     ]
 
 
+def test_statusless_routine_read_keeps_durable_result_and_capability_gap() -> None:
+    """Missing host outcome semantics are not coalesced as a successful read."""
+
+    from yoetz.application.observation_materialize import HOST_OUTCOME_UNAVAILABLE_GAP
+
+    task = _task_id()
+    session = f"hmac-sha256:{'bb' * 32}"
+    post = _envelope(session=session, kind="PostToolUse", identity="hook:read-unknown")
+    unknown = materialize_observation_envelope(
+        replace(
+            post,
+            structural_payload=JsonObject({**post.structural_payload, "action": "routine_read"}),
+        ),
+        task_id=task,
+    )
+    assert unknown.skip_reason is None
+    assert [item.draft.schema.name for item in unknown.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
+    assert HOST_OUTCOME_UNAVAILABLE_GAP in unknown.coverage.known_gaps
+
+
 def test_completion_signal_is_evidence_unless_claim_kind_is_explicit() -> None:
     task = _task_id()
     session = f"hmac-sha256:{'ac' * 32}"

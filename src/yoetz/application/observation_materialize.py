@@ -223,12 +223,6 @@ def _post_outcome(payload: Mapping[str, JsonValue]) -> ResultOutcome:
     return ResultOutcome.UNKNOWN
 
 
-def _explicit_post_failure(payload: Mapping[str, JsonValue]) -> bool:
-    """True when a post-event is an explicit failure or denial, not status-unknown."""
-
-    return _post_outcome(payload) in {ResultOutcome.FAILURE, ResultOutcome.PARTIAL}
-
-
 def _action_kind(tool: str | None) -> ActionKind:
     if tool is None:
         return ActionKind.OTHER
@@ -406,7 +400,12 @@ def materialize_observation_envelope(
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind == "PostToolUse":
-        if routine_read and not _explicit_post_failure(structural):
+        # A routine read is coalesced only after the host supplied an explicit
+        # successful outcome. An outcome-less result must retain its durable
+        # action/result identity and folded host_outcome_unavailable gap under
+        # ADR-022 decision 12; treating UNKNOWN as a successful read would
+        # discard that limitation before the materializer can record it.
+        if routine_read and _post_outcome(structural) is ResultOutcome.SUCCESS:
             return MaterializedObservationBatch(
                 (), coverage, channel, gaps, "routine_read_coalesced"
             )
