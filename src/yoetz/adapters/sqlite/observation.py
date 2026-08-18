@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Final, cast
 
 import apsw
@@ -340,11 +340,30 @@ class SqliteObservationStore:
             return None
         return advice_snapshot_from_json(JsonObject(cast(Mapping[str, JsonValue], parsed)))
 
+    def codex_session_commitment_for_session(
+        self, *, workspace: str, yoetz_session_id: str
+    ) -> str | None:
+        """Return the mapped Codex session commitment for one Yoetz session, if routed."""
+
+        try:
+            row = self._db.execute(
+                "SELECT codex_session_commitment FROM observation_workspace_session_routes "
+                "WHERE workspace_commitment = ? AND yoetz_session_id = ?",
+                (workspace, yoetz_session_id),
+            ).fetchone()
+        except Exception:
+            # Pre-0004 bundles carry no route table; callers fall back to
+            # workspace-scoped construction exactly as before.
+            return None
+        if row is None or type(row[0]) is not str:
+            return None
+        return row[0]
+
     def workspace_for_yoetz_session(self, yoetz_session_id: str) -> str | None:
         try:
             row = self._db.execute(
                 "SELECT workspace_commitment FROM observation_workspace_session_routes "
-                "WHERE yoetz_session_id = ? AND active = 1",
+                "WHERE yoetz_session_id = ?",
                 (yoetz_session_id,),
             ).fetchone()
         except Exception:
@@ -972,15 +991,24 @@ class SqliteObservationStore:
                 (workspace, excess),
             )
 
-    def _last_receipt(self, workspace: str) -> str | None:
-        row = self._db.execute(
-            "SELECT receipt_time FROM observation_events WHERE workspace_commitment = ? "
-            "ORDER BY id DESC LIMIT 1",
-            (workspace,),
-        ).fetchone()
+    def _last_receipt(self, workspace: str, *, session_commitment: str | None = None) -> str | None:
+        if session_commitment is None:
+            row = self._db.execute(
+                "SELECT receipt_time FROM observation_events WHERE workspace_commitment = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (workspace,),
+            ).fetchone()
+        else:
+            row = self._db.execute(
+                "SELECT receipt_time FROM observation_events WHERE workspace_commitment = ? "
+                "AND session_commitment = ? ORDER BY id DESC LIMIT 1",
+                (workspace, session_commitment),
+            ).fetchone()
         return cast(str, row[0]) if row is not None and type(row[0]) is str else None
 
-    def _status_unlocked(self, workspace_commitment: str) -> ObservationStatus:
+    def _status_unlocked(
+        self, workspace_commitment: str, *, session_commitment: str | None = None
+    ) -> ObservationStatus:
         consent = self._consent_row(workspace_commitment)
         coverage = {
             ObservationSource.CODEX_HOOK: False,
@@ -988,24 +1016,68 @@ class SqliteObservationStore:
         }
         gaps: set[str] = set()
         unsupported: set[str] = set()
-        rows = self._db.execute(
-            "SELECT source, event_kind, gap_codes_json FROM observation_events "
-            "WHERE workspace_commitment = ?",
-            (workspace_commitment,),
-        ).fetchall()
-        for row in rows:
-            source = ObservationSource(cast(str, row[0]))
+        if session_commitment is None:
+            rows = self._db.execute(
+                "SELECT session_commitment, source, event_kind, gap_codes_json, "
+                "content_refs_json FROM observation_events "
+                "WHERE workspace_commitment = ? ORDER BY id ASC",
+                (workspace_commitment,),
+            ).fetchall()
+        else:
+            rows = self._db.execute(
+                "SELECT session_commitment, source, event_kind, gap_codes_json, "
+                "content_refs_json FROM observation_events "
+                "WHERE workspace_commitment = ? AND session_commitment = ? ORDER BY id ASC",
+                (workspace_commitment, session_commitment),
+            ).fetchall()
+        # Event rows are append-only, but ``gap_codes`` describe the condition
+        # observed at that row rather than an everlasting current state. Keep a
+        # small per-session current projection while retaining all rows for the
+        # operator history. In particular, a later accepted observation is live
+        # evidence that an earlier source-lag/cursor-stale condition healed;
+        # another session's healthy event must never clear this session's gap.
+        current_by_session: dict[str, set[str]] = {}
+        unsupported_by_session: dict[str, set[str]] = {}
+        for row in cast("Iterable[tuple[object, ...]]", rows):
+            row_session = row[0]
+            source = ObservationSource(cast(str, row[1]))
+            event_kind = cast(str, row[2])
+            if type(row_session) is not str:
+                continue
+            session_current = current_by_session.setdefault(row_session, set())
+            session_unsupported = unsupported_by_session.setdefault(row_session, set())
             coverage[source] = True
-            event_kind = cast(str, row[1])
-            gap_blob = row[2]
+            gap_codes: set[str] = set()
+            gap_blob = row[3]
             if type(gap_blob) is bytes:
                 parsed = strict_json_parse(gap_blob)
                 if type(parsed) is list:
-                    for item in cast(list[object], parsed):
-                        if type(item) is str:
-                            gaps.add(item)
-                            if item == ObservationGapCode.UNSUPPORTED_EVENT.value:
-                                unsupported.add(event_kind)
+                    gap_codes = {item for item in cast(list[object], parsed) if type(item) is str}
+            # A synthetic observation_gap row records the failure itself and
+            # must not be mistaken for recovery. Any accepted envelope after
+            # it advances the session's source and clears only the transient
+            # conditions whose healing the observation authority can prove.
+            if event_kind != "observation_gap":
+                session_current.discard(ObservationGapCode.SOURCE_LAG.value)
+                session_current.discard(ObservationGapCode.CURSOR_STALE.value)
+                refs_blob = row[4]
+                if type(refs_blob) is bytes:
+                    refs = strict_json_parse(refs_blob)
+                    if type(refs) is list and refs:
+                        session_current.discard(
+                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+                        )
+            session_current.update(gap_codes)
+            if ObservationGapCode.UNSUPPORTED_EVENT.value in gap_codes:
+                session_unsupported.add(event_kind)
+        if session_commitment is None:
+            for session_current in current_by_session.values():
+                gaps.update(session_current)
+            for session_unsupported in unsupported_by_session.values():
+                unsupported.update(session_unsupported)
+        else:
+            gaps.update(current_by_session.get(session_commitment, ()))
+            unsupported.update(unsupported_by_session.get(session_commitment, ()))
         if consent is None:
             lifecycle = ObservationLifecycle.STOPPED
         elif consent[0] is not None:
@@ -1013,6 +1085,8 @@ class SqliteObservationStore:
         elif consent[1]:
             lifecycle = ObservationLifecycle.STOPPED
         elif not any(coverage.values()):
+            lifecycle = ObservationLifecycle.DEGRADED
+        elif gaps or unsupported:
             lifecycle = ObservationLifecycle.DEGRADED
         else:
             lifecycle = ObservationLifecycle.ACTIVE
@@ -1025,7 +1099,7 @@ class SqliteObservationStore:
             if advice_row is not None and type(advice_row[0]) is str
             else None
         )
-        last = self._last_receipt(workspace_commitment)
+        last = self._last_receipt(workspace_commitment, session_commitment=session_commitment)
         return ObservationStatus(
             lifecycle=lifecycle,
             workspace_commitment=workspace_commitment,
@@ -1043,8 +1117,39 @@ class SqliteObservationStore:
             "WHERE workspace_commitment = ? ORDER BY id ASC",
             (workspace,),
         ).fetchall()
+        return self._envelopes_from_rows(rows)
+
+    def list_envelopes_for_session(
+        self, workspace: str, session_commitment: str
+    ) -> tuple[ObservationEnvelope, ...]:
+        """Return only the mapped session's retained envelopes (#352).
+
+        Task-scoped advice construction must not see other sessions' envelopes:
+        a workspace retains history for every consented session, and building a
+        mapped session snapshot from all of it re-attributes unrelated
+        degradation to the current task — the exact #249/#250 failure mode one
+        layer down.
+        """
+
+        rows = self._db.execute(
+            "SELECT structural_json FROM observation_events "
+            "WHERE workspace_commitment = ? AND session_commitment = ? ORDER BY id ASC",
+            (workspace, session_commitment),
+        ).fetchall()
+        return self._envelopes_from_rows(rows)
+
+    async def status_for_session(
+        self, workspace: str, session_commitment: str
+    ) -> ObservationStatus:
+        """Session-scoped lifecycle/gap/coverage health for mapped advice inputs (#352)."""
+
+        async with self._lock:
+            return self._status_unlocked(workspace, session_commitment=session_commitment)
+
+    @staticmethod
+    def _envelopes_from_rows(rows: Iterable[object]) -> tuple[ObservationEnvelope, ...]:
         result: list[ObservationEnvelope] = []
-        for row in rows:
+        for row in cast("Iterable[tuple[object, ...]]", rows):
             blob = row[0]
             if type(blob) is not bytes:
                 continue

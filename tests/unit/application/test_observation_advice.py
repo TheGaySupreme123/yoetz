@@ -231,6 +231,121 @@ def test_callable_composition_is_resolved_freshly_on_every_build() -> None:
     assert "provider_not_ready" in rule_codes(revoked)
 
 
+def test_mapped_build_uses_session_scoped_envelopes_and_health() -> None:
+    """#352: a mapped session snapshot is built from that session's evidence and
+    current health, never from workspace-wide history."""
+
+    session_a = "hmac-sha256:" + "b" * 64
+    session_b = "hmac-sha256:" + "c" * 64
+
+    def _session_envelope(
+        session: str, identity: str, payload: dict[str, object], pos: int
+    ) -> ObservationEnvelope:
+        base = _envelope(identity, payload, pos=pos)
+        return ObservationEnvelope(
+            session_commitment=session,
+            event_kind=base.event_kind,
+            source_identity=base.source_identity,
+            source=base.source,
+            cursor=base.cursor,
+            receipt_time=base.receipt_time,
+            structural_payload=base.structural_payload,
+            content_object_refs=base.content_object_refs,
+            gap_codes=base.gap_codes,
+        )
+
+    # Session A carries an unresolved failure and degraded health; session B
+    # carries only its own completion-without-verification condition.
+    failed_a = _session_envelope(
+        session_a, "hook:fail-a", {"tool_name": "shell", "exit_status": 2, "tool_call_id": "a1"}, 1
+    )
+    claim_b = _session_envelope(
+        session_b, "hook:claim-b", {"claim_kind": "completion", "result_status": "completed"}, 2
+    )
+
+    class _Store:
+        def __init__(self) -> None:
+            self.workspace_reads = 0
+
+        def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]:
+            del workspace
+            self.workspace_reads += 1
+            return (failed_a, claim_b)
+
+        def list_envelopes_for_session(
+            self, workspace: str, session_commitment: str
+        ) -> tuple[ObservationEnvelope, ...]:
+            del workspace
+            return tuple(
+                env for env in (failed_a, claim_b) if env.session_commitment == session_commitment
+            )
+
+        async def status(self, query: ObservationStatusQuery) -> ObservationStatus:
+            self.workspace_reads += 1
+            return ObservationStatus(
+                ObservationLifecycle.STALE,
+                query.workspace_commitment,
+                {},
+                _TIME,
+                0,
+                ("observation_storage_corrupt", "source_lag"),
+                (),
+                None,
+            )
+
+        async def status_for_session(
+            self, workspace: str, session_commitment: str
+        ) -> ObservationStatus:
+            del workspace
+            degraded = session_commitment == session_a
+            return ObservationStatus(
+                ObservationLifecycle.STALE if degraded else ObservationLifecycle.ACTIVE,
+                _COMMITMENT,
+                {},
+                _TIME,
+                0,
+                ("observation_storage_corrupt", "source_lag") if degraded else (),
+                (),
+                None,
+            )
+
+        def load_advice_snapshot(self, workspace: str) -> None:
+            del workspace
+            return None
+
+    def rule_codes(snapshot: object) -> tuple[str, ...]:
+        if snapshot is None:
+            return ()
+        assert isinstance(snapshot, AdviceSnapshot)
+        return tuple(item.rule_code for item in snapshot.ranked_items)
+
+    builder = ObservationAdviceContextBuilder()
+    store = _Store()
+    snapshot_b = asyncio.run(
+        builder.build(_COMMITMENT, store, session_commitment=session_b)  # type: ignore[arg-type]
+    )
+    codes_b = rule_codes(snapshot_b)
+    # B's own condition is visible; A's failure and A's degraded health are not.
+    assert "completion_without_verification" in codes_b
+    assert "failed_command_unresolved" not in codes_b
+    assert "observation_gap_or_stale" not in codes_b
+    assert store.workspace_reads == 0, "a mapped build must not read workspace-wide inputs"
+
+    snapshot_a = asyncio.run(
+        builder.build(_COMMITMENT, store, session_commitment=session_a)  # type: ignore[arg-type]
+    )
+    codes_a = rule_codes(snapshot_a)
+    # A's real degradation stays visible and actionable in A's own snapshot.
+    assert "failed_command_unresolved" in codes_a
+    assert "observation_gap_or_stale" in codes_a
+
+    # Without a session commitment (unmapped build), workspace-wide behavior
+    # is unchanged for the operator surface.
+    aggregate = asyncio.run(builder.build(_COMMITMENT, store))  # type: ignore[arg-type]
+    assert store.workspace_reads == 2
+    assert "failed_command_unresolved" in rule_codes(aggregate)
+
+
 def test_delivery_identity_is_stable_while_the_envelope_stream_grows() -> None:
     """The hook-channel identity keys on rendered content, not on evidence breadth."""
 

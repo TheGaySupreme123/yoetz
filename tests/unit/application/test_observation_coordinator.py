@@ -197,6 +197,113 @@ def test_successful_routine_reads_stay_observation_only_but_failures_materialize
     ]
 
 
+def test_materialize_post_consumes_host_outcome_semantics() -> None:
+    """#350: every host-stated outcome fact is consumed; only a truly outcome-less
+    payload records UNKNOWN, and that record carries the bounded coverage gap."""
+
+    from collections.abc import Mapping as _Mapping
+
+    from yoetz.application.observation_materialize import (
+        HOST_OUTCOME_UNAVAILABLE_GAP,
+        MaterializedObservationBatch,
+    )
+    from yoetz.domain.events import ResultOutcome, ResultRecordedPayload
+
+    task = _task_id()
+    session = f"hmac-sha256:{'aa' * 32}"
+
+    def _outcome(
+        extra: _Mapping[str, object], identity: str
+    ) -> tuple[ResultOutcome, MaterializedObservationBatch]:
+        base = _envelope(session=session, kind="PostToolUse", identity=identity)
+        batch = materialize_observation_envelope(
+            replace(base, structural_payload=JsonObject({**base.structural_payload, **extra})),
+            task_id=task,
+        )
+        payload = cast(ResultRecordedPayload, batch.drafts[1].draft.payload)
+        return payload.outcome, batch
+
+    # The real Codex payload shape from the #346 session: no exit_status, no
+    # success, no result_status. Never upgraded to success; the durable per-call
+    # record stays, and its coverage names the single bounded condition.
+    outcome, batch = _outcome({}, "hook:no-outcome")
+    assert outcome is ResultOutcome.UNKNOWN
+    assert HOST_OUTCOME_UNAVAILABLE_GAP in batch.coverage.known_gaps
+    assert [item.draft.schema.name for item in batch.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
+
+    for index, (extra, expected) in enumerate(
+        (
+            ({"exit_status": 0}, ResultOutcome.SUCCESS),
+            ({"exit_status": 3}, ResultOutcome.FAILURE),
+            ({"success": True}, ResultOutcome.SUCCESS),
+            ({"success": False}, ResultOutcome.FAILURE),
+            ({"denied": True}, ResultOutcome.FAILURE),
+            ({"result_status": "completed"}, ResultOutcome.SUCCESS),
+            ({"result_status": "failed"}, ResultOutcome.FAILURE),
+            ({"result_status": "partial"}, ResultOutcome.PARTIAL),
+        )
+    ):
+        outcome, batch = _outcome(extra, f"hook:outcome-{index}")
+        assert outcome is expected, extra
+        assert HOST_OUTCOME_UNAVAILABLE_GAP not in batch.coverage.known_gaps, extra
+
+    # An unrecognized spelling is not an upgrade path.
+    outcome, batch = _outcome({"result_status": "mystery"}, "hook:outcome-mystery")
+    assert outcome is ResultOutcome.UNKNOWN
+    assert HOST_OUTCOME_UNAVAILABLE_GAP in batch.coverage.known_gaps
+
+    # exit_status stays authoritative over softer fields.
+    outcome, _batch = _outcome({"exit_status": 2, "success": True}, "hook:outcome-precedence")
+    assert outcome is ResultOutcome.FAILURE
+
+
+def test_routine_read_coalescing_respects_result_status_failures() -> None:
+    """A routine read that failed via result_status alone still materializes (#350)."""
+
+    task = _task_id()
+    session = f"hmac-sha256:{'ba' * 32}"
+    post = _envelope(session=session, kind="PostToolUse", identity="hook:read-status")
+    failed = materialize_observation_envelope(
+        replace(
+            post,
+            structural_payload=JsonObject(
+                {**post.structural_payload, "action": "routine_read", "result_status": "error"}
+            ),
+        ),
+        task_id=task,
+    )
+    assert [item.draft.schema.name for item in failed.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
+
+
+def test_statusless_routine_read_keeps_durable_result_and_capability_gap() -> None:
+    """Missing host outcome semantics are not coalesced as a successful read."""
+
+    from yoetz.application.observation_materialize import HOST_OUTCOME_UNAVAILABLE_GAP
+
+    task = _task_id()
+    session = f"hmac-sha256:{'bb' * 32}"
+    post = _envelope(session=session, kind="PostToolUse", identity="hook:read-unknown")
+    unknown = materialize_observation_envelope(
+        replace(
+            post,
+            structural_payload=JsonObject({**post.structural_payload, "action": "routine_read"}),
+        ),
+        task_id=task,
+    )
+    assert unknown.skip_reason is None
+    assert [item.draft.schema.name for item in unknown.drafts] == [
+        "action_recorded",
+        "result_recorded",
+    ]
+    assert HOST_OUTCOME_UNAVAILABLE_GAP in unknown.coverage.known_gaps
+
+
 def test_completion_signal_is_evidence_unless_claim_kind_is_explicit() -> None:
     task = _task_id()
     session = f"hmac-sha256:{'ac' * 32}"
@@ -2291,6 +2398,232 @@ async def test_duplicate_ingest_reconciles_ledger_instead_of_early_return(tmp_pa
     assert result.disposition is ObservationIngestDisposition.DUPLICATE
     assert calls["append"] == 1, "duplicate must still reconcile the ledger append"
     assert calls["advice"] == 1, "duplicate must still refresh advice"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "code",
+    [
+        PublicErrorCode.OPERATION_PENDING,
+        PublicErrorCode.BUNDLE_BUSY,
+        PublicErrorCode.FRONTIER_CONFLICT,
+    ],
+)
+async def test_check_barrier_deferral_is_designed_backpressure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: PublicErrorCode
+) -> None:
+    """#351: an ADR-022 barrier deferral keeps the row retryable without an
+    unexpected-exception diagnostic or a false service_unavailable gap."""
+
+    from types import SimpleNamespace
+
+    import yoetz.application.observation_coordinator as coordinator_module
+    from yoetz.domain.observation import OBSERVATION_BACKPRESSURE_REASON
+
+    recorded: list[str] = []
+
+    def _recording(exc: object, *, component: str, operation: str) -> None:
+        del exc, component
+        recorded.append(operation)
+
+    monkeypatch.setattr(
+        coordinator_module, "record_unexpected_exception_without_raising", _recording
+    )
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, f"barrier-{code.value.lower()}")
+
+    class _BarrierStore:
+        def grant_consent(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def bind_session(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
+            return ObservationIngestResult(
+                ObservationIngestDisposition.ACCEPTED, None, envelope.cursor
+            )
+
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=_BarrierStore(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            del released
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Coordinator(ObservationCoordinator):
+        async def _capture_content(  # type: ignore[override]
+            self, runtime: object, store: object, **kwargs: object
+        ) -> tuple[tuple[str, ...], bool]:
+            del runtime, store, kwargs
+            return ((), False)
+
+        async def _append_materialized(  # type: ignore[override]
+            self, *args: object, **kwargs: object
+        ) -> tuple[str, str, None]:
+            del args, kwargs
+            raise PublicOperationError(code, "Deferred behind the check barrier.", True)
+
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=f"barrier-{code.value.lower()}",
+            envelope=_envelope(session=session, kind="PostToolUse", identity="hook:barrier"),
+        )
+    )
+
+    assert result.disposition is ObservationIngestDisposition.REJECTED
+    assert result.reason == OBSERVATION_BACKPRESSURE_REASON
+    assert result.reason != ObservationGapCode.SERVICE_UNAVAILABLE.value
+    assert recorded == [], "a designed deferral must not record an unexpected exception"
+
+
+@pytest.mark.anyio
+async def test_run_advice_scopes_envelopes_to_the_mapped_session(tmp_path: Path) -> None:
+    """#352: the advice pipeline sees only the mapped session's envelopes, and a
+    post-commit caller without an envelope recovers the scope from the route."""
+
+    from types import SimpleNamespace
+
+    session_a = f"hmac-sha256:{'0a' * 32}"
+    session_b = f"hmac-sha256:{'0b' * 32}"
+    envelope_a = _envelope(session=session_a, kind="PostToolUse", identity="hook:a", exit_status=2)
+    envelope_b = _envelope(session=session_b, kind="PostToolUse", identity="hook:b", exit_status=0)
+    yoetz_session = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+
+    class _Store:
+        def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]:
+            del workspace
+            return (envelope_a, envelope_b)
+
+        def list_envelopes_for_session(
+            self, workspace: str, session_commitment: str
+        ) -> tuple[ObservationEnvelope, ...]:
+            del workspace
+            return tuple(
+                env
+                for env in (envelope_a, envelope_b)
+                if env.session_commitment == session_commitment
+            )
+
+        def codex_session_commitment_for_session(
+            self, *, workspace: str, yoetz_session_id: str
+        ) -> str | None:
+            del workspace
+            return session_b if yoetz_session_id == yoetz_session else None
+
+        def load_advice_snapshot(self, workspace: str) -> None:
+            del workspace
+            return None
+
+        async def status(self, query: ObservationStatusQuery) -> object:
+            raise AssertionError("mapped build must not read workspace-wide status")
+
+        async def status_for_session(self, workspace: str, session_commitment: str) -> object:
+            from yoetz.domain.observation import ObservationLifecycle, ObservationStatus
+
+            del workspace
+            return ObservationStatus(
+                ObservationLifecycle.ACTIVE,
+                session_commitment,
+                {},
+                None,
+                0,
+                (),
+                (),
+                None,
+            )
+
+        def set_advice_snapshot(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+    seen: list[tuple[str, ...]] = []
+
+    def _hook(
+        *,
+        workspace_commitment: str,
+        task_id: str,
+        store: object,
+        envelopes: tuple[ObservationEnvelope, ...],
+        frontier: object,
+    ) -> None:
+        del workspace_commitment, task_id, store, frontier
+        seen.append(tuple(env.source_identity for env in envelopes))
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        advice_hook=_hook,
+    )
+    runtime = SimpleNamespace(
+        task_id=_task_id(),
+        session_id=yoetz_session,
+        writer_id=None,
+    )
+
+    # Explicit scope from the ingest path.
+    await coordinator._run_advice(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        "hmac-sha256:" + "9" * 64,
+        cast(TaskRuntime, runtime),
+        _Store(),  # type: ignore[arg-type]
+        session_commitment=session_b,
+    )
+    # Route-recovered scope for post-commit callers with no envelope in hand.
+    await coordinator._run_advice(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        "hmac-sha256:" + "9" * 64,
+        cast(TaskRuntime, runtime),
+        _Store(),  # type: ignore[arg-type]
+    )
+    assert seen == [("hook:b",), ("hook:b",)]
+
+
+def test_backpressure_reason_routes_to_retry_without_gap_projection() -> None:
+    """#351: operation_pending is retryable, safe, and marked as expected."""
+
+    from yoetz.application.observation_drain import (
+        EXPECTED_OBSERVATION_BACKPRESSURE_REASONS,
+        ObservationDrainAction,
+        route_observation_ingest,
+    )
+    from yoetz.domain.observation import OBSERVATION_BACKPRESSURE_REASON
+
+    decision = route_observation_ingest(
+        ObservationIngestResult(
+            ObservationIngestDisposition.REJECTED,
+            OBSERVATION_BACKPRESSURE_REASON,
+            None,
+        )
+    )
+    assert decision.action is ObservationDrainAction.RETRY
+    assert decision.reason == OBSERVATION_BACKPRESSURE_REASON
+    assert OBSERVATION_BACKPRESSURE_REASON in EXPECTED_OBSERVATION_BACKPRESSURE_REASONS
 
 
 @pytest.mark.anyio

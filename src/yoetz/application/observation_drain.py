@@ -18,6 +18,7 @@ from yoetz.adapters.integrations.observation_local import (
     ObservationOutboxRow,
 )
 from yoetz.domain.observation import (
+    OBSERVATION_BACKPRESSURE_REASON,
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestRequest,
@@ -26,6 +27,7 @@ from yoetz.domain.observation import (
 
 __all__ = [
     "DEFAULT_OBSERVATION_SWEEP_LIMIT",
+    "EXPECTED_OBSERVATION_BACKPRESSURE_REASONS",
     "ObservationDrainAction",
     "ObservationDrainDecision",
     "ObservationDrainSummary",
@@ -39,11 +41,16 @@ DEFAULT_OBSERVATION_SWEEP_LIMIT: Final = 64
 # handful of stranded threads (a deadline expiring against a parked flock) cannot wedge the
 # next pass outright.
 _SWEEP_EXECUTOR_WORKERS: Final = 4
+# Designed coordination, not delivery failure (#351): the row stays pending and
+# retries, but the reason never becomes a coverage gap or a failure-shaped hook
+# diagnostic. ADR-022's check barrier is the canonical producer.
+EXPECTED_OBSERVATION_BACKPRESSURE_REASONS: Final = frozenset({OBSERVATION_BACKPRESSURE_REASON})
 RETRYABLE_OBSERVATION_REJECTIONS: Final = frozenset(
     {
         ObservationGapCode.SERVICE_UNAVAILABLE.value,
         ObservationGapCode.VAULT_LOCKED.value,
         ObservationGapCode.MAPPING_MISSING.value,
+        OBSERVATION_BACKPRESSURE_REASON,
         "observation_disabled",
         "paused",
     }
@@ -247,9 +254,13 @@ class ObservationOutboxSweeper:
                         continue
                     if decision.reason is not None:
                         reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
-                        await self._off_loop(
-                            partial(self.local.note_coverage_gap, workspace, decision.reason)
-                        )
+                        if decision.reason not in EXPECTED_OBSERVATION_BACKPRESSURE_REASONS:
+                            # A deferral behind a check barrier is designed
+                            # coordination; recording it as a coverage gap would
+                            # project a false current condition (#351).
+                            await self._off_loop(
+                                partial(self.local.note_coverage_gap, workspace, decision.reason)
+                            )
 
                     if decision.action is ObservationDrainAction.RETRY:
                         # The head of this lane stays pending, so no later row of the same

@@ -30,6 +30,7 @@ from yoetz.protocol.errors import PROTOCOL_REASON_CODES, ProtocolValueError
 __all__ = [
     "AdviceItem",
     "AdviceSnapshot",
+    "OBSERVATION_BACKPRESSURE_REASON",
     "OBSERVATION_HOOK_COMMITMENT_DOMAIN",
     "OBSERVATION_STREAM_LINE_DOMAIN",
     "OBSERVATION_WORKSPACE_DOMAIN",
@@ -179,6 +180,16 @@ class ObservationLifecycle(str, Enum):  # noqa: UP042 - exact durable wire enum
     DEGRADED = "degraded"
     STALE = "stale"
     STOPPED = "stopped"
+
+
+# Retryable ingest-rejection reason for designed back-pressure (#351): the
+# observation ledger deferred the append behind an ADR-022 check-acquisition or
+# frozen-case barrier (or equivalent transient bundle/frontier contention). It
+# is deliberately not an ObservationGapCode — a deferral is expected
+# coordination, never a current coverage gap, and must not project into
+# observation status, advice, coverage, or receipt inputs. The durable outbox
+# simply keeps the row pending and retries after the barrier clears.
+OBSERVATION_BACKPRESSURE_REASON: Final = "operation_pending"
 
 
 class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum

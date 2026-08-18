@@ -56,6 +56,7 @@ from yoetz.protocol.coverage import (
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
 __all__ = [
+    "HOST_OUTCOME_UNAVAILABLE_GAP",
     "approved_check_author",
     "MATERIALIZATION_MAPPING_VERSION",
     "MaterializedObservationBatch",
@@ -68,6 +69,14 @@ __all__ = [
 ]
 
 MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.2.0"
+# One bounded coverage condition for "the host emitted a paired tool result with
+# no outcome semantics at all" (#350). It rides the entry coverage of the
+# affected action/result records, so any number of outcome-less observed calls
+# fold into a single known-gap code in check coverage and the receipt instead of
+# one material-limitation candidate per call. It is deliberately not an
+# ObservationGapCode: envelopes are complete observations; the gap belongs to
+# the materialized ledger records whose outcome the host did not state.
+HOST_OUTCOME_UNAVAILABLE_GAP: Final = "host_outcome_unavailable"
 _LOGICAL_IDENTITY_DOMAIN: Final = "yoetz/observation-logical-identity/v1"
 _ID_DOMAIN: Final = b"yoetz/observation-materialize-id/v1\x00"
 _FILE_TOOLS: Final = frozenset(
@@ -164,12 +173,54 @@ def _exit_status(payload: Mapping[str, JsonValue]) -> int | None:
     return None
 
 
-def _explicit_post_failure(payload: Mapping[str, JsonValue]) -> bool:
-    """True when a post-event is an explicit failure or denial, not status-unknown."""
+# Closed result_status vocabularies. Codex hosts spell tool outcomes several
+# ways; only exact known spellings map to an outcome, and any other string
+# stays UNKNOWN so an unrecognized status is never upgraded to success.
+_RESULT_STATUS_SUCCESS: Final = frozenset({"success", "succeeded", "ok", "completed", "passed"})
+_RESULT_STATUS_FAILURE: Final = frozenset(
+    {
+        "failure",
+        "failed",
+        "error",
+        "errored",
+        "denied",
+        "aborted",
+        "cancelled",
+        "canceled",
+        "timeout",
+        "timed_out",
+        "interrupted",
+    }
+)
+_RESULT_STATUS_PARTIAL: Final = frozenset({"partial", "partially_completed"})
 
-    if _exit_status(payload) not in {None, 0}:
-        return True
-    return payload.get("success") is False or payload.get("denied") is True
+
+def _post_outcome(payload: Mapping[str, JsonValue]) -> ResultOutcome:
+    """Map every host-provided outcome fact to a result outcome (#350).
+
+    The real Codex ``PostToolUse`` payload may state its outcome as
+    ``exit_status``, ``denied``, boolean ``success``, or a ``result_status``
+    string; all of them are consumed rather than discarded. Any explicit
+    failure signal wins over any success signal — conflicting facts must never
+    launder a stated failure into success — and only a payload with no outcome
+    fact at all is UNKNOWN: a missing outcome is never upgraded to success.
+    """
+
+    exit_status = _exit_status(payload)
+    status = payload.get("result_status")
+    lowered = status.lower() if type(status) is str else None
+    if (
+        (exit_status is not None and exit_status != 0)
+        or payload.get("denied") is True
+        or payload.get("success") is False
+        or lowered in _RESULT_STATUS_FAILURE
+    ):
+        return ResultOutcome.FAILURE
+    if lowered in _RESULT_STATUS_PARTIAL:
+        return ResultOutcome.PARTIAL
+    if exit_status == 0 or payload.get("success") is True or lowered in _RESULT_STATUS_SUCCESS:
+        return ResultOutcome.SUCCESS
+    return ResultOutcome.UNKNOWN
 
 
 def _action_kind(tool: str | None) -> ActionKind:
@@ -349,7 +400,12 @@ def materialize_observation_envelope(
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind == "PostToolUse":
-        if routine_read and not _explicit_post_failure(structural):
+        # A routine read is coalesced only after the host supplied an explicit
+        # successful outcome. An outcome-less result must retain its durable
+        # action/result identity and folded host_outcome_unavailable gap under
+        # ADR-022 decision 12; treating UNKNOWN as a successful read would
+        # discard that limitation before the materializer can record it.
+        if routine_read and _post_outcome(structural) is ResultOutcome.SUCCESS:
             return MaterializedObservationBatch(
                 (), coverage, channel, gaps, "routine_read_coalesced"
             )
@@ -445,12 +501,23 @@ def materialize_observation_envelope(
             )
         )
         exit_status = _exit_status(structural)
-        if exit_status is None:
-            outcome = ResultOutcome.UNKNOWN
-        elif exit_status == 0:
-            outcome = ResultOutcome.SUCCESS
-        else:
-            outcome = ResultOutcome.FAILURE
+        outcome = _post_outcome(structural)
+        if outcome is ResultOutcome.UNKNOWN:
+            # The host stated no outcome for this call. The per-call record stays
+            # durable, but its coverage names the one standing capability
+            # condition so check/receipt fold every such call into a single
+            # bounded known gap instead of per-result limitation candidates.
+            coverage = Coverage(
+                publication_channels=coverage.publication_channels,
+                authorship_assurance=coverage.authorship_assurance,
+                artifact_observation=coverage.artifact_observation,
+                evidence_immutability=coverage.evidence_immutability,
+                ledger_freshness=coverage.ledger_freshness,
+                check_types=coverage.check_types,
+                known_gaps=tuple(
+                    sorted({*coverage.known_gaps, HOST_OUTCOME_UNAVAILABLE_GAP}, key=str.encode)
+                ),
+            )
         drafts.append(
             _draft(
                 event=result_event,
