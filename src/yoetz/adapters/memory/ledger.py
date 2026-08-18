@@ -1220,18 +1220,18 @@ class MemoryLedgerAdapter:
             if record.ledger.ingestion_sequence > sequence
         )
 
-    def _chain_anchored_unlocked(self, prefix: Frontier) -> bool:
-        """True when ``prefix`` names this chain's genesis prefix at its sequence."""
+    def _projection_anchored_unlocked(self, projection: ProjectionState) -> bool:
+        """True when ``projection`` is the exact replay of this chain through its frontier."""
 
-        record = next(
-            (
-                row
-                for row in self._state.records
-                if row.ledger.ingestion_sequence == prefix.sequence
-            ),
-            None,
+        records = tuple(
+            row
+            for row in self._state.records
+            if row.ledger.ingestion_sequence <= projection.frontier
         )
-        return record is not None and record.entry_digest == prefix.head_digest
+        try:
+            return replay(records) == projection
+        except ValueError as exc:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
 
     def _replace_pending_record(
         self,
@@ -1496,12 +1496,13 @@ class MemoryLedgerAdapter:
             if not any(row.session_id == session_id for row in self._state.records):
                 raise _frontier_conflict(live)
             # A case pinned to a past frontier stays valid while the live chain only extends it
-            # with observation-authored, finding-free records: the chain digest anchors the passed
-            # projection to the genesis prefix, and nothing in such a suffix can change what the
-            # case must account for. Anything else is a real conflict.
+            # with observation-authored, finding-free records. Replaying and comparing the exact
+            # prefix is required: its head digest authenticates the ledger prefix, not an arbitrary
+            # caller-supplied ProjectionState that happens to repeat that frontier. Anything else
+            # is a real conflict.
             if projection != self._state.projection and not (
                 projection.frontier < live.sequence
-                and self._chain_anchored_unlocked(frontier)
+                and self._projection_anchored_unlocked(projection)
                 and self._observation_only_since_unlocked(projection.frontier, finding_free=True)
             ):
                 raise _frontier_conflict(live)
@@ -1757,6 +1758,7 @@ class MemoryLedgerAdapter:
         projection: ProjectionState | None = None
         frontier: Frontier | None = None
         records: tuple[LedgerRecord, ...] | None = None
+        acquisition_reservation: _CheckReservation | None = None
         async with self._lock:
             prior = self._state.operations.get(key)
             if prior is not None:
@@ -1809,9 +1811,10 @@ class MemoryLedgerAdapter:
                 reservation = self._state.check_reservations.get(key)
                 if reservation is not None and reservation.expires_at > _now(self._clock):
                     raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
-                self._state.check_reservations[key] = _CheckReservation(
+                acquisition_reservation = _CheckReservation(
                     session_id, _now(self._clock) + timedelta(seconds=60)
                 )
+                self._state.check_reservations[key] = acquisition_reservation
         if prior_record is not None:
             assert self._objects is not None
             try:
@@ -1899,9 +1902,12 @@ class MemoryLedgerAdapter:
                 self._state.operations[key] = (operation, None)
                 return FrozenCase(case, self._lease_for(operation))
         finally:
-            # The frozen case (registered above on success) carries the barrier from here on;
-            # there is no await between that registration and this release.
-            self._state.check_reservations.pop(key, None)
+            # The frozen case (registered above on success) carries the barrier from here on. An
+            # expired acquisition may have been replaced under the same request key, so release
+            # only the exact reservation this invocation installed.
+            async with self._lock:
+                if self._state.check_reservations.get(key) is acquisition_reservation:
+                    self._state.check_reservations.pop(key, None)
 
     async def advance_check_phase(
         self,

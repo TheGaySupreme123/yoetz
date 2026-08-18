@@ -42,6 +42,7 @@ from yoetz.domain.values import (
     obligation_id,
     parse_rfc3339_millis,
 )
+from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
 from yoetz.ports.ledger import (
     AppendCommand,
@@ -56,6 +57,7 @@ from yoetz.ports.ledger import (
     FrozenCase,
     OperationKind,
     OperationLease,
+    ProjectionView,
     SelectedAttempt,
     SemanticAttemptHandle,
 )
@@ -73,6 +75,7 @@ from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.coverage import (
     AuthorshipAssurance,
     Coverage,
+    LedgerFreshness,
     PublicationChannel,
     coverage_for_channel,
 )
@@ -559,6 +562,39 @@ async def test_freeze_case_spoofed_observation_suffix_still_conflicts() -> None:
         assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
 
 
+@pytest.mark.anyio
+async def test_historical_case_availability_rejects_forged_projection_with_adapter_parity() -> None:
+    """A ledger-prefix digest authenticates the records, not an arbitrary ProjectionState.
+
+    Historical receipt tolerance must therefore replay and compare the exact prefix before it
+    returns availability facts, even when the live suffix is observation-authored and finding-free.
+    """
+
+    base = ledger_command(unknown=True)
+    observation = _observation_command(request_suffix="3", expected_frontier=1, seed="e")
+    for adapter in (memory_ledger(base), sqlite_ledger(base)):
+        held = await adapter.append_batch(base)
+        stored = await adapter.load_projection(base.session_id, ProjectionView.CANDIDATE_FINDINGS)
+        assert stored is not None
+        assert type(stored.state) is ProjectionState
+        await adapter.append_batch(observation)
+        availability = await adapter.load_case_availability(
+            base.session_id, held.result_frontier, stored.state
+        )
+        assert availability.unavailable_event_ids == ()
+        forged_freshness = (
+            LedgerFreshness.PARTIAL
+            if stored.state.freshness is LedgerFreshness.CURRENT
+            else LedgerFreshness.CURRENT
+        )
+        forged = replace(stored.state, freshness=forged_freshness)
+
+        with pytest.raises(PublicOperationError) as caught:
+            await adapter.load_case_availability(base.session_id, held.result_frontier, forged)
+
+        assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+
+
 class _GatedObjects(_Objects):
     """Block the first check-resume staging call so a test can act inside the freeze window."""
 
@@ -638,6 +674,87 @@ async def test_observation_append_defers_while_freeze_is_acquiring() -> None:
         gate.release_freeze.set()
         frozen = await asyncio.wait_for(freeze, timeout=5)
         assert isinstance(frozen, FrozenCase)
+
+
+@pytest.mark.anyio
+async def test_agent_append_during_freeze_invalidates_acquisition_with_adapter_parity() -> None:
+    """Material motion in the acquisition window must reach final revalidation in both adapters.
+
+    SQLite uses copy-on-write state for append durability. A freeze oracle must continue to see the
+    adopted state after that swap rather than reserving a case against its stale object snapshot.
+    """
+
+    base = ledger_command(unknown=True)
+    observation_shaped = _observation_command(request_suffix="5", expected_frontier=1, seed="f")
+    agent = replace(
+        observation_shaped,
+        entries=(
+            replace(
+                observation_shaped.entries[0],
+                author=base.entries[0].author,
+                publication_channel=PublicationChannel.LOCAL_CLI,
+                coverage=coverage_for_channel(PublicationChannel.LOCAL_CLI),
+            ),
+        ),
+    )
+
+    def gated_memory() -> tuple[MemoryLedgerAdapter, _GatedObjects]:
+        ids = _Ids()
+        gate = _GatedObjects(ids)
+        adapter = MemoryLedgerAdapter(
+            task_id=base.task_id,
+            ownership_fence=_fence(),
+            state=MemoryLedgerState(),
+            import_state=MemoryImportState(),
+            transaction_lock=asyncio.Lock(),
+            clock=_Clock(),
+            ids=ids,
+            objects=gate,
+        )
+        return adapter, gate
+
+    def gated_sqlite() -> tuple[SqliteLedger, _GatedObjects]:
+        db = apsw.Connection(":memory:")
+        initialize_bundle(
+            db,
+            {
+                "task_id": base.task_id,
+                "owner_generation": "1",
+                "owner_nonce": "ledger-test-nonce",
+            },
+        )
+        ids = _Ids()
+        gate = _GatedObjects(ids)
+        adapter = SqliteLedger(
+            db=db,
+            task_id=base.task_id,
+            ownership_fence=_fence(),
+            clock=_Clock(),
+            ids=ids,
+            objects=gate,
+        )
+        return adapter, gate
+
+    for adapter, gate in (gated_memory(), gated_sqlite()):
+        await adapter.append_batch(base)
+        freeze = asyncio.ensure_future(
+            adapter.freeze_case(
+                base.session_id,
+                base.writer_id,
+                1,
+                "req_00000000-0000-4000-8000-0000000000f3",
+                "sha256:" + "9" * 64,
+            )
+        )
+        await asyncio.wait_for(gate.freeze_entered.wait(), timeout=5)
+        moved = await adapter.append_batch(agent)
+        gate.release_freeze.set()
+
+        with pytest.raises(PublicOperationError) as caught:
+            await asyncio.wait_for(freeze, timeout=5)
+
+        assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+        assert caught.value.safe_details["sequence"] == moved.result_frontier.sequence
 
 
 @pytest.mark.anyio
