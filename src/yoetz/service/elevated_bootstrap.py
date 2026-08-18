@@ -9,11 +9,21 @@ import hmac
 import json
 import os
 import secrets
+import stat
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, NoReturn, cast
+from typing import Any, Final, Literal, NoReturn, cast
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows uses msvcrt below
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX uses fcntl above
+    msvcrt = None  # type: ignore[assignment]
 
 from yoetz.config.paths import ensure_owner_only_dir, state_dir
 from yoetz.domain.values import ProtocolValueError, validate_commitment, validate_sha256_digest
@@ -72,6 +82,7 @@ _LEGACY_SCHEMA: Final = "yoetz.elevated-bootstrap.pending/1"
 _TTL_SECONDS: Final = 15 * 60
 _PENDING_NAME: Final = "elevated-bootstrap-pending.json"
 _REVIEW_NAME: Final = "elevated-bootstrap-reviewing.json"
+_REVIEW_LOCK_NAME: Final = ".elevated-bootstrap.lock"
 _AUDIT_NAME: Final = "elevated-bootstrap-audit.jsonl"
 _FORBIDDEN: Final = ("mcp", "argv", "env", "stdin", "config", "transcript")
 _PROVIDER_BINDING_KEYS: Final = (
@@ -352,6 +363,84 @@ def review_path(*, _state: Path | None = None) -> Path:
     return elevated_dir(_state=_state) / _REVIEW_NAME
 
 
+class _PendingStateLock:
+    """Owner-only advisory lock spanning every pending-state transition."""
+
+    def __init__(self, state: Path | None) -> None:
+        self._path = elevated_dir(_state=state) / _REVIEW_LOCK_NAME
+        self._descriptor: int | None = None
+
+    def __enter__(self) -> None:
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        try:
+            try:
+                existing = self._path.lstat()
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and stat.S_ISLNK(existing.st_mode):
+                raise OSError("pending_lock_unsafe")
+            descriptor = os.open(self._path, flags, 0o600)
+            facts = os.fstat(descriptor)
+            effective_uid = (
+                os.geteuid()
+                if hasattr(os, "geteuid")
+                else os.getuid()
+                if hasattr(os, "getuid")
+                else None
+            )
+            if not stat.S_ISREG(facts.st_mode) or (
+                effective_uid is not None
+                and hasattr(facts, "st_uid")
+                and facts.st_uid != effective_uid
+            ):
+                raise OSError("pending_lock_unsafe")
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(descriptor, 0o600)
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            elif msvcrt is not None:
+                self._acquire_windows(descriptor)
+            else:
+                raise OSError("pending_lock_unsupported")
+        except OSError as exc:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise ElevatedBootstrapError("pending_lock_failed") from exc
+        self._descriptor = descriptor
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        del exc_type, exc, traceback
+        descriptor = self._descriptor
+        self._descriptor = None
+        if descriptor is not None:
+            try:
+                if fcntl is None and msvcrt is not None:
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    windows_msvcrt = cast(Any, msvcrt)
+                    windows_msvcrt.locking(descriptor, windows_msvcrt.LK_UNLCK, 1)
+            finally:
+                os.close(descriptor)
+
+    @staticmethod
+    def _acquire_windows(descriptor: int) -> None:
+        if msvcrt is None:  # pragma: no cover - guarded by __enter__
+            raise OSError("pending_lock_unsupported")
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"\0")
+            os.fsync(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        windows_msvcrt = cast(Any, msvcrt)
+        while True:
+            try:
+                windows_msvcrt.locking(descriptor, windows_msvcrt.LK_NBLCK, 1)
+                return
+            except OSError:
+                time.sleep(0.05)
+
+
 def audit_path(*, _state: Path | None = None) -> Path:
     return elevated_dir(_state=_state) / _AUDIT_NAME
 
@@ -410,49 +499,50 @@ def prepare_pending(
         validated_digest = validate_sha256_digest(target_digest)
     except ProtocolValueError as exc:
         raise ElevatedBootstrapError("target_digest_invalid") from exc
-    if review_path(_state=_state).is_file():
-        raise ElevatedBootstrapError("review_in_progress")
-    existing = load_pending(_state=_state)
-    if existing is not None and existing.expires_at_unix > int(time.time()):
-        raise ElevatedBootstrapError("pending_already_active")
-    now = int(time.time())
-    pending_id = secrets.token_hex(32)
-    text = spec.danger_text
-    expires = now + _TTL_SECONDS
-    digest = _danger_digest(
-        operation=operation,
-        risk_class=spec.risk_class,
-        danger_text=text,
-        target_digest=validated_digest,
-        pending_id=pending_id,
-        expires_at_unix=expires,
-        provider_binding=binding,
-        grant_binding=grant,
-    )
-    pending = PendingElevatedConsent(
-        pending_id=pending_id,
-        operation=operation,
-        risk_class=spec.risk_class,
-        danger_text=text,
-        danger_digest=digest,
-        created_at_unix=now,
-        expires_at_unix=expires,
-        target_digest=validated_digest,
-        provider_binding=binding,
-        grant_binding=grant,
-    )
-    _write_pending(pending, _state=_state)
-    _audit(
-        {
-            "event": "prepare",
-            "operation": operation,
-            "risk_class": spec.risk_class,
-            "pending_id": pending_id,
-            "danger_digest": digest,
-            "expires_at_unix": expires,
-        },
-        _state=_state,
-    )
+    with _PendingStateLock(_state):
+        if review_path(_state=_state).is_file():
+            raise ElevatedBootstrapError("review_in_progress")
+        existing = _load_pending_unlocked(_state=_state)
+        if existing is not None and existing.expires_at_unix > int(time.time()):
+            raise ElevatedBootstrapError("pending_already_active")
+        now = int(time.time())
+        pending_id = secrets.token_hex(32)
+        text = spec.danger_text
+        expires = now + _TTL_SECONDS
+        digest = _danger_digest(
+            operation=operation,
+            risk_class=spec.risk_class,
+            danger_text=text,
+            target_digest=validated_digest,
+            pending_id=pending_id,
+            expires_at_unix=expires,
+            provider_binding=binding,
+            grant_binding=grant,
+        )
+        pending = PendingElevatedConsent(
+            pending_id=pending_id,
+            operation=operation,
+            risk_class=spec.risk_class,
+            danger_text=text,
+            danger_digest=digest,
+            created_at_unix=now,
+            expires_at_unix=expires,
+            target_digest=validated_digest,
+            provider_binding=binding,
+            grant_binding=grant,
+        )
+        _write_pending(pending, _state=_state)
+        _audit(
+            {
+                "event": "prepare",
+                "operation": operation,
+                "risk_class": spec.risk_class,
+                "pending_id": pending_id,
+                "danger_digest": digest,
+                "expires_at_unix": expires,
+            },
+            _state=_state,
+        )
     return pending
 
 
@@ -696,7 +786,7 @@ def _load_pending_path(
     return pending
 
 
-def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None:
+def _load_pending_unlocked(*, _state: Path | None = None) -> PendingElevatedConsent | None:
     claim = review_path(_state=_state)
     path = pending_path(_state=_state)
     if claim.is_file():
@@ -708,12 +798,18 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
     return _load_pending_path(path, _state=_state, expire=True)
 
 
+def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None:
+    with _PendingStateLock(_state):
+        return _load_pending_unlocked(_state=_state)
+
+
 def clear_pending(*, _state: Path | None = None) -> None:
-    path = pending_path(_state=_state)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as exc:
-        raise ElevatedBootstrapError("pending_clear_failed") from exc
+    with _PendingStateLock(_state):
+        path = pending_path(_state=_state)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ElevatedBootstrapError("pending_clear_failed") from exc
 
 
 def _exact_match(left: str, right: str) -> bool:
@@ -725,57 +821,58 @@ def _exact_match(left: str, right: str) -> bool:
 def claim_pending_for_review(*, _state: Path | None = None) -> PendingElevatedConsent:
     """Atomically consume one pending request for a verified-console review."""
 
-    pending = load_pending(_state=_state)
-    if pending is None:
-        raise ElevatedBootstrapError("pending_absent")
-    if not operation_spec(pending.operation).implemented:
-        raise ElevatedBootstrapError("operation_not_implemented")
-    source = pending_path(_state=_state)
-    claim = review_path(_state=_state)
-    try:
-        os.link(source, claim)
-    except FileExistsError as exc:
-        raise ElevatedBootstrapError("review_in_progress") from exc
-    except FileNotFoundError as exc:
-        raise ElevatedBootstrapError("pending_absent") from exc
-    except OSError as exc:
-        raise ElevatedBootstrapError("pending_claim_failed") from exc
-    try:
-        source.unlink()
-    except FileNotFoundError:
-        # The hard link already made this caller the winner. Concurrent cancellation or
-        # cleanup of the public name cannot revoke ownership of the private review marker.
-        pass
-    except OSError as exc:
+    with _PendingStateLock(_state):
+        pending = _load_pending_unlocked(_state=_state)
+        if pending is None:
+            raise ElevatedBootstrapError("pending_absent")
+        if not operation_spec(pending.operation).implemented:
+            raise ElevatedBootstrapError("operation_not_implemented")
+        source = pending_path(_state=_state)
+        claim = review_path(_state=_state)
         try:
-            claim.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise ElevatedBootstrapError("pending_claim_failed") from exc
-    claimed = _load_pending_path(claim, _state=_state, expire=False)
-    if claimed is None or claimed != pending:
+            os.link(source, claim)
+        except FileExistsError as exc:
+            raise ElevatedBootstrapError("review_in_progress") from exc
+        except FileNotFoundError as exc:
+            raise ElevatedBootstrapError("pending_absent") from exc
+        except OSError as exc:
+            raise ElevatedBootstrapError("pending_claim_failed") from exc
         try:
-            claim.unlink(missing_ok=True)
-        except OSError:
+            source.unlink()
+        except FileNotFoundError:
+            # The hard link already made this caller the winner. Concurrent cancellation or
+            # cleanup of the public name cannot revoke ownership of the private review marker.
             pass
-        raise ElevatedBootstrapError("pending_tampered")
-    if claimed.expires_at_unix <= int(time.time()):
-        complete_review(claimed, outcome="expired", _state=_state)
-        raise ElevatedBootstrapError("pending_expired")
-    _audit(
-        {
-            "event": "review_claimed",
-            "pending_id": pending.pending_id,
-            "operation": pending.operation,
-            "risk_class": pending.risk_class,
-            "danger_digest": pending.danger_digest,
-        },
-        _state=_state,
-    )
-    return claimed
+        except OSError as exc:
+            try:
+                claim.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ElevatedBootstrapError("pending_claim_failed") from exc
+        claimed = _load_pending_path(claim, _state=_state, expire=False)
+        if claimed is None or claimed != pending:
+            try:
+                claim.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ElevatedBootstrapError("pending_tampered")
+        if claimed.expires_at_unix <= int(time.time()):
+            _complete_review_unlocked(claimed, outcome="expired", _state=_state)
+            raise ElevatedBootstrapError("pending_expired")
+        _audit(
+            {
+                "event": "review_claimed",
+                "pending_id": pending.pending_id,
+                "operation": pending.operation,
+                "risk_class": pending.risk_class,
+                "danger_digest": pending.danger_digest,
+            },
+            _state=_state,
+        )
+        return claimed
 
 
-def complete_review(
+def _complete_review_unlocked(
     pending: PendingElevatedConsent,
     *,
     outcome: str,
@@ -806,6 +903,18 @@ def complete_review(
         },
         _state=_state,
     )
+
+
+def complete_review(
+    pending: PendingElevatedConsent,
+    *,
+    outcome: str,
+    _state: Path | None = None,
+) -> None:
+    """Consume the claimed request exactly once for approval, denial, cancellation, or expiry."""
+
+    with _PendingStateLock(_state):
+        _complete_review_unlocked(pending, outcome=outcome, _state=_state)
 
 
 def projection_for_status(
