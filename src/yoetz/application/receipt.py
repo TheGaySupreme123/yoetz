@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, replace
-from typing import Literal, Protocol, cast
+from typing import Final, Literal, Protocol, cast
 
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import (
@@ -49,7 +49,10 @@ from yoetz.kernel.reducers import (
     is_material_event_family,
     replay,
 )
-from yoetz.observability.logging import record_classified_exception_without_raising
+from yoetz.observability.logging import (
+    record_classified_exception_without_raising,
+    record_public_error_without_raising,
+)
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
@@ -89,6 +92,15 @@ from yoetz.protocol.models import (
 __all__ = ["Application", "ReceiptInternalResult", "execute_receipt"]
 
 _RECEIPT_MEDIA_TYPE = "application/vnd.yoetz.receipt+json"
+_RECEIPT_REPLAY_MISMATCH_REASONS: Final = frozenset(
+    {
+        "receipt_conclusion_mismatch",
+        "receipt_digest_mismatch",
+        "receipt_frontier_mismatch",
+        "receipt_id_mismatch",
+        "receipt_redaction_profile_mismatch",
+    }
+)
 
 
 class Application(Protocol):
@@ -184,15 +196,29 @@ def _classified_storage_error(
     retryable: bool = False,
     request_id: str | None = None,
     operation: str,
+    diagnostic_reason: str | None = None,
 ) -> PublicOperationError:
     """Classify one object-store exception as a public error with a resolvable correlation id."""
 
-    correlation_id = record_classified_exception_without_raising(
-        exc,
-        component="application.receipt",
-        operation=operation,
-        request_id=request_id,
-    )
+    if diagnostic_reason is None:
+        correlation_id = record_classified_exception_without_raising(
+            exc,
+            component="application.receipt",
+            operation=operation,
+            request_id=request_id,
+        )
+    else:
+        if diagnostic_reason not in _RECEIPT_REPLAY_MISMATCH_REASONS:
+            raise ValueError("receipt_diagnostic_reason_invalid") from exc
+        # Replay integrity mismatches are application-derived facts, not exception classes. Keep
+        # their reason closed and structural while recording the same application-site correlation
+        # contract as object-store exceptions.
+        correlation_id = record_public_error_without_raising(
+            component="application.receipt",
+            operation=operation,
+            reason=diagnostic_reason,
+            request_id=request_id,
+        )
     return PublicOperationError(code, message, retryable, correlation_id=correlation_id)
 
 
@@ -570,14 +596,27 @@ async def _replay_result(
             operation="receipt_object_read",
         ) from exc
     digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
-    if (
-        digest != payload.receipt_digest
-        or str(document.receipt_id) != str(payload.receipt_id)
-        or document.subject_frontier != payload.subject_frontier
-        or document.conclusion is not payload.conclusion_code
-        or request.redaction_profile is not payload.redaction_profile
-    ):
-        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The stored receipt is invalid.")
+    mismatch_reason: str | None = None
+    if digest != payload.receipt_digest:
+        mismatch_reason = "receipt_digest_mismatch"
+    elif str(document.receipt_id) != str(payload.receipt_id):
+        mismatch_reason = "receipt_id_mismatch"
+    elif document.subject_frontier != payload.subject_frontier:
+        mismatch_reason = "receipt_frontier_mismatch"
+    elif document.conclusion is not payload.conclusion_code:
+        mismatch_reason = "receipt_conclusion_mismatch"
+    elif request.redaction_profile is not payload.redaction_profile:
+        mismatch_reason = "receipt_redaction_profile_mismatch"
+    if mismatch_reason is not None:
+        mismatch = ValueError("receipt_replay_integrity_mismatch")
+        raise _classified_storage_error(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "The stored receipt is invalid.",
+            mismatch,
+            request_id=request.request_id,
+            operation="receipt_object_read",
+            diagnostic_reason=mismatch_reason,
+        ) from mismatch
     return _internal_result(
         request,
         document,

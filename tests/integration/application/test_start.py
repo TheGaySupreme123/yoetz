@@ -24,6 +24,7 @@ from builders.start_application import (
     start_request,
 )
 from yoetz.adapters.memory.start_catalog import MemoryStartCatalogAdapter
+from yoetz.adapters.objects import encrypted_files as encrypted_files_module
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.objects.envelope import decode_object_envelope
 from yoetz.adapters.sqlite.migrations import initialize_bundle, initialize_catalog
@@ -55,6 +56,7 @@ from yoetz.ports.secret_memory import (
 )
 from yoetz.ports.start_catalog import StartCatalogPort
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
 if TYPE_CHECKING:
     from yoetz.ports.secret_memory import SecretHandle
@@ -516,3 +518,39 @@ async def test_sqlite_and_encrypted_files_resume_exact_catalog_pinned_object(
     }
     assert start_result_ids == {object_id}
     assert runtime.release_count == 2
+
+
+async def test_start_result_replay_eio_is_retryable_and_resumes_after_storage_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """START must keep a result-published row resumable when resolve_verified sees transient EIO."""
+
+    app, runtime, clock, catalog, _catalog_db = _real_composition(tmp_path)
+    request = start_request(1730)
+    catalog.fail_complete = True
+
+    with pytest.raises(RuntimeError, match="simulated_post_publish_crash"):
+        await execute_start(app, request)
+
+    clock.advance(61)
+
+    def failing_read(_descriptor: int, _n: int) -> bytes:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(encrypted_files_module.os, "read", failing_read)
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_start(app, request)
+    assert caught.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert caught.value.retryable is True
+    assert caught.value.message == "The start result is temporarily unavailable."
+    assert "Input/output error" not in caught.value.message
+    assert runtime.release_count == 2
+
+    # The transient failure did not quarantine or consume the result-published allocation; once
+    # the environment recovers, the exact request reopens and completes the original object.
+    monkeypatch.undo()
+    clock.advance(61)
+    resumed = await execute_start(app, request)
+    assert resumed.ok is True
+    assert resumed.outcome == "created"
+    assert runtime.release_count == 3

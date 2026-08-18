@@ -1159,6 +1159,11 @@ site with a bounded exception-class reason and optional `yoetz` origin; the daem
 id on the `ok:false` envelope and does not mint an `internal_error` diagnostic. Pre-append object
 `stage`/`finalize` I/O on a fresh receipt is retryable `STORAGE_UNSAFE` because nothing has
 committed.
+Receipt replay binding mismatches use the same application-site correlation contract with one of
+the closed structural reasons `receipt_digest_mismatch`, `receipt_id_mismatch`,
+`receipt_frontier_mismatch`, `receipt_conclusion_mismatch`, or
+`receipt_redaction_profile_mismatch`; the public message remains fixed and carries no mismatch
+detail.
 
 `freeze_case` uses one closed ordering for both adapters. For an absent operation: (1) a bounded
 prepare snapshot establishes absent idempotency, no pending import, `expected_frontier`, head `F`,
@@ -1322,6 +1327,10 @@ the per-bundle monotonic fence generation in `bundle_meta`.
 `StartCompletionEvidence.owner_generation` carries the same start-lease generation so
 `complete` can CAS against the catalog row; bundle-fence rotation is verified separately via
 `validate_fence` against the fence's own `owner_generation` and nonce.
+When a `result_published` allocation resumes, a deterministic verification or binding mismatch
+quarantines the allocation as `STORAGE_CORRUPT`; environmental object I/O remains pending and is
+returned as retryable `STORAGE_UNSAFE` so the same request can retry without losing the pinned
+result.
 
 `StartIdentityInput(task_title, workspace_ref?, external_ref?)` is a redacted one-shot value;
 `StartIdentityCommitments(title_commitment, workspace_ref_commitment?,
@@ -1344,7 +1353,9 @@ repository-privacy commitment, and cannot select or inherit disclosure authority
 - `stage(ObjectSource, ObjectMetadata) -> StagedObject`;
 - `finalize(StagedObject) -> ObjectRef`;
 - `resolve_verified(object_id, envelope_digest) -> ObjectRef` — bounded exact finalized-object
-  resolution for catalog-pinned START crash resume;
+  resolution for catalog-pinned START crash resume; deterministic verification failures raise
+  `ValueError("object_verification_failed")`, while environmental I/O re-raises `OSError` for the
+  START application to classify as retryable `STORAGE_UNSAFE`;
 - `open_verified(ObjectRef) -> AsyncIterator[bytes]` — missing, tampered, or otherwise
   unverifiable objects raise `ValueError("object_verification_failed")`; environmental I/O
   during an otherwise well-formed open re-raises `OSError`;

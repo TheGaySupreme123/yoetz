@@ -101,7 +101,13 @@ _EXPECTED_EXIT_CODES: dict[PublicErrorCode, int] = {
 # The exact closed set of public codes each six-operation module is known to raise. A module
 # widening this set (inventing a new mapping) or narrowing it silently both fail this lock.
 _MODULE_CODE_INVENTORY: dict[str, frozenset[PublicErrorCode]] = {
-    "start.py": frozenset({PublicErrorCode.INVALID_REQUEST, PublicErrorCode.STORAGE_CORRUPT}),
+    "start.py": frozenset(
+        {
+            PublicErrorCode.INVALID_REQUEST,
+            PublicErrorCode.STORAGE_CORRUPT,
+            PublicErrorCode.STORAGE_UNSAFE,
+        }
+    ),
     "publish_work.py": frozenset(
         {
             PublicErrorCode.EVENT_INVALID,
@@ -263,10 +269,13 @@ def test_retryability_tracks_operation_state() -> None:
             assert not _is_retryable_call(window), (name, window)
 
     # status is a read-only projection: its bounded error helper hardcodes ``retryable=False``
-    # for every code, so no ``status`` failure can ever claim the operation may continue. start
-    # never marks any of its two codes retryable either.
+    # for every code, so no ``status`` failure can ever claim the operation may continue. START's
+    # storage-unsafe result-object replay path is the one intentional retryable exception.
     assert "retryable=True" not in _application_source("status.py")
-    assert "retryable=True" not in _application_source("start.py")
+    start_unsafe = _call_windows(_application_source("start.py"), "STORAGE_UNSAFE")
+    assert start_unsafe
+    for window in start_unsafe:
+        assert _is_retryable_call(window), window
 
 
 def test_safe_details_stay_bounded() -> None:

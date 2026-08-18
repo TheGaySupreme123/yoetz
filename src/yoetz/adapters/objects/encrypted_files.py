@@ -45,6 +45,17 @@ __all__ = ["EncryptedFilesObjectStore"]
 _CHUNK_SIZE: Final = 64 * 1024
 _ORPHAN_WINDOW: Final = timedelta(hours=24)
 _MAX_FRAME_BYTES: Final = 4 + 1 + 4 + MAX_OBJECT_HEADER_BYTES + 12 + MAX_OBJECT_PLAINTEXT_BYTES + 16
+# These are adapter-owned structural failures.  They describe an object that cannot be
+# authenticated as the finalized object named by the caller, so they must remain deterministic
+# verification failures even though the low-level reader uses ``OSError`` to report them.
+_DETERMINISTIC_OPEN_OSERRORS: Final = frozenset(
+    {
+        "object_file_truncated",
+        "object_file_unsafe",
+        "object_path_unsafe",
+        "object_root_unsafe",
+    }
+)
 
 type CurrentRootSnapshot = Callable[[], Awaitable[ObjectRootSnapshot]]
 
@@ -58,11 +69,15 @@ def _is_environmental_open_fault(exc: BaseException) -> bool:
 
     ``FileNotFoundError`` stays a verification mismatch: a missing id is the same deterministic
     outcome as a digest mismatch, and the object-store port requires ``object_verification_failed``
-    for that case. Other ``OSError`` subclasses (EIO, permission, truncation, unsafe mode) are
-    environmental and must not be collapsed into that token.
+    for that case. Adapter-owned structural faults (truncation and unsafe finalized-object
+    metadata) use ``OSError`` internally but are deterministic verification failures too. Other
+    ``OSError`` instances (EIO, permission, and similar host I/O) are environmental and must not
+    be collapsed into that token.
     """
 
-    return isinstance(exc, OSError) and not isinstance(exc, FileNotFoundError)
+    if not isinstance(exc, OSError) or isinstance(exc, FileNotFoundError):
+        return False
+    return not (exc.errno is None and str(exc) in _DETERMINISTIC_OPEN_OSERRORS)
 
 
 def root_snapshot_identity(snapshot: ObjectRootSnapshot) -> tuple[object, ...]:

@@ -243,6 +243,16 @@ def _storage_corrupt(code: str) -> PublicOperationError:
     )
 
 
+def _storage_unsafe() -> PublicOperationError:
+    """Keep transient START-result I/O retryable without quarantining the catalog row."""
+
+    return _error(
+        PublicErrorCode.STORAGE_UNSAFE,
+        "The start result is temporarily unavailable.",
+        retryable=True,
+    )
+
+
 def _request_digest(request: StartRequest, command: StartCommand) -> str:
     commitments = command.identity_commitments
     return canonical_digest(
@@ -662,6 +672,11 @@ async def _reopen_result(
         raise _StartContradiction("start_result_object_missing")
     try:
         ref = await task.objects.resolve_verified(response_object_id, envelope_digest)
+    except OSError as exc:
+        # An environmental read fault leaves the result-published catalog row resumable. Do not
+        # turn it into a contradiction/quarantine: the same request can retry after the storage
+        # transient clears.
+        raise _storage_unsafe() from exc
     except (ProtocolValueError, PublicOperationError, TypeError, ValueError) as exc:
         raise _StartContradiction("start_result_object_missing") from exc
     if (
@@ -685,6 +700,8 @@ async def _reopen_result(
             chunks.append(chunk)
     except _StartContradiction:
         raise
+    except OSError as exc:
+        raise _storage_unsafe() from exc
     except (ProtocolValueError, PublicOperationError, TypeError, ValueError) as exc:
         raise _StartContradiction("start_result_object_missing") from exc
     observed = b"".join(chunks)
