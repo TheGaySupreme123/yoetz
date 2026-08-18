@@ -810,7 +810,9 @@ async def test_classified_receipt_storage_fault_is_ok_false_not_internal_error(
     assert found[0]["component"] == "application.receipt"
     assert found[0]["operation"] == "receipt_object_read"
     assert found[0]["reason"] == "exception_value_error"
-    assert "internal_error" not in found[0]["operation"]
+    recorded_operation = found[0]["operation"]
+    assert type(recorded_operation) is str
+    assert "internal_error" not in recorded_operation
     assert application.receipt_calls == 1
     await daemon.close()
 
@@ -849,7 +851,9 @@ async def test_unbound_receipt_storage_unsafe_is_ok_false_not_internal_error(
     assert len(found) == 1
     assert found[0]["operation"] == "receipt_public_error"
     assert found[0]["reason"] == "storage_unsafe"
-    assert "internal_error" not in found[0]["operation"]
+    recorded_operation = found[0]["operation"]
+    assert type(recorded_operation) is str
+    assert "internal_error" not in recorded_operation
     await daemon.close()
 
 

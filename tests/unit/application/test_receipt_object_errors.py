@@ -25,7 +25,7 @@ _REQUEST_ID = "req_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 @pytest.fixture(autouse=True)
-def _diagnostic_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def _diagnostic_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:  # pyright: ignore[reportUnusedFunction]
     import yoetz.observability.diagnostics as diagnostics
 
     monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
@@ -81,7 +81,9 @@ def _assert_classified(
     assert found[0]["operation"] == operation
     assert found[0]["component"] == "application.receipt"
     assert found[0]["request_id"] == _REQUEST_ID
-    assert "internal_error" not in found[0]["operation"]
+    recorded_operation = found[0]["operation"]
+    assert type(recorded_operation) is str
+    assert "internal_error" not in recorded_operation
     assert "Input/output error" not in error.message
     assert "object_verification_failed" not in error.message
 

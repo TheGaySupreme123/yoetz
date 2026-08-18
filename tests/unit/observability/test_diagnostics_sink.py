@@ -139,6 +139,7 @@ def test_record_classified_exception_writes_public_error_not_internal_error(
         LogMode.SERVICE,
         clock=frozen_clock(utc=_NOW, monotonic=0.0),
     )
+    correlation_id = ""
     try:
         validate_id(IdKind.REQUEST, "not-a-request-id")
     except Exception as exc:

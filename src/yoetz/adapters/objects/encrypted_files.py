@@ -445,7 +445,14 @@ class EncryptedFilesObjectStore:
         self._validate_private_directory(self._objects_root)
         if path.parent.parent != self._objects_root:
             raise OSError("object_path_unsafe")
-        self._validate_private_directory(path.parent)
+        try:
+            self._validate_private_directory(path.parent)
+        except OSError as exc:
+            # A never-written object_id has no shard directory. That is a missing object, not a
+            # missing store root, so verified open must keep the port's verification token.
+            if str(exc) == "object_root_missing":
+                raise FileNotFoundError from exc
+            raise
 
     def _new_temp_path(self, object_id: str) -> Path:
         for _ in range(128):
