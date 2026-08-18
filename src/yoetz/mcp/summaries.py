@@ -223,7 +223,9 @@ def summary_for_check(envelope: object) -> str:
             f"findings returned: {findings}; suppressed: {suppressed}; "
         )
     else:
-        prefix = f"Check verdict: {verdict}; findings returned: {findings}; suppressed: {suppressed}; "
+        prefix = (
+            f"Check verdict: {verdict}; findings returned: {findings}; suppressed: {suppressed}; "
+        )
     suffix = f"semantic status/reason: {status}/{reason}; {_frontier_clause(source)}."
     clause = _finding_identity_clause(
         source,

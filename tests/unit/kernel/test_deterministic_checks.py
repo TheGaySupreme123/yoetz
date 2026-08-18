@@ -343,8 +343,7 @@ def test_material_limitation_detail_names_the_safe_limiting_record() -> None:
         observed_facts=(FindingFact("material_limitation_present", (claim, result)),),
     )
     assert (
-        "Omitted limitation basis: non-success result "
-        "res_00000000-0000-4000-8000-000000000002."
+        "Omitted limitation basis: non-success result res_00000000-0000-4000-8000-000000000002."
     ) in detail
 
 
