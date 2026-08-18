@@ -2433,6 +2433,12 @@ Shared closed types:
   lifecycle event. Once a readable condition finding exists, later evidence-window or frontier
   changes update the observation snapshot and coverage/gap state without appending another
   `finding_recorded` event.
+  Snapshot construction is session-scoped: a mapped session's snapshot is built from that
+  session's own retained envelopes and session-scoped lifecycle/gap health (resolved from the
+  ingest envelope's session commitment or the durable workspace session route), never from every
+  retained workspace envelope. The workspace-wide aggregate remains the operator surface
+  (`yoetz observe status`) and the source of deliberately workspace-standing machine conditions;
+  it is not an input to a mapped task snapshot (ADR-022 decision 14).
   Hook-channel delivery is relevance-scoped: task-scoped conditions come from the mapped Yoetz
   session snapshot when one exists, otherwise from the current Codex session's retained envelopes.
   The workspace-wide snapshot is not a fallback for task-scoped work. Deliberately workspace-
@@ -2491,6 +2497,22 @@ encryption. SQLite/envelopes retain only encrypted object IDs, commitments, clas
 and relations. Vault/service failure records `content_capture_unavailable` and no plaintext spool.
 Unrecognized visible events accept an opaque stable envelope plus encrypted content and
 `unsupported_event`; unknown semantics never infer success.
+
+Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
+
+- Paired `PostToolUse` materialization consumes `exit_status`, `denied`, boolean `success`, and a
+  closed `result_status` spelling table; a payload with no outcome fact records `UNKNOWN` and its
+  ledger entries carry the `host_outcome_unavailable` known gap. Check coverage and receipts fold
+  that gap into one bounded code regardless of how many observed calls lack outcome semantics; the
+  deterministic research-evidence policy does not mint one `material_limitation_omitted` candidate
+  per such record. Observed work facts (durable per-call action/result records), the acquisition
+  limitation (`host_outcome_unavailable` coverage gap), actionable findings (explicit
+  `FAILURE`/`PARTIAL`, cooperative `UNKNOWN`), and receipt gaps stay distinct surfaces.
+- `operation_pending` is the retryable ingest-rejection reason for designed observation
+  back-pressure (check-acquisition/frozen-case barriers and adjacent transient bundle/frontier
+  contention). It keeps the outbox row pending and annotated, but is never a current observation
+  gap, never a hook failure diagnostic, and never projects `service_unavailable` into status,
+  advice, coverage, or receipt inputs.
 
 Canonical normalization precedes materialization. Equivalent hook/stream host calls share logical
 identity, roles, operation digest, and stable ledger IDs. That canonical logical identity remains

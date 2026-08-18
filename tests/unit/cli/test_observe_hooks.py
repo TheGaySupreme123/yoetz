@@ -1666,7 +1666,9 @@ async def test_drain_lease_prevents_concurrent_hooks_from_double_draining(
     with store.drain_lease(workspace) as owned:
         assert owned is True
         # A second store instance (another hook process) must lose the lease
-        # and skip the drain entirely — no connect, with a bounded contention diagnostic.
+        # and skip the drain entirely — no connect. Losing to a live owner is
+        # designed coordination, so no failure-shaped diagnostic is recorded
+        # (#351): one row per contending hook buried genuine failures.
         other = LocalObservationStore(_state=tmp_path)
         await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
             other,
@@ -1677,8 +1679,123 @@ async def test_drain_lease_prevents_concurrent_hooks_from_double_draining(
         )
     assert connects == []
     diagnostics = tmp_path / "observation/hook-diagnostics.jsonl"
-    assert diagnostics.exists()
-    assert "drain_lease_contended" in diagnostics.read_text(encoding="utf-8")
+    if diagnostics.exists():
+        assert "drain_lease_contended" not in diagnostics.read_text(encoding="utf-8")
+
+
+@pytest.mark.anyio
+async def test_budget_expiry_after_delivery_progress_is_a_silent_yield(tmp_path: Path) -> None:
+    """A bounded slice that moved backlog and then yielded is working as designed (#351).
+
+    drain_budget_exhausted remains reserved for a pass that timed out before
+    any progress; a capacity yield to the service sweeper is not a failure.
+    """
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "yield")
+    for ordinal in (1, 2, 3):
+        store.enqueue_outbox(
+            workspace, "yield", _drain_envelope(store, "yield", "hook:yield", ordinal)
+        )
+
+    clock = {"now": 0.0}
+
+    class OneThenSlowClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            self.calls += 1
+            # First row delivers instantly; afterwards the budget is exhausted.
+            clock["now"] += 0.05 if self.calls == 1 else 1.0
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return OneThenSlowClient()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="yield",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+        budget_seconds=0.2,
+        monotonic=lambda: clock["now"],
+    )
+    assert store.pending_outbox_count(workspace) == 1, "two rows delivered before the yield"
+    diagnostics = tmp_path / "observation/hook-diagnostics.jsonl"
+    if diagnostics.exists():
+        assert '"reason":"drain_budget_exhausted"' not in diagnostics.read_text()
+
+
+@pytest.mark.anyio
+async def test_operation_pending_deferral_keeps_row_without_gap_or_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """An ADR-022 check-barrier deferral is expected back-pressure, not failure (#351)."""
+
+    from yoetz.domain.observation import OBSERVATION_BACKPRESSURE_REASON
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "deferred")
+    for ordinal in (1, 2):
+        store.enqueue_outbox(
+            workspace, "deferred", _drain_envelope(store, "deferred", "hook:deferred", ordinal)
+        )
+
+    attempts = 0
+
+    class BarrierClient:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            nonlocal attempts
+            attempts += 1
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    OBSERVATION_BACKPRESSURE_REASON,
+                    None,
+                )
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return BarrierClient()
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="deferred",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+    # The deferred head retires its lane for the pass; both rows stay pending
+    # with the honest annotation, and neither a coverage gap nor a hook
+    # diagnostic reports the designed barrier as a failure.
+    assert attempts == 1
+    pending = store.list_pending_outbox_rows(workspace)
+    assert [row.last_reason for row in pending] == [
+        OBSERVATION_BACKPRESSURE_REASON,
+        OBSERVATION_BACKPRESSURE_REASON,
+    ]
+    status = store.status(ObservationStatusQuery(workspace))
+    assert OBSERVATION_BACKPRESSURE_REASON not in status.gaps
+    assert ObservationGapCode.SERVICE_UNAVAILABLE.value not in status.gaps
+    diagnostics = tmp_path / "observation/hook-diagnostics.jsonl"
+    if diagnostics.exists():
+        assert OBSERVATION_BACKPRESSURE_REASON not in diagnostics.read_text()
 
 
 def test_drain_lease_refuses_a_symlink_lock_file(tmp_path: Path) -> None:

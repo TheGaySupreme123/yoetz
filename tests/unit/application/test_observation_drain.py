@@ -292,6 +292,50 @@ async def test_sweep_routes_rows_persists_attempts_and_marks_success(tmp_path: P
 
 
 @pytest.mark.anyio
+async def test_sweep_backpressure_deferral_never_projects_a_coverage_gap(tmp_path: Path) -> None:
+    """#351: a check-barrier deferral keeps its row pending and annotated, but the
+    workspace's current gaps never report the designed barrier as a condition."""
+
+    from yoetz.domain.observation import OBSERVATION_BACKPRESSURE_REASON
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "session-deferred")
+    envelope = _envelope(session, "hook:deferred", 1)
+    store.enqueue_outbox(workspace, "session-deferred", envelope)
+
+    coordinator = _Coordinator(
+        {
+            envelope.source_identity: ObservationIngestResult(
+                ObservationIngestDisposition.REJECTED,
+                OBSERVATION_BACKPRESSURE_REASON,
+                None,
+            ),
+        }
+    )
+    summary = await ObservationOutboxSweeper(store, coordinator).sweep()
+
+    assert summary.retry_pending == 1
+    assert summary.reasons == ((OBSERVATION_BACKPRESSURE_REASON, 1),)
+    pending = store.list_pending_outbox_rows(workspace)
+    assert [row.last_reason for row in pending] == [OBSERVATION_BACKPRESSURE_REASON]
+    status = store.status(ObservationStatusQuery(workspace))
+    assert OBSERVATION_BACKPRESSURE_REASON not in status.gaps
+    assert ObservationGapCode.SERVICE_UNAVAILABLE.value not in status.gaps
+
+    # After the barrier clears, the retried row delivers and the outbox drains.
+    coordinator.outcomes[envelope.source_identity] = ObservationIngestResult(
+        ObservationIngestDisposition.ACCEPTED, None, envelope.cursor
+    )
+    converged = await ObservationOutboxSweeper(store, coordinator).sweep()
+    assert converged.acknowledged == 1
+    assert store.pending_outbox_count(workspace) == 0
+    cleared = store.status(ObservationStatusQuery(workspace))
+    assert OBSERVATION_BACKPRESSURE_REASON not in cleared.gaps
+
+
+@pytest.mark.anyio
 async def test_sweep_round_robins_pending_workspaces_under_limit(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     outcomes: dict[str, ObservationIngestResult | Exception] = {}

@@ -54,6 +54,8 @@ __all__ = [
     "build_observation_advice_snapshot",
     "hook_advice_context",
     "minimized_semantic_evidence_packet",
+    "scoped_session_envelopes",
+    "scoped_session_status",
     "select_advice_item",
     "select_standing_item",
     "should_reissue_advice",
@@ -121,6 +123,48 @@ class ObservationContextStore(Protocol):
     def load_advice_snapshot(self, workspace: str) -> AdviceSnapshot | None: ...
 
 
+def scoped_session_envelopes(
+    store: ObservationContextStore,
+    workspace: str,
+    session_commitment: str | None,
+) -> tuple[ObservationEnvelope, ...]:
+    """Mapped builds read the mapped session's envelopes, never the workspace's (#352).
+
+    Stores that predate session-scoped listing (or an unmapped build with no
+    session commitment) keep the workspace-wide behavior.
+    """
+
+    if session_commitment is not None:
+        session_list = getattr(store, "list_envelopes_for_session", None)
+        if callable(session_list):
+            loaded = cast(
+                Callable[[str, str], object],
+                session_list,
+            )(workspace, session_commitment)
+            if type(loaded) is tuple:
+                return cast(tuple[ObservationEnvelope, ...], loaded)
+    return store.list_envelopes(workspace)
+
+
+async def scoped_session_status(
+    store: ObservationContextStore,
+    workspace: str,
+    session_commitment: str | None,
+) -> ObservationStatus:
+    """Mapped builds derive lifecycle/gap inputs for the mapped session only (#352)."""
+
+    if session_commitment is not None:
+        session_status = getattr(store, "status_for_session", None)
+        if callable(session_status):
+            loaded = await cast(
+                Callable[[str, str], Awaitable[object]],
+                session_status,
+            )(workspace, session_commitment)
+            if type(loaded) is ObservationStatus:
+                return loaded
+    return await store.status(ObservationStatusQuery(workspace))
+
+
 type CallableFacts = Callable[[str], tuple[ObservationCheckFact, ...]]
 type CallableInspect = Callable[[str], ObservationInspectFact | None]
 type CallablePlans = Callable[[str], tuple[str, ...]]
@@ -181,10 +225,16 @@ class ObservationAdviceContextBuilder:
         store: ObservationContextStore,
         *,
         yoetz_session_id: str | None = None,
+        session_commitment: str | None = None,
     ) -> AdviceSnapshot | None:
-        envelopes = store.list_envelopes(workspace)
+        # Task-scoped conditions come from the mapped session's own evidence and
+        # current health. The workspace-wide aggregate remains the operator
+        # surface (`yoetz observe status --workspace`) and the home of
+        # deliberately workspace-standing machine conditions (composition
+        # facts below); it is never a silent input to a mapped task snapshot.
+        envelopes = scoped_session_envelopes(store, workspace, session_commitment)
         composition = await self._resolve_composition()
-        status = await store.status(ObservationStatusQuery(workspace))
+        status = await scoped_session_status(store, workspace, session_commitment)
         store_check_facts = getattr(store, "load_check_facts", None)
         checks: tuple[ObservationCheckFact, ...] = ()
         if self.check_facts is not None:

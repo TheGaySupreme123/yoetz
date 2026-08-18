@@ -37,6 +37,7 @@ from yoetz.kernel.policies.response_support import (
     RESEARCH_REJECTION_PRESENT_FACT,
     response_support_admissible,
 )
+from yoetz.protocol.coverage import PublicationChannel
 
 __all__ = [
     "RESEARCH_EVIDENCE_FACT_CODES",
@@ -217,14 +218,47 @@ def _diff_mismatch_findings(case: DeterministicCase) -> list[DeterministicAssess
     return output
 
 
+def _observation_outcome_unavailable(case: DeterministicCase, ref: FindingBasisRef) -> bool:
+    """One host capability limitation, not one omission per observed call (#350).
+
+    The narrowing is provenance- and cause-aware: it applies only to results the
+    service itself materialized from harness observation — their source-event
+    coverage carries the ``hook_observed`` publication channel, which ADR-022
+    decision 2 keeps service-derived and unselectable by cooperative requests —
+    and only when the host stated no outcome at all (``UNKNOWN`` with no exit
+    status). Such records name the standing ``host_outcome_unavailable``
+    coverage condition that check coverage and the receipt already carry, so
+    excluding them here bounds the finding set without hiding the limitation.
+    A cooperative result with an ``UNKNOWN`` outcome remains individually
+    limiting, and explicit ``FAILURE``/``PARTIAL`` observations are unaffected.
+    """
+
+    record = case.projection.results.get(ResultId(ref))
+    if record is None or record.payload is None:
+        return False
+    if record.payload.outcome is not ResultOutcome.UNKNOWN:
+        return False
+    if record.payload.exit_status is not None:
+        return False
+    coverage = case.coverage_by_ref.get(ref)
+    return coverage is not None and PublicationChannel.HOOK_OBSERVED in set(
+        coverage.publication_channels
+    )
+
+
 def _limiting_refs(case: DeterministicCase) -> tuple[FindingBasisRef, ...]:
     limitations: set[FindingBasisRef] = set()
     for result_id, record in case.projection.results.items():
-        if record.payload is not None and record.payload.outcome in {
-            ResultOutcome.FAILURE,
-            ResultOutcome.PARTIAL,
-            ResultOutcome.UNKNOWN,
-        }:
+        if (
+            record.payload is not None
+            and record.payload.outcome
+            in {
+                ResultOutcome.FAILURE,
+                ResultOutcome.PARTIAL,
+                ResultOutcome.UNKNOWN,
+            }
+            and not _observation_outcome_unavailable(case, result_id)
+        ):
             limitations.add(result_id)
     for ref, coverage in case.coverage_by_ref.items():
         if ref.startswith(("obl_", "res_", "evd_")) and _MATERIAL_GAPS & set(coverage.known_gaps):

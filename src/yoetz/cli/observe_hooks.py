@@ -763,13 +763,15 @@ async def _drain_outbox(
 
     Codex runs async hooks concurrently; without the lease every concurrent
     hook re-ingests the identical backlog for zero extra delivery. Losing the
-    lease means another live hook process is already draining — not a failure,
-    so nothing is recorded.
+    lease means another live owner — a concurrent hook or the service sweeper —
+    is already draining. That is the intended coordination, not a failure, so
+    nothing is recorded (#351): one failure-shaped row per contending hook was
+    exactly the diagnostic noise that buried genuine preflight/service faults.
+    A crashed holder cannot wedge the lease; flock releases with its process.
     """
 
     with store.drain_lease(workspace_commitment) as owned:
         if not owned:
-            record_hook_diagnostic("drain_lease_contended", event_name, _state=_state)
             return
         await _drain_outbox_leased(
             store,
@@ -807,6 +809,7 @@ async def _drain_outbox_leased(
     import asyncio
 
     from yoetz.application.observation_drain import (
+        EXPECTED_OBSERVATION_BACKPRESSURE_REASONS,
         ObservationDrainAction,
         route_observation_ingest,
     )
@@ -875,13 +878,19 @@ async def _drain_outbox_leased(
     )
     skipped_sessions: set[str] = set()
     consecutive_unavailable = 0
+    # The hook owns a bounded slice; the service sweeper owns bulk delivery.
+    # Hitting the slice after moving backlog (acknowledged or quarantined rows)
+    # is a capacity yield, not a failed drain, so budget expiry records a
+    # diagnostic only when the pass made no progress at all (#351).
+    progressed = 0
     try:
         for row in pending:
             if row.codex_session_id in skipped_sessions:
                 continue
             remaining = budget_seconds - (monotonic() - started)
             if remaining <= 0:
-                record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
+                if progressed == 0:
+                    record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
                 break
             chunks = (
                 ()
@@ -900,19 +909,21 @@ async def _drain_outbox_leased(
                     timeout=remaining,
                 )
             except TimeoutError:
-                record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
+                if progressed == 0:
+                    record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
                 break
             decision = route_observation_ingest(result)
             # One batch per row, opened only after this row's RPC returned and
             # closed before the next one: the acknowledgement is never durable
             # ahead of the ingest it acknowledges, and the store lock never
             # spans a network wait (#242).
+            expected_backpressure = decision.reason in EXPECTED_OBSERVATION_BACKPRESSURE_REASONS
             with store.batched(workspace_commitment):
                 attempted = store.bump_outbox_row_attempt(
                     workspace_commitment, row, reason=decision.reason
                 )
                 if attempted is not None:
-                    if decision.reason is not None:
+                    if decision.reason is not None and not expected_backpressure:
                         store.note_coverage_gap(workspace_commitment, decision.reason)
                     if chunks and decision.action is not ObservationDrainAction.ACKNOWLEDGE:
                         store.note_coverage_gap(
@@ -925,11 +936,13 @@ async def _drain_outbox_leased(
                             attempted,
                             decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
                         )
+                        progressed += 1
                     elif decision.action is ObservationDrainAction.ACKNOWLEDGE:
                         store.acknowledge_outbox_row(workspace_commitment, attempted)
+                        progressed += 1
             if attempted is None:
                 continue
-            if decision.reason is not None:
+            if decision.reason is not None and not expected_backpressure:
                 record_hook_diagnostic(decision.reason, event_name, _state=_state)
             if decision.action is ObservationDrainAction.RETRY:
                 if decision.reason in global_stop:

@@ -31,6 +31,7 @@ from yoetz.adapters.integrations.observation_local import (
 from yoetz.adapters.workspace_inspect import LocalWorkspaceInspectAdapter
 from yoetz.application.observation_advice import (
     ObservationAdviceContextBuilder,
+    scoped_session_envelopes,
 )
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.application.observation_materialize import (
@@ -81,6 +82,7 @@ from yoetz.domain.findings import (
     FindingOrigin,
 )
 from yoetz.domain.observation import (
+    OBSERVATION_BACKPRESSURE_REASON,
     AdviceItem,
     ObservationContentChunk,
     ObservationContentKind,
@@ -585,10 +587,28 @@ class ObservationCoordinator:
                 )
                 stage = "advice"
                 await self._run_advice(
-                    workspace, runtime, store, legacy_writer_id=mapping.yoetz_writer_id
+                    workspace,
+                    runtime,
+                    store,
+                    legacy_writer_id=mapping.yoetz_writer_id,
+                    session_commitment=envelope.session_commitment,
                 )
                 return result
             except PublicOperationError as exc:
+                if exc.code in {
+                    PublicErrorCode.OPERATION_PENDING,
+                    PublicErrorCode.BUNDLE_BUSY,
+                    PublicErrorCode.FRONTIER_CONFLICT,
+                }:
+                    # Designed back-pressure, not a failure (#351). ADR-022
+                    # decision 4 makes observation appends receive retryable
+                    # OPERATION_PENDING while check acquisition or a frozen-case
+                    # barrier is active; BUNDLE_BUSY and FRONTIER_CONFLICT are
+                    # the same transient coordination one layer down. The
+                    # durable outbox keeps the row pending and retries after the
+                    # barrier clears, so no unexpected-exception diagnostic is
+                    # recorded and no service_unavailable gap is projected.
+                    return _reject(OBSERVATION_BACKPRESSURE_REASON)
                 record_unexpected_exception_without_raising(
                     exc,
                     component="application.observation_coordinator",
@@ -607,7 +627,6 @@ class ObservationCoordinator:
                     return _reject(ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
                 if exc.code in {
                     PublicErrorCode.SERVICE_UNAVAILABLE,
-                    PublicErrorCode.BUNDLE_BUSY,
                     PublicErrorCode.SESSION_NOT_FOUND,
                 }:
                     return _reject(ObservationGapCode.SERVICE_UNAVAILABLE.value)
@@ -1196,6 +1215,7 @@ class ObservationCoordinator:
                         deferred_runtime,
                         deferred_store,
                         legacy_writer_id=legacy_writer_id,
+                        session_commitment=envelope.session_commitment,
                     )
 
                 async def _release() -> None:
@@ -1638,19 +1658,35 @@ class ObservationCoordinator:
         store: TaskObservationPort,
         *,
         legacy_writer_id: str | None = None,
+        session_commitment: str | None = None,
     ) -> None:
-        task_id = runtime.task_id if isinstance(runtime, TaskRuntime) else runtime
-        envelopes = store.list_envelopes(workspace)
-        session_id = runtime.session_id if isinstance(runtime, TaskRuntime) else None
+        # A plain string is a bare task id from callers with no runtime in hand;
+        # anything else is runtime-shaped (the concrete TaskRuntime in
+        # production, duck-typed stand-ins in tests).
+        task_id = runtime if isinstance(runtime, str) else runtime.task_id
+        session_id = None if isinstance(runtime, str) else runtime.session_id
+        if session_commitment is None and type(session_id) is str:
+            # Post-commit callers (verification drains, restart rediscovery)
+            # carry no envelope; recover the mapped Codex session commitment
+            # from the durable route so the build stays session-scoped (#352).
+            route_lookup = getattr(store, "codex_session_commitment_for_session", None)
+            if callable(route_lookup):
+                routed = route_lookup(workspace=workspace, yoetz_session_id=session_id)
+                if type(routed) is str:
+                    session_commitment = routed
+        envelopes = scoped_session_envelopes(store, workspace, session_commitment)
         snapshot = await self.advice_context_builder.build(
-            workspace, store, yoetz_session_id=session_id if type(session_id) is str else None
+            workspace,
+            store,
+            yoetz_session_id=session_id if type(session_id) is str else None,
+            session_commitment=session_commitment,
         )
         if snapshot is not None:
             # Materialize before publishing the snapshot to either durable cache.
             # Snapshot identity participates in deterministic suppression, so
             # advancing it first could make a failed ledger append disappear on
             # retry and let the outbox ACK without the finding ever landing.
-            if isinstance(runtime, TaskRuntime):
+            if not isinstance(runtime, str) and runtime.writer_id is not None:
                 await self._materialize_advice_findings(
                     runtime,
                     envelopes,
@@ -1659,7 +1695,6 @@ class ObservationCoordinator:
                 )
             now = timestamp_from_datetime(self.clock.now_utc())
             store.set_advice_snapshot(workspace, snapshot, now)
-            session_id = runtime.session_id if isinstance(runtime, TaskRuntime) else None
             session_setter = getattr(store, "set_session_advice_snapshot", None)
             if callable(session_setter) and type(session_id) is str:
                 session_setter(
@@ -1694,7 +1729,7 @@ class ObservationCoordinator:
                 )
             # Mirror into local store for hook advice delivery.
             await self._local(partial(self.local.set_advice_snapshot, workspace, snapshot))
-            if isinstance(runtime, TaskRuntime) and type(session_id) is str:
+            if not isinstance(runtime, str) and type(session_id) is str:
                 await self._local(
                     partial(
                         self.local.set_session_advice_snapshot,

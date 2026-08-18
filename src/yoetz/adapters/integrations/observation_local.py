@@ -24,6 +24,7 @@ from typing import Final, cast
 
 from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
 from yoetz.domain.observation import (
+    OBSERVATION_BACKPRESSURE_REASON,
     AdviceItem,
     AdviceSnapshot,
     ObservationControlCommand,
@@ -2714,7 +2715,10 @@ class LocalObservationStore:
         if source_overflow is not None and source_overflow.active:
             current.add(ObservationGapCode.OUTBOX_OVERFLOW.value)
         for row in state.pending_outbox:
-            if row.last_reason is not None:
+            # A row deferred behind an ADR-022 check barrier is designed
+            # back-pressure awaiting retry, never a current coverage gap (#351);
+            # the row keeps its honest last_reason annotation without it.
+            if row.last_reason is not None and row.last_reason != OBSERVATION_BACKPRESSURE_REASON:
                 current.add(row.last_reason)
         # Live mapping presence outranks both the latched code and any stale row reason: a row
         # rejected for a missing mapping keeps that reason after the mapping is restored, and

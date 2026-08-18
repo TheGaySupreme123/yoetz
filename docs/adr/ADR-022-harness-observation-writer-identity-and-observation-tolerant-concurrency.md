@@ -1,7 +1,8 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-08-18 for maintainer-authored issues #320 and #326 and issue #322
+**Amended:** 2026-08-18 for the maintainer-directed issue #346 incident repairs #350, #351, and
+#352 (decisions 12–14); 2026-08-18 for maintainer-authored issues #320 and #326 and issue #322
 (delivered frontier-motion high-water); 2026-08-16 for maintainer-approved issue #224; 2026-08-14
 for moderator-approved issue #244 and the reopened issue #216 recurrence.
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
@@ -127,6 +128,43 @@ unsupported claims and unbounded duplicate findings.
     motion, and directs callers to use repair facts when an operation still conflicts. The pending notice is
     removed only after its bytes reach the hook consumer. It grants no authority, changes no
     optimistic-concurrency predicate, and adds no MCP operation.
+
+12. Paired `PostToolUse` materialization consumes every host-stated outcome fact: `exit_status`
+    remains authoritative; without it, explicit `denied`, boolean `success`, and a closed
+    `result_status` spelling table map to `SUCCESS`/`FAILURE`/`PARTIAL`. Only a payload with no
+    outcome fact at all records `UNKNOWN` — a missing outcome is never upgraded to success. Such a
+    record keeps its durable per-call action/result identity but carries the
+    `host_outcome_unavailable` known gap on its entry coverage. Because check coverage and receipts
+    fold per-record known gaps into one deduplicated code set, any number of outcome-less observed
+    calls surface as one bounded task/session coverage condition. The research-evidence policy
+    excludes exactly these records — result outcome `UNKNOWN`, no exit status, and source coverage
+    carrying the service-derived `hook_observed` channel that decision 2 keeps unselectable by
+    cooperative requests — from per-result `material_limitation_omitted` candidates. Explicit
+    observed `FAILURE`/`PARTIAL` results and cooperative `UNKNOWN` results remain individually
+    limiting, an outcome-less result still cannot support a completion claim, and the receipt
+    retains the limitation through the coverage gap even when no actionable finding is emitted.
+    Historical rows are not rewritten; mapping identity is unchanged so in-flight outbox replays of
+    committed appends still deduplicate (issues #346/#350).
+
+13. The retryable `OPERATION_PENDING` that decision 4 applies to observation appends during check
+    acquisition or a frozen-case barrier — and the adjacent transient `BUNDLE_BUSY` and
+    `FRONTIER_CONFLICT` coordination shapes — is designed back-pressure, not failure. The
+    coordinator rejects such an ingest with the retryable `operation_pending` reason without an
+    unexpected-exception diagnostic; drain paths keep the row pending without recording a coverage
+    gap or a failure-shaped hook diagnostic, and the reason never projects into observation
+    status, advice, coverage, or receipt inputs. Losing the nonblocking drain lease records
+    nothing: the holder is a live hook or the service sweeper, and flock releases with a dead
+    process. Hook drain-budget expiry records `drain_budget_exhausted` only when the pass moved no
+    backlog; a bounded slice that delivered or quarantined rows and then yielded to the sweeper is
+    working as designed. Genuine `SERVICE_UNAVAILABLE`, vault, storage, and preflight failures
+    keep their existing visibility (issues #346/#351).
+
+14. A mapped session's advice snapshot is constructed from that session's own retained envelopes
+    and session-scoped lifecycle/gap health, resolved from the ingest envelope's session
+    commitment or the durable workspace session route. The workspace-wide aggregate remains the
+    operator surface and the source of deliberately standing machine conditions (composition
+    facts), but is never a silent input to a mapped task snapshot — completing at the construction
+    layer the delivery-selection boundary #250 established (issues #346/#352).
 
 ## Security and privacy consequences
 
