@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -148,6 +150,70 @@ def test_concurrent_review_has_one_winner(tmp_path: Path) -> None:
     assert len(winners) == 1
     assert losers[0] in {"pending_absent", "review_in_progress"}
     complete_review(cast(Any, winners[0]), outcome="cancelled", _state=tmp_path)
+
+
+def test_concurrent_loser_cannot_consume_atomic_review_claim(tmp_path: Path) -> None:
+    prepared = prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    pending = tmp_path / "elevated-bootstrap" / "elevated-bootstrap-pending.json"
+    reviewing = tmp_path / "elevated-bootstrap" / "elevated-bootstrap-reviewing.json"
+    claim_published = Event()
+    loser_finished = Event()
+    real_link = os.link
+
+    def pause_winner_after_atomic_claim(source: Any, claim: Any) -> None:
+        real_link(source, claim)
+        claim_published.set()
+        assert loser_finished.wait(timeout=5), "concurrent loser did not finish"
+
+    def claim() -> tuple[str, object]:
+        try:
+            return "ok", claim_pending_for_review(_state=tmp_path)
+        except ElevatedBootstrapError as exc:
+            return "error", exc.reason
+
+    with patch(
+        "yoetz.service.elevated_bootstrap.os.link",
+        side_effect=pause_winner_after_atomic_claim,
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            winner_future = pool.submit(claim)
+            assert claim_published.wait(timeout=5), "winner did not publish its review marker"
+            loser_future = pool.submit(claim)
+            try:
+                loser = loser_future.result(timeout=5)
+                assert loser == ("error", "pending_absent")
+                assert pending.is_file(), "loser removed the winner-owned pending name"
+                assert reviewing.is_file(), "loser removed the winner-owned review marker"
+            finally:
+                loser_finished.set()
+            winner = winner_future.result(timeout=5)
+
+    assert winner == ("ok", prepared)
+    assert not pending.exists()
+    assert reviewing.is_file()
+    complete_review(prepared, outcome="cancelled", _state=tmp_path)
+
+
+def test_public_name_cleanup_cannot_revoke_atomic_review_claim(tmp_path: Path) -> None:
+    prepared = prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    pending = tmp_path / "elevated-bootstrap" / "elevated-bootstrap-pending.json"
+    reviewing = tmp_path / "elevated-bootstrap" / "elevated-bootstrap-reviewing.json"
+    real_link = os.link
+
+    def remove_public_name_after_atomic_claim(source: Any, claim: Any) -> None:
+        real_link(source, claim)
+        Path(source).unlink()
+
+    with patch(
+        "yoetz.service.elevated_bootstrap.os.link",
+        side_effect=remove_public_name_after_atomic_claim,
+    ):
+        claimed = claim_pending_for_review(_state=tmp_path)
+
+    assert claimed == prepared
+    assert not pending.exists()
+    assert reviewing.is_file()
+    complete_review(claimed, outcome="cancelled", _state=tmp_path)
 
 
 def test_interrupted_review_marker_blocks_reuse_and_new_prepare(tmp_path: Path) -> None:

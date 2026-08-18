@@ -700,11 +700,10 @@ def load_pending(*, _state: Path | None = None) -> PendingElevatedConsent | None
     claim = review_path(_state=_state)
     path = pending_path(_state=_state)
     if claim.is_file():
-        # Complete an interrupted hard-link claim by ensuring the public pending name is gone.
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            raise ElevatedBootstrapError("pending_clear_failed") from exc
+        # Creating the hard-link marker is the atomic ownership transition. A reader that
+        # observes it is a loser and must not mutate either name: the winning claimant owns
+        # removal of the public pending name, and an interrupted winner deliberately leaves
+        # the private marker in place to block reuse.
         return None
     return _load_pending_path(path, _state=_state, expire=True)
 
@@ -743,6 +742,10 @@ def claim_pending_for_review(*, _state: Path | None = None) -> PendingElevatedCo
         raise ElevatedBootstrapError("pending_claim_failed") from exc
     try:
         source.unlink()
+    except FileNotFoundError:
+        # The hard link already made this caller the winner. Concurrent cancellation or
+        # cleanup of the public name cannot revoke ownership of the private review marker.
+        pass
     except OSError as exc:
         try:
             claim.unlink(missing_ok=True)

@@ -1,10 +1,11 @@
 # ADR-015 — OS-presence-gated elevated bootstrap consent
 
 **Status:** Amended 2026-07-31; amended 2026-08-09 for agent-attested chat authorize
-(issue #164). Superseded in scope by ADR-016 for the general non-default consent catalog.
-Console `yoetz consent review` remains fail-closed until a verified OS-presence adapter is
-installed; allowlisted first-party agents may use `yoetz consent authorize` for exact prepared
-operations that advertise delegated chat authority.
+(issue #164); amended 2026-08-18 for atomic concurrent review claims (issue #344). Superseded in
+scope by ADR-016 for the general non-default consent catalog. Console `yoetz consent review`
+remains fail-closed until a verified OS-presence adapter is installed; allowlisted first-party
+agents may use `yoetz consent authorize` for exact prepared operations that advertise delegated
+chat authority.
 **Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
 `src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`,
 `src/yoetz/protocol/consent.py`, and `src/yoetz/protocol/chat_user_authority.py`.
@@ -56,10 +57,14 @@ still must not accept an agent-selected passphrase.
    pending, catalog, result, log, error, or agent projection. `vault_initialize` remains
    console/helper-only. Trusted CLI/TUI remains the stronger recommended path.
 
-4. **Single-shot state.** A review claim consumes the public pending name. Approval, denial,
+4. **Single-shot state.** Atomically creating the no-clobber hard-link review marker is the
+   linearization point that transfers ownership from pending state to one reviewer. The winner
+   removes the public pending name as cleanup; concurrent losers that observe the marker do not
+   mutate either name, and cleanup cannot revoke the winner's marker. Approval, denial,
    cancellation, expiry, and post-claim failure consume the claim once. Concurrent and duplicate
-   reviewers fail closed. An ambiguous crash may leave the private reviewing marker in place; that
-   blocks both reuse and a new preparation until an explicit repair path is designed.
+   reviewers fail closed. An ambiguous crash may leave the private reviewing marker (and, if the
+   crash preceded winner cleanup, its public hard-link name) in place; the marker blocks both reuse
+   and a new preparation until an explicit repair path is designed.
 
 5. **Vault initialization secret.** The trusted helper generates a high-entropy passphrase,
    round-trips it through the exact bundle-scoped platform credential store, and submits it
