@@ -488,9 +488,12 @@ def render_deterministic_finding_text(
             if not ref.startswith("clm_")
         )
         if limitation_refs:
+            # A res_ ref reaches this fact through either a non-success outcome
+            # or a material coverage gap on its source event, and the basis does
+            # not record which route; the label must stay truthful for both.
             limiting_records = "; ".join(
                 (
-                    f"non-success result {ref}"
+                    f"limiting result {ref}"
                     if ref.startswith("res_")
                     else f"material coverage-gap record {ref}"
                 )
