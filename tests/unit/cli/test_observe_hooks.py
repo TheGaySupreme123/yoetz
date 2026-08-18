@@ -1164,6 +1164,7 @@ async def test_drain_is_round_robin_across_all_workspace_sessions(
         workspace_commitment=workspace,
         codex_session_id="current",
         connect=connect,  # type: ignore[arg-type]
+        monotonic=lambda: 0.0,
     )
     assert calls == ["current", "recovered", "current", "recovered"]
     assert store.pending_outbox_count(workspace) == 0
@@ -1297,6 +1298,7 @@ async def test_drain_probes_a_mapping_missing_session_once_per_pass(tmp_path: Pa
         codex_session_id="dead",
         connect=connect,  # type: ignore[arg-type]
         _state=tmp_path,
+        monotonic=lambda: 0.0,
     )
     assert attempts.count("dead") == 1, "a mapping_missing session must be probed once per pass"
     assert attempts.count("healthy") == 2, "healthy sessions must still deliver in the same pass"
