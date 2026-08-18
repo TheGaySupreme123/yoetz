@@ -462,9 +462,7 @@ def test_frontier_motion_renote_after_delivery_drops_replay_and_clamps_stale_fro
         92,
         11,
     )
-    reloaded.commit_frontier_motion_delivery(
-        workspace, "replay-session", clamped.delivery_identity
-    )
+    reloaded.commit_frontier_motion_delivery(workspace, "replay-session", clamped.delivery_identity)
 
     reloaded.note_frontier_motion(
         workspace,
