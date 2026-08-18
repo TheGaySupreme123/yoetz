@@ -717,6 +717,16 @@ def _freshness(
     stale: bool,
     check_freshness: LedgerFreshness | None,
 ) -> LedgerFreshness:
+    """Fold the projection scalar from carried state alone.
+
+    ``check_freshness`` is the retained check's own recorded freshness, not a signal that decays
+    with the event that recorded it: a check that reported ``partial`` coverage keeps the
+    projection at ``partial`` for as long as that check is the retained one. Only supersession
+    (``stale``), a redaction of the check itself, or a later check replacing it may move the
+    scalar off that value, so the scalar can never read cleaner than the coverage of the very
+    check reported beside it (issue #307).
+    """
+
     if frontier == 0:
         return LedgerFreshness.UNKNOWN
     if any(marker.startswith("redacted_") for marker in gaps):
@@ -755,7 +765,6 @@ def reduce_event(
     latest = state.latest_tested_state
     unknown_count = state.unknown_event_count
     stale = state.freshness is LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE
-    check_freshness: LedgerFreshness | None = None
 
     if type(event) is UnknownEvent:
         unknown_count += 1
@@ -878,8 +887,9 @@ def reduce_event(
                     suppressed_count=check.suppressed_count,
                     coverage=check.coverage,
                 )
-                check_freshness = check.coverage.ledger_freshness
-                stale = check_freshness is LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE
+                stale = (
+                    check.coverage.ledger_freshness is LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE
+                )
         elif family == "redaction_recorded":
             event_targets = set(accepted.projection_locator.redaction_target_event_ids)
             object_targets = accepted.projection_locator.redaction_target_object_ids
@@ -948,7 +958,7 @@ def reduce_event(
         frontier,
         coverage_gaps,
         stale=stale,
-        check_freshness=check_freshness,
+        check_freshness=None if latest is None else latest.coverage.ledger_freshness,
     )
     return ProjectionState(
         frontier=frontier,

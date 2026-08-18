@@ -24,8 +24,11 @@ from yoetz.application.observation_materialize import observation_author
 from yoetz.application.service import Application, VerificationPolicy
 from yoetz.application.start import StartInternalResult
 from yoetz.domain.events import (
+    EVIDENCE_SCHEMA_VERSION,
     EventDraft,
     EventSchema,
+    EvidenceKind,
+    EvidenceRecordedPayload,
     RuntimeProfile,
     encode_payload,
     media_type_for,
@@ -55,10 +58,12 @@ from yoetz.domain.receipts import PolicyVersionEntry, ReceiptVersionSlice, Schem
 from yoetz.domain.values import (
     Frontier,
     event_id,
+    evidence_id,
     finding_id,
     session_id,
     timestamp_from_datetime,
 )
+from yoetz.mcp.summaries import summary_for_status
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import AppendCommand, AppendEntry, CheckCommitResult, OperationKind
@@ -77,7 +82,7 @@ from yoetz.protocol.coverage import (
     PublicationChannel,
     coverage_for_channel,
 )
-from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
     FrontierModel,
@@ -958,6 +963,13 @@ async def test_receipt_folds_retained_observation_finding_coverage_after_recover
     )
     assert records
 
+    retained_gap_codes = tuple(
+        sorted(
+            {"cursor_stale", *(f"retained_capacity_{index:03d}" for index in range(62))},
+            key=str.encode,
+        )
+    )
+    assert len(retained_gap_codes) == 63
     retained_coverage = Coverage(
         publication_channels=(PublicationChannel.ENGINE_DERIVED,),
         authorship_assurance=AuthorshipAssurance.HARNESS_OBSERVED,
@@ -965,7 +977,7 @@ async def test_receipt_folds_retained_observation_finding_coverage_after_recover
         evidence_immutability=EvidenceImmutability.METADATA_ONLY,
         ledger_freshness=LedgerFreshness.PARTIAL,
         check_types=(CheckType.DETERMINISTIC,),
-        known_gaps=("cursor_stale",),
+        known_gaps=retained_gap_codes,
     )
     kind = FindingKind.LEDGER_STALE_OR_INCOMPLETE
     retained = Finding(
@@ -1059,12 +1071,47 @@ async def test_receipt_folds_retained_observation_finding_coverage_after_recover
     assert FINDING_KIND_TRAITS[kind][1] is False
     assert receipt.conclusion == "insufficient_coverage"
     assert receipt.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+    # The retained 63-code set plus semantic_review_not_requested exercises the exact public
+    # boundary through real receipt construction and JSON projection, not only admission math.
+    assert len(receipt.coverage.known_gaps) == 64
     assert "cursor_stale" in receipt.coverage.known_gaps
     document = cast(Mapping[str, JsonValue], receipt.document)
     findings = cast(tuple[Mapping[str, JsonValue], ...], document["findings"])
     assert any(item["finding_id"] == retained.finding_id for item in findings)
     gaps = cast(tuple[Mapping[str, JsonValue], ...], document["gaps"])
     assert sum(item["code"] == "cursor_stale" for item in gaps) == 1
+
+
+async def test_legacy_receipt_coverage_overflow_is_not_invalid_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An internal 65-code fold is capacity exhaustion, not caller-malformed input."""
+
+    app, _runtime, _ = _build_app(seed_offset=26)
+    started = await app.start(start_request(2600, title="Legacy receipt coverage overflow"))
+
+    def overflow(*_args: object, **_kwargs: object) -> object:
+        raise ProtocolValueError("invalid_known_gap")
+
+    monkeypatch.setattr("yoetz.application.receipt._context", overflow)
+    with pytest.raises(PublicOperationError) as caught:
+        await app.receipt(
+            ReceiptRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", 2601)),
+                    "task_id": started.task_id,
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(started.frontier),
+                    "format": "json",
+                    "include": "standard",
+                    "redaction_profile": "full_local",
+                }
+            )
+        )
+    assert caught.value.code is PublicErrorCode.LIMIT_EXCEEDED
+    assert caught.value.retryable is False
+    assert "capacity" in caught.value.message.lower()
 
 
 async def test_successful_check_contributes_to_receipt_at_resulting_head() -> None:
@@ -1413,8 +1460,89 @@ async def test_check_respond_recheck_reaches_a_fixed_point() -> None:
     item = compact.items[0]
     # The acknowledged finding is answered on the record and the recheck's own bookkeeping is not
     # material change, so nothing demands another cycle.
-    assert item.unresolved_finding_count == "0"
+    assert item.unanswered_finding_count == "0"
+    assert int(item.receipt_blocking_finding_count) > 0
+    assert status.closure_readiness.blocking_conditions == (
+        "receipt_findings_unresolved",
+        "no_plan_published",
+    )
     assert item.freshness != "stale_after_material_change"
+
+    # The MCP text fallback stands in for this exact result when a host drops structured content,
+    # so it must report the singleton's own counters and freshness, not the newest record
+    # envelope's coverage, which reads `current` at this same frontier.
+    summary = summary_for_status(status.as_json())
+    assert f"freshness: {item.freshness}" in summary
+    assert status.coverage.ledger_freshness.value != item.freshness
+    assert "unanswered findings: 0" in summary
+    assert f"receipt-blocking findings: {item.receipt_blocking_finding_count}" in summary
+
+
+async def test_status_freshness_scalar_survives_immaterial_events() -> None:
+    """Issue #307: a check that declared coverage gaps recorded ``partial`` freshness. The
+    projection scalar reported that only on the event that recorded the check and reverted to
+    ``current`` on the next event of any family, while the item's own
+    ``coverage.ledger_freshness`` kept the gaps. One item then carried two disagreeing freshness
+    fields, and an agent reading the summary line was told the ledger was clean.
+
+    A receipt and a re-attach change nothing but the frontier and the session id, so the retained
+    check still governs and its recorded freshness must still be what the item reports.
+    """
+
+    app, _runtime, _ = _build_app(seed_offset=27)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=1900)
+
+    # `deterministic_only` declines the semantic review, which is a declared coverage gap, so the
+    # check downgraded its own freshness. This is the precondition the bug needs.
+    assert checked.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+    assert "semantic_review_not_requested" in checked.coverage.known_gaps
+
+    def status_wire(seed: int) -> dict[str, JsonValue]:
+        return {
+            **_request_base(protocol_id("req_", seed)),
+            "session_id": started.session_id,
+            "writer_id": started.writer_id,
+            "view": "compact",
+            "limit": "10",
+        }
+
+    status = await app.status(StatusRequest.model_validate(status_wire(1910)))
+    item = cast(StatusCompactPageModel, status.page).items[0]
+    # Immediately after the check both fields already agreed; the bug was never visible here.
+    assert item.freshness == "partial"
+    assert item.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+
+    # A receipt appends one engine-derived `receipt_recorded`. It is not a material family, so it
+    # cannot supersede the check, and nothing in the ledger changed except the frontier.
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 1911)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
+
+    after_receipt = await app.status(StatusRequest.model_validate(status_wire(1912)))
+    item_after = cast(StatusCompactPageModel, after_receipt.page).items[0]
+    # The retained check still carries the gaps, so the scalar still has to report them.
+    assert item_after.coverage.ledger_freshness is LedgerFreshness.PARTIAL
+    assert "semantic_review_not_requested" in item_after.coverage.known_gaps
+    assert item_after.freshness == "partial"
+    assert item_after.freshness == item_after.coverage.ledger_freshness.value
+
+    # The summary line an agent reads is derived from the scalar, so it must not read clean while
+    # the structured coverage beside it records the gaps.
+    summary = summary_for_status(after_receipt.as_json())
+    assert "freshness: partial" in summary
+    assert "freshness: current" not in summary
 
 
 def _receipt_wire(
@@ -1660,3 +1788,427 @@ async def test_reattach_detaches_the_prior_session_from_the_task_route() -> None
     ledger, _objects = _runtime.resources[attached.task_id]
     stranger = protocol_id("ses_", 2099)
     assert [record async for record in ledger.load_events(stranger)] == []
+
+
+async def _drain_observation_record(
+    app: Application,
+    runtime: _WorkflowRuntime,
+    started: StartInternalResult,
+    *,
+    seed: int,
+    expected_frontier: int,
+    finding: Finding | None = None,
+    operation_kind: OperationKind = OperationKind.PUBLISH_WORK,
+):
+    """Append one observation-authored record straight to the ledger, standing in for the hook
+    drain that keeps moving the head between an agent's calls (issue #320)."""
+
+    ledger, objects = next(iter(runtime.resources.values()))
+    now = app.clock.now_utc()
+    if finding is None:
+        schema_name = "evidence_recorded"
+        schema = EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION)
+        channel = PublicationChannel.HOOK_OBSERVED
+        payload: Finding | EvidenceRecordedPayload = EvidenceRecordedPayload(
+            evidence_id(protocol_id("evd_", seed)),
+            EvidenceKind.ARTIFACT,
+            EvidenceImmutability.MUTABLE_REFERENCE,
+            timestamp_from_datetime(now),
+            reference="hook-observation-note",
+        )
+    else:
+        schema_name = "finding_recorded"
+        schema = EventSchema("finding_recorded", "1.0.0")
+        channel = PublicationChannel.ENGINE_DERIVED
+        payload = finding
+    encoded = canonical_encode(encode_payload(payload))
+    metadata = ObjectMetadata(
+        ObjectKind.EVENT_PAYLOAD, media_type_for(schema_name), started.task_id, now
+    )
+    staged = await objects.stage(ObjectSource(data=encoded, declared_size=len(encoded)), metadata)
+    payload_ref = await objects.finalize(staged)
+    result_object_ref = None
+    if operation_kind is OperationKind.RECEIPT:
+        receipt_metadata = ObjectMetadata(
+            ObjectKind.RECEIPT,
+            "application/vnd.yoetz.receipt+json",
+            started.task_id,
+            now,
+        )
+        receipt_staged = await objects.stage(
+            ObjectSource(data=b"{}", declared_size=2), receipt_metadata
+        )
+        result_object_ref = await objects.finalize(receipt_staged)
+    return await ledger.append_batch(
+        AppendCommand(
+            started.task_id,
+            started.session_id,
+            started.writer_id,
+            protocol_id("req_", seed + 1),
+            operation_kind,
+            _DIGEST,
+            expected_frontier,
+            (
+                AppendEntry(
+                    EventDraft(
+                        event_id(protocol_id("evt_", seed + 2)),
+                        schema,
+                        timestamp_from_datetime(now),
+                        (),
+                        payload,
+                        (),
+                        (),
+                    ),
+                    observation_author(),
+                    payload_ref,
+                    payload_ref.commitment,
+                    metadata.media_type,
+                    payload_ref.plaintext_size,
+                    channel,
+                    coverage_for_channel(channel),
+                    "projected",
+                ),
+            ),
+            result_object_ref,
+        )
+    )
+
+
+def _drained_finding(subject_event_id: str, frontier: Frontier, seed: int) -> Finding:
+    kind = FindingKind.LEDGER_STALE_OR_INCOMPLETE
+    return Finding(
+        finding_id(protocol_id("fnd_", seed)),
+        kind,
+        FindingOrigin.DETERMINISTIC,
+        FINDING_KIND_TRAITS[kind][0],
+        "Observation advice materialized a finding mid-drain.",
+        "Re-run the check at the current head to cover it.",
+        (event_id(subject_event_id),),
+        "work-integrity",
+        "0.1.0",
+        frontier,
+        Coverage(
+            publication_channels=(PublicationChannel.ENGINE_DERIVED,),
+            authorship_assurance=AuthorshipAssurance.HARNESS_OBSERVED,
+            artifact_observation=ArtifactObservation.HOOK_OBSERVED,
+            evidence_immutability=EvidenceImmutability.METADATA_ONLY,
+            ledger_freshness=LedgerFreshness.PARTIAL,
+            check_types=(CheckType.DETERMINISTIC,),
+            known_gaps=("cursor_stale",),
+        ),
+        None,
+    )
+
+
+async def test_check_freeze_tolerates_observation_only_drain() -> None:
+    """Regression for #320 (check side).
+
+    A check whose expected frontier went stale to observation-only motion must not conflict:
+    freeze acquisition accepts the held frontier and freezes at the real head, so the case covers
+    the drained records instead of racing them.
+    """
+
+    app, runtime, _ = _build_app(seed_offset=20)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=3100)
+    drained = await _drain_observation_record(
+        app, runtime, started, seed=3110, expected_frontier=checked.result_frontier.sequence
+    )
+
+    recheck_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 3120)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        # Stale on purpose: the drain moved the head after this frontier was read.
+        "expected_frontier": _frontier(checked.result_frontier),
+        "mode": "deterministic_only",
+        "max_findings": "3",
+    }
+    rechecked = await app.check(CheckRequest.model_validate(recheck_wire))
+    assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
+    assert rechecked.subject_frontier == drained.result_frontier
+
+
+async def test_receipt_tolerates_observation_only_drain() -> None:
+    """Regression for #320 (receipt side, the session 01a013c1 livelock).
+
+    A receipt whose expected frontier went stale to observation-only, finding-free motion pins to
+    that frontier: the case replays the genesis prefix and the locator event appends past the
+    drained head, instead of the retry loop racing the drain forever.
+    """
+
+    app, runtime, _ = _build_app(seed_offset=21)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=3200)
+    finding = checked.findings[0]
+    respond_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 3210)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "finding_id": finding.finding_id,
+        "finding_frontier": _frontier(checked.result_frontier),
+        "disposition": "acknowledged",
+    }
+    responded = await app.respond(RespondRequest.model_validate(respond_wire))
+
+    first = await _drain_observation_record(
+        app, runtime, started, seed=3220, expected_frontier=responded.result_frontier.sequence
+    )
+    second = await _drain_observation_record(
+        app, runtime, started, seed=3230, expected_frontier=first.result_frontier.sequence
+    )
+
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 3240)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        # Stale on purpose: two observation records landed after the respond result was read.
+        "expected_frontier": _frontier(responded.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    receipt = await app.receipt(ReceiptRequest.model_validate(receipt_wire))
+
+    assert receipt.subject_frontier == responded.result_frontier
+    assert receipt.result_frontier.sequence == second.result_frontier.sequence + 1
+    # The pinned case is the same truth an undrained receipt would have documented.
+    assert receipt.conclusion == "unresolved_findings_remain"
+
+
+async def test_receipt_conflict_on_drained_finding_carries_repair_facts_and_converges() -> None:
+    """The receipt tolerance is bounded by material truth (#320).
+
+    A finding materialized past the pinned frontier would be silently uncovered, so that drain
+    stays a conflict — but one honoring the shared retry contract: retryable, head in
+    safe_details, and the retry at that head documents the drained finding.
+    """
+
+    app, runtime, _ = _build_app(seed_offset=22)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=3300)
+    finding = checked.findings[0]
+    respond_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 3310)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "finding_id": finding.finding_id,
+        "finding_frontier": _frontier(checked.result_frontier),
+        "disposition": "acknowledged",
+    }
+    responded = await app.respond(RespondRequest.model_validate(respond_wire))
+
+    obligation_event_id = protocol_id("evt_", 3302)
+    drained = await _drain_observation_record(
+        app,
+        runtime,
+        started,
+        seed=3320,
+        expected_frontier=responded.result_frontier.sequence,
+        finding=_drained_finding(
+            obligation_event_id,
+            Frontier(
+                int(responded.result_frontier.sequence), responded.result_frontier.head_digest
+            ),
+            3325,
+        ),
+    )
+
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 3330)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(responded.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    with pytest.raises(PublicOperationError) as caught:
+        await app.receipt(ReceiptRequest.model_validate(receipt_wire))
+    assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+    assert caught.value.retryable is True
+    assert caught.value.safe_details["sequence"] == drained.result_frontier.sequence
+    assert caught.value.safe_details["head_digest"] == drained.result_frontier.head_digest
+
+    retried_wire: dict[str, JsonValue] = {
+        **receipt_wire,
+        "request_id": protocol_id("req_", 3340),
+        "expected_frontier": {
+            "sequence": str(caught.value.safe_details["sequence"]),
+            "head_digest": str(caught.value.safe_details["head_digest"]),
+        },
+    }
+    retried = await app.receipt(ReceiptRequest.model_validate(retried_wire))
+    assert retried.subject_frontier == drained.result_frontier
+    document = cast(Mapping[str, JsonValue], retried.document)
+    findings = cast(tuple[Mapping[str, JsonValue], ...], document["findings"])
+    assert any(item["finding_id"] == protocol_id("fnd_", 3325) for item in findings)
+
+
+async def test_receipt_agent_motion_still_conflicts_with_repair_facts() -> None:
+    """Material (agent-authored) motion past the receipt frontier stays a real conflict, with
+    the shared retry contract intact."""
+
+    app, _runtime, _ = _build_app(seed_offset=23)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=3400)
+    finding = checked.findings[0]
+    respond_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 3410)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "finding_id": finding.finding_id,
+        "finding_frontier": _frontier(checked.result_frontier),
+        "disposition": "acknowledged",
+    }
+    responded = await app.respond(RespondRequest.model_validate(respond_wire))
+
+    publish_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 3420)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(responded.result_frontier),
+        "event_drafts": (
+            {
+                "event_id": protocol_id("evt_", 3421),
+                "schema": {"name": "evidence_recorded", "version": "1.0.0"},
+                "occurred_at": "2026-07-19T12:00:02.000Z",
+                "causal_parents": (),
+                "payload": {
+                    "evidence_id": protocol_id("evd_", 3422),
+                    "evidence_kind": "artifact",
+                    "strength": "mutable_reference",
+                    "observed_at": "2026-07-19T12:00:02.000Z",
+                    "reference": "agent-authored-motion",
+                },
+                "artifact_refs": (),
+                "evidence_refs": (),
+            },
+        ),
+    }
+    published = await app.publish_work(PublishWorkRequest.model_validate(publish_wire))
+
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 3430)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(responded.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    with pytest.raises(PublicOperationError) as caught:
+        await app.receipt(ReceiptRequest.model_validate(receipt_wire))
+    assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+    assert caught.value.retryable is True
+    assert caught.value.safe_details["sequence"] == published.result_frontier.sequence
+
+
+async def test_receipt_prefix_replay_conflict_is_retryable_with_repair_facts() -> None:
+    """Regression for #326.
+
+    The receipt's own prefix-replay conflict must honor the same retry contract as every
+    ledger-minted frontier conflict on the same request: retryable, with the replayed head as
+    the repair fact — not a dead-end ``retryable: false`` with no details.
+    """
+
+    app, _runtime, _ = _build_app(seed_offset=24)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=3500)
+    head = checked.result_frontier
+
+    beyond_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 3510)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        # A frontier past the live head: copied from another writer's in-flight result.
+        "expected_frontier": {
+            "sequence": str(int(head.sequence) + 5),
+            "head_digest": head.head_digest,
+        },
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    with pytest.raises(PublicOperationError) as caught:
+        await app.receipt(ReceiptRequest.model_validate(beyond_wire))
+    assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+    assert caught.value.retryable is True
+    assert dict(caught.value.safe_details) == {
+        "reason_code": "frontier_changed",
+        "sequence": int(head.sequence),
+        "head_digest": head.head_digest,
+    }
+
+    stale_digest_wire: dict[str, JsonValue] = {
+        **beyond_wire,
+        "request_id": protocol_id("req_", 3520),
+        "expected_frontier": {
+            "sequence": str(head.sequence),
+            "head_digest": "sha256:" + "e" * 64,
+        },
+    }
+    with pytest.raises(PublicOperationError) as stale_caught:
+        await app.receipt(ReceiptRequest.model_validate(stale_digest_wire))
+    assert stale_caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+    assert stale_caught.value.retryable is True
+    assert stale_caught.value.safe_details["head_digest"] == head.head_digest
+
+    repaired_wire: dict[str, JsonValue] = {
+        **beyond_wire,
+        "request_id": protocol_id("req_", 3530),
+        "expected_frontier": {
+            "sequence": str(caught.value.safe_details["sequence"]),
+            "head_digest": str(caught.value.safe_details["head_digest"]),
+        },
+    }
+    repaired = await app.receipt(ReceiptRequest.model_validate(repaired_wire))
+    assert repaired.subject_frontier == head
+
+
+async def test_receipt_append_stage_rejects_observation_finding_suffix() -> None:
+    """The append-stage twin of the availability guard (#320).
+
+    A finding drained between a receipt's availability snapshot and its locator append would be
+    silently uncovered by the pinned case, so a RECEIPT-kind append refuses a finding-bearing
+    observation suffix that the same append tolerates for every other operation kind.
+    """
+
+    app, runtime, _ = _build_app(seed_offset=25)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=3600)
+    drained = await _drain_observation_record(
+        app,
+        runtime,
+        started,
+        seed=3610,
+        expected_frontier=checked.result_frontier.sequence,
+        finding=_drained_finding(
+            protocol_id("evt_", 3602),
+            Frontier(int(checked.result_frontier.sequence), checked.result_frontier.head_digest),
+            3615,
+        ),
+    )
+
+    with pytest.raises(PublicOperationError) as caught:
+        await _drain_observation_record(
+            app,
+            runtime,
+            started,
+            seed=3620,
+            expected_frontier=checked.result_frontier.sequence,
+            operation_kind=OperationKind.RECEIPT,
+        )
+    assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+    assert caught.value.retryable is True
+    assert caught.value.safe_details["sequence"] == drained.result_frontier.sequence
+
+    accepted = await _drain_observation_record(
+        app,
+        runtime,
+        started,
+        seed=3630,
+        expected_frontier=checked.result_frontier.sequence,
+    )
+    assert accepted.result_frontier.sequence == drained.result_frontier.sequence + 1

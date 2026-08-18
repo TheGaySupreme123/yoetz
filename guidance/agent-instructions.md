@@ -12,6 +12,10 @@ Yoetz is a local work ledger and deterministic checker. It records only what par
 
 Yoetz is not an enforcement system, observer, authorship proof, transcript recorder, or orchestrator. A clean check does not mean the underlying work is correct.
 
+# Guidance catalog
+
+Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance. The five `yoetz://guidance/` URIs under Read more are the complete catalog. A list failure is not a missing server and is not a reason to read product source. Read the named URI. If that body is empty, call `read_guidance` with the same URI. Only if that result is also empty, open the matching installed `references/<name>.md` copy.
+
 # How often to call each operation
 
 - `start` — once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; do not start a second task and do not send bare `task_id`.
@@ -33,7 +37,7 @@ For `check` mode: use `semantic_if_configured` for most material implementation/
 
 # A recorded finding stays recorded
 
-`respond` records your disposition and links your evidence; it does not erase the historical finding. A readable response identifying that finding removes it from the unresolved count, but does not close an independent coverage gap. Publish exactly the first time — an exact `attempted_items` entry for every requested item, evidence for every claim — because a finding cannot be un-fired. Repairing the record is still worth doing: it stops the next check from minting a duplicate and shows the reader what you did.
+`respond` records your disposition and links your evidence; it does not erase the historical finding. Agents may use `acknowledged`, `provenance_disputed`, or `rejected`; `waived` is reserved for an authorized local-CLI human. A readable response removes that finding from `unanswered_finding_count`, but every current actionable finding remains in `receipt_blocking_finding_count` and keeps the receipt conclusion at `unresolved_findings_remain`. Treat `findings_unanswered` as response work and `receipt_findings_unresolved` as a permanent conclusion bound, never as a reason to respond again. Publish exactly the first time — an exact `attempted_items` entry on `action_recorded` for every requested item you attempted, evidence for every claim — because a finding cannot be un-fired. `attempted_items` belongs to `action_recorded.payload` alone, never a claim, and each entry copies the obligation's `requested_items` `value` string exactly. Repairing the record is still worth doing: it stops the next check from minting a duplicate and shows the reader what you did.
 
 # Semantic review runs on authority the user already gave
 
@@ -122,6 +126,8 @@ On `OPERATION_PENDING`, read `status` with `view=operation` once and replay the 
 
 Fields backed by canonical integers stay JSON strings on the wire. In particular, send frontier `sequence` and pagination `limit` as strings such as `"10"`, never JSON numbers.
 
+Some payload fields are structural identifiers or closed enums, not prose. `decision_recorded.authority` names the actor who exercised the authority as an actor id (`^[A-Za-z0-9._:-]{1,128}$`); the approval story belongs in `rationale`. `action_kind` admits exactly `command`, `edit`, `research`, `review`, and `other` — a source or file modification is `edit`.
+
 # Word conclusions honestly
 
 Match the weakest material coverage and every limitation in the current receipt.
@@ -197,6 +203,7 @@ upgrade unless the user separately instructs you to do so.
 
 # Read more
 
+- `yoetz://guidance/agent-instructions.md` - this document; re-read it if the initialize copy is not in context.
 - `yoetz://guidance/workflow.md` - read before your first `start`: the cooperative workflow, cadence, resume behavior, and final response.
 - `yoetz://guidance/coverage-and-receipts.md` - read before your first `check`: coverage, findings, freshness, and receipt wording.
 - `yoetz://guidance/publication-policy.md` - read before your first `publish_work`: what is material and safe to publish.

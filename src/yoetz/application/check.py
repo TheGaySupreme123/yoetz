@@ -27,7 +27,7 @@ from yoetz.domain.receipts import (
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
-    SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
+    semantic_coverage_gap_code,
 )
 from yoetz.domain.values import (
     REPOSITORY_GRANT_CONTINUATION_KIND,
@@ -47,10 +47,15 @@ from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     DeterministicCase,
     FindingBasisRef,
+    case_coverage,
     finding_basis_from_json,
     finding_basis_to_json,
 )
 from yoetz.kernel.policies.research_evidence import research_evidence_findings
+from yoetz.kernel.policies.response_support import (
+    RESEARCH_REJECTION_PRESENT_FACT,
+    WORK_RESPONSE_PRESENT_FACT,
+)
 from yoetz.kernel.policies.work_integrity import work_integrity_findings
 from yoetz.kernel.projections import PROJECTION_VERSION, ProjectionState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
@@ -82,13 +87,8 @@ from yoetz.protocol.canonical import (
     strict_json_parse,
 )
 from yoetz.protocol.coverage import (
-    CheckType,
-    Coverage,
     LedgerFreshness,
-    PublicationChannel,
-    coverage_for_channel,
     coverage_to_json,
-    weakest,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
@@ -407,21 +407,6 @@ class FinalSemanticEvaluation:
                 raise _invalid("semantic_continuation_invalid")
 
 
-def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -> str | None:
-    """Map a terminal semantic outcome to the receipt/check structural gap code, or None."""
-
-    validate_semantic_outcome(status, reason)
-    if status is SemanticStatus.SUCCEEDED:
-        return None
-    if status is SemanticStatus.NOT_REQUESTED:
-        return SEMANTIC_REVIEW_NOT_REQUESTED_GAP
-    if status is SemanticStatus.BLOCKED_BY_POLICY:
-        return OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP
-    if status is SemanticStatus.NOT_CONFIGURED:
-        return SEMANTIC_REVIEW_NOT_CONFIGURED_GAP
-    return SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP
-
-
 # Gaps that record a semantic review the task actually attempted and did not get. They are the
 # environment's account of the missing review, never the caller's; `semantic_review_not_requested`
 # is deliberately absent because it is the one this set exists to disambiguate.
@@ -708,6 +693,48 @@ def _scope_execution(
     return None
 
 
+def _response_identity(
+    assessment: DeterministicAssessment,
+    fact_code: str,
+) -> tuple[FindingBasisRef, ...] | None:
+    """Return the (finding, response event, admissible evidence) refs a response rule reported."""
+
+    for fact in assessment.basis.observed_facts:
+        if fact.fact_code == fact_code:
+            return fact.subject_refs
+    return None
+
+
+def _collapse_response_overlap(
+    assessments: tuple[DeterministicAssessment, ...],
+) -> tuple[DeterministicAssessment, ...]:
+    """Drop the work-integrity response finding when research-evidence reported the same response.
+
+    A current unsupported rejection or waiver of a deterministic finding satisfies both
+    ``weak_or_stale_response`` and ``questionable_finding_rejection``. Each pack is a closed rule
+    table that cannot see the other, so the collapse belongs here, where it is known which packs
+    actually ran. Keying on the assessment research-evidence really produced -- rather than
+    re-deriving its predicate inside work-integrity -- means a research pack that was deselected,
+    scope-excluded, skipped as unavailable, or that failed leaves the work-integrity finding
+    standing instead of silently losing it.
+    """
+
+    rejected = {
+        identity
+        for item in assessments
+        if item.candidate.kind is FindingKind.QUESTIONABLE_FINDING_REJECTION
+        and (identity := _response_identity(item, RESEARCH_REJECTION_PRESENT_FACT)) is not None
+    }
+    if not rejected:
+        return assessments
+    return tuple(
+        item
+        for item in assessments
+        if item.candidate.kind is not FindingKind.WEAK_OR_STALE_RESPONSE
+        or _response_identity(item, WORK_RESPONSE_PRESENT_FACT) not in rejected
+    )
+
+
 def run_deterministic_policies(
     case: DeterministicCase,
     scope: CheckScope,
@@ -751,7 +778,9 @@ def run_deterministic_policies(
             by_pack[pack] = evaluated
 
     # Finding emission order is intentionally distinct from execution accounting order.
-    assessments = by_pack.get(_WORK_PACK, ()) + by_pack.get(_RESEARCH_PACK, ())
+    assessments = _collapse_response_overlap(
+        by_pack.get(_WORK_PACK, ()) + by_pack.get(_RESEARCH_PACK, ())
+    )
     keys = tuple(
         (item.candidate.policy_id, item.basis.rule_id, item.candidate.subject_refs)
         for item in assessments
@@ -903,37 +932,6 @@ async def _publish_deterministic_result(
         result_ref,
     )
     return FrozenCase(frozen.case, lease)
-
-
-def case_coverage(case: DeterministicCase, *, semantic: bool = False) -> Coverage:
-    """Fold every frozen material dependency and explicit case gap conservatively."""
-
-    ordered = tuple(case.coverage_by_ref[key] for key in sorted(case.coverage_by_ref, key=str))
-    if ordered:
-        result = ordered[0]
-        for coverage in ordered[1:]:
-            result = weakest(result, coverage)
-    else:
-        result = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
-    gaps = set(result.known_gaps)
-    gaps.update(gap.code for gap in case.gaps)
-    channels = set(result.publication_channels)
-    channels.add(PublicationChannel.ENGINE_DERIVED)
-    checks = set(result.check_types)
-    checks.discard(CheckType.NONE)
-    checks.add(CheckType.DETERMINISTIC)
-    if semantic:
-        checks.add(CheckType.SEMANTIC_MODEL_DERIVED)
-    freshness = result.ledger_freshness
-    if gaps and freshness is LedgerFreshness.CURRENT:
-        freshness = LedgerFreshness.PARTIAL
-    return replace(
-        result,
-        publication_channels=tuple(sorted(channels, key=lambda value: value.value.encode("ascii"))),
-        ledger_freshness=freshness,
-        check_types=tuple(sorted(checks, key=lambda value: value.value.encode("ascii"))),
-        known_gaps=tuple(sorted(gaps, key=str.encode)),
-    )
 
 
 def _policy_identity(kind: FindingKind) -> tuple[str, str]:

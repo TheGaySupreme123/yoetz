@@ -34,7 +34,11 @@ async def test_read_resource_uses_registry_media_type(
         "_GUIDANCE_BY_URI",
         MappingProxyType({override.uri: override}),
     )
-    monkeypatch.setattr(mcp_server, "read_guidance_resource", lambda _uri: b"hello")
+
+    def _read(_uri: str) -> bytes:
+        return b"hello"
+
+    monkeypatch.setattr(mcp_server, "read_guidance_resource", _read)
     contents = await mcp_server.read_resource(override.uri)
     assert len(contents) == 1
     assert contents[0].content == "hello"

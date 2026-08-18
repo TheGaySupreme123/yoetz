@@ -194,6 +194,10 @@ _SAFE_VALUE_ERROR_REASON_TOKENS: Final = frozenset(
     {"paired_field_required", "conditional_field_required", "extra_forbidden"}
 )
 _EXTRA_FORBIDDEN_REASON: Final = "extra_forbidden"
+_CONDITIONAL_FIELD_REQUIRED_REASON: Final = "conditional_field_required"
+_EVENT_DRAFT_PAYLOAD_FIELD_POINTER: Final = re.compile(
+    r"/event_drafts/[0-9]{1,3}/payload/[a-z][a-z0-9_]{0,63}", re.ASCII
+)
 # Payload pointers the unknown-key hint answers. Deeper pointers name their own admitted values.
 _EVENT_DRAFT_PAYLOAD_POINTER: Final = re.compile(r"/event_drafts/[0-9]{1,3}/payload", re.ASCII)
 _REASON_CODE: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
@@ -332,12 +336,54 @@ def _unknown_count_from_validation_item(item: Mapping[str, object]) -> int:
     return count
 
 
+def _misplaced_field_from_validation_item(item: Mapping[str, object]) -> str | None:
+    """Return the frozen-vocabulary field name the validator flagged as misplaced, or None.
+
+    Admission is doubly closed, mirroring `_family_from_validation_item`: the token must look
+    like a payload field name and must be a name this module's frozen allowlist already trusts,
+    so nothing caller-controlled can arrive under the key (issue #266).
+    """
+
+    ctx = item.get("ctx")
+    if not isinstance(ctx, Mapping):
+        return None
+    field = cast(Mapping[object, object], ctx).get("misplaced_field")
+    if type(field) is not str or EVENT_FAMILY_NAME_PATTERN.fullmatch(field) is None:
+        return None
+    return field if field in _SAFE_LOCATION_SEGMENTS else None
+
+
+def _conditional_requirement_from_validation_item(
+    item: Mapping[str, object],
+) -> tuple[str, str] | None:
+    """Return a frozen const discriminator only when its bounded shape is safe to carry."""
+
+    ctx = item.get("ctx")
+    if not isinstance(ctx, Mapping):
+        return None
+    source = cast(Mapping[object, object], ctx)
+    field = source.get("condition_field")
+    value = source.get("condition_value")
+    if (
+        type(field) is not str
+        or field not in _SAFE_LOCATION_SEGMENTS
+        or EVENT_FAMILY_NAME_PATTERN.fullmatch(field) is None
+        or type(value) is not str
+        or not value.isascii()
+        or not 1 <= len(value) <= 64
+    ):
+        return None
+    return (field, value)
+
+
 def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
     """Project Pydantic failures to allowlisted locations and bounded reason tokens.
 
-    ``family``, ``family_version``, and ``count`` ride along on an unknown-property location for
-    the hint builders in this module. ``build_public_error_result`` projects only ``field`` and
-    ``reason`` to the wire, so none of them reaches a caller as a detail key.
+    ``family``, ``family_version``, ``misplaced_field``, ``count``, and selected-oneOf condition
+    facts ride along only for the hint builders in this module.
+    ``build_public_error_result`` projects only ``field`` and ``reason`` to the wire — plus the
+    bounded ``repair_*`` fact when ownership is unambiguous (issue #266) — so none of the
+    ride-along keys reaches a caller directly.
     """
 
     if not isinstance(exc, ValidationError):
@@ -370,9 +416,23 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
                 family_version = _family_version_from_validation_item(source)
                 if family_version is not None:
                     entry["family_version"] = family_version
+                # Only meaningful beside a family: ownership is a fact about where else the field
+                # is legal, and without the selected family there is no "else" (issue #266).
+                misplaced_field = _misplaced_field_from_validation_item(source)
+                if misplaced_field is not None:
+                    entry["misplaced_field"] = misplaced_field
             count = _unknown_count_from_validation_item(source)
             if count:
                 entry["count"] = str(count)
+        elif reason == _CONDITIONAL_FIELD_REQUIRED_REASON:
+            family = _family_from_validation_item(source)
+            family_version = _family_version_from_validation_item(source)
+            condition = _conditional_requirement_from_validation_item(source)
+            if family is not None and family_version is not None and condition is not None:
+                entry["family"] = family
+                entry["family_version"] = family_version
+                entry["condition_field"] = condition[0]
+                entry["condition_value"] = condition[1]
         projected.append(entry)
         if len(projected) == _MAX_VALIDATION_LOCATIONS:
             break
@@ -417,6 +477,7 @@ def authoring_hint(
         # part that names the most about how to author the next request.
         keyed_parts: list[tuple[str, tuple[str, str]]] = [
             *_unknown_payload_key_hint_parts(document, locations),
+            *_conditional_requirement_hint_parts(document, locations),
             *((text, (text, "")) for text in _object_rule_hint_parts(document, locations)),
             *_event_draft_hint_parts(document, locations),
             *((text, (text, "")) for text in _corrective_hint_parts(tool, locations)),
@@ -584,6 +645,15 @@ def _unknown_payload_key_hint_parts(
         if admitted:
             text = f"{text}; admitted keys are {admitted}"
         parts.append((text, (text, "")))
+        # One bounded ownership sentence when the rejected key is a known field with exactly one
+        # legal owning family. Both names are frozen registry content; the field name matched the
+        # frozen schema vocabulary before it could travel here (issue #266).
+        misplaced = location.get("misplaced_field")
+        if type(misplaced) is str and family is not None:
+            owner = _FIELD_OWNERSHIP.get(misplaced)
+            if owner is not None and owner != family:
+                ownership = f"{misplaced} is admitted only by the {owner} payload, not {family}"
+                parts.append((ownership, (ownership, "")))
         if not admitted:
             # Without the family the caller still needs the contract; the recital is gated off.
             names = _union_schema_names(document, cast(JsonValue, _event_draft_items(document)))
@@ -610,16 +680,40 @@ def _payload_property_names(
     taken from the instance.
     """
 
-    if family is None or family_version is None:
+    payload = _payload_schema(document, family, family_version)
+    if payload is None:
         return ""
+    payload_properties = payload.get("properties")
+    if not isinstance(payload_properties, Mapping):
+        return ""
+    names = sorted(
+        key for key in cast(Mapping[object, object], payload_properties) if type(key) is str
+    )
+    # A partial list would read as complete and send the caller after the wrong key.
+    if not names or len(names) > _MAX_HINT_SCHEMA_NAMES:
+        return ""
+    if any(name not in _SAFE_LOCATION_SEGMENTS for name in names):
+        return ""
+    return _format_required_list(
+        cast(JsonValue, names), cast(Mapping[str, JsonValue], payload_properties)
+    )
+
+
+def _payload_schema(
+    document: Mapping[str, JsonValue], family: str | None, family_version: str | None
+) -> Mapping[str, JsonValue] | None:
+    """Return the exact frozen payload schema for a family and version."""
+
+    if family is None or family_version is None:
+        return None
     items = _event_draft_items(document)
     if items is None:
-        return ""
+        return None
     options = items.get("oneOf")
     if not isinstance(options, list):
         options = items.get("anyOf")
     if not isinstance(options, list):
-        return ""
+        return None
     for branch in cast(list[JsonValue], options):
         resolved = _resolve_local(document, branch)
         if not isinstance(resolved, Mapping):
@@ -630,27 +724,73 @@ def _payload_property_names(
             continue
         branch_properties = cast(Mapping[str, JsonValue], resolved).get("properties")
         if not isinstance(branch_properties, Mapping):
-            return ""
+            return None
         payload = _resolve_local(
             document, cast(Mapping[str, JsonValue], branch_properties).get("payload")
         )
         if not isinstance(payload, Mapping):
-            return ""
-        payload_properties = cast(Mapping[str, JsonValue], payload).get("properties")
-        if not isinstance(payload_properties, Mapping):
-            return ""
-        names = sorted(
-            key for key in cast(Mapping[object, object], payload_properties) if type(key) is str
+            return None
+        return cast(Mapping[str, JsonValue], payload)
+    return None
+
+
+def _conditional_requirement_hint_parts(
+    document: Mapping[str, JsonValue], locations: Sequence[Mapping[str, str]]
+) -> list[tuple[str, tuple[str, str]]]:
+    """Render selected-oneOf repairs only after re-checking frozen schema metadata."""
+
+    parts: list[tuple[str, tuple[str, str]]] = []
+    for location in locations:
+        if location.get("reason") != _CONDITIONAL_FIELD_REQUIRED_REASON:
+            continue
+        pointer = location.get("field")
+        condition_field = location.get("condition_field")
+        condition_value = location.get("condition_value")
+        if (
+            type(pointer) is not str
+            or _EVENT_DRAFT_PAYLOAD_FIELD_POINTER.fullmatch(pointer) is None
+            or type(condition_field) is not str
+            or type(condition_value) is not str
+        ):
+            continue
+        required = pointer.rsplit("/", 1)[-1]
+        payload = _payload_schema(
+            document,
+            location.get("family"),
+            location.get("family_version"),
         )
-        # A partial list would read as complete and send the caller after the wrong key.
-        if not names or len(names) > _MAX_HINT_SCHEMA_NAMES:
-            return ""
-        if any(name not in _SAFE_LOCATION_SEGMENTS for name in names):
-            return ""
-        return _format_required_list(
-            cast(JsonValue, names), cast(Mapping[str, JsonValue], payload_properties)
-        )
-    return ""
+        if payload is None:
+            continue
+        properties = payload.get("properties")
+        options = payload.get("oneOf")
+        if (
+            not isinstance(properties, Mapping)
+            or condition_field not in properties
+            or required not in properties
+            or not isinstance(options, list)
+        ):
+            continue
+        for branch in cast(list[JsonValue], options):
+            if not isinstance(branch, Mapping):
+                continue
+            branch_properties = cast(Mapping[str, JsonValue], branch).get("properties")
+            branch_required = cast(Mapping[str, JsonValue], branch).get("required")
+            if not isinstance(branch_properties, Mapping) or not isinstance(branch_required, list):
+                continue
+            condition = cast(Mapping[str, JsonValue], branch_properties).get(condition_field)
+            if not isinstance(condition, Mapping):
+                continue
+            if (
+                cast(Mapping[str, JsonValue], condition).get("const") != condition_value
+                or required not in branch_required
+            ):
+                continue
+            text = f"{condition_field} {condition_value} requires {required}"
+            parts.append((text, (text, "")))
+            break
+        if len(parts) == _MAX_HINT_FIELDS:
+            break
+    return parts
 
 
 def _unknown_property_measure(count: object) -> str:
@@ -1238,6 +1378,41 @@ def _validated_failure(
     )
 
 
+_FIELD_OWNERSHIP_REPAIR_KIND: Final = "field_ownership"
+_FIELD_OWNERSHIP_TEMPLATE_URI: Final = "yoetz://guidance/request-templates.md"
+
+
+def _field_ownership_repair(locations: Sequence[Mapping[str, str]]) -> dict[str, str] | None:
+    """Return the bounded repair fact for the first misplaced uniquely-owned payload field.
+
+    The request stays rejected; this fact only names where the rejected field is legal, so a
+    caller repairs by moving the field instead of deleting it and silently losing the record it
+    carried (issue #266). Every value is frozen content: the field name matched the frozen schema
+    vocabulary inside the validator, both family names come from the import-gated ownership
+    registry beside the frozen presentation schema, and the template URI is a checked-in constant.
+    When ownership is ambiguous or unknown there is no entry in the registry and no fact travels.
+    """
+
+    for location in locations:
+        if location.get("reason") != _EXTRA_FORBIDDEN_REASON:
+            continue
+        family = location.get("family")
+        field = location.get("misplaced_field")
+        if type(family) is not str or type(field) is not str:
+            continue
+        owner = _FIELD_OWNERSHIP.get(field)
+        if owner is None or owner == family:
+            continue
+        return {
+            "repair_field": field,
+            "repair_kind": _FIELD_OWNERSHIP_REPAIR_KIND,
+            "repair_owning_family": owner,
+            "repair_selected_family": family,
+            "repair_template_uri": _FIELD_OWNERSHIP_TEMPLATE_URI,
+        }
+    return None
+
+
 def tool_error_envelope(
     error: PublicOperationError, *, request_id: str | None = None
 ) -> dict[str, JsonValue]:
@@ -1272,6 +1447,9 @@ def build_public_error_result(
         }
         if type(details_reason_code) is str and _REASON_CODE.fullmatch(details_reason_code):
             details["reason_code"] = details_reason_code
+        repair = _field_ownership_repair(locations)
+        if repair is not None:
+            details.update(repair)
         public_error: dict[str, object] = {
             "code": code.value,
             "message": message,
@@ -1383,3 +1561,65 @@ def _check_locatable_required_names() -> None:
 
 
 _check_locatable_required_names()
+
+
+def _build_field_ownership() -> Mapping[str, str]:
+    """Map each payload field to its sole owning ordinary publish family, or omit it.
+
+    Derived at import from the frozen publish_work presentation schema — the exact surface
+    callers author against — so the registry cannot drift from the contract it corrects (issue
+    #266). A field is entered only when ownership is unambiguous: fields declared by more than
+    one ordinary family are excluded, as is anything the presentation draft branches declare
+    beside the payload. Keys the wire draft envelope itself admits (``evidence_refs``,
+    ``artifact_refs``) never arrive here because the validator's ``misplaced_field`` projection
+    skips them: those are misplaced across levels, not families. Every key is a declared
+    presentation property, which the gate above already holds inside ``_SAFE_LOCATION_SEGMENTS``.
+    """
+
+    from yoetz.mcp.descriptors import ORDINARY_MCP_PUBLISH_EVENT_FAMILIES, descriptor_for
+
+    document = descriptor_for("publish_work").input_schema
+    items = _event_draft_items(document)
+    if items is None:
+        raise RuntimeError("field_ownership_event_drafts_missing")
+    options = items.get("oneOf")
+    if not isinstance(options, list):
+        options = items.get("anyOf")
+    if not isinstance(options, list):
+        raise RuntimeError("field_ownership_event_drafts_missing")
+    owners: dict[str, set[str]] = {}
+    envelope_keys: set[str] = set()
+    for branch in cast(list[JsonValue], options):
+        resolved = _resolve_local(document, branch)
+        if not isinstance(resolved, Mapping):
+            continue
+        family = _schema_name_const(document, resolved)
+        if family is None or family not in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES:
+            continue
+        branch_properties = cast(Mapping[str, JsonValue], resolved).get("properties")
+        if not isinstance(branch_properties, Mapping):
+            continue
+        typed_branch_properties = cast(Mapping[str, JsonValue], branch_properties)
+        envelope_keys.update(key for key in typed_branch_properties if type(key) is str)
+        payload = _resolve_local(document, typed_branch_properties.get("payload"))
+        if not isinstance(payload, Mapping):
+            continue
+        payload_properties = cast(Mapping[str, JsonValue], payload).get("properties")
+        if not isinstance(payload_properties, Mapping):
+            continue
+        for key in cast(Mapping[object, object], payload_properties):
+            if type(key) is str:
+                owners.setdefault(key, set()).add(family)
+    ownership = {
+        field: next(iter(families))
+        for field, families in owners.items()
+        if len(families) == 1 and field not in envelope_keys and field in _SAFE_LOCATION_SEGMENTS
+    }
+    # The registry is generated, but the fact issue #266 exists to state is pinned here: losing it
+    # to a schema or projection change must fail startup, not silently drop the repair.
+    if ownership.get("attempted_items") != "action_recorded":
+        raise RuntimeError("field_ownership_registry_drifted")
+    return MappingProxyType(dict(sorted(ownership.items())))
+
+
+_FIELD_OWNERSHIP: Final[Mapping[str, str]] = _build_field_ownership()

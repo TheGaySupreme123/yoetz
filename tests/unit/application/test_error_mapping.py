@@ -147,9 +147,11 @@ _MODULE_CODE_INVENTORY: dict[str, frozenset[PublicErrorCode]] = {
             PublicErrorCode.FRONTIER_CONFLICT,
             PublicErrorCode.IDEMPOTENCY_CONFLICT,
             PublicErrorCode.INVALID_REQUEST,
+            PublicErrorCode.LIMIT_EXCEEDED,
             PublicErrorCode.OPERATION_PENDING,
             PublicErrorCode.SESSION_CONFLICT,
             PublicErrorCode.STORAGE_CORRUPT,
+            PublicErrorCode.STORAGE_UNSAFE,
         }
     ),
 }
@@ -249,6 +251,11 @@ def test_retryability_tracks_operation_state() -> None:
         for code_name in ("IDEMPOTENCY_CONFLICT", "STORAGE_CORRUPT"):
             for window in _call_windows(source, code_name):
                 assert not _is_retryable_call(window), (name, code_name, window)
+
+    receipt_unsafe = _call_windows(_application_source("receipt.py"), "STORAGE_UNSAFE")
+    assert receipt_unsafe
+    for window in receipt_unsafe:
+        assert _is_retryable_call(window), window
 
     for name in ("check.py", "status.py", "start.py"):
         source = _application_source(name)

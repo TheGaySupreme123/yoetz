@@ -33,11 +33,13 @@ from yoetz.domain.values import (
     finding_id,
     object_id,
     obligation_id,
+    result_id,
 )
 from yoetz.kernel import deterministic_checks
 from yoetz.kernel.deterministic_checks import (
     DETERMINISTIC_FINDING_TEMPLATES,
     CaseAvailabilityFacts,
+    FindingFact,
     PolicyPack,
     UnavailableCapturedObject,
     build_deterministic_case,
@@ -314,7 +316,7 @@ def test_captured_object_unavailability_requires_current_exact_association() -> 
         build_deterministic_case(projection, records, bad)
 
 
-def test_templates_are_complete_exact_and_id_only() -> None:
+def test_templates_are_complete_exact_and_structural() -> None:
     assert frozenset(DETERMINISTIC_FINDING_TEMPLATES) == frozenset(FindingKind)
     assert len(DETERMINISTIC_FINDING_TEMPLATES) == 14
     refs = (
@@ -330,6 +332,30 @@ def test_templates_are_complete_exact_and_id_only() -> None:
         "obl_00000000-0000-4000-8000-000000000001. Main agent: "
         "Resolve the obligation or revise the completion claim.",
     )
+
+
+def test_material_limitation_detail_names_the_safe_limiting_record() -> None:
+    claim = claim_id("clm_00000000-0000-4000-8000-000000000001")
+    result = result_id("res_00000000-0000-4000-8000-000000000002")
+    _, detail = render_deterministic_finding_text(
+        FindingKind.MATERIAL_LIMITATION_OMITTED,
+        (claim,),
+        observed_facts=(FindingFact("material_limitation_present", (claim, result)),),
+    )
+    assert (
+        "Omitted limitation basis: limiting result res_00000000-0000-4000-8000-000000000002."
+    ) in detail
+
+
+def test_rootless_material_limitation_detail_does_not_invent_a_record() -> None:
+    claim = claim_id("clm_00000000-0000-4000-8000-000000000001")
+    _, detail = render_deterministic_finding_text(
+        FindingKind.MATERIAL_LIMITATION_OMITTED,
+        (claim,),
+        observed_facts=(FindingFact("material_limitation_present", (claim,)),),
+    )
+    assert "task-level material coverage gap" in detail
+    assert "no individual limitation record was available" in detail
 
 
 def test_dispatch_is_assessments_only_ordered_and_origin_deterministic() -> None:

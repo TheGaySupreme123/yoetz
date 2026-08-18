@@ -57,7 +57,7 @@ from yoetz.kernel.projections import (
     PROJECTION_VERSION,
     ProjectionState,
     projection_digest,
-    unresolved_finding_count,
+    unanswered_finding_count,
 )
 from yoetz.kernel.reducers import replay
 from yoetz.ports.clock import ClockPort
@@ -1251,7 +1251,7 @@ class SqliteLedger:
                 projection.frontier,
                 projection.head_digest,
                 len(projection.obligations),
-                unresolved_finding_count(projection),
+                unanswered_finding_count(projection),
                 projection.freshness.value,
                 projection.unknown_event_count,
                 records[0].event_id,
@@ -1378,7 +1378,7 @@ class SqliteLedger:
                 projection.frontier,
                 projection.head_digest,
                 len(projection.obligations),
-                unresolved_finding_count(projection),
+                unanswered_finding_count(projection),
                 projection.freshness.value,
                 projection.unknown_event_count,
                 canonical_encode(
@@ -1441,6 +1441,7 @@ class SqliteLedger:
             )
             result = await oracle.append_batch(command)
             new_records = clone.records[len(self._state.records) :]
+            prior_state = self._state
             try:
                 self._db.execute("BEGIN IMMEDIATE")
                 if (
@@ -1459,18 +1460,16 @@ class SqliteLedger:
                     is not None
                 ):
                     raise _public_error(PublicErrorCode.OPERATION_PENDING, retryable=True)
-                old_state = self._state
                 self._state = clone
-                try:
-                    self._persist_append(command, result, new_records)
-                except BaseException:
-                    self._state = old_state
-                    raise
+                self._persist_append(command, result, new_records)
                 self._db.execute("COMMIT")
             except BaseException:
+                self._state = prior_state
                 if self._db.get_autocommit() is False:
                     self._db.execute("ROLLBACK")
                 raise
+            self._adopt_state(prior_state, clone)
+            self._state = prior_state
             return result
 
     async def _load_events_recovered(
@@ -1513,7 +1512,43 @@ class SqliteLedger:
             attempts=dict(self._state.attempts),
             disclosure_waits=dict(self._state.disclosure_waits),
             object_refs=dict(self._state.object_refs),
+            check_reservations=dict(self._state.check_reservations),
         )
+
+    @staticmethod
+    def _adopt_state(target: MemoryLedgerState, source: MemoryLedgerState) -> None:
+        """Adopt a durable clone without invalidating in-flight oracle state references."""
+
+        target.records = source.records
+        target.operations = source.operations
+        target.writers = source.writers
+        target.projection = source.projection
+        target.frozen_cases = source.frozen_cases
+        target.check_results = source.check_results
+        target.check_errors = source.check_errors
+        target.jobs = source.jobs
+        target.job_by_case = source.job_by_case
+        target.attempts = source.attempts
+        target.disclosure_waits = source.disclosure_waits
+        target.object_refs = source.object_refs
+        target.check_reservations = source.check_reservations
+
+    def _sync_clone_locked(
+        self,
+        prior: MemoryLedgerState,
+        clone: MemoryLedgerState,
+        new_records: tuple[LedgerRecord, ...] = (),
+    ) -> None:
+        """Persist one clone, then update the stable state object only after commit."""
+
+        self._state = clone
+        try:
+            self._sync_after_mutation_locked(new_records)
+        except BaseException:
+            self._state = prior
+            raise
+        self._adopt_state(prior, clone)
+        self._state = prior
 
     def _sync_after_mutation_locked(self, new_records: tuple[LedgerRecord, ...] = ()) -> None:
         self._db.execute("BEGIN IMMEDIATE")
@@ -1729,20 +1764,10 @@ class SqliteLedger:
             except PublicOperationError:
                 # The memory oracle terminalizes a frontier conflict before raising it. Preserve
                 # that durable error transition just as the pre-clone implementation did.
-                self._state = clone
-                try:
-                    self._sync_after_mutation_locked()
-                except BaseException:
-                    self._state = prior
-                    raise
+                self._sync_clone_locked(prior, clone)
                 raise
             new_records = clone.records[len(prior.records) :]
-            self._state = clone
-            try:
-                self._sync_after_mutation_locked(new_records)
-            except BaseException:
-                self._state = prior
-                raise
+            self._sync_clone_locked(prior, clone, new_records)
             return result
 
     async def fail_check_if_current(
@@ -1763,12 +1788,7 @@ class SqliteLedger:
                 objects=self._objects,
             )
             await oracle.fail_check_if_current(lease, failure)
-            self._state = clone
-            try:
-                self._sync_after_mutation_locked()
-            except BaseException:
-                self._state = prior
-                raise
+            self._sync_clone_locked(prior, clone)
 
     async def run_passive_checkpoint(self, wal_page_threshold: int) -> CheckpointReport:
         await self._ensure_recovered()

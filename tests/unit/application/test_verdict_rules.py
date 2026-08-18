@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 
 import pytest
 
-from builders.policy_cases import BASE_COVERAGE, clm, make_case, record
+from builders.policy_cases import (
+    BASE_COVERAGE,
+    FRONTIER,
+    clm,
+    evd,
+    evidence_record,
+    evt,
+    fnd,
+    make_case,
+    record,
+)
 from yoetz.application.check import (
     CheckScope,
     FinalSemanticEvaluation,
@@ -13,8 +24,21 @@ from yoetz.application.check import (
     case_coverage,
     run_deterministic_policies,
 )
-from yoetz.domain.events import ClaimKind, ClaimRecordedPayload
-from yoetz.domain.findings import CheckVerdict
+from yoetz.domain.events import (
+    ClaimKind,
+    ClaimRecordedPayload,
+    EvidenceKind,
+    EvidenceRecordedPayload,
+    ResponseDisposition,
+    ResponseRecordedPayload,
+)
+from yoetz.domain.findings import (
+    CheckVerdict,
+    Finding,
+    FindingKind,
+    FindingOrigin,
+    WaiverScope,
+)
 from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
@@ -23,10 +47,16 @@ from yoetz.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
-from yoetz.domain.values import EventId
-from yoetz.kernel.deterministic_checks import CaseGap, DeterministicCase
+from yoetz.domain.values import EventId, object_id, timestamp_from_string
+from yoetz.kernel.deterministic_checks import (
+    CaseGap,
+    DeterministicAssessment,
+    DeterministicCase,
+    FindingBasisRef,
+)
 from yoetz.kernel.projections import LatestTestedState
 from yoetz.kernel.ranking import CheckCompleteness, RankingContext, rank_findings
+from yoetz.protocol.coverage import Coverage, EvidenceImmutability
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import SemanticReason, SemanticStatus
 
@@ -70,6 +100,196 @@ def test_deterministic_packs_account_and_rank_actual_kernel_findings() -> None:
     assert ranked.verdict is CheckVerdict.ACTION_REQUIRED
     assert ranked.findings
     assert coverage != BASE_COVERAGE
+
+
+_WORK_ONLY_COVERAGE: Mapping[FindingBasisRef, Coverage] = {
+    evd(1): replace(BASE_COVERAGE, known_gaps=("evidence_digest_subject_legacy_unknown",))
+}
+
+
+def _responded_finding(number: int, subject: EventId) -> Finding:
+    return Finding(
+        finding_id=fnd(number),
+        kind=FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
+        origin=FindingOrigin.DETERMINISTIC,
+        priority=1,
+        summary="A completion claim covers an obligation that remains open.",
+        detail="Resolve the open obligation.",
+        subject_refs=(subject,),
+        policy_id="work-integrity",
+        policy_version="0.1.0",
+        subject_frontier=FRONTIER,
+        coverage=BASE_COVERAGE,
+        provenance=None,
+    )
+
+
+def _hollow_response(
+    number: int,
+    disposition: ResponseDisposition,
+    *,
+    stale: bool = False,
+    work_only_gap: bool = False,
+) -> ResponseRecordedPayload:
+    return ResponseRecordedPayload(
+        finding_id=fnd(number),
+        finding_frontier=replace(FRONTIER, sequence=FRONTIER.sequence - 1) if stale else FRONTIER,
+        disposition=disposition,
+        reason="The finding is not applicable.",
+        waiver_scope=(
+            WaiverScope.FINDING_ONLY if disposition is ResponseDisposition.WAIVED else None
+        ),
+        evidence_refs=(evd(1),) if work_only_gap else (),
+    )
+
+
+def _legacy_evidence() -> EvidenceRecordedPayload:
+    return EvidenceRecordedPayload(
+        evidence_id=evd(1),
+        evidence_kind=EvidenceKind.TEST_RESULT,
+        strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        observed_at=timestamp_from_string("2026-01-01T00:00:00.000Z"),
+        captured_object_id=object_id("obj_10000000-0000-4000-8000-000000000001"),
+        content_digest="sha256:" + "1" * 64,
+    )
+
+
+def _finding_response_case(
+    disposition: ResponseDisposition,
+    *,
+    stale: bool,
+    work_only_gap: bool = False,
+) -> DeterministicCase:
+    return make_case(
+        evidence={evd(1): evidence_record(_legacy_evidence(), 1)} if work_only_gap else None,
+        findings={fnd(1): record(_responded_finding(1, evt(99)), 2)},
+        responses={
+            fnd(1): record(
+                _hollow_response(1, disposition, stale=stale, work_only_gap=work_only_gap), 3
+            )
+        },
+        extra_refs=(evt(99),),
+        coverage_overrides=_WORK_ONLY_COVERAGE if work_only_gap else None,
+    )
+
+
+def _two_response_case() -> DeterministicCase:
+    """Two hollow rejections where only the first is inadmissible under research-evidence too."""
+
+    return make_case(
+        evidence={evd(1): evidence_record(_legacy_evidence(), 1)},
+        findings={
+            fnd(1): record(_responded_finding(1, evt(99)), 2),
+            fnd(2): record(_responded_finding(2, evt(98)), 3),
+        },
+        responses={
+            fnd(1): record(_hollow_response(1, ResponseDisposition.REJECTED), 4),
+            fnd(2): record(
+                _hollow_response(2, ResponseDisposition.REJECTED, work_only_gap=True), 5
+            ),
+        },
+        extra_refs=(evt(99), evt(98)),
+        coverage_overrides=_WORK_ONLY_COVERAGE,
+    )
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    (ResponseDisposition.REJECTED, ResponseDisposition.WAIVED),
+)
+@pytest.mark.parametrize(
+    ("stale", "expected_kind"),
+    (
+        (False, FindingKind.QUESTIONABLE_FINDING_REJECTION),
+        (True, FindingKind.WEAK_OR_STALE_RESPONSE),
+    ),
+)
+def test_finding_response_penalty_has_one_policy_owner(
+    disposition: ResponseDisposition,
+    stale: bool,
+    expected_kind: FindingKind,
+) -> None:
+    assessments, executions = run_deterministic_policies(
+        _finding_response_case(disposition, stale=stale),
+        CheckScope((), ()),
+        ("research-evidence/0.1.0", "work-integrity/0.1.0"),
+    )
+
+    assert tuple(item.candidate.kind for item in assessments) == (expected_kind,)
+    assert all(item.outcome == "run" and item.reason == "completed" for item in executions)
+
+
+def test_response_with_work_only_evidence_gap_is_not_dropped() -> None:
+    assessments, _executions = run_deterministic_policies(
+        _finding_response_case(
+            ResponseDisposition.REJECTED,
+            stale=False,
+            work_only_gap=True,
+        ),
+        CheckScope((), ()),
+        ("research-evidence/0.1.0", "work-integrity/0.1.0"),
+    )
+
+    assert tuple(item.candidate.kind for item in assessments) == (
+        FindingKind.WEAK_OR_STALE_RESPONSE,
+    )
+
+
+def test_work_pack_selected_alone_still_reports_the_hollow_rejection() -> None:
+    """`policy_packs` is caller-selectable, so the collapse must not depend on research running."""
+
+    case = _finding_response_case(ResponseDisposition.REJECTED, stale=False)
+
+    assessments, _executions = run_deterministic_policies(
+        case,
+        CheckScope((), ()),
+        ("work-integrity/0.1.0",),
+    )
+
+    assert tuple(item.candidate.kind for item in assessments) == (
+        FindingKind.WEAK_OR_STALE_RESPONSE,
+    )
+
+
+def test_failed_research_pack_leaves_the_work_response_finding_standing() -> None:
+    """A research pack that raises must not silently take the work-integrity finding with it."""
+
+    def _explode(case: DeterministicCase) -> tuple[DeterministicAssessment, ...]:
+        raise RuntimeError("policy_failure")
+
+    assessments, executions = run_deterministic_policies(
+        _finding_response_case(ResponseDisposition.REJECTED, stale=False),
+        CheckScope((), ()),
+        ("research-evidence/0.1.0", "work-integrity/0.1.0"),
+        evaluators={"research-evidence/0.1.0": _explode},
+    )
+
+    assert tuple(item.candidate.kind for item in assessments) == (
+        FindingKind.WEAK_OR_STALE_RESPONSE,
+    )
+    assert ("research-evidence", "failed", "policy_failure") == (
+        executions[0].policy_id,
+        executions[0].outcome,
+        executions[0].reason,
+    )
+
+
+def test_collapse_is_scoped_to_the_response_it_matched() -> None:
+    """One collapsed response must not absorb a different response's work-integrity finding."""
+
+    assessments, _executions = run_deterministic_policies(
+        _two_response_case(),
+        CheckScope((), ()),
+        ("research-evidence/0.1.0", "work-integrity/0.1.0"),
+    )
+
+    # fnd(1) is a plain hollow rejection and collapses to the research-evidence kind; fnd(2) is
+    # inadmissible only under work-integrity, so its own finding must survive alongside it.
+    assert sorted(item.candidate.kind.value for item in assessments) == [
+        "questionable_finding_rejection",
+        "weak_or_stale_response",
+    ]
+    assert {item.candidate.subject_refs for item in assessments} == {(evt(99),), (evt(98),)}
 
 
 def test_direct_scope_excludes_pack_without_selected_root() -> None:

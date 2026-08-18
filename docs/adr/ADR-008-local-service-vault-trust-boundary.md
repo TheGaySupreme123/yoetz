@@ -39,11 +39,15 @@ on-demand connector treats as still-starting rather than unavailable (#235). It 
 while locked so a human can inspect structural status and initiate the dedicated unlock flow. Only `ready` admits workflows,
 maintenance, imports, payload access, or egress.
 
-Authenticated local connections and admitted work hold a process-idle lease. Once both counts stay
-zero for 1,800 seconds, the daemon performs its bounded stop and exits. A later fixed on-demand
-launcher start advances the generation and reconnects to the singleton winner. A passphrase-backed
-successor first tries its exact bundle-scoped auto-unlock entry when one was explicitly provisioned;
-otherwise it remains locked until a local-human unlock.
+Authenticated local connections, admitted work, and harness observation rows resolved by the ready
+sweep hold a process-idle lease. Once no connection or admission is outstanding and no row has
+resolved for 7,200 seconds, the daemon performs its bounded stop and exits. The process-idle stop
+is deliberately longer than the default idle relock so the cheap in-process soft lock — which
+re-readies on the next ordinary admission — is always the first containment reached, and a live
+workspace that holds off the relock holds off the stop with it rather than reaching the harsher
+containment first. A later fixed on-demand launcher start advances the generation and reconnects to
+the singleton winner. A passphrase-backed successor first tries its exact bundle-scoped auto-unlock
+entry when one was explicitly provisioned; otherwise it remains locked until a local-human unlock.
 
 On a pristine first install, keyring storage usability alone does not select immutable keyring
 mode. Before creating a staging artifact, IVK, keyring entry, or mode marker, the service requires
@@ -342,14 +346,18 @@ vault before first release is the one materially stronger containment choice sti
   control admission, or the human may run the unlock ceremony; explicit lock still requires the
   human/keyring ceremony.
 - Idle relock is enabled by default only when there are no connected clients, in-flight requests,
-  queued commits, leases, or provider calls for the complete configured interval. It never counts
-  a long-running operation as idle. The default is 900 seconds. The only v0.1 mutation path is a
+  queued commits, leases, provider calls, or harness observation rows resolved by the ready sweep
+  for the complete configured interval. It never counts a long-running operation as idle, and a
+  workspace whose harness hooks keep delivering observation rows is not idle: a resolved row is a
+  same-user authenticated write of the same trust class as an admitted control call, and each row
+  resets the clock at most once (retrying rows never count, so a wedged row cannot hold the vault
+  unlocked). The default is 3600 seconds. The only v0.1 mutation path is a
   foreground YZH1 `idle_relock_policy_change` preview over the exact current/proposed value,
   followed by action-bound OS user presence or the distinct passphrase-mode
   `security_reauthentication` purpose. It may select 60..86400 seconds or explicit `disabled`;
   server-side `edit` does not exist. The service consumes the exact vault-minted proof atomically
   with the change. The exception lasts only for the current service generation, is never persisted,
-  and restart restores 900 seconds. Disabling idle relock never disables explicit, session-lock,
+  and restart restores 3600 seconds. Disabling idle relock never disables explicit, session-lock,
   suspend, or monitor-loss relock.
 - Privacy-policy loosening is not authorized by a boolean CLI flag or ordinary control request.
   It requires a fresh OS user-presence assertion or a confidential vault reauthentication proof

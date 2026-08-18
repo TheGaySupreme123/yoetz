@@ -62,6 +62,7 @@ __all__ = [
     "MaterializedObservationDraft",
     "canonical_logical_identity",
     "materialize_observation_envelope",
+    "observation_claim_identity",
     "observation_writer_id",
     "stable_observation_id",
 ]
@@ -146,7 +147,10 @@ def _tool_name(payload: Mapping[str, JsonValue]) -> str | None:
 
 
 def _correlation(payload: Mapping[str, JsonValue]) -> str | None:
-    for key in ("tool_call_id", "correlation_id", "parent_tool_call_id"):
+    # Codex spells the host tool-call id ``tool_use_id``; ingress normalizes it
+    # to ``tool_call_id``, but read the host spelling first too so a payload
+    # that reaches this seam un-normalized still correlates (#274).
+    for key in ("tool_use_id", "tool_call_id", "correlation_id", "parent_tool_call_id"):
         value = payload.get(key)
         if type(value) is str and value:
             return value
@@ -651,6 +655,29 @@ def canonical_logical_identity(envelope: ObservationEnvelope) -> str:
         return _logical_identity_digest(("opaque", envelope.source.value, envelope.source_identity))
     family = _action_kind(_tool_name(structural)).value
     return _logical_identity_digest(("action", envelope.session_commitment, host_call, family))
+
+
+def observation_claim_identity(envelope: ObservationEnvelope, draft_roles: tuple[str, ...]) -> str:
+    """Return the role-scoped key for one durable logical-identity claim.
+
+    One host call legitimately materializes several role-sets against the same
+    canonical logical identity: hook ``PreToolUse`` (``action``), a paired
+    ``PostToolUse`` (``action`` + ``result``), unpaired evidence, permission and
+    subagent events carrying the call id, and opaque stream phases. Each has its
+    own operation digest, so claims keyed on the bare logical identity conflict
+    with their own siblings. Scoping the claim by roles (and by the mapping
+    version, matching the digest) keeps each phase's claim independent while
+    cross-source copies of the *same* phase still merge their source masks.
+    """
+
+    return _logical_identity_digest(
+        (
+            "claim",
+            MATERIALIZATION_MAPPING_VERSION,
+            canonical_logical_identity(envelope),
+            *draft_roles,
+        )
+    )
 
 
 def _logical_identity_digest(components: tuple[str, ...]) -> str:

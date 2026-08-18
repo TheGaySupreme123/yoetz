@@ -50,7 +50,12 @@ from yoetz.protocol.coverage import (
     weakest,
 )
 from yoetz.protocol.errors import ProtocolValueError
-from yoetz.protocol.models import ReceiptRedactionProfile
+from yoetz.protocol.models import (
+    ReceiptRedactionProfile,
+    SemanticReason,
+    SemanticStatus,
+    validate_semantic_outcome,
+)
 
 __all__ = [
     "CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP",
@@ -82,6 +87,7 @@ __all__ = [
     "receipt_document_to_json",
     "receipt_weakest_coverage",
     "render_receipt_compact",
+    "semantic_coverage_gap_code",
 ]
 
 # Structural completion-scope gaps. These are case-coverage facts, not policy findings: an
@@ -125,6 +131,27 @@ _SEMANTIC_REVIEW_NOT_RUN_GAPS: Final = frozenset(
         SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
     }
 )
+
+
+def semantic_coverage_gap_code(status: SemanticStatus, reason: SemanticReason) -> str | None:
+    """Map a terminal semantic outcome to the receipt/check structural gap code, or None.
+
+    This lives beside the gap constants rather than in the check application module because
+    append-time receipt-capacity admission must fold the same code the receipt builder will
+    later add. A copy that drifted would let a state pass admission and then fail receipt
+    construction on the gap the copy forgot.
+    """
+
+    validate_semantic_outcome(status, reason)
+    if status is SemanticStatus.SUCCEEDED:
+        return None
+    if status is SemanticStatus.NOT_REQUESTED:
+        return SEMANTIC_REVIEW_NOT_REQUESTED_GAP
+    if status is SemanticStatus.BLOCKED_BY_POLICY:
+        return OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP
+    if status is SemanticStatus.NOT_CONFIGURED:
+        return SEMANTIC_REVIEW_NOT_CONFIGURED_GAP
+    return SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP
 
 
 class ReceiptConclusion(str, Enum):  # noqa: UP042 - exact wire enum base
@@ -478,7 +505,10 @@ class ReceiptResponse:
         if self.disposition is ResponseDisposition.ACKNOWLEDGED:
             if self.waiver_scope is not None or self.waiver_expiry is not None:
                 raise ProtocolValueError(invalid)
-        elif self.disposition is ResponseDisposition.REJECTED:
+        elif self.disposition in {
+            ResponseDisposition.PROVENANCE_DISPUTED,
+            ResponseDisposition.REJECTED,
+        }:
             if (
                 self.reason is None
                 or self.waiver_scope is not None

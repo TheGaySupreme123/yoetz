@@ -88,7 +88,8 @@ do not turn routine file mechanics into obligations.
         "description": "Replace with the outcome this work owes",
         "acceptance_criteria": "Replace with an observable acceptance criterion",
         "evidence_expectation": "Replace with the named test, reviewed diff, or other evidence",
-        "status": "open"
+        "status": "open",
+        "requested_items": [{"item_kind": "command", "value": "pytest -q"}]
       },
       "artifact_refs": [],
       "evidence_refs": []
@@ -106,6 +107,11 @@ do not turn routine file mechanics into obligations.
 The two drafts above cover `plan_published` and `obligation_published`. The next seven requests
 show the remaining ordinary families. Replace the frontier in each; the genesis values only keep
 each standalone example schema-valid.
+
+`requested_items` declares the material items the obligation asks for; each entry is an object
+whose `value` is the exact item string. When you later attempt an item, copy that exact `value`
+string into `attempted_items` on the `action_recorded` event that attempted it — see the action
+template below. Matching is exact: do not normalize, reorder words, or paraphrase.
 
 ### Alternate `plan_published`: explicitly no obligations
 
@@ -172,6 +178,12 @@ reason beside nonempty `obligation_refs`.
 
 ## `publish_work`: decision
 
+`authority` is a structural actor identifier matching `^[A-Za-z0-9._:-]{1,128}$` — it names the
+actor who exercised the authority (for example `user:shay` or `harness:cli`), exactly as an
+`actor_id` does. It is never a sentence describing the approval; put the approval story in
+`rationale` or `statement`. A value that merely satisfies the pattern but names no real actor is
+still wrong on the record.
+
 ```json
 {
   "protocol_version": "0.1", "schema_version": "1.0.0",
@@ -197,6 +209,14 @@ reason beside nonempty `obligation_refs`.
 
 ## `publish_work`: action
 
+`action_kind` is a closed enum: `command`, `edit`, `research`, `review`, or `other`. A source or
+file modification is `edit` — there is no `code_change` value — and `command` additionally
+requires the `command` field.
+
+`attempted_items` belongs to `action_recorded.payload` only; no other family admits it, and the
+claim payload in particular stays closed. Each entry copies one attempted obligation
+`requested_items` entry's exact `value` string, as in the pairing below.
+
 ```json
 {
   "protocol_version": "0.1", "schema_version": "1.0.0",
@@ -211,7 +231,8 @@ reason beside nonempty `obligation_refs`.
     "payload": {
       "action_id": "act_00000000-0000-4000-8000-000000000001",
       "action_kind": "command", "command": "pytest -q",
-      "description": "Replace with the material action summary"
+      "description": "Replace with the material action summary",
+      "attempted_items": ["pytest -q"]
     },
     "artifact_refs": [], "evidence_refs": []
   }],
@@ -219,6 +240,10 @@ reason beside nonempty `obligation_refs`.
   "client": {"kind": "cooperative_agent", "version": "0.1.0", "integration": "cooperative_mcp"}
 }
 ```
+
+The `attempted_items` entry above repeats the obligation template's
+`requested_items[0].value` byte for byte. Publish it on the action that attempted the item —
+including a failed attempt — so the receipt can account for every requested item.
 
 ## `publish_work`: result
 
@@ -279,6 +304,11 @@ reason beside nonempty `obligation_refs`.
 ```
 
 ## `publish_work`: claim
+
+The claim payload is closed: it admits `claim_id`, `claim_kind`, `disputes_refs`,
+`obligation_refs`, `statement`, `subject_state`, and `supporting_refs` — never `attempted_items`,
+which lives on `action_recorded`. Link the obligations a claim answers with `obligation_refs` and
+its evidence with `supporting_refs`.
 
 ```json
 {
@@ -421,8 +451,10 @@ erases the finding.
 
 ## `receipt`
 
-Read `status.closure_readiness` before requesting a receipt. Keep the final claim no stronger than
-the returned coverage, freshness, unresolved findings, and limitations.
+Read `status.closure_readiness` before requesting a receipt. Respond while
+`findings_unanswered` is present. A remaining `receipt_findings_unresolved` condition is a permanent
+conclusion bound, not a reason to respond again; request the receipt and keep the final claim no
+stronger than its conclusion, coverage, freshness, receipt-blocking findings, and limitations.
 
 ```json
 {

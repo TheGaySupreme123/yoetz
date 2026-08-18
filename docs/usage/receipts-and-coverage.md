@@ -119,10 +119,13 @@ claim, dispute with evidence, or state an unresolved limitation. Then recheck af
 A response never deletes the original challenge. That is the point — the record keeps the
 disagreement visible.
 
-No disposition resolves a finding. `acknowledged`, `rejected`, and `waived` each record what was
-decided and what evidence was attached; none of them clears the finding for receipt purposes. Every
-actionable finding recorded in a task keeps the receipt conclusion at `unresolved_findings_remain`,
-even after later checks return no findings at all.
+No disposition resolves a finding. Agents can record `acknowledged`, `provenance_disputed`, or
+`rejected`; `waived` is reserved for an authorized local-CLI human. Each records what was decided
+and what evidence was attached; none clears the finding for receipt purposes. A readable response
+does clear the status surface's `unanswered_finding_count`, while the actionable finding remains in
+`receipt_blocking_finding_count`. Every actionable finding recorded in a task therefore keeps the
+receipt conclusion at `unresolved_findings_remain`, even after later checks return no findings at
+all.
 
 Repairing the record is still worth doing — it stops the next check from firing the same rule, and
 it shows a reader what was done — but a task that fired an actionable finding does not go on to
@@ -141,5 +144,7 @@ and the check contributes nothing until it is re-run at the current frontier. `s
 rule, so status and a receipt at the same frontier never disagree about what was checked.
 
 The cheapest finding is the one that never fires. Before the first `check`, confirm that every
-requested item has an exact `attempted_items` entry, that every claim has linked evidence, and that
-every open obligation is either resolved or deliberately left open with a stated reason.
+requested item has an exact `attempted_items` entry on the `action_recorded` event that attempted
+it — `attempted_items` belongs to that family alone, never a claim, and each entry copies the
+obligation's `requested_items` `value` string exactly — that every claim has linked evidence, and
+that every open obligation is either resolved or deliberately left open with a stated reason.

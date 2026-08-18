@@ -102,14 +102,42 @@ unknown or hostile property names are never echoed. Closed reason tokens are:
   and the required peer are named; the authoring hint states the schema peer rule (e.g.
   `workspace_ref requires external_ref`) without echoing submitted values;
 - `conditional_field_required` — a root-level schema `if`/`then` (or equivalent closed object rule)
-  activated required alternatives (for example `start` with `mode` `attach` without `session_id`
-  or the paired external/workspace refs). Named fields are the safe required alternatives; the
-  authoring hint states the activating condition when it is a bounded schema const (e.g.
-  `mode attach requires …`).
+  activated required alternatives, or a selected const-discriminated `oneOf` branch has a missing
+  required peer (for example `start` with `mode` `attach` without `session_id`, or
+  `evidence_recorded` with `strength` `mutable_reference` without `reference`). Named fields are
+  the safe required alternatives; the authoring hint states the activating condition when it is a
+  bounded schema const (e.g. `mode attach requires …` or `strength mutable_reference requires
+  reference`).
 
 These object-rule tokens are projected only from checked-in schema metadata and validator kind —
 never from caller-controlled keys or free-form exception text. Unrecognized object rules degrade
 to a bounded generic `INVALID_REQUEST` without inventing field pointers.
+
+For an `extra_forbidden` payload rejection whose unknown key is a known field with exactly one
+legal owning event family among the ordinary `publish_work` families, `safe_details` additionally
+carries a flat bounded repair fact (issue #266): `repair_kind` (always `field_ownership`),
+`repair_field`, `repair_selected_family`, `repair_owning_family`, and `repair_template_uri`
+(always `yoetz://guidance/request-templates.md`), merged into the same ASCII key order. The
+request stays rejected; the field is never moved or reinterpreted. The field name is admitted only
+when it byte-equals a frozen catalogued payload property name (a caller-invented key can never
+match), both family names come from an import-gated registry derived from the frozen `publish_work`
+presentation schema, and ownership is asserted only when it is unique — ambiguous fields (for
+example `statement`, `summary`), draft-envelope keys (`evidence_refs`, `artifact_refs`), fields
+owned by another version of the selected family, and unknown keys all retain the plain
+admitted-key answer. The same fact is repeated as one bounded sentence in the authoring hint and
+as a `Repair:` clause on the compatible text summary channel, because MCP hosts are not required
+to surface `structuredContent`.
+
+Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
+drop `structuredContent`. A successful projection includes the first valid returned frontier's
+`sequence` and canonical `head_digest` when both are present. Generic successful operations also
+include any returned, kind-valid `task_id`, `session_id`, and `writer_id`; in particular, the
+`start` text alone carries the identifiers and frontier needed to author the next request. A
+`check` projection includes as many returned, kind-valid `finding_id` values as fit and reports a
+`+N more` remainder when any valid finding IDs do not fit, so the text fallback can author the
+required `respond` request. Caller-controlled prose, malformed identifiers, and malformed digests
+are never admitted to this text channel. A deterministic finding's structured `detail` may name
+only its closed policy facts and typed server IDs; it never copies ledger-authored prose.
 
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
@@ -190,6 +218,13 @@ the control error also carries `sequence`, `head_digest`, and `count` in `accept
 
 MCP resource discovery: `resources/list` serves the five `yoetz://guidance/*.md` entries and
 validates against the MCP `ListResourcesResult` schema (`tests/subprocess/test_mcp_resource_discovery.py`).
+A schema-valid list payload does not mean every host delivered it: some Codex builds reject
+`resources/list` with `Unexpected response type`. That error is not a missing Yoetz field:
+`rmcp 3.0.0` (the crate Codex `0.148.0-alpha.6` pins) decodes the live list payload as
+`ServerResult::ListResourcesResult` for the full registry shape and for the
+`title` / `annotations` / `size` / minimal (`uri`+`name`) subsets. Stripping optional
+resource fields therefore cannot change the typed variant. Step 0 names exact URIs and does
+not use list as a discovery step. A list failure is not a missing server.
 `resources/read` advertises the same registry `media_type` that `resources/list` serves as
 `mimeType`; it does not hardcode a markdown type.
 `resources/templates/list` answers method-not-found because no templates are declared and the
@@ -311,6 +346,20 @@ constructor validation is left-to-right in declared field order. The two helpers
 rather than accepting spoofed `__class__` or duck-typed objects.
 No arithmetic averaging exists anywhere.
 
+`known_gaps` remains an exact sorted-unique set with a 64-code wire bound. The ledger append
+boundary owns the corresponding task-global receipt-capacity invariant: before committing a
+proposed batch, it freezes the healthy-storage deterministic case for the proposed projection and
+unions its gap codes with the applicable check coverage, receipt applicability gaps, and every
+current retained finding coverage selected by the receipt successor rule. Exactly 64 distinct
+codes is admitted; a 65th distinct code rejects the whole batch atomically as `LIMIT_EXCEEDED`
+with `component=receipt_coverage`, `count`, and `limit=64`. Duplicate codes do not consume extra
+capacity, and comparison/order is ASCII byte order. No event, operation result, writer advance, or
+projection change from the rejected batch becomes durable. This admission failure reports a
+representational capacity limit, never caller-malformed `INVALID_REQUEST`, and it never truncates
+or lexically selects material gap identities. `weakest`, codecs, schemas, and receipt validation
+therefore retain their exact 64-code rule; append admission prevents a newly accepted healthy
+task state from requiring an unrepresentable receipt fold.
+
 ## 6. Actor and client types (`protocol/models.py` boundary; `domain/values.py` internal)
 
 - `ActorType`: `human`, `harness`, `logical_agent`, `model_backed_worker`, `delegated_subagent`,
@@ -423,12 +472,14 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   revision restates the effective current declaration: omission clears an earlier reason, and a
   present reason is valid only when applying the revision leaves zero effective obligation refs.
 - `response_recorded`: `finding_id`, `finding_frontier`, `disposition`
-  (`acknowledged`|`rejected`|`waived`), optional `reason`, optional `waiver_scope`, `waiver_expiry`,
-  `evidence_refs`.
+  (`acknowledged`|`provenance_disputed`|`rejected`|`waived`), optional `reason`, optional
+  `waiver_scope`, `waiver_expiry`, `evidence_refs`. `provenance_disputed` contests the finding's
+  authorship or provenance premise without rejecting its conclusion or resolving it.
 - `SubjectStateRef`: optional `tree_digest`, `diff_digest`, `described_state` — binds evidence
   and claims to repository/artifact state for freshness checks.
 
-`reason` MAY be omitted for `acknowledged` and MUST be non-empty for `rejected` or `waived`.
+`reason` MAY be omitted for `acknowledged` and MUST be non-empty for `provenance_disputed`,
+`rejected`, or `waived`.
 Waiver-only fields are forbidden on other dispositions. `finding_frontier` is always the full
 domain `Frontier`, even when the public request supplied only its canonical sequence string.
 
@@ -437,7 +488,8 @@ already present on the response. The nominal enum is owned by `domain/findings.p
 subject/obligation/project waivers are deferred. A waiver
 is accepted only from an interactive `local_cli` request constrained as a human and explicitly
 confirmed at the prompt; MCP, importer, noninteractive CLI, and model-backed actors may acknowledge
-or reject with evidence but may not waive. `waiver_expiry` may further narrow that one-finding
+or dispute provenance, and may reject with evidence, but may not waive. `waiver_expiry` may further
+narrow that one-finding
 scope. This is authorization policy, not a caller-asserted actor upgrade.
 `ResponseDisposition` is likewise nominally owned by `domain/findings.py` and reused by event and
 receipt records.
@@ -532,7 +584,8 @@ summary, detail, subject_refs: tuple[event/obligation/claim ids], policy_id, pol
 subject_frontier, coverage: Coverage, provenance: SemanticProvenance | None)`.
 
 `FindingOrigin` is the nominal enum `deterministic|semantic_model_derived` and
-`ResponseDisposition` is the nominal enum `acknowledged|rejected|waived`; both are owned here.
+`ResponseDisposition` is the nominal enum
+`acknowledged|provenance_disputed|rejected|waived`; both are owned here.
 `domain/findings.py` also solely owns the finalized, receipt-bound `SemanticProvenance` and its
 schema-shaped `SamplingParams`, `TokenUsage`, `CostFields`, `SemanticDispatchKind`, and
 `SemanticFailureClass` values
@@ -570,9 +623,22 @@ Work-integrity finding kinds (`FindingKind`):
 `failed_work_omitted`, `claim_without_admissible_evidence`, `result_without_action`,
 `action_without_result`,
 `stale_evidence_for_changed_state`, `contradictory_claims_unresolved`,
-`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow rejection/waiver).
+`ledger_stale_or_incomplete`, `weak_or_stale_response` (flags a hollow or stale rejection/waiver).
 Research/evidence-assessment kinds: `evidence_does_not_support_claim`, `diff_does_not_match_account`,
-`material_limitation_omitted`, `questionable_finding_rejection`.
+`material_limitation_omitted`, `questionable_finding_rejection` (flags a current hollow
+rejection/waiver of a deterministic finding).
+
+Those two response predicates overlap on one case: a current rejection or waiver of a
+deterministic finding whose support is inadmissible under both packs' evidence criteria. Each pack
+is a closed rule table that cannot observe the other, so both still report it. The check
+composition layer resolves the overlap, dropping `weak_or_stale_response` only when
+`questionable_finding_rejection` was actually produced for the same finding and response event in
+the same run, so one response yields one actionable finding.
+
+The collapse is keyed on the assessment research-evidence really emitted, not on re-deriving its
+predicate. When that pack is deselected via `policy_packs`, excluded by scope, skipped as
+materially unavailable, or fails, `weak_or_stale_response` stands, so a hollow rejection is never
+lost to a pack that did not run. Selecting a single pack therefore yields that pack's own view.
 
 The ownership partition is exhaustive and disjoint: the first ten kinds belong to the built-in
 `work-integrity/0.1.0` pack, and the latter four belong to the built-in
@@ -761,6 +827,13 @@ deciding between the two, shared by the receipt and by compact status coverage.
   `freshness` folds staleness under the same supersession rule as
   `kernel/reducers.invalidates_recorded_check`: a readable `response_recorded` answering a finding
   in `latest_tested_state.returned_finding_ids` never by itself marks the ledger stale.
+  `freshness` is a function of carried state alone, never of which event is being folded. Its
+  precedence is unchanged — genesis, `redacted_*` markers, `unknown_event:`/`missing_ref:` markers,
+  supersession — and below those it reports `latest_tested_state.coverage.ledger_freshness`, so a
+  check that recorded `partial` holds the scalar at `partial` for as long as it is the retained
+  check. Only supersession, a redaction removing that check, or a later check replacing it moves
+  the scalar off that value. The scalar therefore cannot read cleaner than the coverage of the
+  very check reported beside it (issue #307).
   `CurrentPlanScope` and `current_plan_scope`, owned by `kernel/plan_scope.py`, are the one shared
   readable-plan-chain derivation consumed by status, check, and receipt: effective obligation refs,
   their declared count, and the current `no_obligations_reason`. A revision applies its obligation
@@ -953,7 +1026,9 @@ deciding between the two, shared by the receipt and by compact status coverage.
   replayable — the same membership rule that `load_projection` and `query_projection` apply);
 - `load_projection(session_id, view) -> StoredProjection | None` (cache/rebuild use);
 - `load_case_availability(session_id, frontier, projection) -> CaseAvailabilityFacts` (shared bounded
-  event/captured-object availability snapshot for case construction);
+  event/captured-object availability snapshot for case construction; an exact live projection is
+  accepted, while a historical projection must equal the genesis-prefix replay at its frontier and
+  may trail the live head only across an observation-authored, finding-free suffix);
 - `query_projection(query: ProjectionQuery) -> ProjectionPage` (bounded public status use);
 - `freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest) ->
   FrozenCase | CheckCommitResult`;
@@ -987,8 +1062,10 @@ an internal failure, never caller-side `INVALID_REQUEST`. The application calls
 `complete/terminal` with a durable bounded error result, same-request replay returns that error,
 and a fresh check identity remains admissible at the unchanged frontier. SQLite commits the
 in-memory oracle state and durable rows atomically: a failed persistence sync restores the prior
-oracle state. `awaiting_human` and retryable ownership conflicts remain pending and never use this
-terminalization path.
+oracle state, while a successful copy-on-write commit adopts the clone into the stable state object
+so an in-flight oracle's final revalidation observes every durable concurrent append.
+`awaiting_human` and retryable ownership conflicts remain pending and never use this terminalization
+path.
 `ports/ledger.py` owns the shared closed enums: `OperationKind` is
 `start|publish_work|check|respond|receipt`; `OperationState` is `pending|complete|quarantined`;
 `CheckPhase` is `reserved|local_ready|semantic_wait|ready_to_finalize|terminal`;
@@ -1071,11 +1148,18 @@ next step.
 last_ingestion_sequence: int | None, result_object_ref: ObjectRef | None,
 structural_ids: tuple[str, ...])` requires both sequence fields absent or both present and ordered;
 `structural_ids` is sorted unique and has at most `MAX_EVENTS_PER_BATCH + 1` members. Receipt
-replay uses this locator; it never scans an unbounded ledger or rebuilds the receipt.
+replay uses this locator; it never scans an unbounded ledger or rebuilds the receipt. A failed
+verified read of that stored object (tampered envelope, missing file, wrong key slot, or I/O
+while reading) is `STORAGE_CORRUPT` with the stored-receipt-invalid family, never unclassified
+`INTERNAL_ERROR`. Pre-append object `stage`/`finalize` I/O on a fresh receipt is retryable
+`STORAGE_UNSAFE` because nothing has committed.
 
 `freeze_case` uses one closed ordering for both adapters. For an absent operation: (1) a bounded
 prepare snapshot establishes absent idempotency, no pending import, `expected_frontier`, head `F`,
-active projection identity, and exact dependency revisions; (2) outside every write transaction,
+active projection identity, and exact dependency revisions; a caller frontier may trail `F` only
+across an ADR-022 observation-authored suffix, in which case the case freezes at `F` and a transient
+60-second in-memory acquisition reservation immediately defers observation appends; (2) outside
+every write transaction,
 the adapter snapshots `CaseAvailabilityFacts`, includes its canonical digest in `D`, pages the
 immutable accepted prefix through `F`, and builds the exact `DeterministicCase` from that same
 availability value; (3) only after the case exists, it canonicalizes, encrypts, and durably
@@ -1098,9 +1182,11 @@ nothing. SQLite uses the co-located importer rows; memory uses one shared task-s
 `append_batch` normally requires an exact task-global `expected_frontier`. A held frontier may be
 behind the head only when every intervening record is observation-authored under ADR-022's exact
 actor-id, actor-type, assurance, and channel predicate. The accepted batch still appends at and
-reports the real head. Any other intervening record conflicts. Observation appends receive
-retryable `OPERATION_PENDING` while a case for their session is frozen; check commit equality is not
-relaxed.
+reports the real head. For `operation_kind=receipt`, that suffix must additionally contain no
+`finding_recorded` event, so the pinned receipt cannot append past a finding it did not cover. Any
+other intervening record conflicts. Observation appends receive retryable `OPERATION_PENDING` while
+a check-acquisition reservation or frozen case for their session is active; check commit equality
+with the frontier actually frozen is not relaxed.
 
 `ProjectionView` is `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`,
 `evidence`, `history`, or `versions`. Application status also admits `view=operation` (operation
@@ -1138,7 +1224,11 @@ five seconds ahead of acceptance and `ahead_of_forward_skew_allowance` beyond it
 outside clock. Ordering remains ingestion sequence and caller time is never a sort or filter key.
 New check cases carry both clocks and this classification in their bounded frozen timelines;
 versions is one verified runtime manifest; compact uses exact structural counters and bounded
-summaries.
+summaries. The compact singleton's `freshness` follows the same weaker-of-two rule as the evidence
+view: it is the weaker of the projection scalar and the `ledger_freshness` of the applicable-check
+coverage reported in the same item, so the summary line an agent reads can never claim the ledger
+is cleaner than the coverage vector beside it. `StatusCompactItemModel` rejects the inverse
+(issue #307).
 
 Finding response does not resolve. The issue key is `(origin, policy_id, policy_version, kind,
 complete canonical subject_refs)`. A later same-key row supersedes the old and starts unresolved.
@@ -1422,7 +1512,9 @@ or paths. The daemon's control-plane watchdog samples event-loop lag from a plai
 appends `control_plane_saturation_entered`/`_persists`/`_cleared` records (component
 `service.daemon`) with those counts at a bounded cadence, so a starved control plane is diagnosed
 while it is happening rather than never (#238); sweep failures append
-`observation_sweep_failed`. The same `correlation_id` is attached to the raised
+`observation_sweep_failed`. A sweep-raised exception uses the unexpected-exception recorder so
+its bounded reason and origin survive; only an actual sweep deadline records
+`sweep_deadline_exceeded`. The same `correlation_id` is attached to the raised
 `ControlError` (and to the reduced publish acceptance envelope when that path is taken) so the
 agent-facing public error and the durable sink share one identity. The MCP bridge reuses a
 service-supplied id rather than minting a second one; only bridge-local failures without a
@@ -1496,10 +1588,10 @@ admission, resolves bounded shielded commits, closes provider/runtime handles, i
 generations, then reports `locked`. Resume never implies ready.
 
 `ServiceLifecycle.change_idle_relock_policy(proposed, proof)` is the only idle-policy mutation
-path. `IdleRelockPolicy` defaults to 900 seconds, accepts finite `60..86400`, and may use its
+path. `IdleRelockPolicy` defaults to 3600 seconds, accepts finite `60..86400`, and may use its
 internal `seconds=None` disabled state only after this method atomically consumes the exact
 vault-minted proof. The exception is scoped to the current service generation, is not persisted,
-and restart restores 900 seconds. Explicit, session-lock, suspend, and monitor-loss relock remain
+and restart restores 3600 seconds. Explicit, session-lock, suspend, and monitor-loss relock remain
 enabled when idle relock is disabled.
 
 Shared lifecycle/control values are `ServiceInstance`, `Admission`, `SessionSecurityEvent`
@@ -1520,8 +1612,12 @@ does not authenticate the current envelope reports `auto_unlock_stale`; structur
 or entry failures use the two other `auto_unlock_*` reasons. None reveals entry bytes, paths, or
 credential/policy state.
 After a soft lock (`idle_relock`, `user_session_locked`, `system_suspend`), the
-service may re-read the same scoped entry (or retry OS keyring) once before denying ordinary
-control with `vault_locked`. `explicit_lock`, `monitor_lost`, and hard `auto_unlock_*` /
+service may re-read the same scoped entry (or retry OS keyring) before denying ordinary
+control with `vault_locked`. When the credential succeeds but ready-application activation fails,
+the service preserves the soft-lock reason for up to three consecutive attempts so a later dispatch
+can retry; a fourth consecutive activation failure becomes terminal `unlock_failed`.
+The resulting `VAULT_LOCKED` error is retryable only while this automatic recovery path remains
+eligible. `explicit_lock`, `monitor_lost`, and hard `auto_unlock_*` /
 `passphrase_required` reasons do not take that path. The trusted unlock helper may submit the scoped entry through the
 confidential unlock ceremony without a TTY prompt when the entry is present.
 `ServiceStatus.state_reason=human_authority_unavailable` has exactly two valid combinations:
@@ -2379,9 +2475,10 @@ Independent verification support (local control, not MCP):
   discovers pending work at startup, drains one serialized check per workspace through the
   enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest
   never executes approved checks inside the hook RPC budget. Pure-ingress hook handlers declare
-  `"async": true` and never block a host tool call; handlers that return `additionalContext` or a
-  Stop `decision: block` stay synchronous with a declared 10-second budget, and `SessionEnd`
-  keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
+  `"async": true` only when the exact probed Codex version supports registration; older or unknown
+  hosts run them synchronously with the declared 10-second budget so no event is dropped. Handlers
+  that return `additionalContext` or a Stop `decision: block` stay synchronous with the same bound,
+  and `SessionEnd` keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
 
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
 The normalized locator is authenticated encrypted content; plaintext keeps only commitment and
@@ -2396,20 +2493,44 @@ Unrecognized visible events accept an opaque stable envelope plus encrypted cont
 `unsupported_event`; unknown semantics never infer success.
 
 Canonical normalization precedes materialization. Equivalent hook/stream host calls share logical
-identity, roles, operation digest, and stable ledger IDs. The logical-identity repository merges a
-two-bit source mask; duplicates retry incomplete content/store/ledger/verification/advice work
+identity, roles, operation digest, and stable ledger IDs. That canonical logical identity remains
+the content and ledger-dedup key. The durable repository claim is separately domain-scoped by the
+materialization mapping version and exact draft-role tuple, so phases of one host call with
+different materializations (for example pre-action versus paired action/result) cannot collide,
+while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
+The claim stores the source-independent materialization version, never the hook/stream cursor
+version (issue #309). Duplicates retry incomplete content/store/ledger/verification/advice work
 idempotently. Stream cursor advancement occurs only after outbox insertion. Session end is
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
 across workspace sessions under a nonblocking per-workspace lease; within one pass a
 `mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),
-and workspace-global rejections (`vault_locked`, disabled, paused) end the pass. A
-`service_unavailable` rejection is row-scoped: later rows are still attempted, and the pass yields
-after three consecutive such rejections. Local observation-store acquisition is capped at two
-seconds for both the process-local reentrant lock and the cross-process flock. Coordinator and
+and an ended unmapped session is terminally quarantined because no future mapping can deliver it,
+but only after atomically acquiring its lifecycle lock so an attach already in flight wins.
+Turn-boundary hooks retry auto-attach under a bounded budget and record a payload-free diagnostic
+when no mapping results. A status read against a mapping whose Yoetz session or writer was replaced
+classifies `SESSION_CONFLICT` and `SESSION_NOT_FOUND` as `mapping_stale`, not service unavailability:
+the hook preserves the mapping, tells the agent to call `start` again, and accepts only that
+successful `start` result as authority for replacement ids. `OPERATION_PENDING`, `BUNDLE_BUSY`, and
+`FRONTIER_CONFLICT` are transient status reads; vault and repository-privacy failures retain their
+distinct recovery advisories. The closed public-error table is exhaustive so a new code cannot
+silently inherit an unrelated advisory (issue #308). `observe status` retains the current and rotated
+hook-diagnostic history, but pairs every all-time reason count with `first_seen`, `last_seen`, and a
+count in the closed one-hour `window_seconds`; timings likewise date the all-time maximum and report
+a separate recent maximum. Unreadable or future timestamps remain retained but are never classified
+as recent, so a fixed historical failure cannot masquerade as live degradation (issue #310).
+Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
+A `service_unavailable` rejection retires that session's lane for the pass while other sessions
+remain eligible; no later row may step over a failed lane head. Local observation-store acquisition is capped at two
+seconds for both the process-local reentrant lock and the cross-process flock. Hook timing rows
+attribute that queueing as `store_lock_wait`, cover the previously unwindowed resolve/deliver
+regions, and name any remaining wall-time difference as `unattributed`; nested store sub-stages are
+reported separately from the end-to-end partition (issues #310 and #311). A conflicting
+logical-identity claim rejects and quarantines only its own envelope as `dedup_conflict`; it does
+not establish bundle corruption or arm the session latch (issue #309). Coordinator and
 sweeper calls use separate bounded executors, so cancellation cannot strand an exit-blocking flock
 wait or exhaust the shared default executor. `observation_storage_corrupt` is terminal for its Codex
-session in the current READY generation: the coordinator remembers that session after the first
-bundle `STORAGE_CORRUPT`, later ingests are rejected without reopening the bundle, and the sweeper
+session in the current READY generation: the coordinator remembers that session only after a
+bundle-level `STORAGE_CORRUPT`, later ingests are rejected without reopening the bundle, and the sweeper
 atomically moves that session's pending backlog to quarantine while healthy lanes continue. A new
 READY generation clears the in-memory suppression and permits one recovery probe. A successful
 probe removes that session from the local corruption set and resolves the workspace corruption gap
@@ -2418,7 +2539,10 @@ budget, and by a 14-day age measured from a store-authored
 quarantined-at time behind the trusted-clock epoch fence; an operator can drop it explicitly with
 `yoetz observe reclaim`. Every drop — cap, age, or reclaim — retains aggregate commitment, count
 (evictions and reclaims counted separately), first/last receipt times, and
-`quarantine_detail_evicted`.
+`quarantine_detail_evicted`. The `truncated_payload` gap is live rather than permanent: a later
+save resolves its active flag only when that save evicts nothing and leaves one-eighth of the state
+budget free. Merely landing under the cap cannot clear the same loss it just recorded; the durable
+gap history remains after recovery, and renewed shedding reactivates it (issue #310).
 
 Routine-read materialization follows ADR-022's rate policy. A service-owned structural
 `action=routine_read` label is derived only for the closed direct-read tool set or a conservatively
@@ -2432,12 +2556,18 @@ The local observation state also owns a sparse, one-shot `FrontierMotionNotice` 
 `from_sequence`, `to_sequence`, final `head_digest`, and exact accepted observation-record count.
 A newly accepted observation append creates it. Idempotent replay of a completed append
 reconciles a missing pending notice from that append's committed frontier metadata; a still-pending
-notice is coalesced rather than duplicated. The mapping is capped and drops ended-session entries
-before serialization; a malformed stored value is ignored as empty. Contiguous pending notices
-coalesce, and an advice-safe `PostToolUse` hook consumes the exact notice only after emitting its
-bounded agent context. This context is informational: it neither weakens exact-frontier checks
-nor expands the ADR-022 predicate that permits a cooperative publish to retain a stale frontier
-across observation-authored records.
+notice is coalesced rather than duplicated. After the hook consumer receives the notice bytes, the
+store keeps that session's delivered high-water `to_sequence`, scoped to the announced task
+ledger. A later replay at or behind that mark is dropped; an overlapping candidate is clamped so
+`from` and record count cover only the undelivered remainder. A mark recorded for a different
+task never suppresses or clamps: when the session's mapping moves to another task, the stale
+mark and any pending notice for the old task are discarded and announcements restart from the
+new ledger's motion. The notice and delivered-mark maps are capped and drop ended-session
+entries before serialization; a malformed stored value is ignored as empty. Contiguous pending
+notices coalesce, and an advice-safe `PostToolUse` hook consumes the exact notice only after
+emitting its bounded agent context. This context is informational: it neither weakens
+exact-frontier checks nor expands the ADR-022 predicate that permits a cooperative publish to
+retain a stale frontier across observation-authored records.
 
 `hook_observed` (publication channel and artifact-observation class) and `harness_observed`
 authorship require real observation evidence under an active consented observation arm — never a
@@ -2595,6 +2725,12 @@ pathname rollback that could race a concurrent replacement.
 installed and enabled and its installed-version cache tree to match the managed source bytes;
 marketplace/config presence alone remains `installed_not_activated`. This is standing trust for
 future sessions, not proof that a session loaded a hook or delivered observation evidence.
+The managed hook tree is selected from the exact activation probe version. Pure-ingress command
+hooks use `"async": true` only from Codex `0.148.0-alpha.6`; older, missing, malformed, or
+oversized versions use the bounded synchronous form because affected Codex hosts otherwise discard
+the handlers. The version-specific source marker and cache bytes are included in the existing
+preview/source digests, and apply refuses a variant transition until the intended managed source
+tree is installed.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
 `HarnessMcpPort` methods are `status_registration`, `observe_registration`, `preview_registration`,
 and `apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,
@@ -2708,23 +2844,28 @@ per operation: `start`, `publish_work`, `check`, `respond`, `status`, `receipt`,
 `PublicOperationError`.
 
 Every `status` success carries `closure_readiness(open_obligation_count,
-unresolved_finding_count, declared_obligation_count, no_obligations_reason,
-blocking_conditions)` beside `import_status`, on every view. `unresolved_finding_count` counts
-recorded findings with no recorded response, whatever the response's disposition; a rejection or
-waiver answers the finding on the record and its own quality surfaces as a later finding. The compact singleton carries the same
-two completion-scope fields beside its current plan locator and counters. Its
-`blocking_conditions` are exactly
-`obligations_open|findings_unresolved|no_plan_published|no_obligations_declared|projection_stale|
-coverage_gaps_declared|readiness_unknown`. It is derived per request from the compact projection:
-reading it records
-nothing, creates no verdict or IDs, and never strengthens coverage. It exists so a check or receipt
-is not spent before the record can support a conclusion.
+unanswered_finding_count, receipt_blocking_finding_count, declared_obligation_count,
+no_obligations_reason, blocking_conditions)` beside `import_status`, on every view.
+`unanswered_finding_count` counts recorded findings with no recorded response, whatever a later
+response's disposition; a rejection, waiver, or provenance dispute answers the finding on the
+record and its own quality surfaces as a later finding. `receipt_blocking_finding_count` selects the
+newest readable finding per receipt issue key and counts the actionable ones. It never decreases
+merely because a response was recorded: every receipt finding state remains `resolved=false`.
+The compact singleton carries the same two completion-scope fields beside its current plan locator,
+both counters, and an `unanswered_findings` preview. Its `blocking_conditions` are exactly
+`obligations_open|findings_unanswered|receipt_findings_unresolved|no_plan_published|
+no_obligations_declared|projection_stale|coverage_gaps_declared|readiness_unknown`. It is derived
+per request from the compact projection: reading it records nothing, creates no verdict or IDs, and
+never strengthens coverage. `findings_unanswered` identifies response work still to do;
+`receipt_findings_unresolved` is a persistent conclusion bound, not an instruction to respond
+again. Once every readable finding is answered, the latter condition remains and tells the caller
+that a receipt may be requested but cannot conclude `no_unresolved_deterministic_findings`.
 
 No plan yields `no_plan_published`. A readable effective plan with declared count zero and no reason
 yields `no_obligations_declared`; the same count with a typed reason clears that blocker while the
 reason remains visible. A positive declared count has no completion-scope blocker when all effective
 obligations are resolved. Compact omits its singleton when the task title is unreadable. Readiness
-never fills an unreadable scope or count with zeros: all three counts and the reason are then `null`,
+never fills an unreadable scope or count with zeros: all four counts and the reason are then `null`,
 and `blocking_conditions` is exactly `("readiness_unknown",)`. Unknown is a bounded state, not a
 default. Existing stale, unknown-event, missing-reference, redaction, and coverage-gap blockers
 remain conservative.
@@ -2858,10 +2999,15 @@ facade and are never MCP tools.
   composed at runtime from user, task, provider, or environment values. Shared values are
   `ToolDescriptor`, `TOOL_DESCRIPTORS` (frozen `policy|strict` sets, each in the same order
   `tools/list` returns), `TOOL_DESCRIPTOR_DIGESTS`, `TOOL_DESCRIPTOR_SET_DIGEST`,
-  `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`, and
-  `PRESENTATION_INPUT_SCHEMA_BUDGETS`. Initialize `instructions` concatenate the packaged
-  `agent-instructions.md`, `workflow.md`, and `coverage-and-receipts.md` documents in that order,
-  then the route-profile suffix. `ToolDescriptor.input_schema` is the tools/list presentation
+  `INITIALIZE_GUIDANCE_URIS`, `server_instructions()`, `ORDINARY_MCP_PUBLISH_EVENT_FAMILIES`,
+  `PRESENTATION_INPUT_SCHEMA_BUDGETS`, `SERVER_INSTRUCTIONS_BUDGET`, `ADVERTISED_SURFACE_BUDGET`,
+  and `advertised_surface_metrics()`. Initialize `instructions` carry the packaged
+  `agent-instructions.md` document and then the route-profile suffix; every other guidance document
+  is fetched on demand through `resources/read` or `read_guidance`. A host may charge the
+  `instructions` string once per advertised tool — Codex copies it into every tool `description` —
+  so `SERVER_INSTRUCTIONS_BUDGET` bounds that string per route profile and
+  `ADVERTISED_SURFACE_BUDGET` bounds the aggregate of instructions-per-tool plus every description
+  plus every advertised input schema (issue #300). `ToolDescriptor.input_schema` is the tools/list presentation
   projection (inlined common shapes, ordinary publish event families, minimal examples), preserving
   every catalogued schema-version branch for each advertised ordinary event family. Every shipped
   worked example validates against that presentation schema as well as catalog admission;
@@ -2879,9 +3025,12 @@ facade and are never MCP tools.
   the exact sufficient coverage.
 - `mcp/resources.py`: exposes the packaged harness-neutral guidance documents as MCP resources under
   stable `yoetz://guidance/<name>` URIs for hosts that return the resource text. Initialize
-  `instructions` always carry `agent-instructions.md`, `workflow.md`, and
-  `coverage-and-receipts.md`. A conformant `resources/read` payload does
-  not mean the host delivered those bytes to the model; an empty body is not a fetch. First-party
+  `instructions` always carry `agent-instructions.md`, whose catalog paragraph names the other four
+  URIs and the `resources/read` → `read_guidance` → installed-copy chain that reaches them. A
+  conformant `resources/read` payload does
+  not mean the host delivered those bytes to the model; an empty body is not a fetch. A
+  schema-valid `resources/list` payload likewise does not mean the host accepted the list; some
+  Codex builds reject it with `Unexpected response type`. First-party
   skill install places the same files on disk as `references/<name>.md` beside the skill. Resources
   are static reviewed product bytes read through `importlib.resources` and digest-checked against
   the resource manifest; the registry

@@ -12,9 +12,12 @@ Publish one batch per material transition, roughly one to eight events. A normal
 
 State-sensitive families require `expected_frontier`. Read it from `status` and include it in the
 batch; omitting it returns retryable `expected_frontier_required` without writing an operation.
-The guard is task-scoped but tolerates a held frontier when every intervening record is
-observation-authored; the batch then appends at the real head. Any intervening cooperative or
-imported record still conflicts, so refresh `status` rather than guessing a replacement frontier.
+The guard is task-scoped. Publication tolerates a held frontier when every intervening record is
+observation-authored and then appends at the real head. Check acquisition applies the same suffix
+predicate but freezes the case at that real head. Receipt may instead stay pinned to the supplied
+frontier only when it names the exact ledger prefix and the observation-authored suffix contains no
+finding; its append repeats that finding-free check. Any other motion conflicts. Use the returned
+repair facts for a retry rather than guessing a replacement frontier.
 
 These are not publishable transitions: reading or searching, running a command whose result you already expect, formatting, regenerating a derived file, repeating a status read, or republishing state that has not changed since the last accepted event. When in doubt, ask whether an independent reader of the ledger alone would conclude something different without the fact.
 
@@ -126,6 +129,25 @@ public error names the mismatched schema field names only — never their values
 resolution pair lives in the `publish_work` tool input schema `examples` entry. Complete request
 bodies remain available at `yoetz://guidance/request-templates.md` if a host drops schema examples.
 
+## Requested items and attempt accounting
+
+<a id="attempt-accounting"></a>
+
+An obligation's `requested_items` entries are objects; each entry's `value` is the exact item
+string the obligation asks for. Attempt accounting for those items lives in exactly one place:
+`attempted_items` on `action_recorded.payload`. No other family admits the field — a claim in
+particular never carries it; claims link evidence with `supporting_refs` and obligations with
+`obligation_refs`.
+
+When you attempt a requested item, copy its exact `value` string — unnormalized, unparaphrased —
+into `attempted_items` on the `action_recorded` event that attempted it, whether or not the
+attempt succeeded. A requested item with no matching attempted entry is reported as never
+attempted, so dropping the field to satisfy a validator silently erases the attempt record.
+Two more structural payload rules travel on their own families: `decision_recorded.authority`
+is a structural actor id (never approval prose — that belongs in `rationale`), and `action_kind` is
+the closed enum `command`, `edit`, `research`, `review`, `other`, where source or file
+modification is `edit`.
+
 ## Subject state and freshness
 
 Bind change-sensitive evidence to the exact subject state or frontier it concerns. If a material dependency changed or its state is unknown, mark the evidence stale or limited. Absence of visible source is not evidence that nothing changed.
@@ -201,7 +223,7 @@ Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, o
 
 ### Code change
 
-Publish one obligation for the behavior, one material implementation result, a bounded changed-symbol digest or excerpt, and focused test evidence. Do not publish the repository or every edit.
+Publish one obligation for the behavior, one material implementation result, a bounded changed-symbol digest or excerpt, and focused test evidence. The implementing action uses `action_kind: edit` and carries the exact `attempted_items` values for the requested items it attempted. Do not publish the repository or every edit.
 
 ### Research
 

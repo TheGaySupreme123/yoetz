@@ -158,6 +158,12 @@ def observe_status(
         store, commitment, state_root=_state
     )
     quarantine_depth, quarantine_evicted, quarantine_reclaimed = store.quarantine_facts(commitment)
+    # Per-reason depth, so a destroyed-and-replaced-by-gap event (e.g. cursor_stale, #272)
+    # is visible as its cause instead of hiding inside one opaque depth number.
+    quarantine_causes: dict[str, int] = {}
+    for entry in store.list_quarantine(commitment):
+        quarantine_causes[entry[2]] = quarantine_causes.get(entry[2], 0) + 1
+    quarantine_causes = dict(sorted(quarantine_causes.items()))
     plugin_activation = _activation_state(
         root,
         codex_path=codex_path,
@@ -206,6 +212,7 @@ def observe_status(
                 "delivery_causes": delivery_causes,
                 "last_successful_drain": last_drain,
                 "quarantine_count": quarantine_depth,
+                "quarantine_causes": quarantine_causes,
                 "quarantine_evicted_count": quarantine_evicted,
                 "quarantine_reclaimed_count": quarantine_reclaimed,
                 "mapping_present": mapping_present,
@@ -226,7 +233,9 @@ def observe_status(
             f"last successful drain: {last_drain})"
         ),
         "quarantine": (
-            f"{quarantine_depth} (evicted: {quarantine_evicted}; "
+            f"{quarantine_depth} (cause: "
+            f"{','.join(f'{key}={value}' for key, value in quarantine_causes.items()) or 'none'}; "
+            f"evicted: {quarantine_evicted}; "
             f"reclaimed: {quarantine_reclaimed}; "
             f"{reclaim_guidance})"
             if quarantine_depth or quarantine_evicted or quarantine_reclaimed

@@ -218,27 +218,87 @@ async def test_drain_deadline_fails_instead_of_claiming_locked() -> None:
 
 
 def test_idle_policy_is_closed_and_restart_default_is_safe() -> None:
-    assert IDLE_STOP_SECONDS == 1_800
-    assert IdleRelockPolicy().seconds == 900
+    assert IDLE_STOP_SECONDS == 7_200
+    # Relock must stay strictly below the process-idle stop so the cheap in-process soft lock
+    # is always the first containment reached (#291).
+    default_seconds = IdleRelockPolicy().seconds
+    assert default_seconds == 3_600
+    assert default_seconds is not None and default_seconds < IDLE_STOP_SECONDS
     assert IdleRelockPolicy(None).canonical_value() == {"mode": "disabled"}
     with pytest.raises(ValueError, match="idle_relock_policy_invalid"):
         IdleRelockPolicy(59)
 
 
 @pytest.mark.anyio
-async def test_idle_stop_waits_for_client_disconnect_then_stops_after_thirty_minutes() -> None:
+async def test_idle_stop_waits_for_client_disconnect_then_stops_after_two_hours() -> None:
     clock = _Clock()
     lifecycle = _lifecycle(clock)
     await lifecycle.acquire_singleton()
     await lifecycle.transition(ServiceState.LOCKED)
     await lifecycle.client_connected()
-    clock.monotonic += 3_600.0
+    clock.monotonic += 8_000.0
     monitor = asyncio.create_task(lifecycle.run_idle_monitor(poll_seconds=0.001))
     await asyncio.sleep(0.01)
     assert not monitor.done()
 
     await lifecycle.client_disconnected()
-    clock.monotonic += 1_801.0
+    clock.monotonic += 7_201.0
+    await asyncio.wait_for(monitor, timeout=1.0)
+    assert lifecycle.state is ServiceState.DRAINING
+
+
+@pytest.mark.anyio
+async def test_note_activity_renews_the_idle_window_indefinitely() -> None:
+    """Quiescent activity evidence (e.g. resolved observation rows) defers relock forever,
+    while its absence still relocks one full window later (#291)."""
+
+    clock = _Clock()
+    lifecycle = _lifecycle(clock)
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.READY, vault_generation=1)
+    monitor = asyncio.create_task(lifecycle.run_idle_monitor(poll_seconds=0.001))
+    for _ in range(4):
+        clock.monotonic += 3_599.0
+        await lifecycle.note_activity()
+        await asyncio.sleep(0.005)
+        assert lifecycle.state is ServiceState.READY
+
+    clock.monotonic += 3_601.0
+    for _ in range(200):
+        await asyncio.sleep(0.005)
+        if lifecycle.state is ServiceState.LOCKED:
+            break
+    assert lifecycle.state is ServiceState.LOCKED
+    monitor.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await monitor
+
+
+@pytest.mark.anyio
+async def test_note_activity_also_holds_the_process_idle_lease() -> None:
+    """Quiescent activity evidence must defer the process stop, not only the relock.
+
+    The relock check is skipped entirely once the process-idle deadline passes, so if activity
+    renewed only the relock clock a live hook-fed workspace would still lose its daemon at
+    ``IDLE_STOP_SECONDS`` — trading the cheap soft lock that re-readies on the next ordinary call
+    for a full respawn, which is the containment ordering #291 exists to preserve.
+    """
+
+    clock = _Clock()
+    lifecycle = _lifecycle(clock, idle_stop_seconds=5.0)
+    await lifecycle.acquire_singleton()
+    await lifecycle.transition(ServiceState.READY, vault_generation=1)
+    monitor = asyncio.create_task(lifecycle.run_idle_monitor(poll_seconds=0.001))
+    # Four sub-deadline steps total far more than the 5 s stop: only a renewed process clock
+    # can keep the daemon alive across them.
+    for _ in range(4):
+        clock.monotonic += 4.0
+        await lifecycle.note_activity()
+        await asyncio.sleep(0.005)
+        assert lifecycle.state is ServiceState.READY
+        assert not monitor.done()
+
+    clock.monotonic += 6.0
     await asyncio.wait_for(monitor, timeout=1.0)
     assert lifecycle.state is ServiceState.DRAINING
 
@@ -250,7 +310,7 @@ async def test_connected_client_prevents_idle_relock() -> None:
     await lifecycle.acquire_singleton()
     await lifecycle.transition(ServiceState.READY, vault_generation=1)
     await lifecycle.client_connected()
-    clock.monotonic += 901.0
+    clock.monotonic += 3_601.0
     monitor = asyncio.create_task(lifecycle.run_idle_monitor(poll_seconds=0.001))
     await asyncio.sleep(0.01)
     assert lifecycle.state is ServiceState.READY

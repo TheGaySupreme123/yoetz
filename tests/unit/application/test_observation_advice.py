@@ -26,6 +26,7 @@ from yoetz.application.observation_coordinator import (
 )
 from yoetz.cli.observe_hooks import handle_observe
 from yoetz.domain.observation import (
+    AdviceSnapshot,
     ObservationCursor,
     ObservationEnvelope,
     ObservationLifecycle,
@@ -153,6 +154,81 @@ def test_standing_provider_condition_keeps_one_candidate_identity_as_envelopes_g
     # #241: the delivery identity is over what the agent actually receives, so
     # it must NOT move with the envelope stream the basis digest tracks.
     assert advice_delivery_identity(first) == advice_delivery_identity(latest)
+
+
+def test_callable_composition_is_resolved_freshly_on_every_build() -> None:
+    """The provider fact is recomputed per build, tracking live machine state (#265).
+
+    A READY-frozen fact kept advising connect_provider after the same mapped
+    session dispatched successfully. A per-build source lets current structural
+    usability retire the advice and credential revocation resurface it.
+    """
+
+    facts = [
+        ObservationCompositionFact(
+            semantic_configured=True,
+            semantic_ready=False,
+            provider_factory_ids=("fireworks",),
+            connected_provider_ids=(),
+        ),
+        ObservationCompositionFact(
+            semantic_configured=True,
+            semantic_ready=True,
+            provider_factory_ids=("fireworks",),
+            connected_provider_ids=("fireworks",),
+        ),
+        ObservationCompositionFact(
+            semantic_configured=True,
+            semantic_ready=False,
+            provider_factory_ids=("fireworks",),
+            connected_provider_ids=(),
+        ),
+    ]
+    builds: list[ObservationCompositionFact] = []
+
+    async def composition() -> ObservationCompositionFact:
+        fact = facts[len(builds)]
+        builds.append(fact)
+        return fact
+
+    class _Store:
+        def list_envelopes(self, workspace: str) -> tuple[ObservationEnvelope, ...]:
+            del workspace
+            return (_envelope("hook:one", {"tool_name": "shell"}),)
+
+        async def status(self, query: ObservationStatusQuery) -> ObservationStatus:
+            del query
+            return ObservationStatus(
+                ObservationLifecycle.ACTIVE,
+                _COMMITMENT,
+                {},
+                _TIME,
+                0,
+                (),
+                (),
+                None,
+            )
+
+        def load_advice_snapshot(self, workspace: str) -> None:
+            del workspace
+            return None
+
+    builder = ObservationAdviceContextBuilder(composition=composition)
+
+    def rule_codes(snapshot: object) -> tuple[str, ...]:
+        if snapshot is None:
+            return ()
+        assert isinstance(snapshot, AdviceSnapshot)
+        return tuple(item.rule_code for item in snapshot.ranked_items)
+
+    missing = asyncio.run(builder.build(_COMMITMENT, _Store()))  # type: ignore[arg-type]
+    connected = asyncio.run(builder.build(_COMMITMENT, _Store()))  # type: ignore[arg-type]
+    revoked = asyncio.run(builder.build(_COMMITMENT, _Store()))  # type: ignore[arg-type]
+
+    assert len(builds) == 3, "the composition source was not consulted on every build"
+    assert "provider_not_ready" in rule_codes(missing)
+    assert "provider_not_ready" not in rule_codes(connected)
+    assert "provider_not_ready" in rule_codes(revoked)
 
 
 def test_delivery_identity_is_stable_while_the_envelope_stream_grows() -> None:

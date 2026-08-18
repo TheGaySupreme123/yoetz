@@ -8,6 +8,7 @@ extras must keep their existing bounded behavior.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import cast
 
 import pytest
@@ -121,6 +122,64 @@ def test_nested_event_draft_enum_retains_existing_behavior() -> None:
     hint = authoring_hint(_PUBLISH_SCHEMA, locations)
     assert "action_kind admits" in hint
     assert secret not in hint
+
+
+def test_selected_payload_one_of_names_its_missing_co_required_field() -> None:
+    """A satisfied strength discriminator must not be re-reported as an enum failure (#306)."""
+
+    base = deepcopy(cast(dict[str, object], cast(list[object], _PUBLISH_SCHEMA["examples"])[0]))
+    draft = cast(dict[str, object], cast(list[object], base["event_drafts"])[0])
+    draft["schema"] = {"name": "evidence_recorded", "version": "1.1.0"}
+    draft["payload"] = {
+        "evidence_id": "evd_00000000-0000-4000-8000-000000000001",
+        "evidence_kind": "artifact",
+        "strength": "mutable_reference",
+        "observed_at": "2026-01-01T00:00:00.000Z",
+        "description": "bounded evidence description",
+    }
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate(base)
+
+    locations = safe_validation_locations(captured.value)
+    assert locations == (
+        {
+            "field": "/event_drafts/0/payload/reference",
+            "reason": "conditional_field_required",
+            "family": "evidence_recorded",
+            "family_version": "1.1.0",
+            "condition_field": "strength",
+            "condition_value": "mutable_reference",
+        },
+    )
+    message = invalid_request_message("publish_work", locations)
+    assert "strength mutable_reference requires reference" in message
+    assert "strength admits" not in message
+
+
+def test_unselected_sibling_branch_contract_is_never_projected() -> None:
+    """When const rejections cannot isolate one branch, no branch's contract is projected.
+
+    An extra key on the draft ``schema`` object leaves two live branches, so selection fails.
+    The projection must then degrade to the generic rule instead of recursing into a
+    discriminator-rejected sibling and misattributing its family version.
+    """
+
+    base = deepcopy(cast(dict[str, object], cast(list[object], _PUBLISH_SCHEMA["examples"])[0]))
+    draft = cast(dict[str, object], cast(list[object], base["event_drafts"])[0])
+    draft["schema"] = {"name": "evidence_recorded", "version": "1.1.0", "extra": "x"}
+    draft["payload"] = {
+        "evidence_id": "evd_00000000-0000-4000-8000-000000000001",
+        "evidence_kind": "artifact",
+        "strength": "mutable_reference",
+        "observed_at": "2026-01-01T00:00:00.000Z",
+        "description": "bounded evidence description",
+    }
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate(base)
+
+    locations = safe_validation_locations(captured.value)
+    assert all(item.get("reason") != "conditional_field_required" for item in locations)
+    assert all(item.get("family_version") != "1.0.0" for item in locations)
 
 
 def test_hostile_unknown_property_never_reaches_message_or_details() -> None:

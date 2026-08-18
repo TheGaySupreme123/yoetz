@@ -36,7 +36,7 @@ def test_schema_three_upgrade_applies_0004_tables(tmp_path: Path) -> None:
     db = _schema_three(source)
     assert db.execute("PRAGMA user_version").fetchone() == (3,)
     report = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
-    assert report.applied_versions == ("0004", "0005", "0006")
+    assert report.applied_versions == ("0004", "0005", "0006", "0007")
     expected = {
         "observation_inspection_snapshots",
         "observation_workspace_session_routes",
@@ -49,14 +49,14 @@ def test_schema_three_upgrade_applies_0004_tables(tmp_path: Path) -> None:
         )
     }
     assert expected <= actual
-    assert db.execute("PRAGMA user_version").fetchone() == (6,)
+    assert db.execute("PRAGMA user_version").fetchone() == (7,)
     assert db.execute(
         "SELECT value FROM bundle_meta WHERE key='storage_schema_version'"
-    ).fetchone() == ("6",)
+    ).fetchone() == ("7",)
     db.close()
 
     reopened = apsw.Connection(str(source))
-    assert reopened.execute("PRAGMA user_version").fetchone() == (6,)
+    assert reopened.execute("PRAGMA user_version").fetchone() == (7,)
     assert reopened.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     reopened.close()
 
@@ -64,7 +64,7 @@ def test_schema_three_upgrade_applies_0004_tables(tmp_path: Path) -> None:
 def test_failed_followup_migration_after_0004_rolls_back(tmp_path: Path) -> None:
     db = _schema_three(tmp_path / "rollback.sqlite3")
     run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
-    assert db.execute("PRAGMA user_version").fetchone() == (6,)
+    assert db.execute("PRAGMA user_version").fetchone() == (7,)
     # The synthetic follow-up must be the version *after* the real registry, so adding a
     # genuine migration does not turn this into a duplicate-version registry error.
     next_version = current_schema_version(BUNDLE_MIGRATIONS) + 1
@@ -79,5 +79,5 @@ def test_failed_followup_migration_after_0004_rolls_back(tmp_path: Path) -> None
         raise AssertionError("expected failing migration")
     except apsw.SQLError:
         pass
-    assert db.execute("PRAGMA user_version").fetchone() == (6,)
+    assert db.execute("PRAGMA user_version").fetchone() == (7,)
     assert db.execute("SELECT 1 FROM sqlite_schema WHERE name='must_rollback'").fetchone() is None

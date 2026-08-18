@@ -1463,6 +1463,110 @@ async def test_soft_lock_auto_ready_reopens_on_next_ordinary_dispatch(
 
 
 @pytest.mark.anyio
+async def test_transient_activation_failure_keeps_soft_reready_eligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A succeeded soft unlock whose activation fails transiently must stay retryable (#276).
+
+    One event-loop-lag blip during ready activation used to demote the service to a terminal
+    LOCKED(unlock_failed) that nothing ever reconsidered; the very next dispatch must retry
+    and succeed instead.
+    """
+
+    application = _Application()
+    vault = _PassphraseVault()
+    secret = b"correct horse battery staple!!"
+    vault.expect_secret(secret)
+    failures = {"remaining": 1}
+
+    async def factory(service_generation: int, vault_generation: int) -> _Application:
+        del service_generation, vault_generation
+        if failures["remaining"] > 0:
+            failures["remaining"] -= 1
+            raise RuntimeError("transient saturation")
+        return application
+
+    _patch_auto_unlock_store(monkeypatch, secret)
+    daemon = _soft_lock_daemon(tmp_path, factory=factory, vault=vault)
+    await daemon.start()
+    daemon._state_reason = "idle_relock"  # pyright: ignore[reportPrivateUsage]
+
+    rejected = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert rejected.outcome == "error"
+    assert isinstance(rejected.body, ControlError)
+    assert rejected.body.reason == "vault_locked"
+    assert rejected.body.retryable is True, "a transient activation failure must say retryable"
+    assert daemon.status().state is ServiceState.LOCKED
+    assert daemon.status().state_reason == "idle_relock", (
+        "the soft-lock reason survives so the next dispatch re-attempts auto-ready"
+    )
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert result.outcome == "ok"
+    assert daemon.status().state is ServiceState.READY
+    assert daemon.status().state_reason == "none"
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_repeated_activation_failures_degrade_to_terminal_unlock_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transient-failure allowance is bounded; a persistent fault still goes terminal."""
+
+    application = _Application()
+    vault = _PassphraseVault()
+    secret = b"correct horse battery staple!!"
+    vault.expect_secret(secret)
+
+    async def factory(service_generation: int, vault_generation: int) -> _Application:
+        del service_generation, vault_generation
+        raise RuntimeError("persistent activation fault")
+
+    _patch_auto_unlock_store(monkeypatch, secret)
+    daemon = _soft_lock_daemon(tmp_path, factory=factory, vault=vault)
+    await daemon.start()
+    daemon._state_reason = "idle_relock"  # pyright: ignore[reportPrivateUsage]
+    limit = daemon_module._SOFT_REREADY_ACTIVATION_RETRY_LIMIT  # pyright: ignore[reportPrivateUsage]
+
+    for _attempt in range(limit):
+        rejected = await daemon.dispatch(
+            ControlClientKind.MCP_BRIDGE,
+            _request(daemon, ControlMethod.START, _start_body()),
+        )
+        assert rejected.outcome == "error"
+        assert isinstance(rejected.body, ControlError)
+        assert rejected.body.retryable is True
+        assert daemon.status().state_reason == "idle_relock"
+
+    exhausted = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert exhausted.outcome == "error"
+    assert isinstance(exhausted.body, ControlError)
+    assert daemon.status().state_reason == "unlock_failed"
+
+    final_unlocks = vault.unlock_count
+    terminal = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+    assert terminal.outcome == "error"
+    assert isinstance(terminal.body, ControlError)
+    assert terminal.body.retryable is False, "a terminal lock must not claim to be retryable"
+    assert vault.unlock_count == final_unlocks, "terminal state stops burning unlock attempts"
+    assert application.start_calls == 0
+    await daemon.close()
+
+
+@pytest.mark.anyio
 async def test_explicit_lock_does_not_auto_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1687,24 +1791,226 @@ async def test_ready_maintenance_sweeps_immediately_repeats_and_cancels_before_c
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("stall", "expected"),
-    [(False, "sweep_failed"), (True, "sweep_deadline_exceeded")],
-)
+async def test_sweep_resolved_rows_defer_idle_relock_until_the_spool_runs_dry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live workspace whose hooks keep resolving observation rows outlives many idle windows
+    with the service still READY for check/receipt; once the spool runs dry the vault still
+    relocks one full window later (#291)."""
+
+    class _MutableClock:
+        monotonic = 10.0
+
+        def now_utc(self) -> datetime:
+            return datetime(2026, 7, 19, tzinfo=UTC)
+
+        def monotonic_seconds(self) -> float:
+            return self.monotonic
+
+    clock = _MutableClock()
+    resolving = True
+    sweeps = 0
+
+    async def sweep() -> ObservationDrainSummary:
+        nonlocal sweeps
+        sweeps += 1
+        resolved = 1 if resolving else 0
+        return ObservationDrainSummary(
+            attempted=resolved,
+            acknowledged=resolved,
+            retry_pending=0,
+            quarantined=0,
+            reasons=(),
+        )
+
+    application = _Application()
+    application.observation_sweep = sweep  # pyright: ignore[reportAttributeAccessIssue]
+    vault = _Vault()
+    vault.ready = False
+    ready_close_relay = daemon_module._ReadyCloseRelay()  # pyright: ignore[reportPrivateUsage]
+    lifecycle = ServiceLifecycle(
+        clock,  # pyright: ignore[reportArgumentType]
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+        close_ready_composition=ready_close_relay,
+    )
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+            ready_close_relay=ready_close_relay,
+        )
+    )
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INTERVAL_SECONDS", 0.005)
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS", 0.005)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    await daemon.activate_ready_application(7, 3)
+    monitor = asyncio.create_task(lifecycle.run_idle_monitor(poll_seconds=0.001))
+
+    # Three windows' worth of fake time with hooks resolving rows: never relocks.
+    for _ in range(3):
+        clock.monotonic += 3_599.0
+        target = sweeps + 2
+        for _ in range(400):
+            await asyncio.sleep(0.005)
+            if sweeps >= target:
+                break
+        assert daemon.status().state is ServiceState.READY
+
+    # Spool runs dry: the next full window with nothing resolved still relocks.
+    resolving = False
+    target = sweeps + 2
+    for _ in range(400):
+        await asyncio.sleep(0.005)
+        if sweeps >= target:
+            break
+    clock.monotonic += 3_601.0
+    for _ in range(400):
+        await asyncio.sleep(0.005)
+        if daemon.status().state is ServiceState.LOCKED:
+            break
+    assert daemon.status().state is ServiceState.LOCKED
+    assert daemon.status().state_reason == "idle_relock"
+    assert not vault.ready
+
+    monitor.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await monitor
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_retrying_observation_rows_never_defer_idle_relock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only resolution is liveness. A wedged or poisoned row re-appears in every single sweep,
+    so counting retries would let one such row hold the vault unlocked forever. Same timing as
+    the sibling test above, which stays READY because its rows acknowledge (#291)."""
+
+    class _MutableClock:
+        monotonic = 10.0
+
+        def now_utc(self) -> datetime:
+            return datetime(2026, 7, 19, tzinfo=UTC)
+
+        def monotonic_seconds(self) -> float:
+            return self.monotonic
+
+    clock = _MutableClock()
+    sweeps = 0
+
+    async def sweep() -> ObservationDrainSummary:
+        nonlocal sweeps
+        sweeps += 1
+        return ObservationDrainSummary(
+            attempted=1,
+            acknowledged=0,
+            retry_pending=1,
+            quarantined=0,
+            reasons=(),
+        )
+
+    application = _Application()
+    application.observation_sweep = sweep  # pyright: ignore[reportAttributeAccessIssue]
+    vault = _Vault()
+    vault.ready = False
+    ready_close_relay = daemon_module._ReadyCloseRelay()  # pyright: ignore[reportPrivateUsage]
+    lifecycle = ServiceLifecycle(
+        clock,  # pyright: ignore[reportArgumentType]
+        generation_store=_GenerationStore(),
+        process_start_identity_commitment="sha256:" + "2" * 64,
+        instance_id=_INSTANCE_ID,
+        singleton_lock_path=tmp_path / "service.lock",
+        close_ready_composition=ready_close_relay,
+    )
+
+    async def factory(_service_generation: int, _vault_generation: int) -> _Application:
+        return application
+
+    daemon = ServiceDaemon(
+        _composition=ServiceComposition(
+            lifecycle=lifecycle,
+            control_listener=_Listener(),  # pyright: ignore[reportArgumentType]
+            secret_ingress_listener=None,
+            human_control_listener=None,
+            human_control_service=None,
+            session_monitor=None,
+            vault=vault,
+            ready_application_factory=factory,
+            ready_close_relay=ready_close_relay,
+        )
+    )
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_INTERVAL_SECONDS", 0.005)
+    monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS", 0.005)
+    await daemon.start()
+    await daemon.composition.lifecycle.transition(ServiceState.UNLOCKING)
+    vault.ready = True
+    await daemon.activate_ready_application(7, 3)
+    monitor = asyncio.create_task(lifecycle.run_idle_monitor(poll_seconds=0.001))
+
+    # Rows really are flowing through the sweep — the retries just must not count.
+    for _ in range(400):
+        await asyncio.sleep(0.005)
+        if sweeps >= 3:
+            break
+    assert sweeps >= 3
+    assert daemon.status().state is ServiceState.READY
+
+    clock.monotonic += 3_601.0
+    for _ in range(400):
+        await asyncio.sleep(0.005)
+        if daemon.status().state is ServiceState.LOCKED:
+            break
+    assert daemon.status().state is ServiceState.LOCKED
+    assert daemon.status().state_reason == "idle_relock"
+    assert not vault.ready
+
+    monitor.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await monitor
+    await daemon.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stall", [False, True])
 async def test_only_the_deadline_reports_sweep_deadline_exceeded(
-    monkeypatch: pytest.MonkeyPatch, stall: bool, expected: str
+    monkeypatch: pytest.MonkeyPatch, stall: bool
 ) -> None:
     """asyncio.TimeoutError is TimeoutError: a socket timeout inside a sweep is not the deadline."""
 
-    reasons: list[str] = []
+    bounded_reasons: list[str] = []
+    recorded_exceptions: list[BaseException] = []
 
-    def record(*, component: str, operation: str, reason: str) -> str:
+    def record_bounded(*, component: str, operation: str, reason: str) -> str:
         assert component == "service.daemon"
         assert operation == "observation_sweep_failed"
-        reasons.append(reason)
+        bounded_reasons.append(reason)
         return "err_00000000-0000-4000-8000-000000000000"
 
-    monkeypatch.setattr(daemon_module, "record_bounded_event_without_raising", record)
+    def record_exception(exc: BaseException, *, component: str, operation: str) -> str:
+        assert component == "service.daemon"
+        assert operation == "observation_sweep_failed"
+        recorded_exceptions.append(exc)
+        return "err_00000000-0000-4000-8000-000000000001"
+
+    monkeypatch.setattr(daemon_module, "record_bounded_event_without_raising", record_bounded)
+    monkeypatch.setattr(
+        daemon_module, "record_unexpected_exception_without_raising", record_exception
+    )
     monkeypatch.setattr(daemon_module, "_OBSERVATION_SWEEP_DEADLINE_SECONDS", 0.05)
 
     async def sweep() -> ObservationDrainSummary:
@@ -1718,7 +2024,44 @@ async def test_only_the_deadline_reports_sweep_deadline_exceeded(
     summary = await daemon._bounded_observation_sweep(sweep)  # pyright: ignore[reportPrivateUsage]
 
     assert summary is None
-    assert reasons == [expected]
+    if stall:
+        # Only the real deadline is a non-exception operating state.
+        assert bounded_reasons == ["sweep_deadline_exceeded"]
+        assert recorded_exceptions == []
+    else:
+        # The sweep's own exception keeps its identity instead of a generic token (issue #278).
+        assert bounded_reasons == []
+        assert len(recorded_exceptions) == 1
+        assert isinstance(recorded_exceptions[0], TimeoutError)
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_ordinary_sweep_exception_keeps_its_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raised sweep records the exception itself, not a generic token (issue #278)."""
+
+    recorded: list[tuple[BaseException, str, str]] = []
+
+    def record_exception(exc: BaseException, *, component: str, operation: str) -> str:
+        recorded.append((exc, component, operation))
+        return "err_00000000-0000-4000-8000-000000000002"
+
+    monkeypatch.setattr(
+        daemon_module, "record_unexpected_exception_without_raising", record_exception
+    )
+
+    async def sweep() -> ObservationDrainSummary:
+        raise RuntimeError("sweep exploded")
+
+    daemon, _application, _vault, _listener = _daemon()
+    summary = await daemon._bounded_observation_sweep(sweep)  # pyright: ignore[reportPrivateUsage]
+    assert summary is None
+    assert len(recorded) == 1
+    exc, component, operation = recorded[0]
+    assert isinstance(exc, RuntimeError)
+    assert (component, operation) == ("service.daemon", "observation_sweep_failed")
     await daemon.close()
 
 

@@ -13,9 +13,10 @@ import dataclasses
 import errno
 import os
 import re
+import stat
 import threading
 import time
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -87,6 +88,23 @@ _MAX_QUARANTINE: Final = 512
 # stale are pure per-hook parse/encode tax (#211). Age-expired detail folds
 # into the same aggregate eviction evidence as count/byte-cap evictions.
 _MAX_QUARANTINE_AGE_DAYS: Final = 14
+# A stream partial is a pure read-cache: the unterminated tail of the source
+# JSONL, held so the next reconcile need not reread it. The reader seeks to
+# the committed cursor and rereads the tail whenever the partial is absent,
+# so dropping one costs a bounded reread, never observation loss. It is
+# therefore bounded per entry and shed before any durable row when the state
+# file approaches its cap (#289).
+#
+# The bound is the session reader's own read chunk
+# (``codex_session_stream._MAX_READ_CHUNK``) and may not go below it. The
+# reader assembles a source line across passes by holding its prefix here, so
+# a bound smaller than one chunk makes any line longer than a chunk
+# unassemblable: the hold is dropped, the next pass rereads the identical
+# chunk, and the cursor never advances again for that session. Measured on a
+# real Codex corpus, 648 of 1.54M rollout lines exceed 256 KiB, so the stall
+# is reachable. Not imported, to keep this module free of a cycle with the
+# reader that imports it; ``test_observation_state_bounds`` fences the drift.
+_MAX_STREAM_PARTIAL_BYTES: Final = 262_144
 # Parse-cache entry bound: hooks touch one workspace, the daemon's sweep loop
 # touches all of them — without a cap the daemon would retain a parsed object
 # graph per workspace forever.
@@ -106,8 +124,13 @@ _MAX_RUNTIME_GATE_BYTES: Final = 256
 # it so such a value can never be mistaken for an event kind.
 _OPEN_PRE_SEPARATOR: Final = "|"
 _LOCAL_OUTBOX_OVERFLOW_GAP: Final = "_local_outbox_overflow"
+_LOCAL_STREAM_PARTIAL_DROPPED_GAP: Final = "_local_stream_partial_dropped"
+_LEGACY_STREAM_PARTIAL_DROPPED_SESSION: Final = "_legacy_unknown"
 _STORE_LOCK_TIMEOUT_SECONDS: Final = 2.0
 _STORE_LOCK_POLL_SECONDS: Final = 0.01
+# Fraction of the state bound a save must leave free before an eviction gap is
+# treated as healed (#310).
+_STATE_HEADROOM_DIVISOR: Final = 8
 
 YOETZ_TOOL_NAMES: Final = frozenset(
     {
@@ -143,15 +166,32 @@ _STORE_LOCK_REGISTRY: dict[str, _StoreLockState] = {}
 class _InterprocessStoreLock:
     """Reentrant process-local lock plus POSIX serialization across hook/daemon."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, waits_ms: MutableMapping[str, float] | None = None) -> None:
         self._path = path
+        # Queueing behind another process is real hook wall time that no stage
+        # window could see: the wait lands inside and outside the timed 'store'
+        # window alike, so it accumulates here, once per acquisition, wherever
+        # in the pass it happens (#310/#311). Reentrant acquisitions return
+        # immediately and contribute ~0.
+        self._waits_ms = waits_ms
         key = str(path.absolute())
         with _STORE_LOCK_REGISTRY_GUARD:
             self._state = _STORE_LOCK_REGISTRY.setdefault(key, _StoreLockState())
 
     def __enter__(self) -> _InterprocessStoreLock:
+        started = time.monotonic()
+        try:
+            return self._acquire(started + _STORE_LOCK_TIMEOUT_SECONDS)
+        finally:
+            if self._waits_ms is not None:
+                # Recorded on the timeout path too: a pass that waited two
+                # seconds and then failed spent those seconds queueing.
+                self._waits_ms["lock_wait"] = (
+                    self._waits_ms.get("lock_wait", 0.0) + (time.monotonic() - started) * 1000
+                )
+
+    def _acquire(self, deadline: float) -> _InterprocessStoreLock:
         state = self._state
-        deadline = time.monotonic() + _STORE_LOCK_TIMEOUT_SECONDS
         if not state.thread_lock.acquire(timeout=_STORE_LOCK_TIMEOUT_SECONDS):
             raise TimeoutError("observation_store_lock_timeout")
         if state.depth == 0:
@@ -291,12 +331,15 @@ class FrontierMotionNotice:
     to_sequence: int
     head_digest: str
     observation_record_count: int
+    task_id: str
 
     def __post_init__(self) -> None:
         if (
             type(self.from_sequence) is not int
             or type(self.to_sequence) is not int
             or type(self.observation_record_count) is not int
+            or type(self.task_id) is not str
+            or not self.task_id
             or not 0 <= self.from_sequence < self.to_sequence <= _MAX_SAFE_INTEGER
             or not 1 <= self.observation_record_count <= self.to_sequence - self.from_sequence
         ):
@@ -311,10 +354,39 @@ class FrontierMotionNotice:
                     "from_sequence": self.from_sequence,
                     "head_digest": self.head_digest,
                     "observation_record_count": self.observation_record_count,
+                    "task_id": self.task_id,
                     "to_sequence": self.to_sequence,
                 }
             )
         )
+
+
+def _clamp_frontier_motion_notice(
+    notice: FrontierMotionNotice, delivered_to: int
+) -> FrontierMotionNotice | None:
+    """Drop or trim a candidate so it describes only motion past ``delivered_to``."""
+
+    if notice.to_sequence <= delivered_to:
+        return None
+    if notice.from_sequence >= delivered_to:
+        return notice
+    remainder_span = notice.to_sequence - delivered_to
+    original_span = notice.to_sequence - notice.from_sequence
+    if notice.observation_record_count == original_span:
+        remainder_count = remainder_span
+    else:
+        delivered_span = delivered_to - notice.from_sequence
+        remainder_count = min(
+            max(notice.observation_record_count - delivered_span, 1),
+            remainder_span,
+        )
+    return FrontierMotionNotice(
+        delivered_to,
+        notice.to_sequence,
+        notice.head_digest,
+        remainder_count,
+        notice.task_id,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,9 +465,13 @@ class _WorkspaceState:
     session_advice: dict[str, AdviceSnapshot] | None = None
     session_advice_suppression: dict[str, str] | None = None
     frontier_motion_notices: dict[str, FrontierMotionNotice] | None = None
+    # Last delivered notice ``to_sequence`` per Codex session. Survives notice
+    # deletion so a replayed append cannot re-announce already-delivered motion.
+    frontier_motion_delivered: dict[str, tuple[str, int]] | None = None
     open_pre: dict[str, str] | None = None
     stream_cursors: dict[str, ObservationCursor] | None = None
     stream_partials: dict[str, bytes] | None = None
+    stream_partial_dropped_sessions: set[str] | None = None
     hook_sequences: dict[str, int] | None = None
     last_stream_reconcile_mono_ms: int | None = None
     last_hook_receipt_mono_ms: int | None = None
@@ -441,6 +517,8 @@ class _WorkspaceState:
             self.stream_cursors = {}
         if self.stream_partials is None:
             self.stream_partials = {}
+        if self.stream_partial_dropped_sessions is None:
+            self.stream_partial_dropped_sessions = set()
         if self.hook_sequences is None:
             self.hook_sequences = {}
         if self.pending_outbox is None:
@@ -463,6 +541,8 @@ class _WorkspaceState:
             self.session_advice_suppression = {}
         if self.frontier_motion_notices is None:
             self.frontier_motion_notices = {}
+        if self.frontier_motion_delivered is None:
+            self.frontier_motion_delivered = {}
 
 
 def _cursor_key(source: ObservationSource, session_commitment: str) -> str:
@@ -499,9 +579,28 @@ def _load_frontier_motion_notices(raw: object) -> dict[str, FrontierMotionNotice
                 cast(int, notice.get("to_sequence")),
                 cast(str, notice.get("head_digest")),
                 cast(int, notice.get("observation_record_count")),
+                cast(str, notice.get("task_id")),
             )
         except ProtocolValueError, TypeError, ValueError:
             continue
+    return result
+
+
+def _load_frontier_motion_delivered(raw: object) -> dict[str, tuple[str, int]]:
+    if not isinstance(raw, Mapping):
+        return {}
+    result: dict[str, tuple[str, int]] = {}
+    for key, value in cast(Mapping[str, JsonValue], raw).items():
+        if type(key) is not str or not isinstance(value, Mapping):
+            continue
+        entry = cast(Mapping[str, JsonValue], value)
+        task_id = entry.get("task_id")
+        to_sequence = entry.get("to_sequence")
+        if type(task_id) is not str or not task_id or type(to_sequence) is not int:
+            continue
+        if not 1 <= to_sequence <= _MAX_SAFE_INTEGER:
+            continue
+        result[key] = (task_id, to_sequence)
     return result
 
 
@@ -579,9 +678,11 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         session_advice=dict(state.session_advice or {}),
         session_advice_suppression=dict(state.session_advice_suppression or {}),
         frontier_motion_notices=dict(state.frontier_motion_notices or {}),
+        frontier_motion_delivered=dict(state.frontier_motion_delivered or {}),
         open_pre=dict(state.open_pre or {}),
         stream_cursors=dict(state.stream_cursors or {}),
         stream_partials=dict(state.stream_partials or {}),
+        stream_partial_dropped_sessions=set(state.stream_partial_dropped_sessions or ()),
         hook_sequences=dict(state.hook_sequences or {}),
         pending_outbox=list(state.pending_outbox or ()),
         quarantine=list(state.quarantine or ()),
@@ -619,7 +720,21 @@ class LocalObservationStore:
         _wall: Callable[[], float] | None = None,
     ) -> None:
         self._root = observation_dir(_state=_state)
-        self._lock = _InterprocessStoreLock(self._root / ".store.lock")
+        self._state_root = self._root.parent
+        # Monotonic milliseconds accumulated per store sub-stage since
+        # construction. Hooks fold these into their pass-timing rows so the
+        # formerly opaque 'store' stage is attributable (#290), and so time
+        # spent queueing for the store lock is reported as queueing rather
+        # than as unexplained wall time (#310).
+        self.stage_timings_ms: dict[str, float] = {
+            "hydrate": 0.0,
+            "encode": 0.0,
+            "lock_wait": 0.0,
+            "write": 0.0,
+        }
+        self._lock = _InterprocessStoreLock(
+            self._root / ".store.lock", waits_ms=self.stage_timings_ms
+        )
         self._monotonic = _monotonic
         self._wall = _wall
         # Parse cache keyed by workspace commitment, validated by the state
@@ -703,23 +818,35 @@ class LocalObservationStore:
             _atomic_write(self._root / _RUNTIME_GATE_NAME, payload)
 
     def runtime_enabled(self) -> bool:
-        """Return the current service-synchronized capture gate, failing closed."""
+        """Return the current service-synchronized capture gate, failing closed.
+
+        Deliberately lock-free: the marker is a tiny owner-only file that
+        :meth:`set_runtime_enabled` only ever replaces atomically, and every
+        hook event begins with this read. Serializing it on the interprocess
+        store lock converted ordinary batch contention into gate failures
+        that discarded events (#273). Reading through one descriptor keeps
+        the safety checks and the payload bound to a single inode instead.
+        """
 
         path = self._root / _RUNTIME_GATE_NAME
-        with self._lock:
-            try:
-                facts = path.lstat()
-            except FileNotFoundError:
-                return True
-            except OSError as exc:
-                raise _error(
-                    PublicErrorCode.STORAGE_UNSAFE,
-                    "Observation runtime gate is unavailable.",
-                    retryable=False,
-                ) from exc
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            message = (
+                "Observation runtime gate is unsafe."
+                if exc.errno == errno.ELOOP
+                else "Observation runtime gate is unavailable."
+            )
+            raise _error(PublicErrorCode.STORAGE_UNSAFE, message, retryable=False) from exc
+        try:
+            facts = os.fstat(descriptor)
             if (
-                path.is_symlink()
-                or not path.is_file()
+                not stat.S_ISREG(facts.st_mode)
                 or facts.st_uid != os.geteuid()
                 or facts.st_mode & 0o077
                 or facts.st_size <= 0
@@ -730,27 +857,46 @@ class LocalObservationStore:
                     "Observation runtime gate is unsafe.",
                     retryable=False,
                 )
-            try:
-                raw = path.read_bytes()
-                parsed = strict_json_parse(raw)
-            except (OSError, ProtocolValueError) as exc:
+            chunks: list[bytes] = []
+            remaining = _MAX_RUNTIME_GATE_BYTES + 1
+            while remaining > 0 and (chunk := os.read(descriptor, remaining)):
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            if len(raw) > _MAX_RUNTIME_GATE_BYTES:
                 raise _error(
                     PublicErrorCode.STORAGE_UNSAFE,
-                    "Observation runtime gate is invalid.",
-                    retryable=False,
-                ) from exc
-            if (
-                not isinstance(parsed, Mapping)
-                or set(parsed) != {"schema", "enabled"}
-                or parsed.get("schema") != _RUNTIME_GATE_SCHEMA
-                or type(parsed.get("enabled")) is not bool
-            ):
-                raise _error(
-                    PublicErrorCode.STORAGE_UNSAFE,
-                    "Observation runtime gate is invalid.",
+                    "Observation runtime gate is unsafe.",
                     retryable=False,
                 )
-            return cast(bool, parsed["enabled"])
+        except OSError as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation runtime gate is invalid.",
+                retryable=False,
+            ) from exc
+        finally:
+            os.close(descriptor)
+        try:
+            parsed = strict_json_parse(raw)
+        except ProtocolValueError as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation runtime gate is invalid.",
+                retryable=False,
+            ) from exc
+        if (
+            not isinstance(parsed, Mapping)
+            or set(parsed) != {"schema", "enabled"}
+            or parsed.get("schema") != _RUNTIME_GATE_SCHEMA
+            or type(parsed.get("enabled")) is not bool
+        ):
+            raise _error(
+                PublicErrorCode.STORAGE_UNSAFE,
+                "Observation runtime gate is invalid.",
+                retryable=False,
+            )
+        return cast(bool, parsed["enabled"])
 
     def workspace_commitment(self, path: str) -> str:
         return workspace_commitment_from_path(self.key_material(), path)
@@ -802,6 +948,11 @@ class LocalObservationStore:
             state.session_generations[session_commitment] = generation
             state.ended_session_generations.pop(session_commitment, None)
             state.ended_sessions.discard(session_commitment)
+            assert state.stream_partial_dropped_sessions is not None
+            state.stream_partial_dropped_sessions.discard(session_commitment)
+            state.stream_partial_dropped_sessions.discard(_LEGACY_STREAM_PARTIAL_DROPPED_SESSION)
+            if not state.stream_partial_dropped_sessions:
+                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
             self._save(workspace_commitment, state)
             return generation
 
@@ -838,6 +989,10 @@ class LocalObservationStore:
             state.session_workspaces.setdefault(session_commitment, workspace_commitment)
             state.ended_sessions.add(session_commitment)
             state.ended_session_generations[session_commitment] = observed
+            assert state.stream_partial_dropped_sessions is not None
+            state.stream_partial_dropped_sessions.discard(session_commitment)
+            if not state.stream_partial_dropped_sessions:
+                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
             self._save(workspace_commitment, state)
 
     def bind_codex_session(self, workspace_commitment: str, codex_session_id: str) -> str:
@@ -851,6 +1006,46 @@ class LocalObservationStore:
             state.codex_session_bindings[codex_session_id] = session
             self._save(workspace_commitment, state)
         return session
+
+    def codex_session_ended(self, workspace_commitment: str, codex_session_id: str) -> bool:
+        """Whether the bound Codex session is marked ended for its current generation.
+
+        Drain routing consults this for ``mapping_missing`` rejections: pending outbox rows
+        of a session that ended while unmapped can never deliver -- no future ``start`` will
+        map an ended session -- so they get a terminal state instead of retrying forever and
+        holding outbox capacity (#275). A restarted session clears the mark via
+        ``begin_session_generation``.
+        """
+
+        with self._lock:
+            state = self._load(workspace_commitment)
+            assert state.codex_session_bindings is not None
+            assert state.ended_sessions is not None
+            session = state.codex_session_bindings.get(codex_session_id)
+            return session is not None and session in state.ended_sessions
+
+    def quarantine_ended_unmapped_session(
+        self,
+        workspace: str,
+        codex_session_id: str,
+        reason: str,
+    ) -> int:
+        """Quarantine an ended unmapped lane only when no attach owns its lifecycle lock.
+
+        A concurrent turn-boundary attach must win over terminalization: it may have
+        received mapping_missing before persisting the mapping. Acquiring the same
+        lifecycle lock closes that race; a contended lock leaves every row pending for
+        the next pass, while an uncontended ended session is terminal (#275).
+        """
+
+        if not self.codex_session_ended(workspace, codex_session_id):
+            return 0
+        from yoetz.adapters.integrations.codex_lifecycle import acquire_session_lock
+
+        with acquire_session_lock(codex_session_id, _state=self._state_root) as owned:
+            if not owned or not self.codex_session_ended(workspace, codex_session_id):
+                return 0
+            return self.quarantine_outbox_session(workspace, codex_session_id, reason)
 
     def find_workspace_for_codex_session(self, codex_session_id: str) -> str | None:
         with self._lock:
@@ -911,6 +1106,9 @@ class LocalObservationStore:
             raw = state.open_pre.pop(correlation_id, None)
             if raw is None:
                 return None
+            # A post consuming its open pre is live proof pairing works now;
+            # a latched unpaired_event no longer describes this workspace (#274).
+            self._resolve_gap_state(state, ObservationGapCode.UNPAIRED_EVENT.value)
             self._save(workspace, state)
             return raw.split(_OPEN_PRE_SEPARATOR, 1)[0]
 
@@ -1076,29 +1274,65 @@ class LocalObservationStore:
         to_sequence: int,
         head_digest: str,
         observation_record_count: int,
+        task_id: str,
     ) -> None:
-        """Merge contiguous observation appends into one pending agent notice."""
+        """Merge contiguous undelivered observation appends into one pending notice."""
 
         candidate = FrontierMotionNotice(
             from_sequence,
             to_sequence,
             head_digest,
             observation_record_count,
+            task_id,
         )
         with self._lock:
             state = self._load(workspace)
             assert state.frontier_motion_notices is not None
-            prior = state.frontier_motion_notices.get(codex_session_id)
+            assert state.frontier_motion_delivered is not None
+            notices = state.frontier_motion_notices
+            delivered = state.frontier_motion_delivered
+            mutated = False
+            # The delivered mark is scoped to the task ledger it was announced
+            # for. A session whose mapping moves to another task (or whose
+            # prior ledger was announced under a different task id) must not
+            # have the new ledger's motion suppressed by the old mark.
+            delivered_entry = delivered.get(codex_session_id)
+            if delivered_entry is not None and delivered_entry[0] != task_id:
+                del delivered[codex_session_id]
+                delivered_entry = None
+                mutated = True
+            delivered_to = delivered_entry[1] if delivered_entry is not None else 0
+            prior = notices.get(codex_session_id)
+            if prior is not None and prior.task_id != task_id:
+                del notices[codex_session_id]
+                prior = None
+                mutated = True
+            if prior is not None and prior.to_sequence <= delivered_to:
+                del notices[codex_session_id]
+                prior = None
+                mutated = True
+            if candidate.to_sequence <= delivered_to:
+                if mutated:
+                    self._save(workspace, state)
+                return
             if prior is not None and prior.to_sequence == candidate.from_sequence:
                 candidate = FrontierMotionNotice(
                     prior.from_sequence,
                     candidate.to_sequence,
                     candidate.head_digest,
                     prior.observation_record_count + candidate.observation_record_count,
+                    candidate.task_id,
                 )
             elif prior is not None and candidate.to_sequence <= prior.to_sequence:
+                if mutated:
+                    self._save(workspace, state)
                 return
-            state.frontier_motion_notices[codex_session_id] = candidate
+            clamped = _clamp_frontier_motion_notice(candidate, delivered_to)
+            if clamped is None:
+                notices.pop(codex_session_id, None)
+                self._save(workspace, state)
+                return
+            notices[codex_session_id] = clamped
             self._save(workspace, state)
 
     def peek_frontier_motion(
@@ -1120,6 +1354,16 @@ class LocalObservationStore:
             if current is None or current.delivery_identity != delivery_identity:
                 return
             del notices[codex_session_id]
+            assert state.frontier_motion_delivered is not None
+            delivered = state.frontier_motion_delivered
+            previous = delivered.pop(codex_session_id, None)
+            previous_to = (
+                previous[1] if previous is not None and previous[0] == current.task_id else 0
+            )
+            delivered[codex_session_id] = (
+                current.task_id,
+                max(previous_to, current.to_sequence),
+            )
             self._save(workspace, state)
 
     def advice_snapshot_for(self, workspace: str) -> AdviceSnapshot | None:
@@ -1232,15 +1476,29 @@ class LocalObservationStore:
             return state.stream_partials.get(session_commitment, b"")
 
     def set_stream_partial(self, workspace: str, session_commitment: str, partial: bytes) -> None:
-        if type(partial) is not bytes or len(partial) > 262_144:
+        if type(partial) is not bytes:
             raise ProtocolValueError("invalid_event_value_type")
         with self._lock:
             state = self._load(workspace)
             assert state.stream_partials is not None
-            if partial:
+            assert state.stream_partial_dropped_sessions is not None
+            if len(partial) > _MAX_STREAM_PARTIAL_BYTES:
+                # An oversized tail drops with an explicit gap instead of
+                # pinning megabytes of read-cache in the state file: the
+                # reader rereads it from the committed cursor on the next
+                # reconcile (#289). Raising here instead stalled the stream
+                # forever while retaining the partial that caused the stall.
+                state.stream_partials.pop(session_commitment, None)
+                state.stream_partial_dropped_sessions.add(session_commitment)
+                self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+            elif partial:
                 state.stream_partials[session_commitment] = partial
+                state.stream_partial_dropped_sessions.discard(session_commitment)
             else:
                 state.stream_partials.pop(session_commitment, None)
+                state.stream_partial_dropped_sessions.discard(session_commitment)
+            if not state.stream_partial_dropped_sessions:
+                self._resolve_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
             self._save(workspace, state)
 
     def note_stream_reconcile(self, workspace: str, *, mono: float | None = None) -> None:
@@ -1301,7 +1559,7 @@ class LocalObservationStore:
             # Resolve before projecting so the size-checked bytes are exactly
             # the bytes _save would otherwise re-encode: one encode, not three.
             self._resolve_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
-            projected = canonical_encode(self._state_to_json(workspace, state)) + b"\n"
+            projected = self._encode_state(workspace, state)
             if len(projected) > _MAX_STATE_BYTES:
                 state.pending_outbox.pop()
                 self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
@@ -2065,13 +2323,17 @@ class LocalObservationStore:
         raw = _read_bytes(path, maximum=_MAX_LEGACY_STATE_BYTES)
         if raw is None:
             return _WorkspaceState()
+        hydrate_started = self._now_mono()
         try:
-            parsed = strict_json_parse(raw)
-        except ProtocolValueError:
-            return _WorkspaceState()
-        if not isinstance(parsed, Mapping):
-            return _WorkspaceState()
-        state = self._state_from_json(cast(Mapping[str, JsonValue], parsed))
+            try:
+                parsed = strict_json_parse(raw)
+            except ProtocolValueError:
+                return _WorkspaceState()
+            if not isinstance(parsed, Mapping):
+                return _WorkspaceState()
+            state = self._state_from_json(cast(Mapping[str, JsonValue], parsed))
+        finally:
+            self.stage_timings_ms["hydrate"] += (self._now_mono() - hydrate_started) * 1000
         # Cache only when the file provably did not change while it was read.
         if before is not None and before == self._stat_key(path):
             self._cache_state(workspace_commitment, before, state)
@@ -2107,19 +2369,54 @@ class LocalObservationStore:
             state.quarantine[:] = kept
 
     def _prune_frontier_motion_notices(self, state: _WorkspaceState) -> None:
-        """Drop ended-session notices and cap the per-workspace mapping."""
+        """Drop ended-session notices and delivered marks; cap both mappings."""
 
-        notices = state.frontier_motion_notices
-        if not notices:
-            return
         ended = state.ended_sessions or set()
         bindings = state.codex_session_bindings or {}
-        for session_id in tuple(notices):
+
+        def _session_ended(session_id: str) -> bool:
             commitment = bindings.get(session_id)
-            if commitment is not None and commitment in ended:
-                del notices[session_id]
-        while len(notices) > _MAX_FRONTIER_MOTION_NOTICES:
-            del notices[next(iter(notices))]
+            return commitment is not None and commitment in ended
+
+        notices = state.frontier_motion_notices
+        if notices:
+            for session_id in tuple(notices):
+                if _session_ended(session_id):
+                    del notices[session_id]
+            while len(notices) > _MAX_FRONTIER_MOTION_NOTICES:
+                del notices[next(iter(notices))]
+        delivered = state.frontier_motion_delivered
+        if delivered:
+            for session_id in tuple(delivered):
+                if _session_ended(session_id):
+                    del delivered[session_id]
+            while len(delivered) > _MAX_FRONTIER_MOTION_NOTICES:
+                del delivered[next(iter(delivered))]
+
+    def _encode_state(self, workspace_commitment: str, state: _WorkspaceState) -> bytes:
+        """Encode one state to its on-disk bytes, attributing the cost (#290)."""
+
+        encode_started = self._now_mono()
+        try:
+            return canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+        finally:
+            self.stage_timings_ms["encode"] += (self._now_mono() - encode_started) * 1000
+
+    def _drop_oversized_stream_partials(self, state: _WorkspaceState) -> bool:
+        """Enforce the per-entry partial bound on states persisted before #289."""
+
+        partials = state.stream_partials
+        dropped_sessions = state.stream_partial_dropped_sessions
+        assert partials is not None
+        assert dropped_sessions is not None
+        oversized = [
+            key for key, value in partials.items() if len(value) > _MAX_STREAM_PARTIAL_BYTES
+        ]
+        for key in oversized:
+            del partials[key]
+            dropped_sessions.add(key)
+            self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+        return bool(oversized)
 
     def _save(
         self,
@@ -2142,16 +2439,34 @@ class LocalObservationStore:
         path = self._workspace_path(workspace_commitment)
         quarantined_before = len(state.quarantine or ())
         notices_before = len(state.frontier_motion_notices or ())
+        delivered_before = len(state.frontier_motion_delivered or ())
         self._prune_expired_quarantine(state)
         self._prune_frontier_motion_notices(state)
+        partials_dropped = self._drop_oversized_stream_partials(state)
         if (
             projected is not None
+            and not partials_dropped
             and len(state.quarantine or ()) == quarantined_before
             and len(state.frontier_motion_notices or ()) == notices_before
+            and len(state.frontier_motion_delivered or ()) == delivered_before
         ):
             payload = projected
         else:
-            payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+            payload = self._encode_state(workspace_commitment, state)
+        partials = state.stream_partials
+        dropped_sessions = state.stream_partial_dropped_sessions
+        assert partials is not None
+        assert dropped_sessions is not None
+        while partials and len(payload) > _MAX_STATE_BYTES:
+            # Shed the read-cache before any durable row: a dropped partial
+            # is reread from the committed cursor on the next reconcile,
+            # while an evicted envelope is a lost observation (#289).
+            largest = max(partials, key=lambda key: (len(partials[key]), key.encode()))
+            del partials[largest]
+            dropped_sessions.add(largest)
+            self._note_gap_state(state, _LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+            payload = self._encode_state(workspace_commitment, state)
+        truncated = False
         if len(payload) > _MAX_STATE_BYTES:
             # Retain authority state and make every observation-detail loss explicit.
             assert state.envelopes is not None
@@ -2159,7 +2474,8 @@ class LocalObservationStore:
                 del state.envelopes[0]
                 assert state.gaps is not None
                 self._note_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
-                payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+                truncated = True
+                payload = self._encode_state(workspace_commitment, state)
         assert state.pending_outbox is not None
         assert state.quarantine is not None
         assert state.gaps is not None
@@ -2182,18 +2498,36 @@ class LocalObservationStore:
                 )
             self._note_gap_state(state, _LOCAL_OUTBOX_OVERFLOW_GAP)
             self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
-            payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+            payload = self._encode_state(workspace_commitment, state)
         while state.quarantine and len(payload) > _MAX_STATE_BYTES:
             evicted = state.quarantine.pop(0)
             self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
-            payload = canonical_encode(self._state_to_json(workspace_commitment, state)) + b"\n"
+            payload = self._encode_state(workspace_commitment, state)
         if len(payload) > _MAX_STATE_BYTES:
             raise _error(
                 PublicErrorCode.STORAGE_UNSAFE,
                 "Observation state exceeds its safe local bound.",
                 retryable=False,
             )
+        truncation = state.gaps.get(ObservationGapCode.TRUNCATED_PAYLOAD.value)
+        if (
+            not truncated
+            and truncation is not None
+            and truncation.active
+            and len(payload) + _MAX_STATE_BYTES // _STATE_HEADROOM_DIVISOR <= _MAX_STATE_BYTES
+        ):
+            # Landing with a full headroom margin, having shed nothing, is live
+            # proof the store is no longer losing observations to the bound.
+            # Landing merely *under* the bound proves nothing — that is the
+            # state an eviction itself leaves behind, so clearing there would
+            # retire the gap in the same pass that opened it. History stays in
+            # gap_history; only the active flag, which reports live
+            # degradation, is cleared (#310).
+            self._resolve_gap_state(state, ObservationGapCode.TRUNCATED_PAYLOAD.value)
+            payload = self._encode_state(workspace_commitment, state)
+        write_started = self._now_mono()
         _atomic_write(path, payload)
+        self.stage_timings_ms["write"] += (self._now_mono() - write_started) * 1000
         key = self._stat_key(path)
         if key is None:
             self._state_cache.pop(workspace_commitment, None)
@@ -2360,8 +2694,15 @@ class LocalObservationStore:
             ObservationGapCode.OUTBOX_OVERFLOW.value,
             ObservationGapCode.OUTBOX_QUARANTINED.value,
             _LOCAL_OUTBOX_OVERFLOW_GAP,
+            _LOCAL_STREAM_PARTIAL_DROPPED_GAP,
         }
         current = {code for code, seen in state.gaps.items() if seen.active} - transient
+        # A dropped stream partial means the source tail is pending a reread:
+        # the stream is observably behind its source until reconcile catches
+        # up, which is exactly SOURCE_LAG on the wire vocabulary (#289).
+        partial_gap = state.gaps.get(_LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+        if partial_gap is not None and partial_gap.active:
+            current.add(ObservationGapCode.SOURCE_LAG.value)
         if state.quarantine:
             current.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
         overflow_gap = state.gaps.get(_LOCAL_OUTBOX_OVERFLOW_GAP)
@@ -2406,11 +2747,12 @@ class LocalObservationStore:
                 }
             )
         payload: dict[str, JsonValue] = {
-            # /6 adds one-shot task-frontier motion notices. /5 adds terminal
+            # /7 attributes dropped stream-partial gaps per session. /6 adds one-shot
+            # task-frontier motion notices. /5 adds terminal
             # corruption-session tracking. /3 added quarantined_at per
             # quarantine entry and the reclaimed counter. Readers tolerate both directions:
             # unknown keys are ignored and missing keys default safely.
-            "schema": "yoetz.observation-local/6",
+            "schema": "yoetz.observation-local/7",
             "workspace_commitment": workspace,
             "consent": consent_json,
             "session_workspaces": JsonObject(
@@ -2568,6 +2910,7 @@ class LocalObservationStore:
                             "from_sequence": notice.from_sequence,
                             "head_digest": notice.head_digest,
                             "observation_record_count": notice.observation_record_count,
+                            "task_id": notice.task_id,
                             "to_sequence": notice.to_sequence,
                         }
                     )
@@ -2576,6 +2919,20 @@ class LocalObservationStore:
                         key=lambda item: item[0].encode(),
                     )
                 }
+            )
+        if state.frontier_motion_delivered:
+            payload["frontier_motion_delivered"] = JsonObject(
+                {
+                    key: JsonObject({"task_id": value[0], "to_sequence": value[1]})
+                    for key, value in sorted(
+                        state.frontier_motion_delivered.items(),
+                        key=lambda item: item[0].encode(),
+                    )
+                }
+            )
+        if state.stream_partial_dropped_sessions:
+            payload["stream_partial_dropped_sessions"] = tuple(
+                sorted(state.stream_partial_dropped_sessions, key=str.encode)
             )
         return payload
 
@@ -2658,6 +3015,23 @@ class LocalObservationStore:
                 )
             except ValueError, OSError:
                 continue
+        dropped_sessions_raw = raw.get("stream_partial_dropped_sessions")
+        stream_partial_dropped_sessions: set[str]
+        if isinstance(dropped_sessions_raw, (list, tuple)):
+            stream_partial_dropped_sessions = {
+                value
+                for value in cast(tuple[JsonValue, ...] | list[JsonValue], dropped_sessions_raw)
+                if type(value) is str and value
+            }
+        else:
+            legacy_gap = gap_history.get(_LOCAL_STREAM_PARTIAL_DROPPED_GAP)
+            stream_partial_dropped_sessions = (
+                set(stream_cursors) | set(session_workspaces)
+                if legacy_gap is not None and legacy_gap.active
+                else set[str]()
+            )
+            if legacy_gap is not None and legacy_gap.active and not stream_partial_dropped_sessions:
+                stream_partial_dropped_sessions.add(_LEGACY_STREAM_PARTIAL_DROPPED_SESSION)
         hook_sequences: dict[str, int] = {}
         for key, value in cast(Mapping[str, JsonValue], raw.get("hook_sequences") or {}).items():
             if type(value) is int and not isinstance(value, bool) and value >= 0:
@@ -2818,6 +3192,9 @@ class LocalObservationStore:
             raw_quarantine_reclaimed_count if type(raw_quarantine_reclaimed_count) is int else 0
         )
         frontier_motion_notices = _load_frontier_motion_notices(raw.get("frontier_motion_notices"))
+        frontier_motion_delivered = _load_frontier_motion_delivered(
+            raw.get("frontier_motion_delivered")
+        )
         return _WorkspaceState(
             consent=consent,
             session_workspaces=session_workspaces,
@@ -2842,9 +3219,11 @@ class LocalObservationStore:
                 if type(key) is str and type(value) is str
             },
             frontier_motion_notices=frontier_motion_notices,
+            frontier_motion_delivered=frontier_motion_delivered,
             open_pre=open_pre,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,
+            stream_partial_dropped_sessions=stream_partial_dropped_sessions,
             hook_sequences=hook_sequences,
             last_stream_reconcile_mono_ms=last_reconcile,
             last_hook_receipt_mono_ms=last_hook_mono,

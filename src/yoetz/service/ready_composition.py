@@ -2314,6 +2314,38 @@ async def provide_service_ready_context(
     provider_binding: ProviderBinding | None = None
     provider_credential_connected = await configured_provider_credential_present()
     semantic_ready = False
+
+    async def observation_composition_fact() -> ObservationCompositionFact | None:
+        # Standing provider advice must rest on current machine facts, not this
+        # READY-time snapshot: credential presence changes at runtime and the
+        # connected registry only fills lazily on repository-scoped dispatch, so
+        # the frozen values would advise connect_provider against an installation
+        # that just dispatched successfully (#265). Structural usability claims
+        # no repository authority; an unreadable fact (for example a vault
+        # locking race) yields no fact rather than a false not-ready claim.
+        try:
+            connected_now = cast(
+                tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids", lambda: ())())
+            )
+            # provider_factory_ids is provider-id grain while factories are
+            # keyed by full binding; the id test is exact today because the
+            # factory set is built from this same config.provider through the
+            # same provider_binding_from_config, so an id match implies the
+            # binding match. The credential probe below is full-binding grain.
+            structurally_usable = (
+                candidate_binding is not None
+                and candidate_binding.provider_id in provider_factory_ids
+                and await configured_provider_credential_present()
+            )
+        except Exception:
+            return None
+        return ObservationCompositionFact(
+            semantic_configured=semantic_configured,
+            semantic_ready=structurally_usable,
+            provider_factory_ids=provider_factory_ids,
+            connected_provider_ids=connected_now,
+        )
+
     capabilities = {
         RuntimeCapability.STRUCTURAL_READ,
         RuntimeCapability.PAYLOAD_READ,
@@ -2525,12 +2557,7 @@ async def provide_service_ready_context(
         clock=clock,
         ids=ids,
         advice_context_builder=ObservationAdviceContextBuilder(
-            composition=ObservationCompositionFact(
-                semantic_configured=semantic_configured,
-                semantic_ready=semantic_ready,
-                provider_factory_ids=provider_factory_ids,
-                connected_provider_ids=connected_provider_ids,
-            ),
+            composition=observation_composition_fact,
             semantic_review=_semantic_review if semantic_configured else None,
         ),
         verification_supervisor=verification_supervisor,

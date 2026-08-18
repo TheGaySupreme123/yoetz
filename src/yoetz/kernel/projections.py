@@ -80,7 +80,7 @@ __all__ = [
     "projection_digest",
     "projection_from_snapshot",
     "projection_snapshot",
-    "unresolved_finding_count",
+    "unanswered_finding_count",
 ]
 
 PROJECTION_VERSION: Final = "yoetz/0.1.0"
@@ -666,11 +666,13 @@ def empty_projection_state() -> ProjectionState:
     )
 
 
-def unresolved_finding_count(state: ProjectionState) -> int:
+def unanswered_finding_count(state: ProjectionState) -> int:
     """Count findings the ledger still carries no response for.
 
-    Any recorded response resolves the finding for this counter, whatever its stance: a rejection
-    or a waiver answers the finding on the record, and its own quality surfaces as a later finding.
+    Any recorded response answers the finding for this counter, whatever its stance: a rejection,
+    waiver, or provenance dispute answers the finding on the record, and its own quality surfaces
+    as a later finding. This counter does not set the receipt's ``resolved`` field, which remains
+    false for every response disposition.
     """
 
     return sum(key not in state.responses for key in state.findings)

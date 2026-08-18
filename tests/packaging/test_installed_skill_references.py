@@ -53,8 +53,26 @@ def test_step_zero_stops_on_an_empty_guidance_read() -> None:
     assert "with the same URI" in collapsed
     assert "`references/<name>.md`" in collapsed
     assert "Do not call `start` on an empty guidance body" in collapsed
-    assert "`agent-instructions.md`, `workflow.md`, and `coverage-and-receipts.md`" in collapsed
-    assert "Both are already in initialize `instructions`" in collapsed
+    # #300 trimmed the inlined set to agent-instructions.md. The skill must not tell the agent it
+    # already has workflow.md or coverage-and-receipts.md in context — a false pre-delivery claim
+    # licenses skipping the fetch, which is strictly worse than the #203 empty read it replaced.
+    assert "Initialize `instructions` already include `agent-instructions.md`;" in collapsed
+    assert "`workflow.md`, and `coverage-and-receipts.md`" not in collapsed
+    assert "Both are already in initialize `instructions`" not in collapsed
+    assert "Neither is in initialize `instructions`; read both before the first `start`" in (
+        collapsed
+    )
+
+
+def test_step_zero_does_not_use_resources_list_for_discovery() -> None:
+    """A failed resources/list is not a missing server (issue #173)."""
+
+    text = _skill_text()
+    collapsed = " ".join(text.split())
+    assert "Do not call `resources/list` or `list_mcp_resources`" in collapsed
+    assert "The five URIs below are the complete catalog" in collapsed
+    assert "A list failure is not a missing server" in collapsed
+    assert "not a reason to read product source" in collapsed
 
 
 def test_every_yoetz_uri_the_skill_names_is_a_registered_readable_resource() -> None:

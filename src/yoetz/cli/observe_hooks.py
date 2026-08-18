@@ -124,10 +124,31 @@ _DRAIN_MAX_CONSECUTIVE_UNAVAILABLE: Final = 3
 # 69-schema catalog), and 1.0s leaves margin for daemon contention without
 # letting a dead daemon consume the whole drain budget.
 _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
+# SessionStart is the primary auto-attach point, but the daemon often spawns on
+# demand and may miss a session's opening moments; without a later re-attempt an
+# unmapped session stayed unmapped for its whole life and its outbox retried as
+# mapping_missing forever (#275). Low-frequency, once-per-turn events only --
+# never the PreToolUse/PostToolUse storm -- under a budget that keeps even the
+# Codex 3s SessionEnd clamp honest (attach 1.0 + connect preflight 1.0 + drain).
+_AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop", "SessionEnd"})
+_AUTO_ATTACH_RETRY_BUDGET_SECONDS: Final = 1.0
 # End-to-end observability contract for one hook pass, process start included.
 # Never an abort point: the drain and preflight budgets own enforcement.
-_HOOK_TOTAL_BUDGET_SECONDS: Final = 1.0
+# Derived from the enforced budgets nested inside one pass plus an allowance
+# for the local stages (import, store, advice), so the parts can never again
+# drift past the whole and turn hook_budget_exceeded into noise (#288). The
+# allowance covers the measured local cost on a full 1 MiB store with margin.
+_HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS: Final = 1.0
+_HOOK_TOTAL_BUDGET_SECONDS: Final = (
+    _HOOK_CONNECT_PREFLIGHT_SECONDS
+    + _HOOK_DRAIN_BUDGET_SECONDS
+    + _HOOK_LOCAL_STAGE_ALLOWANCE_SECONDS
+)
 _TIMING_REPORT_EVENTS: Final = frozenset({"SessionStart", "Stop", "SessionEnd"})
+# The stages that partition one pass end to end, in order. 'advice' is nested
+# inside 'store' and every 'store_*' accumulator spans the whole pass, so
+# neither belongs in a sum against the total.
+_PASS_PARTITION_STAGES: Final = ("import", "resolve", "store", "drain", "deliver")
 _ROUTINE_READ_TOOLS: Final = frozenset(
     {
         "glob",
@@ -311,7 +332,6 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         fields["tool_name"] = tool_name
     for key in (
         "correlation_id",
-        "tool_call_id",
         "parent_tool_call_id",
         "permission_decision",
         "permission_kind",
@@ -328,6 +348,16 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         token = _token_or_none(payload.get(key))
         if token is not None and key in _STRUCTURAL_ALLOW:
             fields[key] = token
+    # Codex names the host tool-call id ``tool_use_id``. Normalize it to the
+    # canonical structural key here, with the host spelling taking precedence
+    # over legacy aliases exactly as it does in the pairing path. The wire
+    # schema enumerates structural fields, so the identity must land under
+    # ``tool_call_id`` or it is discarded at the boundary (#274).
+    tool_call_id = _token_or_none(payload.get("tool_use_id")) or _token_or_none(
+        payload.get("tool_call_id")
+    )
+    if tool_call_id is not None:
+        fields["tool_call_id"] = tool_call_id
     # Nested tool_input / tool_response never contribute prose — only structural scalars.
     tool_input = payload.get("tool_input")
     if isinstance(tool_input, Mapping):
@@ -375,12 +405,14 @@ def _source_identity(
 ) -> str:
     host_ids: dict[str, JsonValue] = {"event_ordinal": event_ordinal}
     for key in (
+        "tool_use_id",
         "tool_call_id",
         "correlation_id",
         "event_id",
         "id",
         "parent_tool_call_id",
         "subagent_id",
+        "turn_id",
     ):
         token = _token_or_none(payload.get(key))
         if token is not None:
@@ -593,6 +625,20 @@ def _elapsed_ms(started: float, finished: float) -> int:
     return max(0, int((finished - started) * 1000))
 
 
+def _hook_total_budget_seconds(event: str) -> float:
+    """Return the end-to-end budget for one pass of *event*.
+
+    Events that may legitimately retry auto-attach (and SessionStart, the
+    primary attach point) carry that enforced budget on top of the base sum;
+    the high-frequency PreToolUse/PostToolUse storm never attaches and keeps
+    the tighter contract (#288).
+    """
+
+    if event == "SessionStart" or event in _AUTO_ATTACH_RETRY_EVENTS:
+        return _HOOK_TOTAL_BUDGET_SECONDS + _AUTO_ATTACH_RETRY_BUDGET_SECONDS
+    return _HOOK_TOTAL_BUDGET_SECONDS
+
+
 def _record_pass_timing(
     event: str,
     *,
@@ -611,12 +657,26 @@ def _record_pass_timing(
 
     with contextlib.suppress(BaseException):
         total_ms = _elapsed_ms(entry_started, monotonic())
-        over = total_ms > int(_HOOK_TOTAL_BUDGET_SECONDS * 1000)
+        over = total_ms > int(_hook_total_budget_seconds(event) * 1000)
         if not over and event not in _TIMING_REPORT_EVENTS:
             return
         if over:
             record_hook_diagnostic("hook_budget_exceeded", event, _state=_state)
-        record_hook_timing(event, ms=total_ms, stages={**stages, "total": total_ms}, _state=_state)
+        # What the partition does not cover is reported as its own term rather
+        # than left for a reader to derive by knowing which stages nest. A row
+        # whose stages sum to half its total said nothing about the other half
+        # (#310/#311); now it names it.
+        attributed = sum(stages.get(name, 0) for name in _PASS_PARTITION_STAGES)
+        record_hook_timing(
+            event,
+            ms=total_ms,
+            stages={
+                **stages,
+                "total": total_ms,
+                "unattributed": max(0, total_ms - attributed),
+            },
+            _state=_state,
+        )
 
 
 def _cached_recommendation_context(*, _state: Path | None) -> str:
@@ -797,12 +857,15 @@ async def _drain_outbox_leased(
     # - vault_locked / observation_disabled / paused are workspace-global and
     #   cannot heal mid-pass, so they end the pass;
     # - service_unavailable is the catch-all for row-scoped and transient
-    #   failures (bundle contention, one malformed envelope, a dropped reply),
-    #   so it must NOT poison other rows — but a run of them in a row means
-    #   the service is genuinely struggling, so the pass yields after a few.
+    #   failures (bundle contention, one malformed envelope, a dropped reply).
+    #   It must not poison other *sessions*, but it still retires its own
+    #   session for the pass: the failed row stays pending at the head of its
+    #   lane, and delivering a later row of the same session would advance the
+    #   ingest cursor past it and destroy it as terminal cursor_stale (#272).
+    #   A run of them across sessions means the service is genuinely
+    #   struggling, so the pass yields after a few.
     # Re-attempting every row of a permanently-undeliverable backlog burned
     # the whole drain budget per hook forever — the recurrence tax of #211.
-    session_scoped_stop = ObservationGapCode.MAPPING_MISSING.value
     global_stop = frozenset(
         {
             ObservationGapCode.VAULT_LOCKED.value,
@@ -869,14 +932,28 @@ async def _drain_outbox_leased(
             if decision.reason is not None:
                 record_hook_diagnostic(decision.reason, event_name, _state=_state)
             if decision.action is ObservationDrainAction.RETRY:
-                if decision.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value:
-                    consecutive_unavailable += 1
-                    if consecutive_unavailable >= _DRAIN_MAX_CONSECUTIVE_UNAVAILABLE:
-                        break
-                    continue
-                consecutive_unavailable = 0
-                if decision.reason == session_scoped_stop:
-                    skipped_sessions.add(row.codex_session_id)
+                if decision.reason in global_stop:
+                    break
+                # The lane's head row stays pending; skipping to a later row of
+                # the same session would deliver it out of order (#272), so the
+                # session retires for the pass whatever the retryable reason.
+                skipped_sessions.add(row.codex_session_id)
+                if decision.reason == ObservationGapCode.MAPPING_MISSING.value:
+                    # The session ended while unmapped: nothing will ever map it, so
+                    # its rows would otherwise retry forever. Terminalization takes
+                    # the lifecycle lock so a concurrent attach that is still
+                    # persisting its mapping wins this race (#275, #283 review).
+                    moved = 0
+                    with contextlib.suppress(Exception):
+                        moved = store.quarantine_ended_unmapped_session(
+                            workspace_commitment,
+                            row.codex_session_id,
+                            decision.reason,
+                        )
+                    if moved:
+                        consecutive_unavailable = 0
+                        continue
+                if decision.reason is not None:
                     # Stamp the retired siblings with the shared cause so
                     # `observe status` never reports them as not_attempted.
                     with contextlib.suppress(Exception):
@@ -885,8 +962,12 @@ async def _drain_outbox_leased(
                             row.codex_session_id,
                             decision.reason,
                         )
-                elif decision.reason in global_stop:
-                    break
+                if decision.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value:
+                    consecutive_unavailable += 1
+                    if consecutive_unavailable >= _DRAIN_MAX_CONSECUTIVE_UNAVAILABLE:
+                        break
+                else:
+                    consecutive_unavailable = 0
                 continue
             consecutive_unavailable = 0
     finally:
@@ -968,9 +1049,43 @@ async def _try_auto_start(
                 await client.close()
 
 
+def _note_dropped_event_gap(
+    store: LocalObservationStore,
+    payload: Mapping[str, JsonValue],
+    workspace: str | None,
+) -> None:
+    """Record a coverage gap for an event dropped before the local pass ran.
+
+    Mirrors the binding order of the main pass: the explicit workspace
+    argument first, then the Codex-session→workspace map. A silently missing
+    event is the one outcome this subsystem must not produce, so any drop
+    must be visible to ``observe status`` and coverage wording.
+    """
+
+    commitment: str | None = None
+    if workspace is not None:
+        try:
+            locator = str(Path(workspace).expanduser().resolve(strict=False))
+            candidate = store.workspace_commitment(locator)
+            consent = store.consent_for(candidate)
+            if consent is not None and consent.active:
+                commitment = candidate
+        except Exception:
+            commitment = None
+    if commitment is None:
+        codex_session_id = validate_codex_session_id(payload.get("session_id"))
+        commitment = store.find_workspace_for_codex_session(codex_session_id)
+    if commitment is None:
+        return
+    consent = store.consent_for(commitment)
+    if consent is None or not consent.active:
+        return
+    store.note_coverage_gap(commitment, ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
+
+
 def handle_observe(
     *,
-    event_name: str,
+    event_name: str | None,
     stdin_bytes: bytes | None = None,
     stdout: BinaryIO | None = None,
     workspace: str | None = None,
@@ -985,7 +1100,9 @@ def handle_observe(
 
     ``skip_service`` keeps the hook fully local: capture, binding, and outbox
     enqueue still run, but no service connection is ever opened (auto-attach,
-    mapped-session status, and outbox drains are all skipped).
+    mapped-session status, and outbox drains are all skipped). Advisory output
+    that needs no service still runs — an unattached SessionStart binding emits
+    the static "call start to attach a task" context either way (issue #280).
 
     ``_entry_monotonic`` is the console shim's pre-import sample; without it the
     recorded import stage reads zero rather than guessing.
@@ -995,7 +1112,8 @@ def handle_observe(
     stages: dict[str, int] = {}
     try:
         store = LocalObservationStore(_state=_state)
-        stages["import"] = _elapsed_ms(entry_started, _monotonic())
+        resolve_started = _monotonic()
+        stages["import"] = _elapsed_ms(entry_started, resolve_started)
         raw_stdout_json = hook_io.stdout_json
 
         def _resolve_runner() -> AsyncRunner:
@@ -1013,7 +1131,9 @@ def handle_observe(
             emitted = raw_stdout_json(value, stream)
             if not emitted:
                 with contextlib.suppress(BaseException):
-                    record_hook_diagnostic("stdout_write_failed", event_name, _state=_state)
+                    record_hook_diagnostic(
+                        "stdout_write_failed", event_name or "unknown_event", _state=_state
+                    )
             if stream is None and sys.stdout is sys.__stdout__:
                 with contextlib.suppress(BaseException):
                     sys.stdout.flush()
@@ -1028,8 +1148,18 @@ def handle_observe(
         resolved_event = raw_event
         try:
             capture_enabled = store.runtime_enabled()
+        except TimeoutError:
+            # Store-lock contention says nothing about the gate itself.
+            # Fall back to the missing-marker default (enabled) instead of
+            # discarding the event; consent still gates every ingest below.
+            _stderr_line("hook_observe_degraded: runtime_gate_contended")
+            record_hook_diagnostic("runtime_gate_contended", resolved_event, _state=_state)
+            capture_enabled = True
         except Exception:
+            _stderr_line("hook_observe_degraded: runtime_gate_unsafe")
             record_hook_diagnostic("runtime_gate_unsafe", resolved_event, _state=_state)
+            with contextlib.suppress(Exception):
+                _note_dropped_event_gap(store, payload, workspace)
             _stdout_json({}, stdout)
             return 0
         if not capture_enabled:
@@ -1081,6 +1211,11 @@ def handle_observe(
 
         assert workspace_commitment is not None
         store_started = _monotonic()
+        # Payload parse, runtime gate, workspace resolution and the consent
+        # probe ran between 'import' and here, unwindowed. Three of those calls
+        # take the store lock, so a contended pass spent real time in a region
+        # no stage could name (#310/#311).
+        stages["resolve"] = _elapsed_ms(resolve_started, store_started)
         # One flush for the whole local pass. The batch is closed before any
         # service RPC so an outbox acknowledgement can never become durable
         # ahead of the ingest it acknowledges, and it never spans a network
@@ -1094,9 +1229,12 @@ def handle_observe(
             )
             gap_codes: list[str] = []
 
-            # Pair pre/post via correlation_id when present.
-            correlation = _token_or_none(payload.get("correlation_id")) or _token_or_none(
-                payload.get("tool_call_id")
+            # Prefer the host's canonical tool-use identity, while retaining
+            # compatibility with earlier tool-call and correlation aliases.
+            correlation = (
+                _token_or_none(payload.get("tool_use_id"))
+                or _token_or_none(payload.get("tool_call_id"))
+                or _token_or_none(payload.get("correlation_id"))
             )
             if correlation is not None and _is_pre_event(resolved_event):
                 store.note_open_pre(workspace_commitment, correlation, resolved_event)
@@ -1209,6 +1347,7 @@ def handle_observe(
         # skip_service so local-only callers (e.g. the setup readiness probe)
         # never create or attach real ledger tasks.
         additional = ""
+        attach_advisory_only = False
         mapping: LifecycleMapping | None = load_mapping(codex_session_id, _state=_state)
         drain_started = _monotonic()
         if resolved_event == "SessionStart":
@@ -1217,6 +1356,11 @@ def handle_observe(
                 # SessionStart-only status/attach helpers: they drag protocol.models
                 # and service.client, which no other event needs (#242).
                 from yoetz.cli.hooks import (
+                    _LOCKED_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _PRIVACY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _RETRY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _STALE_MAPPING_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _UNAVAILABLE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _active_context,  # pyright: ignore[reportPrivateUsage]
                     _read_status,  # pyright: ignore[reportPrivateUsage]
                 )
@@ -1224,18 +1368,22 @@ def handle_observe(
                 with acquire_session_lock(codex_session_id, _state=_state) as owned:
                     if owned:
                         mapping = load_mapping(codex_session_id, _state=_state)
-                        if mapping is None and not skip_advice_loop and not skip_service:
+                        if mapping is None and not skip_advice_loop:
+                            if not skip_service:
 
-                            async def _attach() -> LifecycleMapping | None:
-                                return await _try_auto_start(codex_session_id, _state=_state)
+                                async def _attach() -> LifecycleMapping | None:
+                                    return await _try_auto_start(codex_session_id, _state=_state)
 
-                            mapping = cast(LifecycleMapping | None, _resolve_runner()(_attach))
+                                mapping = cast(LifecycleMapping | None, _resolve_runner()(_attach))
                             if mapping is None:
+                                # Static advisory for the unattached binding: it needs no
+                                # service, so local-only mode still emits it (issue #280).
                                 additional = (
                                     "Yoetz observation is consented for this workspace; "
                                     "no ledger task is mapped yet (observation-derived binding "
                                     "only). Call start to attach a task."
                                 )
+                                attach_advisory_only = True
                             else:
                                 additional = _active_context(mapping, mapping.last_frontier)
                         elif mapping is not None and not skip_service:
@@ -1255,16 +1403,25 @@ def handle_observe(
                                 store_mapping(updated, _state=_state)
                                 mapping = updated
                                 additional = _active_context(updated, updated.last_frontier)
+                            elif kind == "stale":
+                                # The service answered: only the stored mapping is stale
+                                # (re-started elsewhere). Repair flows through the agent's
+                                # own start via handle_post_tool_use; meanwhile the static
+                                # advisory must not starve pending advice (issue #308).
+                                additional = _STALE_MAPPING_CONTEXT
+                                attach_advisory_only = True
+                                with contextlib.suppress(Exception):
+                                    record_hook_diagnostic(
+                                        "mapping_stale", resolved_event, _state=_state
+                                    )
                             elif kind == "locked":
-                                additional = (
-                                    "Yoetz vault is locked for this mapped session; "
-                                    "no live receipt can be promised."
-                                )
+                                additional = _LOCKED_CONTEXT
+                            elif kind == "retry":
+                                additional = _RETRY_CONTEXT
+                            elif kind == "privacy":
+                                additional = _PRIVACY_CONTEXT
                             else:
-                                additional = (
-                                    "Yoetz service is unavailable for this mapped session; "
-                                    "no live receipt can be promised."
-                                )
+                                additional = _UNAVAILABLE_CONTEXT
                         if not skip_service:
 
                             async def _drain() -> None:
@@ -1281,6 +1438,43 @@ def handle_observe(
 
                             with contextlib.suppress(Exception):
                                 _resolve_runner()(_drain)
+
+        if (
+            not skip_service
+            and not skip_advice_loop
+            and mapping is None
+            and resolved_event in _AUTO_ATTACH_RETRY_EVENTS
+        ):
+            # Re-attempt auto-attach for a session that started while the service was
+            # unreachable, so one missed SessionStart no longer costs the session's whole
+            # record (#275). Bounded, and placed before the drain below so a fresh mapping
+            # delivers this session's backlog in the same pass.
+            with acquire_session_lock(codex_session_id, _state=_state) as owned:
+                if owned:
+                    mapping = load_mapping(codex_session_id, _state=_state)
+                    if mapping is None:
+
+                        async def _attach_retry() -> LifecycleMapping | None:
+                            import asyncio
+
+                            return await asyncio.wait_for(
+                                _try_auto_start(codex_session_id, _state=_state),
+                                timeout=_AUTO_ATTACH_RETRY_BUDGET_SECONDS,
+                            )
+
+                        try:
+                            mapping = cast(
+                                LifecycleMapping | None, _resolve_runner()(_attach_retry)
+                            )
+                        except Exception:
+                            record_hook_diagnostic(
+                                "auto_attach_retry_failed", resolved_event, _state=_state
+                            )
+                        else:
+                            if mapping is None:
+                                record_hook_diagnostic(
+                                    "auto_attach_retry_failed", resolved_event, _state=_state
+                                )
 
         if not skip_service and resolved_event != "SessionStart":
             # Every later mapped hook drains the complete session outbox, so the
@@ -1317,7 +1511,8 @@ def handle_observe(
                 ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
             )
 
-        stages["drain"] = _elapsed_ms(drain_started, _monotonic())
+        deliver_started = _monotonic()
+        stages["drain"] = _elapsed_ms(drain_started, deliver_started)
 
         # Advice selection and commit are serialized with the stdout write by a
         # dedicated delivery lease. The lease is independent of workspace state:
@@ -1330,8 +1525,12 @@ def handle_observe(
         # continued this turn. Blocking again would loop; leave advice for a
         # later turn or SessionStart instead of consuming it here.
         stop_already_active = payload.get("stop_hook_active") is True
+        # Task/receipt context always wins this shared channel outright, with one exception:
+        # the static attach advisory carries no advice of its own, so pending advice joins it
+        # (the delivery text is appended below) instead of being silently starved at the very
+        # SessionStart that bootstraps an unmapped session (issues #241, #280).
         delivery_eligible = (
-            not additional
+            (not additional or attach_advisory_only)
             and resolved_event in ADVICE_SAFE_EVENTS
             and not skip_advice_loop
             and not stop_already_active
@@ -1391,6 +1590,20 @@ def handle_observe(
                         codex_session_id,
                         pending_frontier_notice.delivery_identity,
                     )
+        # Advice selection, the lease, the stdout write itself and both delivery
+        # commits sit past the 'drain' window; a blocked host pipe or a
+        # contended commit was previously invisible (#310/#311).
+        stages["deliver"] = _elapsed_ms(deliver_started, _monotonic())
+        # Attribute the whole pass's store work (#290), folded in last because
+        # the store keeps saving after the 'store' stage window closes: the
+        # drain saves once per delivered row and advice commits its own. A
+        # snapshot taken at that window would have hidden exactly the rows the
+        # 1300ms drains were made of. These are store-wide accumulations, not a
+        # partition of 'store' — store_hydrate also covers the consent probe
+        # that runs before the window opens.
+        with contextlib.suppress(BaseException):
+            for name, spent in store.stage_timings_ms.items():
+                stages[f"store_{name}"] = max(0, int(spent))
         _record_pass_timing(
             resolved_event,
             entry_started=entry_started,

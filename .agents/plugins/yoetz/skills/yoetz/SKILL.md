@@ -13,17 +13,22 @@ Yoetz is a local work ledger and deterministic checker. It records only what par
 
 Read these with the MCP `resources/read` request for the exact URI when they are not already in
 context. They are served by the `yoetz` server. Initialize `instructions` already include
-`agent-instructions.md`, `workflow.md`, and `coverage-and-receipts.md`. After install the same
+`agent-instructions.md`; every other document below is fetched on demand. After install the same
 files are also on disk beside this file as `references/workflow.md`,
 `references/coverage-and-receipts.md`, `references/publication-policy.md`,
 `references/request-templates.md`, and `references/agent-instructions.md`.
+
+Do not call `resources/list` or `list_mcp_resources` to discover those documents. Some Codex
+builds fail that call with `Unexpected response type` even when the server list payload is
+spec-correct. The five URIs below are the complete catalog. A list failure is not a missing
+server, not a reason to stop, and not a reason to read product source.
 
 If a `resources/read` result has no text, call `read_guidance` with the same URI. If that result
 also has no text, open the matching `references/<name>.md` beside this file and continue from that
 copy. Do not call `start` on an empty guidance body. An empty resource body is not a reason to
 read Yoetz product source.
 
-- Before the first `start`: `yoetz://guidance/workflow.md` (the ten steps, cadence, resume behavior) and `yoetz://guidance/coverage-and-receipts.md` (coverage, findings, receipt wording). Both are already in initialize `instructions`; re-read them if that text is not in context.
+- Before the first `start`: `yoetz://guidance/workflow.md` (the ten steps, cadence, resume behavior) and `yoetz://guidance/coverage-and-receipts.md` (coverage, findings, receipt wording). Neither is in initialize `instructions`; read both before the first `start`, and call `read_guidance` with the same URI if the `resources/read` body is empty.
 - Before the first `publish_work`: `yoetz://guidance/publication-policy.md` (what is material and safe to publish).
 - When schema metadata is missing or a request is rejected:
   `yoetz://guidance/request-templates.md` (complete bodies for all six operations and all nine
@@ -225,7 +230,7 @@ Prefer receipt format `markdown` or `text`. Default policy can return usable `js
 
 `respond` records your disposition and links your evidence; it does not clear the finding. Every actionable finding recorded in a task keeps the receipt conclusion at `unresolved_findings_remain`, whichever disposition you record, even when later checks return no findings. Repair the record anyway — it stops the next check from firing the same rule — but do not call an acknowledged finding resolved, and do not promise a clean receipt afterwards.
 
-Publish exactly the first time: an exact `attempted_items` entry for every requested item, evidence for every claim.
+Publish exactly the first time: an exact `attempted_items` entry for every requested item you attempted, evidence for every claim. `attempted_items` belongs to `action_recorded.payload` only — never `claim_recorded` — and each entry copies the obligation's `requested_items` `value` string exactly; see the action template in `yoetz://guidance/request-templates.md`.
 
 ## When to stop retrying
 

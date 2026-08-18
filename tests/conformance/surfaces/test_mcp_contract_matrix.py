@@ -11,12 +11,16 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from yoetz.mcp import resources as resource_module
 from yoetz.mcp.descriptors import (
+    ADVERTISED_SURFACE_BUDGET,
     INITIALIZE_GUIDANCE_URIS,
     ORDINARY_MCP_PUBLISH_EVENT_FAMILIES,
     PRESENTATION_INPUT_SCHEMA_BUDGETS,
+    SERVER_INSTRUCTIONS_BUDGET,
     TOOL_DESCRIPTOR_DIGESTS,
     TOOL_DESCRIPTOR_SET_DIGEST,
     TOOL_DESCRIPTORS,
+    McpRouteProfile,
+    advertised_surface_metrics,
     descriptor_for,
     ordinary_publish_families_in_presentation,
     presentation_schema_metrics,
@@ -276,8 +280,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:0c9351ae1ca918b20a1ac171ee65625fd437d1207c317d1c4d6429ce5f94af18",
-        "strict": "sha256:b69ed08dec479a20e79300bee313406376b957663190482c5c27add1dcea5caf",
+        "policy": "sha256:6759a95082b5eac9741fa86508e7f310d3490954c1fcb626078390510a84da15",
+        "strict": "sha256:2cdacc504bdf3f4344cd6d20ef6e0974857dbf02f66da2010605ec3840c1c5b2",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -338,16 +342,24 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     base_instructions = read_resource("yoetz://guidance/agent-instructions.md").decode("utf-8")
     workflow = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
     coverage = read_resource("yoetz://guidance/coverage-and-receipts.md").decode("utf-8")
-    assert INITIALIZE_GUIDANCE_URIS == (
-        "yoetz://guidance/agent-instructions.md",
-        "yoetz://guidance/workflow.md",
-        "yoetz://guidance/coverage-and-receipts.md",
-    )
+    assert INITIALIZE_GUIDANCE_URIS == ("yoetz://guidance/agent-instructions.md",)
     assert server_instructions().startswith(base_instructions.rstrip())
-    assert server_instructions().startswith(
-        f"{base_instructions.rstrip()}\n\n{workflow.rstrip()}\n\n{coverage.rstrip()}\n\n"
+    assert server_instructions() == f"{base_instructions.rstrip()}\n\nRoute profile: policy. " + (
+        "External semantic review follows the configured policy.\n"
     )
+    # Inlining these two cost 24 KB on every advertised tool description (#300). They are fetched
+    # on demand instead; the catalog paragraph below is what makes that reachable.
+    assert workflow.rstrip() not in server_instructions()
+    assert coverage.rstrip() not in server_instructions()
     assert "Route profile: policy." in server_instructions()
+    assert "Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance" in (
+        server_instructions()
+    )
+    # The on-demand catalog is only reachable because the inlined document names both the URI set
+    # and the read_guidance recovery path. Losing either line strands the un-inlined documents.
+    assert "yoetz://guidance/workflow.md" in server_instructions()
+    assert "yoetz://guidance/coverage-and-receipts.md" in server_instructions()
+    assert "call `read_guidance` with the same URI" in server_instructions()
     strict_instructions = server_instructions("strict")
     assert "Route profile: strict." in strict_instructions
     assert "This route will not request external semantic review" in strict_instructions
@@ -355,6 +367,26 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     with pytest.raises(KeyError, match="unregistered_tool_descriptor") as captured:
         descriptor_for("secret-tool")
     assert "secret-tool" not in str(captured.value)
+
+
+def test_respond_agent_surface_names_every_admitted_disposition() -> None:
+    """The advertised respond text is the only place an MCP caller learns the per-disposition
+    field rules: ``_mcp_presentation_schema`` drops respond-request's ``allOf`` before advertising
+    it. A disposition added to the enum without a rule here is an undiscoverable wire value."""
+
+    descriptor = descriptor_for("respond")
+    schema = cast(dict[str, Any], dict(descriptor.input_schema))
+    disposition = cast(dict[str, Any], cast(dict[str, Any], schema["properties"])["disposition"])
+    admitted = tuple(cast(list[str], disposition["enum"]))
+    assert admitted == ("acknowledged", "provenance_disputed", "rejected", "waived")
+    assert "allOf" not in schema
+    rules = cast(str, disposition["description"]).lower()
+    for value in admitted:
+        assert value in rules, f"{value} has no advertised field rule"
+    assert "requires reason" in rules
+    # The tool description is the first text a caller reads, and it is digest-pinned.
+    assert "provenance dispute" in descriptor.description
+    assert "provenance_disputed" in descriptor.description
 
 
 def test_guidance_resources_are_exact_and_static() -> None:
@@ -412,6 +444,31 @@ def test_advertised_input_schemas_honor_presentation_keyword_budgets() -> None:
         assert "common/client-info" not in encoded
         assert "common/actor-assertion" not in encoded
         assert "common/frontier" not in encoded
+
+
+def test_advertised_surface_honors_instructions_and_aggregate_budgets() -> None:
+    """#300: the instructions block grew to 41 KB unnoticed because nothing bounded it, while the
+    adjacent input schemas have been bounded since #128. A host may charge `instructions` once per
+    advertised tool, so an unbounded edit here is multiplied, not merely added."""
+
+    profiles: tuple[McpRouteProfile, ...] = ("policy", "strict")
+    for profile in profiles:
+        metrics = advertised_surface_metrics(profile)
+        assert metrics["tool_count"] == len(_EXPECTED_TOOL_NAMES)
+        assert (
+            metrics["instructions_encoded_bytes"] <= SERVER_INSTRUCTIONS_BUDGET["max_encoded_bytes"]
+        ), f"{profile} initialize instructions exceed their reviewed budget"
+        assert (
+            metrics["replicated_encoded_bytes"] <= ADVERTISED_SURFACE_BUDGET["max_encoded_bytes"]
+        ), f"{profile} advertised surface exceeds its reviewed budget"
+        # The aggregate must actually be an aggregate: a per-item bound cannot catch total growth.
+        assert metrics["replicated_encoded_bytes"] == (
+            metrics["instructions_encoded_bytes"] * metrics["tool_count"]
+            + metrics["description_encoded_bytes"]
+            + metrics["schema_encoded_bytes"]
+        )
+    # Guard the reason the aggregate budget is small enough to bite: exactly one inlined document.
+    assert len(INITIALIZE_GUIDANCE_URIS) == 1
 
 
 def test_publish_work_presentation_matches_ordinary_admission_families() -> None:

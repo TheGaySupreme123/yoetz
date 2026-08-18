@@ -11,13 +11,74 @@ describes behavior intended for the first release rather than a change from a pr
 
 ### Added
 
+- A `status` item's `freshness` scalar no longer contradicts the `coverage.ledger_freshness` in the
+  same item. A check that declared a coverage gap records `partial` freshness, but the projection
+  reported that only while folding the check itself and reverted to `current` on the next event of
+  any family — a receipt or a re-attach was enough — while the item's coverage kept the gaps. The
+  projection scalar is now derived from the retained check rather than from whichever event is being
+  folded, so it holds `partial` for as long as that check governs, and the compact item reports the
+  weaker of the scalar and its own coverage the way the evidence view already did. An agent reading
+  the summary line is no longer told the ledger is clean while the structured coverage records the
+  gaps (issue #307).
+
+- `provenance_disputed` is a fourth `respond` disposition. It records that the responder contests
+  the finding's authorship or provenance premise rather than its conclusion, requires a reason, may
+  carry evidence, and is not scored as an evidence-free rejection by either deterministic policy
+  pack. Like every other disposition it never resolves or erases the finding. The MCP `respond`
+  surface advertises it in both the tool description and the `disposition` field rules, so a caller
+  reading only the advertised schema learns the rule (issue #224).
+
+- Status compact/readiness projections now distinguish `unanswered_finding_count` from
+  `receipt_blocking_finding_count`. Responses clear the former; current actionable receipt findings
+  remain in the latter for every disposition. The paired `findings_unanswered` and
+  `receipt_findings_unresolved` conditions tell agents whether to respond or proceed to an honestly
+  unresolved receipt, and agent guidance no longer offers the human-only `waived` disposition
+  (issues #286 and #287).
+
+- The idle relock clock now counts harness observation rows resolved by the ready sweep as
+  activity, so a live workspace whose hooks keep delivering events is never relocked underneath
+  an open task session — however long the run — while a workspace that truly goes quiet still
+  relocks one full window after its spool runs dry. The default idle-relock interval is now 3600
+  seconds (was 900, shorter than one legitimate implementation phase under the prescribed publish
+  cadence), and the process-idle stop is now 7200 seconds so the in-process soft relock — which
+  re-readies on the next ordinary call — always comes before the full process stop (issue #291).
+
+- MCP success summaries now preserve the canonical frontier head digest and, for generic
+  operations such as `start`, returned task/session/writer identifiers after strict shape
+  validation. The bounded text fallback can therefore seed the next request even when a host drops
+  `structuredContent` (issue #279).
+
+- Local-only SessionStart observation now emits the static attach advisory without opening a
+  service connection, and pending standing advice shares that bootstrap context instead of being
+  starved (issue #280).
+
+- Observation sweeps that raise now retain the exception's bounded reason and origin in owner-only
+  diagnostics; only the actual sweep deadline emits `sweep_deadline_exceeded` (issue #278).
+
+- `publish_work` rejections for a payload field placed on the wrong event family now name the
+  field's one legal owning family (issue #266). When an `extra_forbidden` key byte-equals a frozen
+  catalogued payload property with exactly one owner among the ordinary publish families — the
+  2026-08-14 dogfood case was `attempted_items` on `claim_recorded`, owned solely by
+  `action_recorded` — the error carries a flat `repair_*` fact in `safe_details`, one bounded
+  ownership sentence in the authoring hint, and a `Repair:` clause on the compatible text summary.
+  The request stays rejected, nothing is moved or reinterpreted, caller-invented keys are never
+  echoed, and ambiguous or envelope-owned fields keep the plain admitted-key answer from issue
+  #240. Agent-facing guidance now teaches the same ownership before the first call (issue #264):
+  the skill, workflow, and agent instructions name `action_recorded` as the sole owner of
+  `attempted_items`; the request templates show the `requested_items` → `attempted_items`
+  exact-value pairing, call `decision_recorded.authority` a structural actor id, and name the
+  closed `action_kind` enum with `edit` for source changes; and the model-visible `publish_work`
+  description front-loads all three rules for hosts that degrade schema metadata.
+
 - Cooperative writers now receive a one-shot, coalesced notice when the observation writer moves the
   task frontier, including the bounded sequence range and observation-record count. The notice map
   is capped, drops ended-session entries, and is reconstructed on retry from a completed append's
-  frontier metadata when the local write did not land. Successful routine reads remain available in
-  the local observation store but are rate-limited out of the task ledger; failures, denials,
-  path-qualified executables, and conservatively unrecognized commands still materialize normally
-  (issue #244, ADR-022 amendment).
+  frontier metadata when the local write did not land. A per-session delivered high-water
+  `to_sequence`, scoped to the announced task ledger, survives notice deletion so a replayed
+  append is not re-announced. Successful
+  routine reads remain available in the local observation store but are rate-limited out of the
+  task ledger; failures, denials, path-qualified executables, and conservatively unrecognized
+  commands still materialize normally (issues #244 and #322, ADR-022 amendment).
 
 - Consent-based Codex observation activation and durable delivery repair (issues #204 and #205,
   ADR-012 amendment): setup now distinguishes installed hook sources from an active plugin, previews
@@ -37,6 +98,12 @@ describes behavior intended for the first release rather than a change from a pr
   explain failures, and `yoetz observe status|drain` reports and repairs undelivered work without
   silently deleting it. `[observation].enabled` is a typed local configuration gate that defaults
   on; per-workspace observation consent remains independently required.
+  Observation drains preserve FIFO within each session lane, retire a lane after its head fails,
+  quarantine ended unmapped sessions only after fencing against a concurrent attach, and stop a
+  service sweep after one workspace-global rejection. Turn-boundary auto-attach retries are
+  bounded and diagnostically visible. Transient
+  ready-application activation failures after a successful soft unlock remain retryable for three
+  attempts, and MCP now preserves the daemon's retryability in `VAULT_LOCKED` guidance.
   Observation hooks no longer block the session (#209/#210/#211): pure-ingress handlers are
   declared `"async": true`, advice-returning handlers get a meetable 10-second budget, the control
   handshake hashes the schema manifest without building the catalog, the local store caches its
@@ -189,10 +256,10 @@ describes behavior intended for the first release rather than a change from a pr
   discovery/registration adapters.
 
 - `closure_readiness` on every `status` success (`open_obligation_count`,
-  `unresolved_finding_count`, `blocking_conditions`), so an agent can see what currently bounds a
+  finding counters, `blocking_conditions`), so an agent can see what currently bounds a
   completion conclusion before spending a `check` or `receipt` rather than learning it afterwards
   from an insufficient receipt. Derived per request: it records nothing, creates no verdict or IDs,
-  and never strengthens coverage. When the compact singleton is unreadable both counts are `null`
+  and never strengthens coverage. When the compact singleton is unreadable all counts are `null`
   and the only condition is `readiness_unknown` — unknown is reported as unknown, never as zero.
 
 - A worked `publish_work` example per ordinary publishable event family, so agents no longer
@@ -389,16 +456,104 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- Frontier-motion notices no longer re-announce already-delivered observation appends when the
+  outbox redelivers a committed envelope. The local store keeps a per-session delivered high-water
+  `to_sequence` after the hook consumer receives the notice; `note_frontier_motion` drops
+  candidates at or behind that mark and clamps overlapping ranges so later genuine motion starts
+  from the announced head and record counts do not double-count. The mark is scoped to the
+  announced task ledger: when a session's mapping moves to a different task, the stale mark is
+  discarded rather than silently suppressing the new ledger's motion (issue #322).
+
+- Receipt replay of a completed `request_id` no longer collapses a failed object verification
+  (tampered or missing envelope, wrong key slot, or I/O while reading) into non-retryable
+  `INTERNAL_ERROR`. That path now returns `STORAGE_CORRUPT` with the stored-receipt-invalid
+  family. Pre-append object `stage`/`finalize` I/O on a fresh receipt is retryable
+  `STORAGE_UNSAFE` because nothing has committed (issue #325).
+
+- The MCP initialize `instructions` string had no size bound and had grown to 41 KB by inlining
+  three guidance documents. Codex copies that string into the `description` of every advertised
+  tool, so it was charged seven times on every turn of every session — roughly 288 KB of advertised
+  surface, six-sevenths of it duplicate, which a dogfood session hit as a truncation warning.
+  `instructions` now carry `agent-instructions.md` alone; `workflow.md` and
+  `coverage-and-receipts.md` are reached through the catalog paragraph that document already
+  carries, and through the `read_guidance` tool that has served them since the same issue the
+  inlining was working around. The packaged Codex skill no longer claims the two documents are
+  already in context. `SERVER_INSTRUCTIONS_BUDGET` and `ADVERTISED_SURFACE_BUDGET` now bound the
+  instructions block and the aggregate advertised surface, asserted alongside the per-schema
+  budgets, so the next oversized guidance edit fails CI instead of a live session (issue #300).
+
+- Correlated Codex `PreToolUse` and `PostToolUse` phases no longer claim one SQLite logical identity
+  with incompatible operation digests. The canonical host-call identity remains the content and
+  ledger-dedup key, while the durable claim key is additionally scoped by the materialization
+  version and exact draft-role tuple; pre-action and paired-result phases therefore cannot collide,
+  and hook/stream copies of the same paired phase still merge to `source_mask == 3`. Claims record
+  the source-independent materialization version rather than the source cursor version. A genuine
+  claim conflict now quarantines only that envelope as `dedup_conflict`; only bundle corruption arms
+  the READY-generation session latch (issue #309).
+
+- A Codex hook with a stale lifecycle mapping treated the daemon's `SESSION_CONFLICT` or
+  `SESSION_NOT_FOUND` response as proof that the service was unavailable, then repeated that false
+  advisory forever because it retained the old session and writer ids. Status errors now pass
+  through an exhaustive classification: stale mappings tell the agent to call `start` again while
+  explicitly preserving service health, transient reads request a later status read, privacy and
+  vault conditions name their actual recovery paths, and only genuine degradation says the service
+  is unavailable. The stale advisory remains advice-safe and the agent's successful `start` result
+  is still the only source of a replacement mapping (issue #308).
+
+- The end-to-end hook budget was smaller than the budgets enforced inside a single pass, so
+  `hook_budget_exceeded` fired on healthy hooks — 253 of 833 diagnostics on one workspace — and
+  carried no signal about the regressions it was added for. The total is now derived from the
+  connect preflight and drain budgets plus a local-stage allowance rather than being an
+  independent constant, and events that may retry auto-attach carry that enforced budget too. A
+  test asserts the derivation so the parts can no longer drift past the whole (issue #288).
+
+- `stream_partials` was the only unbounded collection in the observation state file and was
+  absent from the eviction ladder, so two entries could hold 41% of a file at 95% of its hard
+  1 MiB cap while overflow evicted envelopes and outbox rows around them. A partial is a
+  read-cache — the reader rereads the tail from the committed cursor whenever it is missing — so
+  it is now bounded per entry, dropped with an explicit gap instead of raising (which previously
+  stalled the stream while retaining the partial that caused the stall), and shed first in the
+  `_save` eviction ladder, ahead of any durable row. The per-entry bound is the reader's own read
+  chunk and may not fall below it: the reader assembles a source line longer than one chunk by
+  holding its prefix, so a smaller bound would drop that prefix every pass and freeze the cursor
+  for that session. Oversized partials persisted before this
+  change are dropped on the next save; the condition projects as `source_lag` on status until a
+  reconcile catches up (issue #289).
+
+- The `store` stage of every hook pass cost ~500 ms on a full state file and the diagnostic could
+  not say where it went. Canonical JSON validation and escaping walked every string one character
+  at a time in Python, which was ~70× the stdlib cost on the same bytes; both hot loops now take a
+  single C-level scan and fall back to the original logic only when a string actually contains an
+  escape or an invalid codepoint, so output and error identity are unchanged. Measured against a
+  live 1 MiB state file, one parse, hydrate, encode, and write fell from ~275 ms to ~55 ms — parse
+  ~82→13 ms and encode ~155→24 ms. Timing rows now also
+  break `store` into `store_hydrate`, `store_encode`, and `store_write` so any remaining cost is
+  attributable, and a latency fence bounds the codec against the stdlib on a realistically-sized
+  document (issue #290).
+
+- An evidence-free rejection or waiver of a current deterministic finding minted two actionable
+  findings, `questionable_finding_rejection` and `weak_or_stale_response`, doubling the response
+  burden at every level. `check` now collapses that overlap when it composes the built-in packs,
+  keeping only `questionable_finding_rejection`. `weak_or_stale_response` still stands on its own
+  for stale responses, for unsupported current responses to semantic findings, for stricter
+  work-integrity-only evidence exclusions, and whenever the research-evidence pack did not run
+  (issue #285).
 - Codex Step 0 treated an empty MCP `resources/read` as success and advertised that guidance URIs
   "resolve without any repository checkout". The skill now stops on an empty body, calls
   `read_guidance` with the same URI, and opens the matching installed `references/<name>.md` copy
-  if that tool result is also empty. Initialize `instructions` also append `workflow.md` and
-  `coverage-and-receipts.md` so those Step 0 documents arrive without depending on
-  `resources/read`. MCP registers `read_guidance` as a seventh, read-only tool that returns the
+  if that tool result is also empty. MCP registers `read_guidance` as a seventh, read-only tool that returns the
   full guidance document as tool text and is not a ledger operation. `resources/read` now
   advertises each registry `media_type` instead of hardcoding `text/markdown`.
   `docs/INTERFACES.md` no longer states that unprofiled hosts can fetch those documents
   unconditionally (issue #203).
+- Codex Step 0 never named `resources/list`, but agents still called `list_mcp_resources` first
+  and treated `Unexpected response type` as a missing server. The skill and initialize
+  `agent-instructions.md` now say not to list: the five `yoetz://guidance/` URIs are the
+  complete catalog, and a list failure is not a reason to stop or to read product source
+  (issue #173). The served list payload stays spec-correct. `rmcp 3.0.0` (Codex
+  `0.148.0-alpha.6`'s pin) decodes that payload as `ListResourcesResult` for every
+  optional-field subset, so this does not strip list fields and does not claim a host-side
+  decode fix.
 - A Stop hook that selected advice completed in ~1.4s with exit 0, then Codex marked it Failed
   with `hook returned invalid stop hook JSON output`. Stop has no `hookSpecificOutput`; the
   event-agnostic emitter was writing `additionalContext` onto a wire type that only admits
@@ -527,6 +682,41 @@ carried them; they are listed because each one describes the behavior that now s
   session where every check returned `blocked_by_policy` / `route_semantic_ceiling` with nothing
   connecting the two. `yoetz privacy setup` now names the mismatch and the command that fixes it,
   and the terminal interface reports the agent-route verdict as its own readiness line.
+- Ordinary store-lock contention discarded hook events as `runtime_gate_unsafe`: the runtime-gate
+  read serialized on the interprocess store lock, whose two-second acquisition timeout is routinely
+  exceeded by a concurrent hook's batched local pass, and the guard treated the resulting
+  `TimeoutError` as an unsafe gate — dropping the event before capture with no stderr line and no
+  workspace gap, on a workspace every health surface reported as covered. The gate is now read
+  lock-free through a single descriptor (it is an owner-only marker replaced only atomically), a
+  contended read is reported as `runtime_gate_contended` and falls back to the missing-marker
+  default instead of discarding the event, and a genuinely unsafe gate still fails closed but says
+  so on stderr and records an `observation_storage_corrupt` coverage gap for the bound workspace so
+  `observe status` can see the drop (issue #273).
+
+- `hook_diagnostics` in `observe status` was an all-time tally with no recency, so a failure that
+  was diagnosed and fixed days earlier read exactly like one happening now: one machine reported
+  `runtime_gate_unsafe: 97` for two days after issue #273's fix ended it, and a `max_ms` of 60001
+  from a single pre-fix pass alongside a healthy median of 789 ms. Every count is now paired with
+  a count over the last `window_seconds`, every reason carries `first_seen`/`last_seen`, and the
+  all-time `max_ms` carries the `max_ts` it happened at next to a `recent_max_ms` for the live
+  window. Nothing is discarded — a stale failure is dated rather than dropped — and a row whose
+  timestamp cannot be read is never counted as recent (issue #310).
+
+- The `truncated_payload` coverage gap had note call sites and no resolution path, so one
+  size-pressure eviction reported the workspace as currently losing observations forever. A save
+  that sheds nothing and lands with a headroom margin under the state bound now clears the active
+  flag; merely landing under the bound does not, because that is the state an eviction itself
+  leaves behind. Renewed shedding reopens it, and `gap_history` keeps the sighting either way
+  (issue #310).
+
+- Hook timing rows attributed as little as 14% of the pass they measured, so `hook_budget_exceeded`
+  could not distinguish real work from queueing. Time spent acquiring the interprocess store lock
+  is now reported as `store_lock_wait` wherever in the pass it occurs, including on the timeout
+  path; the two formerly unwindowed regions — workspace resolution and the consent probe before
+  the store window, advice selection and the stdout write after the drain window — are reported as
+  `resolve` and `deliver`; and whatever the partition still misses is reported as `unattributed`
+  rather than left for a reader to derive. A contended pass that spent 707 of 711 ms queueing
+  previously showed `store: 4` and nothing else (issues #310 and #311).
 
 ### Security
 

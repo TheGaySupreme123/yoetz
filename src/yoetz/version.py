@@ -39,6 +39,7 @@ __all__ = [
     "PRIVACY_POLICY_SCHEMA_VERSION",
     "PROJECTION_VERSION",
     "PROTOCOL_VERSION",
+    "REVIEWED_RESOURCE_COUNT",
     "RESEARCH_EVIDENCE_POLICY_VERSION",
     "ResourceIdentity",
     "ResourceIntegrityError",
@@ -70,7 +71,10 @@ _SUPPORT_SCHEMA: Final = "yoetz.runtime-support/1"
 _RESOURCE_ROOT: Final = "yoetz.resources"
 _MANIFEST_LIMIT: Final = 1_048_576
 _RESOURCE_LIMIT: Final = 4_194_304
-_EXPECTED_RESOURCE_COUNT: Final = 98
+# One independently reviewed cardinality tripwire guards the generated resource manifest. All
+# per-kind counts are derived from the manifest entries so adding a resource has exactly one
+# hand-authored count to review and the owning resource-ripple command can regenerate the rest.
+REVIEWED_RESOURCE_COUNT: Final = 99
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -408,7 +412,7 @@ def _load_resource_manifest() -> _ResourceManifest:
     entries = tuple(_entry_from_json(item) for item in raw_entries)
     names = tuple(entry.logical_name for entry in entries)
     if (
-        len(entries) != _EXPECTED_RESOURCE_COUNT
+        len(entries) != REVIEWED_RESOURCE_COUNT
         or names != tuple(sorted(set(names), key=str.encode))
         or len({entry.package_path for entry in entries}) != len(entries)
         or sum(entry.kind == "runtime_support" for entry in entries) != 1
@@ -577,16 +581,8 @@ def _resource_counts(entries: tuple[_ResourceEntry, ...]) -> VersionPairs:
         ),
         "total": len(entries),
     }
-    expected = {
-        "canonical_vectors": 9,
-        "guidance_resources": 5,
-        "migrations": 9,
-        "runtime_support_resources": 1,
-        "schema_resources": 72,
-        "skill_resources": 2,
-        "total": 98,
-    }
-    if counts != expected:
+    categorized_total = sum(count for name, count in counts.items() if name != "total")
+    if counts["total"] != REVIEWED_RESOURCE_COUNT or categorized_total != counts["total"]:
         raise ResourceIntegrityError("resource_counts_invalid")
     return tuple((name, str(counts[name])) for name in sorted(counts, key=str.encode))
 

@@ -782,7 +782,8 @@ def _readiness_unknown() -> StatusClosureReadinessModel:
         declared_obligation_count=None,
         no_obligations_reason=None,
         open_obligation_count=None,
-        unresolved_finding_count=None,
+        unanswered_finding_count=None,
+        receipt_blocking_finding_count=None,
         blocking_conditions=("readiness_unknown",),
     )
 
@@ -839,7 +840,8 @@ async def _closure_readiness(
             return _readiness_unknown()
         declared_obligations = int(item.declared_obligation_count)
         open_obligations = int(item.open_obligation_count)
-        unresolved_findings = int(item.unresolved_finding_count)
+        unanswered_findings = int(item.unanswered_finding_count)
+        receipt_blocking_findings = int(item.receipt_blocking_finding_count)
         has_plan = item.current_plan_event_id is not None
         no_obligations_reason = item.no_obligations_reason
         stale = page.rebuild_state != "current" or bool(page.lag)
@@ -855,8 +857,10 @@ async def _closure_readiness(
     blocking: list[str] = []
     if open_obligations:
         blocking.append("obligations_open")
-    if unresolved_findings:
-        blocking.append("findings_unresolved")
+    if unanswered_findings:
+        blocking.append("findings_unanswered")
+    if receipt_blocking_findings:
+        blocking.append("receipt_findings_unresolved")
     if not has_plan:
         blocking.append("no_plan_published")
     elif declared_obligations == 0 and no_obligations_reason is None:
@@ -869,12 +873,14 @@ async def _closure_readiness(
         declared_obligation_count=str(declared_obligations),
         no_obligations_reason=no_obligations_reason,
         open_obligation_count=str(open_obligations),
-        unresolved_finding_count=str(unresolved_findings),
+        unanswered_finding_count=str(unanswered_findings),
+        receipt_blocking_finding_count=str(receipt_blocking_findings),
         blocking_conditions=cast(
             tuple[
                 Literal[
                     "obligations_open",
-                    "findings_unresolved",
+                    "findings_unanswered",
+                    "receipt_findings_unresolved",
                     "no_plan_published",
                     "no_obligations_declared",
                     "readiness_unknown",

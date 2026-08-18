@@ -43,12 +43,15 @@ __all__ = [
 
 LOCK_DRAIN_SECONDS: Final = 5
 STOP_DRAIN_SECONDS: Final = 30
-IDLE_STOP_SECONDS: Final = 1_800
+# Soft relock (default 3,600 s) must come before process stop: the in-process soft lock re-readies
+# on the next ordinary call, while a stopped process needs an on-demand relaunch. Keeping
+# relock < stop makes the cheap containment the first one reached.
+IDLE_STOP_SECONDS: Final = 7_200
 # One name for the per-user singleton lock file, so the daemon that takes it and the CLI that
 # reports on its holder can never disagree about which file that is.
 SINGLETON_LOCK_NAME: Final = "service.lock"
 _MAX_SINGLETON_HOLDER_BYTES: Final = 256
-_DEFAULT_IDLE_SECONDS: Final = 900
+_DEFAULT_IDLE_SECONDS: Final = 3_600
 _IDLE_POLICY_DOMAIN: Final = "yoetz/idle-relock-policy-change/v1\x00"
 _LIFECYCLE_REASONS: Final = frozenset(
     {

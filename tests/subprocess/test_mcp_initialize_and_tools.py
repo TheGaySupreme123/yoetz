@@ -124,14 +124,18 @@ async def test_static_inventory_is_exact_and_verified() -> None:
     coverage = (
         read_guidance_resource("yoetz://guidance/coverage-and-receipts.md").decode("utf-8").rstrip()
     )
-    assert INITIALIZE_GUIDANCE_URIS == (
-        "yoetz://guidance/agent-instructions.md",
-        "yoetz://guidance/workflow.md",
-        "yoetz://guidance/coverage-and-receipts.md",
-    )
+    assert INITIALIZE_GUIDANCE_URIS == ("yoetz://guidance/agent-instructions.md",)
     assert BRIDGE_RUNTIME.instructions.startswith(agent)
-    assert BRIDGE_RUNTIME.instructions.startswith(f"{agent}\n\n{workflow}\n\n{coverage}\n\n")
+    # #300: workflow.md and coverage-and-receipts.md are reached through the catalog and
+    # read_guidance, not inlined here. Both URIs stay named so the agent can still find them.
+    assert workflow not in BRIDGE_RUNTIME.instructions
+    assert coverage not in BRIDGE_RUNTIME.instructions
+    assert "yoetz://guidance/workflow.md" in BRIDGE_RUNTIME.instructions
+    assert "yoetz://guidance/coverage-and-receipts.md" in BRIDGE_RUNTIME.instructions
     assert "Route profile: policy." in BRIDGE_RUNTIME.instructions
+    assert "Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance" in (
+        BRIDGE_RUNTIME.instructions
+    )
 
 
 def test_raw_initialize_lists_exact_capabilities_tools_and_resources() -> None:

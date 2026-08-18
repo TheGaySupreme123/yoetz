@@ -88,7 +88,8 @@ def test_work_detail_preserves_unknown_open_obligation_count(tmp_path: Path) -> 
         gaps=("readiness_unknown",),
         ledger_freshness="redacted_gap",
         open_obligation_count=None,
-        unresolved_finding_count="0",
+        unanswered_finding_count="0",
+        receipt_blocking_finding_count="0",
     )
 
     detail = runtime._work_detail(  # pyright: ignore[reportPrivateUsage]

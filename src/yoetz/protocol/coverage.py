@@ -18,6 +18,7 @@ __all__ = [
     "COVERAGE_DEFAULTS_BY_CHANNEL",
     "EVIDENCE_IMMUTABILITY_ORDER",
     "LEDGER_FRESHNESS_ORDER",
+    "MAX_KNOWN_GAPS",
     "ArtifactObservation",
     "AuthorshipAssurance",
     "CheckType",
@@ -30,6 +31,8 @@ __all__ = [
     "coverage_to_json",
     "weakest",
 ]
+
+MAX_KNOWN_GAPS: Final = 64
 
 
 class PublicationChannel(str, Enum):  # noqa: UP042 - wire values require str-valued Enum
@@ -231,7 +234,7 @@ def _validate_known_gaps(value: object) -> None:
     if type(value) is not tuple:
         raise ProtocolValueError("invalid_known_gap")
     gaps = cast(tuple[object, ...], value)
-    if len(gaps) > 64:
+    if len(gaps) > MAX_KNOWN_GAPS:
         raise ProtocolValueError("invalid_known_gap")
     previous: str | None = None
     for gap in gaps:
@@ -471,7 +474,7 @@ def weakest(a: Coverage, b: Coverage) -> Coverage:
         check_set.discard(CheckType.NONE)
     checks = tuple(sorted(check_set, key=lambda check: check.value.encode("ascii")))
     gap_set = set(a.known_gaps) | set(b.known_gaps)
-    if len(gap_set) > 64:
+    if len(gap_set) > MAX_KNOWN_GAPS:
         raise ProtocolValueError("invalid_known_gap")
     gaps = tuple(sorted(gap_set, key=lambda gap: gap.encode("ascii")))
     return Coverage(

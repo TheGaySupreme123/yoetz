@@ -213,6 +213,14 @@ _SOFT_LOCK_AUTO_READY_REASONS: Final = frozenset(
         "system_suspend",
     }
 )
+# A soft-lock re-ready whose vault unlock already succeeded can still fail while activating the
+# ready application for ambient reasons (event-loop saturation, transient contention). Those
+# failures keep the soft-lock reason -- and with it auto-ready eligibility, so the next dispatch
+# simply tries again -- for this many consecutive attempts before degrading to the terminal
+# ``unlock_failed`` that only a trusted ceremony clears. Without the allowance, one transient
+# blip demoted a succeeded re-ready into a permanent LOCKED that nothing ever reconsidered
+# (#276). Credential-shaped failures are unaffected: they never reach this classification.
+_SOFT_REREADY_ACTIVATION_RETRY_LIMIT: Final = 3
 # Response-frame send must complete within this wall-clock window. A stalled peer that stops
 # reading cannot retain an in-flight entry in ``calls`` (and thus the inactive-session exemption)
 # indefinitely via write backpressure on sock_sendall.
@@ -551,6 +559,7 @@ class ServiceDaemon:
         # re-ready can update it without replacing the composition object.
         self._auto_unlock_reason = _composition.auto_unlock_reason
         self._monitor_state = "unavailable"
+        self._soft_reready_activation_failures = 0
         self._stop_event = asyncio.Event()
         # ``serve`` owns the accept loops; a daemon driven by ``start`` alone never serves and
         # must never wait on an event nothing will set.
@@ -686,6 +695,7 @@ class ServiceDaemon:
             self._start_ready_maintenance(partial, service_generation, vault_generation)
             self._state_reason = "none"
             self._auto_unlock_reason = "none"
+            self._soft_reready_activation_failures = 0
         except BaseException:
             if self._application is partial:
                 self._application = None
@@ -931,7 +941,14 @@ class ServiceDaemon:
             if await self._try_soft_lock_auto_ready():
                 application = self._application
         if application is None:
-            raise ControlError("vault_locked", retryable=True)
+            # Honest retryability: a soft lock -- including a transient re-ready activation
+            # failure that kept its soft reason (#276) -- heals on a later attempt, while a
+            # hard lock or missing setup needs a trusted ceremony no retry will perform.
+            raise ControlError(
+                "vault_locked",
+                retryable=self._state_reason in _SOFT_LOCK_AUTO_READY_REASONS
+                or self._state_reason == "none",
+            )
         admission: Admission | None = None
         try:
             admission = await self._composition.lifecycle.admit(request.method.value)
@@ -1481,6 +1498,7 @@ class ServiceDaemon:
             summary: ObservationDrainSummary | None = None
             if observation_sweep is not None:
                 summary = await self._bounded_observation_sweep(observation_sweep)
+                await self._note_sweep_liveness(summary)
             if recommendation_refresh is not None:
                 try:
                     await asyncio.wait_for(
@@ -1509,8 +1527,25 @@ class ServiceDaemon:
                     # loop before the next immediate bulk-drain pass.
                     await asyncio.sleep(_OBSERVATION_SWEEP_PROGRESS_DELAY_SECONDS)
                 summary = await self._bounded_observation_sweep(observation_sweep)
+                await self._note_sweep_liveness(summary)
         except asyncio.CancelledError:
             raise
+
+    async def _note_sweep_liveness(self, summary: ObservationDrainSummary | None) -> None:
+        """Count resolved outbox rows as activity for the idle relock clock.
+
+        A resolved row is a same-user authenticated write the live workspace just produced —
+        the same trust class as an admitted control call, which already resets the clock. A
+        harness that follows the prescribed publish cadence can legitimately go far longer than
+        the idle interval between control calls while its hooks keep writing rows, and relocking
+        underneath that live session costs the run its check and receipt (#291). Only resolution
+        counts: each row acknowledges or quarantines at most once, so an abandoned backlog
+        extends the unlock by one bounded drain, while a retrying row re-appears every sweep and
+        counting it would let one wedged row hold the vault unlocked forever.
+        """
+
+        if summary is not None and summary.acknowledged + summary.quarantined > 0:
+            await self._composition.lifecycle.note_activity()
 
     async def _bounded_observation_sweep(
         self, observation_sweep: Callable[[], Awaitable[ObservationDrainSummary]]
@@ -1532,21 +1567,30 @@ class ServiceDaemon:
 
         try:
             return await asyncio.wait_for(guarded(), timeout=_OBSERVATION_SWEEP_DEADLINE_SECONDS)
-        except TimeoutError:
+        except TimeoutError as exc:
             # ``asyncio.TimeoutError`` is the builtin ``TimeoutError``, so any socket or OS
             # timeout raised inside the sweep lands here too and must not be reported as the
             # deadline. The flag above is the discriminator.
-            reason = "sweep_failed" if raised_inside else "sweep_deadline_exceeded"
-            record_bounded_event_without_raising(
+            if raised_inside:
+                record_unexpected_exception_without_raising(
+                    exc,
+                    component="service.daemon",
+                    operation="observation_sweep_failed",
+                )
+            else:
+                record_bounded_event_without_raising(
+                    component="service.daemon",
+                    operation="observation_sweep_failed",
+                    reason="sweep_deadline_exceeded",
+                )
+        except Exception as exc:
+            # The sweep raised on its own: keep the exception's bounded identity (reason and
+            # origin) rather than collapsing every distinct fault into one ``sweep_failed``
+            # token (issue #278).
+            record_unexpected_exception_without_raising(
+                exc,
                 component="service.daemon",
                 operation="observation_sweep_failed",
-                reason=reason,
-            )
-        except Exception:
-            record_bounded_event_without_raising(
-                component="service.daemon",
-                operation="observation_sweep_failed",
-                reason="sweep_failed",
             )
         return None
 
@@ -1590,6 +1634,7 @@ class ServiceDaemon:
                 or lifecycle.state is not ServiceState.LOCKED
             ):
                 return False
+            soft_lock_reason = self._state_reason
             vault = self._composition.vault
             mode = getattr(vault.mode, "value", vault.mode)
             try:
@@ -1615,11 +1660,6 @@ class ServiceDaemon:
                     vault.generation,
                 )
             except Exception:
-                get_logger("service.daemon").warning(
-                    "auto_unlock",
-                    outcome="failed",
-                    reason="unlock_failed",
-                )
                 try:
                     # Always best-effort lock: unlock may have left transient store state
                     # even when ready is still false.
@@ -1628,11 +1668,34 @@ class ServiceDaemon:
                     pass
                 await self._return_to_locked_after_soft_unlock()
                 if (
+                    unlocked
+                    and self._soft_reready_activation_failures
+                    < _SOFT_REREADY_ACTIVATION_RETRY_LIMIT
+                ):
+                    # The vault credential worked; only ready-application activation failed.
+                    # Restoring the soft-lock reason keeps auto-ready eligible, so the very
+                    # next dispatch retries instead of the service staying LOCKED until a
+                    # manual ceremony (#276).
+                    self._soft_reready_activation_failures += 1
+                    self._state_reason = soft_lock_reason
+                    get_logger("service.daemon").warning(
+                        "auto_unlock",
+                        outcome="failed",
+                        reason="activation_failed_retryable",
+                    )
+                    return False
+                get_logger("service.daemon").warning(
+                    "auto_unlock",
+                    outcome="failed",
+                    reason="unlock_failed",
+                )
+                if (
                     self._state_reason in _SOFT_LOCK_AUTO_READY_REASONS
                     or self._state_reason == "none"
                 ):
                     self._state_reason = "unlock_failed"
                 return False
+            self._soft_reready_activation_failures = 0
             return self._application is not None
 
     async def _return_to_locked_after_soft_unlock(self) -> None:

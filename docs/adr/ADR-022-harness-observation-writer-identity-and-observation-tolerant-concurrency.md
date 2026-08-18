@@ -1,13 +1,16 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-08-14 for moderator-approved issue #244 and the reopened issue #216 recurrence.
+**Amended:** 2026-08-18 for maintainer-authored issues #320 and #326 and issue #322
+(delivered frontier-motion high-water); 2026-08-16 for maintainer-approved issue #224; 2026-08-14
+for moderator-approved issue #244 and the reopened issue #216 recurrence.
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/adapters/memory/ledger.py`,
-`src/yoetz/application/publish_work.py`, `src/yoetz/kernel/policies/observation_advice.py`, and
-`src/yoetz/service/ready_composition.py`.
+`src/yoetz/application/publish_work.py`, `src/yoetz/application/receipt.py`,
+`src/yoetz/kernel/policies/observation_advice.py`, `src/yoetz/service/ready_composition.py`, and
+`src/yoetz/adapters/integrations/observation_local.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
-issues #214, #216, #217, #223, #224, #225, #226, #227, and #244.
+issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #320, #322, and #326.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -55,16 +58,29 @@ unsupported claims and unbounded duplicate findings.
    computation and commit share one critical section so no concurrent append can invalidate ledger
    digests or assigned sequences between them.
 
-4. A frozen check retains exact-frontier equality. Observation-authored append attempts while any
-   case for the session is frozen receive retryable `OPERATION_PENDING`; the durable outbox retries
-   after the check commits. The check verdict is never retargeted to a frontier it did not inspect.
+4. Check acquisition may accept a caller frontier behind the live head only across an
+   observation-authored suffix. It freezes the case at the live head, under a transient in-memory
+   reservation that defers observation appends until the durable frozen-case barrier is installed.
+   The reservation is never persisted and expires after 60 seconds if acquisition stalls.
+   Observation-authored append attempts while either barrier is active receive retryable
+   `OPERATION_PENDING`; the durable outbox retries after the check commits. Commit retains exact
+   equality with the frontier actually frozen, so the verdict is never retargeted to a frontier it
+   did not inspect.
 
-5. Hook envelopes are observation evidence, not agent claims. Completion-like lifecycle signals
+5. Receipt acquisition may keep its caller-supplied subject frontier across an
+   observation-authored suffix only when the supplied projection is the exact genesis-prefix replay
+   at that frontier and the suffix contains no `finding_recorded` event. The receipt document stays
+   pinned to that subject frontier. Its locator append repeats the finding-free suffix check so a
+   finding drained between availability inspection and append still conflicts. Material motion,
+   spoofed observation authorship, a mismatched prefix projection, or a finding-bearing suffix
+   returns the shared retryable `FRONTIER_CONFLICT` shape with repair facts.
+
+6. Hook envelopes are observation evidence, not agent claims. Completion-like lifecycle signals
    materialize as metadata-only `evidence_recorded` events. A narrow claim path exists only when the
    structural payload explicitly carries an admitted `claim_kind`. Mapping version
    `obs-ledger/1.2.0` separates these identities from historical observation-derived claims.
 
-6. Deterministic advice finding IDs are condition-scoped over policy, kind, rule code, and detail
+7. Deterministic advice finding IDs are condition-scoped over policy, kind, rule code, and detail
    token. Evidence refs prove the condition but never identify it: several rules intentionally cite
    a rolling or accumulating envelope window. Candidate subject refs map only their source envelopes
    to ledger event ids; a standing condition with no envelope anchors to the session lifecycle
@@ -72,17 +88,20 @@ unsupported claims and unbounded duplicate findings.
    changes do not append another `finding_recorded` event. The current observation snapshot and
    coverage/gap state retain the changing evidence context without growing the durable finding set.
 
-7. A provenance-dispute response disposition is deferred to issue #224. This change removes the
-   false observation-authored claim premise but does not add a fourth `ResponseDisposition`, change
-   response schemas, migrate SQL constraints, or weaken the rule that a recorded finding remains
-   historically visible.
+8. `provenance_disputed` is the fourth `ResponseDisposition`. It records that the responder
+   contests the finding's authorship or provenance premise, requires a non-empty reason, and may
+   carry evidence, but is not scored as an evidence-free rejection by either deterministic policy
+   pack. It never resolves or erases the finding. Public compact/readiness projections expose two
+   distinct counters: `unanswered_finding_count` decreases after any readable response, including a
+   provenance dispute, while `receipt_blocking_finding_count` continues to count current actionable
+   findings whose receipt state remains `resolved=false` for every disposition.
 
-8. Standing provider-readiness advice is not converted into a `material_limitation_omitted`
+9. Standing provider-readiness advice is not converted into a `material_limitation_omitted`
    finding. That finding kind remains actionable for an omission in the work account. Provider
    configuration and availability remain visible through observation advice before a check and
    through the check coverage vector and receipt limitations after one.
 
-9. Successful routine reads are rate-limited at the task-ledger boundary. The hook adapter labels
+10. Successful routine reads are rate-limited at the task-ledger boundary. The hook adapter labels
    only a closed set of read tools and conservatively parsed single read-only shell commands as
    `routine_read`; path-qualified executables, side-effecting Git options, shell composition,
    redirection, mutation flags, unknown commands, explicit failures or denials, and other
@@ -91,16 +110,23 @@ unsupported claims and unbounded duplicate findings.
    individual task-ledger records. A failed post-event still materializes action and result records,
    and edits, checks, tests, lifecycle events, and other non-routine observations are unchanged.
 
-10. Every newly accepted observation-authored append records one bounded pending frontier-motion
+11. Every newly accepted observation-authored append records one bounded pending frontier-motion
     notice for the originating Codex session. A retry of a completed append whose local notice
     write did not land reconstructs that notice from the committed append's frontier metadata.
-    Contiguous undelivered appends coalesce their from/to sequences and record count. The
-    per-workspace notice map is capped and drops ended-session entries before serialization. A
-    later advice-safe `PostToolUse` hook surfaces that the motion was hook-observed, explains that
-    held cooperative publish frontiers remain admissible only across observation-authored motion,
-    and directs exact-frontier operations to refresh status. The notice is removed only after its
-    bytes reach the hook consumer. It grants no authority, changes no optimistic-concurrency
-    predicate, and adds no MCP operation.
+    After the notice's bytes reach the hook consumer, the store retains that session's delivered
+    high-water `to_sequence`, scoped to the announced task ledger, so a later replay of the same
+    append is not re-announced. Candidates at or behind that mark are dropped; overlapping
+    candidates are clamped to the undelivered remainder so `from` and record count describe only
+    motion not yet announced. A mark recorded for a different task neither drops nor clamps:
+    when a session's mapping moves to another task, the stale mark and any pending notice for
+    the old task are discarded so the new ledger's motion is announced from its start. Contiguous
+    undelivered appends coalesce their from/to sequences and record count. The per-workspace
+    notice and delivered-mark maps are capped and drop ended-session entries before serialization.
+    A later advice-safe `PostToolUse` hook surfaces that the motion was hook-observed, explains
+    that held cooperative publish frontiers remain admissible only across observation-authored
+    motion, and directs callers to use repair facts when an operation still conflicts. The pending notice is
+    removed only after its bytes reach the hook consumer. It grants no authority, changes no
+    optimistic-concurrency predicate, and adds no MCP operation.
 
 ## Security and privacy consequences
 
@@ -122,6 +148,7 @@ outbox rather than weakening verdict binding. Observation can contribute evidenc
 advice without impersonating the agent or minting the same standing finding indefinitely. Routine
 reads retain their local observation evidence without producing an unbounded task-ledger trail, and
 cooperative writers learn about meaningful observation-authored frontier motion before their next
-state-sensitive operation. Observation-advice policy `0.1.1` applies the condition-scoped identity
-to new materialization. Historical duplicate findings remain append-only evidence; this change does
+state-sensitive operation. Observation-advice policy `0.1.2` applies the condition-scoped identity
+to new materialization (`0.1.1` first introduced it; `0.1.2` rebased the standing
+`provider_not_ready` condition onto per-build structural machine facts for issue #265). Historical duplicate findings remain append-only evidence; this change does
 not erase or rewrite an existing task ledger.

@@ -45,12 +45,18 @@ def _target(tmp_path: Path) -> tuple[IntegrationTarget, Path, Path]:
     return target, project, home
 
 
-def _install(target: IntegrationTarget) -> None:
-    install_plugin(target, allow_untested=True)
+def _install(target: IntegrationTarget, *, codex_version: str = "0.148.0-alpha.6") -> None:
+    install_plugin(target, allow_untested=True, codex_version=codex_version)
 
 
 class _FakeCodex:
-    def __init__(self, target: IntegrationTarget, home: Path) -> None:
+    def __init__(
+        self,
+        target: IntegrationTarget,
+        home: Path,
+        *,
+        codex_version: str = "0.148.0-alpha.6",
+    ) -> None:
         self.project = Path(target.project_root)
         self.home = home
         self.executable = home / "codex"
@@ -59,6 +65,7 @@ class _FakeCodex:
         self.calls: list[tuple[str, ...]] = []
         self.environments: list[dict[str, str]] = []
         self.fail_add_after_copy = False
+        self.codex_version = codex_version
 
     def __call__(
         self, command: tuple[str, ...], **kwargs: object
@@ -71,7 +78,10 @@ class _FakeCodex:
         args = tuple(command[1:])
         if args == ("--version",):
             return subprocess.CompletedProcess(
-                command, 0, stdout=b"codex-cli 0.148.0-alpha.6\n", stderr=b""
+                command,
+                0,
+                stdout=f"codex-cli {self.codex_version}\n".encode("ascii"),
+                stderr=b"",
             )
         elif args == ("plugin", "list", "--marketplace", "yoetz", "--json"):
             body: object
@@ -210,6 +220,85 @@ def test_inspect_preview_and_apply_activation(tmp_path: Path) -> None:
     config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
     assert config["marketplaces"]["yoetz"]["source"] == str(project)
     assert config["plugins"]["yoetz@yoetz"]["enabled"] is True
+
+
+def test_stable_codex_activation_serves_required_hooks_synchronously(tmp_path: Path) -> None:
+    target, project, home = _target(tmp_path)
+    version = "0.147.0"
+    _install(target, codex_version=version)
+    runner = _FakeCodex(target, home, codex_version=version)
+
+    preview = _preview_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        _run=runner,
+    )
+    result = _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=preview.preview_digest,
+        _run=runner,
+    )
+
+    assert result.state is ActivationState.ACTIVE
+    installed_hooks = json.loads(
+        (home / "plugins/cache/yoetz/yoetz/0.1.0/hooks/hooks.json").read_bytes()
+    )
+    for event in (
+        "PreToolUse",
+        "PermissionRequest",
+        "PreCompact",
+        "PostCompact",
+        "SubagentStart",
+        "SubagentStop",
+    ):
+        groups = installed_hooks["hooks"][event]
+        handler = groups[0]["hooks"][0]
+        assert "async" not in handler
+    assert (project / ".agents/plugins/marketplace.json").is_file()
+
+
+def test_version_variant_migration_is_previewed_but_fenced_until_source_refresh(
+    tmp_path: Path,
+) -> None:
+    target, project, home = _target(tmp_path)
+    _install(target, codex_version="0.147.0")
+    runner = _FakeCodex(target, home, codex_version="0.148.0-alpha.6")
+    preview = _preview_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        _run=runner,
+    )
+
+    with pytest.raises(IntegrationError) as caught:
+        _apply_activation(
+            target,
+            executable_path=str(runner.executable),
+            codex_home=home,
+            approved_digest=preview.preview_digest,
+            _run=runner,
+        )
+    assert caught.value.reason is IntegrationReason.PARTIAL_INSTALL
+    assert not (project / ".agents/plugins/marketplace.json").exists()
+    assert not (home / "config.toml").exists()
+
+    install_plugin(
+        target,
+        replace_modified=True,
+        allow_untested=True,
+        codex_version=runner.codex_version,
+    )
+    result = _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=preview.preview_digest,
+        _run=runner,
+    )
+    assert result.state is ActivationState.ACTIVE
 
 
 def test_apply_preserves_foreign_marketplace_entries_and_config(tmp_path: Path) -> None:
@@ -448,12 +537,19 @@ def test_final_plugin_fence_preserves_approved_partial_writes(
         checked_target: IntegrationTarget,
         expected_digest: str,
         expected_members: object,
+        *,
+        codex_version: str,
     ) -> None:
         nonlocal calls
         calls += 1
         if calls == 4:
             hook_path.write_text("{}\n", encoding="utf-8")
-        real_assert(checked_target, expected_digest, expected_members)
+        real_assert(
+            checked_target,
+            expected_digest,
+            expected_members,
+            codex_version=codex_version,
+        )
 
     monkeypatch.setattr(
         "yoetz.adapters.integrations.codex_marketplace._assert_plugin_source",

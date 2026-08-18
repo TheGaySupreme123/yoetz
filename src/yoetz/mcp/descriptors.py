@@ -21,15 +21,18 @@ from yoetz.protocol.schemas import (
 )
 
 __all__ = [
+    "ADVERTISED_SURFACE_BUDGET",
     "INITIALIZE_GUIDANCE_URIS",
     "ORDINARY_MCP_PUBLISH_EVENT_FAMILIES",
     "PRESENTATION_INPUT_SCHEMA_BUDGETS",
+    "SERVER_INSTRUCTIONS_BUDGET",
     "McpRouteProfile",
     "TOOL_DESCRIPTOR_DIGESTS",
     "TOOL_DESCRIPTOR_SET_DIGEST",
     "TOOL_DESCRIPTORS",
     "ToolAnnotations",
     "ToolDescriptor",
+    "advertised_surface_metrics",
     "descriptor_for",
     "ordinary_publish_families_in_presentation",
     "presentation_schema_metrics",
@@ -39,11 +42,12 @@ __all__ = [
 type McpRouteProfile = Literal["policy", "strict"]
 
 _SCHEMA_VERSION: Final = "1.0.0"
-INITIALIZE_GUIDANCE_URIS: Final[tuple[str, ...]] = (
-    "yoetz://guidance/agent-instructions.md",
-    "yoetz://guidance/workflow.md",
-    "yoetz://guidance/coverage-and-receipts.md",
-)
+# Exactly the entry document. Every other guidance document is fetched on demand: the catalog
+# section of agent-instructions.md names the `resources/read` -> `read_guidance` -> installed
+# `references/<name>.md` chain, and `read_guidance` (a plain tool call) survives the empty
+# resource-read failure that motivated inlining workflow.md and coverage-and-receipts.md here.
+# Keep this tuple at one entry; see ADVERTISED_SURFACE_BUDGET for why length is load-bearing.
+INITIALIZE_GUIDANCE_URIS: Final[tuple[str, ...]] = ("yoetz://guidance/agent-instructions.md",)
 _GUIDANCE_URI: Final = re.compile(r"yoetz://guidance/[a-z0-9.-]+\.md", re.ASCII)
 _FORBIDDEN_CLAIMS: Final = re.compile(
     r"\b(?:authenticated|enforces?|gates?|observes?|proved|proves?|verified)\b",
@@ -164,6 +168,52 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
         ),
     }
 )
+
+# Reviewed budget for the initialize instructions block, per route profile.
+#
+# The MCP server sends `instructions` once, but a host is free to render it wherever it likes.
+# Codex copies it verbatim into the `description` of every advertised tool, so this one string is
+# charged once per tool on every turn of every session. Nothing bounded it before, and it grew to
+# 41 KB (three inlined guidance documents) before a dogfood session noticed. The advertised input
+# schemas have been bounded since #128; this is the same guardrail for the adjacent text.
+SERVER_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
+    {"max_encoded_bytes": 20_000}
+)
+
+# Reviewed budget for everything one host renders into the model's context to advertise Yoetz:
+# the instructions block charged once per tool, plus every tool description, plus every advertised
+# input schema. Per-item budgets cannot catch this — each item can sit inside its own bound while
+# the total still doubles. `instructions_copies_per_tool` is descriptive, not a knob: it records the
+# worst observed host behavior, one full copy of the instructions block charged to each of the
+# seven advertised tools, which is what the total is computed against.
+ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
+    {"instructions_copies_per_tool": 1, "max_encoded_bytes": 200_000}
+)
+
+
+def advertised_surface_metrics(profile: McpRouteProfile = "policy") -> dict[str, int]:
+    """Return the byte cost of one route profile's complete advertised MCP surface.
+
+    ``replicated_encoded_bytes`` charges the instructions block once per advertised tool, which is
+    what a host that inlines `instructions` into each tool description actually spends.
+    """
+
+    if profile not in TOOL_DESCRIPTORS:
+        raise ValueError("mcp_route_profile_invalid")
+    descriptors = TOOL_DESCRIPTORS[profile]
+    instructions_bytes = len(server_instructions(profile).encode("utf-8"))
+    description_bytes = sum(len(item.description.encode("utf-8")) for item in descriptors)
+    schema_bytes = sum(
+        presentation_schema_metrics(item.input_schema)["encoded_bytes"] for item in descriptors
+    )
+    copies = len(descriptors) * ADVERTISED_SURFACE_BUDGET["instructions_copies_per_tool"]
+    return {
+        "tool_count": len(descriptors),
+        "instructions_encoded_bytes": instructions_bytes,
+        "description_encoded_bytes": description_bytes,
+        "schema_encoded_bytes": schema_bytes,
+        "replicated_encoded_bytes": instructions_bytes * copies + description_bytes + schema_bytes,
+    }
 
 
 def _example_id(kind: str, seed: int) -> str:
@@ -386,6 +436,9 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                             # action_kind "command" additionally requires command.
                             "command": "pytest -q",
                             "description": "Ran the focused test slice for the touched module.",
+                            # Each entry copies one obligation requested_items value byte-for-byte;
+                            # only action_recorded admits attempted_items (issue #264).
+                            "attempted_items": ["pytest -q"],
                         },
                     ),
                     _example_draft(
@@ -934,7 +987,9 @@ def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> No
             raise RuntimeError("mcp_event_draft_projection_invalid")
         payload["type"] = "object"
         payload["description"] = (
-            "Fields depend on schema.name; use the matching event family template."
+            "Fields depend on schema.name; use the matching event family template. "
+            "attempted_items is admitted only by action_recorded, authority is an actor id, and "
+            "action_kind admits command, edit, research, review, and other."
         )
     elif name == "check-request":
         scope = properties.get("scope")
@@ -947,8 +1002,10 @@ def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> No
         disposition = properties.get("disposition")
         if isinstance(disposition, dict):
             disposition["description"] = (
-                "Acknowledged accepts no waiver fields. Rejected requires reason and accepts no "
-                "waiver fields. Waived requires reason and waiver_scope."
+                "Acknowledged accepts no waiver fields. Provenance_disputed contests the "
+                "finding's authorship or provenance premise rather than its conclusion; it "
+                "requires reason and accepts no waiver fields. Rejected requires reason and "
+                "accepts no waiver fields. Waived requires reason and waiver_scope."
             )
         finding_frontier = properties.get("finding_frontier")
         if isinstance(finding_frontier, dict):
@@ -1268,7 +1325,13 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "publish_work",
         "Publish recorded work",
         "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. It has no information about work outside that batch. Each draft "
+        "range and coverage. It has no information about work outside that batch. Field ownership "
+        "is exact: attempted_items is admitted only by the action_recorded payload — copy each "
+        "attempted obligation requested_items value string exactly, and never place the field on "
+        "claim_recorded. decision_recorded authority is a structural actor id such as "
+        "harness:cli, never approval prose; the approval story belongs in rationale. action_kind "
+        "is a closed enum of command, edit, research, review, and other; a source or file change "
+        "is edit, and command additionally requires the command field. Each draft "
         "occurred_at is a caller-asserted RFC 3339 UTC time with millisecond precision: use the "
         "best real time available and do not copy the illustrative example timestamp. Ledger order "
         "follows ingestion sequence; receipt freshness is frontier-bound. Service accepted_at is "
@@ -1345,11 +1408,15 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
     _descriptor(
         "respond",
         "Respond to a finding",
-        "Records an acknowledgement, rejection, or bounded waiver for one finding at the result "
-        "frontier of the check that returned it, not its subject_frontier. It does not resolve "
-        "other findings or establish that underlying work changed. "
-        "A readable response removes that finding from the unresolved count without erasing its "
-        "historical record or closing an independent coverage gap. Call it once per finding; a "
+        "Records an acknowledgement, provenance dispute, or rejection for one finding at the "
+        "result frontier of the check that returned it, not its subject_frontier. It does not "
+        "resolve other findings or establish that underlying work changed. "
+        "A provenance_disputed response contests the finding's authorship or provenance premise "
+        "rather than its conclusion, requires a reason, and never resolves the finding. "
+        "Bounded waiver is reserved for an authorized local-CLI human and is not an agent option. "
+        "A readable response removes that finding from unanswered_finding_count without reducing "
+        "receipt_blocking_finding_count, erasing its historical record, or closing an independent "
+        "coverage gap. Call it once per finding; a "
         "readable response identifying a finding that check returned is not material change and "
         "needs no recheck, while a redacted or unreadable response does. Guidance: "
         "yoetz://guidance/publication-policy.md.",
@@ -1369,9 +1436,11 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "view=operation takes filter.operation_request_id and returns that operation's stored "
         "result for recovery without resending the body. view=findings reads recorded findings; "
         "view=candidate_findings returns unrecorded deterministic candidates without verdicts or "
-        "IDs. Read closure_readiness on any result before spending a check or a receipt: it names "
-        "the open obligations, unresolved findings, and declared gaps that currently bound a "
-        "conclusion. Call it after a resume, a compaction, or a delegate handoff, and before a "
+        "IDs. Read closure_readiness on any result before spending a check or a receipt: "
+        "unanswered_finding_count names response work, while receipt_blocking_finding_count names "
+        "actionable findings that permanently prevent a clean receipt. findings_unanswered should "
+        "be acted on; receipt_findings_unresolved must not trigger another response loop. Call it "
+        "after a resume, a compaction, or a delegate handoff, and before a "
         "completion claim, rather than between routine tool calls. Guidance: "
         "yoetz://guidance/workflow.md.",
         read_only=True,
@@ -1451,10 +1520,10 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
-                "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
+                "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
                 "check": "sha256:3a81f3a6d3e0f714680e221e8dc5fa90d0131629386b03d75bc55d21ab618ee1",
-                "respond": "sha256:b71f8e0a70e6740a07fafbf77bf1a94a7f452e2f8ebdfefe95dd23381d31dd17",
-                "status": "sha256:419abcdbcc8ddd833318c23a8a1b17e60e65031f89758401d2716090170d434e",
+                "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
+                "status": "sha256:bcd91efb3b8f96d3198dbf3c0991ec8efb745c19b02c15349ff2bcdc08dfc250",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1462,10 +1531,10 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
-                "publish_work": "sha256:e29c8b514d8eeab7efdc4d7b16181f766d45824f91b6960eb6c93ff0a9071d34",
+                "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
                 "check": "sha256:91b090140843ef3f50bbdf02a42dc78fc418b1968dca8685018698cf276f4557",
-                "respond": "sha256:b71f8e0a70e6740a07fafbf77bf1a94a7f452e2f8ebdfefe95dd23381d31dd17",
-                "status": "sha256:419abcdbcc8ddd833318c23a8a1b17e60e65031f89758401d2716090170d434e",
+                "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
+                "status": "sha256:bcd91efb3b8f96d3198dbf3c0991ec8efb745c19b02c15349ff2bcdc08dfc250",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1474,8 +1543,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:0c9351ae1ca918b20a1ac171ee65625fd437d1207c317d1c4d6429ce5f94af18",
-        "strict": "sha256:b69ed08dec479a20e79300bee313406376b957663190482c5c27add1dcea5caf",
+        "policy": "sha256:6759a95082b5eac9741fa86508e7f310d3490954c1fcb626078390510a84da15",
+        "strict": "sha256:2cdacc504bdf3f4344cd6d20ef6e0974857dbf02f66da2010605ec3840c1c5b2",
     }
 )
 
