@@ -1513,6 +1513,7 @@ class SqliteLedger:
             attempts=dict(self._state.attempts),
             disclosure_waits=dict(self._state.disclosure_waits),
             object_refs=dict(self._state.object_refs),
+            check_reservations=dict(self._state.check_reservations),
         )
 
     def _sync_after_mutation_locked(self, new_records: tuple[LedgerRecord, ...] = ()) -> None:

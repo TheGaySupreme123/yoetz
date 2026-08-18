@@ -449,6 +449,197 @@ async def test_observation_append_resumes_after_frozen_check_terminalizes() -> N
         assert appended.result_frontier.sequence == 2
 
 
+def _observation_command(
+    *, request_suffix: str, expected_frontier: int, seed: str
+) -> AppendCommand:
+    command = ledger_command(
+        request_suffix=request_suffix, unknown=True, expected_frontier=expected_frontier
+    )
+    return replace(
+        command,
+        writer_id=f"wri_00000000-0000-4000-8000-0000000000{seed}1",
+        entries=(
+            replace(
+                command.entries[0],
+                draft=replace(
+                    command.entries[0].draft,
+                    event_id=event_id(f"evt_00000000-0000-4000-8000-0000000000{seed}2"),
+                ),
+                payload_object=replace(
+                    command.entries[0].payload_object,
+                    object_id=object_id(f"obj_00000000-0000-4000-8000-0000000000{seed}4"),
+                ),
+                author=Actor(
+                    actor_id("yoetz:observation-coordinator"),
+                    ActorType.HARNESS,
+                    AuthorshipAssurance.HARNESS_OBSERVED,
+                ),
+                publication_channel=PublicationChannel.HOOK_OBSERVED,
+                coverage=coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+            ),
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_freeze_case_tolerates_observation_only_motion_with_adapter_parity() -> None:
+    """Freeze acquisition accepts an observation-only-stale frontier and freezes at the real
+    head, so a check retried under active observation drain converges (issue #320)."""
+
+    base = ledger_command(unknown=True)
+    observation = _observation_command(request_suffix="3", expected_frontier=1, seed="a")
+    for adapter in (memory_ledger(base), sqlite_ledger(base)):
+        held = await adapter.append_batch(base)
+        drained = await adapter.append_batch(observation)
+        frozen = await adapter.freeze_case(
+            base.session_id,
+            base.writer_id,
+            held.result_frontier.sequence,
+            "req_00000000-0000-4000-8000-0000000000a3",
+            "sha256:" + "9" * 64,
+        )
+        assert isinstance(frozen, FrozenCase)
+        assert frozen.case.frontier == drained.result_frontier
+
+
+@pytest.mark.anyio
+async def test_freeze_case_agent_motion_still_conflicts_with_repair_facts() -> None:
+    """Material (agent-authored) motion past the caller's frontier stays a real conflict, and
+    the error keeps the shared retry contract: retryable with the live head in safe_details."""
+
+    base = ledger_command()
+    second = ledger_command(request_suffix="3", index=1, expected_frontier=1)
+    for adapter in (memory_ledger(base), sqlite_ledger(base)):
+        held = await adapter.append_batch(base)
+        moved = await adapter.append_batch(second)
+        with pytest.raises(PublicOperationError) as caught:
+            await adapter.freeze_case(
+                base.session_id,
+                base.writer_id,
+                held.result_frontier.sequence,
+                "req_00000000-0000-4000-8000-0000000000b3",
+                "sha256:" + "9" * 64,
+            )
+        assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+        assert caught.value.retryable is True
+        assert caught.value.safe_details["sequence"] == moved.result_frontier.sequence
+
+
+@pytest.mark.anyio
+async def test_freeze_case_spoofed_observation_suffix_still_conflicts() -> None:
+    """The freeze tolerance uses the same unforgeable authorship predicate as ``append_batch``:
+    caller-supplied actor fields alone never earn it."""
+
+    base = ledger_command(unknown=True)
+    spoofed = replace(
+        base,
+        entries=(
+            replace(
+                base.entries[0],
+                author=Actor(
+                    actor_id("yoetz:observation-coordinator"),
+                    ActorType.HARNESS,
+                    AuthorshipAssurance.SELF_ASSERTED,
+                ),
+                publication_channel=PublicationChannel.LOCAL_CLI,
+                coverage=coverage_for_channel(PublicationChannel.LOCAL_CLI),
+            ),
+        ),
+    )
+    for adapter in (memory_ledger(spoofed), sqlite_ledger(spoofed)):
+        await adapter.append_batch(spoofed)
+        with pytest.raises(PublicOperationError) as caught:
+            await adapter.freeze_case(
+                spoofed.session_id,
+                spoofed.writer_id,
+                0,
+                "req_00000000-0000-4000-8000-0000000000c3",
+                "sha256:" + "9" * 64,
+            )
+        assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+
+
+class _GatedObjects(_Objects):
+    """Block the first check-resume staging call so a test can act inside the freeze window."""
+
+    def __init__(self, ids: _Ids) -> None:
+        super().__init__(ids)
+        self.freeze_entered = asyncio.Event()
+        self.release_freeze = asyncio.Event()
+
+    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+        if metadata.kind is ObjectKind.CHECK_RESUME:
+            self.freeze_entered.set()
+            await self.release_freeze.wait()
+        return await super().stage(source, metadata)
+
+
+@pytest.mark.anyio
+async def test_observation_append_defers_while_freeze_is_acquiring() -> None:
+    """The observation barrier arms at freeze acquisition, not only once the frozen case exists;
+    otherwise the drain the acquisition just tolerated races the freeze itself (issue #320)."""
+
+    base = ledger_command(unknown=True)
+    observation = _observation_command(request_suffix="3", expected_frontier=1, seed="d")
+
+    def gated_memory() -> tuple[MemoryLedgerAdapter, _GatedObjects]:
+        ids = _Ids()
+        gate = _GatedObjects(ids)
+        adapter = MemoryLedgerAdapter(
+            task_id=base.task_id,
+            ownership_fence=_fence(),
+            state=MemoryLedgerState(),
+            import_state=MemoryImportState(),
+            transaction_lock=asyncio.Lock(),
+            clock=_Clock(),
+            ids=ids,
+            objects=gate,
+        )
+        return adapter, gate
+
+    def gated_sqlite() -> tuple[SqliteLedger, _GatedObjects]:
+        db = apsw.Connection(":memory:")
+        initialize_bundle(
+            db,
+            {
+                "task_id": base.task_id,
+                "owner_generation": "1",
+                "owner_nonce": "ledger-test-nonce",
+            },
+        )
+        ids = _Ids()
+        gate = _GatedObjects(ids)
+        adapter = SqliteLedger(
+            db=db,
+            task_id=base.task_id,
+            ownership_fence=_fence(),
+            clock=_Clock(),
+            ids=ids,
+            objects=gate,
+        )
+        return adapter, gate
+
+    for adapter, gate in (gated_memory(), gated_sqlite()):
+        await adapter.append_batch(base)
+        freeze = asyncio.ensure_future(
+            adapter.freeze_case(
+                base.session_id,
+                base.writer_id,
+                1,
+                "req_00000000-0000-4000-8000-0000000000d3",
+                "sha256:" + "9" * 64,
+            )
+        )
+        await asyncio.wait_for(gate.freeze_entered.wait(), timeout=5)
+        with pytest.raises(PublicOperationError) as caught:
+            await adapter.append_batch(observation)
+        assert caught.value.code is PublicErrorCode.OPERATION_PENDING
+        assert caught.value.retryable is True
+        gate.release_freeze.set()
+        frozen = await asyncio.wait_for(freeze, timeout=5)
+        assert isinstance(frozen, FrozenCase)
+
+
 @pytest.mark.anyio
 async def test_load_and_freeze_contract() -> None:
     command = ledger_command()

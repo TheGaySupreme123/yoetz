@@ -264,8 +264,20 @@ async def _records_through(runtime: TaskRuntime, frontier: Frontier) -> tuple[Le
         # Replay is genesis-anchored; a chain it rejects is a storage fact, not an engine bug, so
         # it leaves here as a bounded public error rather than an unbounded internal one.
         raise _error(PublicErrorCode.STORAGE_CORRUPT, "The task ledger is unreadable.") from exc
-    if Frontier(projection.frontier, projection.head_digest) != frontier:
-        raise _error(PublicErrorCode.FRONTIER_CONFLICT, "The receipt frontier is not current.")
+    replayed = Frontier(projection.frontier, projection.head_digest)
+    if replayed != frontier:
+        # The shared frontier-conflict retry contract: the replayed head is the repair fact, and
+        # the flags must match the ledger's own mint for the same request.
+        raise PublicOperationError(
+            PublicErrorCode.FRONTIER_CONFLICT,
+            "The receipt frontier is not current.",
+            True,
+            safe_details={
+                "reason_code": "frontier_changed",
+                "sequence": replayed.sequence,
+                "head_digest": replayed.head_digest,
+            },
+        )
     return records
 
 
