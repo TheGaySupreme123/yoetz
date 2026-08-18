@@ -132,9 +132,12 @@ Every MCP result also carries a bounded ASCII text projection (at most 512 bytes
 drop `structuredContent`. A successful projection includes the first valid returned frontier's
 `sequence` and canonical `head_digest` when both are present. Generic successful operations also
 include any returned, kind-valid `task_id`, `session_id`, and `writer_id`; in particular, the
-`start` text alone carries the identifiers and frontier needed to author the next request.
-Caller-controlled prose, malformed identifiers, and malformed digests are never admitted to this
-text channel.
+`start` text alone carries the identifiers and frontier needed to author the next request. A
+`check` projection includes as many returned, kind-valid `finding_id` values as fit and reports a
+`+N more` remainder when any valid finding IDs do not fit, so the text fallback can author the
+required `respond` request. Caller-controlled prose, malformed identifiers, and malformed digests
+are never admitted to this text channel. A deterministic finding's structured `detail` may name
+only its closed policy facts and typed server IDs; it never copies ledger-authored prose.
 
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted

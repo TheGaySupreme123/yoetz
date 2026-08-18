@@ -454,8 +454,14 @@ def render_deterministic_finding_text(
     kind: FindingKind,
     subject_refs: tuple[PublicSubjectRef, ...],
     gap_codes: tuple[str, ...] = (),
+    observed_facts: tuple[FindingFact, ...] = (),
 ) -> tuple[str, str]:
-    if type(kind) is not FindingKind or type(gap_codes) is not tuple:
+    if (
+        type(kind) is not FindingKind
+        or type(gap_codes) is not tuple
+        or type(observed_facts) is not tuple
+        or any(type(fact) is not FindingFact for fact in observed_facts)
+    ):
         raise _invalid_policy()
     refs = cast(
         tuple[PublicSubjectRef, ...],
@@ -472,6 +478,35 @@ def render_deterministic_finding_text(
             detail = (
                 f"{detail} An evidence-provenance gap is not resolved by a finding response:"
                 " record content-bearing evidence or accept the gap in the receipt."
+            )
+    if kind is FindingKind.MATERIAL_LIMITATION_OMITTED:
+        limitation_refs = tuple(
+            ref
+            for fact in observed_facts
+            if fact.fact_code == "material_limitation_present"
+            for ref in fact.subject_refs
+            if not ref.startswith("clm_")
+        )
+        if limitation_refs:
+            # A res_ ref reaches this fact through either a non-success outcome
+            # or a material coverage gap on its source event, and the basis does
+            # not record which route; the label must stay truthful for both.
+            limiting_records = "; ".join(
+                (
+                    f"limiting result {ref}"
+                    if ref.startswith("res_")
+                    else f"material coverage-gap record {ref}"
+                )
+                for ref in limitation_refs
+            )
+            detail = (
+                f"{detail} Omitted limitation basis: {limiting_records}. "
+                "Its disclosure link is absent."
+            )
+        else:
+            detail = (
+                f"{detail} Omitted limitation basis: task-level material coverage gap; "
+                "no individual limitation record was available."
             )
     return template.summary, detail
 
@@ -495,6 +530,7 @@ class DeterministicAssessment:
             candidate.kind,
             candidate.subject_refs,
             self.basis.coverage_gaps,
+            self.basis.observed_facts,
         )
         if candidate.summary != summary or candidate.detail != detail:
             raise _invalid_policy()
@@ -1810,7 +1846,12 @@ def build_policy_assessment(
         coverage_gaps=coverage.known_gaps,
         supporting_refs=supporting_refs,
     )
-    summary, detail = render_deterministic_finding_text(kind, public_refs, basis.coverage_gaps)
+    summary, detail = render_deterministic_finding_text(
+        kind,
+        public_refs,
+        basis.coverage_gaps,
+        basis.observed_facts,
+    )
     priority, _ = FINDING_KIND_TRAITS[kind]
     candidate = CandidateFinding(
         kind=kind,

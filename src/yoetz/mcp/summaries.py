@@ -112,6 +112,41 @@ def _item_count(value: object) -> str:
     return "unavailable"
 
 
+def _finding_identity_clause(source: Mapping[str, JsonValue], *, byte_budget: int) -> str:
+    """Render as many revalidated finding IDs as the check summary can safely carry.
+
+    A check's text projection is an authoring fallback.  When it reports actionable
+    findings, the returned IDs are required to author ``respond`` (issue #324).
+    """
+
+    raw_findings = source.get("findings")
+    if not isinstance(raw_findings, list | tuple) or byte_budget <= 0:
+        return ""
+    finding_ids = tuple(
+        cast(str, raw.get("finding_id"))
+        for raw in raw_findings
+        if isinstance(raw, Mapping) and is_valid_id(IdKind.FINDING, raw.get("finding_id"))
+    )
+    if not finding_ids:
+        return ""
+
+    prefix = "finding IDs: "
+    selected: list[str] = []
+    for finding_id in finding_ids:
+        selected.append(finding_id)
+        remaining = len(finding_ids) - len(selected)
+        suffix = f"; +{remaining} more" if remaining else ""
+        clause = f"{prefix}{', '.join(selected)}{suffix}; "
+        if len(clause.encode("ascii")) > byte_budget:
+            selected.pop()
+            break
+    if not selected:
+        return ""
+    remaining = len(finding_ids) - len(selected)
+    suffix = f"; +{remaining} more" if remaining else ""
+    return f"{prefix}{', '.join(selected)}{suffix}; "
+
+
 def _bounded(summary: str) -> str:
     try:
         encoded = summary.encode("ascii", errors="strict")
@@ -183,15 +218,20 @@ def summary_for_check(envelope: object) -> str:
     status = _safe_token(source.get("semantic_status"))
     reason = _safe_token(source.get("semantic_reason"))
     if status == "not_requested":
-        return _bounded(
+        prefix = (
             f"Semantic review not requested; deterministic-only check verdict: {verdict}; "
             f"findings returned: {findings}; suppressed: {suppressed}; "
-            f"semantic status/reason: {status}/{reason}; {_frontier_clause(source)}."
         )
-    return _bounded(
-        f"Check verdict: {verdict}; findings returned: {findings}; suppressed: {suppressed}; "
-        f"semantic status/reason: {status}/{reason}; {_frontier_clause(source)}."
+    else:
+        prefix = (
+            f"Check verdict: {verdict}; findings returned: {findings}; suppressed: {suppressed}; "
+        )
+    suffix = f"semantic status/reason: {status}/{reason}; {_frontier_clause(source)}."
+    clause = _finding_identity_clause(
+        source,
+        byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
     )
+    return _bounded(prefix + clause + suffix)
 
 
 def _first_page_item(source: Mapping[str, JsonValue]) -> Mapping[str, JsonValue] | None:
