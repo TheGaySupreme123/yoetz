@@ -349,7 +349,7 @@ async def load_frozen_case_from_resume(
     source = _strict_mapping(parsed, reason="resume_object_shape_invalid")
 
     if current.metadata.kind is ObjectKind.DETERMINISTIC_RESULT:
-        if frozenset(source) != frozenset(
+        deterministic_result_keys = frozenset(
             {
                 "schema_version",
                 "request_id",
@@ -359,11 +359,21 @@ async def load_frozen_case_from_resume(
                 "writer_id",
                 "subject_frontier",
                 "dependency_digest",
+                "text_contract_digest",
                 "prior_resume",
                 "policy_executions",
                 "assessments",
             }
-        ):
+        )
+        # A checkpoint without the text-contract stamp predates issue #340. Its case pointer and
+        # bindings are still authoritative for reopening the frozen case; only the application's
+        # finding-text replay treats the missing stamp as superseded.
+        if frozenset(source) not in {
+            deterministic_result_keys,
+            deterministic_result_keys - {"text_contract_digest"},
+        }:
+            raise ValueError("deterministic_result_shape_invalid")
+        if "text_contract_digest" in source and type(source["text_contract_digest"]) is not str:
             raise ValueError("deterministic_result_shape_invalid")
         if (
             source["schema_version"] != "1.0.0"

@@ -87,6 +87,7 @@ from yoetz.protocol.coverage import (
 
 __all__ = [
     "DETERMINISTIC_FINDING_TEMPLATES",
+    "DETERMINISTIC_TEXT_CONTRACT_DIGEST",
     "EVIDENCE_PROVENANCE_GAPS",
     "CaseAvailabilityFacts",
     "CaseGap",
@@ -509,6 +510,49 @@ def render_deterministic_finding_text(
                 "no individual limitation record was available."
             )
     return template.summary, detail
+
+
+def _text_contract_corpus() -> tuple[JsonValue, ...]:
+    """Render every finding-text wording branch once, on fixed synthetic inputs.
+
+    The corpus must cover each branch of ``render_deterministic_finding_text`` that can produce
+    distinct wording: every template, the ledger-stale gap listing, the evidence-provenance
+    addendum, and each omitted-limitation basis label. A new wording branch must add a corpus
+    entry here, or checkpoints written before that branch changes will replay as corrupt instead
+    of superseded.
+    """
+
+    subject = (event_id("evt_00000000-0000-4000-8000-000000000000"),)
+    limitation_result = FindingFact(
+        "material_limitation_present",
+        (result_id("res_00000000-0000-4000-8000-000000000000"),),
+    )
+    limitation_record = FindingFact(
+        "material_limitation_present",
+        (event_id("evt_00000000-0000-4000-8000-000000000001"),),
+    )
+    branches: tuple[tuple[str, FindingKind, tuple[str, ...], tuple[FindingFact, ...]], ...] = (
+        *(("template", kind, (), ()) for kind in FindingKind),
+        ("stale_gap_listing", FindingKind.LEDGER_STALE_OR_INCOMPLETE, ("missing_ref",), ()),
+        (
+            "stale_provenance_addendum",
+            FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+            ("evidence_content_withheld",),
+            (),
+        ),
+        ("limitation_result", FindingKind.MATERIAL_LIMITATION_OMITTED, (), (limitation_result,)),
+        ("limitation_record", FindingKind.MATERIAL_LIMITATION_OMITTED, (), (limitation_record,)),
+    )
+    return tuple(
+        [label, kind.value, *render_deterministic_finding_text(kind, subject, gaps, facts)]
+        for label, kind, gaps, facts in branches
+    )
+
+
+# The exact rendered-text contract of deterministic findings. A persisted DETERMINISTIC_RESULT
+# checkpoint stamps this digest; on replay, a stamp from different wording marks the checkpoint
+# superseded (recompute from the frozen case) instead of corrupt (issue #340).
+DETERMINISTIC_TEXT_CONTRACT_DIGEST: Final[str] = canonical_digest(_text_contract_corpus())
 
 
 @dataclass(frozen=True, slots=True)

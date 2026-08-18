@@ -38,6 +38,7 @@ from yoetz.domain.values import (
 from yoetz.kernel import deterministic_checks
 from yoetz.kernel.deterministic_checks import (
     DETERMINISTIC_FINDING_TEMPLATES,
+    DETERMINISTIC_TEXT_CONTRACT_DIGEST,
     CaseAvailabilityFacts,
     FindingFact,
     PolicyPack,
@@ -332,6 +333,35 @@ def test_templates_are_complete_exact_and_structural() -> None:
         "obl_00000000-0000-4000-8000-000000000001. Main agent: "
         "Resolve the obligation or revise the completion claim.",
     )
+
+
+def test_text_contract_digest_pins_every_rendered_wording_branch() -> None:
+    corpus = deterministic_checks._text_contract_corpus()  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    assert canonical_digest(corpus) == DETERMINISTIC_TEXT_CONTRACT_DIGEST
+    assert len(corpus) == len(FindingKind) + 4
+    rendered = canonical_encode(corpus).decode("utf-8")
+    assert "Gaps: missing_ref." in rendered
+    assert "evidence-provenance gap" in rendered
+    assert "limiting result res_" in rendered
+    assert "material coverage-gap record evt_" in rendered
+    assert "task-level material coverage gap" in rendered
+
+
+def test_text_contract_digest_tracks_template_wording(monkeypatch: pytest.MonkeyPatch) -> None:
+    reworded = dict(DETERMINISTIC_FINDING_TEMPLATES)
+    template = reworded[FindingKind.ACTION_WITHOUT_RESULT]
+    reworded[FindingKind.ACTION_WITHOUT_RESULT] = replace(
+        template, summary=template.summary + " (reworded)"
+    )
+    monkeypatch.setattr(
+        deterministic_checks,
+        "DETERMINISTIC_FINDING_TEMPLATES",
+        MappingProxyType(reworded),
+    )
+    reworded_digest = canonical_digest(
+        deterministic_checks._text_contract_corpus()  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    )
+    assert reworded_digest != DETERMINISTIC_TEXT_CONTRACT_DIGEST
 
 
 def test_material_limitation_detail_names_the_safe_limiting_record() -> None:
