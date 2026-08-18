@@ -1003,9 +1003,19 @@ def _project_selected_one_of_required_locations(
     A failed ``oneOf`` normally has an empty instance path.  Flattening all of its branches would
     name fields from alternatives the caller did not choose, while selecting the parent error
     loses the actual missing peer.  This picks a branch only when sibling const rejections prove
-    that every other branch was ruled out by the same schema-authored property.
+    that every other branch was ruled out by the same schema-authored property.  Projection is
+    best-effort: an unexpected error-tree shape degrades to the generic best-path rule.
     """
 
+    try:
+        return _project_selected_one_of_required_locations_impl(exc)
+    except Exception:
+        return None
+
+
+def _project_selected_one_of_required_locations_impl(
+    exc: ValidationError,
+) -> tuple[tuple[tuple[tuple[str | int, ...], str], ...], str, str, tuple[str, str] | None] | None:
     if exc.validator != "oneOf" or not isinstance(exc.schema, Mapping):
         return None
     branches: dict[int, list[ValidationError]] = {}
@@ -1079,9 +1089,14 @@ def _project_selected_one_of_required_locations(
                     ordered.append(location)
         if ordered:
             return (tuple(ordered), field, selected_value, _selected_family_for(exc))
+    # Descend only into a branch the discriminator proved selected. Recursing into
+    # unselected branches would project a sibling contract the caller did not choose
+    # (for example the 1.0.0 family for a 1.1.0 draft) whenever selection fails.
     selected = _discriminator_selected_branch(exc)
-    for nested in selected if selected is not None else exc.context or ():
-        projected = _project_selected_one_of_required_locations(nested)
+    if selected is None:
+        return None
+    for nested in selected:
+        projected = _project_selected_one_of_required_locations_impl(nested)
         if projected is not None:
             return projected
     return None
