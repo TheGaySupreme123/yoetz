@@ -101,9 +101,12 @@ unsupported claims and unbounded duplicate findings.
     notice for the originating Codex session. A retry of a completed append whose local notice
     write did not land reconstructs that notice from the committed append's frontier metadata.
     After the notice's bytes reach the hook consumer, the store retains that session's delivered
-    high-water `to_sequence` so a later replay of the same append is not re-announced. Candidates
-    at or behind that mark are dropped; overlapping candidates are clamped to the undelivered
-    remainder so `from` and record count describe only motion not yet announced. Contiguous
+    high-water `to_sequence`, scoped to the announced task ledger, so a later replay of the same
+    append is not re-announced. Candidates at or behind that mark are dropped; overlapping
+    candidates are clamped to the undelivered remainder so `from` and record count describe only
+    motion not yet announced. A mark recorded for a different task neither drops nor clamps:
+    when a session's mapping moves to another task, the stale mark and any pending notice for
+    the old task are discarded so the new ledger's motion is announced from its start. Contiguous
     undelivered appends coalesce their from/to sequences and record count. The per-workspace
     notice and delivered-mark maps are capped and drop ended-session entries before serialization.
     A later advice-safe `PostToolUse` hook surfaces that the motion was hook-observed, explains

@@ -2539,9 +2539,12 @@ The local observation state also owns a sparse, one-shot `FrontierMotionNotice` 
 A newly accepted observation append creates it. Idempotent replay of a completed append
 reconciles a missing pending notice from that append's committed frontier metadata; a still-pending
 notice is coalesced rather than duplicated. After the hook consumer receives the notice bytes, the
-store keeps that session's delivered high-water `to_sequence`. A later replay at or behind that
-mark is dropped; an overlapping candidate is clamped so `from` and record count cover only the
-undelivered remainder. The notice and delivered-mark maps are capped and drop ended-session
+store keeps that session's delivered high-water `to_sequence`, scoped to the announced task
+ledger. A later replay at or behind that mark is dropped; an overlapping candidate is clamped so
+`from` and record count cover only the undelivered remainder. A mark recorded for a different
+task never suppresses or clamps: when the session's mapping moves to another task, the stale
+mark and any pending notice for the old task are discarded and announcements restart from the
+new ledger's motion. The notice and delivered-mark maps are capped and drop ended-session
 entries before serialization; a malformed stored value is ignored as empty. Contiguous pending
 notices coalesce, and an advice-safe `PostToolUse` hook consumes the exact notice only after
 emitting its bounded agent context. This context is informational: it neither weakens

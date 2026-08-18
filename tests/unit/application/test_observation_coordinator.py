@@ -395,6 +395,7 @@ def test_frontier_motion_notice_merges_contiguous_appends_and_is_one_shot(
         to_sequence=9,
         head_digest="sha256:" + "1" * 64,
         observation_record_count=2,
+        task_id="tsk-frontier-test",
     )
     store.note_frontier_motion(
         workspace,
@@ -403,6 +404,7 @@ def test_frontier_motion_notice_merges_contiguous_appends_and_is_one_shot(
         to_sequence=10,
         head_digest="sha256:" + "2" * 64,
         observation_record_count=1,
+        task_id="tsk-frontier-test",
     )
 
     reloaded = LocalObservationStore(_state=tmp_path)
@@ -430,6 +432,7 @@ def test_frontier_motion_renote_after_delivery_drops_replay_and_clamps_stale_fro
         to_sequence=81,
         head_digest="sha256:" + "7" * 64,
         observation_record_count=1,
+        task_id="tsk-frontier-test",
     )
     notice = store.peek_frontier_motion(workspace, "replay-session")
     assert notice is not None
@@ -444,6 +447,7 @@ def test_frontier_motion_renote_after_delivery_drops_replay_and_clamps_stale_fro
         to_sequence=81,
         head_digest="sha256:" + "7" * 64,
         observation_record_count=1,
+        task_id="tsk-frontier-test",
     )
     assert reloaded.peek_frontier_motion(workspace, "replay-session") is None
 
@@ -454,6 +458,7 @@ def test_frontier_motion_renote_after_delivery_drops_replay_and_clamps_stale_fro
         to_sequence=92,
         head_digest="sha256:" + "8" * 64,
         observation_record_count=12,
+        task_id="tsk-frontier-test",
     )
     clamped = reloaded.peek_frontier_motion(workspace, "replay-session")
     assert clamped is not None
@@ -471,6 +476,7 @@ def test_frontier_motion_renote_after_delivery_drops_replay_and_clamps_stale_fro
         to_sequence=92,
         head_digest="sha256:" + "8" * 64,
         observation_record_count=11,
+        task_id="tsk-frontier-test",
     )
     assert reloaded.peek_frontier_motion(workspace, "replay-session") is None
 
@@ -481,6 +487,7 @@ def test_frontier_motion_renote_after_delivery_drops_replay_and_clamps_stale_fro
         to_sequence=105,
         head_digest="sha256:" + "9" * 64,
         observation_record_count=13,
+        task_id="tsk-frontier-test",
     )
     advanced = reloaded.peek_frontier_motion(workspace, "replay-session")
     assert advanced is not None
@@ -489,6 +496,88 @@ def test_frontier_motion_renote_after_delivery_drops_replay_and_clamps_stale_fro
         105,
         13,
     )
+
+
+def test_frontier_motion_delivered_mark_is_scoped_to_the_announced_task(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.note_frontier_motion(
+        workspace,
+        "remap-session",
+        from_sequence=220,
+        to_sequence=221,
+        head_digest="sha256:" + "c" * 64,
+        observation_record_count=1,
+        task_id="tsk-original",
+    )
+    original = store.peek_frontier_motion(workspace, "remap-session")
+    assert original is not None
+    store.commit_frontier_motion_delivery(workspace, "remap-session", original.delivery_identity)
+
+    # The session's mapping moves to a fresh task whose ledger restarts at a
+    # low sequence. The old task's delivered mark must not suppress it.
+    reloaded = LocalObservationStore(_state=tmp_path)
+    reloaded.note_frontier_motion(
+        workspace,
+        "remap-session",
+        from_sequence=0,
+        to_sequence=5,
+        head_digest="sha256:" + "d" * 64,
+        observation_record_count=5,
+        task_id="tsk-remapped",
+    )
+    remapped = reloaded.peek_frontier_motion(workspace, "remap-session")
+    assert remapped is not None
+    assert (remapped.from_sequence, remapped.to_sequence, remapped.observation_record_count) == (
+        0,
+        5,
+        5,
+    )
+    reloaded.commit_frontier_motion_delivery(workspace, "remap-session", remapped.delivery_identity)
+
+    # Replay suppression still works for the task now owning the mark.
+    reloaded.note_frontier_motion(
+        workspace,
+        "remap-session",
+        from_sequence=0,
+        to_sequence=5,
+        head_digest="sha256:" + "d" * 64,
+        observation_record_count=5,
+        task_id="tsk-remapped",
+    )
+    assert reloaded.peek_frontier_motion(workspace, "remap-session") is None
+
+    # A pending undelivered notice for the old task is replaced, not merged,
+    # when the next announcement belongs to a different task.
+    reloaded.note_frontier_motion(
+        workspace,
+        "pending-remap-session",
+        from_sequence=10,
+        to_sequence=12,
+        head_digest="sha256:" + "e" * 64,
+        observation_record_count=2,
+        task_id="tsk-original",
+    )
+    reloaded.note_frontier_motion(
+        workspace,
+        "pending-remap-session",
+        from_sequence=12,
+        to_sequence=15,
+        head_digest="sha256:" + "f" * 64,
+        observation_record_count=3,
+        task_id="tsk-remapped",
+    )
+    replaced = reloaded.peek_frontier_motion(workspace, "pending-remap-session")
+    assert replaced is not None
+    assert (replaced.from_sequence, replaced.to_sequence, replaced.observation_record_count) == (
+        12,
+        15,
+        3,
+    )
+    assert replaced.task_id == "tsk-remapped"
 
 
 def test_frontier_motion_notices_ignore_malformed_and_prune_ended_sessions(
@@ -505,6 +594,7 @@ def test_frontier_motion_notices_ignore_malformed_and_prune_ended_sessions(
         to_sequence=2,
         head_digest="sha256:" + "4" * 64,
         observation_record_count=1,
+        task_id="tsk-frontier-test",
     )
     state_path = store._workspace_path(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
     raw = json.loads(state_path.read_text(encoding="utf-8"))
@@ -525,6 +615,7 @@ def test_frontier_motion_notices_ignore_malformed_and_prune_ended_sessions(
         to_sequence=3,
         head_digest="sha256:" + "5" * 64,
         observation_record_count=1,
+        task_id="tsk-frontier-test",
     )
     store.note_session_end(workspace, ended)
     assert store.peek_frontier_motion(workspace, "ended-session") is None
@@ -537,6 +628,7 @@ def test_frontier_motion_notices_ignore_malformed_and_prune_ended_sessions(
         to_sequence=4,
         head_digest="sha256:" + "a" * 64,
         observation_record_count=1,
+        task_id="tsk-frontier-test",
     )
     delivered_notice = store.peek_frontier_motion(workspace, "ended-delivered")
     assert delivered_notice is not None
@@ -556,6 +648,7 @@ def test_frontier_motion_notices_ignore_malformed_and_prune_ended_sessions(
         to_sequence=5,
         head_digest="sha256:" + "b" * 64,
         observation_record_count=1,
+        task_id="tsk-frontier-test",
     )
     malformed_notice = store.peek_frontier_motion(workspace, "malformed-delivered")
     assert malformed_notice is not None
@@ -573,6 +666,7 @@ def test_frontier_motion_notices_ignore_malformed_and_prune_ended_sessions(
         to_sequence=5,
         head_digest="sha256:" + "b" * 64,
         observation_record_count=1,
+        task_id="tsk-frontier-test",
     )
     replayed = broken.peek_frontier_motion(workspace, "malformed-delivered")
     assert replayed is not None
@@ -593,6 +687,7 @@ def test_frontier_motion_notices_are_capped(tmp_path: Path) -> None:
             to_sequence=index + 2,
             head_digest=digest,
             observation_record_count=1,
+            task_id="tsk-frontier-test",
         )
     reloaded = LocalObservationStore(_state=tmp_path)
     surviving = [

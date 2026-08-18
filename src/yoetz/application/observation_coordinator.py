@@ -571,6 +571,7 @@ class ObservationCoordinator:
                                     to_sequence=append_result.result_frontier.sequence,
                                     head_digest=append_result.result_frontier.head_digest,
                                     observation_record_count=len(append_result.accepted),
+                                    task_id=runtime.task_id,
                                 )
                             )
 

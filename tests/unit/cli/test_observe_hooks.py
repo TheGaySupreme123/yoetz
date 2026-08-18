@@ -247,6 +247,7 @@ def test_post_tool_hook_delivers_pending_frontier_motion_once(tmp_path: Path) ->
         to_sequence=6,
         head_digest="sha256:" + "3" * 64,
         observation_record_count=2,
+        task_id="tsk-frontier-test",
     )
 
     payload = json.dumps(
@@ -290,6 +291,7 @@ def test_post_tool_hook_delivers_pending_frontier_motion_once(tmp_path: Path) ->
         to_sequence=6,
         head_digest="sha256:" + "3" * 64,
         observation_record_count=2,
+        task_id="tsk-frontier-test",
     )
     replayed = io.BytesIO()
     assert (
@@ -312,6 +314,7 @@ def test_post_tool_hook_delivers_pending_frontier_motion_once(tmp_path: Path) ->
         to_sequence=8,
         head_digest="sha256:" + "4" * 64,
         observation_record_count=2,
+        task_id="tsk-frontier-test",
     )
     advanced = io.BytesIO()
     assert (

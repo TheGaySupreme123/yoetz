@@ -331,12 +331,15 @@ class FrontierMotionNotice:
     to_sequence: int
     head_digest: str
     observation_record_count: int
+    task_id: str
 
     def __post_init__(self) -> None:
         if (
             type(self.from_sequence) is not int
             or type(self.to_sequence) is not int
             or type(self.observation_record_count) is not int
+            or type(self.task_id) is not str
+            or not self.task_id
             or not 0 <= self.from_sequence < self.to_sequence <= _MAX_SAFE_INTEGER
             or not 1 <= self.observation_record_count <= self.to_sequence - self.from_sequence
         ):
@@ -351,6 +354,7 @@ class FrontierMotionNotice:
                     "from_sequence": self.from_sequence,
                     "head_digest": self.head_digest,
                     "observation_record_count": self.observation_record_count,
+                    "task_id": self.task_id,
                     "to_sequence": self.to_sequence,
                 }
             )
@@ -381,6 +385,7 @@ def _clamp_frontier_motion_notice(
         notice.to_sequence,
         notice.head_digest,
         remainder_count,
+        notice.task_id,
     )
 
 
@@ -462,7 +467,7 @@ class _WorkspaceState:
     frontier_motion_notices: dict[str, FrontierMotionNotice] | None = None
     # Last delivered notice ``to_sequence`` per Codex session. Survives notice
     # deletion so a replayed append cannot re-announce already-delivered motion.
-    frontier_motion_delivered: dict[str, int] | None = None
+    frontier_motion_delivered: dict[str, tuple[str, int]] | None = None
     open_pre: dict[str, str] | None = None
     stream_cursors: dict[str, ObservationCursor] | None = None
     stream_partials: dict[str, bytes] | None = None
@@ -574,22 +579,28 @@ def _load_frontier_motion_notices(raw: object) -> dict[str, FrontierMotionNotice
                 cast(int, notice.get("to_sequence")),
                 cast(str, notice.get("head_digest")),
                 cast(int, notice.get("observation_record_count")),
+                cast(str, notice.get("task_id")),
             )
         except ProtocolValueError, TypeError, ValueError:
             continue
     return result
 
 
-def _load_frontier_motion_delivered(raw: object) -> dict[str, int]:
+def _load_frontier_motion_delivered(raw: object) -> dict[str, tuple[str, int]]:
     if not isinstance(raw, Mapping):
         return {}
-    result: dict[str, int] = {}
+    result: dict[str, tuple[str, int]] = {}
     for key, value in cast(Mapping[str, JsonValue], raw).items():
-        if type(key) is not str or type(value) is not int or isinstance(value, bool):
+        if type(key) is not str or not isinstance(value, Mapping):
             continue
-        if not 1 <= value <= _MAX_SAFE_INTEGER:
+        entry = cast(Mapping[str, JsonValue], value)
+        task_id = entry.get("task_id")
+        to_sequence = entry.get("to_sequence")
+        if type(task_id) is not str or not task_id or type(to_sequence) is not int:
             continue
-        result[key] = value
+        if not 1 <= to_sequence <= _MAX_SAFE_INTEGER:
+            continue
+        result[key] = (task_id, to_sequence)
     return result
 
 
@@ -1263,6 +1274,7 @@ class LocalObservationStore:
         to_sequence: int,
         head_digest: str,
         observation_record_count: int,
+        task_id: str,
     ) -> None:
         """Merge contiguous undelivered observation appends into one pending notice."""
 
@@ -1271,15 +1283,30 @@ class LocalObservationStore:
             to_sequence,
             head_digest,
             observation_record_count,
+            task_id,
         )
         with self._lock:
             state = self._load(workspace)
             assert state.frontier_motion_notices is not None
             assert state.frontier_motion_delivered is not None
             notices = state.frontier_motion_notices
-            delivered_to = state.frontier_motion_delivered.get(codex_session_id, 0)
-            prior = notices.get(codex_session_id)
+            delivered = state.frontier_motion_delivered
             mutated = False
+            # The delivered mark is scoped to the task ledger it was announced
+            # for. A session whose mapping moves to another task (or whose
+            # prior ledger was announced under a different task id) must not
+            # have the new ledger's motion suppressed by the old mark.
+            delivered_entry = delivered.get(codex_session_id)
+            if delivered_entry is not None and delivered_entry[0] != task_id:
+                del delivered[codex_session_id]
+                delivered_entry = None
+                mutated = True
+            delivered_to = delivered_entry[1] if delivered_entry is not None else 0
+            prior = notices.get(codex_session_id)
+            if prior is not None and prior.task_id != task_id:
+                del notices[codex_session_id]
+                prior = None
+                mutated = True
             if prior is not None and prior.to_sequence <= delivered_to:
                 del notices[codex_session_id]
                 prior = None
@@ -1294,6 +1321,7 @@ class LocalObservationStore:
                     candidate.to_sequence,
                     candidate.head_digest,
                     prior.observation_record_count + candidate.observation_record_count,
+                    candidate.task_id,
                 )
             elif prior is not None and candidate.to_sequence <= prior.to_sequence:
                 if mutated:
@@ -1328,8 +1356,14 @@ class LocalObservationStore:
             del notices[codex_session_id]
             assert state.frontier_motion_delivered is not None
             delivered = state.frontier_motion_delivered
-            previous = delivered.pop(codex_session_id, 0)
-            delivered[codex_session_id] = max(previous, current.to_sequence)
+            previous = delivered.pop(codex_session_id, None)
+            previous_to = (
+                previous[1] if previous is not None and previous[0] == current.task_id else 0
+            )
+            delivered[codex_session_id] = (
+                current.task_id,
+                max(previous_to, current.to_sequence),
+            )
             self._save(workspace, state)
 
     def advice_snapshot_for(self, workspace: str) -> AdviceSnapshot | None:
@@ -2876,6 +2910,7 @@ class LocalObservationStore:
                             "from_sequence": notice.from_sequence,
                             "head_digest": notice.head_digest,
                             "observation_record_count": notice.observation_record_count,
+                            "task_id": notice.task_id,
                             "to_sequence": notice.to_sequence,
                         }
                     )
@@ -2888,7 +2923,7 @@ class LocalObservationStore:
         if state.frontier_motion_delivered:
             payload["frontier_motion_delivered"] = JsonObject(
                 {
-                    key: value
+                    key: JsonObject({"task_id": value[0], "to_sequence": value[1]})
                     for key, value in sorted(
                         state.frontier_motion_delivered.items(),
                         key=lambda item: item[0].encode(),

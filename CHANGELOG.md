@@ -74,7 +74,8 @@ describes behavior intended for the first release rather than a change from a pr
   task frontier, including the bounded sequence range and observation-record count. The notice map
   is capped, drops ended-session entries, and is reconstructed on retry from a completed append's
   frontier metadata when the local write did not land. A per-session delivered high-water
-  `to_sequence` survives notice deletion so a replayed append is not re-announced. Successful
+  `to_sequence`, scoped to the announced task ledger, survives notice deletion so a replayed
+  append is not re-announced. Successful
   routine reads remain available in the local observation store but are rate-limited out of the
   task ledger; failures, denials, path-qualified executables, and conservatively unrecognized
   commands still materialize normally (issues #244 and #322, ADR-022 amendment).
@@ -459,7 +460,9 @@ carried them; they are listed because each one describes the behavior that now s
   outbox redelivers a committed envelope. The local store keeps a per-session delivered high-water
   `to_sequence` after the hook consumer receives the notice; `note_frontier_motion` drops
   candidates at or behind that mark and clamps overlapping ranges so later genuine motion starts
-  from the announced head and record counts do not double-count (issue #322).
+  from the announced head and record counts do not double-count. The mark is scoped to the
+  announced task ledger: when a session's mapping moves to a different task, the stale mark is
+  discarded rather than silently suppressing the new ledger's motion (issue #322).
 
 - The MCP initialize `instructions` string had no size bound and had grown to 41 KB by inlining
   three guidance documents. Codex copies that string into the `description` of every advertised
