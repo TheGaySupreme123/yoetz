@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -774,7 +774,10 @@ _MAX_PROJECTED_OBJECT_LOCATIONS: Final = 8
 # Closed reason token for a nested instance failure. Only the class of the mistake travels; the
 # rejected key names are caller-controlled and never leave the validator (issue #240).
 _INSTANCE_REASON_EXTRA_FORBIDDEN: Final = "extra_forbidden"
-_INSTANCE_REASONS: Final = frozenset({_INSTANCE_REASON_EXTRA_FORBIDDEN})
+_INSTANCE_REASON_CONDITIONAL_FIELD_REQUIRED: Final = "conditional_field_required"
+_INSTANCE_REASONS: Final = frozenset(
+    {_INSTANCE_REASON_EXTRA_FORBIDDEN, _INSTANCE_REASON_CONDITIONAL_FIELD_REQUIRED}
+)
 MAX_UNKNOWN_PROPERTY_COUNT: Final = 32
 _UNKNOWN_PROPERTY_COUNT_OVERFLOW: Final = MAX_UNKNOWN_PROPERTY_COUNT + 1
 EVENT_FAMILY_NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
@@ -786,11 +789,12 @@ class SchemaInstanceInvalid(ProtocolValueError):
     ``absolute_path`` names one nested field when jsonschema already points there.
     ``location_reasons`` carries root-level object-rule projections (pairing / conditional
     required) when the instance path is empty but the schema names safe corrective fields.
-    ``reason``, ``family``, ``family_version``, and ``unknown_count`` describe an unknown-property
+    ``reason``, ``family``, ``family_version``, and ``unknown_count`` describe a named nested
     failure: a closed token, a frozen schema-derived family name, that family's frozen schema
-    version, and a bounded cardinality. No caller-supplied key or value is admitted through any of
-    them — ``family_version`` in particular is read from the catalogue entry the failing schema's
-    own ``$id`` names, never from the instance's ``schema.version``.
+    version, and a bounded cardinality. ``condition_field`` and ``condition_value`` are populated
+    only for a selected const-discriminated ``oneOf`` branch. No caller-supplied key or value is
+    admitted through any of them — ``family_version`` in particular is read from the catalogue
+    entry the failing schema's own ``$id`` names, never from the instance's ``schema.version``.
     ``misplaced_field`` names one rejected key only when it byte-equals a payload property name
     some catalogued event family declares, so the token that travels is frozen schema vocabulary
     and never a caller-invented key (issue #266).
@@ -798,6 +802,8 @@ class SchemaInstanceInvalid(ProtocolValueError):
 
     __slots__ = (
         "absolute_path",
+        "condition_field",
+        "condition_value",
         "family",
         "family_version",
         "location_reasons",
@@ -807,6 +813,8 @@ class SchemaInstanceInvalid(ProtocolValueError):
     )
 
     absolute_path: tuple[str | int, ...]
+    condition_field: str | None
+    condition_value: str | None
     location_reasons: tuple[tuple[tuple[str | int, ...], str], ...]
     reason: str | None
     family: str | None
@@ -824,6 +832,8 @@ class SchemaInstanceInvalid(ProtocolValueError):
         family_version: str | None = None,
         unknown_count: int = 0,
         misplaced_field: str | None = None,
+        condition_field: str | None = None,
+        condition_value: str | None = None,
     ) -> None:
         if type(absolute_path) is not tuple:
             raise TypeError("schema_instance_path_invalid")
@@ -862,7 +872,18 @@ class SchemaInstanceInvalid(ProtocolValueError):
             or EVENT_FAMILY_NAME_PATTERN.fullmatch(misplaced_field) is None
         ):
             raise TypeError("schema_instance_misplaced_field_invalid")
+        if (condition_field is None) != (condition_value is None):
+            raise TypeError("schema_instance_condition_invalid")
+        if condition_field is not None and (
+            EVENT_FAMILY_NAME_PATTERN.fullmatch(condition_field) is None
+            or type(condition_value) is not str
+            or not condition_value.isascii()
+            or not 1 <= len(condition_value) <= 64
+        ):
+            raise TypeError("schema_instance_condition_invalid")
         self.absolute_path = absolute_path
+        self.condition_field = condition_field
+        self.condition_value = condition_value
         self.location_reasons = location_reasons
         self.reason = reason
         self.family = family
@@ -889,6 +910,21 @@ def validate_schema_instance(name: str, version: str, value: JsonValue) -> None:
         validator_api.validate(_plain_validation_value(value))
     except ValidationError as exc:
         best = _best_schema_instance_error(exc)
+        # A selected nested oneOf can expose a missing peer even though the parent request path is
+        # nonempty. Project it before the generic best-path rule, which otherwise points at the
+        # satisfied discriminator selected only to score the union.
+        selected = _project_selected_one_of_required_locations(exc)
+        if selected is not None:
+            projected, condition_field, condition_value, identity = selected
+            raise SchemaInstanceInvalid(
+                (),
+                projected,
+                reason=_INSTANCE_REASON_CONDITIONAL_FIELD_REQUIRED,
+                family=identity[0] if identity is not None else None,
+                family_version=identity[1] if identity is not None else None,
+                condition_field=condition_field,
+                condition_value=condition_value,
+            ) from None
         path = _path_items_from(best) or ()
         if path:
             reason = _instance_reason_for(best)
@@ -957,6 +993,113 @@ def _project_root_object_rule_locations(
         return _project_root_object_rule_locations_impl(exc)
     except Exception:
         return ()
+
+
+def _project_selected_one_of_required_locations(
+    exc: ValidationError,
+) -> tuple[tuple[tuple[tuple[str | int, ...], str], ...], str, str, tuple[str, str] | None] | None:
+    """Project required peers from exactly one const-discriminated ``oneOf`` branch.
+
+    A failed ``oneOf`` normally has an empty instance path.  Flattening all of its branches would
+    name fields from alternatives the caller did not choose, while selecting the parent error
+    loses the actual missing peer.  This picks a branch only when sibling const rejections prove
+    that every other branch was ruled out by the same schema-authored property.  Projection is
+    best-effort: an unexpected error-tree shape degrades to the generic best-path rule.
+    """
+
+    try:
+        return _project_selected_one_of_required_locations_impl(exc)
+    except Exception:
+        return None
+
+
+def _project_selected_one_of_required_locations_impl(
+    exc: ValidationError,
+) -> tuple[tuple[tuple[tuple[str | int, ...], str], ...], str, str, tuple[str, str] | None] | None:
+    if exc.validator != "oneOf" or not isinstance(exc.schema, Mapping):
+        return None
+    branches: dict[int, list[ValidationError]] = {}
+    parent_schema_path = tuple(exc.absolute_schema_path)
+    for nested in exc.context or ():
+        schema_path = tuple(nested.absolute_schema_path)
+        if (
+            len(schema_path) <= len(parent_schema_path)
+            or schema_path[: len(parent_schema_path)] != parent_schema_path
+            or type(schema_path[len(parent_schema_path)]) is not int
+        ):
+            return None
+        branches.setdefault(cast(int, schema_path[len(parent_schema_path)]), []).append(nested)
+    if len(branches) < _MIN_DISCRIMINATED_BRANCHES:
+        return None
+    options = exc.validator_value
+    if not isinstance(options, list):
+        return None
+    option_values = cast(list[object], options)
+    root_properties = _schema_property_names(exc.schema)
+    if root_properties is None:
+        return None
+    base_path = _path_items_from(exc)
+    if base_path is None:
+        return None
+    for field in sorted(root_properties):
+        rejected: set[int] = set()
+        candidates: list[tuple[int, str]] = []
+        for index, errors in branches.items():
+            if not 0 <= index < len(option_values) or not isinstance(option_values[index], Mapping):
+                return None
+            properties = cast(Mapping[str, JsonValue], option_values[index]).get("properties")
+            if not isinstance(properties, Mapping):
+                continue
+            condition = cast(Mapping[str, JsonValue], properties).get(field)
+            if not isinstance(condition, Mapping):
+                continue
+            value = cast(Mapping[str, JsonValue], condition).get("const")
+            if type(value) is not str or not value.isascii() or not 1 <= len(value) <= 64:
+                continue
+            candidates.append((index, value))
+            if any(
+                error.validator == "const"
+                and tuple((_path_items_from(error) or ())[-1:]) == (field,)
+                for error in errors
+            ):
+                rejected.add(index)
+        survivors = [(index, value) for index, value in candidates if index not in rejected]
+        if (
+            len(candidates) < _MIN_DISCRIMINATED_BRANCHES
+            or len(rejected) < _MIN_DISCRIMINATED_BRANCHES
+        ):
+            continue
+        if len(survivors) != 1:
+            continue
+        selected_index, selected_value = survivors[0]
+        ordered: list[tuple[tuple[str | int, ...], str]] = []
+        for error in branches[selected_index]:
+            validator_value = cast(object, error.validator_value)
+            if error.validator != "required" or not isinstance(validator_value, list):
+                continue
+            instance = error.instance
+            if not isinstance(instance, Mapping):
+                continue
+            for item in cast(list[object], validator_value):
+                required = _safe_schema_field(item, root_properties)
+                if required is None or required in instance:
+                    continue
+                location = (base_path + (required,), _OBJECT_RULE_CONDITIONAL)
+                if location not in ordered:
+                    ordered.append(location)
+        if ordered:
+            return (tuple(ordered), field, selected_value, _selected_family_for(exc))
+    # Descend only into a branch the discriminator proved selected. Recursing into
+    # unselected branches would project a sibling contract the caller did not choose
+    # (for example the 1.0.0 family for a 1.1.0 draft) whenever selection fails.
+    selected = _discriminator_selected_branch(exc)
+    if selected is None:
+        return None
+    for nested in selected:
+        projected = _project_selected_one_of_required_locations_impl(nested)
+        if projected is not None:
+            return projected
+    return None
 
 
 def _project_root_object_rule_locations_impl(
@@ -1113,7 +1256,8 @@ def _best_schema_instance_error(exc: ValidationError) -> ValidationError:
                 best_error = error
                 best_score = points
                 best_path = path
-        for nested in error.context or ():
+        selected_nested = _discriminator_selected_branch(error)
+        for nested in selected_nested if selected_nested is not None else error.context or ():
             visit(nested)
 
     for root in selected if selected is not None else (exc,):
@@ -1158,11 +1302,16 @@ def _discriminator_selected_branch(exc: ValidationError) -> tuple[ValidationErro
     if exc.validator != "oneOf":
         return None
     branches: dict[int, list[ValidationError]] = {}
+    parent_schema_path = tuple(exc.absolute_schema_path)
     for nested in exc.context or ():
-        schema_path = list(nested.schema_path)
-        if not schema_path or type(schema_path[0]) is not int:
+        schema_path = tuple(nested.absolute_schema_path)
+        if (
+            len(schema_path) <= len(parent_schema_path)
+            or schema_path[: len(parent_schema_path)] != parent_schema_path
+            or type(schema_path[len(parent_schema_path)]) is not int
+        ):
             return None
-        branches.setdefault(schema_path[0], []).append(nested)
+        branches.setdefault(cast(int, schema_path[len(parent_schema_path)]), []).append(nested)
     if len(branches) < _MIN_DISCRIMINATED_BRANCHES:
         return None
     discriminated = 0
@@ -1174,9 +1323,53 @@ def _discriminator_selected_branch(exc: ValidationError) -> tuple[ValidationErro
             continue
         if any(error.validator == "const" for error in rejections):
             discriminated += 1
-    if discriminated < _MIN_DISCRIMINATED_BRANCHES or len(survivors) != 1:
-        return None
-    return tuple(survivors[0])
+    if discriminated >= _MIN_DISCRIMINATED_BRANCHES and len(survivors) == 1:
+        return tuple(survivors[0])
+    # Event-draft unions discriminate under schema.name, but payload contracts also use ordinary
+    # top-level const properties such as evidence strength. Select those only when const failures
+    # rule out every sibling but one; the selected branch then exposes its real required peer.
+    for field in _const_discriminator_fields(exc, branches):
+        rejected = {
+            index
+            for index, errors in branches.items()
+            if any(
+                error.validator == "const"
+                and tuple((_path_items_from(error) or ())[-1:]) == (field,)
+                for error in errors
+            )
+        }
+        selected = [errors for index, errors in branches.items() if index not in rejected]
+        if len(rejected) >= _MIN_DISCRIMINATED_BRANCHES and len(selected) == 1:
+            return tuple(selected[0])
+    return None
+
+
+def _const_discriminator_fields(
+    exc: ValidationError, branches: Mapping[int, Sequence[ValidationError]]
+) -> tuple[str, ...]:
+    """Return schema-authored root const fields shared by at least two ``oneOf`` branches."""
+
+    validator_value = cast(object, exc.validator_value)
+    if not isinstance(validator_value, list):
+        return ()
+    options = cast(list[object], validator_value)
+    fields: set[str] = set()
+    for index in branches:
+        if not 0 <= index < len(options):
+            return ()
+        branch = options[index]
+        if not isinstance(branch, Mapping):
+            return ()
+        properties = cast(Mapping[str, JsonValue], branch).get("properties")
+        if not isinstance(properties, Mapping):
+            continue
+        for field, node in cast(Mapping[object, object], properties).items():
+            if type(field) is not str or not isinstance(node, Mapping):
+                continue
+            value = cast(Mapping[str, JsonValue], node).get("const")
+            if type(value) is str and value.isascii() and 1 <= len(value) <= 64:
+                fields.add(field)
+    return tuple(sorted(fields))
 
 
 def _instance_reason_for(error: ValidationError) -> str | None:

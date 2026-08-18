@@ -102,10 +102,12 @@ unknown or hostile property names are never echoed. Closed reason tokens are:
   and the required peer are named; the authoring hint states the schema peer rule (e.g.
   `workspace_ref requires external_ref`) without echoing submitted values;
 - `conditional_field_required` — a root-level schema `if`/`then` (or equivalent closed object rule)
-  activated required alternatives (for example `start` with `mode` `attach` without `session_id`
-  or the paired external/workspace refs). Named fields are the safe required alternatives; the
-  authoring hint states the activating condition when it is a bounded schema const (e.g.
-  `mode attach requires …`).
+  activated required alternatives, or a selected const-discriminated `oneOf` branch has a missing
+  required peer (for example `start` with `mode` `attach` without `session_id`, or
+  `evidence_recorded` with `strength` `mutable_reference` without `reference`). Named fields are
+  the safe required alternatives; the authoring hint states the activating condition when it is a
+  bounded schema const (e.g. `mode attach requires …` or `strength mutable_reference requires
+  reference`).
 
 These object-rule tokens are projected only from checked-in schema metadata and validator kind —
 never from caller-controlled keys or free-form exception text. Unrecognized object rules degrade

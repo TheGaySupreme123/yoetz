@@ -194,6 +194,10 @@ _SAFE_VALUE_ERROR_REASON_TOKENS: Final = frozenset(
     {"paired_field_required", "conditional_field_required", "extra_forbidden"}
 )
 _EXTRA_FORBIDDEN_REASON: Final = "extra_forbidden"
+_CONDITIONAL_FIELD_REQUIRED_REASON: Final = "conditional_field_required"
+_EVENT_DRAFT_PAYLOAD_FIELD_POINTER: Final = re.compile(
+    r"/event_drafts/[0-9]{1,3}/payload/[a-z][a-z0-9_]{0,63}", re.ASCII
+)
 # Payload pointers the unknown-key hint answers. Deeper pointers name their own admitted values.
 _EVENT_DRAFT_PAYLOAD_POINTER: Final = re.compile(r"/event_drafts/[0-9]{1,3}/payload", re.ASCII)
 _REASON_CODE: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
@@ -349,11 +353,34 @@ def _misplaced_field_from_validation_item(item: Mapping[str, object]) -> str | N
     return field if field in _SAFE_LOCATION_SEGMENTS else None
 
 
+def _conditional_requirement_from_validation_item(
+    item: Mapping[str, object],
+) -> tuple[str, str] | None:
+    """Return a frozen const discriminator only when its bounded shape is safe to carry."""
+
+    ctx = item.get("ctx")
+    if not isinstance(ctx, Mapping):
+        return None
+    source = cast(Mapping[object, object], ctx)
+    field = source.get("condition_field")
+    value = source.get("condition_value")
+    if (
+        type(field) is not str
+        or field not in _SAFE_LOCATION_SEGMENTS
+        or EVENT_FAMILY_NAME_PATTERN.fullmatch(field) is None
+        or type(value) is not str
+        or not value.isascii()
+        or not 1 <= len(value) <= 64
+    ):
+        return None
+    return (field, value)
+
+
 def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
     """Project Pydantic failures to allowlisted locations and bounded reason tokens.
 
-    ``family``, ``family_version``, ``misplaced_field``, and ``count`` ride along on an
-    unknown-property location for the hint builders in this module.
+    ``family``, ``family_version``, ``misplaced_field``, ``count``, and selected-oneOf condition
+    facts ride along only for the hint builders in this module.
     ``build_public_error_result`` projects only ``field`` and ``reason`` to the wire — plus the
     bounded ``repair_*`` fact when ownership is unambiguous (issue #266) — so none of the
     ride-along keys reaches a caller directly.
@@ -397,6 +424,15 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
             count = _unknown_count_from_validation_item(source)
             if count:
                 entry["count"] = str(count)
+        elif reason == _CONDITIONAL_FIELD_REQUIRED_REASON:
+            family = _family_from_validation_item(source)
+            family_version = _family_version_from_validation_item(source)
+            condition = _conditional_requirement_from_validation_item(source)
+            if family is not None and family_version is not None and condition is not None:
+                entry["family"] = family
+                entry["family_version"] = family_version
+                entry["condition_field"] = condition[0]
+                entry["condition_value"] = condition[1]
         projected.append(entry)
         if len(projected) == _MAX_VALIDATION_LOCATIONS:
             break
@@ -441,6 +477,7 @@ def authoring_hint(
         # part that names the most about how to author the next request.
         keyed_parts: list[tuple[str, tuple[str, str]]] = [
             *_unknown_payload_key_hint_parts(document, locations),
+            *_conditional_requirement_hint_parts(document, locations),
             *((text, (text, "")) for text in _object_rule_hint_parts(document, locations)),
             *_event_draft_hint_parts(document, locations),
             *((text, (text, "")) for text in _corrective_hint_parts(tool, locations)),
@@ -643,16 +680,40 @@ def _payload_property_names(
     taken from the instance.
     """
 
-    if family is None or family_version is None:
+    payload = _payload_schema(document, family, family_version)
+    if payload is None:
         return ""
+    payload_properties = payload.get("properties")
+    if not isinstance(payload_properties, Mapping):
+        return ""
+    names = sorted(
+        key for key in cast(Mapping[object, object], payload_properties) if type(key) is str
+    )
+    # A partial list would read as complete and send the caller after the wrong key.
+    if not names or len(names) > _MAX_HINT_SCHEMA_NAMES:
+        return ""
+    if any(name not in _SAFE_LOCATION_SEGMENTS for name in names):
+        return ""
+    return _format_required_list(
+        cast(JsonValue, names), cast(Mapping[str, JsonValue], payload_properties)
+    )
+
+
+def _payload_schema(
+    document: Mapping[str, JsonValue], family: str | None, family_version: str | None
+) -> Mapping[str, JsonValue] | None:
+    """Return the exact frozen payload schema for a family and version."""
+
+    if family is None or family_version is None:
+        return None
     items = _event_draft_items(document)
     if items is None:
-        return ""
+        return None
     options = items.get("oneOf")
     if not isinstance(options, list):
         options = items.get("anyOf")
     if not isinstance(options, list):
-        return ""
+        return None
     for branch in cast(list[JsonValue], options):
         resolved = _resolve_local(document, branch)
         if not isinstance(resolved, Mapping):
@@ -663,27 +724,73 @@ def _payload_property_names(
             continue
         branch_properties = cast(Mapping[str, JsonValue], resolved).get("properties")
         if not isinstance(branch_properties, Mapping):
-            return ""
+            return None
         payload = _resolve_local(
             document, cast(Mapping[str, JsonValue], branch_properties).get("payload")
         )
         if not isinstance(payload, Mapping):
-            return ""
-        payload_properties = cast(Mapping[str, JsonValue], payload).get("properties")
-        if not isinstance(payload_properties, Mapping):
-            return ""
-        names = sorted(
-            key for key in cast(Mapping[object, object], payload_properties) if type(key) is str
+            return None
+        return cast(Mapping[str, JsonValue], payload)
+    return None
+
+
+def _conditional_requirement_hint_parts(
+    document: Mapping[str, JsonValue], locations: Sequence[Mapping[str, str]]
+) -> list[tuple[str, tuple[str, str]]]:
+    """Render selected-oneOf repairs only after re-checking frozen schema metadata."""
+
+    parts: list[tuple[str, tuple[str, str]]] = []
+    for location in locations:
+        if location.get("reason") != _CONDITIONAL_FIELD_REQUIRED_REASON:
+            continue
+        pointer = location.get("field")
+        condition_field = location.get("condition_field")
+        condition_value = location.get("condition_value")
+        if (
+            type(pointer) is not str
+            or _EVENT_DRAFT_PAYLOAD_FIELD_POINTER.fullmatch(pointer) is None
+            or type(condition_field) is not str
+            or type(condition_value) is not str
+        ):
+            continue
+        required = pointer.rsplit("/", 1)[-1]
+        payload = _payload_schema(
+            document,
+            location.get("family"),
+            location.get("family_version"),
         )
-        # A partial list would read as complete and send the caller after the wrong key.
-        if not names or len(names) > _MAX_HINT_SCHEMA_NAMES:
-            return ""
-        if any(name not in _SAFE_LOCATION_SEGMENTS for name in names):
-            return ""
-        return _format_required_list(
-            cast(JsonValue, names), cast(Mapping[str, JsonValue], payload_properties)
-        )
-    return ""
+        if payload is None:
+            continue
+        properties = payload.get("properties")
+        options = payload.get("oneOf")
+        if (
+            not isinstance(properties, Mapping)
+            or condition_field not in properties
+            or required not in properties
+            or not isinstance(options, list)
+        ):
+            continue
+        for branch in cast(list[JsonValue], options):
+            if not isinstance(branch, Mapping):
+                continue
+            branch_properties = cast(Mapping[str, JsonValue], branch).get("properties")
+            branch_required = cast(Mapping[str, JsonValue], branch).get("required")
+            if not isinstance(branch_properties, Mapping) or not isinstance(branch_required, list):
+                continue
+            condition = cast(Mapping[str, JsonValue], branch_properties).get(condition_field)
+            if not isinstance(condition, Mapping):
+                continue
+            if (
+                cast(Mapping[str, JsonValue], condition).get("const") != condition_value
+                or required not in branch_required
+            ):
+                continue
+            text = f"{condition_field} {condition_value} requires {required}"
+            parts.append((text, (text, "")))
+            break
+        if len(parts) == _MAX_HINT_FIELDS:
+            break
+    return parts
 
 
 def _unknown_property_measure(count: object) -> str:

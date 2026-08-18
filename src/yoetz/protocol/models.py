@@ -1075,7 +1075,13 @@ def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
                         "type": "value_error",
                         "loc": tuple(path),
                         "input": None,
-                        "ctx": {"error": ValueError(reason)},
+                        "ctx": {
+                            "error": ValueError(reason),
+                            "schema_name": exc.family,
+                            "schema_version": exc.family_version,
+                            "condition_field": exc.condition_field,
+                            "condition_value": exc.condition_value,
+                        },
                     }
                     for path, reason in exc.location_reasons
                 ],
