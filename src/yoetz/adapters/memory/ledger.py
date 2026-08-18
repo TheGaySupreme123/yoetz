@@ -260,6 +260,12 @@ class _AttemptState:
     terminal_code: SemanticReason | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _CheckReservation:
+    session_id: str
+    expires_at: datetime
+
+
 @dataclass(slots=True)
 class MemoryLedgerState:
     """Copy-on-write task state shared by the reference adapters."""
@@ -279,6 +285,8 @@ class MemoryLedgerState:
     # Keyed by job_id: at most one disclosure wait per semantic job.
     disclosure_waits: dict[str, SemanticDisclosureWait] = field(default_factory=lambda: {})
     object_refs: dict[str, ObjectRef] = field(default_factory=lambda: {})
+    # Transient freeze-acquisition holds: never persisted; a crash mid-freeze must drop them.
+    check_reservations: dict[tuple[str, str], _CheckReservation] = field(default_factory=lambda: {})
 
     def restore_writer(
         self,
@@ -1177,6 +1185,12 @@ class MemoryLedgerAdapter:
         return record
 
     def _has_active_frozen_case_unlocked(self, session_id: str) -> bool:
+        now = _now(self._clock)
+        if any(
+            reservation.session_id == session_id and reservation.expires_at > now
+            for reservation in self._state.check_reservations.values()
+        ):
+            return True
         return any(
             (writer := self._state.writers.get(case_writer_id)) is not None
             and writer.session_id == session_id
@@ -1189,6 +1203,35 @@ class MemoryLedgerAdapter:
     async def has_active_frozen_case(self, session_id: str) -> bool:
         async with self._lock:
             return self._has_active_frozen_case_unlocked(session_id)
+
+    def _observation_only_since_unlocked(
+        self, sequence: int, *, finding_free: bool = False
+    ) -> bool:
+        """True when every record past ``sequence`` is observation-authored.
+
+        ``finding_free`` additionally rejects a suffix that materialized findings: a caller
+        pinned to the older frontier would otherwise leave those findings silently uncovered.
+        """
+
+        return all(
+            is_observation_authored(record)
+            and not (finding_free and record.schema.name == "finding_recorded")
+            for record in self._state.records
+            if record.ledger.ingestion_sequence > sequence
+        )
+
+    def _projection_anchored_unlocked(self, projection: ProjectionState) -> bool:
+        """True when ``projection`` is the exact replay of this chain through its frontier."""
+
+        records = tuple(
+            row
+            for row in self._state.records
+            if row.ledger.ingestion_sequence <= projection.frontier
+        )
+        try:
+            return replay(records) == projection
+        except ValueError as exc:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
 
     def _replace_pending_record(
         self,
@@ -1247,15 +1290,17 @@ class MemoryLedgerAdapter:
             if importer_authored and not self._reservation_valid(command):
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
             subject = Frontier(self._state.projection.frontier, self._state.projection.head_digest)
+            # A receipt's case replays the prefix at its subject frontier, so a finding drained
+            # past that frontier would be silently uncovered; receipt appends alone treat a
+            # finding-bearing suffix as a real conflict.
             if (
                 command.expected_frontier is not None
                 and command.expected_frontier != subject.sequence
                 and not (
                     command.expected_frontier < subject.sequence
-                    and all(
-                        is_observation_authored(record)
-                        for record in self._state.records
-                        if record.ledger.ingestion_sequence > command.expected_frontier
+                    and self._observation_only_since_unlocked(
+                        command.expected_frontier,
+                        finding_free=command.operation_kind is OperationKind.RECEIPT,
                     )
                 )
             ):
@@ -1447,12 +1492,20 @@ class MemoryLedgerAdapter:
         ):
             raise _frontier_conflict(Frontier(projection.frontier, projection.head_digest))
         async with self._lock:
-            if projection != self._state.projection or not any(
-                row.session_id == session_id for row in self._state.records
+            live = Frontier(self._state.projection.frontier, self._state.projection.head_digest)
+            if not any(row.session_id == session_id for row in self._state.records):
+                raise _frontier_conflict(live)
+            # A case pinned to a past frontier stays valid while the live chain only extends it
+            # with observation-authored, finding-free records. Replaying and comparing the exact
+            # prefix is required: its head digest authenticates the ledger prefix, not an arbitrary
+            # caller-supplied ProjectionState that happens to repeat that frontier. Anything else
+            # is a real conflict.
+            if projection != self._state.projection and not (
+                projection.frontier < live.sequence
+                and self._projection_anchored_unlocked(projection)
+                and self._observation_only_since_unlocked(projection.frontier, finding_free=True)
             ):
-                raise _frontier_conflict(
-                    Frontier(self._state.projection.frontier, self._state.projection.head_digest)
-                )
+                raise _frontier_conflict(live)
             by_event = {row.event_id: row for row in self._state.records}
             refs = dict(self._state.object_refs)
             current_records = tuple(
@@ -1705,6 +1758,7 @@ class MemoryLedgerAdapter:
         projection: ProjectionState | None = None
         frontier: Frontier | None = None
         records: tuple[LedgerRecord, ...] | None = None
+        acquisition_reservation: _CheckReservation | None = None
         async with self._lock:
             prior = self._state.operations.get(key)
             if prior is not None:
@@ -1737,12 +1791,30 @@ class MemoryLedgerAdapter:
                     raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
                 projection = self._state.projection
                 frontier = Frontier(projection.frontier, projection.head_digest)
-                if expected_frontier is not None and expected_frontier != frontier.sequence:
+                # Observation-only motion past the caller's frontier is tolerated by freezing at
+                # the real head: the case then covers the drained records instead of racing them.
+                if (
+                    expected_frontier is not None
+                    and expected_frontier != frontier.sequence
+                    and not (
+                        expected_frontier < frontier.sequence
+                        and self._observation_only_since_unlocked(expected_frontier)
+                    )
+                ):
                     raise _frontier_conflict(frontier)
                 records = self._state.records
                 writer = self._state.writers.get(writer_id)
                 if writer is None or writer.session_id != session_id:
                     raise _error(PublicErrorCode.SESSION_NOT_FOUND)
+                # Arm the observation-append barrier before this lock is released, or the drain
+                # that stayed active through acquisition would race the freeze it just tolerated.
+                reservation = self._state.check_reservations.get(key)
+                if reservation is not None and reservation.expires_at > _now(self._clock):
+                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                acquisition_reservation = _CheckReservation(
+                    session_id, _now(self._clock) + timedelta(seconds=60)
+                )
+                self._state.check_reservations[key] = acquisition_reservation
         if prior_record is not None:
             assert self._objects is not None
             try:
@@ -1764,68 +1836,78 @@ class MemoryLedgerAdapter:
                 _, renewed = self._replace_pending_record(prior_record)
                 return FrozenCase(case, renewed)
         assert projection is not None and frontier is not None and records is not None
-        availability = await self.load_case_availability(session_id, frontier, projection)
         try:
-            case = build_deterministic_case(projection, records, availability)
-        except ValueError as exc:
-            if str(exc) == "deterministic_case_invalid":
-                raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
-            raise
-        dependency = _case_dependency_digest(case)
-        case_json = deterministic_case_to_json(case)
-        case_bytes = canonical_encode(
-            {
-                "schema_version": "1.0.0",
-                "task_id": self._task_id,
-                "case": case_json,
-                "case_digest": canonical_digest(case_json),
-                "dependency_digest": dependency,
-                "frontier": frontier.as_wire(),
-                "request_digest": request_digest,
-                "request_id": request_id,
-                "session_id": session_id,
-                "writer_id": writer_id,
-            }
-        )
-        assert self._objects is not None
-        created_at = _now(self._clock)
-        staged = await self._objects.stage(
-            ObjectSource(data=case_bytes, declared_size=len(case_bytes)),
-            ObjectMetadata(
-                ObjectKind.CHECK_RESUME,
-                "application/vnd.yoetz.check-resume+json",
-                self._task_id,
-                created_at,
-            ),
-        )
-        resume_ref = await self._objects.finalize(staged)
-        async with self._lock:
-            if key in self._state.operations:
-                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
-            current = Frontier(self._state.projection.frontier, self._state.projection.head_digest)
-            if current != frontier or self._pending_import(session_id):
-                raise _frontier_conflict(current)
-            operation = OperationRecord(
-                writer_id,
-                request_id,
-                OperationKind.CHECK,
-                request_digest,
-                OperationState.PENDING,
-                CheckPhase.RESERVED,
-                str(self._fence.owner_generation),
-                self._fence.service_instance_id,
-                1,
-                _now(self._clock) + timedelta(seconds=60),
-                resume_ref,
-                None,
-                None,
-                None,
-                None,
-                None,
+            availability = await self.load_case_availability(session_id, frontier, projection)
+            try:
+                case = build_deterministic_case(projection, records, availability)
+            except ValueError as exc:
+                if str(exc) == "deterministic_case_invalid":
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+                raise
+            dependency = _case_dependency_digest(case)
+            case_json = deterministic_case_to_json(case)
+            case_bytes = canonical_encode(
+                {
+                    "schema_version": "1.0.0",
+                    "task_id": self._task_id,
+                    "case": case_json,
+                    "case_digest": canonical_digest(case_json),
+                    "dependency_digest": dependency,
+                    "frontier": frontier.as_wire(),
+                    "request_digest": request_digest,
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "writer_id": writer_id,
+                }
             )
-            self._state.frozen_cases[key] = case
-            self._state.operations[key] = (operation, None)
-            return FrozenCase(case, self._lease_for(operation))
+            assert self._objects is not None
+            created_at = _now(self._clock)
+            staged = await self._objects.stage(
+                ObjectSource(data=case_bytes, declared_size=len(case_bytes)),
+                ObjectMetadata(
+                    ObjectKind.CHECK_RESUME,
+                    "application/vnd.yoetz.check-resume+json",
+                    self._task_id,
+                    created_at,
+                ),
+            )
+            resume_ref = await self._objects.finalize(staged)
+            async with self._lock:
+                if key in self._state.operations:
+                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+                current = Frontier(
+                    self._state.projection.frontier, self._state.projection.head_digest
+                )
+                if current != frontier or self._pending_import(session_id):
+                    raise _frontier_conflict(current)
+                operation = OperationRecord(
+                    writer_id,
+                    request_id,
+                    OperationKind.CHECK,
+                    request_digest,
+                    OperationState.PENDING,
+                    CheckPhase.RESERVED,
+                    str(self._fence.owner_generation),
+                    self._fence.service_instance_id,
+                    1,
+                    _now(self._clock) + timedelta(seconds=60),
+                    resume_ref,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                self._state.frozen_cases[key] = case
+                self._state.operations[key] = (operation, None)
+                return FrozenCase(case, self._lease_for(operation))
+        finally:
+            # The frozen case (registered above on success) carries the barrier from here on. An
+            # expired acquisition may have been replaced under the same request key, so release
+            # only the exact reservation this invocation installed.
+            async with self._lock:
+                if self._state.check_reservations.get(key) is acquisition_reservation:
+                    self._state.check_reservations.pop(key, None)
 
     async def advance_check_phase(
         self,

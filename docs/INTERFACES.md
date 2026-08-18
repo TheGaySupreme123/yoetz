@@ -1026,7 +1026,9 @@ deciding between the two, shared by the receipt and by compact status coverage.
   replayable — the same membership rule that `load_projection` and `query_projection` apply);
 - `load_projection(session_id, view) -> StoredProjection | None` (cache/rebuild use);
 - `load_case_availability(session_id, frontier, projection) -> CaseAvailabilityFacts` (shared bounded
-  event/captured-object availability snapshot for case construction);
+  event/captured-object availability snapshot for case construction; an exact live projection is
+  accepted, while a historical projection must equal the genesis-prefix replay at its frontier and
+  may trail the live head only across an observation-authored, finding-free suffix);
 - `query_projection(query: ProjectionQuery) -> ProjectionPage` (bounded public status use);
 - `freeze_case(session_id, writer_id, expected_frontier, request_id, request_digest) ->
   FrozenCase | CheckCommitResult`;
@@ -1060,8 +1062,10 @@ an internal failure, never caller-side `INVALID_REQUEST`. The application calls
 `complete/terminal` with a durable bounded error result, same-request replay returns that error,
 and a fresh check identity remains admissible at the unchanged frontier. SQLite commits the
 in-memory oracle state and durable rows atomically: a failed persistence sync restores the prior
-oracle state. `awaiting_human` and retryable ownership conflicts remain pending and never use this
-terminalization path.
+oracle state, while a successful copy-on-write commit adopts the clone into the stable state object
+so an in-flight oracle's final revalidation observes every durable concurrent append.
+`awaiting_human` and retryable ownership conflicts remain pending and never use this terminalization
+path.
 `ports/ledger.py` owns the shared closed enums: `OperationKind` is
 `start|publish_work|check|respond|receipt`; `OperationState` is `pending|complete|quarantined`;
 `CheckPhase` is `reserved|local_ready|semantic_wait|ready_to_finalize|terminal`;
@@ -1148,7 +1152,10 @@ replay uses this locator; it never scans an unbounded ledger or rebuilds the rec
 
 `freeze_case` uses one closed ordering for both adapters. For an absent operation: (1) a bounded
 prepare snapshot establishes absent idempotency, no pending import, `expected_frontier`, head `F`,
-active projection identity, and exact dependency revisions; (2) outside every write transaction,
+active projection identity, and exact dependency revisions; a caller frontier may trail `F` only
+across an ADR-022 observation-authored suffix, in which case the case freezes at `F` and a transient
+60-second in-memory acquisition reservation immediately defers observation appends; (2) outside
+every write transaction,
 the adapter snapshots `CaseAvailabilityFacts`, includes its canonical digest in `D`, pages the
 immutable accepted prefix through `F`, and builds the exact `DeterministicCase` from that same
 availability value; (3) only after the case exists, it canonicalizes, encrypts, and durably
@@ -1171,9 +1178,11 @@ nothing. SQLite uses the co-located importer rows; memory uses one shared task-s
 `append_batch` normally requires an exact task-global `expected_frontier`. A held frontier may be
 behind the head only when every intervening record is observation-authored under ADR-022's exact
 actor-id, actor-type, assurance, and channel predicate. The accepted batch still appends at and
-reports the real head. Any other intervening record conflicts. Observation appends receive
-retryable `OPERATION_PENDING` while a case for their session is frozen; check commit equality is not
-relaxed.
+reports the real head. For `operation_kind=receipt`, that suffix must additionally contain no
+`finding_recorded` event, so the pinned receipt cannot append past a finding it did not cover. Any
+other intervening record conflicts. Observation appends receive retryable `OPERATION_PENDING` while
+a check-acquisition reservation or frozen case for their session is active; check commit equality
+with the frontier actually frozen is not relaxed.
 
 `ProjectionView` is `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`,
 `evidence`, `history`, or `versions`. Application status also admits `view=operation` (operation

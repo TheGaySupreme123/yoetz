@@ -12,9 +12,12 @@ Publish one batch per material transition, roughly one to eight events. A normal
 
 State-sensitive families require `expected_frontier`. Read it from `status` and include it in the
 batch; omitting it returns retryable `expected_frontier_required` without writing an operation.
-The guard is task-scoped but tolerates a held frontier when every intervening record is
-observation-authored; the batch then appends at the real head. Any intervening cooperative or
-imported record still conflicts, so refresh `status` rather than guessing a replacement frontier.
+The guard is task-scoped. Publication tolerates a held frontier when every intervening record is
+observation-authored and then appends at the real head. Check acquisition applies the same suffix
+predicate but freezes the case at that real head. Receipt may instead stay pinned to the supplied
+frontier only when it names the exact ledger prefix and the observation-authored suffix contains no
+finding; its append repeats that finding-free check. Any other motion conflicts. Use the returned
+repair facts for a retry rather than guessing a replacement frontier.
 
 These are not publishable transitions: reading or searching, running a command whose result you already expect, formatting, regenerating a derived file, repeating a status read, or republishing state that has not changed since the last accepted event. When in doubt, ask whether an independent reader of the ledger alone would conclude something different without the fact.
 
