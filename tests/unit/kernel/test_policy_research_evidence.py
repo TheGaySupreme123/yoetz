@@ -159,6 +159,8 @@ def test_material_limitation_omitted_and_exact_link_nontrigger() -> None:
         if item.candidate.kind is FindingKind.MATERIAL_LIMITATION_OMITTED
     )
     assert finding.basis.required_but_missing_facts[0].fact_code == ("limitation_disclosure_absent")
+    assert f"Omitted limitation basis: non-success result {res(1)}." in finding.candidate.detail
+    assert omitted.statement not in finding.candidate.detail
     disclosed = ClaimRecordedPayload(
         claim_id=clm(1),
         claim_kind=ClaimKind.COMPLETION,
