@@ -997,9 +997,7 @@ def _project_root_object_rule_locations(
 
 def _project_selected_one_of_required_locations(
     exc: ValidationError,
-) -> tuple[
-    tuple[tuple[tuple[str | int, ...], str], ...], str, str, tuple[str, str] | None
-] | None:
+) -> tuple[tuple[tuple[tuple[str | int, ...], str], ...], str, str, tuple[str, str] | None] | None:
     """Project required peers from exactly one const-discriminated ``oneOf`` branch.
 
     A failed ``oneOf`` normally has an empty instance path.  Flattening all of its branches would
@@ -1056,7 +1054,10 @@ def _project_selected_one_of_required_locations(
             ):
                 rejected.add(index)
         survivors = [(index, value) for index, value in candidates if index not in rejected]
-        if len(candidates) < _MIN_DISCRIMINATED_BRANCHES or len(rejected) < _MIN_DISCRIMINATED_BRANCHES:
+        if (
+            len(candidates) < _MIN_DISCRIMINATED_BRANCHES
+            or len(rejected) < _MIN_DISCRIMINATED_BRANCHES
+        ):
             continue
         if len(survivors) != 1:
             continue

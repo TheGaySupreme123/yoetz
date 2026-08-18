@@ -694,7 +694,9 @@ def _payload_property_names(
         return ""
     if any(name not in _SAFE_LOCATION_SEGMENTS for name in names):
         return ""
-    return _format_required_list(cast(JsonValue, names), cast(Mapping[str, JsonValue], payload_properties))
+    return _format_required_list(
+        cast(JsonValue, names), cast(Mapping[str, JsonValue], payload_properties)
+    )
 
 
 def _payload_schema(
