@@ -59,6 +59,8 @@ from yoetz.protocol.models import (
     PublishWorkResult,
     PublishWorkSuccessModel,
     PublishWorkVersionSliceModel,
+    ReceiptRequest,
+    ReceiptResult,
     StartRequest,
     StartResult,
     StatusRequest,
@@ -201,6 +203,8 @@ class _Application:
         self.projection_bindings: list[ControlProjectionBinding] = []
         self.close_count = 0
         self.publish_work_error: PublicOperationError | None = None
+        self.receipt_error: PublicOperationError | None = None
+        self.receipt_calls = 0
         # Stands in for an accepted, durable batch so the post-commit response path can be
         # exercised without a real ledger.
         self.publish_work_result: PublishWorkResult | None = None
@@ -286,6 +290,20 @@ class _Application:
                 self.append_count += 1
             return replace(self.publish_work_internal, outcome=outcome)
         raise AssertionError("publish_work_error_required")
+
+    async def receipt(
+        self,
+        request: object,
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> object:
+        del repository_privacy_context
+        assert isinstance(request, ReceiptRequest)
+        self.receipt_calls += 1
+        await asyncio.sleep(0)
+        if self.receipt_error is not None:
+            raise self.receipt_error
+        raise AssertionError("receipt_error_required")
 
     async def load_publish_response(
         self, result: PublishWorkInternalResult, sink: LocalDisclosureSink
@@ -439,6 +457,29 @@ def _publish_work_body() -> PublishWorkRequest:
                     "evidence_refs": [],
                 }
             ],
+            "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+            "client": {
+                "kind": "test_client",
+                "version": "0.1.0",
+                "integration": "local_cli",
+            },
+        }
+    )
+
+
+def _receipt_body() -> ReceiptRequest:
+    return ReceiptRequest.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "request_id": "req_00000000-0000-4000-8000-000000000020",
+            "task_id": "tsk_00000000-0000-4000-8000-000000000021",
+            "session_id": "ses_00000000-0000-4000-8000-000000000022",
+            "writer_id": "wri_00000000-0000-4000-8000-000000000023",
+            "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+            "format": "json",
+            "include": "standard",
+            "redaction_profile": "full_local",
             "actor": {"actor_id": "harness:test", "actor_type": "harness"},
             "client": {
                 "kind": "test_client",
@@ -719,6 +760,100 @@ async def test_public_operation_error_surfaces_as_ok_false_not_internal_error() 
     assert application.publish_work_calls == 1
     assert application.projections == []
     assert not isinstance(result.body, ControlError)
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_classified_receipt_storage_fault_is_ok_false_not_internal_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Receipt object-store classification must not become the #325 internal_error diagnostic."""
+
+    import yoetz.observability.diagnostics as diagnostics
+    from yoetz.observability.logging import record_classified_exception_without_raising
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    try:
+        raise ValueError("object_verification_failed")
+    except ValueError as exc:
+        correlation_id = record_classified_exception_without_raising(
+            exc,
+            component="application.receipt",
+            operation="receipt_object_read",
+            request_id="req_00000000-0000-4000-8000-000000000020",
+        )
+        application.receipt_error = PublicOperationError(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "The stored receipt is invalid.",
+            False,
+            correlation_id=correlation_id,
+        )
+    body = _receipt_body()
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.RECEIPT, body),
+    )
+
+    assert result.outcome == "ok"
+    assert isinstance(result.body, ReceiptResult)
+    assert result.body.root.ok is False
+    assert result.body.root.error.code is PublicErrorCode.STORAGE_CORRUPT
+    assert result.body.root.error.message == "The stored receipt is invalid."
+    assert result.body.root.error.retryable is False
+    assert result.body.root.error.correlation_id == correlation_id
+    assert result.body.root.request_id == body.request_id
+    found = lookup_diagnostic_records(correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["component"] == "application.receipt"
+    assert found[0]["operation"] == "receipt_object_read"
+    assert found[0]["reason"] == "exception_value_error"
+    recorded_operation = found[0]["operation"]
+    assert type(recorded_operation) is str
+    assert "internal_error" not in recorded_operation
+    assert application.receipt_calls == 1
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_unbound_receipt_storage_unsafe_is_ok_false_not_internal_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even without a pre-bound id, receipt storage faults stay public_error, not internal_error."""
+
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    daemon, application, _vault, _listener = _daemon()
+    await daemon.start()
+    application.receipt_error = PublicOperationError(
+        PublicErrorCode.STORAGE_UNSAFE,
+        "Receipt object storage is unavailable.",
+        True,
+    )
+    body = _receipt_body()
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.RECEIPT, body),
+    )
+
+    assert result.outcome == "ok"
+    assert isinstance(result.body, ReceiptResult)
+    assert result.body.root.ok is False
+    assert result.body.root.error.code is PublicErrorCode.STORAGE_UNSAFE
+    assert result.body.root.error.retryable is True
+    correlation_id = result.body.root.error.correlation_id
+    assert correlation_id.startswith("err_")
+    found = lookup_diagnostic_records(correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["operation"] == "receipt_public_error"
+    assert found[0]["reason"] == "storage_unsafe"
+    recorded_operation = found[0]["operation"]
+    assert type(recorded_operation) is str
+    assert "internal_error" not in recorded_operation
     await daemon.close()
 
 

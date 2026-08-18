@@ -21,6 +21,7 @@ from yoetz.observability.logging import (
     configure_logging,
     exception_origin,
     record_bounded_counts_without_raising,
+    record_classified_exception_without_raising,
     record_unexpected_exception_without_raising,
 )
 from yoetz.protocol.ids import IdKind, validate_id
@@ -125,6 +126,42 @@ def test_record_unexpected_exception_writes_durable_sink(
     err = capsys.readouterr().err
     assert "must-not-leak" not in err
     assert correlation_id in err
+
+
+def test_record_classified_exception_writes_public_error_not_internal_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    configure_logging(
+        LoggingConfig(level="debug"),  # type: ignore[arg-type]
+        LogMode.SERVICE,
+        clock=frozen_clock(utc=_NOW, monotonic=0.0),
+    )
+    correlation_id = ""
+    try:
+        validate_id(IdKind.REQUEST, "not-a-request-id")
+    except Exception as exc:
+        correlation_id = record_classified_exception_without_raising(
+            exc,
+            component="application.receipt",
+            operation="receipt_object_read",
+            request_id=_REQUEST,
+        )
+    assert correlation_id.startswith("err_")
+    found = lookup_diagnostic_records(correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["reason"] == "exception_protocol_value_error"
+    assert found[0]["operation"] == "receipt_object_read"
+    assert found[0]["component"] == "application.receipt"
+    origin = found[0].get("origin")
+    assert type(origin) is str
+    assert origin.startswith("yoetz.protocol")
+    err = capsys.readouterr().err
+    assert "public_error" in err
+    assert "internal_error" not in err
+    assert "not-a-request-id" not in err
 
 
 def test_unexpected_exception_records_a_bounded_yoetz_origin() -> None:

@@ -45,12 +45,39 @@ __all__ = ["EncryptedFilesObjectStore"]
 _CHUNK_SIZE: Final = 64 * 1024
 _ORPHAN_WINDOW: Final = timedelta(hours=24)
 _MAX_FRAME_BYTES: Final = 4 + 1 + 4 + MAX_OBJECT_HEADER_BYTES + 12 + MAX_OBJECT_PLAINTEXT_BYTES + 16
+# These are adapter-owned structural failures.  They describe an object that cannot be
+# authenticated as the finalized object named by the caller, so they must remain deterministic
+# verification failures even though the low-level reader uses ``OSError`` to report them.
+_DETERMINISTIC_OPEN_OSERRORS: Final = frozenset(
+    {
+        "object_file_truncated",
+        "object_file_unsafe",
+        "object_path_unsafe",
+        "object_root_unsafe",
+    }
+)
 
 type CurrentRootSnapshot = Callable[[], Awaitable[ObjectRootSnapshot]]
 
 
 def _verification_failed() -> ValueError:
     return ValueError("object_verification_failed")
+
+
+def _is_environmental_open_fault(exc: BaseException) -> bool:
+    """True when a verified open failed because the environment, not the object, is unreadable.
+
+    ``FileNotFoundError`` stays a verification mismatch: a missing id is the same deterministic
+    outcome as a digest mismatch, and the object-store port requires ``object_verification_failed``
+    for that case. Adapter-owned structural faults (truncation and unsafe finalized-object
+    metadata) use ``OSError`` internally but are deterministic verification failures too. Other
+    ``OSError`` instances (EIO, permission, and similar host I/O) are environmental and must not
+    be collapsed into that token.
+    """
+
+    if not isinstance(exc, OSError) or isinstance(exc, FileNotFoundError):
+        return False
+    return not (exc.errno is None and str(exc) in _DETERMINISTIC_OPEN_OSERRORS)
 
 
 def root_snapshot_identity(snapshot: ObjectRootSnapshot) -> tuple[object, ...]:
@@ -263,7 +290,9 @@ class EncryptedFilesObjectStore:
             return plaintext
         except InvalidTag as exc:
             raise _verification_failed() from exc
-        except (OSError, ValueError) as exc:
+        except (OSError, TypeError, ValueError) as exc:
+            if _is_environmental_open_fault(exc):
+                raise
             if isinstance(exc, ValueError) and str(exc) == "object_verification_failed":
                 raise
             raise _verification_failed() from exc
@@ -316,6 +345,8 @@ class EncryptedFilesObjectStore:
         except InvalidTag as exc:
             raise _verification_failed() from exc
         except (OSError, TypeError, ValueError) as exc:
+            if _is_environmental_open_fault(exc):
+                raise
             if isinstance(exc, ValueError) and str(exc) == "object_verification_failed":
                 raise
             raise _verification_failed() from exc
@@ -429,7 +460,14 @@ class EncryptedFilesObjectStore:
         self._validate_private_directory(self._objects_root)
         if path.parent.parent != self._objects_root:
             raise OSError("object_path_unsafe")
-        self._validate_private_directory(path.parent)
+        try:
+            self._validate_private_directory(path.parent)
+        except OSError as exc:
+            # A never-written object_id has no shard directory. That is a missing object, not a
+            # missing store root, so verified open must keep the port's verification token.
+            if str(exc) == "object_root_missing":
+                raise FileNotFoundError from exc
+            raise
 
     def _new_temp_path(self, object_id: str) -> Path:
         for _ in range(128):

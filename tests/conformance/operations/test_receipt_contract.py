@@ -29,7 +29,7 @@ from yoetz.application.service import (
     VerificationPolicy,
 )
 from yoetz.application.start import StartInternalResult
-from yoetz.domain.events import RuntimeProfile
+from yoetz.domain.events import ReceiptRecordedPayload, RuntimeProfile
 from yoetz.domain.privacy import (
     AuthorizationScope,
     AuthorizationScopeKind,
@@ -48,6 +48,7 @@ from yoetz.domain.privacy import (
 )
 from yoetz.domain.receipts import (
     PolicyVersionEntry,
+    ReceiptConclusion,
     ReceiptVersionSlice,
     SchemaVersionEntry,
     receipt_document_from_json,
@@ -68,6 +69,7 @@ from yoetz.protocol.models import (
     CheckRequest,
     FrontierModel,
     PublishWorkRequest,
+    ReceiptRedactionProfile,
     ReceiptRequest,
     ReceiptResultModel,
     RespondRequest,
@@ -822,6 +824,112 @@ async def test_receipt_replay_object_verification_failure_is_storage_corrupt() -
     assert caught.value.code is PublicErrorCode.STORAGE_CORRUPT
     assert caught.value.message == "The stored receipt is invalid."
     assert caught.value.retryable is False
+
+
+async def test_receipt_replay_object_oserror_is_retryable_storage_unsafe() -> None:
+    app, runtime, _projection = _build_app(seed_offset=24)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=2400)
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 2410)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    first = await _receipt(app, receipt_wire)
+    assert first.ok is True
+
+    _task_id, resources = next(iter(runtime.resources.items()))
+    _ledger, objects = resources
+
+    def _failing_open(_ref: object) -> object:
+        raise OSError(5, "Input/output error")
+
+    objects.open_verified = _failing_open  # pyright: ignore[reportAttributeAccessIssue]
+
+    with pytest.raises(PublicOperationError) as caught:
+        await _receipt(app, receipt_wire)
+    assert caught.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert caught.value.message == "Receipt object storage is unavailable."
+    assert caught.value.retryable is True
+    assert caught.value.correlation_id is not None
+    assert caught.value.correlation_id.startswith("err_")
+    assert "Input/output error" not in caught.value.message
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "reason"),
+    (
+        ("receipt_digest", "sha256:" + "9" * 64, "receipt_digest_mismatch"),
+        ("receipt_id", protocol_id("egr_", 2420), "receipt_id_mismatch"),
+        ("subject_frontier", Frontier(0, "genesis"), "receipt_frontier_mismatch"),
+        (
+            "conclusion_code",
+            ReceiptConclusion.NO_UNRESOLVED_DETERMINISTIC_FINDINGS,
+            "receipt_conclusion_mismatch",
+        ),
+        (
+            "redaction_profile",
+            ReceiptRedactionProfile.REDACTED_SHARE,
+            "receipt_redaction_profile_mismatch",
+        ),
+    ),
+)
+async def test_receipt_replay_integrity_mismatch_is_classified_at_application_site(
+    field: str,
+    replacement: object,
+    reason: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each bounded replay-binding mismatch retains an application-site diagnostic identity."""
+
+    import yoetz.observability.diagnostics as diagnostics
+    from yoetz.observability.diagnostics import lookup_diagnostic_records
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    app, runtime, _projection = _build_app(seed_offset=25)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=2500)
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 2510)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    first = await _receipt(app, receipt_wire)
+    assert first.ok is True
+
+    _task_id, resources = next(iter(runtime.resources.items()))
+    ledger, _objects = resources
+    record = next(
+        record
+        for record in ledger._state.records  # pyright: ignore[reportPrivateUsage]
+        if record.schema.name == "receipt_recorded"
+    )
+    payload = cast(ReceiptRecordedPayload, record.payload)
+    object.__setattr__(payload, field, replacement)
+
+    with pytest.raises(PublicOperationError) as caught:
+        await _receipt(app, receipt_wire)
+    assert caught.value.code is PublicErrorCode.STORAGE_CORRUPT
+    assert caught.value.message == "The stored receipt is invalid."
+    assert caught.value.retryable is False
+    assert caught.value.correlation_id is not None
+    found = lookup_diagnostic_records(caught.value.correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["component"] == "application.receipt"
+    assert found[0]["operation"] == "receipt_object_read"
+    assert found[0]["reason"] == reason
+    recorded_operation = found[0]["operation"]
+    assert type(recorded_operation) is str
+    assert "internal_error" not in recorded_operation
 
 
 async def test_receipt_stage_oserror_is_retryable_storage_unsafe() -> None:
