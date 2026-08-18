@@ -11,6 +11,7 @@ import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -263,6 +264,80 @@ def test_verified_open_reads_only_finalized_objects(tmp_path: Path) -> None:
         return b"".join([chunk async for chunk in store.open_verified(ref)])
 
     assert asyncio.run(read_after_finalize()) == b"{}"
+
+
+def test_verified_open_reraises_environmental_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    store = object_store(tmp_path, now)
+    metadata = ObjectMetadata(ObjectKind.RECEIPT, "application/json", _TASK_ID, now)
+    ref = asyncio.run(store.finalize(asyncio.run(store.stage(ObjectSource(data=b"{}"), metadata))))
+
+    def failing_read(_descriptor: int, _n: int) -> bytes:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(encrypted_files_module.os, "read", failing_read)
+
+    async def read_after_finalize() -> bytes:
+        return b"".join([chunk async for chunk in store.open_verified(ref)])
+
+    with pytest.raises(OSError) as caught:
+        asyncio.run(read_after_finalize())
+    assert caught.value.errno == 5
+    assert not isinstance(caught.value, ValueError)
+
+    with pytest.raises(OSError) as resolve_caught:
+        asyncio.run(store.resolve_verified(ref.object_id, ref.envelope_digest))
+    assert resolve_caught.value.errno == 5
+
+
+def test_read_object_through_encrypted_files_maps_eio_to_retryable_storage_unsafe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """execute_receipt replay reads through ``_read_object``; use the real adapter, not a stub."""
+
+    import yoetz.observability.diagnostics as diagnostics
+    from yoetz.application.receipt import (  # noqa: SLF001
+        _read_object,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.observability.diagnostics import lookup_diagnostic_records
+    from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    store = object_store(tmp_path, now)
+    metadata = ObjectMetadata(ObjectKind.RECEIPT, "application/json", _TASK_ID, now)
+    ref = asyncio.run(store.finalize(asyncio.run(store.stage(ObjectSource(data=b"{}"), metadata))))
+    runtime = SimpleNamespace(objects=store)
+
+    async def read_ok() -> bytes:
+        return await _read_object(runtime, ref)  # type: ignore[arg-type]
+
+    assert asyncio.run(read_ok()) == b"{}"
+
+    def failing_read(_descriptor: int, _n: int) -> bytes:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(encrypted_files_module.os, "read", failing_read)
+
+    async def read_eio() -> bytes:
+        return await _read_object(runtime, ref)  # type: ignore[arg-type]
+
+    with pytest.raises(PublicOperationError) as caught:
+        asyncio.run(read_eio())
+    assert caught.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert caught.value.retryable is True
+    assert caught.value.message == "Receipt object storage is unavailable."
+    assert caught.value.correlation_id is not None
+    found = lookup_diagnostic_records(caught.value.correlation_id, root=tmp_path)
+    assert len(found) == 1
+    assert found[0]["reason"] == "exception_os_error"
+    assert found[0]["operation"] == "receipt_object_read"
+    origin = found[0].get("origin")
+    assert type(origin) is str
+    assert origin.startswith("yoetz.")
+    assert "Input/output error" not in caught.value.message
 
 
 def test_header_and_envelope_digest_fields_match_reference(tmp_path: Path) -> None:

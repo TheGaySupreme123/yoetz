@@ -464,11 +464,14 @@ carried them; they are listed because each one describes the behavior that now s
   announced task ledger: when a session's mapping moves to a different task, the stale mark is
   discarded rather than silently suppressing the new ledger's motion (issue #322).
 
-- Receipt replay of a completed `request_id` no longer collapses a failed object verification
-  (tampered or missing envelope, wrong key slot, or I/O while reading) into non-retryable
-  `INTERNAL_ERROR`. That path now returns `STORAGE_CORRUPT` with the stored-receipt-invalid
-  family. Pre-append object `stage`/`finalize` I/O on a fresh receipt is retryable
-  `STORAGE_UNSAFE` because nothing has committed (issue #325).
+- Receipt replay of a completed `request_id` no longer collapses object-store faults into
+  unclassified `INTERNAL_ERROR`. Verification mismatches (tampered or missing envelope, wrong key
+  slot) are non-retryable `STORAGE_CORRUPT` with the stored-receipt-invalid family. Environmental
+  I/O on a durable valid envelope is retryable `STORAGE_UNSAFE`. Pre-append `stage`/`finalize` I/O
+  on a fresh receipt is also retryable `STORAGE_UNSAFE`. Classified receipt storage faults carry a
+  resolvable `correlation_id` with a bounded exception-class reason and optional `yoetz` origin so
+  the corruption runbook can join the public envelope to the diagnostic ring without an
+  `internal_error` diagnostic (issues #325, #336, #337).
 
 - The MCP initialize `instructions` string had no size bound and had grown to 41 KB by inlining
   three guidance documents. Codex copies that string into the `description` of every advertised

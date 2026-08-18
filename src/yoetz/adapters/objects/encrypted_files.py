@@ -53,6 +53,18 @@ def _verification_failed() -> ValueError:
     return ValueError("object_verification_failed")
 
 
+def _is_environmental_open_fault(exc: BaseException) -> bool:
+    """True when a verified open failed because the environment, not the object, is unreadable.
+
+    ``FileNotFoundError`` stays a verification mismatch: a missing id is the same deterministic
+    outcome as a digest mismatch, and the object-store port requires ``object_verification_failed``
+    for that case. Other ``OSError`` subclasses (EIO, permission, truncation, unsafe mode) are
+    environmental and must not be collapsed into that token.
+    """
+
+    return isinstance(exc, OSError) and not isinstance(exc, FileNotFoundError)
+
+
 def root_snapshot_identity(snapshot: ObjectRootSnapshot) -> tuple[object, ...]:
     return (
         snapshot.task_id,
@@ -263,7 +275,9 @@ class EncryptedFilesObjectStore:
             return plaintext
         except InvalidTag as exc:
             raise _verification_failed() from exc
-        except (OSError, ValueError) as exc:
+        except (OSError, TypeError, ValueError) as exc:
+            if _is_environmental_open_fault(exc):
+                raise
             if isinstance(exc, ValueError) and str(exc) == "object_verification_failed":
                 raise
             raise _verification_failed() from exc
@@ -316,6 +330,8 @@ class EncryptedFilesObjectStore:
         except InvalidTag as exc:
             raise _verification_failed() from exc
         except (OSError, TypeError, ValueError) as exc:
+            if _is_environmental_open_fault(exc):
+                raise
             if isinstance(exc, ValueError) and str(exc) == "object_verification_failed":
                 raise
             raise _verification_failed() from exc

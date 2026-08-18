@@ -30,6 +30,7 @@ __all__ = [
     "exception_origin",
     "record_bounded_counts_without_raising",
     "record_bounded_event_without_raising",
+    "record_classified_exception_without_raising",
     "record_fatal_exception_without_raising",
     "record_public_error_without_raising",
     "record_unexpected_exception_without_raising",
@@ -491,6 +492,31 @@ def record_bounded_event_without_raising(
     )
 
 
+def record_classified_exception_without_raising(
+    exc: BaseException,
+    *,
+    component: str,
+    operation: str,
+    request_id: str | None = None,
+) -> str:
+    """Record a public classified failure with bounded exception identity.
+
+    Unlike ``record_unexpected_exception_without_raising``, this is not an internal last-resort:
+    ``outcome`` is ``public_error`` so a wire ``correlation_id`` stays joinable to a class-name
+    token and optional ``yoetz`` origin without collapsing the failure into ``internal_error``.
+    The sinks still never record ``str(exc)``, paths, or object ids.
+    """
+
+    return _record_bounded_without_raising(
+        component=component,
+        operation=operation,
+        reason=_exception_reason(exc),
+        outcome="public_error",
+        request_id=request_id,
+        origin=exception_origin(exc),
+    )
+
+
 def record_public_error_without_raising(
     *,
     component: str,
@@ -529,6 +555,7 @@ def _record_bounded_without_raising(
     reason: str,
     outcome: str,
     request_id: str | None,
+    origin: str | None = None,
 ) -> str:
     """Mint one correlation id and write it to both sinks. Never raises to callers."""
 
@@ -540,6 +567,7 @@ def _record_bounded_without_raising(
             request_id=request_id,
             outcome=outcome,
             reason=reason,
+            origin=origin,
         )
     except BaseException:
         pass
@@ -552,6 +580,7 @@ def _record_bounded_without_raising(
             operation=operation,
             reason=reason,
             request_id=request_id,
+            origin=origin,
         )
     except BaseException:
         pass

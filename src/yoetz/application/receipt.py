@@ -49,6 +49,7 @@ from yoetz.kernel.reducers import (
     is_material_event_family,
     replay,
 )
+from yoetz.observability.logging import record_classified_exception_without_raising
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
@@ -175,6 +176,26 @@ def _error(code: PublicErrorCode, message: str, *, retryable: bool = False) -> P
     return PublicOperationError(code, message, retryable)
 
 
+def _classified_storage_error(
+    code: PublicErrorCode,
+    message: str,
+    exc: BaseException,
+    *,
+    retryable: bool = False,
+    request_id: str | None = None,
+    operation: str,
+) -> PublicOperationError:
+    """Classify one object-store exception as a public error with a resolvable correlation id."""
+
+    correlation_id = record_classified_exception_without_raising(
+        exc,
+        component="application.receipt",
+        operation=operation,
+        request_id=request_id,
+    )
+    return PublicOperationError(code, message, retryable, correlation_id=correlation_id)
+
+
 def _version_json(value: ReceiptVersionSlice) -> JsonValue:
     return {
         "package_name": value.package_name,
@@ -222,19 +243,47 @@ def _identity(request: ReceiptRequest, versions: ReceiptVersionSlice) -> JsonVal
     }
 
 
-async def _read_object(runtime: TaskRuntime, ref: ObjectRef) -> bytes:
+async def _read_object(
+    runtime: TaskRuntime, ref: ObjectRef, *, request_id: str | None = None
+) -> bytes:
     try:
         chunks = [chunk async for chunk in runtime.objects.open_verified(ref)]
         data = b"".join(chunks)
-    except (KeyError, OSError, TypeError, ValueError) as exc:
-        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The stored receipt is invalid.") from exc
+    except OSError as exc:
+        raise _classified_storage_error(
+            PublicErrorCode.STORAGE_UNSAFE,
+            "Receipt object storage is unavailable.",
+            exc,
+            retryable=True,
+            request_id=request_id,
+            operation="receipt_object_read",
+        ) from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _classified_storage_error(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "The stored receipt is invalid.",
+            exc,
+            request_id=request_id,
+            operation="receipt_object_read",
+        ) from exc
     if len(data) != ref.plaintext_size:
-        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The receipt object is invalid.")
+        mismatch = ValueError("receipt_object_size_mismatch")
+        raise _classified_storage_error(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "The receipt object is invalid.",
+            mismatch,
+            request_id=request_id,
+            operation="receipt_object_read",
+        ) from mismatch
     return data
 
 
 async def _persist_object(
-    runtime: TaskRuntime, source: ObjectSource, metadata: ObjectMetadata
+    runtime: TaskRuntime,
+    source: ObjectSource,
+    metadata: ObjectMetadata,
+    *,
+    request_id: str | None = None,
 ) -> ObjectRef:
     """Stage and finalize one receipt object before the ledger append."""
 
@@ -242,10 +291,13 @@ async def _persist_object(
         staged = await runtime.objects.stage(source, metadata)
         return await runtime.objects.finalize(staged)
     except OSError as exc:
-        raise _error(
+        raise _classified_storage_error(
             PublicErrorCode.STORAGE_UNSAFE,
             "Receipt object storage is unavailable.",
+            exc,
             retryable=True,
+            request_id=request_id,
+            operation="receipt_object_persist",
         ) from exc
 
 
@@ -506,11 +558,17 @@ async def _replay_result(
 ) -> ReceiptInternalResult:
     record, receipt_ref = await _accepted_receipt_event(runtime, operation)
     payload = cast(ReceiptRecordedPayload, record.payload)
-    data = await _read_object(runtime, receipt_ref)
+    data = await _read_object(runtime, receipt_ref, request_id=request.request_id)
     try:
         document = receipt_document_from_json(strict_json_parse(data))
     except (TypeError, ValueError) as exc:
-        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The stored receipt is invalid.") from exc
+        raise _classified_storage_error(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "The stored receipt is invalid.",
+            exc,
+            request_id=request.request_id,
+            operation="receipt_object_read",
+        ) from exc
     digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
     if (
         digest != payload.receipt_digest
@@ -612,6 +670,7 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
             runtime,
             ObjectSource(data=document_bytes, declared_size=len(document_bytes)),
             ObjectMetadata(ObjectKind.RECEIPT, _RECEIPT_MEDIA_TYPE, runtime.task_id, now),
+            request_id=request.request_id,
         )
         payload = ReceiptRecordedPayload(
             document.receipt_id,
@@ -641,6 +700,7 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
             runtime,
             ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)),
             payload_metadata,
+            request_id=request.request_id,
         )
         coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
         command = AppendCommand(

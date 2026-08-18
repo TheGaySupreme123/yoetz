@@ -824,6 +824,40 @@ async def test_receipt_replay_object_verification_failure_is_storage_corrupt() -
     assert caught.value.retryable is False
 
 
+async def test_receipt_replay_object_oserror_is_retryable_storage_unsafe() -> None:
+    app, runtime, _projection = _build_app(seed_offset=24)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=2400)
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 2410)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    first = await _receipt(app, receipt_wire)
+    assert first.ok is True
+
+    _task_id, resources = next(iter(runtime.resources.items()))
+    _ledger, objects = resources
+
+    def _failing_open(_ref: object) -> object:
+        raise OSError(5, "Input/output error")
+
+    objects.open_verified = _failing_open  # pyright: ignore[reportAttributeAccessIssue]
+
+    with pytest.raises(PublicOperationError) as caught:
+        await _receipt(app, receipt_wire)
+    assert caught.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert caught.value.message == "Receipt object storage is unavailable."
+    assert caught.value.retryable is True
+    assert caught.value.correlation_id is not None
+    assert caught.value.correlation_id.startswith("err_")
+    assert "Input/output error" not in caught.value.message
+
+
 async def test_receipt_stage_oserror_is_retryable_storage_unsafe() -> None:
     app, runtime, _projection = _build_app(seed_offset=23)
     started, checked, _obligation = await _bootstrap_finding(app, seed=2300)

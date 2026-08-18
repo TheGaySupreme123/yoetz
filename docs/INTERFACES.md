@@ -1148,11 +1148,17 @@ next step.
 last_ingestion_sequence: int | None, result_object_ref: ObjectRef | None,
 structural_ids: tuple[str, ...])` requires both sequence fields absent or both present and ordered;
 `structural_ids` is sorted unique and has at most `MAX_EVENTS_PER_BATCH + 1` members. Receipt
-replay uses this locator; it never scans an unbounded ledger or rebuilds the receipt. A failed
-verified read of that stored object (tampered envelope, missing file, wrong key slot, or I/O
-while reading) is `STORAGE_CORRUPT` with the stored-receipt-invalid family, never unclassified
-`INTERNAL_ERROR`. Pre-append object `stage`/`finalize` I/O on a fresh receipt is retryable
-`STORAGE_UNSAFE` because nothing has committed.
+replay uses this locator; it never scans an unbounded ledger or rebuilds the receipt. A verified
+read of that stored object that fails because the envelope is tampered, missing, under the wrong
+key slot, or otherwise unverifiable is non-retryable `STORAGE_CORRUPT` with the
+stored-receipt-invalid family. Environmental I/O during that same verified read (a retryable
+`OSError` such as EIO on a durable, valid envelope) is retryable `STORAGE_UNSAFE` with the
+receipt-object-storage-unavailable family. Neither path is unclassified `INTERNAL_ERROR`.
+Classified receipt object-store faults record a resolvable `correlation_id` at the application
+site with a bounded exception-class reason and optional `yoetz` origin; the daemon reuses that
+id on the `ok:false` envelope and does not mint an `internal_error` diagnostic. Pre-append object
+`stage`/`finalize` I/O on a fresh receipt is retryable `STORAGE_UNSAFE` because nothing has
+committed.
 
 `freeze_case` uses one closed ordering for both adapters. For an absent operation: (1) a bounded
 prepare snapshot establishes absent idempotency, no pending import, `expected_frontier`, head `F`,
@@ -1339,7 +1345,9 @@ repository-privacy commitment, and cannot select or inherit disclosure authority
 - `finalize(StagedObject) -> ObjectRef`;
 - `resolve_verified(object_id, envelope_digest) -> ObjectRef` — bounded exact finalized-object
   resolution for catalog-pinned START crash resume;
-- `open_verified(ObjectRef) -> AsyncIterator[bytes]`;
+- `open_verified(ObjectRef) -> AsyncIterator[bytes]` — missing, tampered, or otherwise
+  unverifiable objects raise `ValueError("object_verification_failed")`; environmental I/O
+  during an otherwise well-formed open re-raises `OSError`;
 - `sweep_orphans(ObjectRootSnapshot, now) -> int` — delete only safety-window-eligible objects
   absent from every owning root while the bound route/bundle/privacy generations remain unchanged.
 
@@ -1506,9 +1514,9 @@ surface as a failure (`INTERNAL_ERROR` or otherwise).
 Unexpected exceptions recorded in that window (and at other process boundaries) emit the existing
 stderr structural line and also append one owner-only JSONL diagnostic record under `log_dir()`
 (`service.diagnostics.jsonl`, mode `0o600`, size-capped ring). Fields are limited to
-`timestamp`, `correlation_id`, `component`, `operation`, `reason`, optional `request_id`, and the
-optional bounded integer counts `duration_ms` and `operation_count` — no exception text, payload,
-or paths. The daemon's control-plane watchdog samples event-loop lag from a plain OS thread and
+`timestamp`, `correlation_id`, `component`, `operation`, `reason`, optional `origin`, optional
+`request_id`, and the optional bounded integer counts `duration_ms` and `operation_count` — no
+exception text, payload, or paths. The daemon's control-plane watchdog samples event-loop lag from a plain OS thread and
 appends `control_plane_saturation_entered`/`_persists`/`_cleared` records (component
 `service.daemon`) with those counts at a bounded cadence, so a starved control plane is diagnosed
 while it is happening rather than never (#238); sweep failures append
@@ -1530,8 +1538,12 @@ ring record keeps the fixed field set above with `reason` the lowercased public 
 `operation` a bounded operation-context token derived from the failing method or tool
 (`<method>_public_error`, collapsing to `public_error` when the name is not a bounded token);
 `outcome: public_error` appears on the stderr structural line, which carries no more than the ring
-does. A boundary holding an id another sink already recorded reuses it instead: one failure
-resolves to one id. The one path outside this contract is the constructor-free last-resort
+does. A classified application exception that already recorded through
+`record_classified_exception_without_raising` (bounded exception-class `reason` plus optional
+`yoetz` origin) is the same contract: the daemon reuses that id instead of minting a second
+`public_error` or collapsing to `internal_error`. A boundary holding an id another sink already
+recorded reuses it instead: one failure resolves to one id. The one path outside this contract is
+the constructor-free last-resort
 internal-error fallback (`build_last_resort_internal_error_result` in `mcp/errors.py`), which
 exists for when building a normal public error has itself failed and returns a process-constant id
 that resolves to nothing.
