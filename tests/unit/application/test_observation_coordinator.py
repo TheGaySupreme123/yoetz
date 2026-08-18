@@ -417,6 +417,82 @@ def test_frontier_motion_notice_merges_contiguous_appends_and_is_one_shot(
     assert reloaded.peek_frontier_motion(workspace, "motion-session") is None
 
 
+def test_frontier_motion_renote_after_delivery_drops_replay_and_clamps_stale_from(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.note_frontier_motion(
+        workspace,
+        "replay-session",
+        from_sequence=80,
+        to_sequence=81,
+        head_digest="sha256:" + "7" * 64,
+        observation_record_count=1,
+    )
+    notice = store.peek_frontier_motion(workspace, "replay-session")
+    assert notice is not None
+    store.commit_frontier_motion_delivery(workspace, "replay-session", notice.delivery_identity)
+    assert store.peek_frontier_motion(workspace, "replay-session") is None
+
+    reloaded = LocalObservationStore(_state=tmp_path)
+    reloaded.note_frontier_motion(
+        workspace,
+        "replay-session",
+        from_sequence=80,
+        to_sequence=81,
+        head_digest="sha256:" + "7" * 64,
+        observation_record_count=1,
+    )
+    assert reloaded.peek_frontier_motion(workspace, "replay-session") is None
+
+    reloaded.note_frontier_motion(
+        workspace,
+        "replay-session",
+        from_sequence=80,
+        to_sequence=92,
+        head_digest="sha256:" + "8" * 64,
+        observation_record_count=12,
+    )
+    clamped = reloaded.peek_frontier_motion(workspace, "replay-session")
+    assert clamped is not None
+    assert (clamped.from_sequence, clamped.to_sequence, clamped.observation_record_count) == (
+        81,
+        92,
+        11,
+    )
+    reloaded.commit_frontier_motion_delivery(
+        workspace, "replay-session", clamped.delivery_identity
+    )
+
+    reloaded.note_frontier_motion(
+        workspace,
+        "replay-session",
+        from_sequence=81,
+        to_sequence=92,
+        head_digest="sha256:" + "8" * 64,
+        observation_record_count=11,
+    )
+    assert reloaded.peek_frontier_motion(workspace, "replay-session") is None
+
+    reloaded.note_frontier_motion(
+        workspace,
+        "replay-session",
+        from_sequence=92,
+        to_sequence=105,
+        head_digest="sha256:" + "9" * 64,
+        observation_record_count=13,
+    )
+    advanced = reloaded.peek_frontier_motion(workspace, "replay-session")
+    assert advanced is not None
+    assert (advanced.from_sequence, advanced.to_sequence, advanced.observation_record_count) == (
+        92,
+        105,
+        13,
+    )
+
+
 def test_frontier_motion_notices_ignore_malformed_and_prune_ended_sessions(
     tmp_path: Path,
 ) -> None:
@@ -454,6 +530,55 @@ def test_frontier_motion_notices_ignore_malformed_and_prune_ended_sessions(
     )
     store.note_session_end(workspace, ended)
     assert store.peek_frontier_motion(workspace, "ended-session") is None
+
+    delivered_session = store.bind_codex_session(workspace, "ended-delivered")
+    store.note_frontier_motion(
+        workspace,
+        "ended-delivered",
+        from_sequence=3,
+        to_sequence=4,
+        head_digest="sha256:" + "a" * 64,
+        observation_record_count=1,
+    )
+    delivered_notice = store.peek_frontier_motion(workspace, "ended-delivered")
+    assert delivered_notice is not None
+    store.commit_frontier_motion_delivery(
+        workspace, "ended-delivered", delivered_notice.delivery_identity
+    )
+    store.note_session_end(workspace, delivered_session)
+    raw_after_end = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "ended-delivered" not in (raw_after_end.get("frontier_motion_delivered") or {})
+
+    store.grant_consent(workspace)
+    store.bind_codex_session(workspace, "malformed-delivered")
+    store.note_frontier_motion(
+        workspace,
+        "malformed-delivered",
+        from_sequence=4,
+        to_sequence=5,
+        head_digest="sha256:" + "b" * 64,
+        observation_record_count=1,
+    )
+    malformed_notice = store.peek_frontier_motion(workspace, "malformed-delivered")
+    assert malformed_notice is not None
+    store.commit_frontier_motion_delivery(
+        workspace, "malformed-delivered", malformed_notice.delivery_identity
+    )
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    raw["frontier_motion_delivered"] = []
+    state_path.write_text(json.dumps(raw), encoding="utf-8")
+    broken = LocalObservationStore(_state=tmp_path)
+    broken.note_frontier_motion(
+        workspace,
+        "malformed-delivered",
+        from_sequence=4,
+        to_sequence=5,
+        head_digest="sha256:" + "b" * 64,
+        observation_record_count=1,
+    )
+    replayed = broken.peek_frontier_motion(workspace, "malformed-delivered")
+    assert replayed is not None
+    assert (replayed.from_sequence, replayed.to_sequence) == (4, 5)
 
 
 def test_frontier_motion_notices_are_capped(tmp_path: Path) -> None:

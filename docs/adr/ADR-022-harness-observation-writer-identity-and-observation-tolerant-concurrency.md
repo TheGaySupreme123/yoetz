@@ -2,13 +2,15 @@
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
 **Amended:** 2026-08-16 for maintainer-approved issue #224; 2026-08-14 for moderator-approved
-issue #244 and the reopened issue #216 recurrence.
+issue #244 and the reopened issue #216 recurrence; 2026-08-18 for issue #322 (delivered
+frontier-motion high-water).
 **Implemented by:** `src/yoetz/application/observation_materialize.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/adapters/memory/ledger.py`,
-`src/yoetz/application/publish_work.py`, `src/yoetz/kernel/policies/observation_advice.py`, and
-`src/yoetz/service/ready_composition.py`.
+`src/yoetz/application/publish_work.py`, `src/yoetz/kernel/policies/observation_advice.py`,
+`src/yoetz/service/ready_composition.py`, and
+`src/yoetz/adapters/integrations/observation_local.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
-issues #214, #216, #217, #223, #224, #225, #226, #227, and #244.
+issues #214, #216, #217, #223, #224, #225, #226, #227, #244, and #322.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -98,13 +100,17 @@ unsupported claims and unbounded duplicate findings.
 10. Every newly accepted observation-authored append records one bounded pending frontier-motion
     notice for the originating Codex session. A retry of a completed append whose local notice
     write did not land reconstructs that notice from the committed append's frontier metadata.
-    Contiguous undelivered appends coalesce their from/to sequences and record count. The
-    per-workspace notice map is capped and drops ended-session entries before serialization. A
-    later advice-safe `PostToolUse` hook surfaces that the motion was hook-observed, explains that
-    held cooperative publish frontiers remain admissible only across observation-authored motion,
-    and directs exact-frontier operations to refresh status. The notice is removed only after its
-    bytes reach the hook consumer. It grants no authority, changes no optimistic-concurrency
-    predicate, and adds no MCP operation.
+    After the notice's bytes reach the hook consumer, the store retains that session's delivered
+    high-water `to_sequence` so a later replay of the same append is not re-announced. Candidates
+    at or behind that mark are dropped; overlapping candidates are clamped to the undelivered
+    remainder so `from` and record count describe only motion not yet announced. Contiguous
+    undelivered appends coalesce their from/to sequences and record count. The per-workspace
+    notice and delivered-mark maps are capped and drop ended-session entries before serialization.
+    A later advice-safe `PostToolUse` hook surfaces that the motion was hook-observed, explains
+    that held cooperative publish frontiers remain admissible only across observation-authored
+    motion, and directs exact-frontier operations to refresh status. The pending notice is
+    removed only after its bytes reach the hook consumer. It grants no authority, changes no
+    optimistic-concurrency predicate, and adds no MCP operation.
 
 ## Security and privacy consequences
 
