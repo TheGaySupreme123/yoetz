@@ -73,10 +73,12 @@ describes behavior intended for the first release rather than a change from a pr
 - Cooperative writers now receive a one-shot, coalesced notice when the observation writer moves the
   task frontier, including the bounded sequence range and observation-record count. The notice map
   is capped, drops ended-session entries, and is reconstructed on retry from a completed append's
-  frontier metadata when the local write did not land. Successful routine reads remain available in
-  the local observation store but are rate-limited out of the task ledger; failures, denials,
-  path-qualified executables, and conservatively unrecognized commands still materialize normally
-  (issue #244, ADR-022 amendment).
+  frontier metadata when the local write did not land. A per-session delivered high-water
+  `to_sequence`, scoped to the announced task ledger, survives notice deletion so a replayed
+  append is not re-announced. Successful
+  routine reads remain available in the local observation store but are rate-limited out of the
+  task ledger; failures, denials, path-qualified executables, and conservatively unrecognized
+  commands still materialize normally (issues #244 and #322, ADR-022 amendment).
 
 - Consent-based Codex observation activation and durable delivery repair (issues #204 and #205,
   ADR-012 amendment): setup now distinguishes installed hook sources from an active plugin, previews
@@ -453,6 +455,14 @@ carried them; they are listed because each one describes the behavior that now s
   are untested.
 
 ### Fixed
+
+- Frontier-motion notices no longer re-announce already-delivered observation appends when the
+  outbox redelivers a committed envelope. The local store keeps a per-session delivered high-water
+  `to_sequence` after the hook consumer receives the notice; `note_frontier_motion` drops
+  candidates at or behind that mark and clamps overlapping ranges so later genuine motion starts
+  from the announced head and record counts do not double-count. The mark is scoped to the
+  announced task ledger: when a session's mapping moves to a different task, the stale mark is
+  discarded rather than silently suppressing the new ledger's motion (issue #322).
 
 - The MCP initialize `instructions` string had no size bound and had grown to 41 KB by inlining
   three guidance documents. Codex copies that string into the `description` of every advertised

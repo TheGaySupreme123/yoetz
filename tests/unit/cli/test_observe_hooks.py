@@ -247,6 +247,7 @@ def test_post_tool_hook_delivers_pending_frontier_motion_once(tmp_path: Path) ->
         to_sequence=6,
         head_digest="sha256:" + "3" * 64,
         observation_record_count=2,
+        task_id="tsk-frontier-test",
     )
 
     payload = json.dumps(
@@ -282,6 +283,54 @@ def test_post_tool_hook_delivers_pending_frontier_motion_once(tmp_path: Path) ->
         == 0
     )
     assert "task frontier moved" not in second.getvalue().decode()
+
+    store.note_frontier_motion(
+        workspace,
+        "frontier-motion",
+        from_sequence=4,
+        to_sequence=6,
+        head_digest="sha256:" + "3" * 64,
+        observation_record_count=2,
+        task_id="tsk-frontier-test",
+    )
+    replayed = io.BytesIO()
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=payload,
+            stdout=replayed,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert "task frontier moved" not in replayed.getvalue().decode()
+
+    store.note_frontier_motion(
+        workspace,
+        "frontier-motion",
+        from_sequence=6,
+        to_sequence=8,
+        head_digest="sha256:" + "4" * 64,
+        observation_record_count=2,
+        task_id="tsk-frontier-test",
+    )
+    advanced = io.BytesIO()
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=payload,
+            stdout=advanced,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    advanced_context = json.loads(advanced.getvalue())["hookSpecificOutput"]["additionalContext"]
+    assert "task frontier moved from 6 to 8" in advanced_context
+    assert "observation writer appended 2 ledger record(s)" in advanced_context
 
 
 def test_stdout_teardown_failure_exits_zero_and_records_diagnostic(tmp_path: Path) -> None:
