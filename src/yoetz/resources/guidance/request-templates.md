@@ -50,8 +50,9 @@ attach selector.
 
 ## `publish_work`: plan plus obligation
 
-This is the first material publication. Name the requested outcome and its acceptance evidence;
-do not turn routine file mechanics into obligations.
+This is the first material publication. Name the requested outcome in `description` and
+`acceptance_criteria`, and its acceptance evidence in `evidence_expectation`; do not turn
+routine file mechanics into obligations. The requested outcome is not an `item_kind`.
 
 ```json
 {
@@ -89,7 +90,10 @@ do not turn routine file mechanics into obligations.
         "acceptance_criteria": "Replace with an observable acceptance criterion",
         "evidence_expectation": "Replace with the named test, reviewed diff, or other evidence",
         "status": "open",
-        "requested_items": [{"item_kind": "command", "value": "pytest -q"}]
+        "requested_items": [
+          {"item_kind": "command", "value": "pytest -q"},
+          {"item_kind": "change", "value": "Replace with the named change this obligation owes"}
+        ]
       },
       "artifact_refs": [],
       "evidence_refs": []
@@ -109,7 +113,9 @@ show the remaining ordinary families. Replace the frontier in each; the genesis 
 each standalone example schema-valid.
 
 `requested_items` declares the material items the obligation asks for; each entry is an object
-whose `value` is the exact item string. When you later attempt an item, copy that exact `value`
+whose `item_kind` admits `change`, `command`, `file`, `source`, `url` and whose `value` is the
+exact item string. The requested outcome lives in `description` and `acceptance_criteria`;
+`outcome` is not an admitted `item_kind`. When you later attempt an item, copy that exact `value`
 string into `attempted_items` on the `action_recorded` event that attempted it — see the action
 template below. Matching is exact: do not normalize, reorder words, or paraphrase.
 
