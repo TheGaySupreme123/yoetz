@@ -1,13 +1,15 @@
-# Yoetz v0.1 — decision ledger and implementation-freeze gates
+# Yoetz v0.1 — decision ledger and release-gate dispositions
 
 **ADRs:** ADR-001 through ADR-016 | **Related:** [`docs/INTERFACES.md`](INTERFACES.md),
 [`docs/adr/`](adr/), release-evidence generation
 
 ## Purpose
 
-Keep unresolved choices visible in one place instead of scattering founder questions, empirical
-calibration, and deferred features across the repository. An ADR or a code comment may explain a
-local uncertainty; this file is the one queue used to decide whether a release claim may ship.
+This file is the one canonical ledger of the decisions taken for v0.1 and the dated dispositions
+of every release gate. As of the v0.1.0 public-alpha reconciliation (2026-08-19) it holds no open
+questions: every founder item is resolved, every empirical gate carries a disposition, and the two
+independent reviews are deferred with binding conditions. A public claim may strengthen only by
+adding the evidence its gate names and updating this ledger in the same review.
 
 ## How to read an item
 
@@ -20,7 +22,9 @@ in its owning ADR and moving a short result into the resolved-decisions section 
 Before implementation starts, all `founder` items must be accepted or deliberately amended. Before
 the affected release claim ships, all `empirical` and `independent-review` items must have dated,
 artifact-bound evidence. `deferred` items do not block v0.1 and may not leak into v0.1 help,
-schemas, capability claims, or implicit adapter behavior.
+schemas, capability claims, or implicit adapter behavior. As of 2026-08-19 every item is either
+resolved, dispositioned for the v0.1.0 public alpha, or deferred; the sole action still blocking
+the v0.1.0 tag is the E-012 checklist in the disposition table below.
 
 ## Errors and edge cases
 
@@ -46,7 +50,7 @@ schemas, capability claims, or implicit adapter behavior.
 and holds each claim at its honest `release_status`; release-evidence generation refuses open
 applicable empirical/review gates.
 
-## Open items
+## Decision record
 
 ### Phase 0 implementation reconciliation — 2026-07-17
 
@@ -110,9 +114,50 @@ that evidence.
 | E-015 | Exact structural subject-state capture matrix | No support claim until installed-artifact tests freeze Git/object-format and OS cells, symlink/submodule/racy-worktree behavior, file/byte caps, exclusions, sanitized environment, path/content-free output, and no network or trusted-service reachability. | ADR-011 CLI/subprocess, packaging-boundary, privacy, and capability evidence. |
 | E-016 | TOML as alternate nonsecret settings surface, including official OpenAI vs owner-declared OpenAI-compatible HTTPS origin+model | **Working (ADR-014).** Config validates constrained `https_origin`, rejects secrets/free `base_url`, mutual-excludes official vs owner-declared, and writes the same fields from wizard/menu/`yoetz provider endpoint`. Owner-declared data-use defaults to `unknown` (never `assisted`). Privacy desired-state export/apply classifies widen vs tighten and never silently widens. Remaining: optional live owner-declared host probe before advertising verified interoperability beyond the protocol cell. | ADR-014, ADR-006/009 amendments, config/privacy/openai_responses specs, unit fixtures; live probe optional. |
 
+### v0.1.0 public-alpha gate dispositions — 2026-08-19
+
+v0.1.0 ships as a **public alpha** under a maintainer-accepted narrowed claim set. Each empirical
+gate below carries exactly one dated disposition:
+
+- **Closed by decision** — a dated product decision replaces the calibration or refresh for the
+  alpha; the decision itself is the recorded answer and manufactures no support evidence.
+- **Narrowed** — the stronger public claim the gate was protecting does not ship; only the
+  already-bounded wording in `docs/public-claims.json` ships, and any claim whose own text names
+  missing evidence stays `not_yet_evidenced`.
+- **Open** — still blocks tagging v0.1.0.
+
+Every deferred or narrowed gate reverts to a release blocker for any later release that widens the
+affected claim, and for the first non-alpha release regardless.
+
+| ID | v0.1.0-alpha disposition |
+|---|---|
+| E-001 | Closed by decision — v0.1.0 releases on the frozen 2026-07-17 implementation locks unchanged; no refresh is performed and pins still advertise no platform/provider support. A dependency refresh review is re-required for the first non-alpha release. |
+| E-002 | Not applicable (narrowed) — Codex integration ships classified unsupported/incompatible with jointly empty capability-profile IDs, supported versions, and hook map; no populated exact cell ships and `integration.codex_exact_version_support` stays `not_yet_evidenced`. |
+| E-003 | Narrowed — macOS arm64 and manylinux x86-64 remain candidate cells evidenced only by the CI and release jobs that actually ran for the exact candidate; no keyring/filesystem matrix or restore-drill-backed support wording ships. |
+| E-004 | Closed by decision — the reviewed working thresholds ship as explicit uncalibrated operational defaults; the generation-fencing correctness invariants are CI-evidenced independently of the chosen durations, and no tuning or capacity claim ships. |
+| E-005 | Closed by decision — same treatment as E-004 for WAL/checkpoint/backup/soak budgets; public correctness caps stay CI-evidenced, nightly fault/soak calibration is deferred, and no operational-threshold claim ships. |
+| E-006 | Narrowed — Argon2id parameters ship as fixed reviewed defaults recorded in each artifact; the clean-profile restore drill is not evidenced, so `recovery.machine_bound_vs_portable` stays `not_yet_evidenced` and portable-restore wording ships only in its own drill-gated conditional form. |
+| E-007 | Not applicable (narrowed) — no live semantic provider profile ships; production live-provider composition remains design-gated and the catalog data-use records remain setup advice only, exactly as already stated in this gate's posture. |
+| E-008 | Narrowed — the release workflow's machine gates (clean source identity, checksums, SBOM, artifact allowlist, evidence bundle) are the only packaging claims; no signing claim and no reproducibility claim ships. |
+| E-009 | Not applicable (narrowed) — the shipped skill examples remain as authored with the explicit-activation preference; no activation-quality or materiality-threshold claim ships. |
+| E-010 | Narrowed — local service endpoint, lifecycle, and secret-boundary behavior is evidenced by the per-PR subprocess suites on the CI platforms; no broader platform relock/keyring/memory-protection matrix ships. |
+| E-011 | Narrowed — privacy enforcement claims are bounded to the per-PR conformance, property, integration, and subprocess evidence; no live-profile claim ships. |
+| E-012 | **Open — the only gate still blocking the v0.1.0 tag.** Verified 2026-08-19: GitHub private vulnerability reporting is enabled, `yoetz.dev` is registered with active MX records. Remaining before tagging: `security@yoetz.dev` and `conduct@yoetz.dev` mailboxes (or aliases) exist and a dated maintainer delivery/response drill is recorded; `https://schemas.yoetz.dev/0.1/` deploys as part of the release publish step per the resolved schema-hosting decision. |
+| E-013 | Not applicable (narrowed) — no trigger arm and no observation arm ships; every capability cell remains `None`/empty, `hook_observed` is unearnable in v0.1.0, and unprofiled harnesses stay cooperative-only. |
+| E-014 | Closed by decision — publication-ceremony guidance remains qualitative, informed by bounded dogfood use; no numeric budget or grouping-threshold claim ships, and measurement is required before any later budget claim. |
+| E-015 | Narrowed — `yoetz state capture` ships fail-closed with no advertised capability cells; `support.structural_subject_state_capture` stays `not_yet_evidenced`. |
+| E-016 | Working (unchanged, ADR-014) — the optional live owner-declared host probe is not performed and verified interoperability beyond the protocol cell is not advertised. |
+
 ### Independent review blocker
 
-| ID | Required review | Why it blocks release | Exit evidence |
+**Deferred for v0.1.0 (2026-08-19).** By maintainer decision — previously recorded as intent on
+issues #194 and #195 and made canonical by this change — R-001 and R-002 are deferred to the first
+non-alpha release. Binding conditions of the deferral: no public surface of v0.1.0 claims an
+independent review of the cryptographic envelope or the service trust boundary; the ADR-004 and
+ADR-008 status lines record the deferral; and both reviews return to mandatory, non-N/A blockers
+for the first release that drops the alpha designation or widens any claim they protect.
+
+| ID | Required review | Why it blocks a non-alpha release | Exit evidence |
 |---|---|---|---|
 | R-001 | Independent threat review of ADR-004 key hierarchy, domain separation, envelope header/AAD, wrapping, recovery, and commitment-oracle boundaries | Encryption design errors can silently invalidate privacy and portability claims even when unit tests pass. | Written disposition of every review finding plus updated vectors and clean-profile recovery drill. |
 | R-002 | Independent threat review of the service control endpoint, confidential unlock ingress, human-presence authorization, provider credential ingress, policy store, outbound gateway, and egress receipts | A client, local process, adapter, or provider must not bypass the central trust and privacy boundaries merely because each component passes its own tests. | Written disposition of every review finding plus cross-boundary abuse cases and platform evidence. |
@@ -168,6 +213,14 @@ that evidence.
 
 ### Resolved founder and working decisions reflected across the tree
 
+- **v0.1.0 public-alpha reconciliation (2026-08-19):** R-001/R-002 are deferred to the first
+  non-alpha release under the binding conditions recorded above; every empirical gate carries a
+  dated disposition in the v0.1.0 disposition table, with E-012 the sole gate still blocking the
+  tag; and `docs/public-claims.json` is reconciled so `evidenced` means the claim's declared test
+  paths exist and run in per-PR CI for the candidate, while the three claims whose own wording
+  names missing capability or drill evidence (`integration.codex_exact_version_support`,
+  `recovery.machine_bound_vs_portable`, `support.structural_subject_state_capture`) stay
+  `not_yet_evidenced` with their bounded wording as the shipped claim.
 - Ignored architecture/strategy files are private drafting inputs only; the committed ADRs,
   `docs/INTERFACES.md`, and the public code and tests are self-contained public authority.
 - Public schema `$id` values are real immutable hosting routes below

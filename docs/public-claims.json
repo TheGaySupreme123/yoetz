@@ -92,7 +92,7 @@
         "conformance_test",
         "subprocess_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "ops.six_operation_parity",
@@ -125,14 +125,16 @@
         "docs/INTERFACES.md"
       ],
       "tests": [
-        "tests/conformance/protocol/test_operation_parity.py",
-        "tests/integration/mcp/test_tool_registry.py"
+        "tests/conformance/surfaces/test_cli_contract_matrix.py",
+        "tests/conformance/surfaces/test_cli_mcp_parity.py",
+        "tests/conformance/surfaces/test_mcp_contract_matrix.py",
+        "tests/subprocess/test_mcp_initialize_and_tools.py"
       ],
       "evidence_kinds": [
         "conformance_test",
-        "integration_test"
+        "subprocess_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "packaging.source_package_resource_parity",
@@ -156,12 +158,13 @@
       ],
       "tests": [
         "tests/packaging/test_build_artifacts.py",
-        "tests/packaging/test_checksums_sbom_and_provenance.py"
+        "tests/packaging/test_checksums_sbom_and_provenance.py",
+        "tests/packaging/test_resource_byte_parity.py"
       ],
       "evidence_kinds": [
         "packaging_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "platform.advertised_runtime_cells",
@@ -189,14 +192,15 @@
         "ADR-007"
       ],
       "tests": [
-        "tests/conformance/storage/test_sqlite_build_verification.py",
-        "tests/packaging/test_build_artifacts.py"
+        "tests/integration/storage/test_build_and_pragma_gate.py",
+        "tests/packaging/test_build_artifacts.py",
+        "tests/packaging/test_platform_and_sqlite_gate.py"
       ],
       "evidence_kinds": [
-        "conformance_test",
+        "integration_test",
         "packaging_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.assisted_review_user_controlled",
@@ -227,6 +231,7 @@
       "tests": [
         "tests/conformance/privacy/test_privacy_profiles.py",
         "tests/subprocess/test_service_lock_and_confidential_unlock.py",
+        "tests/unit/adapters/test_repository_identity.py",
         "tests/unit/privacy/test_policy_and_contracts.py"
       ],
       "evidence_kinds": [
@@ -234,7 +239,7 @@
         "subprocess_test",
         "unit_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.audit_content_storage_boundary",
@@ -262,14 +267,14 @@
         "docs/protocol/data-egress-and-privacy.md"
       ],
       "tests": [
-        "tests/conformance/privacy/test_never_send_scope_and_channels.py",
-        "tests/integration/privacy/test_egress_gateway.py"
+        "tests/integration/privacy/test_egress_gateway.py",
+        "tests/unit/privacy/test_catalog_audit.py"
       ],
       "evidence_kinds": [
-        "conformance_test",
-        "integration_test"
+        "integration_test",
+        "unit_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.confirm_every_attempt",
@@ -298,7 +303,7 @@
         "conformance_test",
         "integration_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.independent_network_channels",
@@ -324,13 +329,14 @@
       ],
       "tests": [
         "tests/conformance/privacy/test_never_send_scope_and_channels.py",
+        "tests/unit/privacy/test_effective_policy_intersection.py",
         "tests/unit/privacy/test_policy_and_contracts.py"
       ],
       "evidence_kinds": [
         "conformance_test",
         "unit_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.keyring_initialization_presence_gate",
@@ -354,13 +360,17 @@
       ],
       "tests": [
         "tests/conformance/claims/test_local_service_security_doc.py",
-        "tests/subprocess/test_service_lock_and_confidential_unlock.py"
+        "tests/integration/objects/test_key_backends.py",
+        "tests/subprocess/test_service_lock_and_confidential_unlock.py",
+        "tests/unit/service/test_vault_state.py"
       ],
       "evidence_kinds": [
         "conformance_test",
-        "subprocess_test"
+        "integration_test",
+        "subprocess_test",
+        "unit_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.local_human_widening_only",
@@ -385,13 +395,14 @@
       ],
       "tests": [
         "tests/subprocess/test_service_lock_and_confidential_unlock.py",
+        "tests/unit/privacy/test_local_enforcer.py",
         "tests/unit/privacy/test_policy_and_contracts.py"
       ],
       "evidence_kinds": [
         "subprocess_test",
         "unit_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.local_model_same_fences",
@@ -413,13 +424,15 @@
       ],
       "tests": [
         "tests/capability/test_privacy_provider_and_local_model_profiles.py",
-        "tests/conformance/privacy/test_never_send_scope_and_channels.py"
+        "tests/conformance/privacy/test_never_send_scope_and_channels.py",
+        "tests/integration/privacy/test_egress_gateway.py"
       ],
       "evidence_kinds": [
         "capability_run",
-        "conformance_test"
+        "conformance_test",
+        "integration_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.local_only_no_external_llm_content",
@@ -440,12 +453,14 @@
         "ADR-009"
       ],
       "tests": [
-        "tests/conformance/privacy/test_privacy_profiles.py"
+        "tests/conformance/privacy/test_privacy_profiles.py",
+        "tests/integration/privacy/test_egress_gateway.py"
       ],
       "evidence_kinds": [
-        "conformance_test"
+        "conformance_test",
+        "integration_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.never_send_non_overridable",
@@ -478,13 +493,17 @@
       ],
       "tests": [
         "fixtures/privacy/PRIV-005-never-send.case.json",
-        "tests/conformance/privacy/test_never_send_scope_and_channels.py"
+        "tests/conformance/privacy/test_never_send_scope_and_channels.py",
+        "tests/integration/privacy/test_egress_gateway.py",
+        "tests/unit/privacy/test_local_enforcer.py"
       ],
       "evidence_kinds": [
         "conformance_test",
-        "fixture"
+        "fixture",
+        "integration_test",
+        "unit_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.no_raw_traceback_capture",
@@ -513,7 +532,7 @@
         "subprocess_test",
         "unit_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.one_attempt_provider_credentials",
@@ -542,7 +561,7 @@
         "capability_run",
         "integration_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.policy_approved_outbound_only",
@@ -574,7 +593,7 @@
         "capability_run",
         "integration_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.structural_egress_receipts",
@@ -603,7 +622,7 @@
         "conformance_test",
         "integration_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.trusted_local_service_boundary",
@@ -628,13 +647,15 @@
       ],
       "tests": [
         "tests/conformance/claims/test_local_service_security_doc.py",
+        "tests/packaging/test_service_boundary_imports.py",
         "tests/subprocess/test_service_lock_and_confidential_unlock.py"
       ],
       "evidence_kinds": [
         "conformance_test",
+        "packaging_test",
         "subprocess_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.v01_update_checks_only_non_llm_transport",
@@ -669,7 +690,7 @@
         "conformance_test",
         "unit_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "privacy.zero_network_configuration",
@@ -700,6 +721,7 @@
       ],
       "tests": [
         "tests/capability/test_privacy_provider_and_local_model_profiles.py",
+        "tests/conformance/honesty/test_strict_local_zero_egress.py",
         "tests/conformance/privacy/test_never_send_scope_and_channels.py",
         "tests/conformance/privacy/test_privacy_profiles.py"
       ],
@@ -707,7 +729,7 @@
         "capability_run",
         "conformance_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "protocol.coverage_bounded_findings_and_receipts",
@@ -730,14 +752,17 @@
         "docs/INTERFACES.md"
       ],
       "tests": [
-        "tests/conformance/protocol/test_receipt_wording.py",
+        "tests/conformance/honesty/test_coverage_weakening.py",
+        "tests/conformance/honesty/test_receipt_wording.py",
+        "tests/property/test_receipt_properties.py",
         "tests/unit/protocol/test_coverage.py"
       ],
       "evidence_kinds": [
         "conformance_test",
+        "property_test",
         "unit_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "protocol.deterministic_replay",
@@ -760,13 +785,17 @@
       ],
       "tests": [
         "fixtures/replay/all-event-families.case.json",
-        "tests/property/test_replay_determinism.py"
+        "tests/conformance/protocol/test_unknown_events.py",
+        "tests/property/test_reducer_equivalence.py",
+        "tests/unit/kernel/test_replay_and_projections.py"
       ],
       "evidence_kinds": [
+        "conformance_test",
         "fixture",
-        "property_test"
+        "property_test",
+        "unit_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "protocol.idempotent_retry_after_ambiguous_response",
@@ -792,14 +821,14 @@
         "ADR-003"
       ],
       "tests": [
-        "tests/integration/storage/test_idempotent_retry.py",
-        "tests/subprocess/test_cli_invocations.py"
+        "tests/conformance/protocol/test_idempotency_and_frontiers.py",
+        "tests/integration/storage/test_append_and_replay.py"
       ],
       "evidence_kinds": [
-        "integration_test",
-        "subprocess_test"
+        "conformance_test",
+        "integration_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "recovery.machine_bound_vs_portable",
@@ -823,12 +852,12 @@
         "ADR-004"
       ],
       "tests": [
-        "tests/conformance/storage/test_recovery_matrix.py",
-        "tests/subprocess/test_backup_restore_drills.py"
+        "tests/integration/application/test_maintenance.py",
+        "tests/integration/objects/test_portable_recovery.py",
+        "tests/integration/storage/test_backup_restore.py"
       ],
       "evidence_kinds": [
-        "conformance_test",
-        "subprocess_test"
+        "integration_test"
       ],
       "release_status": "not_yet_evidenced"
     },
@@ -855,16 +884,17 @@
         "ADR-009"
       ],
       "tests": [
-        "tests/capability/test_privacy_provider_and_local_model_profiles.py",
-        "tests/conformance/privacy/test_privacy_profiles.py",
-        "tests/integration/privacy/test_egress_gateway.py"
+        "tests/conformance/honesty/test_adversarial_cases.py",
+        "tests/integration/application/test_check.py",
+        "tests/unit/application/test_semantic_case.py",
+        "tests/unit/application/test_semantic_case_envelope.py"
       ],
       "evidence_kinds": [
-        "capability_run",
         "conformance_test",
-        "integration_test"
+        "integration_test",
+        "unit_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "storage.encrypted_payload_at_rest",
@@ -886,14 +916,17 @@
         "ADR-004"
       ],
       "tests": [
-        "tests/conformance/storage/test_encrypted_object_lifecycle.py",
-        "tests/unit/adapters/test_object_envelope.py"
+        "fixtures/canonical/object-envelope.case.json",
+        "tests/conformance/adapters/test_object_store_port.py",
+        "tests/integration/objects/test_envelope_and_encrypted_files.py",
+        "tests/integration/privacy/test_plaintext_canary_sweep.py"
       ],
       "evidence_kinds": [
         "conformance_test",
-        "unit_test"
+        "fixture",
+        "integration_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "storage.generation_fenced_single_writer",
@@ -916,14 +949,15 @@
         "ADR-003"
       ],
       "tests": [
-        "tests/conformance/storage/test_generation_fencing.py",
+        "tests/integration/storage/test_owner_generation.py",
+        "tests/subprocess/test_process_owner_fencing.py",
         "tests/subprocess/test_service_lock_and_confidential_unlock.py"
       ],
       "evidence_kinds": [
-        "conformance_test",
+        "integration_test",
         "subprocess_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "storage.no_forensic_erasure_claim",
@@ -946,12 +980,14 @@
         "ADR-004"
       ],
       "tests": [
-        "tests/conformance/storage/test_redaction_and_gc.py"
+        "tests/conformance/adapters/test_object_store_port.py",
+        "tests/integration/objects/test_redaction_and_gc.py"
       ],
       "evidence_kinds": [
-        "conformance_test"
+        "conformance_test",
+        "integration_test"
       ],
-      "release_status": "not_yet_evidenced"
+      "release_status": "evidenced"
     },
     {
       "claim_id": "support.structural_subject_state_capture",
@@ -973,12 +1009,12 @@
       ],
       "tests": [
         "tests/packaging/test_service_boundary_imports.py",
-        "tests/subprocess/test_cli_invocations.py"
+        "tests/unit/cli/test_state_capture.py"
       ],
       "evidence_kinds": [
         "capability_run",
         "packaging_test",
-        "subprocess_test"
+        "unit_test"
       ],
       "release_status": "not_yet_evidenced"
     }

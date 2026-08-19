@@ -19,8 +19,8 @@ golden vectors under [`fixtures/`](../fixtures/) win over any prose, including t
 
 ## Reference
 
-- [`docs/OPEN_QUESTIONS.md`](OPEN_QUESTIONS.md) — the decision ledger: founder, empirical,
-  independent-review, and deferred items still gating release claims.
+- [`docs/OPEN_QUESTIONS.md`](OPEN_QUESTIONS.md) — the decision ledger: every decision taken, each
+  release gate's dated v0.1.0 disposition, and what evidence a stronger claim would need.
 - [`docs/protocol/`](protocol/) — the technical protocol: compatibility, data egress and privacy,
   local service security, the privacy setup wizard.
 - [`docs/runbooks/`](runbooks/) — operational procedures: backup/restore, key recovery, migration

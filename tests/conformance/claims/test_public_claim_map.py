@@ -177,6 +177,7 @@ def test_claim_words_do_not_outrun_evidence() -> None:
     assert cast(list[str], assisted_review["tests"]) == [
         "tests/conformance/privacy/test_privacy_profiles.py",
         "tests/subprocess/test_service_lock_and_confidential_unlock.py",
+        "tests/unit/adapters/test_repository_identity.py",
         "tests/unit/privacy/test_policy_and_contracts.py",
     ]
 
@@ -193,9 +194,10 @@ def test_claim_words_do_not_outrun_evidence() -> None:
     ):
         assert phrase in review_loop_statement, phrase
     assert cast(list[str], review_loop["tests"]) == [
-        "tests/capability/test_privacy_provider_and_local_model_profiles.py",
-        "tests/conformance/privacy/test_privacy_profiles.py",
-        "tests/integration/privacy/test_egress_gateway.py",
+        "tests/conformance/honesty/test_adversarial_cases.py",
+        "tests/integration/application/test_check.py",
+        "tests/unit/application/test_semantic_case.py",
+        "tests/unit/application/test_semantic_case_envelope.py",
     ]
     assert set(cast(list[str], review_loop["limitations"])) >= {
         "no_live_repository_or_filesystem_fetch",
