@@ -363,9 +363,9 @@ def test_request_templates_document_requested_item_kinds() -> None:
     """Issue #318: the obligation template must name admitted kinds before the first publish."""
 
     text = read_resource("yoetz://guidance/request-templates.md").decode("utf-8")
-    assert (
-        "`item_kind` admits `change`, `command`, `file`, `source`, `url`" in text
-    ), "the authoring fallback never listed the closed item_kind enum"
+    assert "`item_kind` admits `change`, `command`, `file`, `source`, `url`" in text, (
+        "the authoring fallback never listed the closed item_kind enum"
+    )
     assert "`outcome` is not an admitted `item_kind`" in text
     assert '"item_kind": "change"' in text
     assert '"item_kind": "command"' in text
