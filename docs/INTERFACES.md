@@ -2473,7 +2473,11 @@ Shared closed types:
   standing machine conditions remain deliverable from that workspace snapshot at the documented
   session-boundary cadence (`SessionStart` and `Stop`). The agent-visible context carries only
   the bounded rule, action, and evidence token; deciding whether the advice belongs to the
-  current target never requires inspecting Yoetz storage. Hook stdout is event-specific:
+  current target never requires inspecting Yoetz storage. The snapshot's
+  `recommended_next_action` remains the kernel token, including `refresh_observation`. Hook
+  `additionalContext` maps that machine-condition token to a host-shell next step
+  (`yoetz observe status`) rather than naming a nonexistent MCP tool or CLI verb. Hook stdout is
+  event-specific:
   `SessionStart` / `PostToolUse` / `UserPromptSubmit` emit `hookSpecificOutput.additionalContext`;
   `Stop` emits `decision: block` plus `reason` (Codex has no Stop `hookSpecificOutput`, and
   `stop_hook_active` plus delivery identity are the loop guard); `SessionEnd` always emits `{}`

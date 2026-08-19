@@ -90,6 +90,11 @@ _RULE_DETAILS: Final[Mapping[str, str]] = {
     "semantic_claim_without_attempt": "A semantic claim was observed without a matching attempt receipt",
 }
 
+_REFRESH_OBSERVATION_HOOK_NEXT: Final = (
+    "Run `yoetz observe status` from the host shell, wait for drain to recover, "
+    "then continue. If the gap remains at check time, disclose it."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ObservationAdviceSemanticAddon:
@@ -636,6 +641,18 @@ def advice_delivery_identity(snapshot: AdviceSnapshot, *, item: AdviceItem | Non
     return f"deliver-{hashlib.sha256(material).hexdigest()[:48]}"
 
 
+def _hook_next_sentence(next_action: str) -> str:
+    """Render the hook next-step from a snapshot token.
+
+    ``refresh_observation`` is a kernel token, not an MCP tool or CLI verb; the
+    snapshot field stays unchanged and only this human clause is mapped.
+    """
+
+    if next_action == "refresh_observation":
+        return _REFRESH_OBSERVATION_HOOK_NEXT
+    return f"Next: {next_action}."
+
+
 def hook_advice_context(snapshot: AdviceSnapshot, *, item: AdviceItem | None = None) -> str:
     """Highest-priority summary, reason, next action, and one evidence reference.
 
@@ -650,7 +667,7 @@ def hook_advice_context(snapshot: AdviceSnapshot, *, item: AdviceItem | None = N
         ref = top.evidence_refs[0] if top.evidence_refs else "evidence:none"
         text = (
             f"Yoetz: {top.summary}. Reason: {top.detail}. "
-            f"Next: {top.recommended_next_action}. Evidence: {ref}."
+            f"{_hook_next_sentence(top.recommended_next_action)} Evidence: {ref}."
         )
     else:
         findings = ",".join(str(entry) for entry in snapshot.ranked_finding_ids[:8])
