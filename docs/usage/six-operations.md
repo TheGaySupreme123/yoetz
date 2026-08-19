@@ -79,7 +79,8 @@ Answers a finding: accept and act, supply evidence, revise the claim, dispute wi
 state an unresolved limitation. **A response does not erase a finding**, and no disposition
 resolves one: an actionable finding keeps the receipt conclusion at `unresolved_findings_remain`
 for the rest of the task, whichever disposition is recorded. Recheck after any material edit,
-evidence change, plan change, or response.
+evidence change, or plan change. A readable response to a finding returned by the current check
+does not require a recheck; a redacted or unreadable response does.
 
 ### `status`
 Reads current state — use it after a resume, a compaction, a handoff, or any uncertainty about what
@@ -128,7 +129,7 @@ See [Receipts and coverage](receipts-and-coverage.md) for how to read one.
 | `start` | Once per task, before substantive work. On resume, attach to the existing task instead of starting a second one. |
 | `publish_work` | One batch per material transition, roughly one to eight events. A normal session is a handful of batches, never one per file, tool call, or message. |
 | `status` | After resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls. |
-| `check` | After publishing the completion claim and its evidence, and again after any material edit, new evidence, or finding response. A check with no new events since the last one adds nothing. |
+| `check` | After publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response to a finding returned by that check needs no recheck; a redacted or unreadable response does. A check with no new events since the last one adds nothing. |
 | `respond` | Once per finding, at that finding's recorded frontier. |
 | `receipt` | Once at the end, and again only if material state changed after the previous receipt. |
 

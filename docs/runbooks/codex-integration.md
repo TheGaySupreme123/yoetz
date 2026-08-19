@@ -36,7 +36,7 @@ string or successful file install never promotes an unprofiled release to suppor
 Always run status first:
 
 ```text
-yoetz integrate skill status codex --json
+yoetz integrate codex skill status --json
 ```
 
 Destination states: `absent`, `installed_exact`, `modified`/`unmanaged`, `partial`, `unsafe`.
@@ -48,8 +48,8 @@ does **not** by itself prove Codex has discovered the skill or that MCP is avail
 ## 4. First install
 
 ```text
-yoetz integrate skill preview codex --json
-yoetz integrate skill install codex --json
+yoetz integrate codex skill preview --json
+yoetz integrate codex skill install --json
 ```
 
 1. Preview shows the fixed destination and scope, the source skill/protocol/resource/Codex-tested
@@ -196,8 +196,8 @@ evidence boundary explicitly.
 ## 8. Remove
 
 ```text
-yoetz integrate skill preview codex --json
-yoetz integrate skill remove codex --json
+yoetz integrate codex skill preview --json
+yoetz integrate codex skill remove --json
 ```
 
 Confirm the exact preview digest. Removal deletes only a valid managed marker plus its byte-exact
