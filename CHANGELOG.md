@@ -456,6 +456,12 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- Hook observation advice no longer tells an agent `Next: refresh_observation`. That token
+  remains the snapshot next-action value, but the hook clause now names the real host-shell
+  step (`yoetz observe status`) and asks the agent to disclose the gap if it persists at
+  check time. `guidance/workflow.md` lists all ten next-action tokens as English next-move
+  names, not tools (issue #323).
+
 - The request-template fallback now names the closed `requested_items[].item_kind` enum
   (`change`, `command`, `file`, `source`, `url`) and shows a `change` example beside the
   existing `command` entry. Guidance's own "requested outcome" vocabulary is confined to

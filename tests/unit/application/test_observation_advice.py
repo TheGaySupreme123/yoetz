@@ -7,6 +7,7 @@ import io
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import get_args
 
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.observation_semantic_advice import NullSemanticAdvice, OptionalSemanticAdvice
@@ -36,10 +37,12 @@ from yoetz.domain.observation import (
 )
 from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.kernel.policies.observation_advice import (
+    AdviceNextAction,
     ObservationAdviceContext,
     ObservationCompositionFact,
     observation_advice_findings,
 )
+from yoetz.mcp.resources import read_resource
 
 _COMMITMENT = "hmac-sha256:" + "a" * 64
 _TIME = Timestamp("2026-07-22T21:00:00.000Z")
@@ -417,6 +420,46 @@ def test_delivery_identity_ignores_evidence_refs_that_are_a_rolling_window() -> 
     assert advice_delivery_identity(first) == advice_delivery_identity(later), (
         "the dedup key moved with a rolling evidence window; the advice will storm"
     )
+
+
+def test_hook_advice_context_maps_refresh_observation_to_observe_status() -> None:
+    """Issue #323: the hook clause must name a real host-shell step, not a fake tool."""
+
+    snapshot = _gap_snapshot(3)
+    item = snapshot.ranked_items[0]
+    assert item.recommended_next_action == "refresh_observation"
+    text = hook_advice_context(snapshot)
+    assert "yoetz observe status" in text
+    assert "Next: refresh_observation" not in text
+    assert item.evidence_refs[0] in text
+    assert len(text) <= 512
+
+
+def test_hook_advice_context_keeps_work_next_action_tokens() -> None:
+    snapshot = build_observation_advice_snapshot(
+        ObservationAdviceBuildInput(
+            envelopes=(
+                _envelope(
+                    "hook:fail",
+                    {"tool_name": "shell", "exit_status": 2, "correlation_id": "x1"},
+                ),
+            ),
+            lifecycle=ObservationLifecycle.ACTIVE,
+            gaps=(),
+            has_real_observation=True,
+        )
+    )
+    assert snapshot is not None
+    assert snapshot.recommended_next_action == "resolve_failed_command"
+    assert "Next: resolve_failed_command" in hook_advice_context(snapshot)
+
+
+def test_workflow_guidance_documents_advice_next_action_tokens() -> None:
+    text = read_resource("yoetz://guidance/workflow.md").decode("utf-8")
+    for token in get_args(AdviceNextAction.__value__):
+        assert f"`{token}`" in text, token
+    assert "`yoetz observe status`" in text
+    assert "not MCP tools" in text
 
 
 def test_finding_identity_ignores_evidence_refs_that_are_a_rolling_window() -> None:

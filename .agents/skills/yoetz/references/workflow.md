@@ -27,6 +27,16 @@ Live hook observation may append advisories or evidence after you read a frontie
 observation-authored records do not invalidate the held `expected_frontier`; ordinary cooperative
 or imported work still does. On a real frontier conflict, re-read `status` rather than guessing.
 
+Hook observation advice may include a next-action token. Those tokens are English next-move names,
+not MCP tools and not `yoetz observe` verbs. The ten values are `resolve_failed_command`,
+`rerun_approved_check`, `provide_verification`, `disclose_limitation`,
+`address_subagent_finding`, `revise_plan_scope`, `refresh_observation`, `connect_provider`,
+`attempt_semantic_dispatch`, and `reground_status`.
+
+`refresh_observation` means observation coverage is incomplete or stale. Run
+`yoetz observe status` from the host shell and wait for drain to recover. If the gap remains at
+check time, disclose it as a limitation. There is no `refresh_observation` MCP tool or CLI command.
+
 ## When to stop retrying
 
 <a id="stop-rules"></a>
