@@ -431,9 +431,9 @@ def _context(
             and record.ledger.ingestion_sequence > check_record.ledger.ingestion_sequence
             for record in records
         ):
-            # Only check-answering responses can reach here. The verdict still covers the
-            # frontier it tested rather than this one, so the receipt names that frontier
-            # instead of reading as though the work were re-checked here.
+            # Check-answering responses and finding-free observation-authored records can reach
+            # here. The verdict still covers the frontier it tested rather than this one, so the
+            # receipt names that frontier instead of reading as though the work were re-checked.
             gaps.append(
                 CaseGap(
                     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,

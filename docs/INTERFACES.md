@@ -810,11 +810,14 @@ provider identity remain forbidden from this sink like every other.
 
 The check-applicability gap family follows the same material-state rule: `check_not_applicable`
 means material work was appended after the recorded check and superseded its verdict, never that
-the frontier merely advanced. `check_current_as_of_earlier_frontier` is the one qualified
-attribution in that family: every material event after the check answered a finding that same check
-returned, so the check still contributes its coverage while the receipt names the subject frontier
-its verdict is current as of. `kernel/reducers.invalidates_recorded_check` is the single predicate
-deciding between the two, shared by the receipt and by compact status coverage.
+the frontier merely advanced. A finding-free suffix made entirely of service-stamped observation
+records also keeps the check attributable: observation reports what the harness saw rather than
+publishing new cooperative work on the participant's behalf. An observation-authored
+`finding_recorded` still invalidates the older check. `check_current_as_of_earlier_frontier` is the
+qualified attribution in this family: when only check-answering responses and/or finding-free
+observation records follow the check, its coverage still contributes while the receipt names the
+subject frontier its verdict is current as of. `kernel/reducers.invalidates_recorded_check` is the
+single predicate deciding between the two, shared by the receipt and by compact status coverage.
 
 ## 9. Kernel (`kernel/`)
 
@@ -966,13 +969,14 @@ deciding between the two, shared by the receipt and by compact status coverage.
   with the same kind, policy, and subject refs keeps that finding's ID and is cited in
   `returned_finding_ids`
   without a duplicate `finding_recorded` event); an immaterial advance — `receipt_recorded`, `session_opened`,
-  `session_resumed` — never revokes it; and a readable `response_recorded` answering a finding the
-  check itself returned never revokes it, though the context then carries the
-  `check_current_as_of_earlier_frontier` gap. Every other material-family event revokes it,
-  including a response to a finding the check did not return and a response whose payload is
-  unreadable. Frontier equality is not the rule: a check necessarily advances the frontier past
-  the subject it tested. The application constructs this context; the builder never imports a
-  port type or re-derives applicability.
+  `session_resumed` — never revokes it; a readable `response_recorded` answering a finding the check
+  itself returned never revokes it; and a finding-free suffix consisting entirely of
+  service-stamped observation-authored records never revokes it. Those latter advances carry the
+  `check_current_as_of_earlier_frontier` gap. An observation-authored `finding_recorded`, every
+  other material-family event, a response to a finding the check did not return, and a response
+  whose payload is unreadable all revoke it. Frontier equality is not the rule: a check necessarily
+  advances the frontier past the subject it tested. The application constructs this context; the
+  builder never imports a port type or re-derives applicability.
 - `build_receipt(context, receipt_id, task_id, session_id, generated_at,
   versions: ReceiptVersionSlice, redaction_profile, include) -> ReceiptDocument`. Every
   nondeterministic input is explicit; the

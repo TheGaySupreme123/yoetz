@@ -132,16 +132,18 @@ it shows a reader what was done — but a task that fired an actionable finding 
 produce a clean completion receipt, and the final answer should not describe one.
 
 Responding does not throw the check away. A recorded check still counts toward a later receipt when
-the only events between the two are responses to findings that check itself returned — the receipt
-folds the check's coverage, including `semantic_model_derived`, and carries the gap
+the only events between the two are responses to findings that check itself returned and/or a
+finding-free suffix made entirely of service-stamped observation records. The receipt folds the
+check's coverage, including `semantic_model_derived`, and carries the gap
 `check_current_as_of_earlier_frontier` naming the subject frontier that was tested. The verdict is
 current as of that earlier frontier, not the receipt's, so the receipt is still coverage-incomplete.
 
-Any other material event after the check — published work, a new finding, a response to a finding
-the check did not return, or a response whose payload is redacted or unreadable (it cannot prove
-which finding it answered) — requires a re-check first. The receipt reports `check_not_applicable`
-and the check contributes nothing until it is re-run at the current frontier. `status` applies the same
-rule, so status and a receipt at the same frontier never disagree about what was checked.
+Any other material event after the check — published work, a new finding (including an
+observation-authored finding), a response to a finding the check did not return, or a response whose
+payload is redacted or unreadable (it cannot prove which finding it answered) — requires a re-check
+first. The receipt reports `check_not_applicable` and the check contributes nothing until it is
+re-run at the current frontier. `status` applies the same rule, so status and a receipt at the same
+frontier never disagree about what was checked.
 
 The cheapest finding is the one that never fires. Before the first `check`, confirm that every
 requested item has an exact `attempted_items` entry on the `action_recorded` event that attempted

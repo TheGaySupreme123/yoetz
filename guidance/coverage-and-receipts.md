@@ -49,11 +49,11 @@ Agents can record `acknowledged`, `provenance_disputed`, or `rejected`; `waived`
 
 ## Coverage attribution
 
-A recorded check remains attributable to a later receipt when the only events between them are responses to findings that same check returned. Answering a check's own findings reports on the check; it does not publish untested work. The receipt then folds the check's coverage — including `semantic_model_derived` — and carries the gap `check_current_as_of_earlier_frontier`, naming the subject frontier that was actually tested.
+A recorded check remains attributable to a later receipt when the only events between them are responses to findings that same check returned and/or a finding-free suffix made entirely of service-stamped observation records. Answering a check's own findings reports on the check, and observation reports what the harness saw rather than publishing new cooperative work on the participant's behalf. The receipt then folds the check's coverage — including `semantic_model_derived` — and carries the gap `check_current_as_of_earlier_frontier`, naming the subject frontier that was actually tested.
 
 That gap is a limitation, not a clean state: the verdict is current as of the tested frontier, not the receipt's, so the receipt is still coverage-incomplete and must not be described as a clean completion receipt.
 
-Any other material event after the check — published work, a new finding, a response to a finding the check did not return, or a response whose payload is redacted or unreadable (it cannot prove which finding it answered) — requires a re-check before the receipt. The receipt reports `check_not_applicable` and the check contributes nothing until you re-run it at the current frontier.
+Any other material event after the check — published work, a new finding (including an observation-authored finding), a response to a finding the check did not return, or a response whose payload is redacted or unreadable (it cannot prove which finding it answered) — requires a re-check before the receipt. The receipt reports `check_not_applicable` and the check contributes nothing until you re-run it at the current frontier.
 
 `status` applies the same rule, so a compact status view and a receipt taken at the same frontier never disagree about what was checked.
 

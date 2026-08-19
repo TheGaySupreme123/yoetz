@@ -28,6 +28,7 @@ from yoetz.domain.events import (
     ResultRecordedPayload,
     UnknownEvent,
     encode_payload,
+    is_observation_authored,
     obligation_meaning_field_diffs,
 )
 from yoetz.domain.findings import Finding
@@ -97,7 +98,7 @@ _MATERIAL_FAMILIES: Final = frozenset(
 
 
 def is_material_event_family(name: str) -> bool:
-    """True when an event of this family invalidates a previously recorded check."""
+    """True when the family ordinarily represents a material work-state transition."""
     return name in _MATERIAL_FAMILIES
 
 
@@ -132,6 +133,20 @@ def invalidates_recorded_check(
 
     if record.ledger.ingestion_sequence <= check_sequence:
         return False
+    return _record_supersedes_recorded_check(record, returned_finding_ids)
+
+
+def _record_supersedes_recorded_check(
+    record: LedgerRecord,
+    returned_finding_ids: tuple[FindingId, ...],
+) -> bool:
+    """Apply the shared authorship-aware supersession rule to a later record."""
+
+    if is_observation_authored(record):
+        # Hook delivery reports what the harness observed; it does not publish new cooperative
+        # work on the participant's behalf. Keep the check attributable across that motion unless
+        # the observation suffix materialized a finding that the older check could not cover.
+        return record.schema.name == "finding_recorded"
     return supersedes_recorded_check(record.schema.name, record.payload, returned_finding_ids)
 
 
@@ -774,8 +789,8 @@ def reduce_event(
         accepted = cast(AcceptedEvent, event)
         family = accepted.schema.name
         payload = accepted.payload
-        if latest is not None and supersedes_recorded_check(
-            family, payload, latest.returned_finding_ids
+        if latest is not None and _record_supersedes_recorded_check(
+            event, latest.returned_finding_ids
         ):
             stale = True
 
