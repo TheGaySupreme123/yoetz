@@ -367,6 +367,8 @@ def test_request_templates_document_requested_item_kinds() -> None:
         "the authoring fallback never listed the closed item_kind enum"
     )
     assert "`outcome` is not an admitted `item_kind`" in text
+    assert "requested outcome in `description` and\n`acceptance_criteria`" in text
+    assert "acceptance evidence in `evidence_expectation`" in text
     assert '"item_kind": "change"' in text
     assert '"item_kind": "command"' in text
     assert '"item_kind": "outcome"' not in text
