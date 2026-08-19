@@ -359,6 +359,21 @@ def test_publish_work_examples_include_obligation_resolution_pair() -> None:
     assert set(refs) <= evidence_ids
 
 
+def test_request_templates_document_requested_item_kinds() -> None:
+    """Issue #318: the obligation template must name admitted kinds before the first publish."""
+
+    text = read_resource("yoetz://guidance/request-templates.md").decode("utf-8")
+    assert "`item_kind` admits `change`, `command`, `file`, `source`, `url`" in text, (
+        "the authoring fallback never listed the closed item_kind enum"
+    )
+    assert "`outcome` is not an admitted `item_kind`" in text
+    assert "requested outcome in `description` and\n`acceptance_criteria`" in text
+    assert "acceptance evidence in `evidence_expectation`" in text
+    assert '"item_kind": "change"' in text
+    assert '"item_kind": "command"' in text
+    assert '"item_kind": "outcome"' not in text
+
+
 def test_publication_policy_documents_obligation_resolution_rule() -> None:
     text = read_resource("yoetz://guidance/publication-policy.md").decode("utf-8")
     assert "obligation-resolution" in text or "Obligation resolution" in text

@@ -462,6 +462,11 @@ carried them; they are listed because each one describes the behavior that now s
   check time. `guidance/workflow.md` lists all ten next-action tokens as English next-move
   names, not tools (issue #323).
 
+- The request-template fallback now names the closed `requested_items[].item_kind` enum
+  (`change`, `command`, `file`, `source`, `url`) and shows a `change` example beside the
+  existing `command` entry. Guidance's own "requested outcome" vocabulary is confined to
+  `description` / `acceptance_criteria`, so `outcome` is no longer primed as a kind (issue #318).
+
 - A finding-wording change no longer wedges an in-flight check on its own `request_id`. The
   persisted deterministic-result checkpoint requires byte-equal rendered finding text on replay,
   so any wording edit made every pre-change checkpoint replay as non-retryable `STORAGE_CORRUPT`
