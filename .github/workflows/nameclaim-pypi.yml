@@ -1,0 +1,90 @@
+# One-off name reservation: publish a `yoetz` 0.0.1 placeholder to PyPI through Trusted
+# Publishing so the project name is claimed before the first real release. Manual dispatch only,
+# self-contained (builds nothing from this repository's source), and refuses to run once any
+# `yoetz` release exists on PyPI. The real publication pipeline is release.yml; delete this
+# workflow after the claim.
+name: nameclaim-pypi
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  publish-placeholder:
+    name: publish-placeholder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write # Trusted Publishing only; no long-lived package token
+      contents: read
+    steps:
+      - name: Refuse to run if any yoetz release already exists on PyPI
+        run: |
+          set -euo pipefail
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/yoetz/json")
+          if [ "$status" = "200" ]; then
+            echo "::error::yoetz already exists on PyPI; nothing to claim"
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Author the placeholder package in the runner temp directory
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/nameclaim"
+          mkdir -p "$root/src/yoetz"
+          cat > "$root/pyproject.toml" <<'EOF'
+          [build-system]
+          requires = ["uv_build>=0.11.29,<0.12"]
+          build-backend = "uv_build"
+
+          [project]
+          name = "yoetz"
+          version = "0.0.1"
+          description = "Name reservation for Yoetz, a local-first work-verification ledger for coding agents. The first real release is v0.1.0."
+          readme = "README.md"
+          requires-python = ">=3.12"
+          license = "Apache-2.0"
+          authors = [{ name = "Shay Ben Shabtay" }]
+
+          [project.urls]
+          Homepage = "https://yoetz.dev"
+          Repository = "https://github.com/TheGaySupreme123/yoetz"
+          EOF
+          cat > "$root/README.md" <<'EOF'
+          # yoetz
+
+          This is a name-reservation placeholder published by the Yoetz maintainers.
+
+          Yoetz is a local-first work-verification ledger for coding agents. The first
+          real release will be v0.1.0.
+
+          - Project: https://github.com/TheGaySupreme123/yoetz
+          - Site: https://yoetz.dev
+
+          Do not depend on this version; it installs nothing usable.
+          EOF
+          cat > "$root/src/yoetz/__init__.py" <<'EOF'
+          """Name-reservation placeholder for Yoetz. The first real release is v0.1.0."""
+
+          __version__ = "0.0.1"
+          EOF
+
+      - name: Build the placeholder sdist and wheel
+        run: |
+          set -euo pipefail
+          uv build --out-dir "${RUNNER_TEMP}/dist" "${RUNNER_TEMP}/nameclaim"
+          ls -l "${RUNNER_TEMP}/dist"
+
+      - name: Publish via PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        with:
+          packages-dir: ${{ runner.temp }}/dist
+          skip-existing: false
+          verify-metadata: true
+          print-hash: true
