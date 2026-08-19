@@ -1,12 +1,14 @@
 # One-off name reservation: publish a `yoetz` 0.0.1 placeholder to PyPI through Trusted
-# Publishing so the project name is claimed before the first real release. Manual dispatch only,
-# self-contained (builds nothing from this repository's source), and refuses to run once any
-# `yoetz` release exists on PyPI. The real publication pipeline is release.yml; delete this
-# workflow after the claim.
+# Publishing so the project name is claimed before the first real release. Runs only on a push to
+# its own branch (never from main, never on merges), is self-contained (builds nothing from this
+# repository's source), and refuses to run once any `yoetz` release exists on PyPI. The real
+# publication pipeline is release.yml; this branch is deleted after the claim.
 name: nameclaim-pypi
 
 on:
-  workflow_dispatch: {}
+  push:
+    branches:
+      - agent/nameclaim-pypi-workflow
 
 permissions:
   contents: read
