@@ -148,7 +148,7 @@ def test_empty_soak_selection_is_disclosed_without_claiming_coverage() -> None:
     assert '"soak_coverage": os.environ.get(' in workflow
 
 
-def test_platform_verifiers_preserve_short_runner_home_and_install_linux_sandbox() -> None:
+def test_platform_verifiers_split_suites_and_bound_linux_alpha_claims() -> None:
     workflow = _WORKFLOW.read_text(encoding="utf-8")
     linux = workflow.split("  verify-linux-x86_64:\n", 1)[1].split(
         "  # ---------------------------------------------------------------------------------------------\n  # verify-macos-arm64",
@@ -159,7 +159,35 @@ def test_platform_verifiers_preserve_short_runner_home_and_install_linux_sandbox
         1,
     )[0]
 
-    assert "sudo apt-get install --yes bubblewrap" in linux
-    assert "bwrap --version" in linux
     assert 'export HOME="${RUNNER_TEMP}/yoetz-home"' not in linux
     assert 'export HOME="${RUNNER_TEMP}/yoetz-home"' not in macos
+    for verifier in (linux, macos):
+        assert "pytest tests/packaging \\" in verifier
+        assert "pytest tests/subprocess \\" in verifier
+        assert "pytest tests/integration \\" in verifier
+        assert '--runtime-tree "$installed_root"' in verifier
+    assert "test_approved_check_stale_when_digest_changes" in linux
+    assert "test_approved_true_check_succeeds_in_sandbox" in linux
+    assert "test_approved_check_stale_when_digest_changes" not in macos
+
+    limitations = (_ROOT / "release" / "known-limitations.json").read_text(encoding="utf-8")
+    release_notes = (_ROOT / "docs" / "releases" / "v0.1.0.md").read_text(encoding="utf-8")
+    assert "linux_approved_command_sandbox_unavailable" in limitations
+    assert "approved external-command checks fail closed" in release_notes
+
+
+def test_generated_evidence_uses_evidence_scanner_mode() -> None:
+    release = _WORKFLOW.read_text(encoding="utf-8")
+    capability = (_ROOT / ".github" / "workflows" / "capability.yml").read_text(encoding="utf-8")
+    fault = (_ROOT / ".github" / "workflows" / "nightly-fault.yml").read_text(encoding="utf-8")
+
+    assert '--evidence-dir "${{ runner.temp }}/release-evidence"' in release
+    assert '--evidence-dir "${{ runner.temp }}/release-evidence"' in capability
+    assert '--evidence-dir "${RUNNER_TEMP}/evidence"' in fault
+    assert "evidence-scanned" not in fault.split("  replay-and-resource:\n", 1)[1]
+
+    download = capability.split(
+        "      - name: Download CapabilityEvidence records (exclude candidate artifact JSON)\n",
+        1,
+    )[1].split("\n      - name:", 1)[0]
+    assert "if-no-files-found" not in download
