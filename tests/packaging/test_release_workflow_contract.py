@@ -118,7 +118,16 @@ def test_pypi_publisher_receives_only_distribution_files_and_supports_same_tag_r
     assert "packages-dir: ${{ runner.temp }}/pypi-dist" in publish
     assert "packages-dir: ${{ runner.temp }}/dist" not in publish
     assert "github.event.inputs.recovery == 'true'" in publish
+    assert "published PyPI bytes differ from recovery candidate" in publish
+    assert "if: steps.pypi-state.outputs.publish == 'true'" in publish
     assert workflow.count("github.event.inputs.recovery == 'true'") >= 8
+
+    npm_publish = workflow.split("  publish-npm:\n", 1)[1].split(
+        "  # ---------------------------------------------------------------------------------------------\n  # publish-github-release",
+        1,
+    )[0]
+    assert "published npm bytes differ from recovery candidate" in npm_publish
+    assert "if: steps.npm-state.outputs.publish == 'true'" in npm_publish
 
 
 def test_tag_workflow_rejects_missing_or_drifted_hosted_schema_bytes() -> None:

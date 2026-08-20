@@ -793,17 +793,49 @@ jobs:
           mkdir -p "${{ runner.temp }}/pypi-dist"
           cp -- "${artifacts[@]}" "${{ runner.temp }}/pypi-dist/"
 
-      - name: Verify the version is absent from PyPI (existing different digest is terminal)
+      - name: Verify PyPI is absent or exactly reconciled for recovery
+        id: pypi-state
         run: |
           set -euo pipefail
+          version="${{ needs.validate-release-source.outputs.version }}"
           status=$(curl -s -o /dev/null -w '%{http_code}' \
-            "https://pypi.org/pypi/yoetz/${{ needs.validate-release-source.outputs.version }}/json")
-          if [ "$status" = "200" ]; then
-            echo "::error::yoetz==${{ needs.validate-release-source.outputs.version }} already exists on PyPI"
-            exit 1
-          fi
+            "https://pypi.org/pypi/yoetz/${version}/json")
+          case "$status" in
+            404)
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              ;;
+            200)
+              [ "${{ github.event.inputs.recovery }}" = "true" ] || {
+                echo "::error::yoetz==${version} already exists on PyPI"
+                exit 1
+              }
+              curl --fail --silent --show-error --location \
+                "https://pypi.org/pypi/yoetz/${version}/json" \
+                --output "${{ runner.temp }}/pypi-existing.json"
+              PYPI_METADATA="${{ runner.temp }}/pypi-existing.json" \
+              PYPI_DIST="${{ runner.temp }}/pypi-dist" python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          metadata = json.loads(Path(os.environ["PYPI_METADATA"]).read_text(encoding="utf-8"))
+          remote = {entry["filename"]: entry["digests"]["sha256"] for entry in metadata["urls"]}
+          local_files = sorted(Path(os.environ["PYPI_DIST"]).iterdir())
+          local = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in local_files}
+          if local != remote:
+              raise SystemExit(f"published PyPI bytes differ from recovery candidate: {local} != {remote}")
+          PY
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::PyPI preflight returned HTTP ${status}"
+              exit 1
+              ;;
+          esac
 
       - name: Publish the prebuilt sdist/wheel via PyPI Trusted Publishing (skip-existing disabled)
+        if: steps.pypi-state.outputs.publish == 'true'
         uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
         with:
           packages-dir: ${{ runner.temp }}/pypi-dist
@@ -855,16 +887,31 @@ jobs:
             exit 1
           }
 
-      - name: Verify the version is absent from npm (existing different digest is terminal)
+      - name: Verify npm is absent or exactly reconciled for recovery
+        id: npm-state
         run: |
           set -euo pipefail
+          version="${{ needs.validate-release-source.outputs.version }}"
           status=$(curl -s -o /dev/null -w '%{http_code}' \
-            "https://registry.npmjs.org/yoetz/${{ needs.validate-release-source.outputs.version }}")
+            "https://registry.npmjs.org/yoetz/${version}")
           case "$status" in
-            404) ;;
+            404)
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              ;;
             200)
-              echo "::error::yoetz@${{ needs.validate-release-source.outputs.version }} already exists on npm"
-              exit 1
+              [ "${{ github.event.inputs.recovery }}" = "true" ] || {
+                echo "::error::yoetz@${version} already exists on npm"
+                exit 1
+              }
+              tarball=$(npm view "yoetz@${version}" dist.tarball)
+              curl --fail --silent --show-error --location "$tarball" \
+                --output "${{ runner.temp }}/npm-published.tgz"
+              cmp -s "${{ runner.temp }}/npm-published.tgz" \
+                "${{ runner.temp }}/npm-dist/yoetz-${version}.tgz" || {
+                echo "::error::published npm bytes differ from recovery candidate"
+                exit 1
+              }
+              echo "publish=false" >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "::error::npm registry preflight returned HTTP ${status}"
@@ -873,6 +920,7 @@ jobs:
           esac
 
       - name: Publish the exact tarball through npm Trusted Publishing
+        if: steps.npm-state.outputs.publish == 'true'
         run: npm publish "${{ runner.temp }}/npm-dist/yoetz-${{ needs.validate-release-source.outputs.version }}.tgz" --access public
 
   # ---------------------------------------------------------------------------------------------
