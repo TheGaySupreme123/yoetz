@@ -24,15 +24,20 @@ on:
         required: true
         type: string
       candidate_ref:
-        description: Current protected-branch ref or commit to test before creating the tag.
+        description: Current protected-branch ref for dry run, or immutable annotated tag for recovery.
         required: true
         type: string
         default: main
       dry_run:
-        description: Must be true; manual dispatch can never acquire publish authority.
+        description: Rehearse current main without publication.
         required: true
         type: boolean
         default: true
+      recovery:
+        description: Re-run the full production path for an existing immutable annotated tag.
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -46,7 +51,7 @@ env:
   TZ: UTC
   LANG: C.UTF-8
   LC_ALL: C.UTF-8
-  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.recovery != 'true' }}
 
 defaults:
   run:
@@ -68,11 +73,15 @@ jobs:
       commit: ${{ steps.version.outputs.commit }}
       is-prerelease: ${{ steps.version.outputs.is_prerelease }}
     steps:
-      - name: Reject a manual run not in dry_run=true mode
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true'
+      - name: Reject an ambiguous manual release mode
+        if: github.event_name == 'workflow_dispatch'
         run: |
-          echo "::error::workflow_dispatch is dry-run only; dry_run must be true"
-          exit 1
+          dry_run="${{ github.event.inputs.dry_run }}"
+          recovery="${{ github.event.inputs.recovery }}"
+          if [ "$dry_run" = "$recovery" ]; then
+            echo "::error::workflow_dispatch requires exactly one of dry_run or recovery"
+            exit 1
+          fi
 
       - name: Checkout the exact release source (no persisted credentials)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -83,7 +92,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.candidate_ref || github.ref }}
 
       - name: Verify the ref is an annotated/signed tag reachable from the protected release branch
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event.inputs.recovery == 'true'
         run: |
           set -euo pipefail
           tag="${{ github.event.inputs.tag || github.ref_name }}"
@@ -99,7 +108,7 @@ jobs:
           fi
 
       - name: Verify the dry-run candidate is current protected main
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.recovery != 'true'
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
@@ -265,7 +274,7 @@ jobs:
           echo "value=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance for the immutable candidate artifacts
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event.inputs.recovery == 'true'
         id: attest
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
@@ -728,7 +737,7 @@ jobs:
   approve-publication:
     name: approve-publication
     needs: [validate-release-source, build-candidate, build-npm-launcher, assemble-release-evidence]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event.inputs.recovery == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: release-approval
@@ -750,7 +759,7 @@ jobs:
   publish-pypi:
     name: publish-pypi
     needs: [validate-release-source, build-candidate, approve-publication]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event.inputs.recovery == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: pypi
@@ -772,6 +781,18 @@ jobs:
           [ "$digest" = "${{ needs.build-candidate.outputs.candidate-digest }}" ] || \
             { echo "::error::candidate digest mismatch before publish"; exit 1; }
 
+      - name: Stage only Python distribution files for the publisher
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifacts=("${{ runner.temp }}/dist/"*.whl "${{ runner.temp }}/dist/"*.tar.gz)
+          [ "${#artifacts[@]}" -eq 2 ] || {
+            echo "::error::expected exactly one wheel and one sdist"
+            exit 1
+          }
+          mkdir -p "${{ runner.temp }}/pypi-dist"
+          cp -- "${artifacts[@]}" "${{ runner.temp }}/pypi-dist/"
+
       - name: Verify the version is absent from PyPI (existing different digest is terminal)
         run: |
           set -euo pipefail
@@ -785,7 +806,7 @@ jobs:
       - name: Publish the prebuilt sdist/wheel via PyPI Trusted Publishing (skip-existing disabled)
         uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
         with:
-          packages-dir: ${{ runner.temp }}/dist
+          packages-dir: ${{ runner.temp }}/pypi-dist
           skip-existing: false
           verify-metadata: true
           print-hash: true
@@ -796,7 +817,7 @@ jobs:
   publish-npm:
     name: publish-npm
     needs: [validate-release-source, build-npm-launcher, approve-publication, publish-pypi]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event.inputs.recovery == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: npm
@@ -867,7 +888,7 @@ jobs:
       - capability-release-profile
       - publish-pypi
       - publish-npm
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event.inputs.recovery == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: github-release
@@ -972,7 +993,7 @@ jobs:
       - publish-pypi
       - publish-github-release
       - verify-schema-site
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event.inputs.recovery == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
@@ -1049,7 +1070,7 @@ jobs:
       - build-npm-launcher
       - publish-npm
       - publish-github-release
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event.inputs.recovery == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -1167,7 +1188,8 @@ jobs:
               failed=1
             fi
           done
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "${{ github.event_name }}" = "push" ] \
+              || [ "${{ github.event.inputs.recovery }}" = "true" ]; then
             declare -A publish_required=(
               [approve-publication]="${{ needs.approve-publication.result }}"
               [publish-pypi]="${{ needs.publish-pypi.result }}"

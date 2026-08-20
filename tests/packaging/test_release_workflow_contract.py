@@ -22,8 +22,12 @@ def test_dry_run_retains_builder_backed_release_evidence_bundle() -> None:
     )[0]
 
     assert "workflow_dispatch:" in workflow
-    assert "DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}" in workflow
-    assert "workflow_dispatch is dry-run only; dry_run must be true" in workflow
+    assert (
+        "DRY_RUN: ${{ github.event_name == 'workflow_dispatch' "
+        "&& github.event.inputs.recovery != 'true' }}" in workflow
+    )
+    assert "workflow_dispatch requires exactly one of dry_run or recovery" in workflow
+    assert "Re-run the full production path for an existing immutable annotated tag" in workflow
     assert "candidate_ref:" in workflow
     assert "dry-run candidate ${candidate} is not current origin/main ${protected}" in workflow
     assert "scripts/build_release_inputs.py" in assembly
@@ -99,6 +103,22 @@ def test_npm_release_is_built_once_published_after_pypi_and_download_verified() 
     assert "npm-published.tgz" in verify
     assert "cmp -s" in verify
     assert "yoetz==${{ needs.validate-release-source.outputs.version }} version --json" in verify
+
+
+def test_pypi_publisher_receives_only_distribution_files_and_supports_same_tag_recovery() -> None:
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    publish = workflow.split("  publish-pypi:\n", 1)[1].split(
+        "  # ---------------------------------------------------------------------------------------------\n  # publish-npm",
+        1,
+    )[0]
+
+    assert (
+        'artifacts=("${{ runner.temp }}/dist/"*.whl "${{ runner.temp }}/dist/"*.tar.gz)' in publish
+    )
+    assert "packages-dir: ${{ runner.temp }}/pypi-dist" in publish
+    assert "packages-dir: ${{ runner.temp }}/dist" not in publish
+    assert "github.event.inputs.recovery == 'true'" in publish
+    assert workflow.count("github.event.inputs.recovery == 'true'") >= 8
 
 
 def test_tag_workflow_rejects_missing_or_drifted_hosted_schema_bytes() -> None:
