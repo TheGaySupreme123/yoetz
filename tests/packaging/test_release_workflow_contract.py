@@ -143,6 +143,22 @@ def test_tag_workflow_rejects_missing_or_drifted_hosted_schema_bytes() -> None:
     assert "|| true" not in verify
 
 
+def test_post_publication_smoke_uses_python314_and_reinstalls_the_approved_wheel_offline() -> None:
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    verify = workflow.split("  verify-published:\n", 1)[1].split(
+        "  # ---------------------------------------------------------------------------------------------\n  # verify-npm-published",
+        1,
+    )[0]
+
+    assert 'version: "0.11.29"' in verify
+    assert "curl -LsSf https://astral.sh/uv/install.sh" not in verify
+    assert "uv python install 3.14" in verify
+    assert 'uv venv --python 3.14 "$venv"' in verify
+    assert 'uv pip install --python "$venv/bin/python" "$wheel"' in verify
+    assert 'uv pip uninstall --python "$venv/bin/python" yoetz' in verify
+    assert '--no-index --no-deps --find-links "${{ runner.temp }}/published"' in verify
+
+
 def test_candidate_digest_is_path_independent_and_checksum_backed() -> None:
     workflow = _WORKFLOW.read_text(encoding="utf-8")
     build = workflow.split("  build-candidate:\n", 1)[1].split(
