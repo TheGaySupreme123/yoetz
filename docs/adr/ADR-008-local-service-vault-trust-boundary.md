@@ -3,8 +3,9 @@
 **Status:** Founder-selected working decision (2026-07-14), amended 2026-07-25 to permit
 bundle-scoped passphrase auto-unlock through an allowlisted platform credential store. Binding for
 v0.1 specification work; independent security review remains required before the first non-alpha
-release — the v0.1.0 public alpha ships without it by maintainer decision (2026-08-19,
-`docs/OPEN_QUESTIONS.md` R-002 disposition) and no public surface claims a reviewed boundary.
+release — the v0.1.0 public alpha may ship without it after its remaining release gate closes, by
+maintainer decision (2026-08-19, `docs/OPEN_QUESTIONS.md` R-002 disposition), and no public surface
+claims a reviewed boundary.
 **Related:** ADR-001 owns single-writer lifecycle; ADR-004 owns cryptography and recovery; ADR-006
 and the privacy protocol own outbound data authorization.
 

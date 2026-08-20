@@ -209,10 +209,10 @@ independent-review release gates are specified in:
 - [`schemas/privacy/privacy-policy-1.0.0.schema.json`](schemas/privacy/privacy-policy-1.0.0.schema.json)
 - [`docs/OPEN_QUESTIONS.md`](docs/OPEN_QUESTIONS.md)
 
-A claim whose declared evidence runs in per-PR CI is flagged `evidenced` in
-[`docs/public-claims.json`](docs/public-claims.json); a claim whose own wording names
-still-missing capability or drill evidence remains explicitly “not yet evidenced” and ships only
-in that bounded form.
+A claim with concrete checked-in test or fixture coverage is flagged `evidenced` in
+[`docs/public-claims.json`](docs/public-claims.json), with its non-live suites exercised in per-PR
+CI. A claim whose own wording names still-missing capability or drill evidence remains explicitly
+“not yet evidenced” and is not asserted as release evidence.
 
 ## How to inspect or report a privacy problem
 

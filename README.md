@@ -108,11 +108,12 @@ See [Architecture](docs/architecture.md).
 
 ## Status
 
-v0.1.0 ships as a **public alpha**. Every public claim in
-[`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in evidence: a claim
-flagged `evidenced` is backed by test suites that run in CI for every change, and a claim whose
-own wording names still-missing capability or drill evidence stays `not_yet_evidenced` and is
-asserted only in that bounded form. Every reviewed provider preset resolves to a real runtime
+v0.1.0 is intended to ship as a **public alpha** after the remaining release gate closes. Every
+public claim in [`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in
+evidence: a claim flagged `evidenced` has concrete test or fixture coverage, with its non-live
+suites exercised in per-PR CI; a claim whose own wording names still-missing capability or drill
+evidence stays `not_yet_evidenced` and is not asserted as release evidence. Every reviewed provider
+preset resolves to a real runtime
 factory, so a preset you can select is a preset Yoetz can dispatch — but none of the non-official
 presets has recorded live evidence yet, so none is claimed as a confirmed working endpoint. That
 claim stays gated by the capability evidence described in

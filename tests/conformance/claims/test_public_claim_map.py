@@ -220,6 +220,16 @@ def test_skipped_or_unsupported_claims_are_flagged() -> None:
     statuses = {cast(str, claim["release_status"]) for claim in claims}
     assert statuses
     assert statuses <= _KNOWN_RELEASE_STATUSES
+    pending = {
+        cast(str, claim["claim_id"])
+        for claim in claims
+        if claim["release_status"] == "not_yet_evidenced"
+    }
+    assert pending == {
+        "integration.codex_exact_version_support",
+        "recovery.machine_bound_vs_portable",
+        "support.structural_subject_state_capture",
+    }
 
     for claim in claims:
         claim_id = cast(str, claim["claim_id"])
@@ -230,3 +240,8 @@ def test_skipped_or_unsupported_claims_are_flagged() -> None:
             # test/fixture paths must exist for real once it claims anything stronger.
             for test_path in cast(list[str], claim["tests"]):
                 assert (_REPO_ROOT / test_path).is_file(), (claim_id, test_path)
+            assert any(
+                test_path.startswith(_KNOWN_TEST_PREFIXES)
+                and not test_path.startswith("tests/capability/")
+                for test_path in cast(list[str], claim["tests"])
+            ), claim_id

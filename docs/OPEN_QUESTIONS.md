@@ -116,8 +116,8 @@ that evidence.
 
 ### v0.1.0 public-alpha gate dispositions — 2026-08-19
 
-v0.1.0 ships as a **public alpha** under a maintainer-accepted narrowed claim set. Each empirical
-gate below carries exactly one dated disposition:
+v0.1.0 may ship as a **public alpha** under a maintainer-accepted narrowed claim set once E-012
+closes. Each empirical gate below carries exactly one dated disposition:
 
 - **Closed by decision** — a dated product decision replaces the calibration or refresh for the
   alpha; the decision itself is the recorded answer and manufactures no support evidence.
@@ -216,11 +216,12 @@ for the first release that drops the alpha designation or widens any claim they 
 - **v0.1.0 public-alpha reconciliation (2026-08-19):** R-001/R-002 are deferred to the first
   non-alpha release under the binding conditions recorded above; every empirical gate carries a
   dated disposition in the v0.1.0 disposition table, with E-012 the sole gate still blocking the
-  tag; and `docs/public-claims.json` is reconciled so `evidenced` means the claim's declared test
-  paths exist and run in per-PR CI for the candidate, while the three claims whose own wording
-  names missing capability or drill evidence (`integration.codex_exact_version_support`,
+  tag; and `docs/public-claims.json` is reconciled so `evidenced` means the claim has concrete
+  checked-in test or fixture coverage and its non-live suites run in per-PR CI, while the three
+  claims whose own wording names missing capability or drill evidence
+  (`integration.codex_exact_version_support`,
   `recovery.machine_bound_vs_portable`, `support.structural_subject_state_capture`) stay
-  `not_yet_evidenced` with their bounded wording as the shipped claim.
+  `not_yet_evidenced` and are not asserted as release evidence.
 - Ignored architecture/strategy files are private drafting inputs only; the committed ADRs,
   `docs/INTERFACES.md`, and the public code and tests are self-contained public authority.
 - Public schema `$id` values are real immutable hosting routes below

@@ -4,7 +4,7 @@
   "claims": [
     {
       "claim_id": "integration.codex_exact_version_support",
-      "statement": "Yoetz records Codex integration and JSONL import support as an exact tested executable set (target/maximum-tested 0.144.5); a version newer than maximum-tested is reported untested, never supported, and the exact release cell separately records whether a trigger compaction-recovery hook and/or an observation arm is present. Consent-based plugin activation binds the exact selected executable path and SHA-256, its version from a network-free probe isolated in a removed owner-private temporary home, an explicitly supplied existing absolute non-symlink target home, marketplace/config preimages and proposals, managed plugin source, versioned cache preimage and intended bytes, forced activation environment, and exact post-consent scoped inventory/add commands. No target-home inventory command runs before consent. After consent, each write is CAS-fenced; a later failure preserves approved partial state for retry rather than risking a concurrent change through pathname rollback. Active requires Codex inventory to report the expected repository plugin installed and enabled and the installed-version cache to match the managed source; marketplace/config presence alone is installed_not_activated. Neither active inventory nor a trigger proves a hook ran: a trigger is a recovery ergonomic carrying no observation or coverage claim, and an observation arm, when supported by capability evidence and consented, is the only path that may earn hook_observed from real observation evidence.",
+      "statement": "Yoetz currently classifies Codex integration as unsupported/incompatible: the release carries no capability-profile IDs, supported or tested executable versions, trigger arm, or observation arm. Exact version support may be advertised only after a release-bound capability run populates those fields; newer or intermediate versions are never inferred supported. Consent-based plugin activation binds the exact selected executable path and SHA-256, its version from a network-free probe isolated in a removed owner-private temporary home, an explicitly supplied existing absolute non-symlink target home, marketplace/config preimages and proposals, managed plugin source, versioned cache preimage and intended bytes, forced activation environment, and exact post-consent scoped inventory/add commands. No target-home inventory command runs before consent. After consent, each write is CAS-fenced; a later failure preserves approved partial state for retry rather than risking a concurrent change through pathname rollback. Active requires Codex inventory to report the expected repository plugin installed and enabled and the installed-version cache to match the managed source; marketplace/config presence alone is installed_not_activated. Neither active inventory nor a trigger proves a hook ran: a trigger is a recovery ergonomic carrying no observation or coverage claim, and an observation arm, when supported by capability evidence and consented, is the only path that may earn hook_observed from real observation evidence.",
       "scope": {
         "operations": [
           "import_codex_jsonl",
@@ -20,9 +20,7 @@
           "macosx_11_0_arm64",
           "manylinux_2_28_x86_64"
         ],
-        "versions": [
-          "codex>=0.139.0,<=0.144.5"
-        ]
+        "versions": []
       },
       "limitations": [
         "capability_evidence_required_per_release",
