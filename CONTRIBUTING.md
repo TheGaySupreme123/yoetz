@@ -132,9 +132,9 @@ Silence, ignoring a thread, or "will do later" without maintainer agreement is n
   `pyproject.toml` and the development-only `package.json` are the only ones this project uses.
 - Don't add a new distribution surface without design-gate acknowledgement. The end-user install
   path is Python/`uv` (see [`README.md`](README.md)); the one reviewed exception is the
-  delegation-only npm launcher at `support/npm-launcher/` (ADR-012), which must stay unpublished
-  (`"private": true`) — publishing it is a separate deliberate release decision, never a side effect
-  of another change.
+  delegation-only npm launcher at `support/npm-launcher/` (ADR-012). Its deliberate public-release
+  decision is recorded for v0.1.0 in issue #366; later changes must keep it version-locked to PyPI,
+  dependency-free, and inside the protected tagged-release workflow.
 
 ## Security and conduct
 

@@ -42,8 +42,9 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
    by `npm run typecheck` is the reproducible invocation. Node/npm are not end-user runtime
    requirements. Amended by ADR-012: the npm launcher now exists at `support/npm-launcher/` with
    its own provenance/delegation/upgrade contract — a dependency-free delegator to
-   `uvx yoetz==<version>` — and remains deliberately unpublished (`"private": true`); publishing
-   is a separate future release decision.
+   `uvx yoetz==<version>`. Maintainer release decision (2026-08-20, issue #366): v0.1.0 publishes
+   that launcher as the public `yoetz` npm package through the protected tagged workflow, after
+   PyPI publication and with trusted-publisher provenance plus byte-for-byte download verification.
 8. **Release artifacts:** sdist + wheel, SHA-256 checksums, CycloneDX SBOM via `uv export`,
    dependency lock, support matrix, conformance summary, known limitations, changelog, security
    policy. Sigstore signing deferred until a documented verification command exists (a signature

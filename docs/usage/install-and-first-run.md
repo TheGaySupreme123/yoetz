@@ -11,9 +11,8 @@ yoetz
 
 `uvx yoetz` works for a one-off run. If you are a coding agent installing Yoetz on a user's
 behalf, follow [Agent start](agent-start.md) instead — setup's questions require the human's own
-terminal. `npx yoetz` will delegate to the same `uvx` path once the
-prepared launcher in [`support/npm-launcher/`](../../support/npm-launcher/) is published; it is
-deliberately unpublished today, so npm is not currently an install route. The launcher pins the
+terminal. With `uv` already installed, `npx yoetz` delegates to the same exact-version `uvx` path.
+The launcher pins the
 exact Python distribution, passes arguments through unchanged, inherits stdio so the child sees
 your real terminal, and propagates exit codes — including `128+n` for a signal. It installs
 nothing itself: when `uv` is missing it prints the install command and stops.

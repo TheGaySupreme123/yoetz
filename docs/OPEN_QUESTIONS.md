@@ -6,7 +6,7 @@
 ## Purpose
 
 This file is the one canonical ledger of the decisions taken for v0.1 and the dated dispositions
-of every release gate. As of the v0.1.0 public-alpha reconciliation (2026-08-19) it holds no open
+of every release gate. As of the v0.1.0 public-alpha reconciliation (2026-08-20) it holds no open
 questions: every founder item is resolved, every empirical gate carries a disposition, and the two
 independent reviews are deferred with binding conditions. A public claim may strengthen only by
 adding the evidence its gate names and updating this ledger in the same review.
@@ -22,9 +22,9 @@ in its owning ADR and moving a short result into the resolved-decisions section 
 Before implementation starts, all `founder` items must be accepted or deliberately amended. Before
 the affected release claim ships, all `empirical` and `independent-review` items must have dated,
 artifact-bound evidence. `deferred` items do not block v0.1 and may not leak into v0.1 help,
-schemas, capability claims, or implicit adapter behavior. As of 2026-08-19 every item is either
-resolved, dispositioned for the v0.1.0 public alpha, or deferred; the sole action still blocking
-the v0.1.0 tag is the E-012 checklist in the disposition table below.
+schemas, capability claims, or implicit adapter behavior. As of 2026-08-20 every item is either
+resolved, dispositioned for the v0.1.0 public alpha, or deferred; none of the E-gate ledger entries
+blocks the v0.1.0 tag under the dated maintainer decisions below.
 
 ## Errors and edge cases
 
@@ -114,10 +114,10 @@ that evidence.
 | E-015 | Exact structural subject-state capture matrix | No support claim until installed-artifact tests freeze Git/object-format and OS cells, symlink/submodule/racy-worktree behavior, file/byte caps, exclusions, sanitized environment, path/content-free output, and no network or trusted-service reachability. | ADR-011 CLI/subprocess, packaging-boundary, privacy, and capability evidence. |
 | E-016 | TOML as alternate nonsecret settings surface, including official OpenAI vs owner-declared OpenAI-compatible HTTPS origin+model | **Working (ADR-014).** Config validates constrained `https_origin`, rejects secrets/free `base_url`, mutual-excludes official vs owner-declared, and writes the same fields from wizard/menu/`yoetz provider endpoint`. Owner-declared data-use defaults to `unknown` (never `assisted`). Privacy desired-state export/apply classifies widen vs tighten and never silently widens. Remaining: optional live owner-declared host probe before advertising verified interoperability beyond the protocol cell. | ADR-014, ADR-006/009 amendments, config/privacy/openai_responses specs, unit fixtures; live probe optional. |
 
-### v0.1.0 public-alpha gate dispositions — 2026-08-19
+### v0.1.0 public-alpha gate dispositions — 2026-08-20
 
-v0.1.0 may ship as a **public alpha** under a maintainer-accepted narrowed claim set once E-012
-closes. Each empirical gate below carries exactly one dated disposition:
+v0.1.0 may ship as a **public alpha** under a maintainer-accepted narrowed claim set. Each
+empirical gate below carries exactly one dated disposition:
 
 - **Closed by decision** — a dated product decision replaces the calibration or refresh for the
   alpha; the decision itself is the recorded answer and manufactures no support evidence.
@@ -142,7 +142,7 @@ affected claim, and for the first non-alpha release regardless.
 | E-009 | Not applicable (narrowed) — the shipped skill examples remain as authored with the explicit-activation preference; no activation-quality or materiality-threshold claim ships. |
 | E-010 | Narrowed — local service endpoint, lifecycle, and secret-boundary behavior is evidenced by the per-PR subprocess suites on the CI platforms; no broader platform relock/keyring/memory-protection matrix ships. |
 | E-011 | Narrowed — privacy enforcement claims are bounded to the per-PR conformance, property, integration, and subprocess evidence; no live-profile claim ships. |
-| E-012 | **Open — the only gate still blocking the v0.1.0 tag.** Verified 2026-08-19: GitHub private vulnerability reporting is enabled, `yoetz.dev` is registered with active MX records, and the maintained `support@yoetz.dev` mailbox exists (2026-08-20 F-006 amendment: one private mailbox serves security fallback, conduct, and support). Remaining before tagging: a dated maintainer delivery/response drill on `support@yoetz.dev`; `https://schemas.yoetz.dev/0.1/` deploys as part of the release publish step per the resolved schema-hosting decision. |
+| E-012 | Closed by decision (2026-08-20, issue #366) — GitHub private vulnerability reporting is enabled, `yoetz.dev` is registered with active MX records, and the maintained `support@yoetz.dev` mailbox exists. The maintainer accepts those routes for the public alpha without making a delivery-time, response-time, availability, or monitored-SLA claim; a completed delivery/response drill is required before any later release makes one. `https://schemas.yoetz.dev/0.1/` is deployed from the exact candidate before tagging and every hosted byte is re-fetched and compared by the tagged workflow. |
 | E-013 | Not applicable (narrowed) — no trigger arm and no observation arm ships; every capability cell remains `None`/empty, `hook_observed` is unearnable in v0.1.0, and unprofiled harnesses stay cooperative-only. |
 | E-014 | Closed by decision — publication-ceremony guidance remains qualitative, informed by bounded dogfood use; no numeric budget or grouping-threshold claim ships, and measurement is required before any later budget claim. |
 | E-015 | Narrowed — `yoetz state capture` ships fail-closed with no advertised capability cells; `support.structural_subject_state_capture` stays `not_yet_evidenced`. |
@@ -213,10 +213,10 @@ for the first release that drops the alpha designation or widens any claim they 
 
 ### Resolved founder and working decisions reflected across the tree
 
-- **v0.1.0 public-alpha reconciliation (2026-08-19):** R-001/R-002 are deferred to the first
+- **v0.1.0 public-alpha reconciliation (2026-08-20):** R-001/R-002 are deferred to the first
   non-alpha release under the binding conditions recorded above; every empirical gate carries a
-  dated disposition in the v0.1.0 disposition table, with E-012 the sole gate still blocking the
-  tag; and `docs/public-claims.json` is reconciled so `evidenced` means the claim has concrete
+  dated disposition in the v0.1.0 disposition table, and none blocks the public-alpha tag;
+  `docs/public-claims.json` is reconciled so `evidenced` means the claim has concrete
   checked-in test or fixture coverage and its non-live suites run in per-PR CI, while the three
   claims whose own wording names missing capability or drill evidence
   (`integration.codex_exact_version_support`,
@@ -238,8 +238,9 @@ for the first release that drops the alpha designation or widens any claim they 
 - **F-005:** The official npm Pyright package remains an exactly pinned contributor/CI tool only.
   Node/npm are not Yoetz runtime requirements. The formerly deferred `npx yoetz` launcher is now
   built as its own reviewed distribution surface under ADR-012: a dependency-free delegation-only
-  package at `support/npm-launcher/` pinned to the exact PyPI version, kept deliberately
-  unpublished (`"private": true`) until a separate publication decision.
+  package at `support/npm-launcher/` pinned to the exact PyPI version. The separate publication
+  decision was made for v0.1.0 on 2026-08-20 (issue #366); npm publication follows PyPI inside the
+  protected tag workflow and the downloaded public tarball must match the approved bytes.
 - **F-020 (ADR-012, 2026-07-21):** Founder-authorized first-run setup wizard. `yoetz setup
   run|status` and `yoetz integrate <harness> mcp status|preview|install` automate Codex discovery
   and the runbook's check-then-add MCP registration behind preview→confirm→execute; bare `yoetz`
@@ -252,8 +253,8 @@ for the first release that drops the alpha designation or widens any claim they 
   as fallback; private conduct reports use the same mailbox with a "Code of conduct" subject;
   ordinary support and bug reports use repository issues. The original decision named distinct
   `security@`/`conduct@` routes; the maintainer consolidated to one monitored mailbox for the
-  solo-maintained v0.1 era — the routes may split again without a claim change. E-012 verifies
-  these routes before release rather than treating prose as operational proof.
+  solo-maintained v0.1 era — the routes may split again without a claim change. The v0.1.0 alpha
+  makes no mailbox delivery-time, response-time, availability, or monitored-SLA claim.
 - The persistent per-user local service is in v0.1 and is the sole owner of keys, decrypted state,
   durable writers, privacy policy enforcement, and outbound dispatch. CLI, MCP, and UI are clients.
 - **F-007:** v0.1 keeps vault keys, provider-credential handles, and decrypted state inside the
