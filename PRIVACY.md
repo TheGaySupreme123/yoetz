@@ -209,8 +209,10 @@ independent-review release gates are specified in:
 - [`schemas/privacy/privacy-policy-1.0.0.schema.json`](schemas/privacy/privacy-policy-1.0.0.schema.json)
 - [`docs/OPEN_QUESTIONS.md`](docs/OPEN_QUESTIONS.md)
 
-Until those decisions are ratified and their release evidence passes, public claims remain
-explicitly “not yet evidenced.”
+A claim with concrete checked-in test or fixture coverage is flagged `evidenced` in
+[`docs/public-claims.json`](docs/public-claims.json), with its non-live suites exercised in per-PR
+CI. A claim whose own wording names still-missing capability or drill evidence remains explicitly
+“not yet evidenced” and is not asserted as release evidence.
 
 ## How to inspect or report a privacy problem
 
@@ -223,7 +225,7 @@ receipts, catalog, and policy file are the evidence, and they live on your machi
 
 If you believe Yoetz has disclosed, retained, or logged something these commitments forbid,
 treat it as a security report: use GitHub private vulnerability reporting or email
-`security@yoetz.dev`. Never open a public issue for a report that may itself contain sensitive
+`support@yoetz.dev`. Never open a public issue for a report that may itself contain sensitive
 content. Ordinary non-sensitive questions about privacy behavior belong in repository issues.
 The repository security policy ([`SECURITY.md`](SECURITY.md)) defines the private routes; they are
 verified before any release that advertises them.

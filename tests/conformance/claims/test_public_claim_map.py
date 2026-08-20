@@ -177,6 +177,7 @@ def test_claim_words_do_not_outrun_evidence() -> None:
     assert cast(list[str], assisted_review["tests"]) == [
         "tests/conformance/privacy/test_privacy_profiles.py",
         "tests/subprocess/test_service_lock_and_confidential_unlock.py",
+        "tests/unit/adapters/test_repository_identity.py",
         "tests/unit/privacy/test_policy_and_contracts.py",
     ]
 
@@ -193,9 +194,10 @@ def test_claim_words_do_not_outrun_evidence() -> None:
     ):
         assert phrase in review_loop_statement, phrase
     assert cast(list[str], review_loop["tests"]) == [
-        "tests/capability/test_privacy_provider_and_local_model_profiles.py",
-        "tests/conformance/privacy/test_privacy_profiles.py",
-        "tests/integration/privacy/test_egress_gateway.py",
+        "tests/conformance/honesty/test_adversarial_cases.py",
+        "tests/integration/application/test_check.py",
+        "tests/unit/application/test_semantic_case.py",
+        "tests/unit/application/test_semantic_case_envelope.py",
     ]
     assert set(cast(list[str], review_loop["limitations"])) >= {
         "no_live_repository_or_filesystem_fetch",
@@ -218,6 +220,16 @@ def test_skipped_or_unsupported_claims_are_flagged() -> None:
     statuses = {cast(str, claim["release_status"]) for claim in claims}
     assert statuses
     assert statuses <= _KNOWN_RELEASE_STATUSES
+    pending = {
+        cast(str, claim["claim_id"])
+        for claim in claims
+        if claim["release_status"] == "not_yet_evidenced"
+    }
+    assert pending == {
+        "integration.codex_exact_version_support",
+        "recovery.machine_bound_vs_portable",
+        "support.structural_subject_state_capture",
+    }
 
     for claim in claims:
         claim_id = cast(str, claim["claim_id"])
@@ -228,3 +240,8 @@ def test_skipped_or_unsupported_claims_are_flagged() -> None:
             # test/fixture paths must exist for real once it claims anything stronger.
             for test_path in cast(list[str], claim["tests"]):
                 assert (_REPO_ROOT / test_path).is_file(), (claim_id, test_path)
+            assert any(
+                test_path.startswith(_KNOWN_TEST_PREFIXES)
+                and not test_path.startswith("tests/capability/")
+                for test_path in cast(list[str], claim["tests"])
+            ), claim_id

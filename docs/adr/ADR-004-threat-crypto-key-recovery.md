@@ -2,7 +2,9 @@
 
 **Status:** Founder-directed working decision (2026-07-14). The service-owned trust boundary and
 forbidden secret channels are binding. The concrete cryptographic envelope remains subject to an
-independent threat review before release.
+independent threat review before the first non-alpha release; the v0.1.0 public alpha may ship
+without that review after its remaining release gate closes, by maintainer decision (2026-08-19,
+`docs/OPEN_QUESTIONS.md` R-001 disposition), and no public surface claims a reviewed design.
 **Implemented by:** `docs/adr/ADR-008-local-service-vault-trust-boundary.md`,
 `src/yoetz/service/vault.py`, `src/yoetz/service/unlock.py`,
 `src/yoetz/ports/keys.py`, the key adapters, and the key-recovery runbook.

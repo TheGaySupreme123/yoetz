@@ -102,24 +102,29 @@ See [Architecture](docs/architecture.md).
 - [Architecture](docs/architecture.md) — topology, module map, honesty rules.
 - [`docs/adr/`](docs/adr/) — architecture decisions; the top authority for public behavior.
 - [`docs/INTERFACES.md`](docs/INTERFACES.md) — shared names, types, ports, trust boundaries.
-- [`docs/OPEN_QUESTIONS.md`](docs/OPEN_QUESTIONS.md) — decisions taken, and the gates still open
-  before release claims can strengthen.
+- [`docs/OPEN_QUESTIONS.md`](docs/OPEN_QUESTIONS.md) — the decision ledger: every decision taken,
+  each release gate's dated disposition, and what evidence a stronger claim would need.
 - [`docs/`](docs/) — full index, including protocol pages and runbooks.
 
 ## Status
 
-v0.1, pre-release; the first release will be a **public alpha**. Every public claim in
-[`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in evidence and is
-currently flagged `not_yet_evidenced` — no release has shipped, so no release-gated claim is
-asserted. Every reviewed provider preset resolves to a real runtime factory, so a preset you can
-select is a preset Yoetz can dispatch — but none of the non-official presets has recorded live
-evidence yet, so none is claimed as a confirmed working endpoint. That claim stays gated by the
-capability evidence described in [ADR-006](docs/adr/ADR-006-semantic-provider-profile.md).
+v0.1.0 is intended to ship as a **public alpha** after the remaining release gate closes. Every
+public claim in [`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in
+evidence: a claim flagged `evidenced` has concrete test or fixture coverage, with its non-live
+suites exercised in per-PR CI; a claim whose own wording names still-missing capability or drill
+evidence stays `not_yet_evidenced` and is not asserted as release evidence. Every reviewed provider
+preset resolves to a real runtime
+factory, so a preset you can select is a preset Yoetz can dispatch — but none of the non-official
+presets has recorded live evidence yet, so none is claimed as a confirmed working endpoint. That
+claim stays gated by the capability evidence described in
+[ADR-006](docs/adr/ADR-006-semantic-provider-profile.md).
 
 Two independent threat reviews — of the key hierarchy and recovery design, and of the service,
-credential, and egress boundaries — are open release gates and have **not** been completed. Codex
-integration likewise ships with an empty tested-version set, so it is recorded as untested rather
-than supported. `docs/OPEN_QUESTIONS.md` is the full list of what still gates a stronger claim.
+credential, and egress boundaries — have **not** been completed; they are deferred to the first
+non-alpha release by dated maintainer decision, so v0.1.0 claims no independently reviewed design.
+Codex integration likewise ships with an empty tested-version set, so it is recorded as untested
+rather than supported. `docs/OPEN_QUESTIONS.md` records every gate disposition and what still
+gates a stronger claim.
 
 ## Contributing
 
@@ -129,8 +134,8 @@ code-review agents — before merge. See [`CONTRIBUTING.md`](CONTRIBUTING.md) an
 [`AGENTS.md`](AGENTS.md).
 
 - Bugs and change requests: GitHub issues (use the forms; blank issues are disabled).
-- Security: [`SECURITY.md`](SECURITY.md) — private vulnerability reporting or `security@yoetz.dev`.
-- Conduct: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — `conduct@yoetz.dev`.
+- Security: [`SECURITY.md`](SECURITY.md) — private vulnerability reporting or `support@yoetz.dev`.
+- Conduct: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — `support@yoetz.dev`.
 
 Private strategy and architecture drafting inputs under `docs/architecture/` are intentionally
 gitignored. The public ADRs, docs, code, and tests must remain self-contained without them.
