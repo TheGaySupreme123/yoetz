@@ -247,8 +247,9 @@ jobs:
         id: digest
         run: |
           set -euo pipefail
-          digest=$(find "${{ runner.temp }}/dist" -type f -name '*.whl' -o -type f -name '*.tar.gz' \
-            | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+          (cd "${{ runner.temp }}/dist" && sha256sum ./*.whl ./*.tar.gz > SHA256SUMS)
+          (cd "${{ runner.temp }}/dist" && sha256sum --check SHA256SUMS)
+          digest=$(sha256sum "${{ runner.temp }}/dist/SHA256SUMS" | cut -d' ' -f1)
           uv run --locked python -c "
           import json, platform
           json.dump({
@@ -261,8 +262,6 @@ jobs:
               'python': '3.14.6',
           }, open('${{ runner.temp }}/dist/candidate.json', 'w'), indent=2)
           "
-          sha256sum "${{ runner.temp }}"/dist/*.whl "${{ runner.temp }}"/dist/*.tar.gz \
-            > "${{ runner.temp }}/dist/SHA256SUMS"
           echo "value=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance for the immutable candidate artifacts
@@ -367,7 +366,7 @@ jobs:
           set -euo pipefail
           tgz="${{ runner.temp }}/npm-dist/yoetz-${{ needs.validate-release-source.outputs.version }}.tgz"
           digest=$(sha256sum "$tgz" | cut -d' ' -f1)
-          sha256sum "$tgz" > "${{ runner.temp }}/npm-dist/NPM_SHA256SUMS"
+          (cd "${{ runner.temp }}/npm-dist" && sha256sum "$(basename "$tgz")" > NPM_SHA256SUMS)
           python3 - <<PY
           import json
           import os
@@ -428,10 +427,16 @@ jobs:
       - name: Verify candidate digest before use
         run: |
           set -euo pipefail
-          digest=$(find "${{ runner.temp }}/dist" -type f -name '*.whl' -o -type f -name '*.tar.gz' \
-            | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+          (cd "${{ runner.temp }}/dist" && sha256sum --check SHA256SUMS)
+          digest=$(sha256sum "${{ runner.temp }}/dist/SHA256SUMS" | cut -d' ' -f1)
           [ "$digest" = "${{ needs.build-candidate.outputs.candidate-digest }}" ] || \
             { echo "::error::downloaded candidate digest mismatch"; exit 1; }
+
+      - name: Install the enforcing Linux check sandbox backend
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          bwrap --version
 
       - name: Install candidate outside checkout; assert OS/CPU/ABI/filesystem/Python/APSW/SQLite identity
         run: |
@@ -450,10 +455,7 @@ jobs:
 
       - name: version/startup, resource/schema/migration identity, strict-local six operations, MCP/CLI subprocess
         run: |
-          iso="${RUNNER_TEMP}/yoetz-home"
-          mkdir -p "$iso"
-          export HOME="$iso" XDG_DATA_HOME="$iso/.local/share" XDG_CONFIG_HOME="$iso/.config" \
-                 XDG_CACHE_HOME="$iso/.cache" YOETZ_DENY_NETWORK=1 \
+          export YOETZ_DENY_NETWORK=1 \
                  YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python"
           "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
           uv sync --locked --group dev
@@ -507,8 +509,8 @@ jobs:
       - name: Verify candidate digest before use
         run: |
           set -euo pipefail
-          digest=$(find "${{ runner.temp }}/dist" -type f -name '*.whl' -o -type f -name '*.tar.gz' \
-            | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+          (cd "${{ runner.temp }}/dist" && sha256sum --check SHA256SUMS)
+          digest=$(sha256sum "${{ runner.temp }}/dist/SHA256SUMS" | cut -d' ' -f1)
           [ "$digest" = "${{ needs.build-candidate.outputs.candidate-digest }}" ] || \
             { echo "::error::downloaded candidate digest mismatch"; exit 1; }
 
@@ -529,10 +531,7 @@ jobs:
 
       - name: version/startup, resource/schema/migration identity, strict-local six operations, MCP/CLI subprocess
         run: |
-          iso="${RUNNER_TEMP}/yoetz-home"
-          mkdir -p "$iso"
-          export HOME="$iso" XDG_DATA_HOME="$iso/.local/share" XDG_CONFIG_HOME="$iso/.config" \
-                 XDG_CACHE_HOME="$iso/.cache" YOETZ_DENY_NETWORK=1 \
+          export YOETZ_DENY_NETWORK=1 \
                  YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python"
           "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
           uv sync --locked --group dev
@@ -754,8 +753,8 @@ jobs:
       - name: Verify candidate digest before publication
         run: |
           set -euo pipefail
-          digest=$(find "${{ runner.temp }}/dist" -type f -name '*.whl' -o -type f -name '*.tar.gz' \
-            | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+          (cd "${{ runner.temp }}/dist" && sha256sum --check SHA256SUMS)
+          digest=$(sha256sum "${{ runner.temp }}/dist/SHA256SUMS" | cut -d' ' -f1)
           [ "$digest" = "${{ needs.build-candidate.outputs.candidate-digest }}" ] || \
             { echo "::error::candidate digest mismatch before publish"; exit 1; }
 

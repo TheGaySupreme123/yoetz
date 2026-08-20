@@ -103,25 +103,27 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Download release-supplied candidate artifact (call mode only)
-        if: github.event_name == 'workflow_call'
+        if: inputs.candidate-digest != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ inputs.candidate-artifact-name }}
           path: ${{ runner.temp }}/dist
 
       - name: Build exactly one clean candidate (dispatch/schedule mode only)
-        if: github.event_name != 'workflow_call'
+        if: inputs.candidate-digest == ''
         run: |
           uv sync --locked --all-extras --group dev
           rm -rf "${{ runner.temp }}/export"
           git worktree add --detach "${{ runner.temp }}/export" HEAD
           (cd "${{ runner.temp }}/export" && uv build --no-sources --out-dir "${{ runner.temp }}/dist")
+          (cd "${{ runner.temp }}/dist" && sha256sum ./*.whl ./*.tar.gz > SHA256SUMS)
 
       - name: Record and verify package/resource/commit digest
         id: digest
         run: |
           set -euo pipefail
-          digest=$(find "${{ runner.temp }}/dist" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+          (cd "${{ runner.temp }}/dist" && sha256sum --check SHA256SUMS)
+          digest=$(sha256sum "${{ runner.temp }}/dist/SHA256SUMS" | cut -d' ' -f1)
           if [ -n "${{ inputs.candidate-digest }}" ] && [ "${{ inputs.candidate-digest }}" != "$digest" ]; then
             echo "::error::built/consumed artifact digest does not match the supplied candidate-digest"
             exit 1
