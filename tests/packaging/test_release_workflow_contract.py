@@ -7,6 +7,11 @@ from typing import Final
 
 _ROOT: Final = Path(__file__).resolve().parents[2]
 _WORKFLOW: Final = _ROOT / ".github" / "workflows" / "release.yml"
+_REUSABLE_WORKFLOWS: Final = (
+    _ROOT / ".github" / "workflows" / "capability.yml",
+    _ROOT / ".github" / "workflows" / "nightly-fault.yml",
+    _ROOT / ".github" / "workflows" / "security-privacy.yml",
+)
 
 
 def test_dry_run_retains_builder_backed_release_evidence_bundle() -> None:
@@ -106,3 +111,55 @@ def test_tag_workflow_rejects_missing_or_drifted_hosted_schema_bytes() -> None:
     assert "curl --fail --silent --show-error --location" in verify
     assert "cmp -s" in verify
     assert "|| true" not in verify
+
+
+def test_candidate_digest_is_path_independent_and_checksum_backed() -> None:
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    build = workflow.split("  build-candidate:\n", 1)[1].split(
+        "  # ---------------------------------------------------------------------------------------------\n  # build-npm-launcher",
+        1,
+    )[0]
+
+    assert "sha256sum ./*.whl ./*.tar.gz > SHA256SUMS" in build
+    assert "sha256sum --check SHA256SUMS" in build
+    assert 'sha256sum "${{ runner.temp }}/dist/SHA256SUMS"' in build
+    assert 'find "${{ runner.temp }}/dist"' not in build
+
+
+def test_reusable_release_workflows_select_supplied_artifacts_by_input() -> None:
+    for path in _REUSABLE_WORKFLOWS:
+        workflow = path.read_text(encoding="utf-8")
+        assert "github.event_name == 'workflow_call'" not in workflow
+        assert "github.event_name != 'workflow_call'" not in workflow
+        assert "if: inputs.candidate-digest != ''" in workflow
+        assert "if: inputs.candidate-digest == ''" in workflow
+
+
+def test_workflows_do_not_declare_step_level_permissions() -> None:
+    for path in (_WORKFLOW, *_REUSABLE_WORKFLOWS):
+        assert "\n        permissions:\n" not in path.read_text(encoding="utf-8")
+
+
+def test_empty_soak_selection_is_disclosed_without_claiming_coverage() -> None:
+    workflow = (_ROOT / ".github" / "workflows" / "nightly-fault.yml").read_text(encoding="utf-8")
+
+    assert "No soak-marked replay/resource tests are checked in" in workflow
+    assert "no 1M-entry coverage is claimed" in workflow
+    assert '"soak_coverage": os.environ.get(' in workflow
+
+
+def test_platform_verifiers_preserve_short_runner_home_and_install_linux_sandbox() -> None:
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    linux = workflow.split("  verify-linux-x86_64:\n", 1)[1].split(
+        "  # ---------------------------------------------------------------------------------------------\n  # verify-macos-arm64",
+        1,
+    )[0]
+    macos = workflow.split("  verify-macos-arm64:\n", 1)[1].split(
+        "  # ---------------------------------------------------------------------------------------------\n  # fault-release-profile",
+        1,
+    )[0]
+
+    assert "sudo apt-get install --yes bubblewrap" in linux
+    assert "bwrap --version" in linux
+    assert 'export HOME="${RUNNER_TEMP}/yoetz-home"' not in linux
+    assert 'export HOME="${RUNNER_TEMP}/yoetz-home"' not in macos

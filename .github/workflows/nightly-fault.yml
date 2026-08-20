@@ -95,14 +95,14 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Download release-supplied candidate artifact (call mode only)
-        if: github.event_name == 'workflow_call'
+        if: inputs.candidate-digest != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ inputs.candidate-artifact-name }}
           path: ${{ runner.temp }}/dist
 
       - name: Build one clean candidate (scheduled/manual source mode only)
-        if: github.event_name != 'workflow_call'
+        if: inputs.candidate-digest == ''
         run: |
           uv sync --locked --all-extras --group dev
           rm -rf "${{ runner.temp }}/export"
@@ -198,14 +198,14 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Download release-supplied candidate artifact (call mode only)
-        if: github.event_name == 'workflow_call'
+        if: inputs.candidate-digest != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ inputs.candidate-artifact-name }}
           path: ${{ runner.temp }}/dist
 
       - name: Build one clean candidate (scheduled/manual source mode only)
-        if: github.event_name != 'workflow_call'
+        if: inputs.candidate-digest == ''
         run: |
           uv sync --locked --all-extras --group dev
           rm -rf "${{ runner.temp }}/export"
@@ -365,14 +365,14 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Download release-supplied candidate artifact (call mode only)
-        if: github.event_name == 'workflow_call'
+        if: inputs.candidate-digest != ''
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ inputs.candidate-artifact-name }}
           path: ${{ runner.temp }}/dist
 
       - name: Build one clean candidate (scheduled/manual source mode only)
-        if: github.event_name != 'workflow_call'
+        if: inputs.candidate-digest == ''
         run: |
           uv sync --locked --all-extras --group dev
           rm -rf "${{ runner.temp }}/export"
@@ -401,15 +401,26 @@ jobs:
             -k "replay or resource or scale" \
             -m "not soak and not live" -q --timeout=1800
 
-      # TODO(wave-f): soak-marked cases are not checked in yet; marker is registered in
-      # pyproject.toml so --strict-markers collection succeeds. Until soak tests exist this
-      # step exits pytest code 5 (no tests collected) when the release/Sunday branch runs.
-      - name: 1M-entry replay/resource probe (release profile, and designated weekly cadence)
+      - name: Run checked-in soak replay/resource probes when present
         if: inputs.profile == 'release' || github.event.schedule == '37 4 * * 0'
         run: |
+          set +e
           uv run --locked pytest tests/integration/storage \
-            -k "replay or resource or scale" \
-            -m "soak" -q --timeout=5400
+            -k "replay or resource or scale" -m "soak" \
+            --collect-only -q > "${RUNNER_TEMP}/soak-collection.txt"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            uv run --locked pytest tests/integration/storage \
+              -k "replay or resource or scale" -m "soak" -q --timeout=5400
+            echo "SOAK_COVERAGE=present-and-passed" >> "$GITHUB_ENV"
+          elif [ "$status" -eq 5 ]; then
+            echo "::notice::No soak-marked replay/resource tests are checked in; no 1M-entry coverage is claimed."
+            echo "SOAK_COVERAGE=not-checked-in" >> "$GITHUB_ENV"
+          else
+            cat "${RUNNER_TEMP}/soak-collection.txt"
+            exit "$status"
+          fi
 
       - name: Latency/RSS/WAL-growth/checkpoint/backup-restore time budgets
         run: |
@@ -418,21 +429,41 @@ jobs:
             -m "not soak and not live" -q --timeout=1800
 
       - name: Redact and produce canonical replay-and-resource evidence
-        if: always()
+        env:
+          CANDIDATE_DIGEST: ${{ inputs.candidate-digest || 'source-build-not-bound' }}
+          RELEASE_PROFILE: ${{ inputs.profile || 'standard' }}
         run: |
           mkdir -p "${RUNNER_TEMP}/evidence"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw_digest = os.environ["CANDIDATE_DIGEST"]
+          candidate_digest = (
+              f"sha256:{raw_digest}" if len(raw_digest) == 64 else raw_digest
+          )
+          evidence = {
+              "candidate_artifact_digest": candidate_digest,
+              "non_soak_replay_resource": "passed",
+              "profile": os.environ["RELEASE_PROFILE"],
+              "resource_budgets": "passed",
+              "soak_coverage": os.environ.get("SOAK_COVERAGE", "not-requested"),
+          }
+          path = Path(os.environ["RUNNER_TEMP"]) / "evidence" / "replay-and-resource.json"
+          path.write_text(json.dumps(evidence, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
           uv run --locked python scripts/scan_public_boundary.py \
             --source-tree "${RUNNER_TEMP}/evidence" \
-            --evidence-dir "${RUNNER_TEMP}/evidence-scanned" || true
+            --evidence-dir "${RUNNER_TEMP}/evidence-scanned"
 
       - name: Upload redacted evidence
-        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-replay-and-resource
           path: ${{ runner.temp }}/evidence-scanned
           retention-days: 10
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------------------------
   # nightly-evidence
@@ -466,17 +497,64 @@ jobs:
           path: ${{ runner.temp }}/evidence
           merge-multiple: false
 
-      - name: Verify completeness and candidate equality; produce nightly manifest
+      - name: Record exact job coverage and produce the nightly manifest
         id: manifest
+        env:
+          CANDIDATE_DIGEST: ${{ inputs.candidate-digest || 'source-build-not-bound' }}
+          FAULT_LINUX_RESULT: ${{ needs.fault-matrix-linux.result }}
+          FAULT_MACOS_RESULT: ${{ needs.fault-matrix-macos.result }}
+          PROFILE: ${{ inputs.profile || 'standard' }}
+          PROPERTY_RESULT: ${{ needs.property-state-machine.result }}
+          REPLAY_RESULT: ${{ needs.replay-and-resource.result }}
         run: |
           set -euo pipefail
-          digest=$(find "${{ runner.temp }}/evidence" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+          mkdir -p "${{ runner.temp }}/evidence"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "evidence"
+          downloaded = sorted(
+              path.relative_to(root).as_posix()
+              for path in root.rglob("*")
+              if path.is_file()
+          )
+          raw_digest = os.environ["CANDIDATE_DIGEST"]
+          candidate_digest = (
+              f"sha256:{raw_digest}" if len(raw_digest) == 64 else raw_digest
+          )
+          manifest = {
+              "candidate_artifact_digest": candidate_digest,
+              "downloaded_evidence_files": downloaded,
+              "jobs": {
+                  "fault-matrix-linux": os.environ["FAULT_LINUX_RESULT"],
+                  "fault-matrix-macos": os.environ["FAULT_MACOS_RESULT"],
+                  "property-state-machine": os.environ["PROPERTY_RESULT"],
+                  "replay-and-resource": os.environ["REPLAY_RESULT"],
+              },
+              "profile": os.environ["PROFILE"],
+          }
+          (root / "nightly-manifest.json").write_text(
+              json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          digest=$(sha256sum "${{ runner.temp }}/evidence/nightly-manifest.json" | cut -d' ' -f1)
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           {
             echo "## Nightly Fault and Scale evidence"
             echo "profile: ${{ inputs.profile || 'standard' }}"
             echo "manifest digest: ${digest}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the canonical nightly manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-manifest
+          path: ${{ runner.temp }}/evidence/nightly-manifest.json
+          retention-days: 10
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------------------------
   # nightly-required
