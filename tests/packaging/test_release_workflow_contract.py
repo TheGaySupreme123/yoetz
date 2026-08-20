@@ -28,6 +28,7 @@ def test_dry_run_retains_builder_backed_release_evidence_bundle() -> None:
     assert "dry-run candidate ${candidate} is not current origin/main ${protected}" in workflow
     assert "scripts/build_release_inputs.py" in assembly
     assert "generate_release_evidence.py" in assembly
+    assert 'mkdir -p "${{ runner.temp }}/release-evidence/${{' not in assembly
     assert 'pattern: "candidate-*,nightly-*,capability-*,security-*"' not in assembly
     assert "python -c" not in assembly
     assert "--candidate-commit" in assembly

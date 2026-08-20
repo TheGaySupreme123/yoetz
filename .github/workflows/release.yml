@@ -688,7 +688,6 @@ jobs:
 
       - name: generate_release_evidence.py --write
         run: |
-          mkdir -p "${{ runner.temp }}/release-evidence/${{ needs.validate-release-source.outputs.version }}"
           uv run --locked python scripts/generate_release_evidence.py \
             --input-manifest "${{ runner.temp }}/release-inputs.json" \
             --output-dir "${{ runner.temp }}/release-evidence/${{ needs.validate-release-source.outputs.version }}" --write
