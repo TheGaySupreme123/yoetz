@@ -159,6 +159,24 @@ def test_post_publication_smoke_uses_python314_and_reinstalls_the_approved_wheel
     assert '--no-index --no-deps --find-links "${{ runner.temp }}/published"' in verify
 
 
+def test_release_bundle_carries_the_scanned_cyclonedx_sbom_into_github_assets() -> None:
+    workflow = _WORKFLOW.read_text(encoding="utf-8")
+    assemble = workflow.split("  assemble-release-evidence:\n", 1)[1].split(
+        "  # ---------------------------------------------------------------------------------------------\n  # approve-publication",
+        1,
+    )[0]
+    publish = workflow.split("  publish-github-release:\n", 1)[1].split(
+        "  # ---------------------------------------------------------------------------------------------\n  # verify-schema-site",
+        1,
+    )[0]
+
+    assert "name: security-dependency-evidence" in assemble
+    assert 'source="${{ runner.temp }}/inputs/security-dependency-evidence/sbom.cdx.json"' in assemble
+    assert "yoetz-${{ needs.validate-release-source.outputs.version }}.sbom.cdx.json" in assemble
+    assert "Public-boundary scan the assembled evidence" in assemble
+    assert "${{ runner.temp }}/release-assets/**/*.json" in publish
+
+
 def test_candidate_digest_is_path_independent_and_checksum_backed() -> None:
     workflow = _WORKFLOW.read_text(encoding="utf-8")
     build = workflow.split("  build-candidate:\n", 1)[1].split(
