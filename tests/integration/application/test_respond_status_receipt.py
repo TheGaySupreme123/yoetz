@@ -8,16 +8,20 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Literal, cast
 
+import apsw
 import pydantic
 import pytest
 
-from builders.ledger_adapters import ownership_fence
+from builders.ledger_adapters import FixedIds, MemoryObjects, ownership_fence
 from builders.start_application import (
     MemoryStartRuntime,
+    StartTestClock,
     protocol_id,
     start_composition,
     start_request,
 )
+from yoetz.adapters.sqlite.migrations import initialize_bundle
+from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.observation_materialize import observation_author
@@ -25,10 +29,15 @@ from yoetz.application.service import Application, VerificationPolicy
 from yoetz.application.start import StartInternalResult
 from yoetz.domain.events import (
     EVIDENCE_SCHEMA_VERSION,
+    ActionKind,
+    ActionRecordedPayload,
+    DecisionRecordedPayload,
     EventDraft,
     EventSchema,
     EvidenceKind,
     EvidenceRecordedPayload,
+    ResultOutcome,
+    ResultRecordedPayload,
     RuntimeProfile,
     encode_payload,
     media_type_for,
@@ -57,19 +66,23 @@ from yoetz.domain.privacy import (
 from yoetz.domain.receipts import PolicyVersionEntry, ReceiptVersionSlice, SchemaVersionEntry
 from yoetz.domain.values import (
     Frontier,
+    action_id,
     event_id,
     evidence_id,
     finding_id,
+    result_id,
     session_id,
     timestamp_from_datetime,
 )
+from yoetz.kernel.receipt_capacity import receipt_gap_codes
+from yoetz.kernel.reducers import replay
 from yoetz.mcp.summaries import summary_for_status
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import AppendCommand, AppendEntry, CheckCommitResult, OperationKind
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
-from yoetz.ports.runtime import BundleRuntimePort, RouteCommand, TaskRuntime
+from yoetz.ports.runtime import BundleProvisionCommand, BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.ports.semantic import SamplingParams, SemanticJudgment
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.coverage import (
@@ -116,6 +129,60 @@ class _WorkflowRuntime(MemoryStartRuntime):
     """Extend the START memory composition with ready writer routing (mirrors the full-workflow
     integration harness; duplicated here rather than imported since test modules are not a shared
     library and this file may not modify that sibling)."""
+
+    def __init__(
+        self,
+        clock: StartTestClock,
+        ids: FixedIds,
+        *,
+        ledger_backend: Literal["memory", "sqlite"] = "memory",
+    ) -> None:
+        super().__init__(clock, ids)
+        self.ledger_backend = ledger_backend
+        self.sqlite_connections: list[apsw.Connection] = []
+
+    async def provision_start(self, command: BundleProvisionCommand) -> TaskRuntime:
+        if self.ledger_backend == "memory":
+            return await super().provision_start(command)
+        resources = self.resources.get(command.task_id)
+        if resources is None:
+            objects = MemoryObjects(self.ids)
+            db = apsw.Connection(":memory:")
+            initialize_bundle(
+                db,
+                {
+                    "task_id": command.task_id,
+                    "owner_generation": str(command.owner_generation),
+                    "owner_nonce": "ledger-test-nonce",
+                },
+            )
+            ledger = SqliteLedger(
+                db=db,
+                task_id=command.task_id,
+                ownership_fence=ownership_fence(generation=command.owner_generation),
+                clock=self.clock,
+                ids=self.ids,
+                objects=objects,
+            )
+            resources = (ledger, objects)  # type: ignore[assignment]
+            self.resources[command.task_id] = resources  # type: ignore[assignment]
+            self.sqlite_connections.append(db)
+        ledger, objects = resources
+        self.owners[(command.session_id, command.writer_id)] = command.owner_generation
+        return TaskRuntime(
+            command.task_id,
+            command.session_id,
+            command.writer_id,
+            frozenset(),
+            ledger,
+            objects,
+            cast(ImporterPort, object()),
+            command.projection_version,
+            command.engine_version,
+            command.protocol_version,
+            command.bundle_schema_version,
+            ownership_fence(generation=command.owner_generation),
+        )
 
     async def route(self, command: RouteCommand) -> TaskRuntime:
         assert command.writer_id is not None
@@ -301,11 +368,12 @@ def _build_app(
     waiver_authorizer: Callable[[RespondRequest], bool] | None = None,
     seed_offset: int = 0,
     semantic: Literal["disabled", "optional"] = "disabled",
+    ledger_backend: Literal["memory", "sqlite"] = "memory",
 ) -> tuple[Application, _WorkflowRuntime, _ProjectionSpy]:
     start_app, start_runtime, clock, catalog = start_composition()
     projection = _ProjectionSpy()
     ids = start_runtime.ids
-    runtime = _WorkflowRuntime(clock, ids)
+    runtime = _WorkflowRuntime(clock, ids, ledger_backend=ledger_backend)
     app = Application(
         start_catalog=catalog.delegate,
         publish_responses=cast(PublishResponseCatalogPort, catalog.delegate),
@@ -1874,6 +1942,94 @@ async def _drain_observation_record(
     )
 
 
+async def _drain_observation_work_sequence(
+    app: Application,
+    runtime: _WorkflowRuntime,
+    started: StartInternalResult,
+    *,
+    seed: int,
+    expected_frontier: int,
+):
+    """Append a non-empty hook-observed action/result/decision suffix like issue #361."""
+
+    ledger, objects = next(iter(runtime.resources.values()))
+    now = app.clock.now_utc()
+    observed_action_id = action_id(protocol_id("act_", seed))
+    payloads: tuple[
+        tuple[str, ActionRecordedPayload | ResultRecordedPayload | DecisionRecordedPayload], ...
+    ] = (
+        (
+            "action_recorded",
+            ActionRecordedPayload(
+                observed_action_id,
+                ActionKind.OTHER,
+                "Hook observed a completed tool action.",
+            ),
+        ),
+        (
+            "result_recorded",
+            ResultRecordedPayload(
+                result_id(protocol_id("res_", seed + 1)),
+                observed_action_id,
+                ResultOutcome.SUCCESS,
+                summary="The observed tool action completed.",
+            ),
+        ),
+        (
+            "decision_recorded",
+            DecisionRecordedPayload(
+                "Observation delivery completed.",
+                "The hook grouped the observed action and result.",
+                observation_author().actor_id,
+            ),
+        ),
+    )
+    entries: list[AppendEntry] = []
+    for offset, (schema_name, payload) in enumerate(payloads):
+        encoded = canonical_encode(encode_payload(payload))
+        metadata = ObjectMetadata(
+            ObjectKind.EVENT_PAYLOAD, media_type_for(schema_name), started.task_id, now
+        )
+        staged = await objects.stage(
+            ObjectSource(data=encoded, declared_size=len(encoded)), metadata
+        )
+        payload_ref = await objects.finalize(staged)
+        entries.append(
+            AppendEntry(
+                EventDraft(
+                    event_id(protocol_id("evt_", seed + 10 + offset)),
+                    EventSchema(schema_name, "1.0.0"),
+                    timestamp_from_datetime(now),
+                    (),
+                    payload,
+                    (),
+                    (),
+                ),
+                observation_author(),
+                payload_ref,
+                payload_ref.commitment,
+                metadata.media_type,
+                payload_ref.plaintext_size,
+                PublicationChannel.HOOK_OBSERVED,
+                coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+                "projected",
+            )
+        )
+    return await ledger.append_batch(
+        AppendCommand(
+            started.task_id,
+            started.session_id,
+            started.writer_id,
+            protocol_id("req_", seed + 20),
+            OperationKind.PUBLISH_WORK,
+            _DIGEST,
+            expected_frontier,
+            tuple(entries),
+            None,
+        )
+    )
+
+
 def _drained_finding(subject_event_id: str, frontier: Frontier, seed: int) -> Finding:
     kind = FindingKind.LEDGER_STALE_OR_INCOMPLETE
     return Finding(
@@ -1974,6 +2130,123 @@ async def test_receipt_tolerates_observation_only_drain() -> None:
     assert receipt.result_frontier.sequence == second.result_frontier.sequence + 1
     # The pinned case is the same truth an undrained receipt would have documented.
     assert receipt.conclusion == "unresolved_findings_remain"
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_finding_free_observation_work_keeps_check_applicable(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #361: delivered hook work is observation, not untested cooperative work.
+
+    Exercise both public receipt construction and append-time capacity over the memory oracle and
+    durable SQLite implementation. The suffix deliberately has more than one record and uses the
+    action/result/decision families from the live occurrence.
+    """
+
+    app, runtime, _ = _build_app(seed_offset=28, ledger_backend=ledger_backend)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=3700)
+    finding = checked.findings[0]
+    responded = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 3710)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(checked.result_frontier),
+                "disposition": "acknowledged",
+            }
+        )
+    )
+    observed = await _drain_observation_work_sequence(
+        app,
+        runtime,
+        started,
+        seed=3720,
+        expected_frontier=responded.result_frontier.sequence,
+    )
+
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([record async for record in ledger.load_events(started.session_id)])
+    projection = replay(records)
+    capacity_gaps = receipt_gap_codes(projection, records)
+    assert "check_not_applicable" not in capacity_gaps
+    assert "check_current_as_of_earlier_frontier" in capacity_gaps
+
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 3740)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    compact = cast(StatusCompactPageModel, status.page)
+    assert CheckType.DETERMINISTIC in compact.items[0].coverage.check_types
+    assert compact.items[0].freshness != LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE.value
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 3750)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(observed.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert "check_not_applicable" not in receipt.coverage.known_gaps
+    assert "check_current_as_of_earlier_frontier" in receipt.coverage.known_gaps
+    assert CheckType.DETERMINISTIC in receipt.coverage.check_types
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_observation_finding_still_invalidates_check(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #361 positive control: a hook-observed finding remains uncovered new truth."""
+
+    app, runtime, _ = _build_app(seed_offset=29, ledger_backend=ledger_backend)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=3800)
+    drained = await _drain_observation_record(
+        app,
+        runtime,
+        started,
+        seed=3810,
+        expected_frontier=checked.result_frontier.sequence,
+        finding=_drained_finding(
+            protocol_id("evt_", 3802),
+            Frontier(int(checked.result_frontier.sequence), checked.result_frontier.head_digest),
+            3815,
+        ),
+    )
+    ledger, _objects = next(iter(runtime.resources.values()))
+    records = tuple([record async for record in ledger.load_events(started.session_id)])
+    assert "check_not_applicable" in receipt_gap_codes(replay(records), records)
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 3820)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(drained.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert "check_not_applicable" in receipt.coverage.known_gaps
 
 
 async def test_receipt_conflict_on_drained_finding_carries_repair_facts_and_converges() -> None:

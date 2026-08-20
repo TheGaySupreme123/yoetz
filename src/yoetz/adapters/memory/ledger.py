@@ -722,7 +722,8 @@ def compact_status_coverage(
     The newest record's envelope (often an engine-derived ``receipt_recorded``) hardcodes
     ``check_types=(none,)`` even immediately after a rich check; the check's real coverage
     lives in its payload. The receipt applicability rule decides whether the projected latest
-    check still covers this state: it does unless material work superseded it.
+    check still covers this state: it does unless cooperative material work or an observation
+    finding superseded it.
 
     Shared by the memory status view and the durable SQLite ``p1_projection_state`` mirror so
     a restart cannot disagree with the in-process projection about what was checked, and it uses
