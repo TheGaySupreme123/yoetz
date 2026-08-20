@@ -1,4 +1,4 @@
-"""npm launcher: publish-ready shape, delegation-only behavior, unpublished guarantee."""
+"""npm launcher: public package shape and delegation-only behavior."""
 
 from __future__ import annotations
 
@@ -20,13 +20,19 @@ def _package() -> dict[str, object]:
 def test_package_shape_is_delegation_only() -> None:
     package = _package()
     assert package["name"] == "yoetz"
-    # The load-bearing "not published yet" guarantee: npm publish refuses it.
-    assert package["private"] is True
+    assert package["private"] is False
     assert package["bin"] == {"yoetz": "./bin/yoetz.js"}
     # No runtime dependencies: the launcher may never bundle or fetch code itself.
     for forbidden in ("dependencies", "devDependencies", "optionalDependencies", "scripts"):
         assert forbidden not in package, forbidden
     assert package["license"] == "Apache-2.0"
+    assert package["homepage"] == "https://yoetz.dev"
+    assert package["repository"] == {
+        "type": "git",
+        "url": "git+https://github.com/TheGaySupreme123/yoetz.git",
+    }
+    assert package["bugs"] == {"url": "https://github.com/TheGaySupreme123/yoetz/issues"}
+    assert package["publishConfig"] == {"access": "public"}
 
 
 def test_version_stays_in_lockstep_with_the_python_distribution() -> None:

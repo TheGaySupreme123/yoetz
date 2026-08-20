@@ -1,6 +1,6 @@
 # yoetz npm launcher
 
-This package is a **delegation launcher only**. `npx yoetz` (once published) runs the exact
+This package is a **delegation launcher only**. `npx yoetz` runs the exact
 pinned Python distribution `yoetz==<this package's version>` through
 [`uv`](https://docs.astral.sh/uv/), which must already be installed. The launcher:
 
@@ -25,9 +25,14 @@ The packaging contract forbids bootstrapping a runtime from here, so the launche
 It prints what is missing, the platform-appropriate install command, and the fact that it
 installs nothing itself — then exits 1 without running anything.
 
-## Publication status
+## Publication and provenance
 
-**This package is deliberately unpublished.** `"private": true` in `package.json` makes
-`npm publish` refuse it. Publishing is a separate, deliberate release decision recorded in
-ADR-012: flip `private` to `false`, verify the registry name, and follow the ordinary release
-review — never publish as a side effect of another change.
+The v0.1.0 maintainer decision publishes this launcher as the public `yoetz` package. The tagged
+release workflow builds its tarball once, records its SHA-256, publishes the exact tarball through
+npm trusted publishing only after the matching `yoetz==0.1.0` Python distribution is live, and
+downloads it back for byte comparison. npm's package provenance binds the public tarball to that
+GitHub Actions workflow.
+
+The launcher remains only a delegator. npm installation does not install Python, `uv`, Yoetz's
+Python code, or any runtime dependency; it selects the same exact-version PyPI distribution that
+the release workflow already published and verified.

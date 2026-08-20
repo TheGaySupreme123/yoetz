@@ -214,14 +214,15 @@ availability, structured-output interoperability, provider data use, or E-007 ca
    or presented as an installation. macOS and Windows therefore combine app and CLI installations;
    Linux uses the identical selection flow for the official CLI surfaces that actually exist.
 
-6. **The npm launcher exists, publish-ready and deliberately unpublished (amends ADR-007
-   decision 7).** `support/npm-launcher/` contains a dependency-free `package.json` (registry name
+6. **The npm launcher is a protected public distribution surface (amends ADR-007 decision 7).**
+   `support/npm-launcher/` contains a dependency-free `package.json` (registry name
    `yoetz`, version locked to the PyPI version) and `bin/yoetz.js`, which requires `uv` on PATH
    (printing install guidance and exiting nonzero otherwise) and delegates to
    `uvx yoetz==<version>` with untouched arguments and the child's exact exit code. It bundles no
    Python, downloads nothing itself, and duplicates no wizard logic — first-run behavior lives
-   once, in the Python CLI. `"private": true` is the load-bearing unpublished guarantee; flipping
-   it is a separate deliberate release decision with its own review, never a side effect.
+   once, in the Python CLI. The separate deliberate release decision was made for v0.1.0 on
+   2026-08-20 (issue #366): the tagged workflow publishes the exact prebuilt npm tarball only after
+   matching PyPI publication, using npm trusted publishing and post-publication byte verification.
 
 7. **The confidential boundaries remain exact.** The wizard never accepts a secret by flag,
    ordinary stdin, environment, config, report, or MCP. A local interactive run may enter the

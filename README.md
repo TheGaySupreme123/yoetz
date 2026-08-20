@@ -18,8 +18,15 @@ uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
 yoetz
 ```
 
-The supported install path is Python via [`uv`](https://docs.astral.sh/uv/); `uvx yoetz` works for a
-one-off run.
+Or, with `uv` already installed:
+
+```text
+npx yoetz
+```
+
+The canonical distribution is Python via [`uv`](https://docs.astral.sh/uv/); `uvx yoetz` works for
+a one-off run. The dependency-free npm package is only a launcher for the exact matching Python
+distribution. It bundles no Python or Yoetz code and never installs `uv` itself.
 
 `yoetz` at a terminal opens a full-screen interface, and the first run walks setup inside it:
 what was detected, whether you trust this project, the exact proposed change, and an explicit
@@ -108,7 +115,7 @@ See [Architecture](docs/architecture.md).
 
 ## Status
 
-v0.1.0 is intended to ship as a **public alpha** after the remaining release gate closes. Every
+v0.1.0 is the first **public alpha**. Every
 public claim in [`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in
 evidence: a claim flagged `evidenced` has concrete test or fixture coverage, with its non-live
 suites exercised in per-PR CI; a claim whose own wording names still-missing capability or drill

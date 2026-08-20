@@ -4,10 +4,10 @@ All notable user-visible changes to Yoetz are documented in this file. Format is
 project-native heading style that marks the pending version as unreleased above
 reverse-chronological released versions.
 
-## 0.1.0 — Public alpha (unreleased)
+## 0.1.0 — Public alpha (2026-08-20)
 
-Planned initial public alpha release. No version has shipped before it, so every entry below
-describes behavior intended for the first release rather than a change from a previous release.
+Initial public alpha release. The earlier 0.0.1 registry packages only reserved the project name
+and contained no usable Yoetz implementation.
 
 ### Added
 
@@ -124,7 +124,8 @@ describes behavior intended for the first release rather than a change from a pr
   flip configuration or Codex activation silently. Initial consumers cover observation enablement,
   Codex plugin activation, and the existing policy-gated PyPI update advisory. The durable
   `update_checks` channel remains the only update-check flag, accepts only bounded package identity,
-  and never auto-upgrades; Yoetz has no npm update check because it ships only on PyPI.
+  and never auto-upgrades; Yoetz has no npm update check because the npm package delegates to the
+  canonical exact-version PyPI distribution.
 
 - Typed evidence digest provenance (`evidence_recorded/1.1.0`) records the exact closed byte
   subject, availability, byte count, and authority that established each new digest. Kind/subject
@@ -266,9 +267,9 @@ describes behavior intended for the first release rather than a change from a pr
   hand-derive action/result/evidence/claim shapes from a large `oneOf`. `check`, `respond`, and
   `receipt` carry worked examples too.
 
-- Publish-ready npm launcher at `support/npm-launcher/` for a future `npx yoetz`: a
-  dependency-free delegator to the exact pinned `uvx yoetz==<version>`, kept deliberately
-  unpublished (`"private": true`) until a separate release decision. It propagates signal
+- Public npm launcher at `support/npm-launcher/` for `npx yoetz`: a dependency-free delegator to
+  the exact pinned `uvx yoetz==<version>`, published only after the matching Python artifact by the
+  protected tagged workflow. It propagates signal
   termination as the conventional `128+n` exit code and gives actionable, platform-specific
   guidance when `uv` is absent; it installs nothing, bundles nothing, and duplicates no setup or
   interface logic.

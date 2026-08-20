@@ -10,6 +10,16 @@ readme = "README.md"
 requires-python = ">=3.14,<3.15"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+authors = [{ name = "Shay Ben Shabtay" }]
+keywords = ["agents", "evidence", "local-first", "mcp", "verification"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
 dependencies = [
     "anyio==4.14.2",
     "apsw==3.53.3.1",
@@ -40,6 +50,13 @@ semantic-openai = [
 
 [project.scripts]
 yoetz = "yoetz.cli.entry:main"
+
+[project.urls]
+Homepage = "https://yoetz.dev"
+Documentation = "https://github.com/TheGaySupreme123/yoetz/tree/main/docs"
+Repository = "https://github.com/TheGaySupreme123/yoetz"
+Issues = "https://github.com/TheGaySupreme123/yoetz/issues"
+Changelog = "https://github.com/TheGaySupreme123/yoetz/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [

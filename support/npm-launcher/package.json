@@ -2,8 +2,20 @@
   "name": "yoetz",
   "version": "0.1.0",
   "description": "Delegation launcher for the Python yoetz distribution via uv. Installs nothing itself.",
-  "private": true,
+  "private": false,
   "license": "Apache-2.0",
+  "author": "Shay Ben Shabtay",
+  "homepage": "https://yoetz.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheGaySupreme123/yoetz.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TheGaySupreme123/yoetz/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "yoetz": "./bin/yoetz.js"
   },
