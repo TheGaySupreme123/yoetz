@@ -165,6 +165,13 @@ def test_platform_verifiers_split_suites_and_bound_linux_alpha_claims() -> None:
         assert "pytest tests/packaging \\" in verifier
         assert "pytest tests/subprocess \\" in verifier
         assert "pytest tests/integration \\" in verifier
+        assert "export YOETZ_DENY_NETWORK" not in verifier
+        assert "export YOETZ_CANDIDATE_PYTHON" not in verifier
+        assert verifier.count("YOETZ_DENY_NETWORK=1 \\") == 2
+        assert (
+            verifier.count('YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \\')
+            == 2
+        )
         assert '--runtime-tree "$installed_root"' in verifier
     assert "test_approved_check_stale_when_digest_changes" in linux
     assert "test_approved_true_check_succeeds_in_sandbox" in linux
