@@ -1141,16 +1141,30 @@ jobs:
           curl -sL -o "${{ runner.temp }}/hosted-manifest.json" https://schemas.yoetz.dev/0.1/manifest.json
           cmp -s "${{ runner.temp }}/hosted-manifest.json" "${{ runner.temp }}/candidate/../schemas/manifest.json" 2>/dev/null || true
 
-      - name: Install with network denied from the captured wheelhouse; run version --json and strict-local smoke
+      - name: Install the locked uv release tool
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          enable-cache: false
+
+      - name: Capture runtime dependencies; reinstall the public wheel with the index denied; run smoke
         run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          export PATH="$HOME/.local/bin:$PATH"
-          uv venv "${{ runner.temp }}/published-venv"
+          set -euo pipefail
+          version="${{ needs.validate-release-source.outputs.version }}"
+          venv="${{ runner.temp }}/published-venv"
+          wheel="${{ runner.temp }}/published/yoetz-${version}-py3-none-any.whl"
+          [ -f "$wheel" ] || { echo "::error::published wheel is missing: $wheel"; exit 1; }
+          uv python install 3.14
+          uv venv --python 3.14 "$venv"
+          # Resolve the wheel's pinned runtime dependencies while the registry is available, then
+          # remove Yoetz so the actual smoke installation is forced through the captured public wheel.
+          uv pip install --python "$venv/bin/python" "$wheel"
+          uv pip uninstall --python "$venv/bin/python" yoetz
           uv pip install --python "${{ runner.temp }}/published-venv/bin/python" \
-            --no-index --find-links "${{ runner.temp }}/published" \
-            "yoetz==${{ needs.validate-release-source.outputs.version }}"
-          "${{ runner.temp }}/published-venv/bin/yoetz" version --json
-          "${{ runner.temp }}/published-venv/bin/python" -c "import yoetz"
+            --no-index --no-deps --find-links "${{ runner.temp }}/published" \
+            "yoetz==${version}"
+          "$venv/bin/yoetz" version --json
+          "$venv/bin/python" -c "import yoetz"
 
   # ---------------------------------------------------------------------------------------------
   # verify-npm-published
