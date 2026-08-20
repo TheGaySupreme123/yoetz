@@ -133,8 +133,8 @@ code-review agents — before merge. See [`CONTRIBUTING.md`](CONTRIBUTING.md) an
 [`AGENTS.md`](AGENTS.md).
 
 - Bugs and change requests: GitHub issues (use the forms; blank issues are disabled).
-- Security: [`SECURITY.md`](SECURITY.md) — private vulnerability reporting or `security@yoetz.dev`.
-- Conduct: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — `conduct@yoetz.dev`.
+- Security: [`SECURITY.md`](SECURITY.md) — private vulnerability reporting or `support@yoetz.dev`.
+- Conduct: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — `support@yoetz.dev`.
 
 Private strategy and architecture drafting inputs under `docs/architecture/` are intentionally
 gitignored. The public ADRs, docs, code, and tests must remain self-contained without them.

@@ -225,7 +225,7 @@ receipts, catalog, and policy file are the evidence, and they live on your machi
 
 If you believe Yoetz has disclosed, retained, or logged something these commitments forbid,
 treat it as a security report: use GitHub private vulnerability reporting or email
-`security@yoetz.dev`. Never open a public issue for a report that may itself contain sensitive
+`support@yoetz.dev`. Never open a public issue for a report that may itself contain sensitive
 content. Ordinary non-sensitive questions about privacy behavior belong in repository issues.
 The repository security policy ([`SECURITY.md`](SECURITY.md)) defines the private routes; they are
 verified before any release that advertises them.

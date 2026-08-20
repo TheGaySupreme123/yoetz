@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please use [GitHub private vulnerability reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability)
-on this repository. If that is not available to you, email **security@yoetz.dev** as a maintained
+on this repository. If that is not available to you, email **support@yoetz.dev** as a maintained
 fallback.
 
 Please include:

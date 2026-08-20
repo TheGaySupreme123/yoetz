@@ -64,8 +64,9 @@ Not every conflict represents a code of conduct violation, and this Code of Cond
 encouraged behaviors and norms that can help avoid conflicts and minimize harm.
 
 When an incident does occur, it is important to report it promptly. To report a possible violation,
-email **conduct@yoetz.dev**. This address is private, is separate from the security-vulnerability
-intake in [`SECURITY.md`](SECURITY.md), and is not a public issue tracker.
+email **support@yoetz.dev** with "Code of conduct" in the subject line. This address is private
+and is not a public issue tracker; it is the same maintained maintainer mailbox that serves as the
+security fallback in [`SECURITY.md`](SECURITY.md).
 
 Community Moderators take reports of violations seriously and will make every effort to respond in a
 timely manner. They will investigate all reports of code of conduct violations, reviewing messages,
