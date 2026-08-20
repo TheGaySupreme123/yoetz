@@ -193,10 +193,11 @@ def test_platform_verifiers_split_suites_and_bound_linux_alpha_claims() -> None:
     assert 'export HOME="${RUNNER_TEMP}/yoetz-home"' not in macos
     for verifier in (linux, macos):
         assert "uv run --locked pytest tests/packaging \\" in verifier
-        assert "uv run --locked env \\" in verifier
-        assert "UV_NO_INDEX=true \\" in verifier
+        assert 'tagged_uv_wrapper="${{ runner.temp }}/tagged-uv-bin"' in verifier
+        assert 'exec "${YOETZ_REAL_UV:?}" pip install --no-index "$@"' in verifier
+        assert 'PATH="$tagged_uv_wrapper:$PATH" \\' in verifier
         assert 'UV_CACHE_DIR="${{ runner.temp }}/tagged-offline-cache" \\' in verifier
-        assert "pytest \\" in verifier
+        assert ".venv/bin/pytest \\" in verifier
         assert verifier.count("test_corrupted_wheel_fails_exact_hash_verification") == 2
         assert verifier.count("test_correct_hash_matching_the_real_wheel_installs_cleanly") == 2
         assert "pytest tests/subprocess \\" in verifier

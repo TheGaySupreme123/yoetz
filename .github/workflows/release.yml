@@ -464,10 +464,23 @@ jobs:
             --deselect tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             --deselect tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -m "not fault and not soak and not live" -q --timeout=900
-          uv run --locked env \
-            UV_NO_INDEX=true \
-            UV_CACHE_DIR="${{ runner.temp }}/tagged-offline-cache" \
-            pytest \
+          real_uv="$(command -v uv)"
+          tagged_uv_wrapper="${{ runner.temp }}/tagged-uv-bin"
+          mkdir -p "$tagged_uv_wrapper"
+          cat > "$tagged_uv_wrapper/uv" <<'UV_WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "${1:-}" == "pip" && "${2:-}" == "install" ]]; then
+            shift 2
+            exec "${YOETZ_REAL_UV:?}" pip install --no-index "$@"
+          fi
+          exec "${YOETZ_REAL_UV:?}" "$@"
+          UV_WRAPPER
+          chmod +x "$tagged_uv_wrapper/uv"
+          YOETZ_REAL_UV="$real_uv" \
+          PATH="$tagged_uv_wrapper:$PATH" \
+          UV_CACHE_DIR="${{ runner.temp }}/tagged-offline-cache" \
+            .venv/bin/pytest \
             tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -q --timeout=900
@@ -561,10 +574,23 @@ jobs:
             --deselect tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             --deselect tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -m "not fault and not soak and not live" -q --timeout=900
-          uv run --locked env \
-            UV_NO_INDEX=true \
-            UV_CACHE_DIR="${{ runner.temp }}/tagged-offline-cache" \
-            pytest \
+          real_uv="$(command -v uv)"
+          tagged_uv_wrapper="${{ runner.temp }}/tagged-uv-bin"
+          mkdir -p "$tagged_uv_wrapper"
+          cat > "$tagged_uv_wrapper/uv" <<'UV_WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "${1:-}" == "pip" && "${2:-}" == "install" ]]; then
+            shift 2
+            exec "${YOETZ_REAL_UV:?}" pip install --no-index "$@"
+          fi
+          exec "${YOETZ_REAL_UV:?}" "$@"
+          UV_WRAPPER
+          chmod +x "$tagged_uv_wrapper/uv"
+          YOETZ_REAL_UV="$real_uv" \
+          PATH="$tagged_uv_wrapper:$PATH" \
+          UV_CACHE_DIR="${{ runner.temp }}/tagged-offline-cache" \
+            .venv/bin/pytest \
             tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -q --timeout=900
