@@ -187,6 +187,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      id-token: write
+      attestations: write
     outputs:
       candidate-digest: ${{ steps.digest.outputs.value }}
       artifact-name: candidate-${{ needs.validate-release-source.outputs.version }}
@@ -267,9 +269,6 @@ jobs:
         if: github.event_name == 'push'
         id: attest
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
-        permissions:
-          id-token: write
-          attestations: write
         with:
           subject-path: "${{ runner.temp }}/dist/*.whl,${{ runner.temp }}/dist/*.tar.gz"
 
