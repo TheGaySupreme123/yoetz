@@ -14,6 +14,10 @@
       "description": "Startup safety validation and 'yoetz version --json' are available; the public 'yoetz doctor' command is deferred to v0.2."
     },
     {
+      "code": "linux_approved_command_sandbox_unavailable",
+      "description": "On Linux v0.1, approved external-command checks fail closed because the bubblewrap launch profile is not release-certified. Ledger operations and Yoetz's built-in deterministic checks remain available; no external command is reported as checked when the sandbox cannot enforce its boundary."
+    },
+    {
       "code": "open_questions_ledger_not_automatically_enforced",
       "description": "The E-001 through E-016 and R-001/R-002 decision ledger remains an owner-reviewed release record; this evidence bundle does not claim that every ledger item is automatically represented or enforced."
     }

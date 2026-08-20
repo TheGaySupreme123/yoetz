@@ -314,12 +314,6 @@ jobs:
             -m "not fault and not soak and not live and not live_provider and not live_keyring" \
             -q --timeout=900
 
-      - name: Keyring disposable test namespace probe (delete after use)
-        run: |
-          uv run --locked pytest tests/unit/adapters -k "keyring or key_backend" \
-            -m "not fault and not soak and not live and not live_provider and not live_keyring" \
-            -q --timeout=300
-
       - name: Redact and upload platform-key-matrix CapabilityEvidence
         if: always()
         run: |
@@ -530,7 +524,6 @@ jobs:
           pattern: capability-evidence-*
           path: ${{ runner.temp }}/capability-evidence
           merge-multiple: true
-          if-no-files-found: ignore
 
       - name: Run generate_capability_matrix.py against reviewed policy
         run: |
@@ -547,7 +540,7 @@ jobs:
       - name: Scan public capability-matrix.json/.md before upload
         run: |
           uv run --locked python scripts/scan_public_boundary.py \
-            --source-tree "${{ runner.temp }}/release-evidence"
+            --evidence-dir "${{ runner.temp }}/release-evidence"
 
       - name: Digest and expose the aggregated capability manifest
         id: aggregate

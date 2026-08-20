@@ -428,7 +428,7 @@ jobs:
             -k "latency or budget or checkpoint or backup" \
             -m "not soak and not live" -q --timeout=1800
 
-      - name: Redact and produce canonical replay-and-resource evidence
+      - name: Produce and scan canonical replay-and-resource evidence
         env:
           CANDIDATE_DIGEST: ${{ inputs.candidate-digest || 'source-build-not-bound' }}
           RELEASE_PROFILE: ${{ inputs.profile || 'standard' }}
@@ -454,14 +454,13 @@ jobs:
           path.write_text(json.dumps(evidence, sort_keys=True, separators=(",", ":")) + "\n")
           PY
           uv run --locked python scripts/scan_public_boundary.py \
-            --source-tree "${RUNNER_TEMP}/evidence" \
-            --evidence-dir "${RUNNER_TEMP}/evidence-scanned"
+            --evidence-dir "${RUNNER_TEMP}/evidence"
 
-      - name: Upload redacted evidence
+      - name: Upload scanned evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-replay-and-resource
-          path: ${{ runner.temp }}/evidence-scanned
+          path: ${{ runner.temp }}/evidence
           retention-days: 10
           if-no-files-found: error
 
