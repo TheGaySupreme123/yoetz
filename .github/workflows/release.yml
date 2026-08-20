@@ -464,7 +464,10 @@ jobs:
             --deselect tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             --deselect tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -m "not fault and not soak and not live" -q --timeout=900
-          uv run --locked env UV_NO_INDEX=1 pytest \
+          uv run --locked env \
+            UV_NO_INDEX=true \
+            UV_CACHE_DIR="${{ runner.temp }}/tagged-offline-cache" \
+            pytest \
             tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -q --timeout=900
@@ -558,7 +561,10 @@ jobs:
             --deselect tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             --deselect tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -m "not fault and not soak and not live" -q --timeout=900
-          uv run --locked env UV_NO_INDEX=1 pytest \
+          uv run --locked env \
+            UV_NO_INDEX=true \
+            UV_CACHE_DIR="${{ runner.temp }}/tagged-offline-cache" \
+            pytest \
             tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
             tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -q --timeout=900
