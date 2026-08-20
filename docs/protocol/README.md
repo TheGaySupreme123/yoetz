@@ -141,7 +141,9 @@ No disposition resolves the finding: a provenance dispute contests its authorshi
 premise, while a waiver is scoped, has an expiry, and requires explicit interactive human
 confirmation. Waiver is unavailable to an MCP caller, importer, or noninteractive client. A
 response is history, never deletion: the original finding remains in the ledger. Any material
-change or a new response requires a recheck before a receipt can rely on the updated disposition.
+change requires a recheck before a receipt can rely on the updated disposition. A readable response
+to a finding returned by the current check does not require one; a redacted or unreadable response
+does.
 
 `Coverage` has six dimensions: `publication_channels` (a set drawn from `cooperative_mcp`,
 `local_cli`, `codex_jsonl_import`, `hook_observed`, `engine_derived`, `human_import`),
@@ -189,11 +191,12 @@ A minimal, honest client workflow:
 4. If multiple writers contribute (e.g. a subagent), each uses its own writer identity from its own
    `start` attach.
 5. After a resume, call `status` to re-ground before publishing more work.
-6. Run `check` at the current frontier.
-7. `respond` to any findings honestly (acknowledge, reject with evidence, or waive with an
+6. Publish the intended completion `claim_recorded` and current evidence.
+7. Run `check` at the current frontier.
+8. `respond` to any findings honestly (acknowledge, reject with evidence, or waive with an
    interactive human confirmation).
-8. Recheck after any material change or response.
-9. Once satisfied, publish a completion `claim_recorded`.
+9. Recheck after any material change. A readable response to a finding returned by that check
+   needs no recheck; a redacted or unreadable response does.
 10. Call `receipt` for the frontier-bound final wording — and only assert what the receipt's
     coverage actually supports.
 

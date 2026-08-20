@@ -130,7 +130,7 @@ standalone Codex CLI and does not fabricate an app installation that OpenAI does
 
 Re-run any time with `yoetz setup run` (the prompt-driven wizard, unchanged) or `/connect` in the
 interface. Change privacy any time with `yoetz --privacy`. Inspect posture read-only with
-`yoetz setup status`. Manage registration directly with `yoetz integrate mcp
+`yoetz setup status`. Manage registration directly with `yoetz integrate codex mcp
 status|preview|install`.
 
 ## Re-run or repair a ceremony
