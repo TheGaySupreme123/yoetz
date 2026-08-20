@@ -460,7 +460,7 @@ jobs:
         run: |
           "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
           uv sync --locked --group dev
-          uv run --locked pytest tests/packaging \
+          UV_NO_INDEX=1 uv run --locked pytest tests/packaging \
             -m "not fault and not soak and not live" -q --timeout=900
           YOETZ_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
@@ -548,7 +548,7 @@ jobs:
         run: |
           "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
           uv sync --locked --group dev
-          uv run --locked pytest tests/packaging \
+          UV_NO_INDEX=1 uv run --locked pytest tests/packaging \
             -m "not fault and not soak and not live" -q --timeout=900
           YOETZ_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
