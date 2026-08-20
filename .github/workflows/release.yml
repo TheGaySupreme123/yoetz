@@ -460,8 +460,14 @@ jobs:
         run: |
           "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
           uv sync --locked --group dev
-          UV_NO_INDEX=1 uv run --locked pytest tests/packaging \
+          uv run --locked pytest tests/packaging \
+            --deselect tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
+            --deselect tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -m "not fault and not soak and not live" -q --timeout=900
+          uv run --locked env UV_NO_INDEX=1 pytest \
+            tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
+            tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
+            -q --timeout=900
           YOETZ_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
             uv run --locked pytest tests/subprocess \
@@ -548,8 +554,14 @@ jobs:
         run: |
           "${{ runner.temp }}/verify-venv/bin/yoetz" version --json
           uv sync --locked --group dev
-          UV_NO_INDEX=1 uv run --locked pytest tests/packaging \
+          uv run --locked pytest tests/packaging \
+            --deselect tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
+            --deselect tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
             -m "not fault and not soak and not live" -q --timeout=900
+          uv run --locked env UV_NO_INDEX=1 pytest \
+            tests/packaging/test_offline_reinstall.py::test_corrupted_wheel_fails_exact_hash_verification_before_any_install \
+            tests/packaging/test_offline_reinstall.py::test_correct_hash_matching_the_real_wheel_installs_cleanly \
+            -q --timeout=900
           YOETZ_DENY_NETWORK=1 \
           YOETZ_CANDIDATE_PYTHON="${{ runner.temp }}/verify-venv/bin/python" \
             uv run --locked pytest tests/subprocess \
