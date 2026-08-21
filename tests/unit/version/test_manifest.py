@@ -49,7 +49,7 @@ def test_development_manifest_is_truthful_and_complete() -> None:
 def test_version_json_allows_installed_sdk_with_empty_tested_protocol_set() -> None:
     rendered = version_manifest_json(build_version_manifest())
     document = json.loads(rendered)
-    schema = json.loads(Path("schemas/version/version-manifest-1.0.0.schema.json").read_text())
+    schema = json.loads(Path("schemas/version/version-manifest-2.0.0.schema.json").read_text())
 
     assert document["mcp_sdk_version"]["status"] == "present"
     assert document["mcp_protocol_supported"] == []

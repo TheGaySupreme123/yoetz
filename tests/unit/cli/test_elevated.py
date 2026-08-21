@@ -217,7 +217,7 @@ def test_chat_user_authorize_consumes_exact_provider_request_and_wipes_input(
     assert observed == [b"chat-secret"]
     assert result["authority_channel"] == "agent_attested_chat_instruction"
     assert result["outcome"] == "completed"
-    validate_schema_instance("review-result", "3.0.0", result)
+    validate_schema_instance("review-result", "4.0.0", result)
     assert load_pending(_state=tmp_path) is None
     assert "chat-secret" not in json.dumps(result)
 
@@ -494,10 +494,10 @@ def test_catalog_and_prepare_are_agent_safe(tmp_path: Path) -> None:
     with _patch_state(tmp_path):
         catalog = cast(dict[str, Any], elevated.catalog_elevated())
         prepared = cast(dict[str, Any], elevated.prepare_elevated("vault_initialize"))
-    assert catalog["schema"] == "yoetz.consent.catalog/3"
-    assert prepared["schema"] == "yoetz.elevated-bootstrap.prepare-result/3"
+    assert catalog["schema"] == "yoetz.consent.catalog/4"
+    assert prepared["schema"] == "yoetz.elevated-bootstrap.prepare-result/4"
     assert prepared["pending"]["review_command"] == ["yoetz", "consent", "review"]
-    validate_schema_instance("prepare-result", "3.0.0", prepared)
+    validate_schema_instance("prepare-result", "4.0.0", prepared)
     rendered = json.dumps({"catalog": catalog, "prepared": prepared})
     for forbidden in (
         "approve_command",
@@ -554,7 +554,7 @@ def test_review_result_binds_operation_outcome_and_result_in_model_and_schema(
     result: dict[str, object],
 ) -> None:
     payload = {
-        "schema": "yoetz.elevated-bootstrap.result/3",
+        "schema": "yoetz.elevated-bootstrap.result/4",
         "pending_id": "a" * 64,
         "operation": operation,
         "risk_class": risk_class,
@@ -566,7 +566,7 @@ def test_review_result_binds_operation_outcome_and_result_in_model_and_schema(
     with pytest.raises(ValidationError):
         ConsentReviewResultModel.model_validate(payload)
     with pytest.raises(SchemaInstanceInvalid):
-        validate_schema_instance("review-result", "3.0.0", cast(Any, payload))
+        validate_schema_instance("review-result", "4.0.0", cast(Any, payload))
 
 
 def test_review_approval_consumes_pending_and_returns_no_secret(tmp_path: Path) -> None:
@@ -586,9 +586,9 @@ def test_review_approval_consumes_pending_and_returns_no_secret(tmp_path: Path) 
                 return cast(dict[str, Any], await elevated.review_elevated())
 
     result = anyio.run(run)
-    assert result["schema"] == "yoetz.elevated-bootstrap.result/3"
+    assert result["schema"] == "yoetz.elevated-bootstrap.result/4"
     assert result["outcome"] == "completed"
-    validate_schema_instance("review-result", "3.0.0", result)
+    validate_schema_instance("review-result", "4.0.0", result)
     assert load_pending(_state=tmp_path) is None
     assert "human-entered-secret" not in json.dumps(result)
 

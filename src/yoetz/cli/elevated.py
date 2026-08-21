@@ -85,7 +85,7 @@ def prepare_elevated(
     )
     model = ConsentPrepareResultModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.prepare-result/3",
+            "schema": "yoetz.elevated-bootstrap.prepare-result/4",
             "pending": projection_for_status(pending),
         }
     )
@@ -120,7 +120,7 @@ def _review_result(
 ) -> dict[str, JsonValue]:
     model = ConsentReviewResultModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.result/3",
+            "schema": "yoetz.elevated-bootstrap.result/4",
             "pending_id": pending.pending_id,
             "operation": pending.operation,
             "risk_class": pending.risk_class,

@@ -941,7 +941,7 @@ def projection_for_status(
     if pending is None:
         return None
     model = AgentSafePendingModel(
-        schema="yoetz.consent.pending-agent/3",
+        schema="yoetz.consent.pending-agent/4",
         operation=pending.operation,
         risk_class=pending.risk_class,
         pending_id=pending.pending_id,
@@ -1000,7 +1000,7 @@ def catalog_payload() -> dict[str, JsonValue]:
         )
     model = ConsentCatalogModel.model_validate(
         {
-            "schema": "yoetz.consent.catalog/3",
+            "schema": "yoetz.consent.catalog/4",
             "default_safe": [
                 "mcp.start",
                 "mcp.publish_work",
@@ -1035,7 +1035,7 @@ def catalog_payload() -> dict[str, JsonValue]:
 def status_payload(*, _state: Path | None = None) -> dict[str, JsonValue]:
     model = ConsentStatusModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.status/3",
+            "schema": "yoetz.elevated-bootstrap.status/4",
             "pending": projection_for_status(load_pending(_state=_state)),
             "consent_catalog": catalog_payload(),
         }

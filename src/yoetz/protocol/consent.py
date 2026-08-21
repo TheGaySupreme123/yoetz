@@ -50,7 +50,7 @@ class _ClosedModel(BaseModel):
 
 
 class AgentSafePendingModel(_ClosedModel):
-    schema_: Literal["yoetz.consent.pending-agent/3"] = Field(alias="schema")
+    schema_: Literal["yoetz.consent.pending-agent/4"] = Field(alias="schema")
     operation: ConsentOperation
     risk_class: RiskClass
     pending_id: PendingId
@@ -107,7 +107,7 @@ class ConsentRulesModel(_ClosedModel):
 
 
 class ConsentCatalogModel(_ClosedModel):
-    schema_: Literal["yoetz.consent.catalog/3"] = Field(alias="schema")
+    schema_: Literal["yoetz.consent.catalog/4"] = Field(alias="schema")
     default_safe: tuple[
         Literal["mcp.start"],
         Literal["mcp.publish_work"],
@@ -127,13 +127,13 @@ class ConsentCatalogModel(_ClosedModel):
 
 
 class ConsentStatusModel(_ClosedModel):
-    schema_: Literal["yoetz.elevated-bootstrap.status/3"] = Field(alias="schema")
+    schema_: Literal["yoetz.elevated-bootstrap.status/4"] = Field(alias="schema")
     pending: AgentSafePendingModel | None
     consent_catalog: ConsentCatalogModel
 
 
 class ConsentPrepareResultModel(_ClosedModel):
-    schema_: Literal["yoetz.elevated-bootstrap.prepare-result/3"] = Field(alias="schema")
+    schema_: Literal["yoetz.elevated-bootstrap.prepare-result/4"] = Field(alias="schema")
     pending: AgentSafePendingModel
 
 
@@ -295,7 +295,7 @@ class ConsentReviewResultModel(_ClosedModel):
         },
     )
 
-    schema_: Literal["yoetz.elevated-bootstrap.result/3"] = Field(alias="schema")
+    schema_: Literal["yoetz.elevated-bootstrap.result/4"] = Field(alias="schema")
     pending_id: PendingId
     operation: ConsentOperation
     risk_class: RiskClass

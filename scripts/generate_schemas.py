@@ -156,7 +156,10 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 
     from yoetz.version import build_version_manifest
 
-    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas/version/version-manifest-1.0.0.schema.json"
+    )
     try:
         document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
         definitions = cast(dict[str, JsonValue], document["$defs"])
@@ -224,6 +227,9 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     resources["maxItems"] = total
     resources["oneOf"] = [{"maxItems": 0}, {"maxItems": total, "minItems": total}]
     properties = cast(dict[str, JsonValue], document["properties"])
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = f"Yoetz version manifest {entry.schema_version}"
+    properties["schema_version"] = {"const": entry.schema_version}
     for field_name in (
         "application_id",
         "bundle_schema_version",
@@ -1229,6 +1235,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "3.0.0",
         "request_result",
         "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/catalog-4.0.0.schema.json",
+        "catalog",
+        "4.0.0",
+        "request_result",
+        "local-control",
         lambda: (
             __import__(
                 "yoetz.protocol.consent", fromlist=["ConsentCatalogModel"]
@@ -1261,6 +1275,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "3.0.0",
         "request_result",
         "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/pending-agent-4.0.0.schema.json",
+        "pending-agent",
+        "4.0.0",
+        "request_result",
+        "local-control",
         lambda: (
             __import__(
                 "yoetz.protocol.consent", fromlist=["AgentSafePendingModel"]
@@ -1279,6 +1301,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "consent/prepare-result-3.0.0.schema.json",
         "prepare-result",
         "3.0.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/prepare-result-4.0.0.schema.json",
+        "prepare-result",
+        "4.0.0",
         "request_result",
         "local-control",
         lambda: (
@@ -1301,6 +1331,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "3.0.0",
         "request_result",
         "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/review-result-4.0.0.schema.json",
+        "review-result",
+        "4.0.0",
+        "request_result",
+        "local-control",
         lambda: (
             __import__(
                 "yoetz.protocol.consent", fromlist=["ConsentReviewResultModel"]
@@ -1319,6 +1357,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "consent/status-3.0.0.schema.json",
         "status",
         "3.0.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/status-4.0.0.schema.json",
+        "status",
+        "4.0.0",
         "request_result",
         "local-control",
         lambda: (
@@ -1847,6 +1893,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "1.0.0",
         "version_manifest",
         "version-report",
+        None,
+    ),
+    _RegistryEntry(
+        "version/version-manifest-2.0.0.schema.json",
+        "version-manifest",
+        "2.0.0",
+        "version_manifest",
+        "version-report",
         lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
     ),
 )
@@ -2077,7 +2131,7 @@ def build_schema_documents(
             normalized = _status_result_schema(entry)
         elif entry.relative_path == "receipts/receipt-document-1.0.0.schema.json":
             normalized = _receipt_document_schema(entry)
-        elif entry.relative_path == "version/version-manifest-1.0.0.schema.json":
+        elif entry.relative_path == "version/version-manifest-2.0.0.schema.json":
             normalized = _version_manifest_schema(entry)
         else:
             try:

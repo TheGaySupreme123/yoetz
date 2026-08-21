@@ -37,9 +37,9 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    `implemented=false` cannot be prepared.
 
 2. **Agent-safe contracts.** Catalog, pending projection, prepare result, review result, and status
-   publish current v3 contracts in `schemas/consent/`; the frozen v2 bytes remain shipped for
+   publish current v4 contracts in `schemas/consent/`; the frozen v2 and v3 bytes remain shipped for
    compatibility. They contain no reusable approval value, generated passphrase, or credential.
-   The v3 pending projection includes only a bounded recipe and an authorize command for operations
+   The v4 pending projection includes only a bounded recipe and an authorize command for operations
    that actually support agent-chat authorization.
 
 3. **One pending request.** One owner-only request with a 15-minute TTL may exist. The trusted

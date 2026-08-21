@@ -1844,7 +1844,7 @@ authorization signals.
 
 Elevated consent (`service/elevated_bootstrap.py`, CLI `yoetz consent` /
 `yoetz elevated-bootstrap`) is a separate owner-only pending-file lane outside
-`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/3`) and creates
+`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/4`) and creates
 digest-bound pending records (`yoetz.elevated-bootstrap.pending/2`). The v3 agent-safe projection
 contains only operation, risk class, bounded danger text, exact digests, expiry, pending ID, an
 exact bounded repository recipe when applicable, the fixed `["yoetz","consent","review"]`
@@ -1871,8 +1871,10 @@ unlock an already-locked vault. The six MCP tools (ADR-011) are unchanged; autho
 CLI control.
 
 The current public JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
-`review-result`, and `status`, each at version `3.0.0` under `schemas/consent/`; frozen version
-`2.0.0` bytes remain shipped for compatibility. `yoetz.chat-user-attestation/1` is version 1.0.0.
+`review-result`, and `status`, each at version `4.0.0` under `schemas/consent/`; frozen versions
+`2.0.0` and `3.0.0` remain shipped for compatibility. The current version report is
+`version/version-manifest-2.0.0.schema.json`; its released `1.0.0` predecessor remains byte-frozen.
+`yoetz.chat-user-attestation/1` is version 1.0.0.
 `review_only` irreversible
 operations remain catalogued with `implemented=false` until owning mutation paths consume review.
 The Windows console adapter is a focused boundary implementation, not a claim that the Yoetz

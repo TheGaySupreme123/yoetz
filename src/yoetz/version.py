@@ -62,7 +62,7 @@ PROJECTION_VERSION: Final = "yoetz/0.1.0"
 WORK_INTEGRITY_POLICY_VERSION: Final = "work-integrity/0.1.0"
 RESEARCH_EVIDENCE_POLICY_VERSION: Final = "research-evidence/0.1.0"
 OBJECT_FORMAT_VERSION: Final = "yoetz-object/1"
-CATALOG_SCHEMA_VERSION: Final = "3"
+CATALOG_SCHEMA_VERSION: Final = "4"
 BUNDLE_SCHEMA_VERSION: Final = "2"
 SQLITE_APPLICATION_ID: Final = "0x594F4554"
 
@@ -74,7 +74,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 103
+REVIEWED_RESOURCE_COUNT: Final = 109
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -88,7 +88,7 @@ _RESOURCE_KINDS: Final = frozenset(
 )
 _REQUEST_RESULT_VERSIONS: Final = (
     ("actor-assertion", "1.0.0"),
-    ("catalog", "3.0.0"),
+    ("catalog", "4.0.0"),
     ("chat-user-attestation", "1.0.0"),
     ("check-request", "1.0.0"),
     ("check-result", "1.0.0"),
@@ -103,8 +103,8 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("frontier", "1.0.0"),
     ("operation-result", "1.0.0"),
     ("outbound-case", "1.0.0"),
-    ("pending-agent", "3.0.0"),
-    ("prepare-result", "3.0.0"),
+    ("pending-agent", "4.0.0"),
+    ("prepare-result", "4.0.0"),
     ("privacy-policy", "1.0.0"),
     ("provider-judgment", "1.0.0"),
     ("public-error", "1.0.0"),
@@ -117,13 +117,13 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("receipt-result", "1.0.0"),
     ("respond-request", "1.0.0"),
     ("respond-result", "1.0.0"),
-    ("review-result", "3.0.0"),
+    ("review-result", "4.0.0"),
     ("semantic-provenance", "1.0.0"),
     ("service-status", "1.0.0"),
     ("setup-wizard-contract", "1.0.0"),
     ("start-request", "1.0.0"),
     ("start-result", "1.0.0"),
-    ("status", "3.0.0"),
+    ("status", "4.0.0"),
     ("status-request", "1.0.0"),
     ("status-result", "1.0.0"),
     ("subject-state-ref", "1.0.0"),
@@ -600,7 +600,7 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
     if mcp_version is not None and not cast(list[JsonValue], support["mcp_cells"]):
         limitations = tuple(sorted({*limitations, "mcp_capability_unverified"}, key=str.encode))
     return VersionManifest(
-        schema_version="1.0.0",
+        schema_version="2.0.0",
         package_name="yoetz",
         package_version=_distribution_version("yoetz") or "0.1.0",
         protocol_version=PROTOCOL_VERSION,
