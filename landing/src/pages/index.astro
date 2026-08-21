@@ -1,12 +1,14 @@
 ---
 import "../styles/tokens.css";
 import "../styles/landing.css";
+import landingPackage from "../../package.json";
 
 const SITE = "https://yoetz.dev";
 const GITHUB = "https://github.com/TheGaySupreme123/yoetz";
 const PYPI = "https://pypi.org/project/yoetz/";
 const NPM = "https://www.npmjs.com/package/yoetz";
-const INSTALL_COMMAND = 'uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"';
+const VERSION = landingPackage.version;
+const INSTALL_COMMAND = `uv tool install --managed-python --python 3.14.6 "yoetz==${VERSION}"`;
 const AGENT_PROMPT = `I want to install Yoetz (${GITHUB}). Start by fetching its agent install guide and follow it exactly:
 
 curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md
@@ -23,7 +25,7 @@ const structuredData = {
   url: SITE,
   codeRepository: GITHUB,
   programmingLanguage: "Python",
-  version: "0.1.0",
+  version: VERSION,
   license: "https://www.apache.org/licenses/LICENSE-2.0",
 };
 
@@ -277,7 +279,7 @@ const coming = [
     <script type="application/ld+json" set:html={JSON.stringify(structuredData)} />
     <noscript>
       <style>
-        .how-step { opacity: 1; transform: none; }
+        html .fl-phase { opacity: 1; transform: none; }
         .term-body .tl[hidden] { display: block; }
       </style>
     </noscript>
@@ -306,11 +308,11 @@ const coming = [
             machine today; a hosted option is coming.
           </p>
           <div class="hero-installers">
-            <div class="inst-tabs" aria-label="Install options">
+            <div class="inst-tabs" role="group" aria-label="Install options">
               <button class="inst-tab active" type="button" data-key="pypi" aria-pressed="true">Install with PyPI</button>
               <button class="inst-tab" type="button" data-key="npm" aria-pressed="false">Install with npm</button>
               <button class="inst-tab agent" type="button" id="agent-copy" data-command={AGENT_PROMPT}>
-                <span id="agent-copy-label">Set up with your agent</span> <span class="rec">recommended</span>
+                <span id="agent-copy-label" role="status" aria-live="polite">Set up with your agent</span> <span class="rec">recommended</span>
               </button>
             </div>
 
@@ -319,7 +321,7 @@ const coming = [
                 <span class="prompt">$</span>
                 <span class="cmd-text">{INSTALL_COMMAND}</span>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
-                <span class="copy-note"></span>
+                <span class="copy-note" role="status" aria-live="polite"></span>
               </button>
               <p class="inst-note">
                 Once installed, just write <code>yoetz</code> in your terminal: a full-screen,
@@ -332,7 +334,7 @@ const coming = [
                 <span class="prompt">$</span>
                 <span class="cmd-text">npx yoetz</span>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
-                <span class="copy-note"></span>
+                <span class="copy-note" role="status" aria-live="polite"></span>
               </button>
               <p class="inst-note">
                 Needs <a href="https://docs.astral.sh/uv/" target="_blank" rel="noopener">uv</a>{" "}
@@ -358,7 +360,7 @@ const coming = [
             <span class="term-title">{termScripts[0].title}</span>
             <span class="term-pill">yoetz · local</span>
           </div>
-          <div class="term-body" id="term">
+          <div class="term-body" id="term" aria-hidden="true">
             {termLines.map((ln) =>
               ln.pre || ln.op || ln.rest ? (
                 <div
@@ -627,14 +629,20 @@ const coming = [
       // --- Copy: agent setup prompt ---
       const agentBtn = document.getElementById("agent-copy");
       const agentLabel = document.getElementById("agent-copy-label");
+      const agentDefaultLabel = agentLabel?.textContent ?? "";
       let agentTimer: ReturnType<typeof setTimeout>;
-      agentBtn?.addEventListener("click", () => {
-        navigator.clipboard?.writeText(agentBtn.dataset.command ?? "").catch(() => {});
+      agentBtn?.addEventListener("click", async () => {
+        if (!navigator.clipboard) return;
+        try {
+          await navigator.clipboard.writeText(agentBtn.dataset.command ?? "");
+        } catch {
+          return;
+        }
         if (agentLabel) agentLabel.textContent = "Copied to your clipboard";
         agentBtn.classList.add("copied");
         clearTimeout(agentTimer);
         agentTimer = setTimeout(() => {
-          if (agentLabel) agentLabel.textContent = "Set up with your agent";
+          if (agentLabel) agentLabel.textContent = agentDefaultLabel;
           agentBtn.classList.remove("copied");
         }, 2000);
       });
@@ -643,8 +651,13 @@ const coming = [
       for (const btn of document.querySelectorAll<HTMLButtonElement>(".inst-cmd")) {
         const note = btn.querySelector<HTMLElement>(".copy-note");
         let t: ReturnType<typeof setTimeout>;
-        btn.addEventListener("click", () => {
-          navigator.clipboard?.writeText(btn.dataset.command ?? "").catch(() => {});
+        btn.addEventListener("click", async () => {
+          if (!navigator.clipboard) return;
+          try {
+            await navigator.clipboard.writeText(btn.dataset.command ?? "");
+          } catch {
+            return;
+          }
           if (note) note.textContent = "copied";
           clearTimeout(t);
           t = setTimeout(() => {
@@ -849,58 +862,64 @@ const coming = [
         // opens, and closes again as the reader moves past. Any manual
         // click hands control back for good. On mobile the flow is a
         // plain timeline (bodies hidden in CSS), so skip it entirely.
-        if (!window.matchMedia("(max-width: 720px)").matches) {
-        const details = Array.from(flow.querySelectorAll<HTMLDetailsElement>("details.fl-phase"));
-        let manual = false;
-        for (const d of details) {
-          d.querySelector("summary")?.addEventListener("click", () => {
-            manual = true;
-            if (pendingClose) {
-              clearTimeout(pendingClose);
-              pendingClose = undefined;
-            }
-          });
-          d.open = false;
+        const mobileFlow = window.matchMedia("(max-width: 720px)").matches;
+        if (mobileFlow) {
+          for (const summary of flow.querySelectorAll("details.fl-phase > summary")) {
+            summary.setAttribute("tabindex", "-1");
+          }
         }
-        let queued = false;
-        let pendingClose: ReturnType<typeof setTimeout> | undefined;
-        const autoOpen = () => {
-          queued = false;
-          if (manual) return;
-          const vh = window.innerHeight;
-          const focus = vh * 0.45;
-          let best = -1;
-          let bestDist = Infinity;
-          details.forEach((d, i) => {
-            const r = d.getBoundingClientRect();
-            if (r.bottom < -80 || r.top > vh + 80) return;
-            const dist = Math.abs((r.top + r.bottom) / 2 - focus);
-            if (dist < bestDist) {
-              bestDist = dist;
-              best = i;
+        if (!reduced && !mobileFlow) {
+          const details = Array.from(flow.querySelectorAll<HTMLDetailsElement>("details.fl-phase"));
+          let manual = false;
+          let pendingClose: ReturnType<typeof setTimeout> | undefined;
+          for (const d of details) {
+            d.querySelector("summary")?.addEventListener("click", () => {
+              manual = true;
+              if (pendingClose) {
+                clearTimeout(pendingClose);
+                pendingClose = undefined;
+              }
+            });
+            d.open = false;
+          }
+          let queued = false;
+          const autoOpen = () => {
+            queued = false;
+            if (manual) return;
+            const vh = window.innerHeight;
+            const focus = vh * 0.45;
+            let best = -1;
+            let bestDist = Infinity;
+            details.forEach((d, i) => {
+              const r = d.getBoundingClientRect();
+              if (r.bottom < -80 || r.top > vh + 80) return;
+              const dist = Math.abs((r.top + r.bottom) / 2 - focus);
+              if (dist < bestDist) {
+                bestDist = dist;
+                best = i;
+              }
+            });
+            if (best >= 0 && !details[best].open) details[best].open = true;
+            // Leave the outgoing phase open for a moment so the swap
+            // doesn't feel like a jarring close-and-open.
+            if (details.some((d, i) => i !== best && d.open)) {
+              if (pendingClose) clearTimeout(pendingClose);
+              pendingClose = setTimeout(() => {
+                pendingClose = undefined;
+                details.forEach((d, i) => {
+                  if (i !== best && d.open) d.open = false;
+                });
+              }, 2500);
             }
-          });
-          if (best >= 0 && !details[best].open) details[best].open = true;
-          // Leave the outgoing phase open for a moment so the swap
-          // doesn't feel like a jarring close-and-open.
-          if (details.some((d, i) => i !== best && d.open)) {
-            if (pendingClose) clearTimeout(pendingClose);
-            pendingClose = setTimeout(() => {
-              pendingClose = undefined;
-              details.forEach((d, i) => {
-                if (i !== best && d.open) d.open = false;
-              });
-            }, 2500);
-          }
-        };
-        const onScroll = () => {
-          if (!queued) {
-            queued = true;
-            setTimeout(autoOpen, 40);
-          }
-        };
-        autoOpen();
-        window.addEventListener("scroll", onScroll, { passive: true });
+          };
+          const onScroll = () => {
+            if (!queued) {
+              queued = true;
+              requestAnimationFrame(autoOpen);
+            }
+          };
+          autoOpen();
+          window.addEventListener("scroll", onScroll, { passive: true });
         }
       }
     </script>
