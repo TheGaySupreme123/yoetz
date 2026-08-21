@@ -1,0 +1,182 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - img "Yoetz" [ref=e7]
+        - link "Star Yoetz on GitHub" [ref=e8] [cursor=pointer]:
+          - /url: https://github.com/TheGaySupreme123/yoetz
+          - text: Star us on GitHub
+      - heading "Agents claim they're done. Yoetz checks if they actually did." [level=1] [ref=e11]:
+        - generic [ref=e12]: Agents claim they're done.
+        - generic [ref=e13]: Yoetz checks if they actually did.
+      - paragraph [ref=e14]: An open-source ledger where your agent records its work, and an independent check on the claims it makes there. It runs on your machine today; a hosted option is on the wish list.
+      - generic [ref=e15]:
+        - generic "Install options" [ref=e16]:
+          - button "Set up with your agent recommended" [ref=e17] [cursor=pointer]:
+            - generic [ref=e18]: Set up with your agent
+            - generic [ref=e19]: recommended
+        - paragraph [ref=e20]:
+          - text: "Tap to copy a setup prompt, then paste it into your coding agent: it fetches the install guide and walks you through setup, showing you every change first. Prefer a terminal? The"
+          - link "README" [ref=e21] [cursor=pointer]:
+            - /url: https://github.com/TheGaySupreme123/yoetz
+          - text: has the install command.
+    - link "open source Apache-2.0" [ref=e24] [cursor=pointer]:
+      - /url: https://github.com/TheGaySupreme123/yoetz/blob/main/LICENSE
+      - generic [ref=e25]: open source
+      - generic [ref=e26]: Apache-2.0
+  - generic [ref=e28]:
+    - generic [ref=e29]: Status
+    - heading "It's an alpha. It's early, and it already does a lot." [level=2] [ref=e30]
+    - paragraph [ref=e31]: Deterministic checks, findings, and receipts work today, out of the box, with nothing configured. Pair them with semantic review — an LLM-powered reviewer agent that reads the ledger and challenges the work like a second pair of eyes — to catch even more.
+    - generic [ref=e32]:
+      - generic [ref=e33]:
+        - generic [ref=e34]: What it already does
+        - paragraph [ref=e35]: Records your agent's plan, work, and claims into a ledger, checks the record deterministically, and issues coverage-bounded receipts, with no provider, no account, and no network needed.
+      - generic [ref=e36]:
+        - generic [ref=e37]: Where it's early
+        - paragraph [ref=e38]: "It is not mature yet: expect rough edges, and treat it as an alpha. Every claim we publish is tracked openly in the repository."
+    - generic [ref=e39]:
+      - paragraph [ref=e40]: Any MCP-capable agent can use Yoetz today — and more harness support is coming soon.
+      - generic [ref=e41]:
+        - generic [ref=e42]:
+          - text: Codex
+          - emphasis [ref=e43]: today
+        - generic [ref=e44]:
+          - text: Claude Code
+          - emphasis [ref=e45]: soon
+        - generic [ref=e46]:
+          - text: Cursor
+          - emphasis [ref=e47]: soon
+        - generic [ref=e48]:
+          - text: opencode
+          - emphasis [ref=e49]: soon
+        - generic [ref=e50]:
+          - text: Grok
+          - emphasis [ref=e51]: soon
+        - generic [ref=e52]:
+          - text: Copilot
+          - emphasis [ref=e53]: soon
+        - generic [ref=e54]: and more
+    - paragraph [ref=e55]:
+      - text: "Help us secure and improve Yoetz:"
+      - link "file an issue" [ref=e56] [cursor=pointer]:
+        - /url: https://github.com/TheGaySupreme123/yoetz/issues/new
+      - text: for anything you hit, and send security issues privately via
+      - link "GitHub" [ref=e57] [cursor=pointer]:
+        - /url: https://github.com/TheGaySupreme123/yoetz/blob/main/SECURITY.md
+      - text: or
+      - link "email" [ref=e58] [cursor=pointer]:
+        - /url: mailto:support@yoetz.dev
+      - text: .
+  - generic [ref=e59]:
+    - generic [ref=e60]:
+      - generic [ref=e61]: How it works
+      - heading "An independent ledger between your agent and “done”" [level=2] [ref=e62]
+      - paragraph [ref=e63]: One task, from the ask to the receipt — semantic review included. Here is the session phase by phase.
+    - generic [ref=e64]:
+      - group [ref=e65]:
+        - generic "01 The agent opens a task and declares what done means":
+          - generic: "01"
+          - generic: The agent opens a task and declares what done means
+        - text: // // //
+      - group [ref=e66]:
+        - generic "02 The agent records the work, and a test that failed":
+          - generic: "02"
+          - generic: The agent records the work, and a test that failed
+        - text: //
+      - group [ref=e67]:
+        - generic "03 The agent claims done, citing only the passing tests":
+          - generic: "03"
+          - generic: The agent claims done, citing only the passing tests
+        - text: // // //
+      - group [ref=e68]:
+        - generic "04 Yoetz checks the record and catches what was missed":
+          - generic: "04"
+          - generic: Yoetz checks the record and catches what was missed
+        - text: // // //
+      - group [ref=e69]:
+        - generic "05 The agent fixes both and revises its claim":
+          - generic: "05"
+          - generic: The agent fixes both and revises its claim
+        - text: // //
+      - group [ref=e70]:
+        - generic "06 Yoetz rechecks, and the receipt still carries the finding":
+          - generic: "06"
+          - generic: Yoetz rechecks, and the receipt still carries the finding
+        - text: // // // //
+      - generic [ref=e71]:
+        - generic [ref=e72]: ✓
+        - generic [ref=e73]: The receipt says what was checked, at what coverage, and what is still open.
+    - paragraph [ref=e75]: Two ways to run the checks.
+    - generic [ref=e76]:
+      - generic [ref=e77]:
+        - generic [ref=e78]: Semantic review, recommended
+        - paragraph [ref=e79]: "The setup we recommend. A reviewer model acts like a mini agent alongside yours: it reads a bounded packet built from the ledger, never your repository, challenges the work, and your agent answers with evidence. Deterministic checks still run underneath and are never erased. That is the reviewer you see challenging the agent in the session above."
+      - generic [ref=e80]:
+        - generic [ref=e81]: Deterministic only, if you prefer
+        - paragraph [ref=e82]: "Works with nothing configured and nothing leaving your machine: versioned policy packs check the recorded ledger and return findings with an exact coverage vector. Less thorough than semantic review, since it can only catch what rules can catch. It runs first in every check, whichever mode you pick."
+  - generic [ref=e83]:
+    - generic [ref=e84]:
+      - generic [ref=e85]: What's next
+      - heading "Coming soon" [level=2] [ref=e86]
+      - paragraph [ref=e87]: "We are actively improving Yoetz: more harness support, deeper Codex support, a hosted option, and more powerful features."
+    - generic [ref=e88]:
+      - generic [ref=e89]:
+        - heading "Claude Code support" [level=3] [ref=e91]
+        - paragraph [ref=e92]: First-party support for Claude Code is next in line.
+        - generic [ref=e93]: very soon
+      - generic [ref=e94]:
+        - heading "Cursor and more harnesses" [level=3] [ref=e97]
+        - paragraph [ref=e98]: More first-party integrations for the agents you already use. Any MCP-capable agent works today.
+        - generic [ref=e99]: coming
+      - generic [ref=e100]:
+        - heading "Deeper Codex support" [level=3] [ref=e102]
+        - paragraph [ref=e103]: Codex already gets live observation of what the agent actually does. We are making that integration even better.
+        - generic [ref=e104]: in progress
+      - generic [ref=e105]:
+        - heading "Hosted Yoetz and more" [level=3] [ref=e107]
+        - paragraph [ref=e108]: A hosted option, more than one agent on a task, sessions you can pick back up, and more powerful checks.
+        - generic [ref=e109]: in the works
+    - paragraph [ref=e110]:
+      - link "See the roadmap in the issues →" [ref=e111] [cursor=pointer]:
+        - /url: https://github.com/TheGaySupreme123/yoetz/issues
+  - contentinfo [ref=e112]:
+    - generic [ref=e114]:
+      - generic [ref=e115]: receipt · yoetz.dev · 2026-08-21
+      - generic [ref=e117]:
+        - generic [ref=e118]:
+          - generic [ref=e119]: task
+          - generic [ref=e120]: read yoetz.dev to the very bottom
+        - generic [ref=e121]:
+          - generic [ref=e122]: actor
+          - generic [ref=e123]: visitor:chrome_on_macos
+        - generic [ref=e124]:
+          - generic [ref=e125]: local_frontier
+          - generic [ref=e126]: 16:32 · Asia/Jerusalem
+        - generic [ref=e127]:
+          - generic [ref=e128]: obligations
+          - generic [ref=e129]: 1 of 1 satisfied · reach_the_footer (you are here)
+        - generic [ref=e130]:
+          - generic [ref=e131]: evidence
+          - generic [ref=e132]: "time_on_page: 65s · scroll_depth: 100%"
+        - generic [ref=e133]:
+          - generic [ref=e134]: findings
+          - generic [ref=e135]: "fnd-01 · curiosity_detected · priority fun · disposition: appreciated"
+        - generic [ref=e136]:
+          - generic [ref=e137]: conclusion
+          - generic [ref=e138]: visitor_had_fun · coverage bounded to this footer · thanks for scrolling
+    - generic [ref=e139]:
+      - generic [ref=e140]: © 2026 Yoetz. Apache-2.0. · support@yoetz.dev
+      - generic [ref=e142]:
+        - link "GitHub" [ref=e143] [cursor=pointer]:
+          - /url: https://github.com/TheGaySupreme123/yoetz
+        - link "PyPI" [ref=e145] [cursor=pointer]:
+          - /url: https://pypi.org/project/yoetz/
+        - link "npm" [ref=e147] [cursor=pointer]:
+          - /url: https://www.npmjs.com/package/yoetz
+        - link "Security" [ref=e149] [cursor=pointer]:
+          - /url: https://github.com/TheGaySupreme123/yoetz/blob/main/SECURITY.md
+        - link "Contributing" [ref=e151] [cursor=pointer]:
+          - /url: https://github.com/TheGaySupreme123/yoetz/blob/main/CONTRIBUTING.md
+        - link "Changelog" [ref=e153] [cursor=pointer]:
+          - /url: https://github.com/TheGaySupreme123/yoetz/blob/main/CHANGELOG.md
