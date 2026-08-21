@@ -281,6 +281,12 @@ narrow approval covers exactly what it covered before, and the standalone portab
 install/remove/activation-apply paths, once implemented by #150, take the ADR-016 `review_only`
 lane instead (ADR-023 decision 11).
 
+Issue #150 implements portable artifact render/preview/status and the exact
+`plugin_artifact_apply` review-only consumer. The shipping wizard still selects the native Codex
+control until a later capability cell proves portable discovery and activation. A portable
+preview therefore creates no activation claim: status keeps rendered bytes, installed bytes, MCP
+ownership, discovery, activation, and skill delivery separate.
+
 Package replacement changes binaries, not accepted trust bytes. Installed-wheel proof is still
 required before issue #139 can close: consecutive real checks must prove distinct attempt authority
 and receipts in one approved repository, and a second repository must remain blocked. Router routing

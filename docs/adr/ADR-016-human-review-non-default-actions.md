@@ -37,9 +37,9 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    `implemented=false` cannot be prepared.
 
 2. **Agent-safe contracts.** Catalog, pending projection, prepare result, review result, and status
-   publish current v3 contracts in `schemas/consent/`; the frozen v2 bytes remain shipped for
+   publish current v4 contracts in `schemas/consent/`; the frozen v2 and v3 bytes remain shipped for
    compatibility. They contain no reusable approval value, generated passphrase, or credential.
-   The v3 pending projection includes only a bounded recipe and an authorize command for operations
+   The v4 pending projection includes only a bounded recipe and an authorize command for operations
    that actually support agent-chat authorization.
 
 3. **One pending request.** One owner-only request with a 15-minute TTL may exist. The trusted
@@ -94,6 +94,14 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    agent-attested current-chat authorize lane (decision 5) is deliberately **not** extended to
    them. The ADR-012 setup wizard's already-authorized digest-bound composition is a separate,
    unchanged authority and does not route through this class.
+
+   Issue #150 implements the artifact half as the exact `plugin_artifact_apply` operation. Its
+   target digest is the complete portable artifact preview digest, its risk class is
+   `review_only`, and agent-chat authorization is disabled. Preparation and single-shot
+   consumption exist, but the packaged runtime still has no production action-bound
+   `UserPresencePort`, so the standalone lane fails closed before mutation with
+   `human_authority_unavailable`. Generic `skill_install`, host activation apply, and harness MCP
+   registration remain catalogued but unimplemented.
 
 ## Consequences
 

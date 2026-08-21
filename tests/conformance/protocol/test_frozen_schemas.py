@@ -23,7 +23,7 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 71
+_EXPECTED_MEMBER_COUNT = 77
 _EXPECTED_REQUEST_RESULT_VERSION_COUNT = 40
 _EXPECTED_EVENT_VERSION_COUNT = 16
 
@@ -165,7 +165,16 @@ def test_schema_registry_is_complete() -> None:
     for member in members:
         path = member["path"]
         expected = (
-            "3.0.0"
+            "4.0.0"
+            if path
+            in {
+                "consent/catalog-4.0.0.schema.json",
+                "consent/pending-agent-4.0.0.schema.json",
+                "consent/prepare-result-4.0.0.schema.json",
+                "consent/review-result-4.0.0.schema.json",
+                "consent/status-4.0.0.schema.json",
+            }
+            else "3.0.0"
             if path
             in {
                 "consent/catalog-3.0.0.schema.json",

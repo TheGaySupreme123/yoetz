@@ -147,6 +147,12 @@ _CODEX_SKILL_MEMBERS: Final = (
 # is deliberately listed here; nothing is discovered by scanning the repository.
 _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     (
+        "fixtures/agent-plugins/codex-project-root.case.json",
+        "compatibility_manifest",
+        "application/json",
+        True,
+    ),
+    (
         "fixtures/canonical/accepted-entry-identity.case.json",
         "canonical_vector",
         "application/json",
@@ -256,6 +262,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/consent/catalog-4.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/consent/chat-user-attestation-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -274,6 +286,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/consent/pending-agent-4.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/consent/prepare-result-2.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -281,6 +299,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/consent/prepare-result-3.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/prepare-result-4.0.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -298,6 +322,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/consent/review-result-4.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/consent/status-2.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -305,6 +335,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/consent/status-3.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/status-4.0.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -617,8 +653,27 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         "application/schema+json",
         True,
     ),
+    (
+        "schemas/version/version-manifest-2.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
     ("skills/codex/yoetz/SKILL.md", "skill", "text/markdown", True),
     ("skills/codex/yoetz/manifest.json", "compatibility_manifest", "application/json", True),
+    ("skills/portable/yoetz/SKILL.md", "skill", "text/markdown", True),
+    (
+        "support/agent-plugins/1.0.0/mcp.schema.json",
+        "json_schema",
+        "application/schema+json",
+        False,
+    ),
+    (
+        "support/agent-plugins/1.0.0/plugin.schema.json",
+        "json_schema",
+        "application/schema+json",
+        False,
+    ),
     ("support/runtime-support.json", "runtime_support", "application/json", True),
 )
 

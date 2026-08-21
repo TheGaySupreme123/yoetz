@@ -29,7 +29,7 @@ still must not accept an agent-selected passphrase.
 
 2. **Agent-safe preparation.** `yoetz consent prepare` creates one owner-only
    `yoetz.elevated-bootstrap.pending/2` record. Its agent projection is
-   `yoetz.consent.pending-agent/3` and contains only operation, risk class, bounded danger text,
+   `yoetz.consent.pending-agent/4` and contains only operation, risk class, bounded danger text,
    exact danger and target digests, expiry, pending ID, an exact bounded repository recipe when
    applicable, the fixed `["yoetz","consent","review"]` command, and an authorize command only
    for operations that permit agent-chat authorization. Frozen public v2 schemas remain shipped;

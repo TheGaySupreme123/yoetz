@@ -74,6 +74,7 @@ ElevatedOperation = Literal[
     "restore_execute",
     "migrate_execute",
     "skill_install",
+    "plugin_artifact_apply",
     "harness_mcp_register",
 ]
 
@@ -275,6 +276,21 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
+        agent_chat_authorize_allowed=False,
+    ),
+    ConsentOperationSpec(
+        operation="plugin_artifact_apply",
+        risk_class="review_only",
+        summary="Install, replace, or remove one portable plugin artifact.",
+        danger_text=(
+            "DANGER — portable plugin artifact apply. Replaces or removes the exact managed "
+            "plugin tree bound to the preview digest. Confirm only after reviewing its format, "
+            "target identity, current-state digest, and complete future inventory."
+        ),
+        requires_provider_binding=False,
+        requires_grant_binding=False,
+        requires_target_digest_arg=True,
+        implemented=True,
         agent_chat_authorize_allowed=False,
     ),
     ConsentOperationSpec(
@@ -925,7 +941,7 @@ def projection_for_status(
     if pending is None:
         return None
     model = AgentSafePendingModel(
-        schema="yoetz.consent.pending-agent/3",
+        schema="yoetz.consent.pending-agent/4",
         operation=pending.operation,
         risk_class=pending.risk_class,
         pending_id=pending.pending_id,
@@ -984,7 +1000,7 @@ def catalog_payload() -> dict[str, JsonValue]:
         )
     model = ConsentCatalogModel.model_validate(
         {
-            "schema": "yoetz.consent.catalog/3",
+            "schema": "yoetz.consent.catalog/4",
             "default_safe": [
                 "mcp.start",
                 "mcp.publish_work",
@@ -1019,7 +1035,7 @@ def catalog_payload() -> dict[str, JsonValue]:
 def status_payload(*, _state: Path | None = None) -> dict[str, JsonValue]:
     model = ConsentStatusModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.status/3",
+            "schema": "yoetz.elevated-bootstrap.status/4",
             "pending": projection_for_status(load_pending(_state=_state)),
             "consent_catalog": catalog_payload(),
         }

@@ -223,6 +223,30 @@ def test_wheel_contains_exactly_one_package_console_entry_and_py_typed(
     assert "yoetz = yoetz.cli.entry:main" in entry_points
 
 
+def test_wheel_contains_portable_plugin_sources_and_exact_vendored_schemas(
+    candidate: Candidate,
+) -> None:
+    members = _wheel_file_members(candidate.wheel)
+    expected = {
+        "yoetz/resources/skills/portable/yoetz/SKILL.md",
+        "yoetz/resources/support/agent-plugins/1.0.0/mcp.schema.json",
+        "yoetz/resources/support/agent-plugins/1.0.0/plugin.schema.json",
+    }
+    assert expected <= set(members)
+    assert (
+        hashlib.sha256(
+            members["yoetz/resources/support/agent-plugins/1.0.0/plugin.schema.json"]
+        ).hexdigest()
+        == "0a4aad95ce337878ad38802ebf0daa3fde76abe3f65400c86bcbb1ec0b3ab883"
+    )
+    assert (
+        hashlib.sha256(
+            members["yoetz/resources/support/agent-plugins/1.0.0/mcp.schema.json"]
+        ).hexdigest()
+        == "6539175bfcdf43085855183e86da40ea94b166547a72b47ae9a0a390516d3acb"
+    )
+
+
 def test_wheel_member_names_have_no_duplicate_or_case_collision(candidate: Candidate) -> None:
     with zipfile.ZipFile(candidate.wheel) as archive:
         names = [info.filename for info in archive.infolist() if not info.filename.endswith("/")]

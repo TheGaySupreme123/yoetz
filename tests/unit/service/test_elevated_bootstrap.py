@@ -58,7 +58,7 @@ def _assert_agent_safe(value: object) -> None:
 
 def test_catalog_is_review_only_and_agent_safe() -> None:
     catalog = cast(dict[str, Any], catalog_payload())
-    assert catalog["schema"] == "yoetz.consent.catalog/3"
+    assert catalog["schema"] == "yoetz.consent.catalog/4"
     assert "mcp.start" in catalog["default_safe"]
     assert catalog["rules"]["no_standing_yolo"] is True
     assert catalog["rules"]["independent_user_presence_required_for_agent_chat"] is False
@@ -75,6 +75,9 @@ def test_catalog_is_review_only_and_agent_safe() -> None:
     assert by_name["repository_privacy_grant"]["agent_chat_authorize_allowed"] is True
     assert by_name["backup_execute"]["implemented"] is False
     assert by_name["backup_execute"]["risk_class"] == "review_only"
+    assert by_name["plugin_artifact_apply"]["implemented"] is True
+    assert by_name["plugin_artifact_apply"]["risk_class"] == "review_only"
+    assert by_name["plugin_artifact_apply"]["agent_chat_authorize_allowed"] is False
     _assert_agent_safe(catalog)
 
 
@@ -95,7 +98,7 @@ def test_prepare_projection_contains_only_agent_safe_review_fields(tmp_path: Pat
         "schema",
         "target_digest",
     }
-    assert projection["schema"] == "yoetz.consent.pending-agent/3"
+    assert projection["schema"] == "yoetz.consent.pending-agent/4"
     assert projection["review_command"] == ["yoetz", "consent", "review"]
     assert projection["authorize_command"] is None
     assert projection["repository_privacy_recipe"] is None
@@ -462,9 +465,9 @@ def test_target_digest_and_unimplemented_operations_are_rejected(tmp_path: Path)
 
 def test_status_contains_nullable_pending_and_catalog(tmp_path: Path) -> None:
     empty = cast(dict[str, Any], status_payload(_state=tmp_path))
-    assert empty["schema"] == "yoetz.elevated-bootstrap.status/3"
+    assert empty["schema"] == "yoetz.elevated-bootstrap.status/4"
     assert empty["pending"] is None
-    assert empty["consent_catalog"]["schema"] == "yoetz.consent.catalog/3"
+    assert empty["consent_catalog"]["schema"] == "yoetz.consent.catalog/4"
     _assert_agent_safe(empty)
 
     prepare_pending(
@@ -474,6 +477,6 @@ def test_status_contains_nullable_pending_and_catalog(tmp_path: Path) -> None:
     assert prepared["pending"]["operation"] == "provider_credential_set"
     assert prepared["pending"]["authorize_command"] == ["yoetz", "consent", "authorize"]
     _assert_agent_safe(prepared)
-    validate_schema_instance("catalog", "3.0.0", prepared["consent_catalog"])
-    validate_schema_instance("pending-agent", "3.0.0", prepared["pending"])
-    validate_schema_instance("status", "3.0.0", prepared)
+    validate_schema_instance("catalog", "4.0.0", prepared["consent_catalog"])
+    validate_schema_instance("pending-agent", "4.0.0", prepared["pending"])
+    validate_schema_instance("status", "4.0.0", prepared)

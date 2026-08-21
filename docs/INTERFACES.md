@@ -1844,7 +1844,7 @@ authorization signals.
 
 Elevated consent (`service/elevated_bootstrap.py`, CLI `yoetz consent` /
 `yoetz elevated-bootstrap`) is a separate owner-only pending-file lane outside
-`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/3`) and creates
+`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/4`) and creates
 digest-bound pending records (`yoetz.elevated-bootstrap.pending/2`). The v3 agent-safe projection
 contains only operation, risk class, bounded danger text, exact digests, expiry, pending ID, an
 exact bounded repository recipe when applicable, the fixed `["yoetz","consent","review"]`
@@ -1871,8 +1871,10 @@ unlock an already-locked vault. The six MCP tools (ADR-011) are unchanged; autho
 CLI control.
 
 The current public JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
-`review-result`, and `status`, each at version `3.0.0` under `schemas/consent/`; frozen version
-`2.0.0` bytes remain shipped for compatibility. `yoetz.chat-user-attestation/1` is version 1.0.0.
+`review-result`, and `status`, each at version `4.0.0` under `schemas/consent/`; frozen versions
+`2.0.0` and `3.0.0` remain shipped for compatibility. The current version report is
+`version/version-manifest-2.0.0.schema.json`; its released `1.0.0` predecessor remains byte-frozen.
+`yoetz.chat-user-attestation/1` is version 1.0.0.
 `review_only` irreversible
 operations remain catalogued with `implemented=false` until owning mutation paths consume review.
 The Windows console adapter is a focused boundary implementation, not a claim that the Yoetz
@@ -2869,10 +2871,11 @@ phase/outcome, before/after state, compatibility, managed-file count, structural
 optional closed integration reason; it has no project path, content, environment, Git, task, or
 exception field.
 
-### Portable plugin carrier and host activation (design-registered, ADR-023)
+### Portable plugin carrier and host activation (ADR-023; artifact slice implemented by #150)
 
-The names below are registered ahead of implementation (ADR-023, issue #149); no implementing
-module exists yet, and the child issues of #148 own the phased code. A portable plugin is a
+The names below were registered by ADR-023 and the skills-only artifact slice is implemented in
+`ports/plugin_artifacts.py` and `adapters/integrations/portable_plugin.py`. Later child issues of
+#148 own plugin-managed MCP, activation, and per-host evidence cells. A portable plugin is a
 carrier, never an authority: it may carry metadata, shared skill bytes, and an optional exact MCP
 declaration, and it cannot authorize disclosure, hold credentials, unlock the vault, approve
 observation, call providers, strengthen coverage, or replace a receipt (ADR-008, ADR-023).
@@ -2924,10 +2927,49 @@ or authority, and no port's status field implies another's. Mutations preserve t
 artifact lifecycle (exact before/after preview and accepted digest, stale-preview rejection,
 safe-root containment, no symlink members, complete digest inventory, no unmanaged/modified
 overwrite, failure-atomic replacement, installed-byte verification, no
-filesystem-presence-to-activation inference). Once implemented under #150, standalone
-install/remove/activation-apply consume the ADR-016 `review_only` single-shot trusted review; this
-design registration does not make a new mutation available. The ADR-012 setup composition remains
-its own separately authorized path (ADR-023 decision 11).
+filesystem-presence-to-activation inference). The #150 standalone artifact install/remove path
+consumes the ADR-016 `review_only` single-shot trusted review; activation apply remains owned by a
+later child and unavailable. The ADR-012 setup composition remains its own separately authorized
+path (ADR-023 decision 11).
+
+The implemented artifact operation is exactly `plugin_artifact_apply`. Its prepare target is the
+portable preview digest, which already binds target identity, current-state digest, action,
+format/schema/renderer versions, external MCP ownership, and the complete sorted future inventory.
+It is `review_only`, never agent-chat-authorizable, and its one pending review is consumed before
+one install/replace/remove attempt. Same-request replay returns the stored process result; after
+restart or an ambiguous filesystem outcome the caller must reconcile through `status_artifact`,
+which never performs automatic repair. The portable marker schema is
+`yoetz.portable-plugin-install/1`; the pre-existing native marker remains
+`yoetz.codex-plugin-install/1`, enabling exact whole-directory migration and rollback without a
+pathname merge.
+
+The #150 artifact wire-neutral domain shapes are closed:
+
+- `PluginArtifactAction` is `install|replace|remove|noop`; callers cannot request `noop`.
+- `PluginArtifactState` is
+  `absent|portable_exact|portable_managed|native_managed|modified|partial|unmanaged|unsafe|recovery_required`.
+  Only exact marker-verified managed states are mutation candidates; `recovery_required` is a
+  preserve-and-reconcile state, never an automatic-repair instruction.
+- `ArtifactTarget` contains one redacted trusted-project root. `ArtifactAuthority` is exactly one
+  of `setup_composition` or `review_only`, plus the exact preview digest; the review-only branch
+  also carries the one-use pending review ID. The string discriminator is not itself authority:
+  the adapter consumes the corresponding injected authority port, and the default adapter denies
+  both channels.
+- `PluginArtifactPreview` carries request ID, action, state before, target-identity digest,
+  current-state digest, artifact digest, preview digest, the complete `PortablePluginPlan`, and
+  sorted structural warnings. It carries no raw target path or member contents.
+- `PluginArtifactStatus` carries artifact and installed-byte state, `PluginOperationState`, detected
+  format, artifact/installed digests, desired and observed MCP ownership, marker validity, rollback
+  availability, and one independent status for every `PluginProofFacet`. Unobserved facets remain
+  `not_observed`; installed bytes never imply discovery or activation.
+- `PluginArtifactResult` carries request/action/operation state, before/after artifact states,
+  preview/artifact/installed digests, and sorted changed member names. The bounded refusal reasons
+  are `authority_required|destination_conflict|format_unsupported|human_authority_unavailable|manifest_invalid|modified_copy|operation_conflict|preview_stale|recovery_required|remove_refused|request_identity_conflict|source_invalid|target_unsafe|target_untrusted|write_failed`.
+
+The `yoetz.portable-plugin-install/1` marker contains only schema, format profile, Yoetz/schema/
+renderer versions, `external_registration`, artifact digest, complete sorted managed-file rows
+(`relative_path`, `size`, `sha256`), and its canonical marker digest. It contains no project path,
+user value, timestamp, credential, secret reference, transcript, host-activation claim, or receipt.
 
 ## 11. Application (`application/`)
 
