@@ -102,6 +102,7 @@ from packaged bytes, committed mirrors regenerated exclusively by their owning s
 hand-edited, and covered by the packaging suites before any install-parity claim. The Agent
 Plugins 1.0.0 schemas must be vendored byte-pinned by #150 with the SHA-256 digests recorded in
 ADR-023 decision 3 and then treated exactly like decision 11 mirrors: the packaged copy is the
-runtime authority and upstream hosting is never an operational dependency. Marketplace publication of the
-portable artifact is deferred and requires its own separate, dated release decision like the
-2026-08-20 npm decision above; rendering an artifact locally creates no publication claim.
+runtime authority and upstream hosting is never an operational dependency. Marketplace
+publication of the portable artifact is deferred and requires its own separate, dated release
+decision like the 2026-08-20 npm decision above; rendering an artifact locally creates no
+publication claim.
