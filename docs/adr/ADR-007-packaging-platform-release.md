@@ -93,3 +93,15 @@ Every dependency update is a reviewed PR + package patch release rerunning contr
 packaging/capability matrices. E-001 refreshes these implementation pins at release lock and must
 record whether each selected identity stayed fixed or changed; a newer version alone never widens
 the support allowlist.
+
+**Amendment (ADR-023, 2026-08-21, issue #149): generated Agent Plugins artifacts and vendored
+upstream schema bytes.** Portable plugin artifacts are generated projections of the neutral
+`PortablePluginPlan` and follow the same parity rules as every packaged resource: rendered only
+from packaged bytes, committed mirrors regenerated exclusively by their owning scripts
+(`scripts/sync_resource_ripple.py` and the committed-tree regeneration it drives), never
+hand-edited, and covered by the packaging suites before any install-parity claim. The Agent
+Plugins 1.0.0 schemas must be vendored byte-pinned by #150 with the SHA-256 digests recorded in
+ADR-023 decision 3 and then treated exactly like decision 11 mirrors: the packaged copy is the
+runtime authority and upstream hosting is never an operational dependency. Marketplace publication of the
+portable artifact is deferred and requires its own separate, dated release decision like the
+2026-08-20 npm decision above; rendering an artifact locally creates no publication claim.

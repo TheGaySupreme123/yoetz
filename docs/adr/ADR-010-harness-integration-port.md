@@ -181,6 +181,19 @@ bounded the adjacent surface since #128. Per-item budgets cannot catch this clas
 item can sit inside its own bound while the total doubles. Anyone inlining a document here again
 will fail CI rather than a live session.
 
+**Amendment (ADR-023, 2026-08-21, issue #149): tier 2 gains a portable carrier; artifact and
+activation are sibling ports.** Tier 2 on-disk delivery may now be carried either by a host-native
+projection (the existing Codex layout) or by a portable Agent Plugins 1.0.0 artifact, both
+generated from the neutral `PortablePluginPlan` — never from each other. The carrier changes reach,
+not authority: tiers 0 and 1 are byte-for-byte unchanged, guidance stays owned once under
+`guidance/` with no byte variation per ADR-010 decision 1, and a host consuming the portable format
+still earns exactly the coverage its evidence cell proves. Following the `HarnessMcpPort`
+precedent above, `PluginArtifactPort` (preview/install/status/remove of a rendered artifact) and
+`HostActivationPort` (discovery/activation observation and authorized preview/apply) are sibling
+ports, never `IntegrationsPort` overloads; a host adapter may compose them but cannot collapse
+their state or authority. The fork guarantee is extended, not weakened: a standards-compliant host
+is reached by a projection plus a host profile, still with no shared-type edits.
+
 **Amendment (2026-08-14, issue #222):** Codex hook stdout is event-specific. `SessionStart`,
 `PostToolUse`, and `UserPromptSubmit` keep `hookSpecificOutput.additionalContext`. `Stop` and
 `SubagentStop` have no such field: JSON that includes `hookSpecificOutput` is marked Failed with

@@ -27,6 +27,7 @@ ADR wins; when an ADR and the code disagree, that is a bug in one of them and wo
 | [020](ADR-020-typed-evidence-digest-provenance.md) | Typed evidence digest provenance |
 | [021](ADR-021-recommended-defaults-advisories-and-update-check-surfacing.md) | Recommended-defaults advisories and update-check surfacing |
 | [022](ADR-022-harness-observation-writer-identity-and-observation-tolerant-concurrency.md) | Harness observation writer identity and observation-tolerant concurrency |
+| [023](ADR-023-portable-plugin-carrier-host-activation.md) | Portable plugin carrier and host activation |
 
 Unresolved gates are centralized in [`docs/OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md), not scattered
 through individual ADRs.

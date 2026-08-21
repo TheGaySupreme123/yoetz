@@ -23,6 +23,12 @@ parent-directory, fuzzy discovery, or symlink-target resolution.
 The installed files are byte-identical to the packaged wheel resource. The managed marker records
 only versions and sorted digests — never a path, username, timestamp, or repository reference.
 
+ADR-023 (issue #149) accepts a portable Agent Plugins carrier design whose Codex projection will
+eventually replace the bespoke plugin layout at the same `.agents/plugins/yoetz` root through the
+ordinary digest-bound preview/apply and activation ceremony. Until that projection is
+capability-proven and explicitly approved, the native behavior in this runbook is the control and
+nothing here changes.
+
 ## 2. Prerequisites and exact supported scope
 
 Check `yoetz version --json`, the installed resource set, and the current compatibility/capability

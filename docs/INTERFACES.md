@@ -2869,6 +2869,66 @@ phase/outcome, before/after state, compatibility, managed-file count, structural
 optional closed integration reason; it has no project path, content, environment, Git, task, or
 exception field.
 
+### Portable plugin carrier and host activation (design-registered, ADR-023)
+
+The names below are registered ahead of implementation (ADR-023, issue #149); no implementing
+module exists yet, and the child issues of #148 own the phased code. A portable plugin is a
+carrier, never an authority: it may carry metadata, shared skill bytes, and an optional exact MCP
+declaration, and it cannot authorize disclosure, hold credentials, unlock the vault, approve
+observation, call providers, strengthen coverage, or replace a receipt (ADR-008, ADR-023).
+
+`PortablePluginPlan` is the one canonical neutral plan every manifest/configuration is generated
+from: common metadata (name exactly `yoetz`, version, description); canonical skill/resource byte
+sources (the packaged `guidance/` mirrors, byte-identical per ADR-010); `format_profile:
+PluginFormatProfile`; `mcp_ownership: McpOwnership` with `mcp_route_profile` (`policy|strict`)
+present exactly when plugin-managed; an optional host-extension profile; schema and renderer
+versions (Agent Plugins spec pin `1.0.0` plus the plan renderer version); and the complete
+managed-file inventory with relative paths, sizes, and SHA-256 digests. Agent Plugin JSON is never
+the input for another host's manifest; projections share only the plan (ADR-023).
+
+- `PluginFormatProfile` is a closed enum; initial membership is exactly
+  `agent_plugins_1|codex_plugin_native`. A new member requires a reviewed projection design and
+  ADR-023-conformant root registration before any render targets it.
+- `McpOwnership` is exactly `external_registration|plugin_managed`. `McpOwnershipState` is the
+  closed observed-owner state `absent|external|plugin|dual|foreign|ambiguous`; `dual`, `foreign`,
+  and `ambiguous` are explicit reported states, never silently resolved or overwritten (ADR-018,
+  ADR-023). Child-issue shorthand does not add members: `owned` resolves to `external|plugin` from
+  the observed source, and `foreign_present` projects to `foreign`.
+- `HostSurface` is the closed host-product enum
+  `codex_cli|chatgpt_desktop|cursor_ide|cursor_cli|cursor_cloud|claude_code`, used only to key
+  evidence cells. It is distinct from `HarnessId` (v0.1 membership still exactly `codex`); format
+  compatibility earns no `HostSurface` support claim, first-party identity, or coverage (ADR-005,
+  ADR-023). A Cursor surface consuming the portable artifact is a *portable* cell; one consuming a
+  generated native projection is a *native* cell; Claude Code is a *native dual-target* host whose
+  project-scope and user-scope targets are separate cells.
+- `PluginOperationState` is the closed mutation status
+  `not_started|in_progress|completed|refused|outcome_unknown`. Every mutating artifact/activation
+  request carries an exact request identity; same-request replay returns the stored result or
+  reconciles through status; timeout or connection loss reports `outcome_unknown` and never implies
+  failure; retry cannot create a second stage/apply/remove; status carries no user-controlled
+  structural content (ADR-023).
+- `PluginProofFacet` is the closed independent-facet list `source`, `rendered_artifact`,
+  `installed_bytes`, `host_discovery`, `host_activation`, `skill_delivery`, `mcp_owner`,
+  `mcp_binding`, `mcp_runtime`, `model_use`, `trigger_capability`, `observation_consent`,
+  `observation_evidence`, `service_readiness`, `semantic_readiness`, `provider_dispatch`,
+  `privacy_receipt`, `workflow_receipt`. No facet implies another, and format validation proves
+  none of activation, observation, semantic dispatch, or closure (ADR-023).
+
+`PluginArtifactPort` methods are `preview_artifact`, `install_artifact`, `status_artifact`, and
+`remove_artifact`; interrupted-swap recovery is expressed through `status_artifact` reconciliation,
+never automatic repair. `HostActivationPort` methods are `observe_discovery`,
+`observe_activation`, and — only when authorized — `preview_activation` and `apply_activation`.
+Both are siblings of `IntegrationsPort`, `HarnessMcpPort`, and `ObservationPort` under the
+ADR-010/ADR-012 sibling-port rule: a host adapter may compose them but cannot collapse their state
+or authority, and no port's status field implies another's. Mutations preserve the full safe
+artifact lifecycle (exact before/after preview and accepted digest, stale-preview rejection,
+safe-root containment, no symlink members, complete digest inventory, no unmanaged/modified
+overwrite, failure-atomic replacement, installed-byte verification, no
+filesystem-presence-to-activation inference). Once implemented under #150, standalone
+install/remove/activation-apply consume the ADR-016 `review_only` single-shot trusted review; this
+design registration does not make a new mutation available. The ADR-012 setup composition remains
+its own separately authorized path (ADR-023 decision 11).
+
 ## 11. Application (`application/`)
 
 `Application` is a service-internal frozen dataclass wiring all use-case ports, `PrivacyCoordinator`,

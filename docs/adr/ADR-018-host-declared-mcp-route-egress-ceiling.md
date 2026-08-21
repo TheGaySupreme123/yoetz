@@ -69,6 +69,19 @@ There are now two reviewed descriptor digests and two owned Codex registration c
 either command or either descriptor set is a public-contract change and must update this ADR,
 documentation, schemas where applicable, fixtures, and conformance evidence together.
 
+**Amendment (ADR-023, 2026-08-21, issue #149): a plugin-managed `mcp.json` is a third generated
+route surface under the same ceiling.** When a portable plugin artifact carries `mcp.json`
+(`plugin_managed` ownership only), that file is generated exclusively from the
+`PortablePluginPlan`'s bound route: the exact argv and `strict|policy` profile are chosen before
+approval and bound into the preview and artifact digests, and runtime configuration, environment,
+agent input, or later privacy widening cannot change the route — the same immutability decision 1
+gives the process flag. An `external_registration` artifact omits `mcp.json` entirely; the
+existing registration commands above remain authoritative. No second native or global registration
+may own the `yoetz` server name while a plugin-managed declaration exists: dual, foreign, and
+ambiguous ownership are explicit `McpOwnershipState` values that are reported, never overwritten
+or silently chosen between. Changing the generated `mcp.json` bytes for a bound route is a
+public-contract change under the same update rule as the two registration commands.
+
 ## Alternatives considered
 
 **Infer the route from current policy for each call.** Rejected: the host would be approving a

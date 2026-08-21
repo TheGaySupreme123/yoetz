@@ -1,0 +1,227 @@
+# ADR-023 — Portable plugin carrier and host activation
+
+**Status:** Accepted (2026-08-21), acknowledged in
+[issue #149](https://github.com/TheGaySupreme123/yoetz/issues/149#issuecomment-5371952502).
+Issue #149 suggested the name ADR-020; that number was taken by typed evidence digest provenance
+before this document landed, so the accepted decision set lives here unchanged.
+**Implemented by:** no module yet. This ADR is design-first under #148/#149; the child issues of
+#148 own the phased implementation, and every shared name below is pre-registered in
+`docs/INTERFACES.md` before code exists.
+**Relates to:** ADR-005 (exact capability identity), ADR-007 (packaging/release), ADR-008
+(trust boundary), ADR-009 (egress/privacy — deliberately not amended), ADR-010 (harness
+integration port), ADR-012 (first-run setup wizard), ADR-016 (human review), ADR-018 (MCP route
+egress ceiling).
+
+## Context
+
+Yoetz has the right security split but no neutral package model. The current Codex renderer
+(`src/yoetz/adapters/integrations/codex_plugin.py`) directly produces `.codex-plugin/plugin.json`,
+`.mcp.json`, skills, and hooks with no owning port, and its generated `.mcp.json` hard-imports the
+policy serve command with no strict variant — a generated file claiming a route the artifact does
+not own, exactly what ADR-018 exists to prevent. Generalizing that renderer would make a Codex
+artifact the source for Cursor and Claude, merge installation with activation, and conflate format
+compatibility with tested support.
+
+The Agent Plugins specification 1.0.0 (Working Draft) standardizes a portable plugin directory: a
+`plugin.json` manifest at the plugin root, shared skills, and an optional MCP configuration. It
+intentionally does not standardize installation, trust, consent, hooks, observation, marketplaces,
+credentials, or proof, and it prescribes no install root — each client chooses. That thinness is
+useful: the portable format can carry Yoetz's shared guidance to any standards-compliant host
+without Yoetz inheriting authority claims it must then disown.
+
+This change is about platform reach, not user experience. Adopting the universal standard lets
+Yoetz reach every host that speaks it while preserving first-class support for hosts that do not.
+The user-facing install surface — the ADR-012 wizard and `yoetz integrate` commands, one
+preview/apply experience — does not change; only the backend selection of what is rendered where
+becomes host-derived.
+
+## Decisions
+
+1. **A portable plugin is a carrier, never an authority.** A portable artifact may carry common
+   metadata, shared skill/guidance bytes, and an optional exact MCP declaration. It cannot
+   authorize disclosure, store credentials, unlock the vault, approve observation, call providers
+   directly, strengthen coverage, or replace a Yoetz receipt. The trusted local service remains the
+   sole state, privacy, and provider authority (ADR-008, ADR-009); plugin and MCP clients remain
+   untrusted. Nothing a host does with the artifact — discovery, activation, marketplace listing —
+   creates authority, consent, or coverage.
+
+2. **One canonical neutral plan: `PortablePluginPlan`.** Every manifest and configuration —
+   Agent Plugins `plugin.json`, the Codex-native layout, any future Cursor or Claude Code native
+   projection, and a plugin-managed `mcp.json` — is a generated projection of one pure plan
+   carrying: common metadata; canonical skill/resource byte sources (the packaged `guidance/`
+   mirrors, byte-identical per ADR-010 decision 1); a `PluginFormatProfile`; `McpOwnership`
+   (`external_registration | plugin_managed`) with the exact `strict | policy` route profile when
+   plugin-managed; an optional host-extension profile; schema and renderer versions; and the
+   complete managed-file inventory with sizes and SHA-256 digests. Agent Plugin JSON is never the
+   input for a Claude, Cursor, or Codex native manifest; projections share only the plan.
+
+3. **The upstream revision is pinned for vendoring.** The portable projection targets Agent Plugins
+   specification 1.0.0 exactly. Its two canonical schemas are pinned for vendoring by URL and
+   digest:
+   `https://agent-plugins.org/schemas/1.0.0/plugin.schema.json`
+   (SHA-256 `0a4aad95ce337878ad38802ebf0daa3fde76abe3f65400c86bcbb1ec0b3ab883`) and
+   `https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`
+   (SHA-256 `6539175bfcdf43085855183e86da40ea94b166547a72b47ae9a0a390516d3acb`). As with ADR-007
+   decision 11, the #150 implementation must vendor those exact bytes before any renderer or
+   validator ships; the packaged vendored copy then becomes the runtime authority and upstream
+   availability is never an operational dependency. Upstream v1 is intentionally thin and may
+   evolve; adopting a newer revision is a reviewed change to this pin, never an ambient upgrade.
+   #150 must register the vendored schema bytes and every generated/committed artifact tree under
+   the `scripts/sync_resource_ripple.py` owning fixed-point before adding them; mirrors are never
+   hand-edited. The two digests above were re-fetched and confirmed against the canonical HTTPS
+   bytes on 2026-08-21; that live comparison is design evidence, not a runtime dependency.
+
+4. **Sibling capabilities, not a catch-all port.** The skill-focused `IntegrationsPort` is not
+   broadened. Two sibling ports are registered, following the `HarnessMcpPort` precedent
+   (ADR-010/ADR-012): `PluginArtifactPort` — `preview_artifact`, `install_artifact`,
+   `status_artifact`, `remove_artifact`, with interrupted-swap recovery expressed through status
+   reconciliation, never automatic repair — and `HostActivationPort` — `observe_discovery`,
+   `observe_activation`, and, only when authorized, `preview_activation` / `apply_activation`.
+   `HarnessMcpPort` keeps external/global MCP registration; `ObservationPort` keeps consented
+   observation. A host adapter may compose these ports; it cannot collapse their state or
+   authority, and no port's status field implies another's.
+
+5. **Host product, format, and capability cell stay distinct.** Codex CLI, ChatGPT desktop, Cursor
+   IDE, Cursor CLI, Cursor cloud, and Claude Code are distinct `HostSurface` values and distinct
+   evidence cells. Each exact host profile records version/build, accepted format, skill discovery,
+   activation, MCP ownership, trigger events, observation events, observability limits, and
+   evidence fixture IDs. Speaking the Agent Plugins format earns no first-party identity, no
+   populated capability cell, and no coverage — ADR-005's rule becomes more load-bearing as format
+   compatibility gets cheaper, not less. `HarnessId` membership is unchanged (exactly `codex` in
+   v0.1). Fixed terminology: a Cursor surface consuming the portable artifact is a **portable**
+   cell and one consuming a generated native projection is a **native** cell — separate cells even
+   on the same product; Claude Code is a **native dual-target** host whose project-scope and
+   user-scope install targets are separate cells, with only project scope in initial design scope.
+
+6. **Hybrid per-host install roots, one install surface.** A host that supports the portable
+   format receives the portable artifact in that host's own client plugin root; a host that cannot
+   consume it receives a generated native projection in a distinct, per-host documented native
+   root. The user-facing installer is unchanged: setup detects the host and derives format and
+   root; the user approves exact before/after bytes and never chooses a root, format, or migration
+   path. For Codex the client plugin root is the existing `.agents/plugins/yoetz`, so migration
+   from the bespoke layout to the portable layout is a whole-directory, marker-identified,
+   digest-bound replacement at the same root under the existing ADR-012 preview/apply and
+   activation ceremony — exactly one managed tree exists there at a time, its format identified by
+   its managed marker, and the bespoke Codex fallback remains the shipping control until a portable
+   projection is capability-proven and explicitly approved. Portable and native projections must
+   have disjoint path inventories wherever both could exist; a collision is a refused preview,
+   never a merge. Native roots for non-supporting hosts (e.g. Claude Code) are frozen in that
+   host's profile registration, with fixture evidence, before any render targets them. Upgrade,
+   remove, interrupted recovery, and rollback follow the existing whole-directory swap rules; there
+   is no pathname rollback.
+
+7. **Exclusive MCP ownership.** Under `external_registration` the portable artifact omits
+   `mcp.json` and the existing `HarnessMcpPort` registration remains authoritative. Under
+   `plugin_managed` the artifact includes a generated `mcp.json` and no second native or global
+   registration may own the `yoetz` server name. Observed ownership is the closed
+   `McpOwnershipState` (`absent | external | plugin | dual | foreign | ambiguous`); dual, foreign,
+   and ambiguous are explicit reported states — never silently resolved, chosen between, or
+   overwritten. Child-issue shorthand is reconciled to this enum: `owned` is not a seventh state
+   and must resolve to `external` or `plugin` from the observed source, while `foreign_present`
+   projects to `foreign`; unknown or conflicting evidence projects to `ambiguous`, never to an
+   effective route. In plugin-managed mode the exact argv and the `strict | policy` route profile
+   are chosen before approval and bound into the preview and artifact digests; runtime
+   configuration, environment, agent input, and later privacy widening cannot change the route
+   (ADR-018).
+
+8. **Idempotent mutations with honest ambiguity.** Every mutating artifact or activation request
+   carries an exact request identity. Same-request replay returns the stored result or reconciles
+   through status; a timeout or connection loss returns `outcome_unknown` and never implies
+   failure; a retry cannot create a second stage, apply, or remove operation. Status distinguishes
+   the closed `PluginOperationState` (`not_started | in_progress | completed | refused |
+   outcome_unknown`) without user-controlled structural content.
+
+9. **The safe artifact lifecycle is preserved wholesale.** Every mutation targets one selected
+   trusted project and keeps the current protections: exact before/after preview and accepted
+   digest; stale-preview rejection; safe-root/path containment with no symlink members; complete
+   inventory, sizes, and SHA-256 digests; no portable/host-extension path collisions; no overwrite
+   or removal of unmanaged or modified content; failure-atomic replacement with conservative
+   recovery; installed-byte verification; and no inference from filesystem presence to activation.
+
+10. **Proof facets stay independent.** Public and setup status keep these facets separate, and no
+    document, status field, or summary may imply one from another: source, rendered artifact,
+    installed bytes, host discovery, host activation, skill delivery, MCP owner, MCP binding, MCP
+    runtime, model-controlled use, trigger capability, observation consent, observation evidence,
+    service readiness, semantic readiness, provider dispatch, privacy receipt, and the final
+    workflow receipt. Format validation in particular proves none of activation, observation,
+    semantic dispatch, or closure.
+
+11. **Authority: standalone mutation is assigned to ADR-016 `review_only`.** The
+    install/remove/activation-apply paths of the new ports must consume the ADR-016 `review_only`
+    single-shot trusted review of the exact plan digest (ADR-016 is amended accordingly). #150
+    owns the first implementation of that operation-specific prepare/consume boundary; this
+    design-only change does not make any new mutation available. An
+    ordinary TTY confirmation, `--accept`, a same-UID process, or a host marketplace prompt is not
+    and cannot silently become `UserPresencePort` authority; until a production presence adapter
+    exists, standalone console review fails closed with `human_authority_unavailable`, leaving
+    those standalone paths render/preview/status-only in practice. Before #150 implements the
+    boundary they do not exist at all. The ADR-012 setup wizard's
+    already-authorized digest-bound composition remains the separately authorized install path and
+    is unchanged. Agent preparation is never trusted human review (ADR-015/ADR-016).
+
+12. **Phased rollout, ADR-009 untouched.** Slice 1 is explicitly skills-only with
+    `external_registration`: the portable artifact carries metadata and shared skill bytes, omits
+    `mcp.json`, and will ship render/preview/status plus the authorized install paths of decision
+    11 only after #150 implements and tests them. The native Codex behavior in
+    `docs/runbooks/codex-integration.md` remains the control.
+    Plugin-managed MCP is a separately reviewed child issue. Every new host cell (ChatGPT desktop,
+    Cursor surfaces, Claude Code) remains evidence-gated under E-017; E-002/E-013 continue to gate
+    Codex unchanged. No consent, disclosure, or observation behavior changes, so ADR-009 is
+    deliberately not amended; if a later slice changes any of those, it must amend ADR-009 first.
+
+## Consequences
+
+Adding a standards-compliant host becomes a projection and a host profile, not a renderer fork —
+the ADR-010 property ("one `HarnessId` value plus one adapter") extends to packaging. The current
+`codex_plugin.py` renderer becomes an adapter behind `PluginArtifactPort` producing the
+Codex-native projection of the plan, and the marketplace/activation mechanics in
+`codex_marketplace.py` become a `HostActivationPort` adapter; both refactors are behavior-preserving
+and land only after the names in `docs/INTERFACES.md` and this ADR. The generated `.mcp.json` route
+hazard is closed structurally: route bytes exist only in a plugin-managed projection, generated
+from the plan's bound route profile.
+
+The cost is a third managed-artifact vocabulary to keep honest (portable format, native
+projections, and their proof facets), a vendored upstream schema pin to maintain, and a per-host
+root model that must be frozen cell by cell instead of assumed. The distinct-cells rule means
+Yoetz will frequently be *format-compatible* with a host it does not *support*; status wording must
+keep saying so.
+
+ADR-007, ADR-010, ADR-012, ADR-016, and ADR-018 are amended in the same review as this ADR.
+`docs/OPEN_QUESTIONS.md` gains gate E-017 for portable-carrier host cells. Child issue scopes under
+#148 must be reconciled against this ADR before their implementation PRs open.
+
+The reconciled execution map is explicit: #150 owns the skills-only portable renderer, schema
+vendoring, artifact lifecycle, and first `review_only` consumer; #151 alone may add
+`plugin_managed` MCP; #152 proves Codex CLI and ChatGPT desktop as separate cells while retaining
+the native fallback; #153 owns the separate Cursor portable/native cells; #154 owns the Claude
+Code native dual target and must not claim Agent Plugins consumption; and #155 consumes those
+bounded cells for cross-host evidence without repairing their implementations. All remain children
+of #148. #151 is not on the critical path for the skills-only #152 pilot, and no child may populate
+E-017 or widen a support claim from format conformance alone.
+
+## Alternatives considered
+
+**Generalize the existing Codex renderer.** Rejected: it makes a Codex artifact the source for
+other hosts, merges installation with activation, and gives a generated `mcp.json` a route it does
+not own.
+
+**Use Agent Plugin JSON as the canonical input for every manifest.** Rejected: the upstream format
+is intentionally thin; deriving native manifests from it would smuggle format limits into the plan
+and invert ownership. The neutral plan is authoritative; every format is a projection.
+
+**One standards root for every host, including non-supporting ones.** Rejected: hosts that cannot
+consume the portable format would need shims or copies inside a root they do not read, and the
+migration risk lands on exactly the hosts least able to verify it. Distinct native roots keep each
+host's cell honest.
+
+**Broaden `IntegrationsPort` into a catch-all.** Rejected: skill-install types carry
+trusted-project file semantics that artifact and activation state must not reuse; the
+`HarnessMcpPort` sibling precedent already proved the split keeps the fork guarantee intact.
+
+**Treat a host marketplace prompt or `--accept` as review authority.** Rejected: ADR-016's
+presence rule exists precisely because same-UID automation can fabricate both; a standing trust
+change needs the single-shot digest-bound review lane or the already-authorized setup ceremony.
+
+**Ship phase 1 render/preview/status-only and defer the authority question.** Rejected by
+maintainer decision: the `review_only` lane is designed now so implementation does not later
+improvise authority; the practical effect is the same until a production presence adapter exists.

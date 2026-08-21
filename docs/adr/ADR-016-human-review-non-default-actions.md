@@ -2,7 +2,9 @@
 
 **Status:** Working decision; amended 2026-07-31 to require action-bound OS user presence before
 console review; amended 2026-08-09 for agent-attested current-chat authorize (issue #164); amended
-2026-08-18 for atomic concurrent review claims (issue #344).
+2026-08-18 for atomic concurrent review claims (issue #344); amended 2026-08-21 to assign portable
+plugin artifact and host-activation mutation to `review_only` (issue #149, ADR-023; implementation
+owned by #150).
 **Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
 `src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`,
 `src/yoetz/protocol/consent.py`, `src/yoetz/protocol/chat_user_authority.py`, and
@@ -77,6 +79,21 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    idle-relock weakening, and generic `privacy_policy_widen` remain catalogued but unimplemented
    until the owning mutation boundary consumes this single-shot review safely.
    `repository_privacy_grant` is the implemented exact-recipe privacy path for chat-user authorize.
+
+   **Amendment (ADR-023, 2026-08-21, issue #149):** the skill/harness-configuration slice of
+   `review_only` is the accepted owning boundary for standalone portable plugin artifact
+   install/remove and host-activation apply. #150 must implement the operation-specific catalog,
+   prepare, and consume path before any such mutation exists; this amendment does not mark the
+   current generic skill/harness operations implemented. Once implemented, the path consumes this
+   class's single-shot trusted review of the exact plan digest under all existing rules — one
+   pending request, atomic claim, verified presence before console review. An ordinary TTY
+   confirmation, `--accept`, a same-UID process, or a host marketplace prompt is not and cannot
+   silently become `UserPresencePort` authority, so
+   until a production presence adapter exists these standalone paths fail closed with
+   `human_authority_unavailable` and remain render/preview/status-only in practice. The
+   agent-attested current-chat authorize lane (decision 5) is deliberately **not** extended to
+   them. The ADR-012 setup wizard's already-authorized digest-bound composition is a separate,
+   unchanged authority and does not route through this class.
 
 ## Consequences
 
