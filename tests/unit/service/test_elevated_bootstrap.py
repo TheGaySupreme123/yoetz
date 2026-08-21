@@ -75,6 +75,9 @@ def test_catalog_is_review_only_and_agent_safe() -> None:
     assert by_name["repository_privacy_grant"]["agent_chat_authorize_allowed"] is True
     assert by_name["backup_execute"]["implemented"] is False
     assert by_name["backup_execute"]["risk_class"] == "review_only"
+    assert by_name["plugin_artifact_apply"]["implemented"] is True
+    assert by_name["plugin_artifact_apply"]["risk_class"] == "review_only"
+    assert by_name["plugin_artifact_apply"]["agent_chat_authorize_allowed"] is False
     _assert_agent_safe(catalog)
 
 

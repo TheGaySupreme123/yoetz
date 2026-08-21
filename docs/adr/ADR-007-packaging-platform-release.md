@@ -106,3 +106,12 @@ runtime authority and upstream hosting is never an operational dependency. Marke
 publication of the portable artifact is deferred and requires its own separate, dated release
 decision like the 2026-08-20 npm decision above; rendering an artifact locally creates no
 publication claim.
+
+**Issue #150 implementation detail.** The first portable projection's exact members are
+`plugin.json`, `skills/yoetz/SKILL.md`, and the five canonical guidance references; `mcp.json` and
+the Codex-specific skill manifest are absent. The Agent Plugins `plugin.schema.json` and
+`mcp.schema.json` bytes are vendored under `support/agent-plugins/1.0.0/` at the ADR-023 digests,
+and the neutral skill wrapper is owned at `skills/portable/yoetz/SKILL.md`. All three enter the
+reviewed resource inventory and wheel/sdist through `sync_resource_ripple.py`. Runtime rendering
+uses only those packaged bytes, so clean-install rendering and installed guidance parity are
+covered by the packaging gates without an upstream fetch.

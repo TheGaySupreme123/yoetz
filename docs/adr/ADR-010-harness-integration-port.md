@@ -194,6 +194,13 @@ ports, never `IntegrationsPort` overloads; a host adapter may compose them but c
 their state or authority. The fork guarantee is extended, not weakened: a standards-compliant host
 is reached by a projection plus a host profile, still with no shared-type edits.
 
+**Issue #150 implementation detail.** The portable skill wrapper is neutral Agent Skills
+frontmatter (`name` and `description` only) plus relative links to byte-identical packaged guidance
+references. The slice is `external_registration`, so it emits no `mcp.json`; Tier 0/1 and the
+existing six-operation MCP registration remain unchanged. `PluginArtifactPort` now exists as the
+sibling boundary, while activation and new host capability cells remain unimplemented and
+evidence-gated.
+
 **Amendment (2026-08-14, issue #222):** Codex hook stdout is event-specific. `SessionStart`,
 `PostToolUse`, and `UserPromptSubmit` keep `hookSpecificOutput.additionalContext`. `Stop` and
 `SubagentStop` have no such field: JSON that includes `hookSpecificOutput` is marked Failed with

@@ -74,6 +74,7 @@ ElevatedOperation = Literal[
     "restore_execute",
     "migrate_execute",
     "skill_install",
+    "plugin_artifact_apply",
     "harness_mcp_register",
 ]
 
@@ -275,6 +276,21 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         requires_grant_binding=False,
         requires_target_digest_arg=True,
         implemented=False,
+        agent_chat_authorize_allowed=False,
+    ),
+    ConsentOperationSpec(
+        operation="plugin_artifact_apply",
+        risk_class="review_only",
+        summary="Install, replace, or remove one portable plugin artifact.",
+        danger_text=(
+            "DANGER — portable plugin artifact apply. Replaces or removes the exact managed "
+            "plugin tree bound to the preview digest. Confirm only after reviewing its format, "
+            "target identity, current-state digest, and complete future inventory."
+        ),
+        requires_provider_binding=False,
+        requires_grant_binding=False,
+        requires_target_digest_arg=True,
+        implemented=True,
         agent_chat_authorize_allowed=False,
     ),
     ConsentOperationSpec(

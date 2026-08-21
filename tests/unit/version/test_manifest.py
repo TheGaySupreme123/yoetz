@@ -73,6 +73,9 @@ def test_guidance_and_skill_source_package_bytes_are_identical() -> None:
         "guidance/workflow.md",
         "skills/codex/yoetz/SKILL.md",
         "skills/codex/yoetz/manifest.json",
+        "skills/portable/yoetz/SKILL.md",
+        "support/agent-plugins/1.0.0/mcp.schema.json",
+        "support/agent-plugins/1.0.0/plugin.schema.json",
         "support/runtime-support.json",
     )
 

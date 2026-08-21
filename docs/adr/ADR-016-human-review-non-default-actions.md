@@ -95,6 +95,14 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    them. The ADR-012 setup wizard's already-authorized digest-bound composition is a separate,
    unchanged authority and does not route through this class.
 
+   Issue #150 implements the artifact half as the exact `plugin_artifact_apply` operation. Its
+   target digest is the complete portable artifact preview digest, its risk class is
+   `review_only`, and agent-chat authorization is disabled. Preparation and single-shot
+   consumption exist, but the packaged runtime still has no production action-bound
+   `UserPresencePort`, so the standalone lane fails closed before mutation with
+   `human_authority_unavailable`. Generic `skill_install`, host activation apply, and harness MCP
+   registration remain catalogued but unimplemented.
+
 ## Consequences
 
 Agents may prepare and inspect a request, then either guide the human to `yoetz consent review` /

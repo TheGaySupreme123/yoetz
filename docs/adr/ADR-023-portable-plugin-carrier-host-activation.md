@@ -4,9 +4,9 @@
 [issue #149](https://github.com/TheGaySupreme123/yoetz/issues/149#issuecomment-5371952502).
 Issue #149 suggested the name ADR-020; that number was taken by typed evidence digest provenance
 before this document landed, so the accepted decision set lives here unchanged.
-**Implemented by:** no module yet. This ADR is design-first under #148/#149; the child issues of
-#148 own the phased implementation, and every shared name below is pre-registered in
-`docs/INTERFACES.md` before code exists.
+**Implemented by:** the skills-only portable slice is implemented by
+`ports/plugin_artifacts.py` and `adapters/integrations/portable_plugin.py` under issue #150. Later
+children of #148 still own plugin-managed MCP, activation, and per-host capability cells.
 **Relates to:** ADR-005 (exact capability identity), ADR-007 (packaging/release), ADR-008
 (trust boundary), ADR-009 (egress/privacy — deliberately not amended), ADR-010 (harness
 integration port), ADR-012 (first-run setup wizard), ADR-016 (human review), ADR-018 (MCP route
@@ -168,6 +168,26 @@ becomes host-derived.
     Cursor surfaces, Claude Code) remains evidence-gated under E-017; E-002/E-013 continue to gate
     Codex unchanged. No consent, disclosure, or observation behavior changes, so ADR-009 is
     deliberately not amended; if a later slice changes any of those, it must amend ADR-009 first.
+
+### Implemented slice-1 artifact (issue #150)
+
+The portable projection contains exactly `plugin.json`, `skills/yoetz/SKILL.md`, and the five
+`skills/yoetz/references/*.md` guidance mirrors. It contains neither `mcp.json` nor the
+Codex-specific `skills/yoetz/manifest.json`. The root manifest validates offline against the
+byte-pinned Agent Plugins 1.0.0 schema, and the immediate-child skill uses only `name` and
+`description` frontmatter. Unknown root manifest fields are reported and ignored for component
+loading; fatal known-field violations reject the manifest, while an invalid skill component is
+reported at its own boundary.
+
+The exact standalone mutation operation is `plugin_artifact_apply`, risk class `review_only`,
+bound to the complete preview digest. Agent-chat authorization is forbidden. Without an
+action-bound production user-presence adapter it fails closed before target mutation. The
+ADR-012 setup composition remains the separate existing authority path. The Codex native tree
+continues to ship as the active control; #150 adds the portable renderer and whole-directory
+migration/rollback implementation but makes no discovery or activation claim.
+The exact Codex project root/scope and skills-only member inventory are registered by fixture
+`agent-plugins-codex-project-root-1`; its proof limits explicitly deny discovery, activation, and
+coverage inference.
 
 ## Consequences
 

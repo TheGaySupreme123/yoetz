@@ -147,11 +147,19 @@ Integration buys ergonomics, never a stronger claim. An agent publishing over MC
 honest coverage, and the coverage vector says so exactly.
 
 The accepted packaging design extends this reach without moving any authority
-([ADR-023](adr/ADR-023-portable-plugin-carrier-host-activation.md), design-first — implementation
-is phased under issue #148). One neutral `PortablePluginPlan` projects into either a portable
+([ADR-023](adr/ADR-023-portable-plugin-carrier-host-activation.md); its skills-only artifact slice
+is implemented by issue #150 and later capabilities remain phased under #148). One neutral
+`PortablePluginPlan` projects into either a portable
 Agent Plugins 1.0.0 artifact, for hosts that consume the universal standard in their own client
 plugin root, or a generated host-native projection in a distinct documented root for hosts that do
 not. The artifact is a carrier, never an authority: installation, activation, MCP ownership, and
 observation stay separately owned sibling capabilities (`PluginArtifactPort`,
 `HostActivationPort`, the existing `HarnessMcpPort` and `ObservationPort`), and format
 compatibility with the standard earns no support claim, activation claim, or coverage.
+
+`src/yoetz/ports/plugin_artifacts.py` owns the neutral plan and lifecycle types.
+`src/yoetz/adapters/integrations/portable_plugin.py` owns the Agent Plugins 1.0.0 projection,
+offline validation, Codex-root preview/status, and failure-atomic whole-directory migration. It
+reads only packaged `skills/portable/`, `guidance/`, and vendored `support/agent-plugins/` bytes.
+The existing `codex_plugin.py` remains the native fallback and is not a source for the portable
+manifest.

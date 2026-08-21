@@ -19,6 +19,7 @@ _RIPPLE_SCRIPT = _REPO_ROOT / "scripts" / "sync_resource_ripple.py"
 
 # Every tree the inventory reads from or writes into, so a copied checkout can run the real ripple.
 _CHECKOUT_TREES: Final = (
+    "fixtures/agent-plugins",
     "fixtures/canonical",
     "guidance",
     "migrations",

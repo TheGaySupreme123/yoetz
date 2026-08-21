@@ -27,6 +27,7 @@ type ConsentOperation = Literal[
     "restore_execute",
     "migrate_execute",
     "skill_install",
+    "plugin_artifact_apply",
     "harness_mcp_register",
 ]
 type RiskClass = Literal[
