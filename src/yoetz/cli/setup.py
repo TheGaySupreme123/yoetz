@@ -680,6 +680,8 @@ def _emit_registration_preview(
     skill_preview: IntegrationPreview | None = None,
     activation_preview: ActivationPreview | None = None,
     activation_target: Path | None = None,
+    *,
+    route_profile_before: str | None = None,
 ) -> None:
     typer.echo("Proposed change: complete Yoetz Codex project integration:")
     typer.echo("  1. Install discoverable guidance under .agents/skills/yoetz")
@@ -688,6 +690,15 @@ def _emit_registration_preview(
     typer.echo("  MCP server name: yoetz")
     serve_command = getattr(mcp_preview, "serve_command", ())
     typer.echo(f"  Command: {' '.join(serve_command)}")
+    route_profile = getattr(mcp_preview, "route_profile", None)
+    if type(route_profile) is str:
+        if route_profile_before is not None and route_profile_before != route_profile:
+            typer.echo(
+                f"  MCP route profile change: {route_profile_before} -> {route_profile} "
+                "(the existing yoetz-owned registration will be rewritten)"
+            )
+        else:
+            typer.echo(f"  MCP route profile: {route_profile}")
     typer.echo(f"  Codex executable: {binary.executable_path}")
     if binary.reported_version is not None:
         typer.echo(f"  Codex version: {binary.reported_version}")
@@ -871,7 +882,9 @@ def configured_mcp_route_profile() -> Literal["policy", "strict"]:
 
     A caller that has just asked the human which review posture they want passes that answer
     instead: the reply is the authority, and configuration is only the fallback for surfaces
-    (post-setup ``/connect``, ``integrate codex mcp``) that ask nothing.
+    (post-setup ``/connect``, ``integrate codex mcp``) that ask nothing. Even then it applies
+    only to a *fresh* registration: an existing yoetz-owned registration keeps its observed
+    route unless an explicit route input requests otherwise (#389 / ADR-018).
     """
 
     return _configured_mcp_route_profile()
@@ -966,27 +979,29 @@ def _readiness_layers(
 ) -> dict[str, JsonValue]:
     consent_active = consent_outcome == "granted"
     service_routing = bool(service.get("reachable"))
+    # Unobserved facts start as null (unknown), never as an asserted ``false``;
+    # they become booleans only when an inspection actually ran (#390).
     activation: dict[str, JsonValue] = {
         "codex_home": None,
         "config_path": None,
-        "marketplace_registered": False,
-        "plugin_enabled": False,
+        "marketplace_registered": None,
+        "plugin_enabled": None,
         "state": "unknown",
     }
     if binary is not None and codex_home is not None:
+        # The bound home is echoed even when inspection fails, so a failure can
+        # never read as "no home was provided" (#390).
+        activation["codex_home"] = str(codex_home)
+        activation["config_path"] = str(codex_home / "config.toml")
         try:
             inspected = inspect_activation(
                 _integration_target(workspace),
                 executable_path=binary.executable_path,
                 codex_home=codex_home,
             )
-            activation = {
-                "codex_home": str(codex_home),
-                "config_path": str(codex_home / "config.toml"),
-                "marketplace_registered": inspected.marketplace_registered,
-                "plugin_enabled": inspected.plugin_enabled,
-                "state": inspected.state.value,
-            }
+            activation["marketplace_registered"] = inspected.marketplace_registered
+            activation["plugin_enabled"] = inspected.plugin_enabled
+            activation["state"] = inspected.state.value
         except IntegrationError as error:
             activation["reason"] = error.reason.value
         except (OSError, TypeError, ValueError) as error:
@@ -1050,9 +1065,16 @@ async def _codex_integration_step(
     previews echo them back. They are a *stricter* gate than ``accept``, not a softer one: the
     step re-previews and refuses as stale if any digest moved since approval was shown,
     and only an explicitly echoed policy digest activates the policy trust.
+
+    ``route_profile=None`` means "no explicit route input": an existing yoetz-owned
+    registration keeps its observed profile, and a fresh registration defaults to
+    strict. No configuration derivation (or derivation-on-exception fallback) may
+    silently rewrite a previously chosen route (#389 / ADR-018).
     """
 
-    mcp_service = HarnessMcpService(_mcp_adapter(route_profile))
+    mcp_service = HarnessMcpService(
+        _mcp_adapter("strict" if route_profile is None else route_profile)
+    )
     plugin_service = CodexPluginService()
     project = _integration_target(workspace)
     selected_codex_home: Path | None = None
@@ -1080,6 +1102,9 @@ async def _codex_integration_step(
                     "state": None,
                     "plugin": {"outcome": "skipped", "presence": None},
                     "plugin_activation": {
+                        "codex_home": str(
+                            selected_codex_home if selected_codex_home is not None else codex_home
+                        ),
                         "outcome": "failed",
                         "reason": activation_unavailable_reason,
                         "state": "unknown",
@@ -1093,12 +1118,21 @@ async def _codex_integration_step(
     activation_state_before = (
         activation_plan.inspection.state.value if activation_plan is not None else "unknown"
     )
-    plugin_codex_version = activation_plan.codex_version if activation_plan is not None else None
+    # The wizard's project-tree plugin steps always use the canonical render
+    # (``codex_version=None``): the committed source deliberately carries the
+    # async-free fallback form, and host-specific rendering belongs only to the
+    # activation cache layer (#387).
+    bound_home = selected_codex_home if selected_codex_home is not None else codex_home
     activation_unavailable: dict[str, JsonValue] = {
         "outcome": "skipped",
         "reason": activation_unavailable_reason,
         "state": activation_state_before,
     }
+    if bound_home is not None:
+        # An explicitly bound home is echoed even when the preview failed, so the
+        # report never claims the home was missing when it was not (#390).
+        activation_unavailable["codex_home"] = str(bound_home)
+        activation_unavailable["config_path"] = str(bound_home / "config.toml")
     if activation_plan is None and approved_activation_digest is not None:
         return {
             "outcome": "failed",
@@ -1125,13 +1159,43 @@ async def _codex_integration_step(
             "observation_consent": {"outcome": "absent", "workspace_commitment": None},
         }
 
-    plugin_preview = plugin_service.preview(project, codex_version=plugin_codex_version)
+    # Only two Yoetz routes exist, so the preview's own probe already names the
+    # observed profile of an existing owned registration: ``noop`` means it
+    # matches the previewing route, ``reregister`` means it is the other one.
+    route_profile_before: Literal["policy", "strict"] | None = None
+    if mcp_preview.state_before is McpRegistrationState.YOETZ_OWNED:
+        if mcp_preview.action is McpRegistrationAction.REREGISTER:
+            route_profile_before = "policy" if mcp_preview.route_profile == "strict" else "strict"
+        else:
+            route_profile_before = mcp_preview.route_profile
+    if (
+        route_profile is None
+        and route_profile_before is not None
+        and route_profile_before != mcp_preview.route_profile
+    ):
+        # No explicit route input: preserve the observed profile of the existing
+        # yoetz-owned registration instead of rewriting it (#389).
+        mcp_service = HarnessMcpService(_mcp_adapter(route_profile_before))
+        try:
+            mcp_preview = await mcp_service.preview(binary)
+        except McpRegistrationError as error:
+            return {
+                "outcome": "failed",
+                "reason": error.reason.value,
+                "state": None,
+                "plugin": {"outcome": "skipped", "presence": None},
+                "plugin_activation": {"outcome": "skipped", "state": "unknown"},
+                "skill": {"outcome": "skipped", "presence": None},
+                "observation_consent": {"outcome": "absent", "workspace_commitment": None},
+            }
+
+    plugin_preview = plugin_service.preview(project)
     check_policy = _check_policy_preview(workspace)
     already_registered = mcp_preview.action is McpRegistrationAction.NOOP
     foreign = mcp_preview.state_before is McpRegistrationState.FOREIGN_PRESENT
 
     if foreign:
-        inspection = plugin_service.inspect(project, codex_version=plugin_codex_version)
+        inspection = plugin_service.inspect(project)
         return {
             "outcome": "skipped",
             "reason": "foreign_entry_present",
@@ -1227,6 +1291,7 @@ async def _codex_integration_step(
             skill_plan.preview,
             activation_plan,
             Path(project.project_root),
+            route_profile_before=route_profile_before,
         )
         typer.echo(
             f"  Plugin presence before apply: {plugin_preview.presence_before.value} "
@@ -1288,7 +1353,6 @@ async def _codex_integration_step(
         inspection = plugin_service.install(
             project,
             allow_untested=True,
-            codex_version=plugin_codex_version,
         )
         plugin_report = {
             "outcome": "installed",
@@ -1456,6 +1520,7 @@ async def _codex_integration_step(
         "outcome": mcp_outcome,
         "reason": None,
         "route_profile": mcp_preview.route_profile,
+        "route_profile_before": route_profile_before,
         "serve_command": list(mcp_preview.serve_command),
         "state": mcp_state.value,
         "plugin": plugin_report,
@@ -2109,8 +2174,16 @@ async def run_setup_wizard(
     codex_home: Path | None,
     accept: bool,
     json_output: bool,
+    route_profile: Literal["policy", "strict"] | None = None,
 ) -> int:
-    """Run the guided first-run setup and report each step honestly."""
+    """Run the guided first-run setup and report each step honestly.
+
+    ``route_profile`` is the explicit MCP route input (``--route-profile``). When
+    absent, an interactive run derives the route from the human's review-mode
+    answer as before, and a non-interactive run preserves the observed profile of
+    an existing yoetz-owned registration (strict only for a fresh registration) —
+    ``--accept`` alone never changes an existing route (#389).
+    """
 
     interactive = not non_interactive and _is_interactive_terminal()
 
@@ -2150,11 +2223,19 @@ async def run_setup_wizard(
     if chosen is None:
         registration = _registration_report(None, outcome="skipped", reason="codex_not_found")
     else:
+        if route_profile is not None:
+            selected_route: Literal["policy", "strict"] | None = route_profile
+        elif interactive:
+            selected_route = "policy" if review_mode == "semantic" else "strict"
+        else:
+            # No explicit input and no human answer: the step preserves an
+            # existing yoetz-owned route and registers strict only when fresh.
+            selected_route = None
         registration = await _register_step(
             chosen,
             interactive=interactive,
             accept=accept,
-            route_profile="policy" if review_mode == "semantic" else "strict",
+            route_profile=selected_route,
             codex_home=codex_home,
         )
 
@@ -2363,6 +2444,10 @@ async def run_setup_wizard(
         raw_codex_home = activation_block.get("codex_home")
         if type(raw_codex_home) is str:
             selected_codex_home = Path(raw_codex_home)
+    if selected_codex_home is None and chosen is not None and codex_home is not None:
+        # An explicitly provided home stays bound for readiness even when the
+        # registration step failed before echoing it (#390).
+        selected_codex_home = codex_home
     readiness = _readiness_layers(
         binary=chosen,
         mcp_state=cast(str | None, registration.get("state")),
@@ -2431,6 +2516,13 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
         if reason:
             line += f" ({reason})"
         typer.echo(line)
+        route = registration.get("route_profile")
+        if type(route) is str:
+            route_line = f"  MCP route profile: {route}"
+            route_before = registration.get("route_profile_before")
+            if type(route_before) is str and route_before != route:
+                route_line += f" (changed from {route_before})"
+            typer.echo(route_line)
         plugin = registration.get("plugin")
         if isinstance(plugin, dict):
             typer.echo(
@@ -2595,8 +2687,14 @@ async def integrate_mcp(
     accept: bool,
     preview_digest: str | None,
     json_output: bool,
+    route_profile: Literal["policy", "strict"] | None = None,
 ) -> int:
-    """Client-local ``integrate <harness> mcp status|preview|install`` commands."""
+    """Client-local ``integrate <harness> mcp status|preview|install`` commands.
+
+    ``route_profile`` is the explicit route input. When absent, an existing
+    yoetz-owned registration keeps its observed profile (#389); only a fresh
+    registration falls back to the structural configuration derivation.
+    """
 
     if harness != "codex" or action not in {"status", "preview", "install"}:
         return _usage_failure("the harness or action is not supported")
@@ -2609,7 +2707,7 @@ async def integrate_mcp(
     if chosen is None:
         return _usage_failure("no codex executable was found on PATH")
 
-    service = HarnessMcpService(_mcp_adapter())
+    service = HarnessMcpService(_mcp_adapter(route_profile))
     try:
         if action == "status":
             observation = await service.observe(chosen)
@@ -2623,6 +2721,25 @@ async def integrate_mcp(
             )
             return 0
         preview = await service.preview(chosen)
+        route_profile_before: Literal["policy", "strict"] | None = None
+        if preview.state_before is McpRegistrationState.YOETZ_OWNED:
+            # Only two Yoetz routes exist, so the preview's probe names the
+            # observed profile: ``noop``/register match the previewing route,
+            # ``reregister`` means the entry carries the other one.
+            route_profile_before = (
+                ("policy" if preview.route_profile == "strict" else "strict")
+                if preview.action is McpRegistrationAction.REREGISTER
+                else preview.route_profile
+            )
+        if (
+            route_profile is None
+            and route_profile_before is not None
+            and route_profile_before != preview.route_profile
+        ):
+            # No explicit route input: preserve the existing yoetz-owned route
+            # rather than letting the configuration derivation rewrite it (#389).
+            service = HarnessMcpService(_mcp_adapter(route_profile_before))
+            preview = await service.preview(chosen)
         if action == "preview":
             _emit(
                 {
@@ -2630,6 +2747,7 @@ async def integrate_mcp(
                     "harness": harness,
                     "preview_digest": preview.preview_digest,
                     "route_profile": preview.route_profile,
+                    "route_profile_before": route_profile_before,
                     "serve_command": list(preview.serve_command),
                     "state_before": preview.state_before.value,
                     "warnings": list(preview.warnings),

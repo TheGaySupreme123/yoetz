@@ -336,6 +336,58 @@ def test_install_refuses_locally_modified_file(
     }
 
 
+def test_install_replaces_prior_managed_variant_render_without_replace_modified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#387: a marker-consistent prior render (e.g. async-variant hooks) is not an owner edit.
+
+    A wizard that previously wrote the host-rendered async form must be able to
+    return the tree to the canonical render without the ``modified_copy`` refusal
+    reserved for genuinely modified files.
+    """
+
+    tmp_path.chmod(0o700)
+    resources = _resources()
+    _enable_supported_profile(monkeypatch, resources)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    install_plugin(target, resource_source=resources, codex_version="0.148.0-alpha.6")
+    hooks_path = tmp_path / ".agents/plugins/yoetz/hooks/hooks.json"
+    assert b'"async":true' in hooks_path.read_bytes()
+
+    inspection = install_plugin(target, resource_source=resources, codex_version=None)
+
+    assert inspection.presence is PluginHookPresence.INSTALLED
+    assert b'"async":true' not in hooks_path.read_bytes()
+
+
+def test_plugin_tree_matches_marker_accepts_only_marker_consistent_trees() -> None:
+    from yoetz.adapters.integrations.codex_plugin import (
+        plugin_tree_matches_marker,
+        render_plugin_install_tree,
+    )
+
+    tree = render_plugin_install_tree(resource_source=_resources())
+    assert plugin_tree_matches_marker(tree) is True
+
+    modified = dict(tree)
+    modified["hooks/hooks.json"] = modified["hooks/hooks.json"] + b"# modified\n"
+    assert plugin_tree_matches_marker(modified) is False
+
+    extra = dict(tree)
+    extra["credential123"] = b"not managed"
+    assert plugin_tree_matches_marker(extra) is False
+
+    missing = dict(tree)
+    del missing[".yoetz-plugin-install.json"]
+    assert plugin_tree_matches_marker(missing) is False
+
+    tampered = dict(tree)
+    tampered[".yoetz-plugin-install.json"] = tampered[".yoetz-plugin-install.json"].replace(
+        b"yoetz.codex-plugin-install/1", b"yoetz.codex-plugin-install/9"
+    )
+    assert plugin_tree_matches_marker(tampered) is False
+
+
 def test_install_refuses_symlinked_plugin_ancestor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

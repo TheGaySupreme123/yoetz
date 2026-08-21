@@ -45,7 +45,7 @@ def _target(tmp_path: Path) -> tuple[IntegrationTarget, Path, Path]:
     return target, project, home
 
 
-def _install(target: IntegrationTarget, *, codex_version: str = "0.148.0-alpha.6") -> None:
+def _install(target: IntegrationTarget, *, codex_version: str | None = "0.148.0-alpha.6") -> None:
     install_plugin(target, allow_untested=True, codex_version=codex_version)
 
 
@@ -260,19 +260,214 @@ def test_stable_codex_activation_serves_required_hooks_synchronously(tmp_path: P
     assert (project / ".agents/plugins/marketplace.json").is_file()
 
 
-def test_version_variant_migration_is_previewed_but_fenced_until_source_refresh(
+def test_canonical_source_activates_on_async_host_and_seeds_host_rendered_cache(
     tmp_path: Path,
 ) -> None:
+    """#387: the committed async-free source must activate on an async-capable host.
+
+    The project tree deliberately carries the canonical (``codex_version=None``)
+    render; the host-specific async hooks belong only to the activation cache.
+    Activation must succeed without rewriting the project source, and the cache
+    must end up byte-identical to the host-specific render.
+    """
+
     target, project, home = _target(tmp_path)
-    _install(target, codex_version="0.147.0")
+    _install(target, codex_version=None)
+    source_hooks = (project / ".agents/plugins/yoetz/hooks/hooks.json").read_bytes()
+    source_tree_before = {
+        path.relative_to(project).as_posix(): path.read_bytes()
+        for path in (project / ".agents/plugins/yoetz").rglob("*")
+        if path.is_file()
+    }
     runner = _FakeCodex(target, home, codex_version="0.148.0-alpha.6")
+
+    assert (
+        _inspect_activation(
+            target, executable_path=str(runner.executable), codex_home=home, _run=runner
+        ).state
+        is ActivationState.INSTALLED_NOT_ACTIVATED
+    )
     preview = _preview_activation(
         target,
         executable_path=str(runner.executable),
         codex_home=home,
         _run=runner,
     )
+    result = _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=preview.preview_digest,
+        _run=runner,
+    )
 
+    assert result.state is ActivationState.ACTIVE
+    # The committed source stays byte-stable in its canonical async-free form.
+    source_tree_after = {
+        path.relative_to(project).as_posix(): path.read_bytes()
+        for path in (project / ".agents/plugins/yoetz").rglob("*")
+        if path.is_file()
+    }
+    assert source_tree_after == source_tree_before
+    assert b'"async":true' not in source_hooks
+    # The cache carries the host-specific render: async ingress hooks present.
+    cache_hooks = json.loads(
+        (home / "plugins/cache/yoetz/yoetz/0.1.0/hooks/hooks.json").read_bytes()
+    )
+    handler = cache_hooks["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert handler.get("async") is True
+
+
+def test_same_version_cache_refresh_replaces_prior_managed_render(tmp_path: Path) -> None:
+    """#388: a marker-identified prior cache render is replaceable, not a conflict."""
+
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    target, _project, home = _target(tmp_path)
+    _install(target, codex_version=None)
+    runner = _FakeCodex(target, home, codex_version="0.148.0-alpha.6")
+    first = _preview_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=first.preview_digest,
+        _run=runner,
+    )
+    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    # Simulate content drift since the prior activation: overwrite the cache with
+    # the other renderer variant, which is exactly a prior yoetz-managed render.
+    shutil.rmtree(cache)
+    cache.mkdir(mode=0o700)
+    for relative_path, payload in render_plugin_install_tree(codex_version=None).items():
+        destination = cache / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+
+    inspection = _inspect_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    assert inspection.state is ActivationState.INSTALLED_NOT_ACTIVATED
+
+    preview = _preview_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    assert preview.cache_mutation_planned is True
+    result = _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=preview.preview_digest,
+        _run=runner,
+    )
+    assert result.state is ActivationState.ACTIVE
+    refreshed = json.loads((cache / "hooks/hooks.json").read_bytes())
+    assert refreshed["hooks"]["PreToolUse"][0]["hooks"][0].get("async") is True
+
+
+def test_cache_refresh_between_preview_and_apply_is_stale(tmp_path: Path) -> None:
+    """A cache that changes after preview must still refuse as ``preview_stale``."""
+
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    target, _project, home = _target(tmp_path)
+    _install(target, codex_version=None)
+    runner = _FakeCodex(target, home, codex_version="0.148.0-alpha.6")
+    first = _preview_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=first.preview_digest,
+        _run=runner,
+    )
+    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    shutil.rmtree(cache)
+    cache.mkdir(mode=0o700)
+    for relative_path, payload in render_plugin_install_tree(codex_version=None).items():
+        destination = cache / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    preview = _preview_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    # The cache moves again between preview and apply: back to the host render.
+    shutil.rmtree(cache)
+    cache.mkdir(mode=0o700)
+    for relative_path, payload in render_plugin_install_tree(
+        codex_version="0.148.0-alpha.6"
+    ).items():
+        destination = cache / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+
+    with pytest.raises(IntegrationError) as caught:
+        _apply_activation(
+            target,
+            executable_path=str(runner.executable),
+            codex_home=home,
+            approved_digest=preview.preview_digest,
+            _run=runner,
+        )
+    assert caught.value.reason is IntegrationReason.PREVIEW_STALE
+
+
+def test_modified_or_foreign_cache_stays_destination_conflict(tmp_path: Path) -> None:
+    """#388 keeps ``destination_conflict`` for marker-inconsistent or foreign trees."""
+
+    target, _project, home = _target(tmp_path)
+    _install(target, codex_version=None)
+    runner = _FakeCodex(target, home, codex_version="0.148.0-alpha.6")
+    first = _preview_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=first.preview_digest,
+        _run=runner,
+    )
+    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    hooks = cache / "hooks/hooks.json"
+    hooks.write_bytes(hooks.read_bytes() + b"# modified\n")
+
+    with pytest.raises(IntegrationError) as caught:
+        _preview_activation(
+            target, executable_path=str(runner.executable), codex_home=home, _run=runner
+        )
+    assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
+
+
+def test_stale_managed_source_render_is_previewed_but_fenced_until_source_refresh(
+    tmp_path: Path,
+) -> None:
+    """An older marker-consistent source render previews, but apply requires a refresh."""
+
+    from yoetz.adapters.integrations.codex_plugin import (
+        _build_marker,  # pyright: ignore[reportPrivateUsage]
+        render_plugin_tree,
+    )
+
+    target, project, home = _target(tmp_path)
+    _install(target, codex_version=None)
+    source = project / ".agents/plugins/yoetz"
+    # Rebuild the source as an older-guidance managed render: one member changes
+    # and the marker is regenerated so the tree stays marker-consistent.
+    members = dict(render_plugin_tree(codex_version=None))
+    members["skills/yoetz/SKILL.md"] = b"# an older guidance render\n"
+    for relative_path, payload in members.items():
+        (source / relative_path).write_bytes(payload)
+    (source / ".yoetz-plugin-install.json").write_bytes(_build_marker(members))
+
+    runner = _FakeCodex(target, home, codex_version="0.148.0-alpha.6")
+    preview = _preview_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
     with pytest.raises(IntegrationError) as caught:
         _apply_activation(
             target,
@@ -285,12 +480,7 @@ def test_version_variant_migration_is_previewed_but_fenced_until_source_refresh(
     assert not (project / ".agents/plugins/marketplace.json").exists()
     assert not (home / "config.toml").exists()
 
-    install_plugin(
-        target,
-        replace_modified=True,
-        allow_untested=True,
-        codex_version=runner.codex_version,
-    )
+    install_plugin(target, allow_untested=True, codex_version=None)
     result = _apply_activation(
         target,
         executable_path=str(runner.executable),

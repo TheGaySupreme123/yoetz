@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import tomllib
@@ -19,6 +20,7 @@ from yoetz import __version__
 from yoetz.adapters.integrations.codex_plugin import (
     PluginHookPresence,
     inspect_plugin,
+    plugin_tree_matches_marker,
     render_plugin_install_tree,
 )
 from yoetz.adapters.integrations.codex_session_stream import resolve_codex_home
@@ -58,7 +60,6 @@ _PLUGIN_ADD_TIMEOUT_SECONDS: Final = 30.0
 _MAX_PLUGIN_OUTPUT_BYTES: Final = 262_144
 _MAX_EXECUTABLE_BYTES: Final = 256 * 1024 * 1024
 _ACTIVATION_LOCK: Final = ".yoetz-marketplace-activation.lock"
-_ASYNC_PLUGIN_VARIANT_VERSION: Final = "0.148.0-alpha.6"
 _PLUGIN_ADD_COMMAND: Final = ("plugin", "add", _PLUGIN_ID, "--json")
 _PLUGIN_LIST_COMMAND: Final = ("plugin", "list", "--marketplace", _MARKETPLACE_NAME, "--json")
 _VERSION_RE: Final = re.compile(
@@ -445,6 +446,41 @@ def _cache_version_path(root: Path, version: str) -> Path:
     return root / version
 
 
+def _plugin_source_installed(target: IntegrationTarget, *, codex_version: str) -> bool:
+    """True when the project tree is byte-exactly one current managed renderer variant.
+
+    The committed project tree deliberately carries the canonical (async-free)
+    render (``codex_version=None``); the host-specific form belongs only to the
+    activation cache. Either byte-exact form counts as an installed source, so a
+    canonical source on an async-capable host never reads as ``not_installed``.
+    """
+
+    return any(
+        inspect_plugin(target, codex_version=variant).presence is PluginHookPresence.INSTALLED
+        for variant in (None, codex_version)
+    )
+
+
+def _read_managed_tree(root: Path) -> dict[str, bytes]:
+    """Read one owner-private managed tree, refusing symlinks and unsafe members."""
+
+    members: dict[str, bytes] = {}
+    try:
+        for candidate in root.rglob("*"):
+            if candidate.is_symlink():
+                raise _error(IntegrationReason.TARGET_UNSAFE)
+            if candidate.is_dir():
+                _owned_not_writable(candidate, directory=True)
+                continue
+            if not candidate.is_file():
+                raise _error(IntegrationReason.TARGET_UNSAFE)
+            _owned_not_writable(candidate, directory=False)
+            members[candidate.relative_to(root).as_posix()] = candidate.read_bytes()
+    except OSError as exc:
+        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    return members
+
+
 def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> dict[str, bytes]:
     project = _validated_project(target)
     source = project / ".agents/plugins/yoetz"
@@ -454,18 +490,12 @@ def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> d
         return expected
     if inspection.presence is not PluginHookPresence.INSTALLED:
         # Setup previews activation before it replaces a previously managed tree.
-        # Admit only the other byte-exact renderer variant here, then bind the
-        # preview to the intended version-specific bytes. Apply still requires
-        # that intended tree at its first source fence before any mutation.
-        alternate_versions = (
-            (None, _ASYNC_PLUGIN_VARIANT_VERSION)
-            if codex_version != _ASYNC_PLUGIN_VARIANT_VERSION
-            else (None,)
-        )
-        if any(
-            inspect_plugin(target, codex_version=alternate).presence is PluginHookPresence.INSTALLED
-            for alternate in alternate_versions
-        ):
+        # Admit any byte-exact prior yoetz-managed render here (the canonical
+        # committed source, the other renderer variant, or an older marker-bound
+        # render), then bind the preview to the intended version-specific bytes.
+        # Apply still requires an exact current renderer variant at its first
+        # source fence before any mutation.
+        if plugin_tree_matches_marker(_read_managed_tree(source)):
             return expected
         raise _error(IntegrationReason.PARTIAL_INSTALL)
     actual_paths: set[str] = set()
@@ -510,31 +540,23 @@ def _members_digest(members: Mapping[str, bytes]) -> str:
 
 
 def _installed_cache_digest(path: Path, expected_members: Mapping[str, bytes]) -> str | None:
+    """Digest the installed cache tree when it is yoetz-managed, else refuse.
+
+    ``None`` means absent. A tree byte-identical to ``expected_members`` is the
+    current render. A tree that instead byte-matches its own valid install marker
+    (schema ``yoetz.codex-plugin-install/1``) is a *prior* yoetz-managed render:
+    preview binds its digest as ``cache_before`` and apply may atomically replace
+    the whole directory (#388). Foreign, marker-inconsistent, or otherwise
+    modified trees stay ``destination_conflict``.
+    """
+
     if path.is_symlink():
         raise _error(IntegrationReason.TARGET_UNSAFE)
     if not path.exists():
         return None
     _owned_not_writable(path, directory=True)
-    expected_paths = frozenset(expected_members)
-    actual_paths: set[str] = set()
-    try:
-        for candidate in path.rglob("*"):
-            if candidate.is_symlink():
-                raise _error(IntegrationReason.TARGET_UNSAFE)
-            relative = candidate.relative_to(path).as_posix()
-            if candidate.is_file():
-                _owned_not_writable(candidate, directory=False)
-                actual_paths.add(relative)
-            elif candidate.is_dir():
-                _owned_not_writable(candidate, directory=True)
-            else:
-                raise _error(IntegrationReason.TARGET_UNSAFE)
-        if actual_paths != set(expected_paths):
-            raise _error(IntegrationReason.DESTINATION_CONFLICT)
-        actual = {relative: (path / relative).read_bytes() for relative in sorted(actual_paths)}
-    except OSError as exc:
-        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
-    if any(actual[name] != payload for name, payload in expected_members.items()):
+    actual = _read_managed_tree(path)
+    if actual != dict(expected_members) and not plugin_tree_matches_marker(actual):
         raise _error(IntegrationReason.DESTINATION_CONFLICT)
     return _members_digest(actual)
 
@@ -630,10 +652,10 @@ def inspect_activation(
     if codex_home is not None and _codex_root(codex_home) != binary.codex_home:
         raise _error(IntegrationReason.PREVIEW_STALE)
     project, home, marketplace_path, config_path = _paths(target, binary.codex_home)
-    installed = (
-        inspect_plugin(target, codex_version=binary.codex_version).presence
-        is PluginHookPresence.INSTALLED
-    )
+    # The committed project tree carries the canonical render; judging ``installed``
+    # against the host-specific render alone would keep an async-capable host at
+    # ``not_installed`` forever (#387).
+    installed = _plugin_source_installed(target, codex_version=binary.codex_version)
     plugin_cached = False
     cache_foreign = False
     if installed:
@@ -854,7 +876,7 @@ def _activation_plan(
         (("CODEX_HOME", str(home)), ("CODEX_TESTING_HOME", str(home))),
         _sha(b"" if marketplace_before is None else marketplace_before),
         _sha(config_bytes),
-        cache_before is None,
+        cache_before != plugin_install_digest,
     )
     config_after = _activated_config_bytes(config_bytes, config, project)
     return _ActivationPlan(
@@ -918,6 +940,47 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         raise _error(IntegrationReason.WRITE_FAILED) from exc
 
 
+def _replace_cache_tree(path: Path, members: Mapping[str, bytes]) -> None:
+    """Atomically replace one managed cache directory with freshly rendered members."""
+
+    parent = path.parent
+    _safe_parent(parent)
+    stage = parent / f".yoetz-cache-stage-{os.urandom(6).hex()}"
+    rollback = parent / f".yoetz-cache-rollback-{os.urandom(6).hex()}"
+    destination_moved = False
+    try:
+        stage.mkdir(mode=0o700)
+        for relative_path, payload in members.items():
+            destination = stage / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                written = 0
+                while written < len(payload):
+                    written += os.write(descriptor, payload[written:])
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        if path.exists():
+            os.replace(path, rollback)
+            destination_moved = True
+        os.replace(stage, path)
+        if rollback.exists():
+            shutil.rmtree(rollback)
+    except OSError as exc:
+        if destination_moved and rollback.exists():
+            try:
+                if path.exists():
+                    shutil.rmtree(path)
+                os.replace(rollback, path)
+            except OSError:
+                pass
+        raise _error(IntegrationReason.WRITE_FAILED) from exc
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
+
+
 def _current_bytes(path: Path) -> bytes | None:
     if path.is_symlink():
         raise _error(IntegrationReason.TARGET_UNSAFE)
@@ -979,10 +1042,7 @@ def _assert_plugin_source(
 ) -> None:
     if _plugin_source_digest(codex_version=codex_version) != expected_digest:
         raise _error(IntegrationReason.PREVIEW_STALE)
-    if (
-        inspect_plugin(target, codex_version=codex_version).presence
-        is not PluginHookPresence.INSTALLED
-    ):
+    if not _plugin_source_installed(target, codex_version=codex_version):
         raise _error(IntegrationReason.PARTIAL_INSTALL)
     if _source_cache_members(target, codex_version=codex_version) != dict(expected_members):
         raise _error(IntegrationReason.PREVIEW_STALE)
@@ -1106,6 +1166,21 @@ def apply_activation(
             if inventory_installed:
                 if inventory_version != __version__ or plan.cache_before is None:
                     raise _error(IntegrationReason.DESTINATION_CONFLICT)
+                if plan.cache_before != preview.plugin_install_digest:
+                    # Same-version refresh (#388): the approved preview bound the
+                    # marker-identified prior render's digest as ``cache_before``.
+                    # Replace only those exact bytes; anything else is stale.
+                    if (
+                        _installed_cache_digest(preview.plugin_install_path, plan.cache_members)
+                        != plan.cache_before
+                    ):
+                        raise _error(IntegrationReason.PREVIEW_STALE)
+                    _replace_cache_tree(preview.plugin_install_path, plan.cache_members)
+                    if (
+                        _installed_cache_digest(preview.plugin_install_path, plan.cache_members)
+                        != preview.plugin_install_digest
+                    ):
+                        raise _error(IntegrationReason.WRITE_FAILED)
             elif plan.cache_before is not None:
                 raise _error(IntegrationReason.DESTINATION_CONFLICT)
             else:
@@ -1127,7 +1202,16 @@ def apply_activation(
                     _installed_cache_digest(cache_created, plan.cache_members)
                     != preview.plugin_install_digest
                 ):
-                    raise _error(IntegrationReason.WRITE_FAILED)
+                    # ``plugin add`` copies the canonical project source; the
+                    # host-specific render belongs to the cache layer (#387).
+                    # Seed the exact previewed install bytes over the copied
+                    # marker-identified tree.
+                    _replace_cache_tree(cache_created, plan.cache_members)
+                    if (
+                        _installed_cache_digest(cache_created, plan.cache_members)
+                        != preview.plugin_install_digest
+                    ):
+                        raise _error(IntegrationReason.WRITE_FAILED)
             _assert_snapshot(config_path, plan.config_after)
             _assert_snapshot(marketplace_path, preview.marketplace_bytes)
             _assert_plugin_source(

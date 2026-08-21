@@ -1146,6 +1146,22 @@ _ACCEPT = Annotated[
     bool,
     typer.Option("--accept", help="Explicitly accept the previewed registration."),
 ]
+_ROUTE_PROFILE = Annotated[
+    str | None,
+    typer.Option(
+        "--route-profile",
+        help=(
+            "Exact MCP route profile to register (strict or policy). Without it, an "
+            "existing yoetz-owned registration keeps its current route."
+        ),
+    ),
+]
+
+
+def _validated_route_profile(route_profile: str | None) -> str | None:
+    if route_profile is not None and route_profile not in {"strict", "policy"}:
+        raise typer.BadParameter("--route-profile must be 'strict' or 'policy'")
+    return route_profile
 
 
 def _setup_operation(name: str) -> Callable[..., Awaitable[int]]:
@@ -1162,9 +1178,11 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
             str | None,
             typer.Option("--preview-digest", help="Exact preview digest to bind."),
         ] = None,
+        route_profile: _ROUTE_PROFILE = None,
         json_output: _JSON = False,
     ) -> None:
         harness = cast(str, context.find_root().find_object(str) or context.obj)
+        chosen_route = _validated_route_profile(route_profile)
         operation = _setup_operation("integrate_mcp")
         _finish(
             run_async(
@@ -1175,6 +1193,7 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
                     accept=accept,
                     preview_digest=preview_digest,
                     json_output=json_output,
+                    route_profile=chosen_route,
                 )
             )
         )
@@ -1198,12 +1217,14 @@ def setup_run(
         typer.Option("--codex-home", help="Exact Codex home to bind activation to."),
     ] = None,
     accept: _ACCEPT = False,
+    route_profile: _ROUTE_PROFILE = None,
     json_output: _JSON = False,
 ) -> None:
     """Run the guided first-run setup wizard."""
 
     if (codex_path is None) != (codex_home is None):
         raise typer.BadParameter("--codex-path and --codex-home must be provided together")
+    chosen_route = _validated_route_profile(route_profile)
 
     operation = _setup_operation("run_setup_wizard")
     _finish(
@@ -1214,6 +1235,7 @@ def setup_run(
                 codex_home=codex_home,
                 accept=accept,
                 json_output=json_output,
+                route_profile=chosen_route,
             )
         )
     )
