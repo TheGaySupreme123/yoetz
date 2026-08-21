@@ -261,6 +261,26 @@ Each mutating step is previewed, digest-bound, and individually declinable; `yoe
 reports the same posture read-only at any time. The CLI support-command matrix grows by one
 (`setup`), recorded in the conformance contract test in the same change.
 
+**Amendment (ADR-023, 2026-08-21, issue #149): host-derived artifact projection behind the
+unchanged wizard.** The setup ordering and user experience above do not change: project skill,
+then structural plugin sources, then explicitly approved activation, then MCP verification, each
+previewed, digest-bound, and individually declinable. What changes is backend selection only: the
+structural plugin-source step becomes a projection of the neutral `PortablePluginPlan`, chosen
+from the detected host profile — the portable Agent Plugins artifact in the host's own client
+plugin root where the host supports it, a generated native projection in that host's distinct
+documented native root where it does not. The user never chooses a root, format, or migration
+path. Artifact preview/apply, host activation, MCP registration, and observation consent remain
+separately reported facts, and setup status additionally reports the closed `McpOwnershipState`
+(`absent|external|plugin|dual|foreign|ambiguous`): dual, foreign, and ambiguous ownership are
+explicit reported states that setup never silently resolves or overwrites. For Codex the plugin
+root stays `.agents/plugins/yoetz`; a format migration there is a whole-directory,
+marker-identified, digest-bound replacement under this ADR's existing preview/apply and activation
+ceremony, and the bespoke layout remains the shipping control until a portable projection is
+capability-proven and explicitly approved. This amendment grants no new authority: the wizard's
+narrow approval covers exactly what it covered before, and the standalone portable
+install/remove/activation-apply paths, once implemented by #150, take the ADR-016 `review_only`
+lane instead (ADR-023 decision 11).
+
 Package replacement changes binaries, not accepted trust bytes. Installed-wheel proof is still
 required before issue #139 can close: consecutive real checks must prove distinct attempt authority
 and receipts in one approved repository, and a second repository must remain blocked. Router routing

@@ -145,3 +145,13 @@ harness by adding an adapter and a profile, without touching the core.
 
 Integration buys ergonomics, never a stronger claim. An agent publishing over MCP earns the weakest
 honest coverage, and the coverage vector says so exactly.
+
+The accepted packaging design extends this reach without moving any authority
+([ADR-023](adr/ADR-023-portable-plugin-carrier-host-activation.md), design-first — implementation
+is phased under issue #148). One neutral `PortablePluginPlan` projects into either a portable
+Agent Plugins 1.0.0 artifact, for hosts that consume the universal standard in their own client
+plugin root, or a generated host-native projection in a distinct documented root for hosts that do
+not. The artifact is a carrier, never an authority: installation, activation, MCP ownership, and
+observation stay separately owned sibling capabilities (`PluginArtifactPort`,
+`HostActivationPort`, the existing `HarnessMcpPort` and `ObservationPort`), and format
+compatibility with the standard earns no support claim, activation claim, or coverage.

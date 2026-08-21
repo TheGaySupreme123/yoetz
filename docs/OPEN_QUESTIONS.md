@@ -1,6 +1,6 @@
 # Yoetz v0.1 — decision ledger and release-gate dispositions
 
-**ADRs:** ADR-001 through ADR-016 | **Related:** [`docs/INTERFACES.md`](INTERFACES.md),
+**ADRs:** ADR-001 through ADR-023 | **Related:** [`docs/INTERFACES.md`](INTERFACES.md),
 [`docs/adr/`](adr/), release-evidence generation
 
 ## Purpose
@@ -113,6 +113,7 @@ that evidence.
 | E-014 | Publication-ceremony budget and work-package grouping examples | Dogfood must measure publications per work package, model-authored event bytes, token/latency overhead, abandoned or stale-ledger rate, skipped checks, and user-visible chatter. Large inventories must compare grouped work packages with per-file publication amplification; no threshold is inferred from file count alone. | Harness-neutral capability/conformance fixtures plus bounded dogfood evidence used to freeze guidance examples and budgets. |
 | E-015 | Exact structural subject-state capture matrix | No support claim until installed-artifact tests freeze Git/object-format and OS cells, symlink/submodule/racy-worktree behavior, file/byte caps, exclusions, sanitized environment, path/content-free output, and no network or trusted-service reachability. | ADR-011 CLI/subprocess, packaging-boundary, privacy, and capability evidence. |
 | E-016 | TOML as alternate nonsecret settings surface, including official OpenAI vs owner-declared OpenAI-compatible HTTPS origin+model | **Working (ADR-014).** Config validates constrained `https_origin`, rejects secrets/free `base_url`, mutual-excludes official vs owner-declared, and writes the same fields from wizard/menu/`yoetz provider endpoint`. Owner-declared data-use defaults to `unknown` (never `assisted`). Privacy desired-state export/apply classifies widen vs tighten and never silently widens. Remaining: optional live owner-declared host probe before advertising verified interoperability beyond the protocol cell. | ADR-014, ADR-006/009 amendments, config/privacy/openai_responses specs, unit fixtures; live probe optional. |
+| E-017 | Agent Plugins portable-carrier host cells (ADR-023, issue #149) | No cell is populated. Each `HostSurface` (Codex CLI, ChatGPT desktop, Cursor IDE/CLI/cloud, Claude Code) × format (portable vs native projection) pair is its own evidence cell requiring installed-artifact proof of discovery, activation, skill delivery, and — where declared — MCP ownership and observation, per the independent ADR-023 proof facets. Format compatibility with Agent Plugins 1.0.0 earns no discovery, activation, support, or coverage claim. E-002/E-013 continue to gate Codex unchanged; non-supporting hosts' native roots are frozen per host profile with fixture evidence before any render targets them. Introduced after the v0.1.0 tag; owned by the #148 child issues. | ADR-023, per-host installed-artifact capability evidence and support-matrix cells. |
 
 ### v0.1.0 public-alpha gate dispositions — 2026-08-20
 
