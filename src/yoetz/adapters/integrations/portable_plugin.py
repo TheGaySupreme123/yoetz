@@ -59,6 +59,7 @@ __all__ = [
     "PortableTreeValidation",
     "RenderedPortablePlugin",
     "build_portable_plugin_plan",
+    "combine_mcp_ownership_states",
     "render_portable_plugin_tree",
     "prepare_portable_artifact_review",
     "observe_plugin_managed_mcp",
@@ -152,6 +153,29 @@ class PluginManagedMcpObservation:
     ownership_state: McpOwnershipState
     route_profile: Literal["strict", "policy"] | None
     observed: bool
+
+
+def combine_mcp_ownership_states(
+    external: McpOwnershipState,
+    plugin: McpOwnershipState,
+) -> McpOwnershipState:
+    """Combine separately observed sources without treating an unobserved source as absent."""
+
+    if type(external) is not McpOwnershipState or type(plugin) is not McpOwnershipState:
+        return McpOwnershipState.AMBIGUOUS
+    if external is McpOwnershipState.AMBIGUOUS or plugin is McpOwnershipState.AMBIGUOUS:
+        return McpOwnershipState.AMBIGUOUS
+    if external is McpOwnershipState.FOREIGN or plugin is McpOwnershipState.FOREIGN:
+        return McpOwnershipState.FOREIGN
+    if external is McpOwnershipState.EXTERNAL and plugin is McpOwnershipState.PLUGIN:
+        return McpOwnershipState.DUAL
+    if external is McpOwnershipState.EXTERNAL and plugin is McpOwnershipState.ABSENT:
+        return McpOwnershipState.EXTERNAL
+    if external is McpOwnershipState.ABSENT and plugin is McpOwnershipState.PLUGIN:
+        return McpOwnershipState.PLUGIN
+    if external is McpOwnershipState.ABSENT and plugin is McpOwnershipState.ABSENT:
+        return McpOwnershipState.ABSENT
+    return McpOwnershipState.AMBIGUOUS
 
 
 @dataclass(frozen=True, slots=True)
@@ -1194,7 +1218,10 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
         elif self._mcp_owner_state is not None:
             value = self._mcp_owner_state
         elif self._mcp_ownership is McpOwnership.PLUGIN_MANAGED:
-            value = observe_plugin_managed_mcp(Path(target.project_root)).ownership_state
+            # The artifact adapter cannot synchronously prove the host/global registration source.
+            # A caller must inject one combined observation; plugin-tree absence alone is not
+            # exclusive absence and must fail closed.
+            value = McpOwnershipState.AMBIGUOUS
         else:
             value = McpOwnershipState.EXTERNAL
         if type(value) is not McpOwnershipState:

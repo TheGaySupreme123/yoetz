@@ -60,6 +60,9 @@ Before a plugin-managed preview, inspect both native/global registration and the
 root. Proceed only from exclusive `absent` or already exact `plugin` ownership. `external`, `dual`,
 `foreign`, and `ambiguous` states are preserved and refused; there is no force overwrite.
 Plugin-managed apply never invokes native/global registration.
+The artifact adapter fails closed as `ambiguous` unless its caller supplies one composed ownership
+observation covering both sources; plugin-tree absence by itself is never treated as exclusive
+absence.
 
 Codex uses the existing `.agents/plugins/yoetz` root. Migration is a whole-directory swap between
 marker-identified native and portable trees; files are never merged. A preserved exact native tree

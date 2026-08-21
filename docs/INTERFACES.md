@@ -2960,6 +2960,9 @@ The #150 artifact wire-neutral domain shapes are closed:
 - `PluginArtifactPreview` carries request ID, action, state before, current `McpOwnershipState`, target-identity digest,
   current-state digest, artifact digest, preview digest, the complete `PortablePluginPlan`, and
   sorted structural warnings. It carries no raw target path or member contents.
+  For plugin-managed mode that owner state must be composed from plugin and external/global
+  observations by the caller; the neutral artifact adapter cannot infer the latter from tree
+  absence, so its uncomposed default is `ambiguous` and refuses preview.
 - `PluginArtifactStatus` carries artifact and installed-byte state, `PluginOperationState`, detected
   format, artifact/installed digests, desired and observed MCP ownership, exact plugin-managed route
   profile, marker validity, rollback

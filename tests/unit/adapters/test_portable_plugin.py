@@ -16,6 +16,7 @@ from yoetz.adapters.integrations.portable_plugin import (
     ElevatedPortableArtifactReview,
     PortablePluginArtifactAdapter,
     build_portable_plugin_plan,
+    combine_mcp_ownership_states,
     observe_plugin_managed_mcp,
     prepare_portable_artifact_review,
     render_portable_plugin_tree,
@@ -515,10 +516,16 @@ async def test_plugin_managed_install_is_observed_from_exact_marker_and_route(
     tmp_path: Path,
 ) -> None:
     target = _target(tmp_path)
+
+    def _combined_owner() -> McpOwnershipState:
+        plugin = observe_plugin_managed_mcp(tmp_path).ownership_state
+        return combine_mcp_ownership_states(McpOwnershipState.ABSENT, plugin)
+
     adapter = PortablePluginArtifactAdapter(
         review=_SetupAuthority(),
         mcp_ownership=McpOwnership.PLUGIN_MANAGED,
         mcp_route_profile="policy",
+        mcp_owner_observer=_combined_owner,
     )
     preview = await adapter.preview_artifact(
         request_id(_request(14)), target, PluginArtifactAction.INSTALL
@@ -541,6 +548,41 @@ async def test_plugin_managed_install_is_observed_from_exact_marker_and_route(
     status = await adapter.status_artifact(PluginArtifactStatusCommand(target))
     assert status.mcp_ownership_state is McpOwnershipState.PLUGIN
     assert status.mcp_route_profile == "policy"
+
+
+@pytest.mark.anyio
+async def test_default_plugin_managed_adapter_refuses_uncomposed_ownership(
+    tmp_path: Path,
+) -> None:
+    adapter = PortablePluginArtifactAdapter(
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        mcp_route_profile="policy",
+    )
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.preview_artifact(
+            request_id(_request(17)), _target(tmp_path), PluginArtifactAction.INSTALL
+        )
+    assert caught.value.reason is PluginArtifactReason.MCP_OWNERSHIP_CONFLICT
+    assert caught.value.safe_details == {"mcp_ownership_state": "ambiguous"}
+
+
+@pytest.mark.parametrize(
+    ("external", "plugin", "combined"),
+    [
+        (McpOwnershipState.ABSENT, McpOwnershipState.ABSENT, McpOwnershipState.ABSENT),
+        (McpOwnershipState.EXTERNAL, McpOwnershipState.ABSENT, McpOwnershipState.EXTERNAL),
+        (McpOwnershipState.ABSENT, McpOwnershipState.PLUGIN, McpOwnershipState.PLUGIN),
+        (McpOwnershipState.EXTERNAL, McpOwnershipState.PLUGIN, McpOwnershipState.DUAL),
+        (McpOwnershipState.AMBIGUOUS, McpOwnershipState.ABSENT, McpOwnershipState.AMBIGUOUS),
+        (McpOwnershipState.ABSENT, McpOwnershipState.FOREIGN, McpOwnershipState.FOREIGN),
+    ],
+)
+def test_composed_ownership_never_collapses_external_or_unknown_sources(
+    external: McpOwnershipState,
+    plugin: McpOwnershipState,
+    combined: McpOwnershipState,
+) -> None:
+    assert combine_mcp_ownership_states(external, plugin) is combined
 
 
 @pytest.mark.anyio
