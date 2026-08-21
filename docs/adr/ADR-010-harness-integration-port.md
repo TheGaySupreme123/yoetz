@@ -201,6 +201,13 @@ existing six-operation MCP registration remain unchanged. `PluginArtifactPort` n
 sibling boundary, while activation and new host capability cells remain unimplemented and
 evidence-gated.
 
+**Issue #151 implementation detail.** The same neutral plan now has a separately selected
+`plugin_managed` projection. It adds only root `mcp.json`, with one exact stdio route and an
+explicit pre-preview `strict|policy` profile. It never invokes `HarnessMcpPort`: external/global
+registration and plugin-managed configuration are mutually exclusive owners. Component validation
+keeps Agent Plugins' narrow failure boundaries, and real initialize/tools-list conformance remains
+the same six operations; this artifact slice still creates no host activation or model-use claim.
+
 **Amendment (2026-08-14, issue #222):** Codex hook stdout is event-specific. `SessionStart`,
 `PostToolUse`, and `UserPromptSubmit` keep `hookSpecificOutput.additionalContext`. `Stop` and
 `SubagentStop` have no such field: JSON that includes `hookSpecificOutput` is marked Failed with

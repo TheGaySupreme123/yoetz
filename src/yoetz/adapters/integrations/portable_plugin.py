@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Any, Final, Protocol, cast
+from typing import Any, Final, Literal, Protocol, cast
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
@@ -51,15 +51,20 @@ from yoetz.protocol.errors import ProtocolValueError
 __all__ = [
     "AGENT_PLUGIN_ROOT",
     "ManifestValidation",
+    "McpConfigValidation",
+    "PluginManagedMcpObservation",
     "PackagedPortableResources",
     "ElevatedPortableArtifactReview",
     "PortablePluginArtifactAdapter",
     "PortableTreeValidation",
     "RenderedPortablePlugin",
     "build_portable_plugin_plan",
+    "combine_mcp_ownership_states",
     "render_portable_plugin_tree",
     "prepare_portable_artifact_review",
+    "observe_plugin_managed_mcp",
     "validate_agent_plugin_manifest",
+    "validate_agent_plugin_mcp",
     "validate_portable_skill",
     "validate_portable_plugin_tree",
 ]
@@ -76,6 +81,7 @@ _GUIDANCE_NAMES: Final = (
     "workflow.md",
 )
 _SCHEMA_ID: Final = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+_MCP_SCHEMA_ID: Final = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 _PLUGIN_SCHEMA_SHA: Final = (
     "sha256:0a4aad95ce337878ad38802ebf0daa3fde76abe3f65400c86bcbb1ec0b3ab883"
 )
@@ -132,6 +138,44 @@ class ManifestValidation:
     accepted: bool
     unknown_fields: tuple[str, ...]
     fatal_field: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class McpConfigValidation:
+    top_level_valid: bool
+    loaded_server_count: int
+    skipped_server_count: int
+    diagnostics: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PluginManagedMcpObservation:
+    ownership_state: McpOwnershipState
+    route_profile: Literal["strict", "policy"] | None
+    observed: bool
+
+
+def combine_mcp_ownership_states(
+    external: McpOwnershipState,
+    plugin: McpOwnershipState,
+) -> McpOwnershipState:
+    """Combine separately observed sources without treating an unobserved source as absent."""
+
+    if type(external) is not McpOwnershipState or type(plugin) is not McpOwnershipState:
+        return McpOwnershipState.AMBIGUOUS
+    if external is McpOwnershipState.AMBIGUOUS or plugin is McpOwnershipState.AMBIGUOUS:
+        return McpOwnershipState.AMBIGUOUS
+    if external is McpOwnershipState.FOREIGN or plugin is McpOwnershipState.FOREIGN:
+        return McpOwnershipState.FOREIGN
+    if external is McpOwnershipState.EXTERNAL and plugin is McpOwnershipState.PLUGIN:
+        return McpOwnershipState.DUAL
+    if external is McpOwnershipState.EXTERNAL and plugin is McpOwnershipState.ABSENT:
+        return McpOwnershipState.EXTERNAL
+    if external is McpOwnershipState.ABSENT and plugin is McpOwnershipState.PLUGIN:
+        return McpOwnershipState.PLUGIN
+    if external is McpOwnershipState.ABSENT and plugin is McpOwnershipState.ABSENT:
+        return McpOwnershipState.ABSENT
+    return McpOwnershipState.AMBIGUOUS
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +273,102 @@ def validate_agent_plugin_manifest(
     return ManifestValidation(True, unknown, None)
 
 
+def validate_agent_plugin_mcp(
+    raw: bytes,
+    *,
+    schema_bytes: bytes,
+    supported_transports: tuple[str, ...] = ("stdio",),
+    connection_failures: Mapping[
+        str, Literal["executable", "start", "connect", "auth", "handshake"]
+    ]
+    | None = None,
+) -> McpConfigValidation:
+    """Validate MCP with Agent Plugins' top-level and per-server failure boundaries."""
+
+    failures: Mapping[str, Literal["executable", "start", "connect", "auth", "handshake"]] = (
+        {} if connection_failures is None else connection_failures
+    )
+    try:
+        document = _load_json(raw, PluginArtifactReason.SOURCE_INVALID)
+        schema = _load_json(schema_bytes, PluginArtifactReason.SOURCE_INVALID)
+    except PluginArtifactError:
+        return McpConfigValidation(False, 0, 0, ("mcp_config_invalid",))
+    if set(document) != {"$schema", "mcpServers"} or document.get("$schema") != _MCP_SCHEMA_ID:
+        return McpConfigValidation(False, 0, 0, ("mcp_config_invalid",))
+    servers = document.get("mcpServers")
+    if not isinstance(servers, Mapping):
+        return McpConfigValidation(False, 0, 0, ("mcp_config_invalid",))
+    validator = cast(_JsonSchemaValidator, Draft202012Validator(cast(Any, schema)))
+    loaded_count = 0
+    skipped_count = 0
+    diagnostics: list[str] = []
+    for raw_name, raw_server in sorted(servers.items(), key=lambda item: str(item[0]).encode()):
+        if type(raw_name) is not str:
+            return McpConfigValidation(False, 0, 0, ("mcp_config_invalid",))
+        candidate = {"$schema": _MCP_SCHEMA_ID, "mcpServers": {raw_name: raw_server}}
+        if next(iter(validator.iter_errors(candidate)), None) is not None:
+            skipped_count += 1
+            diagnostics.append("mcp_server_invalid")
+            continue
+        server = cast(Mapping[str, object], raw_server)
+        transport = server.get("type")
+        if transport == "stdio" and not _stdio_server_paths_valid(server):
+            skipped_count += 1
+            diagnostics.append("mcp_server_invalid")
+            continue
+        if type(transport) is not str or transport not in supported_transports:
+            skipped_count += 1
+            diagnostics.append("mcp_transport_unsupported")
+            continue
+        failure = failures.get(raw_name)
+        if failure is not None:
+            skipped_count += 1
+            diagnostics.append(
+                "mcp_executable_missing" if failure == "executable" else f"mcp_{failure}_failed"
+            )
+            continue
+        loaded_count += 1
+    return McpConfigValidation(
+        True,
+        loaded_count,
+        skipped_count,
+        tuple(diagnostics),
+    )
+
+
+def _contained_relative(value: str, prefix: str) -> bool:
+    if value == prefix.removesuffix("/"):
+        return True
+    if not value.startswith(prefix):
+        return False
+    parts = value.removeprefix(prefix).split("/")
+    return bool(parts) and all(part not in {"", ".", ".."} for part in parts)
+
+
+def _stdio_server_paths_valid(server: Mapping[str, object]) -> bool:
+    command = server.get("command")
+    if type(command) is not str:
+        return False
+    if command.startswith("./"):
+        if not _contained_relative(command, "./"):
+            return False
+    elif not command or "/" in command or "\\" in command or "${" in command:
+        return False
+    cwd = server.get("cwd")
+    if cwd is not None:
+        if type(cwd) is not str or not any(
+            _contained_relative(cwd, prefix)
+            for prefix in ("./", "${PLUGIN_ROOT}/", "${PLUGIN_DATA}/")
+        ):
+            return False
+    env = server.get("env")
+    if isinstance(env, Mapping):
+        env_map = cast(Mapping[str, object], env)
+        if {"PLUGIN_ROOT", "PLUGIN_DATA"}.intersection(env_map):
+            return False
+    return True
+
+
 def validate_portable_skill(raw: bytes) -> None:
     """Validate the portable Agent Skills subset used by the immediate-child skill."""
 
@@ -256,6 +396,12 @@ def validate_portable_plugin_tree(
     members: Mapping[str, bytes],
     *,
     schema_bytes: bytes,
+    mcp_schema_bytes: bytes | None = None,
+    supported_mcp_transports: tuple[str, ...] = ("stdio",),
+    mcp_connection_failures: Mapping[
+        str, Literal["executable", "start", "connect", "auth", "handshake"]
+    ]
+    | None = None,
 ) -> PortableTreeValidation:
     """Apply Agent Plugins component boundaries without upgrading them to activation proof."""
 
@@ -283,7 +429,35 @@ def validate_portable_plugin_tree(
             ("skills/yoetz",),
             ("skill_frontmatter_invalid",),
         )
-    return PortableTreeValidation(manifest, ("manifest", "skills/yoetz"), (), ())
+    loaded = ["manifest", "skills/yoetz"]
+    skipped: list[str] = []
+    diagnostics: list[str] = []
+    mcp_raw = members.get("mcp.json")
+    if mcp_raw is not None:
+        if mcp_schema_bytes is None:
+            skipped.append("mcp")
+            diagnostics.append("mcp_schema_unavailable")
+        else:
+            mcp = validate_agent_plugin_mcp(
+                mcp_raw,
+                schema_bytes=mcp_schema_bytes,
+                supported_transports=supported_mcp_transports,
+                connection_failures=mcp_connection_failures,
+            )
+            if not mcp.top_level_valid:
+                skipped.append("mcp")
+            else:
+                if mcp.loaded_server_count:
+                    loaded.append("mcp")
+                if mcp.skipped_server_count:
+                    skipped.append("mcp_server")
+            diagnostics.extend(mcp.diagnostics)
+    return PortableTreeValidation(
+        manifest,
+        tuple(loaded),
+        tuple(skipped),
+        tuple(diagnostics),
+    )
 
 
 def _source(source: PortableResourceSource | None) -> PortableResourceSource:
@@ -320,6 +494,26 @@ def _plugin_json() -> bytes:
     return canonical_encode(body) + b"\n"
 
 
+def _mcp_json(route_profile: Literal["strict", "policy"]) -> bytes:
+    args = ["mcp", "serve"]
+    if route_profile == "strict":
+        args.extend(("--semantic", "off"))
+    body = cast(
+        dict[str, JsonValue],
+        {
+            "$schema": _MCP_SCHEMA_ID,
+            "mcpServers": {
+                "yoetz": {
+                    "args": args,
+                    "command": "yoetz",
+                    "type": "stdio",
+                }
+            },
+        },
+    )
+    return canonical_encode(body) + b"\n"
+
+
 def _inventory(members: Mapping[str, bytes]) -> tuple[ManagedPluginFile, ...]:
     return tuple(
         ManagedPluginFile(path, len(data), _sha(data))
@@ -327,7 +521,12 @@ def _inventory(members: Mapping[str, bytes]) -> tuple[ManagedPluginFile, ...]:
     )
 
 
-def _artifact_digest(inventory: tuple[ManagedPluginFile, ...]) -> str:
+def _artifact_digest(
+    inventory: tuple[ManagedPluginFile, ...],
+    *,
+    mcp_ownership: McpOwnership,
+    mcp_route_profile: Literal["strict", "policy"] | None,
+) -> str:
     return canonical_digest(
         {
             "format_profile": PluginFormatProfile.AGENT_PLUGINS_1.value,
@@ -339,7 +538,8 @@ def _artifact_digest(inventory: tuple[ManagedPluginFile, ...]) -> str:
                 }
                 for item in inventory
             ],
-            "mcp_ownership": McpOwnership.EXTERNAL_REGISTRATION.value,
+            "mcp_ownership": mcp_ownership.value,
+            "mcp_route_profile": mcp_route_profile,
             "renderer_version": _RENDERER_VERSION,
             "schema_version": "1.0.0",
         }
@@ -347,8 +547,15 @@ def _artifact_digest(inventory: tuple[ManagedPluginFile, ...]) -> str:
 
 
 def build_portable_plugin_plan(
-    *, resource_source: PortableResourceSource | None = None
+    *,
+    resource_source: PortableResourceSource | None = None,
+    mcp_ownership: McpOwnership = McpOwnership.EXTERNAL_REGISTRATION,
+    mcp_route_profile: Literal["strict", "policy"] | None = None,
 ) -> RenderedPortablePlugin:
+    if type(mcp_ownership) is not McpOwnership or (
+        mcp_ownership is McpOwnership.PLUGIN_MANAGED
+    ) != (mcp_route_profile in {"strict", "policy"}):
+        raise _error(PluginArtifactReason.SOURCE_INVALID)
     source = _source(resource_source)
     schema = _read_verified_source(source, _PLUGIN_SCHEMA_PATH)
     mcp_schema = _read_verified_source(source, _MCP_SCHEMA_PATH)
@@ -360,12 +567,19 @@ def build_portable_plugin_plan(
         "plugin.json": _plugin_json(),
         "skills/yoetz/SKILL.md": skill,
     }
+    if mcp_ownership is McpOwnership.PLUGIN_MANAGED:
+        assert mcp_route_profile in {"strict", "policy"}
+        members["mcp.json"] = _mcp_json(mcp_route_profile)
     for name in _GUIDANCE_NAMES:
         data = _read_verified_source(source, f"guidance/{name}")
         if not data.endswith(b"\n") or b"\r" in data:
             raise _error(PluginArtifactReason.SOURCE_INVALID)
         members[f"skills/yoetz/references/{name}"] = data
-    validation = validate_portable_plugin_tree(members, schema_bytes=schema)
+    validation = validate_portable_plugin_tree(
+        members,
+        schema_bytes=schema,
+        mcp_schema_bytes=mcp_schema,
+    )
     if (
         not validation.manifest.accepted
         or validation.manifest.unknown_fields
@@ -383,8 +597,8 @@ def build_portable_plugin_plan(
             "Yoetz cooperative work-ledger guidance carrier; no host activation or authority claim."
         ),
         format_profile=PluginFormatProfile.AGENT_PLUGINS_1,
-        mcp_ownership=McpOwnership.EXTERNAL_REGISTRATION,
-        mcp_route_profile=None,
+        mcp_ownership=mcp_ownership,
+        mcp_route_profile=mcp_route_profile,
         host_extension_profile=None,
         specification_version="1.0.0",
         renderer_version=_RENDERER_VERSION,
@@ -401,13 +615,30 @@ def build_portable_plugin_plan(
         ),
         inventory=inventory,
     )
-    return RenderedPortablePlugin(plan, members, _artifact_digest(inventory))
+    return RenderedPortablePlugin(
+        plan,
+        members,
+        _artifact_digest(
+            inventory,
+            mcp_ownership=mcp_ownership,
+            mcp_route_profile=mcp_route_profile,
+        ),
+    )
 
 
 def render_portable_plugin_tree(
-    *, resource_source: PortableResourceSource | None = None
+    *,
+    resource_source: PortableResourceSource | None = None,
+    mcp_ownership: McpOwnership = McpOwnership.EXTERNAL_REGISTRATION,
+    mcp_route_profile: Literal["strict", "policy"] | None = None,
 ) -> dict[str, bytes]:
-    return dict(build_portable_plugin_plan(resource_source=resource_source).members)
+    return dict(
+        build_portable_plugin_plan(
+            resource_source=resource_source,
+            mcp_ownership=mcp_ownership,
+            mcp_route_profile=mcp_route_profile,
+        ).members
+    )
 
 
 def _marker(rendered: RenderedPortablePlugin) -> bytes:
@@ -423,6 +654,7 @@ def _marker(rendered: RenderedPortablePlugin) -> bytes:
             for item in rendered.plan.inventory
         ],
         "mcp_ownership": rendered.plan.mcp_ownership.value,
+        "mcp_route_profile": rendered.plan.mcp_route_profile,
         "renderer_version": rendered.plan.renderer_version,
         "schema": _MARKER_SCHEMA,
         "schema_version": rendered.plan.specification_version,
@@ -513,6 +745,43 @@ def _parsed_marker(files: Mapping[str, bytes]) -> Mapping[str, JsonValue] | None
         return _load_json(raw, PluginArtifactReason.SOURCE_INVALID)
     except PluginArtifactError:
         return None
+
+
+def observe_plugin_managed_mcp(project_root: Path) -> PluginManagedMcpObservation:
+    """Observe a managed portable route without inferring activation or runtime success."""
+
+    try:
+        root, _identity = _validate_project(ArtifactTarget(str(project_root)))
+        destination = _plugin_parent(root, create=False) / "yoetz"
+        if not destination.exists():
+            return PluginManagedMcpObservation(McpOwnershipState.ABSENT, None, True)
+        if destination.is_symlink() or not destination.is_dir():
+            return PluginManagedMcpObservation(McpOwnershipState.AMBIGUOUS, None, False)
+        files = _safe_tree_files(destination)
+    except OSError, PluginArtifactError, ValueError:
+        return PluginManagedMcpObservation(McpOwnershipState.AMBIGUOUS, None, False)
+    mcp_raw = files.get("mcp.json")
+    if mcp_raw is None:
+        return PluginManagedMcpObservation(McpOwnershipState.ABSENT, None, True)
+    marker = _parsed_marker(files)
+    if marker is None or not _marker_self_valid(marker):
+        return PluginManagedMcpObservation(McpOwnershipState.FOREIGN, None, True)
+    route = marker.get("mcp_route_profile")
+    if (
+        marker.get("schema") != _MARKER_SCHEMA
+        or marker.get("mcp_ownership") != McpOwnership.PLUGIN_MANAGED.value
+        or route not in {"strict", "policy"}
+        or mcp_raw != _mcp_json(cast(Literal["strict", "policy"], route))
+    ):
+        return PluginManagedMcpObservation(McpOwnershipState.AMBIGUOUS, None, True)
+    recorded_valid, _artifact = _recorded_tree_valid(files, marker)
+    if not recorded_valid:
+        return PluginManagedMcpObservation(McpOwnershipState.AMBIGUOUS, None, True)
+    return PluginManagedMcpObservation(
+        McpOwnershipState.PLUGIN,
+        cast(Literal["strict", "policy"], route),
+        True,
+    )
 
 
 def _marker_self_valid(marker: Mapping[str, JsonValue]) -> bool:
@@ -693,6 +962,7 @@ def _preview(
     action: PluginArtifactAction,
     inspection: _Inspection,
     rendered: RenderedPortablePlugin,
+    mcp_owner_state: McpOwnershipState,
 ) -> PluginArtifactPreview:
     if inspection.state is PluginArtifactState.RECOVERY_REQUIRED:
         raise _error(PluginArtifactReason.RECOVERY_REQUIRED)
@@ -716,15 +986,35 @@ def _preview(
         raise _error(PluginArtifactReason.REMOVE_REFUSED)
     if inspection.rollback_available and inspection.state is PluginArtifactState.NATIVE_MANAGED:
         raise _error(PluginArtifactReason.RECOVERY_REQUIRED)
+    allowed_owner_states = (
+        {McpOwnershipState.EXTERNAL}
+        if rendered.plan.mcp_ownership is McpOwnership.EXTERNAL_REGISTRATION
+        else {McpOwnershipState.ABSENT, McpOwnershipState.PLUGIN}
+    )
+    if mcp_owner_state not in allowed_owner_states:
+        raise _error(
+            PluginArtifactReason.MCP_OWNERSHIP_CONFLICT,
+            {"mcp_ownership_state": mcp_owner_state.value},
+        )
     effective = (
         PluginArtifactAction.NOOP
         if inspection.state is PluginArtifactState.PORTABLE_EXACT
         and action in {PluginArtifactAction.INSTALL, PluginArtifactAction.REPLACE}
         else action
     )
-    warnings = (
-        "format_validation_does_not_prove_activation",
-        "mcp_ownership_remains_external_registration",
+    warnings = tuple(
+        sorted(
+            {
+                "format_validation_does_not_prove_activation",
+                "mcp_runtime_not_observed",
+                (
+                    "mcp_ownership_remains_external_registration"
+                    if rendered.plan.mcp_ownership is McpOwnership.EXTERNAL_REGISTRATION
+                    else "plugin_activation_is_not_disclosure_consent"
+                ),
+            },
+            key=str.encode,
+        )
     )
     preview_digest = canonical_digest(
         {
@@ -741,6 +1031,8 @@ def _preview(
                 for item in rendered.plan.inventory
             ],
             "mcp_ownership": rendered.plan.mcp_ownership.value,
+            "mcp_ownership_state": mcp_owner_state.value,
+            "mcp_route_profile": rendered.plan.mcp_route_profile,
             "renderer_version": rendered.plan.renderer_version,
             "request_id": request,
             "schema_version": rendered.plan.specification_version,
@@ -752,6 +1044,7 @@ def _preview(
         request,
         effective,
         inspection.state,
+        mcp_owner_state,
         inspection.target_identity,
         inspection.current_state_digest,
         rendered.artifact_digest,
@@ -886,6 +1179,9 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
 
     __slots__ = (
         "_mcp_owner_state",
+        "_mcp_owner_observer",
+        "_mcp_ownership",
+        "_mcp_route_profile",
         "_operations",
         "_resource_source",
         "_review",
@@ -896,17 +1192,48 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
         resource_source: PortableResourceSource | None = None,
         *,
         review: PluginMutationReviewPort | None = None,
-        mcp_owner_state: McpOwnershipState = McpOwnershipState.AMBIGUOUS,
+        mcp_owner_state: McpOwnershipState | None = None,
+        mcp_owner_observer: Callable[[], McpOwnershipState] | None = None,
+        mcp_ownership: McpOwnership = McpOwnership.EXTERNAL_REGISTRATION,
+        mcp_route_profile: Literal["strict", "policy"] | None = None,
     ) -> None:
-        if type(mcp_owner_state) is not McpOwnershipState:
+        if (
+            (mcp_owner_state is not None and type(mcp_owner_state) is not McpOwnershipState)
+            or type(mcp_ownership) is not McpOwnership
+            or (mcp_ownership is McpOwnership.PLUGIN_MANAGED)
+            != (mcp_route_profile in {"strict", "policy"})
+        ):
             raise ValueError("plugin_mcp_owner_invalid")
         self._resource_source = resource_source
         self._review = _DenyStandaloneReview() if review is None else review
         self._mcp_owner_state = mcp_owner_state
+        self._mcp_owner_observer = mcp_owner_observer
+        self._mcp_ownership = mcp_ownership
+        self._mcp_route_profile: Literal["strict", "policy"] | None = mcp_route_profile
         self._operations: dict[str, tuple[str, PluginArtifactResult]] = {}
 
+    def _owner_state(self, target: ArtifactTarget) -> McpOwnershipState:
+        if self._mcp_owner_observer is not None:
+            value = self._mcp_owner_observer()
+        elif self._mcp_owner_state is not None:
+            value = self._mcp_owner_state
+        elif self._mcp_ownership is McpOwnership.PLUGIN_MANAGED:
+            # The artifact adapter cannot synchronously prove the host/global registration source.
+            # A caller must inject one combined observation; plugin-tree absence alone is not
+            # exclusive absence and must fail closed.
+            value = McpOwnershipState.AMBIGUOUS
+        else:
+            value = McpOwnershipState.EXTERNAL
+        if type(value) is not McpOwnershipState:
+            raise _error(PluginArtifactReason.MCP_OWNERSHIP_CONFLICT)
+        return value
+
     def _rendered(self) -> RenderedPortablePlugin:
-        return build_portable_plugin_plan(resource_source=self._resource_source)
+        return build_portable_plugin_plan(
+            resource_source=self._resource_source,
+            mcp_ownership=self._mcp_ownership,
+            mcp_route_profile=self._mcp_route_profile,
+        )
 
     def _authorize(self, command: PluginArtifactApplyCommand) -> None:
         if command.authority.target_digest != command.accepted_preview_digest:
@@ -932,7 +1259,13 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
         if type(target) is not ArtifactTarget or type(action) is not PluginArtifactAction:
             raise _error(PluginArtifactReason.SOURCE_INVALID)
         rendered = self._rendered()
-        return _preview(normalized, action, _inspect(target, rendered), rendered)
+        return _preview(
+            normalized,
+            action,
+            _inspect(target, rendered),
+            rendered,
+            self._owner_state(target),
+        )
 
     def _replay(self, command: PluginArtifactApplyCommand) -> PluginArtifactResult | None:
         identity = canonical_digest(
@@ -1000,7 +1333,8 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
             inspection.installed_digest,
             rendered.artifact_digest,
             rendered.plan.mcp_ownership,
-            self._mcp_owner_state,
+            self._owner_state(command.target),
+            rendered.plan.mcp_route_profile,
             inspection.marker_valid,
             inspection.rollback_available,
             proof,
@@ -1017,7 +1351,13 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
             return replay
         rendered = self._rendered()
         inspection = _inspect(command.target, rendered)
-        preview = _preview(command.request_id, command.action, inspection, rendered)
+        preview = _preview(
+            command.request_id,
+            command.action,
+            inspection,
+            rendered,
+            self._owner_state(command.target),
+        )
         if preview.preview_digest != command.accepted_preview_digest:
             raise _error(PluginArtifactReason.PREVIEW_STALE)
         self._authorize(command)
@@ -1125,7 +1465,13 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
             return replay
         rendered = self._rendered()
         inspection = _inspect(command.target, rendered)
-        preview = _preview(command.request_id, command.action, inspection, rendered)
+        preview = _preview(
+            command.request_id,
+            command.action,
+            inspection,
+            rendered,
+            self._owner_state(command.target),
+        )
         if preview.preview_digest != command.accepted_preview_digest:
             raise _error(PluginArtifactReason.PREVIEW_STALE)
         self._authorize(command)

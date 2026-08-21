@@ -2842,15 +2842,16 @@ provider's credential connected, the effective `llm_inference` channel enabled, 
 current-session repository binding's `repository_grant_state == "granted"`.
 `repository_grant_state` and `repository_migration_state` expose the separate repository-authority
 inputs without inventing another readiness verdict. `agent_route_semantic_ready` is
-`semantic_ready` **and** `mcp_route.registered_profile == "policy"`, and describes only the
-registered Codex MCP route; an unread route makes it `false`, because `registered_profile` is then
-`null` and an unobserved route is never treated as a policy route. The `mcp_route` object carries
-`registration_state`, `registered_profile`, `configured_profile`, and `observed`. `observed: false`
-means the route was not read, not that none is registered, and is the single reported state for
-every read failure — empty Codex discovery, any `McpRegistrationError` (`harness_unavailable`,
-`parse_failed`, `timeout`), and any `OSError`; `registration_state` and `registered_profile` are
-both `null` there. `registered_profile: null` with `observed: true` is the different fact that no
-Yoetz route is registered (`registration_state` is `absent` or `foreign_present`).
+`semantic_ready` **and** one exclusive observed owner (`external|plugin`) with
+`mcp_route.registered_profile == "policy"`. An unread, dual, foreign, or ambiguous route makes it
+`false`; a policy-shaped file alone never creates readiness. The `mcp_route` object carries the
+legacy external-registration fields `registration_state`, `registered_profile`, and
+`configured_profile`, plus `observed`, `owner_source`, `ownership_state`,
+`external_registration_state`, and `plugin_managed_state`. `owner_source` is
+`external_registration|plugin_managed|dual|foreign|null`; `ownership_state` uses
+`McpOwnershipState`. `observed: false` means exclusive ownership was not read unambiguously, not
+that none is registered. `registered_profile: null` with `observed: true` means the observed state
+has no single Yoetz route (`absent|dual|foreign`).
 A strict registered route adds a `mcp_route_profile` blocker
 with `scope: "agent_route"` and never moves `semantic_ready` or the exit code, because ADR-018
 decision 2 makes the route ceiling process-local — CLI and terminal checks still dispatch. Route
@@ -2871,11 +2872,11 @@ phase/outcome, before/after state, compatibility, managed-file count, structural
 optional closed integration reason; it has no project path, content, environment, Git, task, or
 exception field.
 
-### Portable plugin carrier and host activation (ADR-023; artifact slice implemented by #150)
+### Portable plugin carrier and host activation (ADR-023; artifact/MCP slices implemented by #150/#151)
 
-The names below were registered by ADR-023 and the skills-only artifact slice is implemented in
-`ports/plugin_artifacts.py` and `adapters/integrations/portable_plugin.py`. Later child issues of
-#148 own plugin-managed MCP, activation, and per-host evidence cells. A portable plugin is a
+The names below were registered by ADR-023; the artifact and optional plugin-managed MCP slices are
+implemented in `ports/plugin_artifacts.py` and `adapters/integrations/portable_plugin.py`. Later
+child issues of #148 own activation and per-host evidence cells. A portable plugin is a
 carrier, never an authority: it may carry metadata, shared skill bytes, and an optional exact MCP
 declaration, and it cannot authorize disclosure, hold credentials, unlock the vault, approve
 observation, call providers, strengthen coverage, or replace a receipt (ADR-008, ADR-023).
@@ -2934,7 +2935,8 @@ path (ADR-023 decision 11).
 
 The implemented artifact operation is exactly `plugin_artifact_apply`. Its prepare target is the
 portable preview digest, which already binds target identity, current-state digest, action,
-format/schema/renderer versions, external MCP ownership, and the complete sorted future inventory.
+format/schema/renderer versions, intended and current MCP ownership, optional route profile, exact
+route bytes through the artifact inventory/digest, and the complete sorted future inventory.
 It is `review_only`, never agent-chat-authorizable, and its one pending review is consumed before
 one install/replace/remove attempt. Same-request replay returns the stored process result; after
 restart or an ambiguous filesystem outcome the caller must reconcile through `status_artifact`,
@@ -2955,19 +2957,23 @@ The #150 artifact wire-neutral domain shapes are closed:
   also carries the one-use pending review ID. The string discriminator is not itself authority:
   the adapter consumes the corresponding injected authority port, and the default adapter denies
   both channels.
-- `PluginArtifactPreview` carries request ID, action, state before, target-identity digest,
+- `PluginArtifactPreview` carries request ID, action, state before, current `McpOwnershipState`, target-identity digest,
   current-state digest, artifact digest, preview digest, the complete `PortablePluginPlan`, and
   sorted structural warnings. It carries no raw target path or member contents.
+  For plugin-managed mode that owner state must be composed from plugin and external/global
+  observations by the caller; the neutral artifact adapter cannot infer the latter from tree
+  absence, so its uncomposed default is `ambiguous` and refuses preview.
 - `PluginArtifactStatus` carries artifact and installed-byte state, `PluginOperationState`, detected
-  format, artifact/installed digests, desired and observed MCP ownership, marker validity, rollback
+  format, artifact/installed digests, desired and observed MCP ownership, exact plugin-managed route
+  profile, marker validity, rollback
   availability, and one independent status for every `PluginProofFacet`. Unobserved facets remain
   `not_observed`; installed bytes never imply discovery or activation.
 - `PluginArtifactResult` carries request/action/operation state, before/after artifact states,
   preview/artifact/installed digests, and sorted changed member names. The bounded refusal reasons
-  are `authority_required|destination_conflict|format_unsupported|human_authority_unavailable|manifest_invalid|modified_copy|operation_conflict|preview_stale|recovery_required|remove_refused|request_identity_conflict|source_invalid|target_unsafe|target_untrusted|write_failed`.
+  are `authority_required|destination_conflict|format_unsupported|human_authority_unavailable|manifest_invalid|mcp_ownership_conflict|modified_copy|operation_conflict|preview_stale|recovery_required|remove_refused|request_identity_conflict|source_invalid|target_unsafe|target_untrusted|write_failed`.
 
 The `yoetz.portable-plugin-install/1` marker contains only schema, format profile, Yoetz/schema/
-renderer versions, `external_registration`, artifact digest, complete sorted managed-file rows
+renderer versions, exact MCP ownership and optional route profile, artifact digest, complete sorted managed-file rows
 (`relative_path`, `size`, `sha256`), and its canonical marker digest. It contains no project path,
 user value, timestamp, credential, secret reference, transcript, host-activation claim, or receipt.
 

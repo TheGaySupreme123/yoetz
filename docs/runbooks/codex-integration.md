@@ -30,6 +30,14 @@ skills-only renderer and whole-directory migration/rollback at the same
 capability-proven and explicitly approved by a later host cell, the native behavior in this
 runbook remains the shipping control and nothing here changes.
 
+Issue #151 adds an optional generated plugin-managed MCP mode to that portable artifact. It is not
+the default rollout and does not change the native control. If selected by a later proven host
+cell, preflight must show no external/global `yoetz` registration, bind strict or policy before
+preview, and install the full digest-bound artifact without invoking `codex mcp add`. Dual,
+foreign, or unobservable ownership stops the operation. `yoetz provider status --json` reports
+`owner_source`, `ownership_state`, and the observed route profile; only one exclusively observed
+policy owner can make `agent_route_semantic_ready` true.
+
 ## 2. Prerequisites and exact supported scope
 
 Check `yoetz version --json`, the installed resource set, and the current compatibility/capability

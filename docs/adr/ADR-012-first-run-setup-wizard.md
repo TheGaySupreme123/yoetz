@@ -287,6 +287,16 @@ control until a later capability cell proves portable discovery and activation. 
 preview therefore creates no activation claim: status keeps rendered bytes, installed bytes, MCP
 ownership, discovery, activation, and skill delivery separate.
 
+Issue #151 adds the optional plugin-managed backend without changing this authority order. Setup
+must select `external_registration` or `plugin_managed`, and for the latter select `strict` or
+`policy`, before rendering the preview. The preview shows and binds the current ownership state,
+exact route argv, schema/renderer version, and complete bytes. `dual`, `foreign`, `ambiguous`, or a
+changed owner refuses apply without overwrite. Activation follows artifact apply and never counts
+as privacy/provider consent. Rollback removes only exact managed bytes (restoring the retained exact
+native tree when present); it preserves foreign host config and all Yoetz durable state. PATH or
+executable failure is a capability diagnostic after activation, never permission to inject shell
+configuration, environment values, or credentials.
+
 Package replacement changes binaries, not accepted trust bytes. Installed-wheel proof is still
 required before issue #139 can close: consecutive real checks must prove distinct attempt authority
 and receipts in one approved repository, and a second repository must remain blocked. Router routing

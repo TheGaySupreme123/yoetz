@@ -4,9 +4,10 @@
 [issue #149](https://github.com/TheGaySupreme123/yoetz/issues/149#issuecomment-5371952502).
 Issue #149 suggested the name ADR-020; that number was taken by typed evidence digest provenance
 before this document landed, so the accepted decision set lives here unchanged.
-**Implemented by:** the skills-only portable slice is implemented by
-`ports/plugin_artifacts.py` and `adapters/integrations/portable_plugin.py` under issue #150. Later
-children of #148 still own plugin-managed MCP, activation, and per-host capability cells.
+**Implemented by:** the skills-only artifact slice (#150) and optional exclusive plugin-managed MCP
+slice (#151) are implemented by `ports/plugin_artifacts.py` and
+`adapters/integrations/portable_plugin.py`. Later children of #148 still own activation and
+per-host capability cells.
 **Relates to:** ADR-005 (exact capability identity), ADR-007 (packaging/release), ADR-008
 (trust boundary), ADR-009 (egress/privacy — deliberately not amended), ADR-010 (harness
 integration port), ADR-012 (first-run setup wizard), ADR-016 (human review), ADR-018 (MCP route
@@ -22,7 +23,7 @@ not own, exactly what ADR-018 exists to prevent. Generalizing that renderer woul
 artifact the source for Cursor and Claude, merge installation with activation, and conflate format
 compatibility with tested support.
 
-The Agent Plugins specification 1.0.0 (Working Draft) standardizes a portable plugin directory: a
+The Agent Plugins specification 1.0.0 (Published) standardizes a portable plugin directory: a
 `plugin.json` manifest at the plugin root, shared skills, and an optional MCP configuration. It
 intentionally does not standardize installation, trust, consent, hooks, observation, marketplaces,
 credentials, or proof, and it prescribes no install root — each client chooses. That thinness is
@@ -178,6 +179,15 @@ byte-pinned Agent Plugins 1.0.0 schema, and the immediate-child skill uses only 
 `description` frontmatter. Unknown root manifest fields are reported and ignored for component
 loading; fatal known-field violations reject the manifest, while an invalid skill component is
 reported at its own boundary.
+
+### Implemented slice-2 MCP projection (issue #151)
+
+`plugin_managed` adds only root `mcp.json`, generated in exact policy and strict variants from the
+same plan. The route uses bare executable `yoetz`, contains no secrets or environment, and remains
+exclusive with native/global registration. Preview and artifact identities bind the full bytes,
+route profile, and current ownership state. Offline validation preserves the specification's
+top-level/component/server failure boundaries. Provider status combines external and plugin
+observations conservatively; no host cell or activation claim is created by this implementation.
 
 The exact standalone mutation operation is `plugin_artifact_apply`, risk class `review_only`,
 bound to the complete preview digest. Agent-chat authorization is forbidden. Without an

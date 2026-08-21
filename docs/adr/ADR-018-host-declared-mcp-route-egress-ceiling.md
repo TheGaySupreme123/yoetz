@@ -82,6 +82,15 @@ ambiguous ownership are explicit `McpOwnershipState` values that are reported, n
 or silently chosen between. Changing the generated `mcp.json` bytes for a bound route is a
 public-contract change under the same update rule as the two registration commands.
 
+**Issue #151 implementation detail.** The portable projection emits one closed stdio server named
+`yoetz`. Its executable token is exactly `yoetz`; policy args are exactly `mcp serve`, and strict
+args are exactly `mcp serve --semantic off`. It emits no `env`, headers, credential references, or
+shell command. The pinned Agent Plugins schema is validated offline. Invalid top-level MCP config
+disables only MCP; an invalid, unsupported, or failing entry skips only that server, so the
+independent Yoetz skill remains loadable. Preview binds the full `mcp.json` bytes through
+inventory/artifact digests and also binds the observed `McpOwnershipState`; changed ownership
+makes apply stale or conflicting before mutation.
+
 ## Alternatives considered
 
 **Infer the route from current policy for each call.** Rejected: the host would be approving a

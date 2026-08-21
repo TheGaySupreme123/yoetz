@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -16,9 +16,12 @@ from yoetz.adapters.integrations.portable_plugin import (
     ElevatedPortableArtifactReview,
     PortablePluginArtifactAdapter,
     build_portable_plugin_plan,
+    combine_mcp_ownership_states,
+    observe_plugin_managed_mcp,
     prepare_portable_artifact_review,
     render_portable_plugin_tree,
     validate_agent_plugin_manifest,
+    validate_agent_plugin_mcp,
     validate_portable_plugin_tree,
     validate_portable_skill,
 )
@@ -117,6 +120,27 @@ def test_codex_portable_root_and_scope_are_fixture_registered() -> None:
     assert expected_members == sorted(render_portable_plugin_tree(), key=str.encode)
 
 
+def test_plugin_managed_route_variants_match_the_registered_fixture() -> None:
+    fixture = strict_json_parse(
+        read_verified_resource("fixtures/agent-plugins/codex-project-plugin-managed-mcp.case.json")
+    )
+    assert isinstance(fixture, Mapping)
+    routes = fixture["routes"]
+    assert isinstance(routes, Mapping)
+    server_name = fixture["expected_server_name"]
+    assert type(server_name) is str
+    for profile in ("policy", "strict"):
+        rendered = render_portable_plugin_tree(
+            mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+            mcp_route_profile=profile,
+        )
+        mcp = strict_json_parse(rendered["mcp.json"])
+        assert isinstance(mcp, Mapping)
+        servers = mcp["mcpServers"]
+        assert isinstance(servers, Mapping)
+        assert servers[server_name] == routes[profile]
+
+
 def test_portable_tree_is_skills_only_and_guidance_is_byte_identical() -> None:
     rendered = build_portable_plugin_plan()
     tree = dict(rendered.members)
@@ -138,6 +162,146 @@ def test_portable_tree_is_skills_only_and_guidance_is_byte_identical() -> None:
         "workflow.md",
     ):
         assert tree[f"skills/yoetz/references/{name}"] == read_verified_resource(f"guidance/{name}")
+
+
+@pytest.mark.parametrize(
+    ("route_profile", "expected_args"),
+    [
+        ("policy", ["mcp", "serve"]),
+        ("strict", ["mcp", "serve", "--semantic", "off"]),
+    ],
+)
+def test_plugin_managed_mcp_variants_are_exact_and_offline_valid(
+    route_profile: str, expected_args: list[str]
+) -> None:
+    rendered = build_portable_plugin_plan(
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        mcp_route_profile=cast(Any, route_profile),
+    )
+    mcp_raw = rendered.members["mcp.json"]
+    mcp = strict_json_parse(mcp_raw)
+    assert mcp == {
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+        "mcpServers": {"yoetz": {"args": expected_args, "command": "yoetz", "type": "stdio"}},
+    }
+    assert b"env" not in mcp_raw
+    assert rendered.plan.mcp_ownership is McpOwnership.PLUGIN_MANAGED
+    assert rendered.plan.mcp_route_profile == route_profile
+    validated = validate_agent_plugin_mcp(
+        mcp_raw,
+        schema_bytes=read_verified_resource("support/agent-plugins/1.0.0/mcp.schema.json"),
+    )
+    assert validated.top_level_valid is True
+    assert validated.loaded_server_count == 1
+    assert validated.skipped_server_count == 0
+
+
+def test_mcp_failure_boundaries_preserve_skill_and_other_servers() -> None:
+    plugin = render_portable_plugin_tree()
+    schema = read_verified_resource("support/agent-plugins/1.0.0/plugin.schema.json")
+    mcp_schema = read_verified_resource("support/agent-plugins/1.0.0/mcp.schema.json")
+    plugin["mcp.json"] = canonical_encode(
+        {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+            "mcpServers": {
+                "bad": {"type": "stdio", "command": "yoetz", "unknown": True},
+                "good": {"type": "stdio", "command": "yoetz", "args": ["mcp", "serve"]},
+                "other": {"type": "stdio", "command": "other-server"},
+                "remote": {"type": "streamable-http", "url": "https://example.com/mcp"},
+            },
+        }
+    )
+    result = validate_portable_plugin_tree(
+        plugin,
+        schema_bytes=schema,
+        mcp_schema_bytes=mcp_schema,
+        mcp_connection_failures={"good": "handshake"},
+    )
+    assert "skills/yoetz" in result.loaded_components
+    assert result.loaded_components == ("manifest", "skills/yoetz", "mcp")
+    assert result.skipped_components == ("mcp_server",)
+    assert result.diagnostics == (
+        "mcp_server_invalid",
+        "mcp_handshake_failed",
+        "mcp_transport_unsupported",
+    )
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        {"type": "stdio", "command": "../yoetz"},
+        {"type": "stdio", "command": "yoetz", "cwd": "data"},
+        {"type": "stdio", "command": "yoetz", "env": {"PLUGIN_ROOT": "override"}},
+    ],
+)
+def test_mcp_path_and_reserved_variable_escapes_skip_only_that_server(
+    server: dict[str, JsonValue],
+) -> None:
+    raw = canonical_encode(
+        {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+            "mcpServers": {
+                "invalid": server,
+                "yoetz": {"type": "stdio", "command": "yoetz", "args": ["mcp", "serve"]},
+            },
+        }
+    )
+    result = validate_agent_plugin_mcp(
+        raw,
+        schema_bytes=read_verified_resource("support/agent-plugins/1.0.0/mcp.schema.json"),
+    )
+    assert result.loaded_server_count == 1
+    assert result.skipped_server_count == 1
+    assert result.diagnostics == ("mcp_server_invalid",)
+
+
+@pytest.mark.parametrize(
+    "mcp_raw",
+    [
+        b"not-json",
+        canonical_encode(
+            {
+                "$schema": "https://agent-plugins.org/schemas/9.9.9/mcp.schema.json",
+                "mcpServers": {},
+            }
+        ),
+        canonical_encode(
+            {
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+                "mcpServers": {},
+                "unknown": True,
+            }
+        ),
+    ],
+)
+def test_invalid_top_level_mcp_disables_only_mcp(mcp_raw: bytes) -> None:
+    plugin = render_portable_plugin_tree()
+    plugin["mcp.json"] = mcp_raw
+    result = validate_portable_plugin_tree(
+        plugin,
+        schema_bytes=read_verified_resource("support/agent-plugins/1.0.0/plugin.schema.json"),
+        mcp_schema_bytes=read_verified_resource("support/agent-plugins/1.0.0/mcp.schema.json"),
+    )
+    assert result.loaded_components == ("manifest", "skills/yoetz")
+    assert result.skipped_components == ("mcp",)
+    assert result.diagnostics == ("mcp_config_invalid",)
+
+
+@pytest.mark.parametrize("failure", ["executable", "start", "connect", "auth", "handshake"])
+def test_mcp_runtime_failure_skips_only_the_failed_server(failure: str) -> None:
+    raw = render_portable_plugin_tree(
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        mcp_route_profile="policy",
+    )["mcp.json"]
+    result = validate_agent_plugin_mcp(
+        raw,
+        schema_bytes=read_verified_resource("support/agent-plugins/1.0.0/mcp.schema.json"),
+        connection_failures={"yoetz": cast(Any, failure)},
+    )
+    assert result.top_level_valid is True
+    assert result.loaded_server_count == 0
+    assert result.skipped_server_count == 1
 
 
 def test_manifest_unknown_fields_are_reported_and_ignored() -> None:
@@ -253,6 +417,198 @@ async def test_install_is_preview_bound_verified_and_replay_safe(tmp_path: Path)
     assert proof[PluginProofFacet.INSTALLED_BYTES] == "proven"
     assert proof[PluginProofFacet.HOST_ACTIVATION] == "not_observed"
     assert proof[PluginProofFacet.OBSERVATION_EVIDENCE] == "not_observed"
+
+
+@pytest.mark.anyio
+async def test_plugin_managed_install_is_exclusive_and_owner_state_is_preview_bound(
+    tmp_path: Path,
+) -> None:
+    target = _target(tmp_path)
+    owner = [McpOwnershipState.ABSENT]
+    adapter = PortablePluginArtifactAdapter(
+        review=_SetupAuthority(),
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        mcp_route_profile="strict",
+        mcp_owner_state=McpOwnershipState.ABSENT,
+        mcp_owner_observer=lambda: owner[0],
+    )
+    preview = await adapter.preview_artifact(
+        request_id(_request(12)), target, PluginArtifactAction.INSTALL
+    )
+    assert preview.mcp_ownership_state is McpOwnershipState.ABSENT
+    owner[0] = McpOwnershipState.EXTERNAL
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.install_artifact(
+            PluginArtifactApplyCommand(
+                request_id(_request(12)),
+                target,
+                PluginArtifactAction.INSTALL,
+                preview.preview_digest,
+                _setup_authority(preview.preview_digest),
+            )
+        )
+    assert caught.value.reason is PluginArtifactReason.MCP_OWNERSHIP_CONFLICT
+    assert not (tmp_path / ".agents").exists()
+
+
+@pytest.mark.anyio
+async def test_allowed_owner_transition_after_preview_is_stale(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    owner = [McpOwnershipState.ABSENT]
+    adapter = PortablePluginArtifactAdapter(
+        review=_SetupAuthority(),
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        mcp_route_profile="strict",
+        mcp_owner_state=McpOwnershipState.ABSENT,
+        mcp_owner_observer=lambda: owner[0],
+    )
+    preview = await adapter.preview_artifact(
+        request_id(_request(15)), target, PluginArtifactAction.INSTALL
+    )
+    owner[0] = McpOwnershipState.PLUGIN
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.install_artifact(
+            PluginArtifactApplyCommand(
+                request_id(_request(15)),
+                target,
+                PluginArtifactAction.INSTALL,
+                preview.preview_digest,
+                _setup_authority(preview.preview_digest),
+            )
+        )
+    assert caught.value.reason is PluginArtifactReason.PREVIEW_STALE
+    assert not (tmp_path / ".agents").exists()
+
+
+@pytest.mark.anyio
+async def test_route_change_after_preview_is_stale(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    strict = PortablePluginArtifactAdapter(
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        mcp_route_profile="strict",
+        mcp_owner_state=McpOwnershipState.ABSENT,
+    )
+    preview = await strict.preview_artifact(
+        request_id(_request(16)), target, PluginArtifactAction.INSTALL
+    )
+    policy = PortablePluginArtifactAdapter(
+        review=_SetupAuthority(),
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        mcp_route_profile="policy",
+        mcp_owner_state=McpOwnershipState.ABSENT,
+    )
+    with pytest.raises(PluginArtifactError) as caught:
+        await policy.install_artifact(
+            PluginArtifactApplyCommand(
+                request_id(_request(16)),
+                target,
+                PluginArtifactAction.INSTALL,
+                preview.preview_digest,
+                _setup_authority(preview.preview_digest),
+            )
+        )
+    assert caught.value.reason is PluginArtifactReason.PREVIEW_STALE
+    assert not (tmp_path / ".agents").exists()
+
+
+@pytest.mark.anyio
+async def test_plugin_managed_install_is_observed_from_exact_marker_and_route(
+    tmp_path: Path,
+) -> None:
+    target = _target(tmp_path)
+
+    def _combined_owner() -> McpOwnershipState:
+        plugin = observe_plugin_managed_mcp(tmp_path).ownership_state
+        return combine_mcp_ownership_states(McpOwnershipState.ABSENT, plugin)
+
+    adapter = PortablePluginArtifactAdapter(
+        review=_SetupAuthority(),
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        mcp_route_profile="policy",
+        mcp_owner_observer=_combined_owner,
+    )
+    preview = await adapter.preview_artifact(
+        request_id(_request(14)), target, PluginArtifactAction.INSTALL
+    )
+    await adapter.install_artifact(
+        PluginArtifactApplyCommand(
+            request_id(_request(14)),
+            target,
+            PluginArtifactAction.INSTALL,
+            preview.preview_digest,
+            _setup_authority(preview.preview_digest),
+        )
+    )
+
+    observation = observe_plugin_managed_mcp(tmp_path)
+
+    assert observation.observed is True
+    assert observation.ownership_state is McpOwnershipState.PLUGIN
+    assert observation.route_profile == "policy"
+    status = await adapter.status_artifact(PluginArtifactStatusCommand(target))
+    assert status.mcp_ownership_state is McpOwnershipState.PLUGIN
+    assert status.mcp_route_profile == "policy"
+
+
+@pytest.mark.anyio
+async def test_default_plugin_managed_adapter_refuses_uncomposed_ownership(
+    tmp_path: Path,
+) -> None:
+    adapter = PortablePluginArtifactAdapter(
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        mcp_route_profile="policy",
+    )
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.preview_artifact(
+            request_id(_request(17)), _target(tmp_path), PluginArtifactAction.INSTALL
+        )
+    assert caught.value.reason is PluginArtifactReason.MCP_OWNERSHIP_CONFLICT
+    assert caught.value.safe_details == {"mcp_ownership_state": "ambiguous"}
+
+
+@pytest.mark.parametrize(
+    ("external", "plugin", "combined"),
+    [
+        (McpOwnershipState.ABSENT, McpOwnershipState.ABSENT, McpOwnershipState.ABSENT),
+        (McpOwnershipState.EXTERNAL, McpOwnershipState.ABSENT, McpOwnershipState.EXTERNAL),
+        (McpOwnershipState.ABSENT, McpOwnershipState.PLUGIN, McpOwnershipState.PLUGIN),
+        (McpOwnershipState.EXTERNAL, McpOwnershipState.PLUGIN, McpOwnershipState.DUAL),
+        (McpOwnershipState.AMBIGUOUS, McpOwnershipState.ABSENT, McpOwnershipState.AMBIGUOUS),
+        (McpOwnershipState.ABSENT, McpOwnershipState.FOREIGN, McpOwnershipState.FOREIGN),
+    ],
+)
+def test_composed_ownership_never_collapses_external_or_unknown_sources(
+    external: McpOwnershipState,
+    plugin: McpOwnershipState,
+    combined: McpOwnershipState,
+) -> None:
+    assert combine_mcp_ownership_states(external, plugin) is combined
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "owner_state",
+    [
+        McpOwnershipState.EXTERNAL,
+        McpOwnershipState.DUAL,
+        McpOwnershipState.FOREIGN,
+        McpOwnershipState.AMBIGUOUS,
+    ],
+)
+async def test_plugin_managed_preview_preserves_and_reports_conflicting_owner_states(
+    tmp_path: Path, owner_state: McpOwnershipState
+) -> None:
+    adapter = PortablePluginArtifactAdapter(
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        mcp_route_profile="policy",
+        mcp_owner_state=owner_state,
+    )
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.preview_artifact(
+            request_id(_request(13)), _target(tmp_path), PluginArtifactAction.INSTALL
+        )
+    assert caught.value.reason is PluginArtifactReason.MCP_OWNERSHIP_CONFLICT
+    assert caught.value.safe_details == {"mcp_ownership_state": owner_state.value}
 
 
 @pytest.mark.anyio
