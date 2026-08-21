@@ -38,6 +38,8 @@ coverage.xml
 
 # Local agent work products and execution records; never part of the public repository.
 /.codex-test-handoff.md
+/.claude/launch.json
+/.playwright-mcp/
 /docs/dogfood/
 /docs/plans/
 /docs/postmortems/
