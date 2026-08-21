@@ -514,7 +514,7 @@ def _stub_route(monkeypatch: pytest.MonkeyPatch, observation: object) -> list[st
 
     printed: list[str] = []
 
-    async def observe() -> object:
+    async def observe(_workspace_locator: Path | None = None) -> object:
         if isinstance(observation, Exception):
             raise observation
         return observation
@@ -660,7 +660,7 @@ async def test_a_local_only_commit_never_mentions_the_agent_route(
     )
     probed: list[str] = []
 
-    async def observe() -> object:
+    async def observe(_workspace_locator: Path | None = None) -> object:
         probed.append("observed")
         return {"registered_profile": "strict", "observed": True}
 

@@ -153,7 +153,7 @@ def _install(
     # "could not read" answer, which is what a host without Codex actually produces.
     observation = _UNREAD_ROUTE if mcp_route is None else mcp_route
 
-    async def _observe() -> dict[str, object]:
+    async def _observe(_workspace_locator: Path | None = None) -> dict[str, object]:
         return dict(observation)
 
     monkeypatch.setattr(module, "mcp_route_observation", _observe)
@@ -165,6 +165,10 @@ _UNREAD_ROUTE: dict[str, object] = {
     "registered_profile": None,
     "configured_profile": None,
     "observed": False,
+    "owner_source": None,
+    "ownership_state": "ambiguous",
+    "external_registration_state": None,
+    "plugin_managed_state": "absent",
 }
 
 
@@ -179,6 +183,23 @@ def _route(
         "registered_profile": registered,
         "configured_profile": registered if configured is None else configured,
         "observed": True,
+        "owner_source": "external_registration",
+        "ownership_state": "external",
+        "external_registration_state": state,
+        "plugin_managed_state": "absent",
+    }
+
+
+def _plugin_route(registered: str, *, ownership_state: str = "plugin") -> dict[str, object]:
+    return {
+        "registration_state": "absent",
+        "registered_profile": registered,
+        "configured_profile": registered,
+        "observed": True,
+        "owner_source": "plugin_managed" if ownership_state == "plugin" else ownership_state,
+        "ownership_state": ownership_state,
+        "external_registration_state": "absent",
+        "plugin_managed_state": ownership_state,
     }
 
 
@@ -484,6 +505,41 @@ async def test_policy_registered_route_makes_both_verdicts_true(
     assert [item for item in blockers if item.get("condition") == "mcp_route_profile"] == []
 
 
+async def test_policy_plugin_managed_route_makes_agent_route_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, provider=_provider(), mcp_route=_plugin_route("policy"))
+
+    report = await module.provider_status_report(workspace_locator=tmp_path)
+
+    assert report["semantic_ready"] is True
+    assert report["agent_route_semantic_ready"] is True
+    route = cast(dict[str, object], report["mcp_route"])
+    assert route["owner_source"] == "plugin_managed"
+    assert route["ownership_state"] == "plugin"
+
+
+@pytest.mark.parametrize("ownership_state", ["dual", "foreign", "ambiguous"])
+async def test_conflicting_or_ambiguous_route_never_reports_agent_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ownership_state: str,
+) -> None:
+    route = _plugin_route("policy", ownership_state=ownership_state)
+    if ownership_state in {"dual", "foreign"}:
+        route["registered_profile"] = None
+    _install(monkeypatch, tmp_path, provider=_provider(), mcp_route=route)
+
+    report = await module.provider_status_report(workspace_locator=tmp_path)
+
+    assert report["agent_route_semantic_ready"] is False
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    ownership = [item for item in blockers if item.get("condition") == "mcp_ownership_state"]
+    assert ownership == [
+        {"condition": "mcp_ownership_state", "state": ownership_state, "scope": "agent_route"}
+    ]
+
+
 async def test_a_policy_route_on_an_unready_installation_is_not_agent_route_ready(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -547,6 +603,10 @@ async def test_route_probe_failure_degrades_instead_of_raising(
         # Configured profile is config-local, so it survives a failed probe.
         "configured_profile": "policy",
         "observed": False,
+        "owner_source": None,
+        "ownership_state": "ambiguous",
+        "external_registration_state": None,
+        "plugin_managed_state": "absent",
     }
     assert report["agent_route_semantic_ready"] is False
 

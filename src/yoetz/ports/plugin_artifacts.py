@@ -125,6 +125,7 @@ class PluginArtifactReason(str, Enum):  # noqa: UP042 - exact structural enum
     FORMAT_UNSUPPORTED = "format_unsupported"
     HUMAN_AUTHORITY_UNAVAILABLE = "human_authority_unavailable"
     MANIFEST_INVALID = "manifest_invalid"
+    MCP_OWNERSHIP_CONFLICT = "mcp_ownership_conflict"
     MODIFIED_COPY = "modified_copy"
     OPERATION_CONFLICT = "operation_conflict"
     PREVIEW_STALE = "preview_stale"
@@ -313,6 +314,7 @@ class PluginArtifactPreview:
     request_id: RequestId
     action: PluginArtifactAction
     state_before: PluginArtifactState
+    mcp_ownership_state: McpOwnershipState
     target_identity: str
     current_state_digest: str
     artifact_digest: str
@@ -326,6 +328,7 @@ class PluginArtifactPreview:
             raise ValueError("plugin_action_invalid")
         if (
             type(self.state_before) is not PluginArtifactState
+            or type(self.mcp_ownership_state) is not McpOwnershipState
             or type(self.plan) is not PortablePluginPlan
         ):
             raise ValueError("plugin_preview_invalid")
@@ -351,6 +354,7 @@ class PluginArtifactStatus:
     artifact_digest: str
     mcp_ownership: McpOwnership
     mcp_ownership_state: McpOwnershipState
+    mcp_route_profile: Literal["strict", "policy"] | None
     managed_marker_valid: bool
     rollback_available: bool
     proof: tuple[PluginProofStatus, ...]
@@ -368,6 +372,10 @@ class PluginArtifactStatus:
         if (
             type(self.mcp_ownership) is not McpOwnership
             or type(self.mcp_ownership_state) is not McpOwnershipState
+        ):
+            raise ValueError("plugin_status_invalid")
+        if (self.mcp_ownership is McpOwnership.PLUGIN_MANAGED) != (
+            self.mcp_route_profile in {"strict", "policy"}
         ):
             raise ValueError("plugin_status_invalid")
         if type(self.managed_marker_valid) is not bool or type(self.rollback_available) is not bool:

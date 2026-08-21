@@ -159,7 +159,8 @@ compatibility with the standard earns no support claim, activation claim, or cov
 
 `src/yoetz/ports/plugin_artifacts.py` owns the neutral plan and lifecycle types.
 `src/yoetz/adapters/integrations/portable_plugin.py` owns the Agent Plugins 1.0.0 projection,
-offline validation, Codex-root preview/status, and failure-atomic whole-directory migration. It
+offline validation, optional exclusive route-bound `mcp.json`, Codex-root preview/status, and
+failure-atomic whole-directory migration. It
 reads only packaged `skills/portable/`, `guidance/`, and vendored `support/agent-plugins/` bytes.
 The existing `codex_plugin.py` remains the native fallback and is not a source for the portable
 manifest.

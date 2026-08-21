@@ -136,8 +136,10 @@ def _mcp_local_composition(service_state: str | None, *, service_observed: bool)
     return "unknown"
 
 
-async def mcp_route_observation() -> dict[str, JsonValue]:
-    """Report which Codex MCP route is registered, or say plainly that it was not read.
+async def mcp_route_observation(
+    workspace_locator: Path | None = None,
+) -> dict[str, JsonValue]:
+    """Report exclusive external/plugin MCP ownership without inferring runtime success.
 
     A strict registration and a policy registration are both ``yoetz_owned``, so registration
     state alone cannot tell an operator whether the agent route can dispatch semantic review at
@@ -153,8 +155,10 @@ async def mcp_route_observation() -> dict[str, JsonValue]:
     # stack is only needed on this one path.
     from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
     from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
+    from yoetz.adapters.integrations.portable_plugin import observe_plugin_managed_mcp
     from yoetz.application.harness_mcp import HarnessMcpService
     from yoetz.cli import setup as cli_setup
+    from yoetz.ports.plugin_artifacts import McpOwnershipState
 
     try:
         # The registration-time authority stays owned by `setup`, so this reads it rather than
@@ -162,24 +166,66 @@ async def mcp_route_observation() -> dict[str, JsonValue]:
         configured: JsonValue = cli_setup.configured_mcp_route_profile()
     except Exception:
         configured = None
-    unread: dict[str, JsonValue] = {
-        "registration_state": None,
-        "registered_profile": None,
-        "configured_profile": configured,
-        "observed": False,
-    }
+    external_state: str | None = None
+    external_profile: str | None = None
+    external_observed = False
     try:
         binaries = discover_codex_binaries()
-        if not binaries:
-            return unread
-        observation = await HarnessMcpService(CodexMcpAdapter()).observe(binaries[0])
+        if binaries:
+            observation = await HarnessMcpService(CodexMcpAdapter()).observe(binaries[0])
+            external_state = observation.state.value
+            external_profile = observation.route_profile
+            external_observed = True
     except Exception:
-        return unread
+        pass
+    root = Path.cwd() if workspace_locator is None else workspace_locator
+    plugin = observe_plugin_managed_mcp(root)
+
+    external_owned = external_state == "yoetz_owned"
+    external_foreign = external_state == "foreign_present"
+    plugin_owned = plugin.ownership_state is McpOwnershipState.PLUGIN
+    plugin_foreign = plugin.ownership_state is McpOwnershipState.FOREIGN
+    plugin_ambiguous = plugin.ownership_state is McpOwnershipState.AMBIGUOUS
+    if not external_observed or not plugin.observed or plugin_ambiguous:
+        ownership = McpOwnershipState.AMBIGUOUS
+        source: JsonValue = None
+        route_profile: JsonValue = None
+        observed = False
+    elif external_owned and plugin_owned:
+        ownership = McpOwnershipState.DUAL
+        source = "dual"
+        route_profile = None
+        observed = True
+    elif external_foreign or plugin_foreign:
+        ownership = McpOwnershipState.FOREIGN
+        source = "foreign"
+        route_profile = None
+        observed = True
+    elif external_owned:
+        ownership = McpOwnershipState.EXTERNAL
+        source = "external_registration"
+        route_profile = external_profile
+        observed = True
+    elif plugin_owned:
+        ownership = McpOwnershipState.PLUGIN
+        source = "plugin_managed"
+        route_profile = plugin.route_profile
+        observed = True
+    else:
+        ownership = McpOwnershipState.ABSENT
+        source = None
+        route_profile = None
+        observed = True
+
     return {
-        "registration_state": observation.state.value,
-        "registered_profile": observation.route_profile,
+        "registration_state": external_state,
+        "registered_profile": route_profile,
         "configured_profile": configured,
-        "observed": True,
+        "observed": observed,
+        "owner_source": source,
+        "ownership_state": ownership.value,
+        "external_registration_state": external_state,
+        "plugin_managed_state": plugin.ownership_state.value,
     }
 
 
@@ -285,8 +331,12 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
         credential_connected = None
         llm_inference_enabled = None
 
-    mcp_route = await mcp_route_observation()
-    registered_profile = mcp_route["registered_profile"]
+    mcp_route = await mcp_route_observation(workspace_locator)
+    registered_profile = mcp_route.get("registered_profile")
+    ownership_state = mcp_route.get("ownership_state")
+    if ownership_state is None and mcp_route.get("registration_state") == "yoetz_owned":
+        ownership_state = "external"
+    route_observed = mcp_route.get("observed") is True
 
     blockers: list[dict[str, JsonValue]] = []
     if service_state != "ready":
@@ -372,6 +422,14 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
                 "next_command": "yoetz integrate codex mcp preview",
             }
         )
+    if route_observed and ownership_state in {"dual", "foreign", "ambiguous"}:
+        blockers.append(
+            {
+                "condition": "mcp_ownership_state",
+                "state": ownership_state or "ambiguous",
+                "scope": "agent_route",
+            }
+        )
 
     readiness_determinable = (
         service_state == "ready"
@@ -409,7 +467,12 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
         "readiness_determinable": readiness_determinable,
         "semantic_ready": semantic_ready,
         "mcp_route": mcp_route,
-        "agent_route_semantic_ready": semantic_ready and registered_profile == "policy",
+        "agent_route_semantic_ready": (
+            semantic_ready
+            and route_observed
+            and ownership_state in {"external", "plugin"}
+            and registered_profile == "policy"
+        ),
         "blockers": tuple(blockers),
         "next_commands": next_commands,
         "notes": (
@@ -417,12 +480,13 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
             "credential_connected reports the configured provider's credential, not any provider.",
             "A credential for a different provider than the bound endpoint does not count.",
             "unknown means the service could not be read, not that the step is incomplete.",
-            "agent_route_semantic_ready describes the registered Codex MCP route only; "
+            "agent_route_semantic_ready describes one exclusively observed Codex MCP owner; "
             "semantic_ready describes this repository-bound installation view. Neither "
             "substitutes for the other.",
             "A strict registered route does not make this installation not-ready: CLI and "
             "terminal checks still dispatch, only the strict agent route cannot.",
-            "mcp_route.observed false means the route was not read, not that none is registered.",
+            "mcp_route.observed false means ownership was not read unambiguously, not that no "
+            "route exists.",
         ),
     }
 
