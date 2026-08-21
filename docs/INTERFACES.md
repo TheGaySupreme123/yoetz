@@ -2770,7 +2770,12 @@ digest refuses the whole apply before a file is written. Setup separately report
 `project_skill_installation`, structural plugin-source installation, `plugin_activation`, MCP
 registration, hooks/consent, service routing, and semantic readiness; none of those fields implies
 another. `plugin_activation` uses the closed state
-`active|installed_not_activated|not_installed|foreign`. Its preview/inspection/application bind the
+`active|installed_not_activated|not_installed|foreign`. When an explicitly supplied Codex home is
+bound, the registration and readiness `plugin_activation` blocks echo that home and its config
+path even when the activation preview or inspection fails, and they carry the actual failure
+reason; `codex_home_required` appears only when no home was provided. Readiness facts that were
+not observed (`marketplace_registered`, `plugin_enabled`) are reported as null, never asserted
+`false`. Its preview/inspection/application bind the
 exact selected executable path and SHA-256, an owner-supplied existing absolute non-symlink home,
 the parsed result of exact `--version`, repository marketplace and selected-home config
 preimages/proposals, installed managed source-tree digest, cache root
@@ -2782,15 +2787,25 @@ home variables to the approved home, re-probes under its lock, and CAS-fences ea
 failure preserves approved partial marketplace/config/cache state for retry and performs no
 pathname rollback that could race a concurrent replacement.
 `active` additionally requires canonical inventory to report the expected repository plugin
-installed and enabled and its installed-version cache tree to match the managed source bytes;
-marketplace/config presence alone remains `installed_not_activated`. This is standing trust for
-future sessions, not proof that a session loaded a hook or delivered observation evidence.
-The managed hook tree is selected from the exact activation probe version. Pure-ingress command
+installed and enabled and its installed-version cache tree to match the host-specific render of
+the managed source; marketplace/config presence alone remains `installed_not_activated`. This is
+standing trust for future sessions, not proof that a session loaded a hook or delivered
+observation evidence.
+The managed project-tree source is always the canonical async-free render; the exact activation
+probe version selects only the cache-layer render. Pure-ingress command
 hooks use `"async": true` only from Codex `0.148.0-alpha.6`; older, missing, malformed, or
 oversized versions use the bounded synchronous form because affected Codex hosts otherwise discard
-the handlers. The version-specific source marker and cache bytes are included in the existing
-preview/source digests, and apply refuses a variant transition until the intended managed source
-tree is installed.
+the handlers. Apply seeds the versioned cache with the exact previewed host-rendered bytes
+(`plugin add` copies the canonical source, and apply then replaces that marker-identified copy in
+one atomic whole-directory swap) and verifies the result against the bound install digest. A cache
+tree that carries a valid `yoetz.codex-plugin-install/1` marker and byte-matches that marker's own
+inventory is a prior yoetz-managed render: preview classifies it as replaceable, binds its digest
+as the cache preimage, and apply atomically replaces the whole directory (same-version refresh).
+`destination_conflict` remains reserved for foreign, marker-inconsistent, or modified cache trees,
+and a cache that changes between preview and apply still refuses as `preview_stale`. A project
+source tree that byte-matches its own valid marker (for example a prior host-rendered or
+older-guidance render) is likewise a replaceable managed render, not a `modified_copy`; apply
+still requires a byte-exact current renderer variant at its source fences before any mutation.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
 `HarnessMcpPort` methods are `status_registration`, `observe_registration`, `preview_registration`,
 and `apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,
@@ -2814,8 +2829,15 @@ its `status` diagnostic phase — it exists because both owned serve commands cl
 diagnostics (`McpRegistrationDiagnostic`, `HarnessMcpDiagnosticSink`); every registration
 mutation is digest-bound to a freshly recomputed preview, a foreign same-name entry is
 preserved without any force path, and success is verified by re-reading state. The preview binds
-the exact command and `policy|strict` route profile. A zero-egress setup selects strict; a
-Yoetz-owned registration with the other command requires explicit digest-bound re-registration.
+the exact command and `policy|strict` route profile. The route profile is explicit input:
+`yoetz setup run` and `yoetz integrate <harness> mcp preview|install` accept
+`--route-profile strict|policy`. Without that input, an existing yoetz-owned registration keeps
+its observed profile — no configuration derivation (or derivation-on-exception fallback) may
+rewrite a previously chosen route — and only a fresh registration falls back to strict
+(zero-egress wizard) or the structural configuration derivation (`integrate`). A route transition
+is surfaced before mutation: the wizard preview and report carry `route_profile_before` next to
+`route_profile`, and changing an existing owned route requires the explicit input plus the
+ordinary digest-bound re-registration.
 The setup-wizard
 schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
 `yoetz.setup-status/1`, and `yoetz.mcp-registration-preview/1`; the marker lives at
