@@ -1255,6 +1255,216 @@ def test_integrate_mcp_refuses_foreign_entry(wizard_env: dict[str, object]) -> N
     assert "foreign_entry_present" in result.stderr
 
 
+def test_non_interactive_accept_preserves_existing_policy_route(
+    wizard_env: dict[str, object],
+) -> None:
+    """#389: ``--accept`` without an explicit route never rewrites an owned registration."""
+
+    wizard_env["outputs"] = [
+        _yoetz_entry("policy"),  # tentative strict preview get: owned, other route
+        _yoetz_entry("policy"),  # preserved policy re-preview get: noop
+        _yoetz_entry("policy"),  # status verify after plugin install
+    ]
+    result = _RUNNER.invoke(cli.app, ["setup", "run", "--non-interactive", "--accept", "--json"])
+    assert result.exit_code == 0, (result.output, result.exception)
+    report = json.loads(result.stdout)
+    assert report["registration"]["outcome"] == "already_registered"
+    assert report["registration"]["route_profile"] == "policy"
+    assert report["registration"]["route_profile_before"] == "policy"
+    assert report["registration"]["serve_command"] == ["yoetz", "mcp", "serve"]
+    # No mutating ``mcp add`` ever ran: the existing policy route survives.
+    for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
+        assert all(call[1:3] == ("mcp", "get") for call in calls)
+
+
+def test_explicit_route_profile_flag_reregisters_and_reports_the_transition(
+    wizard_env: dict[str, object],
+) -> None:
+    """#389: only an explicit ``--route-profile`` may change an existing owned route."""
+
+    wizard_env["outputs"] = [
+        _yoetz_entry("policy"),  # preview get: owned on the policy route
+        _yoetz_entry("policy"),  # adapter apply re-preview get
+        CommandOutput(0, b""),  # add
+        _yoetz_entry("strict"),  # verify get
+    ]
+    result = _RUNNER.invoke(
+        cli.app,
+        [
+            "setup",
+            "run",
+            "--non-interactive",
+            "--accept",
+            "--route-profile",
+            "strict",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    report = json.loads(result.stdout)
+    assert report["registration"]["outcome"] == "reregistered"
+    assert report["registration"]["route_profile"] == "strict"
+    assert report["registration"]["route_profile_before"] == "policy"
+
+
+def test_route_profile_flag_rejects_unknown_values(wizard_env: dict[str, object]) -> None:
+    result = _RUNNER.invoke(
+        cli.app,
+        ["setup", "run", "--non-interactive", "--accept", "--route-profile", "open", "--json"],
+    )
+    assert result.exit_code == 2
+
+
+def test_interactive_preview_surfaces_a_route_profile_transition(
+    wizard_env: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#389: a route change must be visible in the preview the human confirms."""
+
+    import yoetz.cli.provider_binding as provider_binding
+    import yoetz.cli.setup as setup_module
+
+    wizard_env["outputs"] = [
+        _yoetz_entry("policy"),  # preview get: owned on the policy route
+        _yoetz_entry("policy"),  # adapter apply re-preview get
+        CommandOutput(0, b""),  # add
+        _yoetz_entry("strict"),  # verify get
+    ]
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(
+        provider_binding, "prompt_provider_endpoint_binding", _skip_provider_binding
+    )
+
+    # Installation, home, local-only review (strict), update checks yes, confirm.
+    result = _RUNNER.invoke(
+        cli.app,
+        ["setup", "run"],
+        input=f"1\n{wizard_env['codex_home']}\n2\nY\nY\n",
+    )
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert "MCP route profile change: policy -> strict" in result.stdout
+    assert "MCP route profile: strict (changed from policy)" in result.stdout
+
+
+def test_failed_activation_preview_reports_bound_home_and_real_reason(
+    wizard_env: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#390: an explicit ``--codex-home`` failure must not read as ``codex_home_required``."""
+
+    import yoetz.cli.setup as setup_module
+
+    codex = tmp_path / "codex-testing"
+    codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    codex.chmod(0o700)
+    codex_home = cast(Path, wizard_env["codex_home"])
+
+    def conflicted(*_args: object, **_kwargs: object) -> object:
+        raise IntegrationError(IntegrationReason.DESTINATION_CONFLICT, {})
+
+    monkeypatch.setattr(setup_module, "preview_activation", conflicted)
+    monkeypatch.setattr(setup_module, "inspect_activation", conflicted)
+    wizard_env["outputs"] = [
+        CommandOutput(1, b""),  # preview get: absent
+        CommandOutput(1, b""),  # apply re-preview get: absent
+        CommandOutput(0, b""),  # add
+        _yoetz_entry(),  # verify get
+    ]
+
+    result = _RUNNER.invoke(
+        cli.app,
+        [
+            "setup",
+            "run",
+            "--non-interactive",
+            "--accept",
+            "--codex-path",
+            str(codex),
+            "--codex-home",
+            str(codex_home),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    report = json.loads(result.stdout)
+    activation = report["registration"]["plugin_activation"]
+    assert activation["outcome"] == "skipped"
+    assert activation["reason"] == "destination_conflict"
+    assert activation["codex_home"] == str(codex_home)
+    assert activation["config_path"] == str(codex_home / "config.toml")
+    readiness_activation = report["readiness"]["plugin_activation"]
+    assert readiness_activation["codex_home"] == str(codex_home)
+    assert readiness_activation["config_path"] == str(codex_home / "config.toml")
+    assert readiness_activation["reason"] == "destination_conflict"
+    # Unobserved facts are reported as unknown (null), never asserted false.
+    assert readiness_activation["marketplace_registered"] is None
+    assert readiness_activation["plugin_enabled"] is None
+
+
+def test_integrate_mcp_install_without_route_input_preserves_owned_policy_route(
+    wizard_env: dict[str, object],
+) -> None:
+    """#389: the ``integrate codex mcp`` surface must not rewrite an owned route either."""
+
+    wizard_env["outputs"] = [
+        _yoetz_entry("policy"),  # derived-strict preview get: owned, other route
+        _yoetz_entry("policy"),  # preserved policy re-preview get: noop
+    ]
+    result = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "install", "--accept", "--json"])
+    assert result.exit_code == 0, (result.output, result.exception)
+    body = json.loads(result.stdout)
+    assert body["action"] == "noop"
+    assert body["state_after"] == "yoetz_owned"
+    for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
+        assert all(call[1:3] == ("mcp", "get") for call in calls)
+
+
+def test_integrate_mcp_preview_names_the_observed_route_before(
+    wizard_env: dict[str, object],
+) -> None:
+    wizard_env["outputs"] = [
+        _yoetz_entry("policy"),
+        _yoetz_entry("policy"),
+    ]
+    result = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert body["action"] == "noop"
+    assert body["route_profile"] == "policy"
+    assert body["route_profile_before"] == "policy"
+
+
+def test_integrate_mcp_explicit_route_profile_reregisters(
+    wizard_env: dict[str, object],
+) -> None:
+    wizard_env["outputs"] = [
+        _yoetz_entry("policy"),  # preview get: owned on the policy route
+        _yoetz_entry("policy"),  # adapter apply re-preview get
+        CommandOutput(0, b""),  # add
+        _yoetz_entry("strict"),  # verify get
+    ]
+    result = _RUNNER.invoke(
+        cli.app,
+        [
+            "integrate",
+            "codex",
+            "mcp",
+            "install",
+            "--accept",
+            "--route-profile",
+            "strict",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    body = json.loads(result.stdout)
+    assert body["action"] == "reregister"
+    assert body["state_after"] == "yoetz_owned"
+
+
 def test_setup_surfaces_no_secret_shaped_option() -> None:
     for args in (
         ["--help"],

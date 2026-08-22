@@ -171,6 +171,45 @@ exactly those contracts and connects the steps without weakening any existing tr
    consequently requires the ordinary digest-bound plugin refresh and activation approval. The
    committed/unprobed plugin tree is the conservative synchronous variant.
 
+   **Amended 2026-08-21 — canonical source, host-rendered cache, and managed refresh (issues
+   #387 and #388).** Live testing on an async-capable host showed the previous amendment's
+   version-threaded *source* render deadlocks activation: the committed project tree deliberately
+   carries the canonical async-free render (pinned by packaging tests), so comparing it against
+   the host-specific render fails `modified_copy` forever and `inspect_activation` reads
+   `not_installed` with everything else in place. The corrected split is: the project-tree plugin
+   source is always the canonical (`codex_version=None`) render — the wizard's project-source
+   preview/inspect/install never thread the probed version, and the committed tree stays
+   byte-stable — while host-specific rendering belongs only to the activation cache layer. The
+   probe version selects the intended cache bytes; `plugin add` copies the canonical source, and
+   apply then atomically replaces that marker-identified copy with the exact previewed
+   host-rendered bytes and verifies the bound install digest. A source tree that reads as
+   `installed` is a byte-exact canonical or host-variant render; a tree that instead byte-matches
+   its own valid `yoetz.codex-plugin-install/1` marker (a prior managed render, including the
+   async-variant or an older-guidance form) is replaceable by install without `replace_modified`,
+   while genuinely modified trees keep the `modified_copy` refusal.
+
+   The same marker rule repairs same-version cache refresh: package version `0.1.0` is stable
+   while plugin content drifts, so a previously activated home's versioned cache can differ from
+   the fresh render without being foreign. A cache tree carrying a valid install marker that
+   byte-matches its own inventory is classified replaceable — preview binds its digest as the
+   cache preimage, apply atomically swaps the whole directory, and a cache changed between preview
+   and apply still refuses as `preview_stale`. `destination_conflict` remains reserved for
+   foreign, marker-inconsistent, or modified cache trees. `active` now requires the versioned
+   cache to match the host-specific render rather than the managed source bytes.
+
+   **Amended 2026-08-21 — explicit route input and honest activation reporting (issues #389 and
+   #390).** `setup run` and `integrate <harness> mcp preview|install` accept an explicit
+   `--route-profile strict|policy`. Without that input, an existing yoetz-owned registration keeps
+   its observed route — the structural configuration derivation (including its fail-closed
+   exception fallback) applies only to a fresh registration, and non-interactive `--accept` alone
+   never changes an existing route. The interactive wizard still derives the route from the
+   review-mode answer, and any transition of an existing owned route is shown in the confirmed
+   preview and reported as `route_profile_before` → `route_profile`. Separately, when an explicit
+   Codex home was supplied, the registration and readiness `plugin_activation` blocks echo the
+   bound home/config path and the actual activation failure reason instead of resetting to
+   `codex_home_required`, and unobserved readiness facts are reported as null rather than asserted
+   `false`.
+
 The short `yoetz --set --fireworks --model MODEL` and `yoetz --set --grok --model MODEL` paths are
 provider-only entries into the same setup ceremonies. They derive internal provider bindings and
 always collect the API key through hidden TTY

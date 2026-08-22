@@ -44,6 +44,7 @@ __all__ = [
     "codex_supports_async_hooks",
     "inspect_plugin",
     "install_plugin",
+    "plugin_tree_matches_marker",
     "render_plugin_install_tree",
     "render_plugin_tree",
 ]
@@ -391,6 +392,73 @@ def _validated_plugin_parent(root: Path, *, create: bool) -> Path:
     return current
 
 
+def plugin_tree_matches_marker(members: Mapping[str, bytes]) -> bool:
+    """True when a file tree byte-matches its own valid Yoetz install marker.
+
+    ADR-023 treats a marker-identified, internally consistent tree as a prior
+    yoetz-managed render that whole-directory replacement may refresh. Anything
+    else — a foreign tree, a missing or inconsistent marker, or a modified
+    member — is not replaceable through this classification.
+    """
+
+    marker_raw = members.get(_MARKER_NAME)
+    if marker_raw is None or len(marker_raw) > _SOURCE_FILE_LIMIT:
+        return False
+    try:
+        parsed = strict_json_parse(marker_raw)
+    except ProtocolValueError:
+        return False
+    if not isinstance(parsed, Mapping):
+        return False
+    marker = cast(Mapping[str, object], parsed)
+    if marker.get("schema") != _MARKER_SCHEMA:
+        return False
+    body = {name: value for name, value in marker.items() if name != "marker_digest"}
+    if marker.get("marker_digest") != canonical_digest(cast(JsonValue, body)):
+        return False
+    rows = marker.get("managed_files")
+    if type(rows) is not list:
+        return False
+    inventory: dict[str, tuple[str, int]] = {}
+    for raw_row in cast(list[object], rows):
+        if not isinstance(raw_row, Mapping):
+            return False
+        row = cast(Mapping[str, object], raw_row)
+        relative_path = row.get("relative_path")
+        digest = row.get("sha256")
+        size = row.get("size")
+        if type(relative_path) is not str or type(digest) is not str or type(size) is not int:
+            return False
+        if relative_path in inventory or relative_path == _MARKER_NAME:
+            return False
+        inventory[relative_path] = (digest, size)
+    actual = {
+        path: (_sha(data), len(data)) for path, data in members.items() if path != _MARKER_NAME
+    }
+    return inventory == actual
+
+
+def _is_prior_managed_render(destination: Path) -> bool:
+    """True when the installed tree is exactly one marker-consistent prior render."""
+
+    members: dict[str, bytes] = {}
+    try:
+        for candidate in destination.rglob("*"):
+            if candidate.is_symlink():
+                return False
+            if candidate.is_dir():
+                continue
+            if not candidate.is_file():
+                return False
+            data = candidate.read_bytes()
+            if len(data) > _SOURCE_FILE_LIMIT:
+                return False
+            members[candidate.relative_to(destination).as_posix()] = data
+    except OSError:
+        return False
+    return plugin_tree_matches_marker(members)
+
+
 def _build_marker(members: Mapping[str, bytes]) -> bytes:
     managed = [
         {
@@ -463,6 +531,19 @@ def install_plugin(
     if destination.exists():
         if destination.is_symlink() or not destination.is_dir():
             raise _error(IntegrationReason.TARGET_UNSAFE)
+        # A destination that byte-matches its own valid install marker is a prior
+        # yoetz-managed render (for example the async-variant hooks form, or an
+        # older guidance render), not an owner edit: ADR-023 whole-directory
+        # replacement may refresh it without ``replace_modified``. The check is
+        # lazy so an already-exact tree never pays for it.
+        prior_render: bool | None = None
+
+        def _replaceable_prior_render() -> bool:
+            nonlocal prior_render
+            if prior_render is None:
+                prior_render = _is_prior_managed_render(destination)
+            return prior_render
+
         for relative_path, expected in members.items():
             path = destination / relative_path
             if not path.exists():
@@ -470,7 +551,7 @@ def install_plugin(
             if path.is_symlink() or not path.is_file():
                 raise _error(IntegrationReason.TARGET_UNSAFE)
             current = path.read_bytes()
-            if current != expected and not replace_modified:
+            if current != expected and not replace_modified and not _replaceable_prior_render():
                 raise _error(
                     IntegrationReason.MODIFIED_COPY,
                     {"relative_path": relative_path, "replace_modified": True},
@@ -480,6 +561,7 @@ def install_plugin(
             existing_marker.is_file()
             and existing_marker.read_bytes() != marker
             and not replace_modified
+            and not _replaceable_prior_render()
         ):
             raise _error(
                 IntegrationReason.MODIFIED_COPY,

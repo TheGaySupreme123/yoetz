@@ -82,6 +82,19 @@ ambiguous ownership are explicit `McpOwnershipState` values that are reported, n
 or silently chosen between. Changing the generated `mcp.json` bytes for a bound route is a
 public-contract change under the same update rule as the two registration commands.
 
+**Amended 2026-08-21 — the route profile is explicit registration input (issue #389).** Live
+testing showed non-interactive `setup run --accept` silently re-registering an existing
+yoetz-owned *policy* route as *strict*, because the registration-time route was derived from
+structural configuration (falling back to strict on any load failure) with no route input surface.
+That violated this ADR's premise that the registered argv is a deliberately chosen, host-inspectable
+ceiling: no derivation — and especially no derivation-on-exception in a degraded environment — may
+rewrite a previously chosen route in either direction. `setup run` and
+`integrate codex mcp preview|install` now accept `--route-profile strict|policy`; without it an
+existing yoetz-owned registration keeps its observed profile, a fresh registration falls back to
+strict (wizard) or the configuration derivation (`integrate`), and any transition of an existing
+owned route is surfaced (`route_profile_before` → `route_profile`) before the ordinary
+digest-bound re-registration.
+
 **Issue #151 implementation detail.** The portable projection emits one closed stdio server named
 `yoetz`. Its executable token is exactly `yoetz`; policy args are exactly `mcp serve`, and strict
 args are exactly `mcp serve --semantic off`. It emits no `env`, headers, credential references, or

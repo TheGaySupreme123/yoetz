@@ -148,14 +148,29 @@ already-approved marketplace/config/cache partial state for an honest retry; it 
 pathname rollback that could delete or overwrite a concurrent change. `active` means all of these
 agree: managed source installed, repository marketplace and selected-home config exact, canonical
 inventory says `yoetz@yoetz` is installed and enabled from this repository, and the installed
-version cache is byte-identical to the managed source. Other closed states are `installed_not_activated`,
-`not_installed`, and `foreign`. None of them—and not even `active`—proves a later Codex process
-loaded a hook or delivered an observation.
+version cache is byte-identical to the host-specific render of the managed source. Other closed
+states are `installed_not_activated`, `not_installed`, and `foreign`. None of them—and not even
+`active`—proves a later Codex process loaded a hook or delivered an observation.
+
+The managed project source always carries the canonical async-free render; the host-specific form
+(async pure-ingress hooks from Codex `0.148.0-alpha.6`) exists only in the versioned activation
+cache, which apply seeds and verifies against the previewed install digest. Because the package
+version stays constant while plugin content drifts, a previously activated home's cache can
+legitimately differ from the fresh render: a cache tree that carries a valid
+`.yoetz-plugin-install.json` marker and byte-matches that marker's own inventory is a prior
+yoetz-managed render, previewed as a same-version refresh and replaced atomically on apply.
+`destination_conflict` is reserved for foreign, marker-inconsistent, or modified cache trees —
+those still require the owner to resolve the conflict by hand.
 
 Registration also decides *which* route the agent gets. Both owned serve commands classify as
 `yoetz_owned`, so the state alone cannot tell a strict registration from a policy one. Read the
 route from `yoetz integrate codex mcp status --json` (`route_profile`) or from
-`yoetz provider status --json` (`mcp_route.registered_profile`). Before running a session that will
+`yoetz provider status --json` (`mcp_route.registered_profile`). The route is explicit input:
+pass `--route-profile strict|policy` to `yoetz setup run` or
+`yoetz integrate codex mcp preview|install` to choose it. Without that flag an existing
+yoetz-owned registration keeps its current route (non-interactive `--accept` never changes it),
+and a route transition is shown in the preview and reported as `route_profile_before` →
+`route_profile`. Before running a session that will
 report a finding about Yoetz's semantic behaviour, walk the
 [semantic dogfood runbook](semantic-dogfood.md) — it declares up front which claim the run is
 allowed to make, and refuses to score semantic quality when no provider attempt happened. To measure
@@ -232,7 +247,9 @@ manage any MCP configuration yourself if you want it removed too.
 | Compatibility is `unsupported` | Automatic activation is unprofiled; use a supported Yoetz/Codex version pair when capability evidence is required. |
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$yoetz` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |
-| Setup reports `installed_not_activated` | Re-run setup/recommendation preview for the exact selected executable. Review canonical inventory and the versioned cache; marketplace/config presence alone is insufficient. |
+| Setup reports `installed_not_activated` | Re-run setup/recommendation preview for the exact selected executable. Review canonical inventory and the versioned cache; marketplace/config presence alone is insufficient. A marker-consistent stale cache is refreshed by an ordinary approved re-run. |
+| Activation reports `destination_conflict` | The versioned cache (or a config/marketplace surface) holds foreign, marker-inconsistent, or modified content. Review it by hand; setup only replaces trees that match their own Yoetz install marker. |
+| Activation failed with an explicit `--codex-home` | Read the actual `reason` in `registration.plugin_activation`/`readiness.plugin_activation`; the bound home and config path are echoed there. `codex_home_required` appears only when no home was passed. |
 | Setup reports plugin source files but no Yoetz skill appears | Check `.agents/skills/yoetz`; source installation and plugin activation do not prove project-skill discovery. |
 | MCP name already present | Preserve it and review ownership rather than running `mcp add`. |
 | `setup` skipped MCP registration | Codex not on PATH, or the entry is foreign-owned; run `yoetz integrate codex mcp status --json` for the exact state. |
