@@ -150,6 +150,8 @@ def _hooks_json(*, codex_version: str | None = None) -> bytes:
     # host-clamped to 3s max, discards stdout, and is downgraded to sync (with
     # a per-session warning) if declared async, so it keeps its own explicit 3.
     observe = "yoetz hooks observe --workspace . --event"
+    legacy_spool = "yoetz hooks spool --workspace . --event"
+    ingress = observe if async_hooks else legacy_spool
     observe_timeout = 10
     session_end_timeout = 3
     body: dict[str, JsonValue] = {
@@ -208,7 +210,7 @@ def _hooks_json(*, codex_version: str | None = None) -> bytes:
             "PreToolUse": [
                 _command(
                     "PreToolUse",
-                    command=f"{observe} PreToolUse",
+                    command=f"{ingress} PreToolUse",
                     timeout=observe_timeout,
                     status="Yoetz observe PreToolUse",
                     run_async=True,
@@ -228,7 +230,7 @@ def _hooks_json(*, codex_version: str | None = None) -> bytes:
                 },
                 _command(
                     "PostToolUse",
-                    command=f"{observe} PostToolUse",
+                    command=f"{ingress} PostToolUse",
                     timeout=observe_timeout,
                     status="Yoetz observe PostToolUse",
                 ),
@@ -236,7 +238,7 @@ def _hooks_json(*, codex_version: str | None = None) -> bytes:
             "PermissionRequest": [
                 _command(
                     "PermissionRequest",
-                    command=f"{observe} PermissionRequest",
+                    command=f"{ingress} PermissionRequest",
                     timeout=observe_timeout,
                     status="Yoetz observe PermissionRequest",
                     run_async=True,

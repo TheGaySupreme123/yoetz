@@ -66,12 +66,55 @@ def _observe_fast_path(arguments: list[str]) -> int | None:
     return 0
 
 
+def _spool_fast_path(arguments: list[str]) -> int | None:
+    """Run the legacy synchronous spool writer without loading typer."""
+
+    event: str | None = None
+    workspace: str | None = None
+    index = 0
+    while index < len(arguments):
+        if index + 1 >= len(arguments):
+            return None
+        token, value = arguments[index], arguments[index + 1]
+        if value.startswith("-"):
+            return None
+        if token == "--event" and event is None:
+            event = value
+        elif token == "--workspace" and workspace is None:
+            workspace = value
+        else:
+            return None
+        index += 2
+    if event is None or workspace is None:
+        return None
+    try:
+        from yoetz.cli.observe_hooks import handle_spool
+
+        return handle_spool(
+            event_name=event,
+            workspace=workspace,
+            _entry_monotonic=_ENTRY_MONOTONIC,
+        )
+    except BaseException:
+        try:
+            from yoetz.cli.hook_io import stdout_json
+
+            stdout_json({})
+        except BaseException:
+            pass
+    return 0
+
+
 def main() -> None:
     """Installed console entry point."""
 
     argv = sys.argv[1:]
     if len(argv) >= 2 and argv[0] == "hooks" and argv[1] == "observe":
         code = _observe_fast_path(argv[2:])
+        if code is not None:
+            raise SystemExit(code)
+    if len(argv) >= 2 and argv[0] == "hooks" and argv[1] == "spool":
+        code = _spool_fast_path(argv[2:])
         if code is not None:
             raise SystemExit(code)
     from yoetz.cli.app import main as app_main

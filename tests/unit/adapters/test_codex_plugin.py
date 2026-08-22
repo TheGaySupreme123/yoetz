@@ -177,8 +177,8 @@ def test_render_plugin_tree_wires_observation_and_compat_hooks() -> None:
     assert "yoetz hooks post-tool-use" in hooks
     assert "yoetz hooks session-start" in hooks
     assert "yoetz hooks observe --workspace . --event SessionStart" in hooks
-    assert "yoetz hooks observe --workspace . --event PreToolUse" in hooks
-    assert "yoetz hooks observe --workspace . --event PermissionRequest" in hooks
+    assert "yoetz hooks spool --workspace . --event PreToolUse" in hooks
+    assert "yoetz hooks spool --workspace . --event PermissionRequest" in hooks
     assert "yoetz hooks observe --workspace . --event SubagentStop" in hooks
     assert "mcp__yoetz__start" in hooks
     assert "resume|compact" in hooks
@@ -191,6 +191,15 @@ def _observe_handler(parsed: Mapping[str, object], event: str) -> dict[str, obje
             if str(handler["command"]).startswith("yoetz hooks observe "):  # type: ignore[index]
                 return dict(handler)  # type: ignore[arg-type, call-overload]
     raise AssertionError(f"no observe handler declared for {event}")
+
+
+def _spool_handler(parsed: Mapping[str, object], event: str) -> dict[str, object]:
+    groups = parsed["hooks"][event]  # type: ignore[index, call-overload]
+    for group in groups:  # type: ignore[union-attr]
+        for handler in group["hooks"]:  # type: ignore[index, call-overload]
+            if str(handler["command"]).startswith("yoetz hooks spool "):  # type: ignore[index]
+                return dict(handler)  # type: ignore[arg-type, call-overload]
+    raise AssertionError(f"no spool handler declared for {event}")
 
 
 def test_observe_hook_execution_modes_use_async_only_on_capable_hosts() -> None:
@@ -278,9 +287,11 @@ def test_unsupported_or_unknown_hosts_keep_all_ingress_handlers_synchronous(
             ]
         )
     )
+    for event in ("PreToolUse", "PermissionRequest"):
+        handler = _spool_handler(parsed, event)
+        assert "async" not in handler
+        assert handler["timeout"] == 10
     for event in (
-        "PreToolUse",
-        "PermissionRequest",
         "PreCompact",
         "PostCompact",
         "SubagentStart",

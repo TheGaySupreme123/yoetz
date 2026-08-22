@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
@@ -15,6 +16,7 @@ import apsw
 
 import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
+from yoetz.adapters.integrations.hook_spool import HookSpool
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
@@ -55,7 +57,7 @@ from yoetz.application.observation_advice import (
 )
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
-from yoetz.application.observation_drain import ObservationOutboxSweeper
+from yoetz.application.observation_drain import ObservationDrainSummary, ObservationOutboxSweeper
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.privacy_control import build_privacy_support_handlers
 from yoetz.application.privacy_policy import PrivacyPolicyApplication
@@ -2565,6 +2567,30 @@ async def provide_service_ready_context(
     )
     observation_sweeper = ObservationOutboxSweeper(local_observation, observation_coordinator)
 
+    async def sweep_observation() -> ObservationDrainSummary:
+        """Move fenced legacy-hook spool records into the normal durable outbox.
+
+        Replaying a claimed file after a daemon crash is safe: each spool UUID is
+        part of the hook source identity, so local ingest deduplicates it before
+        the ordinary service-owned outbox sweep forwards it.
+        """
+
+        spool = HookSpool(_state=paths.state)
+        from yoetz.cli.observe_hooks import handle_observe
+
+        for workspace_commitment in spool.pending_workspaces():
+            with spool.claim(workspace_commitment) as records:
+                for record in records:
+                    handle_observe(
+                        event_name=record.event_name,
+                        stdin_bytes=canonical_encode(cast(DomainJsonValue, record.payload)),
+                        stdout=io.BytesIO(),
+                        _state=paths.state,
+                        skip_service=True,
+                        _workspace_commitment=workspace_commitment,
+                    )
+        return await observation_sweeper.sweep()
+
     def close_observation_maintenance() -> None:
         observation_sweeper.close()
         observation_coordinator.close()
@@ -2618,7 +2644,7 @@ async def provide_service_ready_context(
         connected_provider_ids=connected_provider_ids,
         provider_credential_connected=provider_credential_connected,
         semantic_ready=semantic_ready,
-        observation_sweep=observation_sweeper.sweep,
+        observation_sweep=sweep_observation,
         observation_sweep_close=close_observation_maintenance,
         ready_recommendation_refresh=refresh_ready_recommendations,
     )

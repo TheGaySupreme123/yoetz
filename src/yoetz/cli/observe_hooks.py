@@ -20,6 +20,7 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     store_mapping,
     validate_codex_session_id,
 )
+from yoetz.adapters.integrations.hook_spool import HookSpool
 from yoetz.adapters.integrations.observation_local import (
     HOOK_MAPPING_VERSION,
     YOETZ_TOOL_NAMES,
@@ -73,6 +74,7 @@ __all__ = [
     "STANDING_ADVICE_CADENCE_EVENTS",
     "SUPPORTED_HOOK_EVENTS",
     "handle_observe",
+    "handle_spool",
     "map_hook_payload_to_envelope",
 ]
 
@@ -413,6 +415,7 @@ def _source_identity(
         "parent_tool_call_id",
         "subagent_id",
         "turn_id",
+        "_yoetz_spool_id",
     ):
         token = _token_or_none(payload.get(key))
         if token is not None:
@@ -1108,6 +1111,7 @@ def handle_observe(
     skip_service: bool = False,
     _entry_monotonic: float | None = None,
     _monotonic: Callable[[], float] = time.monotonic,
+    _workspace_commitment: str | None = None,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -1199,7 +1203,9 @@ def handle_observe(
 
         workspace_commitment: str | None = None
         workspace_locator: str | None = None
-        if workspace is not None:
+        if _workspace_commitment is not None:
+            workspace_commitment = _workspace_commitment
+        elif workspace is not None:
             try:
                 # Resolve '.' / relative paths locally; never log or persist plaintext.
                 workspace_locator = str(Path(workspace).expanduser().resolve(strict=False))
@@ -1639,3 +1645,58 @@ def handle_observe(
                     "stdout_write_failed", event_name or "observe", _state=_state
                 )
         return 0
+
+
+def handle_spool(
+    *,
+    event_name: str | None,
+    stdin_bytes: bytes | None = None,
+    stdout: BinaryIO | None = None,
+    workspace: str | None = None,
+    _state: Path | None = None,
+    _entry_monotonic: float | None = None,
+    _monotonic: Callable[[], float] = time.monotonic,
+) -> int:
+    """Append one legacy synchronous ingress record and return immediately.
+
+    No service preflight, local-state hydration, outbox drain, advice refresh,
+    or observation-store write occurs on this host-critical path.
+    """
+
+    started = _monotonic() if _entry_monotonic is None else _entry_monotonic
+    event = event_name or "observe"
+    try:
+        raw = stdin_bytes if stdin_bytes is not None else sys.stdin.buffer.read(_MAX_CONTENT_CHUNK)
+        payload = read_hook_payload(raw)
+        if workspace is not None and event_name in {
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+        }:
+            spool_payload = dict(payload)
+            # Keep the safe classification, never the host command/input prose.
+            if _routine_read_action(payload):
+                spool_payload["action"] = "routine_read"
+            HookSpool(_state=_state).append(
+                workspace=str(Path(workspace).expanduser().resolve(strict=False)),
+                event_name=event_name,
+                payload=spool_payload,
+            )
+    except Exception:
+        record_hook_diagnostic("observe", event, _state=_state)
+    finally:
+        total = _elapsed_ms(started, _monotonic())
+        # The p95 target is computed from retained host-visible timings; one
+        # individual leg is a hard breach only after the 500ms ceiling.
+        if total > 500:
+            record_hook_diagnostic("hook_slo_breached", event, _state=_state)
+        record_hook_timing(
+            event,
+            ms=total,
+            stages={"total": total},
+            path="sync_fallback_spool",
+            _state=_state,
+        )
+        with contextlib.suppress(Exception):
+            hook_io.stdout_json({}, stdout)
+    return 0

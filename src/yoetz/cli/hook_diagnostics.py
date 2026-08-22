@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -65,6 +65,7 @@ _REASONS: Final = frozenset(
         # Observability only: the end-to-end hook budget is a contract, not an
         # enforcement point. Aborting mid-hook would drop ingest.
         "hook_budget_exceeded",
+        "hook_slo_breached",
     }
 )
 _STAGES: Final = frozenset(
@@ -99,6 +100,9 @@ _MAX_STAGE_MS: Final = 3_600_000
 # Every count is therefore paired with a recent-window count, and every extreme
 # with the moment it was observed, so a reader can date what it is looking at.
 _RECENT_WINDOW_SECONDS: Final = 3_600
+_SYNC_FALLBACK_PATH: Final = "sync_fallback_spool"
+_SYNC_FALLBACK_P95_TARGET_MS: Final = 250
+_SYNC_FALLBACK_HARD_CAP_MS: Final = 500
 _thread_lock = Lock()
 
 
@@ -217,6 +221,7 @@ def record_hook_timing(
     *,
     ms: int,
     stages: Mapping[str, int],
+    path: str | None = None,
     _state: Path | None = None,
 ) -> None:
     """Append one bounded end-to-end timing row for a hook pass.
@@ -231,16 +236,16 @@ def record_hook_timing(
         for name, value in stages.items()
         if name in _STAGES and type(value) is int and not isinstance(value, bool)
     }
-    _append_row(
-        {
-            "event": _closed(event, _EVENTS, "unknown_event"),
-            "kind": "timing",
-            "ms": max(0, min(int(ms), _MAX_STAGE_MS)),
-            "stages": dict(sorted(bounded.items())),
-            "ts": _timestamp(),
-        },
-        _state=_state,
-    )
+    row: dict[str, object] = {
+        "event": _closed(event, _EVENTS, "unknown_event"),
+        "kind": "timing",
+        "ms": max(0, min(int(ms), _MAX_STAGE_MS)),
+        "stages": dict(sorted(bounded.items())),
+        "ts": _timestamp(),
+    }
+    if path in {"sync_fallback_spool", "async_host", "ordinary_sync"}:
+        row["path"] = path
+    _append_row(row, _state=_state)
 
 
 @dataclass(slots=True)
@@ -284,8 +289,17 @@ class _Timings:
     max_ms: int | None = None
     max_at: datetime | None = None
     recent_max_ms: int | None = None
+    recent_values: list[int] = field(default_factory=list)
+    by_path: dict[str, _Timings] = field(default_factory=dict)
 
-    def observe(self, ms: int, moment: datetime | None, *, fresh: bool) -> None:
+    def observe(
+        self,
+        ms: int,
+        moment: datetime | None,
+        *,
+        fresh: bool,
+        path: str | None = None,
+    ) -> None:
         self.count += 1
         self.last_ms = ms
         if self.max_ms is None or ms > self.max_ms:
@@ -294,8 +308,19 @@ class _Timings:
         if not fresh:
             return
         self.recent += 1
+        self.recent_values.append(ms)
         if self.recent_max_ms is None or ms > self.recent_max_ms:
             self.recent_max_ms = ms
+        if path is not None:
+            self.by_path.setdefault(path, _Timings()).observe(ms, moment, fresh=True)
+
+    def _recent_p95_ms(self) -> int | None:
+        if not self.recent_values:
+            return None
+        ordered = sorted(self.recent_values)
+        # Nearest-rank p95 intentionally fails closed: a single retained
+        # sample is its own p95, rather than looking healthy by interpolation.
+        return ordered[(95 * len(ordered) + 99) // 100 - 1]
 
     def as_json(self) -> JsonObject:
         return JsonObject(
@@ -306,15 +331,40 @@ class _Timings:
                 "max_ts": None if self.max_at is None else _render(self.max_at),
                 "recent_count": self.recent,
                 "recent_max_ms": self.recent_max_ms,
+                "recent_p95_ms": self._recent_p95_ms(),
+                "paths": JsonObject(
+                    {
+                        path: JsonObject(
+                            {
+                                "count": item.count,
+                                "recent_count": item.recent,
+                                "recent_p95_ms": item._recent_p95_ms(),
+                                "p95_target_ms": _SYNC_FALLBACK_P95_TARGET_MS
+                                if path == _SYNC_FALLBACK_PATH
+                                else None,
+                                "hard_cap_ms": _SYNC_FALLBACK_HARD_CAP_MS
+                                if path == _SYNC_FALLBACK_PATH
+                                else None,
+                                "recent_hard_cap_breach_count": sum(
+                                    value > _SYNC_FALLBACK_HARD_CAP_MS
+                                    for value in item.recent_values
+                                )
+                                if path == _SYNC_FALLBACK_PATH
+                                else 0,
+                            }
+                        )
+                        for path, item in sorted(self.by_path.items(), key=lambda item: item[0])
+                    }
+                ),
             }
         )
 
 
-def _read_rows(directory: Path) -> tuple[list[dict[str, str]], list[tuple[int, str]]]:
+def _read_rows(directory: Path) -> tuple[list[dict[str, str]], list[tuple[int, str, str | None]]]:
     """Return retained failure rows and timing rows, oldest retained file first."""
 
     rows: list[dict[str, str]] = []
-    timings: list[tuple[int, str]] = []
+    timings: list[tuple[int, str, str | None]] = []
     try:
         ensure_owner_only_dir(directory)
         for path in (
@@ -343,13 +393,25 @@ def _read_rows(directory: Path) -> tuple[list[dict[str, str]], list[tuple[int, s
                 if type(parsed) is not dict:
                     continue
                 row = cast(dict[str, object], parsed)
-                if set(row) == {"event", "kind", "ms", "stages", "ts"}:
+                if set(row) in (
+                    {"event", "kind", "ms", "stages", "ts"},
+                    {"event", "kind", "ms", "stages", "ts", "path"},
+                ):
                     # Timing rows are a second shape on the same file; they must
                     # never inflate the failure-reason counts.
                     total = row.get("ms")
                     stamp = row.get("ts")
-                    if row.get("kind") == "timing" and type(total) is int and type(stamp) is str:
-                        timings.append((total, stamp))
+                    path_value = row.get("path")
+                    if (
+                        row.get("kind") == "timing"
+                        and type(total) is int
+                        and type(stamp) is str
+                        and (
+                            path_value is None
+                            or path_value in {"sync_fallback_spool", "async_host", "ordinary_sync"}
+                        )
+                    ):
+                        timings.append((total, stamp, cast(str | None, path_value)))
                     continue
                 if set(row) != {"event", "reason", "ts"} or any(
                     type(row.get(key)) is not str for key in ("event", "reason", "ts")
@@ -393,9 +455,14 @@ def hook_diagnostic_summary(
         overall.observe(moment, fresh=fresh)
         reasons.setdefault(row["reason"], _Recency()).observe(moment, fresh=fresh)
     timing = _Timings()
-    for total, stamp in timings:
+    for total, stamp, path in timings:
         moment = _parse_timestamp(stamp)
-        timing.observe(total, moment, fresh=moment is not None and horizon <= moment <= now)
+        timing.observe(
+            total,
+            moment,
+            fresh=moment is not None and horizon <= moment <= now,
+            path=path,
+        )
     last = rows[-1] if rows else None
     return JsonObject(
         {

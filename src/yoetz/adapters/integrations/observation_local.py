@@ -2640,7 +2640,9 @@ class LocalObservationStore:
             last_drain = None
         consent_active = consent is not None and consent.revoked_at is None and not consent.paused
         mapping_available = bool(state.session_workspaces) or bool(state.codex_session_bindings)
-        current_gaps = self._current_gaps(state, mapping_available=mapping_available)
+        current_gaps = self._current_gaps(
+            state, workspace_commitment=workspace_commitment, mapping_available=mapping_available
+        )
         bound_sessions = set(state.session_workspaces)
         ended_sessions = state.ended_sessions or set()
         # STOPPED once every bound session has ended (consent-stop is handled in
@@ -2679,7 +2681,13 @@ class LocalObservationStore:
             advice_frontier=state.advice_frontier,
         )
 
-    def _current_gaps(self, state: _WorkspaceState, *, mapping_available: bool) -> tuple[str, ...]:
+    def _current_gaps(
+        self,
+        state: _WorkspaceState,
+        *,
+        workspace_commitment: str,
+        mapping_available: bool,
+    ) -> tuple[str, ...]:
         """Project current observable gaps while retaining full history separately."""
 
         assert state.gaps is not None
@@ -2720,6 +2728,15 @@ class LocalObservationStore:
             # the row keeps its honest last_reason annotation without it.
             if row.last_reason is not None and row.last_reason != OBSERVATION_BACKPRESSURE_REASON:
                 current.add(row.last_reason)
+        # A legacy synchronous hook has acknowledged durable append, not
+        # service ingest.  Until the READY forwarder consumes that fenced spool
+        # file, status must report incomplete coverage rather than pretending
+        # the hook reached the normal outbox.
+        with contextlib.suppress(Exception):
+            from yoetz.adapters.integrations.hook_spool import HookSpool
+
+            if HookSpool(_state=self._state_root).has_pending(workspace_commitment):
+                current.add(ObservationGapCode.SOURCE_LAG.value)
         # Live mapping presence outranks both the latched code and any stale row reason: a row
         # rejected for a missing mapping keeps that reason after the mapping is restored, and
         # reporting it again is the exact defect #219 filed.
