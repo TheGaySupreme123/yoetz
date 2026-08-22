@@ -2606,6 +2606,7 @@ class LocalObservationStore:
         coverage = {
             ObservationSource.CODEX_HOOK: False,
             ObservationSource.CODEX_SESSION_STREAM: False,
+            ObservationSource.CURSOR_HOOK: False,
         }
         assert state.envelopes is not None
         assert state.gaps is not None

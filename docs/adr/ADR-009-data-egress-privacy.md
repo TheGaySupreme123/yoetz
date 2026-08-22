@@ -416,6 +416,22 @@ always available.
 
 ## Consequences and proof obligations
 
+### Cursor local hook amendment (2026-08-22, issue #153)
+
+Local Cursor hooks are untrusted advisory inputs and add no provider, privacy, credential, approval,
+or enforcement authority. `cursor_hook` is a distinct observation source. Its ingress allowlist is
+limited to bounded session/generation/tool identifiers, exact Cursor/model/effort tokens,
+durations, booleans, result status, capability profile, and a one-way changed-path digest. The
+ingress never persists or emits prompts, model thoughts/reasoning, response text, file paths,
+file contents or edits, tool/MCP arguments or results, transcripts, shell command/output, email,
+or workspace-root strings from Cursor payloads. Cursor stream/transcript reconciliation is
+forbidden for this source.
+
+Hook failure is always fail-open for Cursor work and records only a bounded gap when consented
+observation cannot proceed. Pause, revoke, or absent consent stops new Cursor observation without
+removing an independently valid plugin skill or MCP route. `sessionStart`, hook configuration,
+plugin discovery, and tool listing are not observation evidence and do not strengthen coverage.
+
 The privacy policy is more than a semantic-provider toggle and cannot be represented by one
 `network=true` capability. Releases must prove the global ceiling; policy-intersection behavior;
 valid `local_only` policies with one bounded but v0.1-unavailable non-LLM channel; channel independence;

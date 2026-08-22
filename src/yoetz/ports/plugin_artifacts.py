@@ -46,6 +46,7 @@ _MAX_ROOT = 4_096
 class PluginFormatProfile(str, Enum):  # noqa: UP042 - exact public enum
     AGENT_PLUGINS_1 = "agent_plugins_1"
     CODEX_PLUGIN_NATIVE = "codex_plugin_native"
+    CURSOR_PLUGIN_NATIVE = "cursor_plugin_native"
 
 
 class McpOwnership(str, Enum):  # noqa: UP042 - exact public enum
@@ -67,6 +68,7 @@ class HostSurface(str, Enum):  # noqa: UP042 - exact public enum
     CHATGPT_DESKTOP = "chatgpt_desktop"
     CURSOR_IDE = "cursor_ide"
     CURSOR_CLI = "cursor_cli"
+    CURSOR_SDK_LOCAL = "cursor_sdk_local"
     CURSOR_CLOUD = "cursor_cloud"
     CLAUDE_CODE = "claude_code"
 

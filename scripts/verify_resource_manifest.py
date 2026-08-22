@@ -159,6 +159,30 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "fixtures/agent-plugins/cursor-cli-portable-2026.07.09.case.json",
+        "compatibility_manifest",
+        "application/json",
+        True,
+    ),
+    (
+        "fixtures/agent-plugins/cursor-ide-native-3.17.8.case.json",
+        "compatibility_manifest",
+        "application/json",
+        True,
+    ),
+    (
+        "fixtures/agent-plugins/cursor-sdk-python-1.0.24.case.json",
+        "compatibility_manifest",
+        "application/json",
+        True,
+    ),
+    (
+        "fixtures/agent-plugins/cursor-sdk-typescript-1.0.23.case.json",
+        "compatibility_manifest",
+        "application/json",
+        True,
+    ),
+    (
         "fixtures/canonical/accepted-entry-identity.case.json",
         "canonical_vector",
         "application/json",

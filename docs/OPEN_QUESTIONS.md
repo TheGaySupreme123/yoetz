@@ -291,7 +291,7 @@ affected claim, and for the first non-alpha release regardless.
   carry-forward entitlement without reapproval. New repositories remain Private.
 - **F-015:** Harness integration is a port and Codex is its first adapter (ADR-010). Agent guidance
   is owned once, harness-neutrally, under `guidance/` with exactly one packaged copy;
-  `IntegrationsPort` is parameterized by a closed `HarnessId` (v0.1: exactly `codex`) plus a
+  `IntegrationsPort` is parameterized by a closed `HarnessId` (exactly `codex|cursor`) plus a
   reviewed `HarnessProfile`. Adding a first-party harness is one `HarnessId` value plus one adapter
   and requires no port, registry, guidance, or schema change, so a fork can do it without touching
   the core. `HarnessProfile.hooks_by_capability_profile` binds every exact profile ID to either

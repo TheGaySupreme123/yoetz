@@ -158,6 +158,19 @@ Yoetz ships with is independent of any provider profile. Platform support is sta
 artifact/runtime/SQLite/filesystem/key-backend cell (for example "macOS 11.0+ arm64, APSW
 `3.53.3.1`, SQLite source ID `2026-06-26 ...`"), never a generic "Python" or "macOS/Linux" claim.
 
+Cursor local compatibility is four independent rows, never one inferred support claim:
+
+| Cell | Exact profile | Required proof boundary |
+|---|---|---|
+| IDE | Cursor `3.17.8` build `3.17.8`, macOS arm64 | explicit isolated user root, portable/native source, discovery, activation, skill delivery, MCP owner/runtime, model call |
+| CLI | Cursor Agent `2026.07.09-a3815c0`, macOS arm64 | exact binary digest, explicit `--plugin-dir`, skill delivery, MCP owner/runtime, model call |
+| SDK TypeScript | `@cursor/sdk==1.0.23`, bridge `sdk.v1` | explicit local `settingSources`, precedence negative controls, correlated model call |
+| SDK Python | `cursor-sdk==1.0.24`, bridge `sdk.v1` | explicit local `setting_sources`, precedence negative controls, correlated model call |
+
+These are the initial fixture pins, not a promise that nearby builds are supported. A different
+Cursor/SDK/bridge version is `untested` until a new fixture is reviewed. Cursor Cloud and Cloud
+Agents are unsupported by issue #153.
+
 ## Change and deprecation process
 
 Every change class (protocol, event, storage, object, projection, provider, platform) names its
