@@ -594,6 +594,24 @@ def hooks_observe(
             pass
 
 
+@hooks_app.command("spool")
+def hooks_spool(
+    event: Annotated[str, typer.Option("--event", help="Codex hook event name.")],
+    workspace: Annotated[str, typer.Option("--workspace", help="Project workspace path.")],
+) -> None:
+    """Append a legacy synchronous hook observation for service-side forwarding."""
+
+    try:
+        module = importlib.import_module("yoetz.cli.observe_hooks")
+        handler = cast(Callable[..., int], getattr(module, "handle_spool"))
+        handler(event_name=event, workspace=workspace)
+    except BaseException:
+        try:
+            _stdout_json({})
+        except BaseException:
+            pass
+
+
 def _observe_operation(name: str) -> Callable[..., int]:
     module = importlib.import_module("yoetz.cli.observe")
     return cast(Callable[..., int], getattr(module, name))

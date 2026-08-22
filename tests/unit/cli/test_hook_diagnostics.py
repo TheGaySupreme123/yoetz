@@ -125,6 +125,8 @@ def test_timing_rows_round_trip_and_reason_counts_are_unpolluted(tmp_path: Path)
     assert timings["count"] == 1
     assert timings["recent_count"] == 1
     assert timings["last_ms"] == timings["max_ms"] == timings["recent_max_ms"] == 1_842
+    assert timings["recent_p95_ms"] == 1_842
+    assert timings["paths"] == {}
     assert timings["max_ts"] is not None
 
 
@@ -186,6 +188,8 @@ def test_fixed_and_gone_failures_are_dated_rather_than_reported_as_live(tmp_path
         "max_ts": "2026-08-15T22:29:17Z",
         "recent_count": 1,
         "recent_max_ms": 789,
+        "recent_p95_ms": 789,
+        "paths": {},
     }
 
 
@@ -260,6 +264,8 @@ def test_an_undatable_row_is_counted_but_never_called_recent(tmp_path: Path) -> 
     assert timings["max_ts"] is None
     assert timings["recent_count"] == 0
     assert timings["recent_max_ms"] is None
+    assert timings["recent_p95_ms"] is None
+    assert timings["paths"] == {}
 
 
 def test_an_absent_diagnostics_file_summarizes_to_an_empty_dated_shape(tmp_path: Path) -> None:
@@ -278,6 +284,8 @@ def test_an_absent_diagnostics_file_summarizes_to_an_empty_dated_shape(tmp_path:
         "max_ts": None,
         "recent_count": 0,
         "recent_max_ms": None,
+        "recent_p95_ms": None,
+        "paths": {},
     }
 
 

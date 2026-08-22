@@ -36,6 +36,14 @@ application facade.
 5. After a service crash, one successor validates durable state, advances the catalog/service
    generation, and lazily advances each bundle generation before opening its writer. Advancing a
    generation invalidates every older lease and handle regardless of wall clock.
+6. On a host that cannot register asynchronous pure-ingress hooks, the hook process is a
+   structural-only spool writer, not a store or service client. It appends one owner-only,
+   workspace-committed record and returns; the READY service fences consumption by rename, maps it
+   into the existing durable outbox, and forwards it through the ordinary coordinator. A crash
+   before spool retirement replays the same stable spool identity, so local ingest is at least
+   once and idempotent. Pending spool work is a current observation coverage gap, never silent
+   success. This exception does not grant the hook process a bundle writer, key handle, decrypted
+   object, or network route.
 
 The service remains alive when a client disconnects. A lost client response is resolved by
 reconnecting and replaying the same request ID; it never transfers storage ownership to the

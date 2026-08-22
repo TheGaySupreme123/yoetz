@@ -21,6 +21,7 @@ from yoetz.cli import observe_hooks as observe_hooks_module
 from yoetz.cli.observe_hooks import (
     SUPPORTED_HOOK_EVENTS,
     handle_observe,
+    handle_spool,
     map_hook_payload_to_envelope,
 )
 from yoetz.domain.observation import (
@@ -233,6 +234,30 @@ def test_observe_without_consent_exits_zero_no_spool(tmp_path: Path) -> None:
     )
     assert code == 0
     assert json.loads(stdout.getvalue().decode()) == {}
+
+
+def test_legacy_spool_is_durable_without_touching_lived_in_observation_state(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    before = next((tmp_path / "observation" / "workspaces").glob("*.json")).read_bytes()
+
+    assert (
+        handle_spool(
+            event_name="PreToolUse",
+            stdin_bytes=b'{"session_id":"spool-test","tool_name":"shell","tool_input":{"cmd":"secret"}}',
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+        )
+        == 0
+    )
+    assert next((tmp_path / "observation" / "workspaces").glob("*.json")).read_bytes() == before
+    spool_files = list((tmp_path / "hook-spool").glob("*.jsonl"))
+    assert len(spool_files) == 1
+    assert b"secret" not in spool_files[0].read_bytes()
 
 
 def test_post_tool_hook_delivers_pending_frontier_motion_once(tmp_path: Path) -> None:
@@ -1930,10 +1955,10 @@ def test_hook_invocation_parses_the_state_file_once_not_seventeen_times(
 
 
 @pytest.mark.slow
-def test_hook_wall_clock_meets_the_declared_timeout_on_a_realistic_store(
+def test_legacy_spool_hook_meets_slo_on_a_realistic_store(
     tmp_path: Path,
 ) -> None:
-    """#209's guard: hook wall time vs the timeout hooks.json declares.
+    """#362's guard: legacy ingress does not hydrate a lived-in store.
 
     The 2026-08-12 regression measured 3.06-4.89s per hook at exactly this
     store shape against a declared 3s, and nothing went red because no test
@@ -1960,11 +1985,8 @@ def test_hook_wall_clock_meets_the_declared_timeout_on_a_realistic_store(
         f"got {state_file.stat().st_size} bytes"
     )
 
-    async def connect(_kind: object):
-        return _InstantAckClient()
-
     started = time_module.monotonic()
-    code = handle_observe(
+    code = handle_spool(
         event_name="PostToolUse",
         stdin_bytes=json.dumps(
             {
@@ -1977,7 +1999,6 @@ def test_hook_wall_clock_meets_the_declared_timeout_on_a_realistic_store(
         stdout=io.BytesIO(),
         workspace=str(tmp_path),
         _state=tmp_path,
-        connect=connect,  # type: ignore[arg-type]
     )
     elapsed = time_module.monotonic() - started
     assert code == 0
@@ -1986,17 +2007,38 @@ def test_hook_wall_clock_meets_the_declared_timeout_on_a_realistic_store(
     declared = None
     for group in events["PostToolUse"]:  # type: ignore[index, call-overload]
         for handler in group["hooks"]:  # type: ignore[index, call-overload]
-            if "observe" in str(handler["command"]):  # type: ignore[index]
-                assert declared is None, "more than one observe handler declared for PostToolUse"
+            if "spool" in str(handler["command"]):  # type: ignore[index]
+                assert declared is None, "more than one spool handler declared for PostToolUse"
                 declared = handler["timeout"]  # type: ignore[index]
     assert isinstance(declared, int)
-    # The machine-independent parse/write-count tests own the tight regression
-    # contract. This wall-clock smoke bound still excludes the pre-fix 1.67-2.50s
-    # band without failing solely because a shared runner is briefly loaded.
-    assert elapsed < declared * 0.4, (
-        f"hook invocation took {elapsed:.2f}s against a realistic store — "
-        f"over 40% of the declared {declared}s timeout Codex kills it at"
+    assert elapsed <= 0.5, (
+        f"legacy spool hook took {elapsed:.2f}s against a realistic store; "
+        "the proposed hard cap is 500ms including hook work"
     )
+
+
+def test_legacy_spool_diagnostics_identify_the_path_and_hard_breach(tmp_path: Path) -> None:
+    from yoetz.cli.hook_diagnostics import hook_diagnostic_summary, record_hook_timing
+
+    record_hook_timing(
+        "PostToolUse",
+        ms=501,
+        stages={"total": 501},
+        path="sync_fallback_spool",
+        _state=tmp_path,
+    )
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    timings = cast(Mapping[str, object], summary["timings"])
+    paths = cast(Mapping[str, object], timings["paths"])
+    spool = cast(Mapping[str, object], paths["sync_fallback_spool"])
+    assert spool == {
+        "count": 1,
+        "recent_count": 1,
+        "recent_p95_ms": 501,
+        "p95_target_ms": 250,
+        "hard_cap_ms": 500,
+        "recent_hard_cap_breach_count": 1,
+    }
 
 
 def _write_counter(monkeypatch: pytest.MonkeyPatch) -> list[str]:

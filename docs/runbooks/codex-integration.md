@@ -193,6 +193,18 @@ only from real observation evidence. `AdviceSnapshot` surfaces via nonblocking h
 path fails, use the ordinary manual resume/compaction procedure and cooperative publication; do not
 infer support from a different Codex version.
 
+### Legacy synchronous-hook latency
+
+Codex versions older than `0.148.0-alpha.6` use a synchronous `hooks spool` command for
+`PreToolUse`, `PermissionRequest`, and the ingress half of `PostToolUse`. It performs one fsync'd,
+structural-only append and must not connect to the service, drain an outbox, or hydrate the local
+observation store. The READY service forwards those records asynchronously through the normal
+fenced outbox path. The proposed (issue #362) host-visible budget is p95 `<=250ms`, with a hard
+`500ms` cap per synchronous leg including process startup. `yoetz observe status` reports pending
+spool work as a coverage gap (`source_lag`), and its hook diagnostics retain the host-visible total
+and `sync_fallback_spool` path. Do not treat a pending spool as delivered evidence; keep the
+service running and wait for it to drain before making receipt claims.
+
 ### Capture and compare the live tool boundary
 
 When a supported Codex build renders a Yoetz argument as `unknown`, capture the client inventory
