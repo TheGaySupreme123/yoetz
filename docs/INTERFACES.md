@@ -2436,7 +2436,7 @@ payload itself carries an explicitly admitted `claim_kind`.
 
 Shared closed types:
 
-- `ObservationSource` — exactly `codex_hook | codex_session_stream`. Hooks are the primary
+- `ObservationSource` — exactly `codex_hook | codex_session_stream | cursor_hook`. Hooks are the primary
   low-latency source; session-stream reconciliation is selective and secondary.
 - `ObservationEnvelope` — Codex session identity (commitment, never raw path), event kind (exact
   closed identifier from the capability cell, or an opaque unsupported token), stable source
@@ -2714,7 +2714,7 @@ Shared types are `HarnessId`, `HarnessProfile`, `HarnessHookProfile`, `Integrati
 `IntegrationFile`, `SkillPreviewCommand`, `SkillApplyCommand`, `SkillStatusCommand`,
 `IntegrationPreview`, `IntegrationStatus`, `IntegrationResult`, and `IntegrationError`.
 
-`HarnessId` is a closed enum whose v0.1 membership is exactly `codex`. `HarnessProfile` is the
+`HarnessId` is a closed enum whose membership is exactly `codex|cursor`. `HarnessProfile` is the
 frozen per-harness descriptor: `harness_id`, `skill_root` (the exact relative install directory),
 `frontmatter_profile` (the harness's required skill-header shape), `capability_profile_ids`,
 `supported_versions`, and `hooks_by_capability_profile: Mapping[str, HarnessHookProfile | None]`.
@@ -2917,8 +2917,8 @@ versions (Agent Plugins spec pin `1.0.0` plus the plan renderer version); and th
 managed-file inventory with relative paths, sizes, and SHA-256 digests. Agent Plugin JSON is never
 the input for another host's manifest; projections share only the plan (ADR-023).
 
-- `PluginFormatProfile` is a closed enum; initial membership is exactly
-  `agent_plugins_1|codex_plugin_native`. A new member requires a reviewed projection design and
+- `PluginFormatProfile` is a closed enum; membership is exactly
+  `agent_plugins_1|codex_plugin_native|cursor_plugin_native`. A new member requires a reviewed projection design and
   ADR-023-conformant root registration before any render targets it.
 - `McpOwnership` is exactly `external_registration|plugin_managed`. `McpOwnershipState` is the
   closed observed-owner state `absent|external|plugin|dual|foreign|ambiguous`; `dual`, `foreign`,
@@ -2926,8 +2926,8 @@ the input for another host's manifest; projections share only the plan (ADR-023)
   ADR-023). Child-issue shorthand does not add members: `owned` resolves to `external|plugin` from
   the observed source, and `foreign_present` projects to `foreign`.
 - `HostSurface` is the closed host-product enum
-  `codex_cli|chatgpt_desktop|cursor_ide|cursor_cli|cursor_cloud|claude_code`, used only to key
-  evidence cells. It is distinct from `HarnessId` (v0.1 membership still exactly `codex`); format
+  `codex_cli|chatgpt_desktop|cursor_ide|cursor_cli|cursor_sdk_local|cursor_cloud|claude_code`, used only to key
+  evidence cells. It is distinct from `HarnessId` (`codex|cursor`); format
   compatibility earns no `HostSurface` support claim, first-party identity, or coverage (ADR-005,
   ADR-023). A Cursor surface consuming the portable artifact is a *portable* cell; one consuming a
   generated native projection is a *native* cell; Claude Code is a *native dual-target* host whose
@@ -3003,6 +3003,62 @@ The `yoetz.portable-plugin-install/1` marker contains only schema, format profil
 renderer versions, exact MCP ownership and optional route profile, artifact digest, complete sorted managed-file rows
 (`relative_path`, `size`, `sha256`), and its canonical marker digest. It contains no project path,
 user value, timestamp, credential, secret reference, transcript, host-activation claim, or receipt.
+
+### Cursor local harness contract (issue #153)
+
+`HarnessId` membership is `codex|cursor`. Adding Cursor changes no method on `IntegrationsPort`,
+`PluginArtifactPort`, `HarnessMcpPort`, `ObservationPort`, or the six workflow operations.
+`PluginFormatProfile` membership adds `cursor_plugin_native`; `HostSurface` adds
+`cursor_sdk_local` beside the existing `cursor_ide|cursor_cli|cursor_cloud`. Cursor Cloud remains an
+unpopulated evidence cell.
+
+`CursorPluginTarget` is an explicit absolute Cursor configuration root plus scope exactly `user`.
+It is redacted in representations and never inferred from regular Cursor, `$HOME`, caches, or a
+single installed candidate. The managed destination is `plugins/local/yoetz` below that selected
+root. `CursorPluginArtifact` contains one `PortablePluginPlan`, one sorted member mapping, and one
+artifact digest. Its format is exactly `agent_plugins_1` or `cursor_plugin_native`; one artifact
+never contains both root `plugin.json` and `.cursor-plugin/plugin.json`.
+
+`CursorPluginPreview` carries request ID, effective action, before state, exact format, target
+identity digest, current-state digest, artifact digest, preview digest, intended MCP ownership,
+observed `McpOwnershipState`, optional exact route, and sorted warnings. `CursorPluginStatus`
+carries artifact/operation state, detected format, artifact/installed digests, marker validity,
+rollback availability, one `CursorMcpObservation`, and every independent `PluginProofFacet`.
+`CursorPluginResult` carries request/action/operation, before/after states, format,
+preview/artifact/installed digests, and sorted changed members. The marker schema is
+`yoetz.cursor-plugin-install/1`; it contains format, renderer/Yoetz versions, hook mapping version,
+MCP owner/route, artifact digest, exact managed inventory, and marker digest, with no path, content,
+credential, transcript, timestamp, activation, coverage, or receipt claim.
+
+Cursor lifecycle is exact-preview bound and whole-directory atomic. Same request/digest replays are
+idempotent at the selected state. Install or replace refuses modified, unmanaged, symlinked, dual,
+foreign, ambiguous, stale-preview, or recovery-required state without overwrite or automatic
+repair. Remove accepts only marker-valid managed bytes; an independently present MCP source does
+not block removal because the operation preserves that source. Removal also preserves ledgers,
+vault/keyring/provider/privacy state, unrelated settings, and Cursor caches.
+
+`CursorMcpSource` is exactly
+`inline_send|inline_create|plugin|project|user`. `CursorMcpObservation` carries observed
+`McpOwnershipState`, winning source or null, exact route or null, ordered present sources, and an
+observation boolean. SDK precedence is exactly that enum order. A higher-precedence or duplicate
+same-name source cannot create a plugin-managed pass: plugin plus external is `dual`, multiple
+same-class sources are `ambiguous`, and any non-exact same-name entry is `foreign`.
+
+`CursorSdkBinding` is exactly `typescript|python`. `CursorArtifactIdentity` carries binding,
+package version/digest, bridge protocol exactly `sdk.v1`, and optional bridge digest.
+`CursorSdkProfile` carries that identity, explicit unique `plugins|project|user` setting sources,
+the frozen precedence tuple, MCP ownership, sandbox boolean, and approval mode
+`default|allowlist|full`. Plugin-managed requires `plugins`; external registration requires
+`project` or `user`. Inline sources are never ambiently accepted as ownership evidence.
+
+`ObservationSource` adds `cursor_hook`. The pinned native profile advertises only
+`sessionStart|sessionEnd|afterMCPExecution|afterFileEdit|stop`; `afterAgentThought` is excluded.
+Cursor ingress maps only bounded session/generation/tool IDs, exact Cursor/model/effort tokens,
+duration/boolean/result status, capability profile, and one-way changed-path digest. It discards
+prompt, reasoning, response text, paths, file contents/edits, MCP/tool inputs/results, transcripts,
+commands/output, email, and workspace roots before storage and never reconciles a Cursor transcript
+stream. Hooks are fail-open and advisory; configuration/trigger-only state earns no observation
+coverage.
 
 ## 11. Application (`application/`)
 

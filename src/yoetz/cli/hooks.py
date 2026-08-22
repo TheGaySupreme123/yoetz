@@ -300,14 +300,18 @@ def _active_context(mapping: LifecycleMapping, frontier: str | None) -> str:
     )
 
 
-def _status_request(mapping: LifecycleMapping) -> StatusRequest:
+def _status_request(
+    mapping: LifecycleMapping,
+    *,
+    actor_id: str = "yoetz:codex-hooks",
+) -> StatusRequest:
     return StatusRequest.model_validate(
         {
             "protocol_version": "0.1",
             "schema_version": "1.0.0",
             "request_id": new_id(IdKind.REQUEST),
             "actor": {
-                "actor_id": "yoetz:codex-hooks",
+                "actor_id": actor_id,
                 "actor_type": "harness",
             },
             "client": {
@@ -329,6 +333,7 @@ async def _read_status(
     mapping: LifecycleMapping,
     *,
     connect: ServiceConnector = connect_service,
+    actor_id: str = "yoetz:codex-hooks",
 ) -> StatusOutcome:
     """Return (context_kind, updated_mapping_or_none).
 
@@ -339,7 +344,9 @@ async def _read_status(
     try:
         connected = await connect(ControlClientKind.CLI)
         client = connected
-        result = await connected.status(_status_request(mapping), deadline_ms=_STATUS_DEADLINE_MS)
+        result = await connected.status(
+            _status_request(mapping, actor_id=actor_id), deadline_ms=_STATUS_DEADLINE_MS
+        )
         branch = getattr(result, "root", result)
         if isinstance(branch, OperationFailureModel):
             return _STATUS_ERROR_CLASSES.get(branch.error.code, "unavailable"), None

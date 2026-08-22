@@ -164,3 +164,12 @@ failure-atomic whole-directory migration. It
 reads only packaged `skills/portable/`, `guidance/`, and vendored `support/agent-plugins/` bytes.
 The existing `codex_plugin.py` remains the native fallback and is not a source for the portable
 manifest.
+
+Cursor is the second first-party harness and remains local-only. The adapter at
+`adapters/integrations/cursor_integration.py` owns exact IDE/CLI/SDK identity capture, the
+Agent Plugins and Cursor-native projections, explicit user-scope lifecycle, MCP source precedence,
+and the pinned `sdk.v1` TypeScript/Python profiles. Cursor-native hooks enter through
+`hooks cursor-observe`; that boundary retains only allowlisted structural scalars and a one-way
+changed-path digest. It drops prompts, reasoning, response text, file paths and contents, edits,
+MCP arguments/results, transcripts, command output, and email before observation storage. The
+adapter never reads or mutates Cursor caches. Cursor Cloud is not a registered local capability.

@@ -116,6 +116,9 @@ integrate_skill_app = typer.Typer(help="Manage the Yoetz harness skill.", no_arg
 integrate_mcp_app = typer.Typer(
     help="Manage the Yoetz MCP server registration.", no_args_is_help=True
 )
+integrate_plugin_app = typer.Typer(
+    help="Manage an explicit host plugin artifact.", no_args_is_help=True
+)
 setup_app = typer.Typer(help="Guided first-run harness and provider setup.", no_args_is_help=True)
 service_app = typer.Typer(help="Manage the foreground local service.", no_args_is_help=True)
 auto_unlock_app = typer.Typer(
@@ -140,7 +143,7 @@ elevated_app = typer.Typer(
     no_args_is_help=True,
 )
 hooks_app = typer.Typer(
-    help="Codex lifecycle hook commands (activation, correlation, re-ground, observe).",
+    help="Local harness lifecycle hook commands (activation, correlation, re-ground, observe).",
     no_args_is_help=True,
 )
 observe_app = typer.Typer(
@@ -161,6 +164,7 @@ app.add_typer(state_app, name="state")
 app.add_typer(integrate_app, name="integrate")
 integrate_app.add_typer(integrate_skill_app, name="skill")
 integrate_app.add_typer(integrate_mcp_app, name="mcp")
+integrate_app.add_typer(integrate_plugin_app, name="plugin")
 app.add_typer(setup_app, name="setup")
 app.add_typer(service_app, name="service")
 service_app.add_typer(auto_unlock_app, name="auto-unlock")
@@ -586,6 +590,33 @@ def hooks_observe(
     try:
         module = importlib.import_module("yoetz.cli.observe_hooks")
         handler = cast(Callable[..., int], getattr(module, "handle_observe"))
+        handler(event_name=event, workspace=workspace)
+    except BaseException:
+        try:
+            _stdout_json({})
+        except BaseException:
+            pass
+
+
+@hooks_app.command("cursor-observe")
+def hooks_cursor_observe(
+    event: Annotated[str, typer.Option("--event", help="Cursor hook event name.")],
+    workspace: Annotated[
+        str | None,
+        typer.Option(
+            "--workspace",
+            help=(
+                "Cursor workspace path (use '.' for cwd). Only its private commitment "
+                "is retained; hook content is structurally minimized."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Privacy-minimized, fail-open observation ingress for local Cursor hooks."""
+
+    try:
+        module = importlib.import_module("yoetz.cli.observe_hooks")
+        handler = cast(Callable[..., int], getattr(module, "handle_cursor_observe"))
         handler(event_name=event, workspace=workspace)
     except BaseException:
         try:
@@ -1136,7 +1167,7 @@ async def _integration(action: str, harness: str, json_output: bool) -> int:
 @integrate_app.callback()
 def integrate_root(
     context: typer.Context,
-    harness: Annotated[str, typer.Argument(help="Exact harness ID (codex).")],
+    harness: Annotated[str, typer.Argument(help="Exact harness ID (codex or cursor).")],
 ) -> None:
     context.obj = harness
 
@@ -1221,6 +1252,71 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
 
 for _mcp_action in ("preview", "install", "status"):
     integrate_mcp_app.command(_mcp_action)(_integration_mcp_command(_mcp_action))
+
+
+def _cursor_plugin_command(command_name: str) -> Callable[..., None]:
+    def command(
+        context: typer.Context,
+        cursor_config_root: Annotated[
+            Path,
+            typer.Option(
+                "--cursor-config-root",
+                help="Exact isolated Cursor ~/.cursor configuration root.",
+            ),
+        ],
+        project_root: Annotated[
+            Path | None,
+            typer.Option("--project-root", help="Exact trusted project for MCP source checks."),
+        ] = None,
+        format_name: Annotated[str, typer.Option("--format", help="portable or native")] = "native",
+        ownership_name: Annotated[
+            str,
+            typer.Option("--mcp-ownership", help="external-registration or plugin-managed"),
+        ] = "external-registration",
+        route_profile: Annotated[
+            str | None,
+            typer.Option("--route-profile", help="strict or policy for plugin-managed MCP."),
+        ] = None,
+        requested_action: Annotated[
+            str | None,
+            typer.Option("--action", help="install or replace; inferred when omitted."),
+        ] = None,
+        request_value: Annotated[
+            str | None,
+            typer.Option("--request-id", help="Exact request ID returned by preview."),
+        ] = None,
+        preview_digest: Annotated[
+            str | None,
+            typer.Option("--preview-digest", help="Exact digest returned by preview."),
+        ] = None,
+        accept: _ACCEPT = False,
+        json_output: _JSON = False,
+    ) -> None:
+        harness = cast(str, context.find_root().find_object(str) or context.obj)
+        module = importlib.import_module("yoetz.cli.cursor_integration")
+        operation = cast(Callable[..., int], getattr(module, "run_cursor_plugin_command"))
+        _finish(
+            operation(
+                command_name,
+                harness=harness,
+                cursor_config_root=cursor_config_root,
+                project_root=project_root,
+                format_name=format_name,
+                ownership_name=ownership_name,
+                route_profile=route_profile,
+                requested_action=requested_action,
+                request_value=request_value,
+                preview_digest=preview_digest,
+                accept=accept,
+                json_output=json_output,
+            )
+        )
+
+    return command
+
+
+for _plugin_action in ("preview", "install", "status", "remove"):
+    integrate_plugin_app.command(_plugin_action)(_cursor_plugin_command(_plugin_action))
 
 
 @setup_app.command("run")

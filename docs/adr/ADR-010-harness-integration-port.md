@@ -49,8 +49,8 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    merely tested. A harness adapter may choose layout, filename, and header; it may not vary a byte.
 
 2. **`IntegrationsPort` is harness-parameterized.** Methods are `preview_skill`, `install_skill`,
-   `status_skill`, and `remove_skill`, each taking an exact `HarnessId` (closed; v0.1 membership is
-   exactly `codex`) plus a `HarnessProfile` carrying `skill_root`, `frontmatter_profile`,
+   `status_skill`, and `remove_skill`, each taking an exact `HarnessId` (closed; membership is
+   exactly `codex|cursor`) plus a `HarnessProfile` carrying `skill_root`, `frontmatter_profile`,
    `capability_profile_ids`, `supported_versions`, and `hooks`. Adding a first-party harness is one
    `HarnessId` value plus one adapter under `adapters/integrations/`; it changes no method, no shared
    type, and no guidance. This is what makes the fork path real rather than aspirational, and it
@@ -134,6 +134,27 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    E-013 still requires installed-artifact payload, privacy, and behavior evidence before use.
 
 ## Consequences
+
+### Cursor local amendment (2026-08-22, issue #153)
+
+`HarnessId` adds exactly `cursor`; `cursor_integration.py` is its one adapter. The accepted local
+cells are Cursor IDE `3.17.9`, Cursor Agent CLI `2026.07.09-a3815c0`, and local TypeScript/Python
+SDK `1.0.23` over bridge protocol `sdk.v1`. Exact artifact digests, OS, architecture, activation
+source, configuration scope, format, MCP owner/source, and SDK setting sources remain evidence per
+cell. No cell inherits another cell's proof, and Cursor Cloud remains outside this amendment.
+
+The portable projection reuses the canonical Agent Plugins skill bytes. The native projection is
+generated independently at `.cursor-plugin/plugin.json`; it may add only proven Cursor components.
+It is not derived from the portable JSON and never co-locates both manifests. Local plugin
+activation uses Cursor's documented explicit user development root or CLI `--plugin-dir`; a
+filesystem copy is not discovery, activation, model delivery, or receipt proof.
+
+Cursor hook ingress is a separate `cursor_hook` observation source. The exact advertised event set
+is `sessionStart`, `sessionEnd`, `afterMCPExecution`, `afterFileEdit`, and `stop`. Hooks are
+fail-open and advisory. Before storage, the adapter discards prompts, thoughts/reasoning, response
+text, paths, file contents/edits, tool arguments/results, transcripts, command output, and email.
+`afterAgentThought` is deliberately not registered. A declaration or `sessionStart` earns no
+observation coverage; only consented accepted `cursor_hook` envelopes can do so.
 
 **Amendment (ADR-012, 2026-07-21):** MCP server registration is added as a *sibling* port,
 `HarnessMcpPort` (`ports/harness_mcp.py`), with its own Codex adapters

@@ -289,6 +289,23 @@ availability, structured-output interoperability, provider data use, or E-007 ca
 
 ## Consequences
 
+### Cursor local selection amendment (2026-08-22, issue #153)
+
+Cursor does not enter ambient first-run discovery. It is selected explicitly with an exact local
+configuration root and, when MCP project state participates, an exact trusted project. Preview
+shows portable versus native format, full artifact identity, user scope, current managed/modified/
+foreign state, MCP ownership/source/route, and every warning before any mutation. Apply re-reads
+that state and requires the same request ID and preview digest. Install, replace, and remove are
+whole-directory atomic operations; modified, unmanaged, dual, foreign, ambiguous, symlinked, or
+recovery-required state is preserved and refused.
+
+The wizard never searches regular Cursor state to configure an isolated target and never mutates
+Cursor caches. SDK configuration is a separate explicit row: TypeScript and Python package
+versions, `sdk.v1`, local sandbox/approval mode, and `settingSources` are previewed; plugin-managed
+MCP requires `plugins`, while external registration requires `project` or `user`. Inline send/create
+servers remain higher precedence and make a same-name plugin proof fail rather than silently pass.
+Observation consent remains a later independent decision and is not implied by plugin installation.
+
 A new user's path is now: `npx yoetz` or `uvx yoetz` → interactive wizard → detected-harness
 selection (Codex in v0.1) → installation selection when needed → explicit `Y`/`N` confirmation →
 local-only or semantic-review choice → discoverable project skill → structural plugin/hook sources

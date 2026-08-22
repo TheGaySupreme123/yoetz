@@ -1,5 +1,10 @@
 # Install and first run
 
+> Local Cursor support is configured explicitly, not by ambient discovery. Use
+> `yoetz integrate cursor plugin preview` with an exact isolated Cursor configuration root and
+> project; see [the Cursor integration runbook](../runbooks/cursor-integration.md). Cursor Cloud is
+> not supported.
+
 ## Install
 
 The supported install path is Python via [`uv`](https://docs.astral.sh/uv/):

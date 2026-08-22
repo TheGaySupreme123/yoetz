@@ -141,6 +141,9 @@ _STRUCTURAL_KEYS: Final = frozenset(
         "mapping_hint",
         "capability_profile_id",
         "codex_version",
+        "cursor_version",
+        "model_id",
+        "model_effort",
     }
 )
 
@@ -173,6 +176,7 @@ _PROSE_KEYS: Final = frozenset(
 class ObservationSource(str, Enum):  # noqa: UP042 - exact durable wire enum
     CODEX_HOOK = "codex_hook"
     CODEX_SESSION_STREAM = "codex_session_stream"
+    CURSOR_HOOK = "cursor_hook"
 
 
 class ObservationLifecycle(str, Enum):  # noqa: UP042 - exact durable wire enum
