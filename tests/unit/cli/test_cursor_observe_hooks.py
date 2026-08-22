@@ -22,7 +22,7 @@ def test_cursor_hook_ingress_drops_every_content_and_identity_denylist_field(
     monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
     payload: dict[str, JsonValue] = {
         "conversation_id": "cursor-session-1",
-        "cursor_version": "3.17.9",
+        "cursor_version": "3.17.8",
         "generation_id": "generation-1",
         "hook_event_name": "afterMCPExecution",
         "model_id": "cursor-grok-4.6-medium",
@@ -46,7 +46,7 @@ def test_cursor_hook_ingress_drops_every_content_and_identity_denylist_field(
     sanitized = strict_json_parse(cast(bytes, captured["stdin_bytes"]))
     assert isinstance(sanitized, Mapping)
     assert sanitized["session_id"] == "cursor:cursor-session-1"
-    assert sanitized["cursor_version"] == "3.17.9"
+    assert sanitized["cursor_version"] == "3.17.8"
     assert sanitized["model_id"] == "cursor-grok-4.6-medium"
     assert sanitized["model_effort"] == "medium"
     assert captured["source"] is ObservationSource.CURSOR_HOOK

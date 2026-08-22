@@ -41,13 +41,13 @@ def test_cursor_profile_and_all_four_cells_are_resource_registered() -> None:
     assert CURSOR_HARNESS_PROFILE.harness_id.value == "cursor"
     assert CURSOR_HARNESS_PROFILE.capability_profile_ids == (
         "cursor-cli-2026.07.09-a3815c0",
-        "cursor-ide-3.17.9",
+        "cursor-ide-3.17.8",
         "cursor-sdk-python-1.0.24",
         "cursor-sdk-typescript-1.0.23",
     )
     for name in (
         "cursor-cli-portable-2026.07.09.case.json",
-        "cursor-ide-native-3.17.9.case.json",
+        "cursor-ide-native-3.17.8.case.json",
         "cursor-sdk-python-1.0.24.case.json",
         "cursor-sdk-typescript-1.0.23.case.json",
     ):

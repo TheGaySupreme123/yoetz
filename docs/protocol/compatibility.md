@@ -162,7 +162,7 @@ Cursor local compatibility is four independent rows, never one inferred support 
 
 | Cell | Exact profile | Required proof boundary |
 |---|---|---|
-| IDE | Cursor `3.17.9` build `3.17.9`, macOS arm64 | explicit isolated user root, portable/native source, discovery, activation, skill delivery, MCP owner/runtime, model call |
+| IDE | Cursor `3.17.8` build `3.17.8`, macOS arm64 | explicit isolated user root, portable/native source, discovery, activation, skill delivery, MCP owner/runtime, model call |
 | CLI | Cursor Agent `2026.07.09-a3815c0`, macOS arm64 | exact binary digest, explicit `--plugin-dir`, skill delivery, MCP owner/runtime, model call |
 | SDK TypeScript | `@cursor/sdk==1.0.23`, bridge `sdk.v1` | explicit local `settingSources`, precedence negative controls, correlated model call |
 | SDK Python | `cursor-sdk==1.0.24`, bridge `sdk.v1` | explicit local `setting_sources`, precedence negative controls, correlated model call |

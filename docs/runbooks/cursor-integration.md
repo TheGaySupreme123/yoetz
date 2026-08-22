@@ -14,7 +14,7 @@ workflow receipt. A later facet never backfills an earlier one.
 
 ## Exact local cells
 
-The initial pins are Cursor IDE `3.17.9` build `3.17.9`, Cursor Agent CLI
+The initial pins are Cursor IDE `3.17.8` build `3.17.8`, Cursor Agent CLI
 `2026.07.09-a3815c0`, `@cursor/sdk==1.0.23`, `cursor-sdk==1.0.24`, and bridge protocol
 `sdk.v1`. Record the executable/package/bridge digest, OS, architecture, scope, and activation
 source. Cursor's Python package deliberately has no `1.0.23` release; it aligned with the shared

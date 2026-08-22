@@ -165,7 +165,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
-        "fixtures/agent-plugins/cursor-ide-native-3.17.9.case.json",
+        "fixtures/agent-plugins/cursor-ide-native-3.17.8.case.json",
         "compatibility_manifest",
         "application/json",
         True,
