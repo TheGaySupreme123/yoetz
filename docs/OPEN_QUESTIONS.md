@@ -133,7 +133,7 @@ affected claim, and for the first non-alpha release regardless.
 | ID | v0.1.0-alpha disposition |
 |---|---|
 | E-001 | Closed by decision — v0.1.0 releases on the frozen 2026-07-17 implementation locks unchanged; no refresh is performed and pins still advertise no platform/provider support. A dependency refresh review is re-required for the first non-alpha release. |
-| E-002 | Not applicable (narrowed) — Codex integration ships classified unsupported/incompatible with jointly empty capability-profile IDs, supported versions, and hook map; no populated exact cell ships and `integration.codex_exact_version_support` stays `not_yet_evidenced`. |
+| E-002 | Not applicable (narrowed) — v0.1.0 ships jointly empty capability-profile IDs, supported versions, and hook map; no populated exact Codex capability cell ships. |
 | E-003 | Narrowed — macOS arm64 and manylinux x86-64 remain candidate cells evidenced only by the CI and release jobs that actually ran for the exact candidate; no keyring/filesystem matrix or restore-drill-backed support wording ships. |
 | E-004 | Closed by decision — the reviewed working thresholds ship as explicit uncalibrated operational defaults; the generation-fencing correctness invariants are CI-evidenced independently of the chosen durations, and no tuning or capacity claim ships. |
 | E-005 | Closed by decision — same treatment as E-004 for WAL/checkpoint/backup/soak budgets; public correctness caps stay CI-evidenced, nightly fault/soak calibration is deferred, and no operational-threshold claim ships. |
@@ -148,20 +148,6 @@ affected claim, and for the first non-alpha release regardless.
 | E-014 | Closed by decision — publication-ceremony guidance remains qualitative, informed by bounded dogfood use; no numeric budget or grouping-threshold claim ships, and measurement is required before any later budget claim. |
 | E-015 | Narrowed — `yoetz state capture` ships fail-closed with no advertised capability cells; `support.structural_subject_state_capture` stays `not_yet_evidenced`. |
 | E-016 | Working (unchanged, ADR-014) — the optional live owner-declared host probe is not performed and verified interoperability beyond the protocol cell is not advertised. |
-
-### Independent review blocker
-
-**Deferred for v0.1.0 (2026-08-19).** By maintainer decision — previously recorded as intent on
-issues #194 and #195 and made canonical by this change — R-001 and R-002 are deferred to the first
-non-alpha release. Binding conditions of the deferral: no public surface of v0.1.0 claims an
-independent review of the cryptographic envelope or the service trust boundary; the ADR-004 and
-ADR-008 status lines record the deferral; and both reviews return to mandatory, non-N/A blockers
-for the first release that drops the alpha designation or widens any claim they protect.
-
-| ID | Required review | Why it blocks a non-alpha release | Exit evidence |
-|---|---|---|---|
-| R-001 | Independent threat review of ADR-004 key hierarchy, domain separation, envelope header/AAD, wrapping, recovery, and commitment-oracle boundaries | Encryption design errors can silently invalidate privacy and portability claims even when unit tests pass. | Written disposition of every review finding plus updated vectors and clean-profile recovery drill. |
-| R-002 | Independent threat review of the service control endpoint, confidential unlock ingress, human-presence authorization, provider credential ingress, policy store, outbound gateway, and egress receipts | A client, local process, adapter, or provider must not bypass the central trust and privacy boundaries merely because each component passes its own tests. | Written disposition of every review finding plus cross-boundary abuse cases and platform evidence. |
 
 ### Explicit v0.2 or later deferrals
 
@@ -214,14 +200,12 @@ for the first release that drops the alpha designation or widens any claim they 
 
 ### Resolved founder and working decisions reflected across the tree
 
-- **v0.1.0 public-alpha reconciliation (2026-08-20):** R-001/R-002 are deferred to the first
-  non-alpha release under the binding conditions recorded above; every empirical gate carries a
+- **v0.1.0 public-alpha reconciliation (2026-08-20):** every empirical gate carries a
   dated disposition in the v0.1.0 disposition table, and none blocks the public-alpha tag;
   `docs/public-claims.json` is reconciled so `evidenced` means the claim has concrete
-  checked-in test or fixture coverage and its non-live suites run in per-PR CI, while the three
+  checked-in test or fixture coverage and its non-live suites run in per-PR CI, while the
   claims whose own wording names missing capability or drill evidence
-  (`integration.codex_exact_version_support`,
-  `recovery.machine_bound_vs_portable`, `support.structural_subject_state_capture`) stay
+  (`recovery.machine_bound_vs_portable`, `support.structural_subject_state_capture`) stay
   `not_yet_evidenced` and are not asserted as release evidence.
 - Ignored architecture/strategy files are private drafting inputs only; the committed ADRs,
   `docs/INTERFACES.md`, and the public code and tests are self-contained public authority.

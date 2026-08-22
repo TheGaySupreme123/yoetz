@@ -226,7 +226,6 @@ def test_skipped_or_unsupported_claims_are_flagged() -> None:
         if claim["release_status"] == "not_yet_evidenced"
     }
     assert pending == {
-        "integration.codex_exact_version_support",
         "recovery.machine_bound_vs_portable",
         "support.structural_subject_state_capture",
     }

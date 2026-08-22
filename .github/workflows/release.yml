@@ -175,6 +175,19 @@ jobs:
           grep -q "${{ steps.version.outputs.value }}" CHANGELOG.md || \
             { echo "::error::CHANGELOG.md has no entry for ${{ steps.version.outputs.value }}"; exit 1; }
 
+      - name: Verify curated release notes exist for this exact tag
+        run: |
+          set -euo pipefail
+          notes="docs/releases/${{ steps.version.outputs.tag }}.md"
+          [ -s "$notes" ] || {
+            echo "::error::missing/empty curated release notes: ${notes} (see docs/releases/TEMPLATE.md)"
+            exit 1
+          }
+          head -n 1 "$notes" | grep -q '^# ' || {
+            echo "::error::${notes} must open with an H1 title line (used as the GitHub release title)"
+            exit 1
+          }
+
       - name: Reject private index/path/Git dependency, ignored/private file, transcript, secret, or canary
         run: |
           uv run --locked python scripts/scan_public_boundary.py --source-tree .
@@ -1034,13 +1047,35 @@ jobs:
           name: capability-matrix
           path: ${{ runner.temp }}/release-assets/capability
 
+      - name: Derive the release title and body from this tag's curated notes
+        id: notes
+        run: |
+          set -euo pipefail
+          notes="docs/releases/${{ needs.validate-release-source.outputs.tag }}.md"
+          [ -s "$notes" ] || {
+            echo "::error::missing/empty curated release notes: ${notes}"
+            exit 1
+          }
+          title=$(head -n 1 "$notes" | sed 's/^# *//')
+          [ -n "$title" ] || {
+            echo "::error::${notes} first line must be an H1 release title"
+            exit 1
+          }
+          # The H1 becomes the release title; the body is everything after it (no duplicated heading).
+          tail -n +2 "$notes" | sed '1{/^[[:space:]]*$/d;}' > "${{ runner.temp }}/release-body.md"
+          [ -s "${{ runner.temp }}/release-body.md" ] || {
+            echo "::error::${notes} has no body below its H1 title"
+            exit 1
+          }
+          echo "title=${title}" >> "$GITHUB_OUTPUT"
+
       - name: Create the GitHub Release with candidate artifacts, checksums, SBOM, evidence, matrices
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ needs.validate-release-source.outputs.tag }}
-          name: Yoetz ${{ needs.validate-release-source.outputs.tag }} — public alpha
-          prerelease: ${{ needs.validate-release-source.outputs.is-prerelease == 'true' || needs.validate-release-source.outputs.version == '0.1.0' }}
-          body_path: docs/releases/v0.1.0.md
+          name: ${{ steps.notes.outputs.title }}
+          prerelease: ${{ needs.validate-release-source.outputs.is-prerelease == 'true' || startsWith(needs.validate-release-source.outputs.version, '0.') }}
+          body_path: ${{ runner.temp }}/release-body.md
           files: |
             ${{ runner.temp }}/release-assets/**/*.whl
             ${{ runner.temp }}/release-assets/**/*.tar.gz
