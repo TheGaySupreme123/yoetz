@@ -1,4 +1,21 @@
-# Yoetz
+<p align="center">
+  <a href="https://yoetz.dev"><img src="https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/landing/public/assets/yoetz-logo.png" alt="Yoetz" width="320"></a>
+</p>
+
+<h1 align="center">Agents claim they're done.<br>Yoetz checks if they actually did.</h1>
+
+<p align="center">
+  <a href="https://pypi.org/project/yoetz/"><img src="https://img.shields.io/pypi/v/yoetz?style=flat-square&label=PyPI" alt="PyPI version"></a>
+  <a href="https://github.com/TheGaySupreme123/yoetz/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="Apache-2.0 license"></a>
+  <a href="https://github.com/TheGaySupreme123/yoetz/actions/workflows/pr-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/TheGaySupreme123/yoetz/pr-ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
+</p>
+
+<p align="center">
+  <a href="https://yoetz.dev">yoetz.dev</a> ·
+  <a href="https://github.com/TheGaySupreme123/yoetz/tree/main/docs/usage">Docs</a> ·
+  <a href="https://github.com/TheGaySupreme123/yoetz/releases">Releases</a> ·
+  <a href="https://github.com/TheGaySupreme123/yoetz/blob/main/CHANGELOG.md">Changelog</a>
+</p>
 
 Yoetz is a local-first, open-source system for recording structured work evidence, checking it
 deterministically, and producing **honest receipts about what was and was not verified**.
@@ -11,32 +28,72 @@ control, and issues a receipt whose wording never outruns its coverage.
 The thing Yoetz refuses to do is the point. It will not tell you work is correct. It will tell you
 exactly what was checked, at what coverage, and what remains open.
 
-## Install
+## What it looks like
 
 ```text
-uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
-yoetz
+$ codex
+› Refactor the rate limiter. Keep the /limits response shape and make sure tests pass.
+
+• I'll plan this first and record the obligations in yoetz.
+⚙ yoetz  start · publish_work · plan, 3 obligations
+⚡ Edited src/limiter.py  (+118 −74)
+⚡ Ran pytest · 41 passed
+
+• Tests pass. Checking with yoetz before I claim done.
+⚙ yoetz  check · action_required · 2 findings
+✗ "tests pass" cites a run older than the last edit
+✗ /limits response shape was never verified
+
+• Fair catch. Fixing, then re-running.
+⚡ Restored /limits shape · Ran pytest · 43 passed
+⚙ yoetz  respond · acknowledged · check · no_issue_detected
+⚙ yoetz  receipt · unresolved_findings_remain · deterministic · coverage-bounded
+
+▸ Done. Limiter refactored, and the receipt still carries the two findings I hit on the way.
 ```
 
-Or, with `uv` already installed:
+Both findings map to real rules in the shipped deterministic policy pack, checked against nothing
+but the published record — no repository access, no model, no interpretation. And the receipt keeps
+carrying them after the fix: a later clean check never erases what was caught.
 
-```text
+## Install
+
+```sh
+# One-off run (needs uv: https://docs.astral.sh/uv/)
+uvx yoetz
+
+# Install from PyPI — the canonical distribution
+uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"
+
+# Via npm — a dependency-free launcher for the exact same PyPI package (needs uv)
 npx yoetz
 ```
 
-The canonical distribution is Python via [`uv`](https://docs.astral.sh/uv/); `uvx yoetz` works for
-a one-off run. The dependency-free npm package is only a launcher for the exact matching Python
-distribution. It bundles no Python or Yoetz code and never installs `uv` itself.
+The npm package bundles no Python and no Yoetz code and never installs `uv` itself; it only
+launches the exact matching Python distribution.
+
+> [!TIP]
+> **Let your agent set it up.** Paste this into your coding agent and it walks you through
+> installation, showing you every proposed change first:
+>
+> ```text
+> I want to install Yoetz (https://github.com/TheGaySupreme123/yoetz). Start by fetching its
+> agent install guide and follow it exactly:
+>
+> curl -fsSL https://raw.githubusercontent.com/TheGaySupreme123/yoetz/main/docs/usage/agent-start.md
+>
+> It tells you what to run yourself, what to ask me, and where to hand me the terminal. Setup's
+> questions are mine to answer in my own terminal, and show me any proposed change before it is
+> applied.
+> ```
 
 `yoetz` at a terminal opens a full-screen interface, and the first run walks setup inside it:
 what was detected, whether you trust this project, the exact proposed change, and an explicit
 approval before anything is applied. You do not need to know what MCP, hooks, policy digests, or
 vaults are to finish it, and you are never asked to configure a provider — local verification is
-complete without one.
-
-Everything non-interactive is unchanged. Pipes, redirects, CI, `yoetz --help`, `--json` output,
-named subcommands, and `yoetz mcp serve` behave exactly as before; a bare `yoetz` with a
-redirected stream still prints help. Set `YOETZ_TUI=0` for the prompt-loop menu instead.
+complete without one. Everything non-interactive is unchanged: pipes, redirects, CI, `--help`,
+`--json`, named subcommands, and `yoetz mcp serve` behave exactly as before, and `YOETZ_TUI=0`
+selects the prompt-loop menu instead.
 
 Full walkthrough: [Install and first run](docs/usage/install-and-first-run.md) and
 [The terminal interface](docs/usage/terminal-interface.md). A coding agent installing Yoetz for
@@ -53,20 +110,23 @@ effects in the selected home. Even an `active` result proves installed inventory
 cache/config state for future sessions—not that a later session loaded a hook or delivered an
 observation.
 
-## The six operations
+## What's in the box
 
-`start`, `publish_work`, `check`, `respond`, `status`, `receipt` — identical contracts on the CLI and
-over MCP. Everything else (import, review, backup/restore/migrate, integration, version, service) is
-a bounded support surface, not a seventh operation.
+| | |
+| --- | --- |
+| **Six operations, two surfaces** | `start`, `publish_work`, `check`, `respond`, `status`, `receipt` — identical contracts on the CLI and over MCP. Everything else is a bounded support surface, not a seventh operation. |
+| **Works with any MCP agent** | No integration, no installed skill, no configuration. Codex has a first-party integration because its skill surface delivers the guidance natively — but integration buys ergonomics, never a stronger claim. |
+| **Honest receipts** | Coverage, provenance, freshness, findings, and limitations stay separate. A clean deterministic check is never presented as proof that work is correct. |
+| **Zero-egress by default** | A fresh installation is deterministic and fully useful offline; nothing leaves your machine before first-run setup commits a policy. |
+| **Privacy-gated semantic review** | An optional reviewer model reads a bounded, minimized packet built from the ledger — never your repository — behind explicit provider binding and reauthenticated policy authority. |
+| **A full-screen terminal interface** | First run, status, privacy, provider, integration, service, and receipt flows in one interface; no secret ever enters it. |
+| **Recoverable local durability** | Encrypted task bundles, generation-fenced single-writer storage, deterministic replay, backup/restore, and forward-only migrations. |
 
-Yoetz works with any agent over MCP with no integration, no installed skill, and no configuration.
-Codex is the first harness with a first-party integration because its skill surface delivers the
-guidance natively — but the guidance is harness-neutral, owned once under [`guidance/`](guidance/),
-and shipped byte-identically everywhere. Integration buys ergonomics, never a stronger claim.
+See [The six operations](docs/usage/six-operations.md) for the protocol and
+[Receipts and coverage](docs/usage/receipts-and-coverage.md) for what a receipt does and does not
+say.
 
-See [The six operations](docs/usage/six-operations.md).
-
-## Two defaults, deliberately separate
+## Private by default
 
 A fresh installation's unconfigured seed is **zero-egress and deterministic**: nothing leaves your
 machine before first-run setup commits a policy, and Yoetz is fully useful in that state. Setup's
@@ -102,6 +162,20 @@ minimization, secret scanning, exact destination binding, and durable structural
 
 See [Architecture](docs/architecture.md).
 
+## Releases you can verify
+
+Every release is more than a tag. The tag workflow builds each distribution once, tests those exact
+candidate bytes, publishes them to PyPI and npm through dedicated approval environments, and
+attaches the same approved artifacts to the
+[GitHub release](https://github.com/TheGaySupreme123/yoetz/releases) alongside `SHA256SUMS`, an
+SBOM, the support matrix, known limitations, the release-evidence bundle, and a `VERIFY.md` that
+walks through checking the bytes you installed. Post-publication jobs re-download the public
+artifacts and compare them to the approved bytes.
+
+Release notes are curated by hand for every release — highlights, an explicit "what this release
+does not claim" section, and the full changelog — and live versioned in
+[`docs/releases/`](docs/releases/).
+
 ## Documentation
 
 - [Using Yoetz](docs/usage/) — install, the terminal interface, operations, privacy, providers,
@@ -115,7 +189,7 @@ See [Architecture](docs/architecture.md).
 
 ## Status
 
-v0.1.0 is the first **public alpha**. Every
+It's an alpha: early, and it already does a lot. v0.1.0 is the first **public alpha**. Every
 public claim in [`docs/public-claims.json`](docs/public-claims.json) is bound to real checked-in
 evidence: a claim flagged `evidenced` has concrete test or fixture coverage, with its non-live
 suites exercised in per-PR CI; a claim whose own wording names still-missing capability or drill

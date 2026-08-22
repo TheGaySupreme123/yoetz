@@ -28,6 +28,9 @@ golden vectors under [`fixtures/`](../fixtures/) win over any prose, including t
   dogfood, and influence dogfood.
 - [`docs/public-claims.json`](public-claims.json) — every public claim bound to its requirements,
   surfaces, tests, and honest release status. Enforced by `tests/conformance/claims/`.
+- [`docs/releases/`](releases/) — curated release notes, one file per tag; the release workflow
+  publishes the tag's file as the GitHub release title and body. Conventions in
+  [`TEMPLATE.md`](releases/TEMPLATE.md).
 - [`guidance/`](../guidance/) — agent-facing guidance, shipped byte-identically to every harness and
   over MCP.
 
