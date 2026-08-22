@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import os
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
@@ -139,7 +139,7 @@ class HookSpool:
         )
 
     @contextlib.contextmanager
-    def claim(self, workspace_commitment: str) -> Iterator[tuple[SpooledHookObservation, ...]]:
+    def claim(self, workspace_commitment: str) -> Generator[tuple[SpooledHookObservation, ...]]:
         """Fence one file by rename; failure leaves it for at-least-once replay."""
 
         digest = workspace_commitment.removeprefix("hmac-sha256:")

@@ -279,6 +279,14 @@ class _Recency:
         )
 
 
+def _empty_recent_values() -> list[int]:
+    return []
+
+
+def _empty_timings_by_path() -> dict[str, _Timings]:
+    return {}
+
+
 @dataclass(slots=True)
 class _Timings:
     """Timing rows, kept datable so a one-off extreme is not read as the norm."""
@@ -289,8 +297,8 @@ class _Timings:
     max_ms: int | None = None
     max_at: datetime | None = None
     recent_max_ms: int | None = None
-    recent_values: list[int] = field(default_factory=list)
-    by_path: dict[str, _Timings] = field(default_factory=dict)
+    recent_values: list[int] = field(default_factory=_empty_recent_values)
+    by_path: dict[str, _Timings] = field(default_factory=_empty_timings_by_path)
 
     def observe(
         self,
