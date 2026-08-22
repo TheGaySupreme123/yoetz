@@ -35,21 +35,36 @@ $ codex
 › Refactor the rate limiter. Keep the /limits response shape and make sure tests pass.
 
 • I'll plan this first and record the obligations in yoetz.
-⚙ yoetz  start · publish_work · plan, 3 obligations
-⚡ Edited src/limiter.py  (+118 −74)
-⚡ Ran pytest · 41 passed
+
+• Called yoetz.start
+  └ task tsk_9c2e1b40 · session ses_9c2e1b40-01
+• Called yoetz.publish_work
+  └ accepted · plan + 3 obligations
+
+• Edited src/limiter.py (+118 -74)
+• Ran pytest -q
+  └ 41 passed
 
 • Tests pass. Checking with yoetz before I claim done.
-⚙ yoetz  check · action_required · 2 findings
-✗ "tests pass" cites a run older than the last edit
-✗ /limits response shape was never verified
+
+• Called yoetz.check
+  └ action_required · 2 findings
+    ✗ stale_evidence_for_changed_state — "tests pass" cites a run older than the last edit
+    ✗ requested_item_never_attempted — the /limits response shape was never verified
 
 • Fair catch. Fixing, then re-running.
-⚡ Restored /limits shape · Ran pytest · 43 passed
-⚙ yoetz  respond · acknowledged · check · no_issue_detected
-⚙ yoetz  receipt · unresolved_findings_remain · deterministic · coverage-bounded
 
-▸ Done. Limiter refactored, and the receipt still carries the two findings I hit on the way.
+• Edited src/limiter.py (+9 -4)
+• Ran pytest -q
+  └ 43 passed
+• Called yoetz.respond
+  └ acknowledged
+• Called yoetz.check
+  └ no_issue_detected
+• Called yoetz.receipt
+  └ unresolved_findings_remain · deterministic · coverage-bounded
+
+Done. The limiter is refactored, and the receipt still carries the two findings I hit on the way.
 ```
 
 Both findings map to real rules in the shipped deterministic policy pack, checked against nothing
@@ -199,13 +214,6 @@ factory, so a preset you can select is a preset Yoetz can dispatch — but none 
 presets has recorded live evidence yet, so none is claimed as a confirmed working endpoint. That
 claim stays gated by the capability evidence described in
 [ADR-006](docs/adr/ADR-006-semantic-provider-profile.md).
-
-Two independent threat reviews — of the key hierarchy and recovery design, and of the service,
-credential, and egress boundaries — have **not** been completed; they are deferred to the first
-non-alpha release by dated maintainer decision, so v0.1.0 claims no independently reviewed design.
-Codex integration likewise ships with an empty tested-version set, so it is recorded as untested
-rather than supported. `docs/OPEN_QUESTIONS.md` records every gate disposition and what still
-gates a stronger claim.
 
 ## Contributing
 
