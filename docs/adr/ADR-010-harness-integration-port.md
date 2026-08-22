@@ -138,8 +138,9 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
 ### Cursor local amendment (2026-08-22, issue #153)
 
 `HarnessId` adds exactly `cursor`; `cursor_integration.py` is its one adapter. The accepted local
-cells are Cursor IDE `3.17.9`, Cursor Agent CLI `2026.07.09-a3815c0`, and local TypeScript/Python
-SDK `1.0.23` over bridge protocol `sdk.v1`. Exact artifact digests, OS, architecture, activation
+cells are Cursor IDE `3.17.9`, Cursor Agent CLI `2026.07.09-a3815c0`, local TypeScript SDK
+`1.0.23`, and local Python SDK `1.0.24` over bridge protocol `sdk.v1`. The Python package has no
+`1.0.23` release. Exact artifact digests, OS, architecture, activation
 source, configuration scope, format, MCP owner/source, and SDK setting sources remain evidence per
 cell. No cell inherits another cell's proof, and Cursor Cloud remains outside this amendment.
 

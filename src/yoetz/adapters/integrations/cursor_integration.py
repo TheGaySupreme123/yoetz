@@ -95,7 +95,7 @@ CURSOR_HOOK_EVENTS: Final = (
 _CURSOR_CAPABILITY_PROFILE_IDS: Final = (
     "cursor-cli-2026.07.09-a3815c0",
     "cursor-ide-3.17.9",
-    "cursor-sdk-python-1.0.23",
+    "cursor-sdk-python-1.0.24",
     "cursor-sdk-typescript-1.0.23",
 )
 _CURSOR_HOOK_PROFILE: Final = HarnessHookProfile(
@@ -112,11 +112,11 @@ CURSOR_HARNESS_PROFILE: Final = HarnessProfile(
     skill_root="plugins/local/yoetz/skills/",
     frontmatter_profile="agent-skills-1",
     capability_profile_ids=_CURSOR_CAPABILITY_PROFILE_IDS,
-    supported_versions=("1.0.23", "2026.07.09-a3815c0", "3.17.9"),
+    supported_versions=("1.0.23", "1.0.24", "2026.07.09-a3815c0", "3.17.9"),
     hooks_by_capability_profile={
         "cursor-cli-2026.07.09-a3815c0": _CURSOR_HOOK_PROFILE,
         "cursor-ide-3.17.9": _CURSOR_HOOK_PROFILE,
-        "cursor-sdk-python-1.0.23": _CURSOR_HOOK_PROFILE,
+        "cursor-sdk-python-1.0.24": _CURSOR_HOOK_PROFILE,
         "cursor-sdk-typescript-1.0.23": _CURSOR_HOOK_PROFILE,
     },
 )

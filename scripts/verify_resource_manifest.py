@@ -171,7 +171,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
-        "fixtures/agent-plugins/cursor-sdk-python-1.0.23.case.json",
+        "fixtures/agent-plugins/cursor-sdk-python-1.0.24.case.json",
         "compatibility_manifest",
         "application/json",
         True,
