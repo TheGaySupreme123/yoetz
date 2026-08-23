@@ -113,6 +113,7 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 | `tools/list` succeeds but owner is dual/ambiguous | source collision; do not choose silently |
 | SDK sees no plugin MCP | `plugins` missing from explicit setting sources |
 | SDK sees the wrong route | a higher-precedence inline/project/user source won |
+| Installed MCP executable changed but Cursor still shows the old tool inventory | first run `Developer: Reload Window`; if the pinned IDE still reuses its shared MCP process, fully quit that exact Cursor testing app, verify its process exited, relaunch it with the same isolated profile, and re-prove discovery plus `tools/list` before claiming activation |
 | Hook fires but status stays published-only | configuration/trigger is not accepted observation evidence |
 | Strict route has no semantic review | expected route ceiling; authorize a separate policy route when intended |
 | Modified plugin cannot remove | preserved local change; inspect and resolve manually |
