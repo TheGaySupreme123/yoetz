@@ -81,6 +81,18 @@ def _external_schema_refs(value: object) -> tuple[str, ...]:
     return ()
 
 
+def _schema_keyword_count(value: object, keyword: str) -> int:
+    if isinstance(value, Mapping):
+        source = cast(Mapping[object, object], value)
+        return int(keyword in source) + sum(
+            _schema_keyword_count(item, keyword) for item in source.values()
+        )
+    if isinstance(value, tuple | list):
+        sequence = cast(tuple[object, ...] | list[object], value)
+        return sum(_schema_keyword_count(item, keyword) for item in sequence)
+    return 0
+
+
 def _initialize(protocol_version: object, request_id: int = 1) -> dict[str, object]:
     return {
         "jsonrpc": "2.0",
@@ -108,9 +120,7 @@ async def test_static_inventory_is_exact_and_verified() -> None:
         assert tool.outputSchema == _plain_json(descriptor.output_schema)
         assert tool.outputSchema["type"] == "object"
         assert "type" not in descriptor.catalog_output_schema
-        assert {
-            key: value for key, value in tool.outputSchema.items() if key != "type"
-        } == _plain_json(descriptor.catalog_output_schema)
+        assert _schema_keyword_count(tool.outputSchema, "prefixItems") == 0
         assert _external_schema_refs(tool.inputSchema) == ()
         assert _external_schema_refs(tool.outputSchema) == ()
         assert tool.annotations == types.ToolAnnotations(
@@ -120,6 +130,9 @@ async def test_static_inventory_is_exact_and_verified() -> None:
             idempotentHint=descriptor.annotations.idempotent,
             openWorldHint=descriptor.annotations.open_world,
         )
+    start_descriptor = next(item for item in descriptors if item.name == "start")
+    assert _schema_keyword_count(start_descriptor.catalog_output_schema, "prefixItems") == 1
+    assert _schema_keyword_count(start_descriptor.output_schema, "prefixItems") == 0
     assert [str(resource.uri) for resource in resources] == [
         item.uri for item in GUIDANCE_RESOURCES
     ]

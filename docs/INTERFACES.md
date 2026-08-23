@@ -143,6 +143,11 @@ identifiers, and malformed digests are never admitted to this text channel. A de
 finding's structured `detail` may name only its closed policy facts and typed server IDs; it never
 copies ledger-authored prose.
 
+The host-facing MCP `outputSchema` also projects fixed `prefixItems` tuples into a bounded
+`items.anyOf` declaration for validators that still apply legacy `items` semantics. This weakens
+only the declaration used by the host: every returned result is first validated against the exact
+immutable catalogue schema, which retains tuple order, length, and member identity.
+
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
 `expected_frontier`. It names that field and is retryable because validation wrote no durable

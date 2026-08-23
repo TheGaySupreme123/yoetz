@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import cast
+from typing import Any, cast
 
 import pytest
+from jsonschema import Draft7Validator, Draft202012Validator
 from pydantic import ValidationError
 
 from yoetz.application.start import StartInternalResult, start_projection_wire
+from yoetz.mcp.descriptors import descriptor_for
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.models import (
     FrontierModel,
@@ -160,6 +162,16 @@ def test_frozen_schema_rejects_reversed_or_mismatched_scaffold_drafts() -> None:
     schema["name"] = "obligation_published"
     with pytest.raises(SchemaInstanceInvalid):
         validate_schema_instance("start-result", "1.0.0", mismatched_wire)
+
+
+def test_mcp_output_schema_accepts_real_start_scaffold_with_legacy_and_modern_validators() -> None:
+    """Cursor's legacy items semantics must accept the real two-draft start result (#153)."""
+
+    wire = _public_wire()
+    schema = cast(dict[str, Any], dict(descriptor_for("start").output_schema))
+
+    cast(Any, Draft7Validator(schema)).validate(wire)
+    cast(Any, Draft202012Validator(schema)).validate(wire)
 
 
 def test_projection_is_deterministic_without_mutating_the_internal_wire() -> None:
