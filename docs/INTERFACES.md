@@ -135,9 +135,13 @@ include any returned, kind-valid `task_id`, `session_id`, and `writer_id`; in pa
 `start` text alone carries the identifiers and frontier needed to author the next request. A
 `check` projection includes as many returned, kind-valid `finding_id` values as fit and reports a
 `+N more` remainder when any valid finding IDs do not fit, so the text fallback can author the
-required `respond` request. Caller-controlled prose, malformed identifiers, and malformed digests
-are never admitted to this text channel. A deterministic finding's structured `detail` may name
-only its closed policy facts and typed server IDs; it never copies ledger-authored prose.
+required `respond` request. Status `compact`/`obligations` projections likewise carry as many
+kind-valid obligation IDs as fit, and receipt projections carry open obligation IDs plus
+schema-gated ASCII-safe coverage gap codes, so a text-only host can recover closure work and name
+an honest limitation without copying obligation or gap prose. Caller-controlled prose, malformed
+identifiers, and malformed digests are never admitted to this text channel. A deterministic
+finding's structured `detail` may name only its closed policy facts and typed server IDs; it never
+copies ledger-authored prose.
 
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted

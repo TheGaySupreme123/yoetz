@@ -37,6 +37,12 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
                     "open_obligation_count": "2",
                     "unanswered_finding_count": "4",
                     "receipt_blocking_finding_count": "3",
+                    "open_obligations": [
+                        {
+                            "obligation_id": "obl_00000000-0000-4000-8000-000000000001",
+                            "description": secret,
+                        }
+                    ],
                     "task_title": secret,
                 }
             ]
@@ -46,7 +52,8 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
     status_summary = render_safe_compact_summary(status)
     assert status_summary == (
         "Status view: compact; frontier: 9; freshness: stale_after_material_change; open "
-        "obligations: 2; unanswered findings: 4; receipt-blocking findings: 3; "
+        "obligations: 2; obligation IDs: obl_00000000-0000-4000-8000-000000000001; "
+        "unanswered findings: 4; receipt-blocking findings: 3; "
         "reported gaps: 2."
     )
     assert secret not in status_summary
@@ -63,9 +70,28 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
     }
     assert render_safe_compact_summary(status) == (
         "Status view: compact; frontier: 9; freshness: stale_after_material_change; open "
-        "obligations: 2; unanswered findings: 0; receipt-blocking findings: 3; "
+        "obligations: 2; obligation IDs: obl_00000000-0000-4000-8000-000000000001; "
+        "unanswered findings: 0; receipt-blocking findings: 3; "
         "reported gaps: 2."
     )
+
+    status["view"] = "obligations"
+    status["page"] = {
+        "items": [
+            {
+                "obligation_id": "obl_00000000-0000-4000-8000-000000000002",
+                "description": secret,
+            },
+            {"obligation_id": secret},
+        ],
+        "next_cursor": None,
+    }
+    assert render_safe_compact_summary(status) == (
+        "Status view: obligations; frontier: 9; freshness: current; open obligations: 2; "
+        "obligation IDs: obl_00000000-0000-4000-8000-000000000002; unanswered findings: 0; "
+        "receipt-blocking findings: 3; reported gaps: 2."
+    )
+    assert secret not in render_safe_compact_summary(status)
 
     status["view"] = "findings"
     status["page"] = {"items": [], "next_cursor": None}
@@ -94,13 +120,70 @@ def test_human_summary_is_weaker_than_structured_output() -> None:
         "receipt_id": "rcp_00000000-0000-4000-8000-000000000001",
         "conclusion": "insufficient_coverage",
         "subject_frontier": {"sequence": "11"},
-        "coverage": {"known_gaps": ["redacted_gap"]},
+        "coverage": {"known_gaps": ["redacted_gap", "semantic_review_not_configured", secret]},
+        "obligations": [
+            {
+                "obligation_id": "obl_00000000-0000-4000-8000-000000000002",
+                "status": "open",
+                "summary": secret,
+            },
+            {
+                "obligation_id": "obl_00000000-0000-4000-8000-000000000003",
+                "status": "resolved",
+            },
+        ],
         "suppressed_finding_count": 5,
         "human_text": secret,
     }
     receipt_summary = render_safe_compact_summary(receipt)
     assert receipt_summary == (
-        "Receipt conclusion: insufficient_coverage; frontier: 11; coverage limitations: 1; "
+        "Receipt conclusion: insufficient_coverage; frontier: 11; coverage limitations: 3; "
+        "open obligation IDs: obl_00000000-0000-4000-8000-000000000002; "
+        "gap codes: redacted_gap, semantic_review_not_configured; "
         "suppressed findings: 5."
     )
     assert secret not in receipt_summary
+
+
+def test_text_only_closure_lists_remain_bounded_and_keep_both_receipt_classes() -> None:
+    obligation_ids = [f"obl_00000000-0000-4000-8000-{index:012x}" for index in range(1, 21)]
+    status: dict[str, JsonValue] = {
+        "ok": True,
+        "view": "obligations",
+        "result_frontier": {"sequence": "12"},
+        "page": {"items": [{"obligation_id": obligation_id} for obligation_id in obligation_ids]},
+        "closure_readiness": {
+            "open_obligation_count": "20",
+            "unanswered_finding_count": "0",
+            "receipt_blocking_finding_count": "0",
+        },
+        "coverage": {"ledger_freshness": "current"},
+        "gaps": [],
+    }
+    status_summary = render_safe_compact_summary(status)
+    assert "obligation IDs: obl_00000000-0000-4000-8000-000000000001" in status_summary
+    assert "more" in status_summary
+    assert len(status_summary.encode("ascii")) <= 512
+
+    receipt: dict[str, JsonValue] = {
+        "ok": True,
+        "receipt_id": "rcp_00000000-0000-4000-8000-000000000001",
+        "conclusion": "insufficient_coverage",
+        "subject_frontier": {"sequence": "13"},
+        "coverage": {
+            "known_gaps": [
+                "check_not_recorded",
+                "semantic_review_not_configured",
+                "semantic_relevance_review_not_run",
+            ]
+        },
+        "obligations": [
+            {"obligation_id": obligation_id, "status": "open"} for obligation_id in obligation_ids
+        ],
+        "suppressed_finding_count": 0,
+    }
+    receipt_summary = render_safe_compact_summary(receipt)
+    assert "open obligation IDs:" in receipt_summary
+    assert "gap codes:" in receipt_summary
+    assert "more" in receipt_summary
+    assert len(receipt_summary.encode("ascii")) <= 512
