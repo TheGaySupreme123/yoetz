@@ -59,6 +59,8 @@ _PURPOSE_MAP: Final = {
     ConfidentialSecretPurpose.PROVIDER_CREDENTIAL: SecretPurpose.PROVIDER_CREDENTIAL,
     ConfidentialSecretPurpose.PRIVACY_REAUTHENTICATION: SecretPurpose.PRIVACY_REAUTHENTICATION,
     ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION: SecretPurpose.SECURITY_REAUTHENTICATION,
+    ConfidentialSecretPurpose.INSTALLATION_RECOVERY: SecretPurpose.INSTALLATION_RECOVERY,
+    ConfidentialSecretPurpose.VAULT_REWRAP: SecretPurpose.VAULT_REWRAP,
 }
 _PASSPHRASE_PURPOSES: Final = frozenset(
     {
@@ -68,6 +70,8 @@ _PASSPHRASE_PURPOSES: Final = frozenset(
         ConfidentialSecretPurpose.PROVIDER_REAUTHENTICATION,
         ConfidentialSecretPurpose.PRIVACY_REAUTHENTICATION,
         ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION,
+        ConfidentialSecretPurpose.INSTALLATION_RECOVERY,
+        ConfidentialSecretPurpose.VAULT_REWRAP,
     }
 )
 

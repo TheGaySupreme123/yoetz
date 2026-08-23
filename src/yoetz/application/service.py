@@ -43,6 +43,7 @@ from yoetz.ports.control import (
     ProjectionRenderMode,
     RepositoryPrivacyContext,
 )
+from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import CheckAwaitingHuman, CheckCommitResult, FrozenCase
 from yoetz.ports.publish_response_catalog import (
@@ -50,8 +51,8 @@ from yoetz.ports.publish_response_catalog import (
     PublishResponseKey,
     StoredPublishResponse,
 )
-from yoetz.ports.runtime import BundleRuntimePort, TaskRuntime
-from yoetz.ports.start_catalog import StartCatalogPort, TaskRouteState
+from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
+from yoetz.ports.start_catalog import StartCatalogPort, TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import (
     MAX_JSON_DEPTH,
     JsonValue,
@@ -644,6 +645,63 @@ class Application:
         # set without it would report ready while every check reports unavailable.
         if self.semantic_ready and not self.provider_credential_connected:
             raise ValueError("semantic_ready_without_connected_provider_credential")
+
+    async def verify_recovery_candidate(self) -> tuple[int, int, int]:
+        """Replay every active task and authenticate its currently present objects.
+
+        The method returns structural counts only.  It is invoked before a recovered passphrase
+        marker is selected, so any corrupt route, ledger chain, projection, or object keeps the
+        prior encrypted authority active.
+        """
+
+        list_routes = getattr(self.start_catalog, "recovery_routes", None)
+        if not callable(list_routes):
+            raise TypeError("recovery_catalog_verifier_unavailable")
+        routes = await cast(
+            Callable[[], Awaitable[tuple[TaskRoute, ...]]], list_routes
+        )()
+        if type(routes) is not tuple:
+            raise TypeError("recovery_catalog_verifier_invalid")
+        active_routes = 0
+        replayed_events = 0
+        verified_objects = 0
+        for route in routes:
+            if type(route) is not TaskRoute:
+                raise TypeError("recovery_catalog_verifier_invalid")
+            if route.state is not TaskRouteState.ACTIVE:
+                continue
+            runtime = await self.runtime.route(
+                RouteCommand(
+                    session_id=route.session_id,
+                    writer_id=None,
+                    access=RouteAccess.PAYLOAD_READ,
+                    required_capabilities=frozenset(
+                        {
+                            RuntimeCapability.STRUCTURAL_READ,
+                            RuntimeCapability.PAYLOAD_READ,
+                        }
+                    ),
+                )
+            )
+            try:
+                frontier = await runtime.ledger.load_frontier()
+                observed = 0
+                async for _record in runtime.ledger.load_events(route.session_id):
+                    observed += 1
+                if observed > frontier.sequence:
+                    raise ValueError("recovery_ledger_frontier_invalid")
+                verify_objects = getattr(runtime.ledger, "verify_recovery_objects", None)
+                if not callable(verify_objects):
+                    raise TypeError("recovery_object_verifier_unavailable")
+                object_count = await cast(Callable[[], Awaitable[int]], verify_objects)()
+                if type(object_count) is not int or object_count < 0:
+                    raise TypeError("recovery_object_verifier_invalid")
+                active_routes += 1
+                replayed_events += observed
+                verified_objects += object_count
+            finally:
+                await self.runtime.release(runtime)
+        return active_routes, replayed_events, verified_objects
 
     async def start(
         self,

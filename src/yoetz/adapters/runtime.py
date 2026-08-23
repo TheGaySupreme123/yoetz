@@ -211,6 +211,15 @@ class _ReadLedger:
     ) -> AsyncIterator[LedgerRecord]:
         return self._value.load_events(session_id, after=after, through=through)
 
+    async def load_frontier(self) -> Frontier:
+        return await self._value.load_frontier()
+
+    async def verify_recovery_objects(self) -> int:
+        verifier = getattr(self._value, "verify_recovery_objects", None)
+        if not callable(verifier):
+            raise TypeError("recovery_object_verifier_unavailable")
+        return await cast(Callable[[], Awaitable[int]], verifier)()
+
     async def load_projection(
         self, session_id: str, view: ProjectionView
     ) -> StoredProjection | None:

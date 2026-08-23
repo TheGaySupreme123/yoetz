@@ -11,6 +11,7 @@ from typing import Final, Literal, Protocol, cast
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.secret_memory import (
     HumanAuthorizationProof,
+    SecretConsumer,
     SecretHandle,
     SecretPurpose,
     UserPresencePort,
@@ -30,6 +31,8 @@ from yoetz.service.confidential_protocol import (
     HumanResult,
     IdleRelockPolicyResult,
     IdleRelockPolicyTarget,
+    InstallationRecoveryResult,
+    InstallationRecoveryTarget,
     KeyringRetryPhase,
     KeyringRetryResult,
     PortableRecoveryResult,
@@ -160,6 +163,35 @@ class _HumanEffects(Protocol):
     ) -> IdleRelockPolicyResult: ...
 
 
+class _InstallationRecoveryEffects(Protocol):
+    async def complete_installation_provision(
+        self,
+        target: InstallationRecoveryTarget,
+        secret: SecretHandle,
+        rewrap_secret: SecretHandle | None,
+        proof: HumanAuthorizationProof,
+        now_monotonic: float,
+    ) -> InstallationRecoveryResult: ...
+
+    async def revoke_installation_recovery(
+        self,
+        target: InstallationRecoveryTarget,
+        rewrap_secret: SecretHandle,
+        proof: HumanAuthorizationProof,
+        now_monotonic: float,
+    ) -> InstallationRecoveryResult: ...
+
+    def begin_installation_restore(
+        self, target: InstallationRecoveryTarget
+    ) -> tuple[object, str]: ...
+
+    def finish_installation_restore(self, continuation_id: str, *, success: bool) -> None: ...
+
+    async def cancel_installation_recovery(
+        self, target: InstallationRecoveryTarget
+    ) -> None: ...
+
+
 @dataclass(slots=True)
 class _Ceremony:
     request: ClientOpenEnvelope
@@ -172,6 +204,8 @@ class _Ceremony:
     secret_task: Task[SecretHandle] | None = None
     proof: HumanAuthorizationProof | None = None
     approved: bool = False
+    installation_recovery_secret: SecretHandle | None = None
+    installation_recovery_continuation: str | None = None
 
 
 class HumanControlService:
@@ -232,11 +266,27 @@ class HumanControlService:
             except HumanControlError:
                 if session is not None:
                     await self._consume_failed(session)
+                elif type(request.target) is InstallationRecoveryTarget:
+                    await cast(
+                        _InstallationRecoveryEffects, self._effects
+                    ).cancel_installation_recovery(request.target)
                 raise
             except (UnlockError, TypeError, ValueError) as exc:
                 if session is not None:
                     await self._consume_failed(session)
+                elif type(request.target) is InstallationRecoveryTarget:
+                    await cast(
+                        _InstallationRecoveryEffects, self._effects
+                    ).cancel_installation_recovery(request.target)
                 raise HumanControlError(self._map_error(exc)) from exc
+            except BaseException:
+                if session is not None:
+                    await self._consume_failed(session)
+                elif type(request.target) is InstallationRecoveryTarget:
+                    await cast(
+                        _InstallationRecoveryEffects, self._effects
+                    ).cancel_installation_recovery(request.target)
+                raise
 
     async def submit_action(
         self, envelope: ClientActionEnvelope
@@ -321,6 +371,100 @@ class HumanControlService:
                     return self._finish_after_secret(
                         session, await self._effects.complete_portable_recovery(target, secret)
                     )
+                if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY:
+                    target = cast(InstallationRecoveryTarget, session.request.target)
+                    recovery_effects = cast(_InstallationRecoveryEffects, self._effects)
+                    if target.operation == "provision":
+                        proof = session.proof
+                        if proof is None:
+                            raise HumanControlError("reauthentication_unavailable")
+                        session.proof = None
+                        return self._finish_after_secret(
+                            session,
+                            await recovery_effects.complete_installation_provision(
+                                target,
+                                secret,
+                                None,
+                                proof,
+                                self._sample_monotonic(),
+                            ),
+                        )
+                    if target.operation == "rotate":
+                        session.installation_recovery_secret = secret
+                        return self._advance_to_secret_after_secret(
+                            session, ConfidentialSecretPurpose.VAULT_REWRAP
+                        )
+                    if target.operation != "restore":
+                        raise HumanControlError("phase_invalid")
+                    session.installation_recovery_secret = secret
+                    return self._advance_to_secret_after_secret(
+                        session, ConfidentialSecretPurpose.VAULT_REWRAP
+                    )
+                if purpose is ConfidentialSecretPurpose.VAULT_REWRAP:
+                    target = cast(InstallationRecoveryTarget, session.request.target)
+                    recovery_secret = session.installation_recovery_secret
+                    recovery_effects = cast(_InstallationRecoveryEffects, self._effects)
+                    if target.operation == "rotate":
+                        proof = session.proof
+                        if recovery_secret is None or proof is None:
+                            raise HumanControlError("phase_invalid")
+                        session.installation_recovery_secret = None
+                        session.proof = None
+                        return self._finish_after_secret(
+                            session,
+                            await recovery_effects.complete_installation_provision(
+                                target,
+                                recovery_secret,
+                                secret,
+                                proof,
+                                self._sample_monotonic(),
+                            ),
+                        )
+                    if target.operation == "revoke":
+                        proof = session.proof
+                        if proof is None or recovery_secret is not None:
+                            raise HumanControlError("phase_invalid")
+                        session.proof = None
+                        return self._finish_after_secret(
+                            session,
+                            await recovery_effects.revoke_installation_recovery(
+                                target,
+                                secret,
+                                proof,
+                                self._sample_monotonic(),
+                            ),
+                        )
+                    if target.operation != "restore" or recovery_secret is None:
+                        raise HumanControlError("phase_invalid")
+                    artifact, continuation = recovery_effects.begin_installation_restore(target)
+                    session.installation_recovery_continuation = continuation
+                    challenge = self._require_unlock_challenge(session)
+                    from yoetz.adapters.keys.installation_recovery import (
+                        InstallationRecoveryArtifact,
+                    )
+
+                    if type(artifact) is not InstallationRecoveryArtifact:
+                        raise HumanControlError("internal_error")
+                    result = await self._unlock.complete_installation_recovery(
+                        challenge,
+                        artifact,
+                        recovery_secret,
+                        secret,
+                    )
+                    session.installation_recovery_secret = None
+                    session.installation_recovery_continuation = None
+                    recovery_effects.finish_installation_restore(
+                        continuation, success=result.state == "ready"
+                    )
+                    return self._finish_after_secret(
+                        session,
+                        InstallationRecoveryResult(
+                            "restore",
+                            "completed" if result.state == "ready" else "failed",
+                            target.recovery_generation,
+                            session.binding.target_digest,
+                        ),
+                    )
                 if purpose in {
                     ConfidentialSecretPurpose.PROVIDER_REAUTHENTICATION,
                     ConfidentialSecretPurpose.PRIVACY_REAUTHENTICATION,
@@ -328,6 +472,15 @@ class HumanControlService:
                 }:
                     challenge = self._require_unlock_challenge(session)
                     session.proof = await self._unlock.complete_reauthentication(challenge, secret)
+                    if session.request.ceremony_kind is HumanCeremonyKind.INSTALLATION_RECOVERY:
+                        target = cast(InstallationRecoveryTarget, session.request.target)
+                        if target.operation == "revoke":
+                            return self._advance_to_secret_after_secret(
+                                session, ConfidentialSecretPurpose.VAULT_REWRAP
+                            )
+                        return self._advance_to_secret_after_secret(
+                            session, ConfidentialSecretPurpose.INSTALLATION_RECOVERY
+                        )
                     if session.request.ceremony_kind in {
                         HumanCeremonyKind.PROVIDER_CREDENTIAL_SET,
                         HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE,
@@ -383,6 +536,14 @@ class HumanControlService:
             return KeyringRetryPhase()
         if kind is HumanCeremonyKind.PORTABLE_RECOVERY:
             return self._secret_phase(session, ConfidentialSecretPurpose.PORTABLE_RECOVERY)
+        if kind is HumanCeremonyKind.INSTALLATION_RECOVERY:
+            target = cast(InstallationRecoveryTarget, session.request.target)
+            if target.operation == "restore":
+                session.unlock_challenge = await self._unlock.begin_installation_recovery(
+                    target_digest=session.binding.target_digest
+                )
+                return self._secret_phase(session, ConfidentialSecretPurpose.INSTALLATION_RECOVERY)
+            return DecisionRequiredPhase()
         if kind in {
             HumanCeremonyKind.PROVIDER_CREDENTIAL_SET,
             HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE,
@@ -406,6 +567,26 @@ class HumanControlService:
                 target, action.decision, None, self._sample_monotonic()
             )
             return self._finish(session, result)
+        if kind is HumanCeremonyKind.INSTALLATION_RECOVERY:
+            target = cast(InstallationRecoveryTarget, session.request.target)
+            if target.operation == "restore":
+                raise HumanControlError("phase_invalid")
+            if action.decision == "deny":
+                await cast(
+                    _InstallationRecoveryEffects, self._effects
+                ).cancel_installation_recovery(target)
+                return self._finish(
+                    session,
+                    InstallationRecoveryResult(
+                        target.operation,
+                        "failed",
+                        target.recovery_generation,
+                        session.binding.target_digest,
+                    ),
+                )
+            session.approved = True
+            session.phase = self._authorization_phase()
+            return self._phase(session)
         if kind is HumanCeremonyKind.PRIVACY_POLICY_DECISION:
             target = cast(PrivacyPendingTarget, session.request.target)
             if action.decision == "deny":
@@ -459,6 +640,15 @@ class HumanControlService:
             HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE,
         }:
             return self._advance_to_secret(session, ConfidentialSecretPurpose.PROVIDER_CREDENTIAL)
+        if session.request.ceremony_kind is HumanCeremonyKind.INSTALLATION_RECOVERY:
+            target = cast(InstallationRecoveryTarget, session.request.target)
+            if target.operation == "revoke":
+                return self._advance_to_secret(
+                    session, ConfidentialSecretPurpose.VAULT_REWRAP
+                )
+            return self._advance_to_secret(
+                session, ConfidentialSecretPurpose.INSTALLATION_RECOVERY
+            )
         return await self._commit_authorized_change(session)
 
     async def _commit_authorized_change(
@@ -525,7 +715,11 @@ class HumanControlService:
         secret_challenge = (
             challenge.challenge
             if challenge is not None
-            and purpose is not ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
+            and purpose
+            not in {
+                ConfidentialSecretPurpose.PROVIDER_CREDENTIAL,
+                ConfidentialSecretPurpose.VAULT_REWRAP,
+            }
             else secrets.token_hex(32)
         )
         binding = SecretIngressBinding(
@@ -598,6 +792,33 @@ class HumanControlService:
             session.secret_task = None
         await self._secret_ingress.cancel_pending()
         await self._unlock.cancel()
+        if type(session.request.target) is InstallationRecoveryTarget:
+            try:
+                await cast(
+                    _InstallationRecoveryEffects, self._effects
+                ).cancel_installation_recovery(session.request.target)
+            except Exception:
+                pass
+        recovery_secret, session.installation_recovery_secret = (
+            session.installation_recovery_secret,
+            None,
+        )
+        if recovery_secret is not None:
+            try:
+                recovery_secret.consume(SecretConsumer.INSTALLATION_RECOVERY, lambda view: None)
+            except Exception:
+                pass
+        continuation, session.installation_recovery_continuation = (
+            session.installation_recovery_continuation,
+            None,
+        )
+        if continuation is not None:
+            try:
+                cast(_InstallationRecoveryEffects, self._effects).finish_installation_restore(
+                    continuation, success=False
+                )
+            except Exception:
+                pass
         session.proof = None
         self._active = None
 
@@ -654,6 +875,10 @@ class HumanControlService:
             ),
             HumanCeremonyKind.IDLE_RELOCK_POLICY_CHANGE: (
                 "idle_relock_policy_change",
+                SecretPurpose.SECURITY_REAUTHENTICATION,
+            ),
+            HumanCeremonyKind.INSTALLATION_RECOVERY: (
+                "installation_recovery_change",
                 SecretPurpose.SECURITY_REAUTHENTICATION,
             ),
         }

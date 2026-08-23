@@ -203,6 +203,9 @@ class _DecisionTerminal:
     def write(self, value: str) -> None:
         self._inner.write(value)
 
+    def write_secret(self, value: bytearray) -> None:
+        self._inner.write_secret(value)
+
     def read_secret(self, prompt: str, maximum: int) -> bytearray:
         return self._inner.read_secret(prompt, maximum)
 

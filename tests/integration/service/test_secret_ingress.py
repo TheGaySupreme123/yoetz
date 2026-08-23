@@ -117,6 +117,10 @@ def _frame(binding: SecretIngressBinding, secret: bytes, *, suffix: bytes = b"")
 
 
 def _consumer(purpose: ConfidentialSecretPurpose) -> SecretConsumer:
+    if purpose is ConfidentialSecretPurpose.PORTABLE_RECOVERY:
+        return SecretConsumer.RECOVERY_WRAPPER
+    if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY:
+        return SecretConsumer.INSTALLATION_RECOVERY
     if purpose in {
         ConfidentialSecretPurpose.VAULT_INITIALIZE,
         ConfidentialSecretPurpose.VAULT_UNLOCK,
@@ -124,9 +128,10 @@ def _consumer(purpose: ConfidentialSecretPurpose) -> SecretConsumer:
         ConfidentialSecretPurpose.PROVIDER_CREDENTIAL,
         ConfidentialSecretPurpose.PRIVACY_REAUTHENTICATION,
         ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION,
+        ConfidentialSecretPurpose.VAULT_REWRAP,
     }:
         return SecretConsumer.VAULT_ROOT
-    return SecretConsumer.RECOVERY_WRAPPER
+    raise AssertionError("unmapped confidential purpose")
 
 
 def _read_handle(handle: SecretHandle, consumer: SecretConsumer) -> bytes:
@@ -135,7 +140,7 @@ def _read_handle(handle: SecretHandle, consumer: SecretConsumer) -> bytes:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("purpose", list(ConfidentialSecretPurpose))
-async def test_all_seven_purposes_capture_one_exact_handle(
+async def test_all_nine_purposes_capture_one_exact_handle(
     purpose: ConfidentialSecretPurpose,
 ) -> None:
     binding = _binding(purpose)

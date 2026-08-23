@@ -5,6 +5,7 @@ forbidden secret channels are binding. The concrete cryptographic envelope remai
 independent threat review before the first non-alpha release (maintainer decision, 2026-08-19),
 and no public surface claims a reviewed design.
 **Implemented by:** `docs/adr/ADR-008-local-service-vault-trust-boundary.md`,
+`docs/adr/ADR-024-installation-vault-recovery.md`,
 `src/yoetz/service/vault.py`, `src/yoetz/service/unlock.py`,
 `src/yoetz/ports/keys.py`, the key adapters, and the key-recovery runbook.
 
@@ -34,6 +35,9 @@ ordinary UI content trusted.
    an existing vault saves a passphrase only after the foreground confidential unlock ceremony
    proves it against the current envelope. This preserves powered-off/copy-at-rest protection but
    deliberately does not claim protection from code already executing as the active logged-in UID.
+   A separately provisioned ADR-024 installation-recovery artifact may wrap this exact IVK for a
+   protected local-human recovery ceremony. Forward revocation stages a new IVK and re-encrypts the
+   vault before switching; it never resets or overwrites the inaccessible vault in place.
 2. **Bundle master key (BMK):** one random 256-bit BMK per task bundle. A BMK is stored only as an
    IVK-wrapped authenticated vault record and as a short-lived service-memory handle after use.
    A bundle record is never readable by a client process.
@@ -43,20 +47,27 @@ ordinary UI content trusted.
    BMK. No implicit NUL, Unicode normalization, or library-default empty salt is permitted. `K_wrap` wraps each
    exact 32-byte object DEK with AES-256 Key Wrap per RFC 3394; AES-KW has no nonce. There is no
    bundle-scoped lookup key.
-4. **Installation MAC keys:** at each successful unlock, the vault derives exactly three exported
-   256-bit installation MAC keys from the stable IVK with HKDF-SHA-256, exact public salt
+4. **Installation MAC keys:** at each successful unlock, the vault derives exactly three
+   exported 256-bit installation MAC keys from the stable installation MAC root with HKDF-SHA-256, exact public salt
    `b"yoetz/installation-mac-root/v1"`, exact ASCII info bytes
    `b"yoetz/catalog-lookup/v1"` (`K_lookup`), `b"yoetz/log-correlation/v1"` (`K_log`), and
    `b"yoetz/privacy-audit/v1"` (`K_audit`), each with output length 32. These names describe internal key purposes, not values
    that cross an interface. The derived bytes are never stored independently or returned: the
    vault exposes only purpose- and generation-bound `MacKeyHandle` operations and destroys them on
-   relock. Because all three derive from the same installation IVK, they are stable across normal
-   service restarts but unlinkable across installations. v0.1 has no independent rotation;
-   changing `K_lookup` requires an explicit catalog-commitment migration. Separately, the vault
+   relock. Before the first recovery-root rotation this MAC root is the initial IVK. ADR-024 then
+   seals the stable MAC root and keyed locator inside an authenticated root-state bootstrap under
+   the new vault-encryption root. This preserves commitments whose one-shot plaintext inputs no
+   longer exist. A revoked artifact may still derive opaque commitments from its old root, but it
+   cannot decrypt the rotated vault or act as the service's authorization boundary.
+   Separately, the vault
    derives a nonexported internal `K_vault_locator` with exact salt
    `b"yoetz/vault-internal-root/v1"`, info `b"yoetz/vault-record-locator/v1"`, and length 32 solely
-   for keyed record locators/index authentication; it is not a fourth `MacKeyHandle`, record, or
-   cross-module key.
+   for keyed record locators; after rotation that exact locator is carried in the encrypted
+   root-state bootstrap. The legacy first-root index authenticates with that locator for backward
+   read. The first recovery-root rotation republishes it under a distinct active-root-derived index
+   authentication key (`yoetz/vault-index-auth-root/v1` / `yoetz/vault-index-auth/v1`), so an old
+   recovery artifact cannot rewrite the current authenticated index. Neither key is a fourth
+   `MacKeyHandle` or cross-module key.
 5. **Per-object DEK:** every encrypted object gets a fresh 256-bit DEK and random 96-bit payload
    nonce. AES-256-GCM encrypts exactly one payload under that DEK; the stable bundle `K_wrap` wraps
    the exact 32-byte DEK with nonce-free AES-256-KW (RFC 3394), yielding exactly 40 wrapped bytes.
@@ -183,18 +194,25 @@ mutable buffers best-effort after one use.
 
 ## Recovery and passphrase separation
 
-Vault unlock and portable backup recovery are distinct operations and types:
+Vault unlock, bundle portable recovery, and installation-vault recovery are distinct operations and
+types:
 
 - `SecretHandle(SecretPurpose.vault_unlock)` unlocks one local installation vault through the
   trusted coordinator. It cannot be used by object APIs or serialized into a recovery artifact.
 - `RecoverySecret` wraps one bundle BMK into a separate versioned portable-recovery artifact. It
   is obtained only through an explicit local-human maintenance flow and is never an automatic
   service-start fallback.
+- `InstallationRecoverySecret` unwraps one exact provisioned IVK recovery generation during the
+  ADR-024 ceremony. A successful recovery rewraps the same authority in a newly verified envelope;
+  it cannot be consumed by bundle APIs, initialization, provider authorization, or ordinary
+  unlock. Compact and self-contained installation sets are not bundle-level portable recovery.
 
-Backups remain either `machine_bound` (vault/key locator and fingerprint only) or
+Bundle backups remain either `machine_bound` (vault/key locator and fingerprint only) or
 `portable_recovery` (separate Argon2id-wrapped BMK artifact). A backup is called portable only
 after a clean-profile restore drill. Logical redaction and object deletion remain the only erasure
 claims; WAL pages, backups, snapshots, or storage remanence preclude a forensic-erasure promise.
+Installation recovery follows ADR-024 and its own formats, lifecycle, status, and impossibility
+boundary; neither mechanism may be relabeled as the other.
 
 ## Headless deployment
 

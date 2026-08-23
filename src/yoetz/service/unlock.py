@@ -16,6 +16,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Final, Literal, Protocol, cast
 
+from yoetz.adapters.keys.installation_recovery import InstallationRecoveryArtifact
 from yoetz.domain.values import format_rfc3339_millis, parse_rfc3339_millis, validate_sha256_digest
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ServiceState
@@ -449,6 +450,42 @@ class UnlockThrottleStore:
             self._deadline = 0.0
             return updated
 
+    def stage_recovery_record(self) -> UnlockThrottleRecord:
+        """Install a clean passphrase throttle generation before a recovery marker switch.
+
+        Recovery authenticates with its own provisioned secret, so it must not consume or bypass a
+        pending vault-passphrase attempt.  The replacement record advances the durable generation
+        when one exists and is safe to orphan: the pre-recovery marker can still use it after a
+        crash because restart admission never binds to the frozen initial digest.
+        """
+
+        with self._lock:
+            current: UnlockThrottleRecord | None
+            try:
+                current = self._read()
+            except UnlockError as exc:
+                if exc.reason != "throttle_record_missing":
+                    raise
+                current = None
+            if current is not None and current.installation_id != self._installation_id:
+                raise UnlockError("throttle_record_tampered")
+            generation = 1 if current is None else current.record_generation + 1
+            if generation > _MAX_CANONICAL_INTEGER:
+                raise UnlockError("throttle_record_tampered")
+            recovered = UnlockThrottleRecord.create(
+                installation_id=self._installation_id,
+                record_generation=generation,
+                consecutive_failures=0,
+                attempt_in_progress=False,
+                last_failure_utc=None,
+                last_writer_instance_id=self._writer_instance_id,
+            )
+            self._write(recovered, replace_existing=current is not None)
+            self._record = recovered
+            self._deadline = 0.0
+            self._repair_required = False
+            return recovered
+
     def _advance(
         self,
         *,
@@ -625,6 +662,7 @@ class UnlockChallenge:
             SecretPurpose.PROVIDER_REAUTHENTICATION,
             SecretPurpose.PRIVACY_REAUTHENTICATION,
             SecretPurpose.SECURITY_REAUTHENTICATION,
+            SecretPurpose.INSTALLATION_RECOVERY,
         }:
             raise ValueError("unlock_purpose_invalid")
         if type(self.service_generation) is not int or self.service_generation <= 0:
@@ -703,6 +741,17 @@ class _Vault(Protocol):
         source: UserPresenceAttestation | SecretHandle,
         challenge: UserPresenceChallenge,
     ) -> HumanAuthorizationProof: ...
+
+
+class _RecoveryVault(Protocol):
+    async def recover_passphrase(
+        self,
+        artifact: InstallationRecoveryArtifact,
+        recovery_secret: SecretHandle,
+        rewrap_secret: SecretHandle,
+        *,
+        throttle_record_digest: str,
+    ) -> object: ...
 
 
 class UnlockCoordinator:
@@ -850,6 +899,7 @@ class UnlockCoordinator:
                 "provider_credential_rotate": SecretPurpose.PROVIDER_REAUTHENTICATION,
                 "privacy_policy_widen": SecretPurpose.PRIVACY_REAUTHENTICATION,
                 "idle_relock_policy_change": SecretPurpose.SECURITY_REAUTHENTICATION,
+                "installation_recovery_change": SecretPurpose.SECURITY_REAUTHENTICATION,
             }
             if allowed.get(purpose) is not secret_purpose:
                 raise UnlockError("secret_purpose_mismatch")
@@ -859,6 +909,73 @@ class UnlockCoordinator:
                 target_digest=target_digest,
                 policy_generation=policy_generation,
             )
+
+    async def begin_installation_recovery(self, *, target_digest: str) -> UnlockChallenge:
+        """Bind one recovery attempt without accepting an artifact or secret on control."""
+
+        async with self._mutex:
+            validate_sha256_digest(target_digest)
+            self._require_open_idle()
+            if (
+                self._lifecycle.state is not ServiceState.LOCKED
+                or self._vault_mode() == "uninitialized"
+            ):
+                raise UnlockError("invalid_state")
+            await self._lifecycle.transition(ServiceState.UNLOCKING)
+            return self._new_challenge(
+                purpose="installation_recovery",
+                secret_purpose=SecretPurpose.INSTALLATION_RECOVERY,
+                target_digest=target_digest,
+                policy_generation=None,
+            )
+
+    async def complete_installation_recovery(
+        self,
+        challenge: UnlockChallenge,
+        artifact: InstallationRecoveryArtifact,
+        recovery_secret: SecretHandle,
+        rewrap_secret: SecretHandle,
+    ) -> UnlockResult:
+        """Verify a provisioned root and activate one newly wrapped passphrase envelope."""
+
+        async with self._mutex:
+            self._require_active(challenge)
+            if (
+                recovery_secret.purpose is not SecretPurpose.INSTALLATION_RECOVERY
+                or rewrap_secret.purpose is not SecretPurpose.VAULT_REWRAP
+            ):
+                self._active = None
+                await self._lifecycle.transition(ServiceState.LOCKED)
+                raise UnlockError("secret_purpose_mismatch")
+            try:
+                record = self._throttle.stage_recovery_record()
+                self._throttle.reserve_attempt()
+                await cast(_RecoveryVault, self._vault).recover_passphrase(
+                    artifact,
+                    recovery_secret,
+                    rewrap_secret,
+                    throttle_record_digest=record.record_digest,
+                )
+                if not self._vault.ready:
+                    raise UnlockError(self._vault_reason())
+                self._throttle.reset_success()
+                self._active = None
+                return await self._activate_fresh_ready()
+            except Exception as exc:
+                if self._attempt_reserved():
+                    self._throttle.charge_failure()
+                self._active = None
+                await self._lifecycle.transition(ServiceState.LOCKED)
+                return UnlockResult("locked", self._bounded_effect_reason(exc))
+
+    async def stage_root_rotation_throttle(self) -> str:
+        """Prepare a clean throttle generation for an authorized ready-vault rotation."""
+
+        async with self._mutex:
+            self._require_open_idle()
+            if self._lifecycle.state is not ServiceState.READY or not self._vault.ready:
+                raise UnlockError("invalid_state")
+            return self._throttle.stage_recovery_record().record_digest
 
     async def complete_reauthentication(
         self,
@@ -916,7 +1033,11 @@ class UnlockCoordinator:
                 self._throttle.charge_failure()
             self._active = None
             self._presence_challenge = None
-            if active is not None and active.purpose in {"vault_initialize", "vault_unlock"}:
+            if active is not None and active.purpose in {
+                "installation_recovery",
+                "vault_initialize",
+                "vault_unlock",
+            }:
                 await self._lifecycle.transition(ServiceState.LOCKED)
 
     async def close(self) -> None:
@@ -926,7 +1047,11 @@ class UnlockCoordinator:
                 self._throttle.charge_failure()
             self._active = None
             self._presence_challenge = None
-            if active is not None and active.purpose in {"vault_initialize", "vault_unlock"}:
+            if active is not None and active.purpose in {
+                "installation_recovery",
+                "vault_initialize",
+                "vault_unlock",
+            }:
                 await self._lifecycle.transition(ServiceState.LOCKED)
             self._closed = True
 

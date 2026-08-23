@@ -29,6 +29,10 @@ obviously unsafe destinations at preview time.
 Neither mode protects against a compromised active account, root, or live process memory, and
 deletion is never forensic erasure — see [`key-recovery.md`](key-recovery.md).
 
+These are one-task bundle backups. They do not recover the installation vault. For compact or
+self-contained installation recovery, use the separate ADR-024 `yoetz service recovery` lifecycle;
+do not relabel a bundle `portable_recovery` artifact as an installation set.
+
 ## 3. Preconditions and capacity
 
 - Verify a supported package/platform: `yoetz version --json`.

@@ -17,7 +17,7 @@ never unlock the vault themselves.
 | Component | Trust and authority |
 |---|---|
 | Per-user local Yoetz service | Trusted local authority. Sole owner of vault keys, decrypted state, catalog/task writers, the provider gateway, and the application facade. |
-| Confidential human helper (`service unlock`, `service initialize-passphrase`) | Narrowly trusted for one exact ceremony and, when required, delivery of one one-shot secret. It has no workflow, storage, provider-dispatch, or policy authority. |
+| Confidential human helper (`service unlock`, `service initialize-passphrase`, `service recovery`) | Narrowly trusted for one exact ceremony and, when required, delivery of one one-shot secret. It has no workflow, storage, provider-dispatch, or policy authority. |
 | CLI, MCP bridge, future ordinary UI | Untrusted control/rendering clients. They submit validated requests and receive bounded results; they cannot open storage, access key handles, unlock the vault, or weaken policy. |
 | Agent, LLM, plugin, repository, imported transcript, provider | Untrusted content or external execution. Never receives an unlock secret or vault capability. |
 
@@ -70,6 +70,16 @@ not deleted. Later unlock of an existing passphrase vault uses the distinct `vau
 existing-vault user experiencing a missing keyring entry, a wrong passphrase, or a tamper failure
 is never told to run initialization; that failure routes to
 [`../runbooks/key-recovery.md`](../runbooks/key-recovery.md) instead.
+
+When a ready vault previously provisioned ADR-024 installation recovery, loss of every ordinary
+unlock path routes to `yoetz service recovery status` and then its exact reported import/restore
+command, not initialization. Recovery authenticates the
+external set and human-held secret, restores the same IVK authority into a generated quarantined
+clean-profile target (or leaves the original encrypted vault byte-for-byte in place), stages a new
+envelope, proves catalog/vault/object/replay access, and switches only after close/reopen succeeds.
+Without valid provisioned material, Yoetz cannot recover the installation.
+MCP can never unlock the service. Agents can report bounded state and the exact trusted local
+command only; recovery artifacts, paths, and secrets remain outside agent-visible channels.
 
 The installed Cryptography Argon2id implementation is required before a passphrase-vault service
 can start. If that exact packaged KDF module is unavailable, `yoetz service run` fails closed before
@@ -133,6 +143,12 @@ directly into that one HTTPS request to the exact profile-bound endpoint, using 
 and hostname validation. v0.1 makes no certificate or SPKI-pinning claim. No SDK client or
 default-header object ever retains the real credential.
 
+An agent may initiate only a zero-secret recovery handoff. It receives a closed recovery state, an
+opaque retry identity, expiry, and the exact trusted local command. An allowlisted candidate may
+open a native action-bound prompt; otherwise the human runs the command in a trusted terminal. The
+agent never receives the set path, artifact bytes, secret, prompt input, keyring identity, or
+decrypted result, and it retries only the original suspended operation after terminal completion.
+
 ## Limits of same-UID and process-memory protection
 
 Peer-UID authentication (`SO_PEERCRED` on Linux, `getpeereid` on macOS) and owner-only filesystem
@@ -175,6 +191,8 @@ policy — it is not a logging or support-bundle mode that exists today.
 | Vault locked after restart | (expected) | No valid scoped auto-unlock entry was available; keyring mode loads at restart when usable | MCP cannot unlock it for you |
 | Idle-relocked mid-session | (expected) | Default 3600s idle timer elapsed with no active work — no control calls and no observation rows resolved; next ordinary call re-applies scoped auto-unlock when provisioned | Not a crash; not a permanent lock when auto-unlock is healthy |
 | Hard-locked after soft lock | `passphrase_required` / `auto_unlock_*` / `keyring_locked` / `explicit_lock` | Auto-unlock missing, stale, keyring load refused, or human locked the service | Run `yoetz service unlock` or `yoetz service auto-unlock repair` on a local terminal |
+| Every ordinary unlock path lost, recovery was provisioned | `recovery_material_required` | The same encrypted installation may be recovered through ADR-024 | Run `yoetz service recovery` locally; an agent may only hand off this command/prompt |
+| Every ordinary unlock path lost, no recovery generation exists | `permanently_unrecoverable` | Yoetz has no key path for the old encrypted installation | Preserve the old state; create only a clearly separate history |
 | Locked after losing the session monitor | `monitor_lost` | The session-event source became unavailable, so session-lock relock can no longer apply to this process | Run `yoetz service unlock` on a local terminal; `session_monitor` stays `lost` in status until restart |
 
 Troubleshooting always uses these bounded reason codes — never a raw file path, account name, or
@@ -183,7 +201,7 @@ internal exception string.
 ## What this page must never imply
 
 Locked or missing data is never "deleted" or "empty." The OS keyring is never described as an
-automatic fallback for a passphrase vault, or vice versa. MCP can never unlock the service. A
+automatic fallback for a passphrase vault, or vice versa. MCP can never unlock or recover the service. A
 boolean flag or TTY acknowledgment never proves human presence. A service manager reporting the
 process as running never means the vault is `ready`. Encryption is never described as protecting
 against a compromised active account, root, or live-memory adversary. Idle relock is never

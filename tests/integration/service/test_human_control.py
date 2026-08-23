@@ -9,6 +9,12 @@ from typing import Literal, cast
 
 import pytest
 
+from yoetz.adapters.keys.installation_recovery import (
+    InstallationRecoveryArtifact,
+    InstallationRecoveryMode,
+    InstallationRecoverySecretKind,
+    create_installation_recovery_artifact,
+)
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.ports.control import ServiceState
 from yoetz.ports.secret_memory import (
@@ -27,11 +33,15 @@ from yoetz.service.confidential_protocol import (
     ClientOpenEnvelope,
     ConfidentialSecretPurpose,
     DecisionAction,
+    DecisionRequiredPhase,
     EmptyVaultTarget,
     HumanCeremonyKind,
     HumanPreview,
     IdleRelockPolicyResult,
     IdleRelockPolicyTarget,
+    InstallationRecoveryPreview,
+    InstallationRecoveryResult,
+    InstallationRecoveryTarget,
     KeyringRetryPreview,
     PortableRecoveryResult,
     PortableRecoveryTarget,
@@ -127,6 +137,22 @@ class _Vault:
         self.ready = True
         self.generation += 1
 
+    async def recover_passphrase(
+        self,
+        artifact: InstallationRecoveryArtifact,
+        recovery_secret: SecretHandle,
+        rewrap_secret: SecretHandle,
+        *,
+        throttle_record_digest: str,
+    ) -> None:
+        assert type(artifact) is InstallationRecoveryArtifact
+        assert throttle_record_digest.startswith("sha256:")
+        recovery_secret.consume(SecretConsumer.INSTALLATION_RECOVERY, bytes)
+        rewrap_secret.consume(SecretConsumer.VAULT_REWRAPPER, bytes)
+        self.mode = "passphrase"
+        self.ready = True
+        self.generation += 1
+
     async def lock(self) -> None:
         self.ready = False
         self.generation += 1
@@ -219,8 +245,10 @@ class _Presence:
 
 
 class _Effects:
-    def __init__(self) -> None:
+    def __init__(self, artifact: InstallationRecoveryArtifact | None = None) -> None:
         self.proofs: list[HumanAuthorizationProof | None] = []
+        self.artifact = artifact
+        self.continuation_finished: bool | None = None
 
     async def prepare(self, request: ClientOpenEnvelope) -> tuple[HumanPreview, str, int | None]:
         if request.ceremony_kind is HumanCeremonyKind.VAULT_UNLOCK:
@@ -249,6 +277,24 @@ class _Effects:
                 TARGET_DIGEST,
                 4,
             )
+        if request.ceremony_kind is HumanCeremonyKind.INSTALLATION_RECOVERY:
+            target = cast(InstallationRecoveryTarget, request.target)
+            return (
+                InstallationRecoveryPreview(
+                    target.operation,
+                    target.request_id,
+                    target.confirmed_plan_digest,
+                    target.recovery_generation,
+                    target.set_mode,
+                    target.secret_kind,
+                    target.target_envelope,
+                    1,
+                    1,
+                    False,
+                ),
+                target.plan_digest(),
+                None,
+            )
         raise AssertionError(request.ceremony_kind)
 
     async def complete_portable_recovery(
@@ -256,6 +302,69 @@ class _Effects:
     ) -> PortableRecoveryResult:
         del target, secret
         raise AssertionError("not used")
+
+    async def complete_installation_provision(
+        self,
+        target: InstallationRecoveryTarget,
+        secret: SecretHandle,
+        rewrap_secret: SecretHandle | None,
+        proof: HumanAuthorizationProof,
+        now_monotonic: float,
+    ) -> InstallationRecoveryResult:
+        secret.consume(SecretConsumer.INSTALLATION_RECOVERY, bytes)
+        if rewrap_secret is not None:
+            rewrap_secret.consume(SecretConsumer.VAULT_REWRAPPER, bytes)
+        proof.consume(
+            "installation_recovery_change",
+            proof.target_digest,
+            7,
+            3,
+            None,
+            now_monotonic,
+        )
+        self.proofs.append(proof)
+        return InstallationRecoveryResult(
+            target.operation,
+            "completed",
+            target.recovery_generation,
+            proof.target_digest,
+        )
+
+    async def revoke_installation_recovery(
+        self,
+        target: InstallationRecoveryTarget,
+        rewrap_secret: SecretHandle,
+        proof: HumanAuthorizationProof,
+        now_monotonic: float,
+    ) -> InstallationRecoveryResult:
+        rewrap_secret.consume(SecretConsumer.VAULT_REWRAPPER, bytes)
+        proof.consume(
+            "installation_recovery_change",
+            proof.target_digest,
+            7,
+            3,
+            None,
+            now_monotonic,
+        )
+        return InstallationRecoveryResult(
+            "revoke", "completed", target.recovery_generation, proof.target_digest
+        )
+
+    def begin_installation_restore(
+        self, target: InstallationRecoveryTarget
+    ) -> tuple[object, str]:
+        assert target.operation == "restore"
+        assert self.artifact is not None
+        return self.artifact, "f" * 64
+
+    def finish_installation_restore(self, continuation_id: str, *, success: bool) -> None:
+        assert continuation_id == "f" * 64
+        self.continuation_finished = success
+
+    async def cancel_installation_recovery(
+        self, target: InstallationRecoveryTarget
+    ) -> None:
+        del target
 
     async def store_provider_credential(
         self,
@@ -307,6 +416,7 @@ def _service(
     ready: bool,
     handles: list[SecretHandle],
     presence: _Presence | None = None,
+    effects: _Effects | None = None,
 ) -> tuple[HumanControlService, _Clock, _Lifecycle, _Vault, _Effects]:
     tmp_path.chmod(0o700)
     clock = _Clock()
@@ -335,7 +445,7 @@ def _service(
         lifecycle=lifecycle,
         activate_ready=activate_ready,
     )
-    effects = _Effects()
+    effects = _Effects() if effects is None else effects
     service = HumanControlService(
         clock=clock,
         lifecycle=lifecycle,
@@ -371,6 +481,240 @@ async def test_passphrase_unlock_uses_separate_exact_secret_binding(tmp_path: Pa
     assert lifecycle.state is ServiceState.READY
     assert vault.ready
     memory.close()
+
+
+@pytest.mark.anyio
+async def test_installation_recovery_uses_two_distinct_secret_frames(tmp_path: Path) -> None:
+    memory = LocalSecretMemory()
+    recovery_bytes = bytearray(b"recovery horse battery staple")
+    artifact = create_installation_recovery_artifact(
+        memory.capture(SecretPurpose.VAULT_ROOT_KEY, bytearray(b"i" * 32)),
+        memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(recovery_bytes)),
+        recovery_generation=1,
+        mode=InstallationRecoveryMode.COMPACT,
+        secret_kind=InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
+        snapshot_manifest_digest=None,
+    )
+    recovery_handle = memory.capture(
+        SecretPurpose.INSTALLATION_RECOVERY, bytearray(recovery_bytes)
+    )
+    rewrap_handle = memory.capture(
+        SecretPurpose.VAULT_REWRAP, bytearray(b"new correct horse battery")
+    )
+    provisional = InstallationRecoveryTarget(
+        "restore",
+        "req_20000000-0000-4000-8000-000000000009",
+        ZERO_DIGEST,
+        1,
+        "compact",
+        "argon2id_passphrase",
+        "passphrase",
+    )
+    target = InstallationRecoveryTarget(
+        provisional.operation,
+        provisional.request_id,
+        provisional.plan_digest(),
+        provisional.recovery_generation,
+        provisional.set_mode,
+        provisional.secret_kind,
+        provisional.target_envelope,
+    )
+    effects = _Effects(artifact)
+    service, _, lifecycle, vault, _ = _service(
+        tmp_path,
+        mode="passphrase",
+        ready=False,
+        handles=[recovery_handle, rewrap_handle],
+        effects=effects,
+    )
+
+    opened = await service.open_ceremony(
+        ClientOpenEnvelope(
+            "9" * 64,
+            HumanCeremonyKind.INSTALLATION_RECOVERY,
+            target,
+        )
+    )
+    assert type(opened.phase) is SecretRequiredPhase
+    assert opened.phase.binding.purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
+    second = await service.secret_completed(opened.ceremony_id)
+    assert type(second) is ServerPhaseEnvelope
+    assert type(second.phase) is SecretRequiredPhase
+    assert second.phase.binding.purpose is ConfidentialSecretPurpose.VAULT_REWRAP
+    assert second.phase.binding.secret_challenge != opened.phase.binding.secret_challenge
+
+    completed = await service.secret_completed(opened.ceremony_id)
+    assert type(completed) is ServerResultEnvelope
+    assert type(completed.result) is InstallationRecoveryResult
+    assert completed.result.status == "completed"
+    assert lifecycle.state is ServiceState.READY
+    assert vault.ready is True
+    assert effects.continuation_finished is True
+    memory.close()
+
+
+@pytest.mark.anyio
+async def test_installation_provision_requires_decision_and_reauthentication(
+    tmp_path: Path,
+) -> None:
+    memory = LocalSecretMemory()
+    reauthentication = memory.capture(
+        SecretPurpose.SECURITY_REAUTHENTICATION,
+        bytearray(b"current correct horse battery"),
+    )
+    recovery = memory.capture(
+        SecretPurpose.INSTALLATION_RECOVERY,
+        bytearray(b"recovery correct horse battery"),
+    )
+    provisional = InstallationRecoveryTarget(
+        "provision",
+        "req_20000000-0000-4000-8000-000000000010",
+        ZERO_DIGEST,
+        1,
+        "compact",
+        "argon2id_passphrase",
+        "preserve",
+    )
+    target = InstallationRecoveryTarget(
+        provisional.operation,
+        provisional.request_id,
+        provisional.plan_digest(),
+        provisional.recovery_generation,
+        provisional.set_mode,
+        provisional.secret_kind,
+        provisional.target_envelope,
+    )
+    service, _, _, _, effects = _service(
+        tmp_path,
+        mode="passphrase",
+        ready=True,
+        handles=[reauthentication, recovery],
+    )
+    opened = await service.open_ceremony(
+        ClientOpenEnvelope(
+            "8" * 64,
+            HumanCeremonyKind.INSTALLATION_RECOVERY,
+            target,
+        )
+    )
+    assert type(opened.phase) is DecisionRequiredPhase
+    authorization = await service.submit_action(
+        ClientActionEnvelope(opened.ceremony_id, 2, DecisionAction("approve"))
+    )
+    assert type(authorization) is ServerPhaseEnvelope
+    assert type(authorization.phase) is AuthorizationRequiredPhase
+    reauth_phase = await service.submit_action(
+        ClientActionEnvelope(
+            opened.ceremony_id,
+            authorization.step + 1,
+            SelectAuthorizationSourceAction("secret_reauthentication"),
+        )
+    )
+    assert type(reauth_phase) is ServerPhaseEnvelope
+    assert type(reauth_phase.phase) is SecretRequiredPhase
+    assert reauth_phase.phase.binding.purpose is (
+        ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION
+    )
+    recovery_phase = await service.secret_completed(opened.ceremony_id)
+    assert type(recovery_phase) is ServerPhaseEnvelope
+    assert type(recovery_phase.phase) is SecretRequiredPhase
+    assert recovery_phase.phase.binding.purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
+    completed = await service.secret_completed(opened.ceremony_id)
+    assert type(completed) is ServerResultEnvelope
+    assert type(completed.result) is InstallationRecoveryResult
+    assert completed.result.operation == "provision"
+    assert completed.result.status == "completed"
+    assert len(effects.proofs) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("operation", "secret_purposes"),
+    [
+        (
+            "rotate",
+            (
+                SecretPurpose.SECURITY_REAUTHENTICATION,
+                SecretPurpose.INSTALLATION_RECOVERY,
+                SecretPurpose.VAULT_REWRAP,
+            ),
+        ),
+        (
+            "revoke",
+            (
+                SecretPurpose.SECURITY_REAUTHENTICATION,
+                SecretPurpose.VAULT_REWRAP,
+            ),
+        ),
+    ],
+)
+async def test_installation_rotation_and_revoke_use_distinct_new_passphrase_frame(
+    tmp_path: Path,
+    operation: str,
+    secret_purposes: tuple[SecretPurpose, ...],
+) -> None:
+    memory = LocalSecretMemory()
+    handles = [
+        memory.capture(purpose, bytearray(f"{purpose.value} horse battery".encode()))
+        for purpose in secret_purposes
+    ]
+    provisional = InstallationRecoveryTarget(
+        cast(Literal["rotate", "revoke"], operation),
+        "req_20000000-0000-4000-8000-000000000011",
+        ZERO_DIGEST,
+        2 if operation == "rotate" else 1,
+        "compact",
+        "argon2id_passphrase",
+        "passphrase",
+    )
+    target = InstallationRecoveryTarget(
+        provisional.operation,
+        provisional.request_id,
+        provisional.plan_digest(),
+        provisional.recovery_generation,
+        provisional.set_mode,
+        provisional.secret_kind,
+        provisional.target_envelope,
+    )
+    service, _, _, _, _ = _service(
+        tmp_path,
+        mode="passphrase",
+        ready=True,
+        handles=handles,
+    )
+    opened = await service.open_ceremony(
+        ClientOpenEnvelope("9" * 64, HumanCeremonyKind.INSTALLATION_RECOVERY, target)
+    )
+    authorization = await service.submit_action(
+        ClientActionEnvelope(opened.ceremony_id, 2, DecisionAction("approve"))
+    )
+    assert type(authorization) is ServerPhaseEnvelope
+    phase = await service.submit_action(
+        ClientActionEnvelope(
+            opened.ceremony_id,
+            authorization.step + 1,
+            SelectAuthorizationSourceAction("secret_reauthentication"),
+        )
+    )
+    assert type(phase) is ServerPhaseEnvelope
+    observed: list[ConfidentialSecretPurpose] = []
+    while type(phase) is ServerPhaseEnvelope:
+        assert type(phase.phase) is SecretRequiredPhase
+        observed.append(phase.phase.binding.purpose)
+        phase = await service.secret_completed(opened.ceremony_id)
+    assert type(phase) is ServerResultEnvelope
+    assert observed == (
+        [
+            ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION,
+            ConfidentialSecretPurpose.INSTALLATION_RECOVERY,
+            ConfidentialSecretPurpose.VAULT_REWRAP,
+        ]
+        if operation == "rotate"
+        else [
+            ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION,
+            ConfidentialSecretPurpose.VAULT_REWRAP,
+        ]
+    )
 
 
 @pytest.mark.anyio

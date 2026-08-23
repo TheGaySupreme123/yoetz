@@ -468,6 +468,21 @@ class SqliteStartCatalog:
     def generation(self) -> int:
         return self._owner_generation()
 
+    async def recovery_routes(self) -> tuple[TaskRoute, ...]:
+        """Decode every durable route for recovery verification without exposing identities."""
+
+        rows = self._rows(
+            f"SELECT {self._route_columns} FROM task_routes ORDER BY task_id ASC",
+            (),
+        )
+        routes: list[TaskRoute] = []
+        for row in rows:
+            try:
+                routes.append(_route_value(_route_from_row(row)))
+            except (TypeError, ValueError) as exc:
+                raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        return tuple(routes)
+
     async def commit_identity(self, value: StartIdentityInput) -> StartIdentityCommitments:
         if type(value) is not StartIdentityInput:
             raise _error(PublicErrorCode.INVALID_REQUEST)

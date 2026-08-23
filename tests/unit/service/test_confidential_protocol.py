@@ -30,6 +30,9 @@ from yoetz.service.confidential_protocol import (
     HumanCeremonyKind,
     HumanOpenTarget,
     IdleRelockPolicyTarget,
+    InstallationRecoveryPreview,
+    InstallationRecoveryResult,
+    InstallationRecoveryTarget,
     KeyringRetryPhase,
     KeyringRetryResult,
     PortableRecoveryTarget,
@@ -112,7 +115,7 @@ def _append(value: bytes) -> bytes:
     return value + b"x"
 
 
-def test_frozen_constants_and_all_seven_purpose_codes() -> None:
+def test_frozen_constants_and_all_nine_purpose_codes() -> None:
     assert CEREMONY_EXPIRY_SECONDS == 300
     assert PASSPHRASE_MIN_BYTES == 16
     assert PASSPHRASE_MAX_BYTES == 1_024
@@ -126,6 +129,8 @@ def test_frozen_constants_and_all_seven_purpose_codes() -> None:
         (5, "provider_credential"),
         (6, "privacy_reauthentication"),
         (7, "security_reauthentication"),
+        (8, "installation_recovery"),
+        (9, "vault_rewrap"),
     ]
 
 
@@ -154,6 +159,18 @@ def test_client_open_has_literal_reviewed_golden_bytes() -> None:
             HumanCeremonyKind.PORTABLE_RECOVERY,
             PortableRecoveryTarget("create", _REQUEST_ID, _DIGEST_A),
         ),
+        (
+            HumanCeremonyKind.INSTALLATION_RECOVERY,
+            InstallationRecoveryTarget(
+                "restore",
+                _REQUEST_ID,
+                _DIGEST_A,
+                2,
+                "self_contained",
+                "generated_code",
+                "platform_auto_unlock",
+            ),
+        ),
         (HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, _provider_target("set")),
         (HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE, _provider_target("rotate")),
         (
@@ -170,7 +187,7 @@ def test_client_open_has_literal_reviewed_golden_bytes() -> None:
         ),
     ],
 )
-def test_all_nine_open_targets_are_closed_and_round_trip(
+def test_all_ten_open_targets_are_closed_and_round_trip(
     kind: HumanCeremonyKind,
     target: object,
 ) -> None:
@@ -251,6 +268,58 @@ def test_actions_and_phases_have_no_edit_or_metadata_branch() -> None:
     assert b'"edit"' not in b"".join(
         encode_human_frame(ClientActionEnvelope("1" * 64, 1, a)) for a in actions
     )
+
+
+def test_installation_recovery_preview_and_result_round_trip_without_paths() -> None:
+    target = InstallationRecoveryTarget(
+        "restore",
+        _REQUEST_ID,
+        _DIGEST_A,
+        2,
+        "self_contained",
+        "generated_code",
+        "passphrase",
+    )
+    preview = InstallationRecoveryPreview(
+        target.operation,
+        target.request_id,
+        target.confirmed_plan_digest,
+        target.recovery_generation,
+        target.set_mode,
+        target.secret_kind,
+        target.target_envelope,
+        12,
+        4096,
+        True,
+    )
+    opened = ServerOpenedEnvelope(
+        "1" * 64,
+        1,
+        HumanCeremonyBinding(
+            1,
+            "1" * 64,
+            "0" * 64,
+            HumanCeremonyKind.INSTALLATION_RECOVERY,
+            _SERVICE_ID,
+            3,
+            0,
+            None,
+            _DIGEST_A,
+            60_000,
+        ),
+        preview,
+        SecretRequiredPhase(_binding(ConfidentialSecretPurpose.INSTALLATION_RECOVERY)),
+    )
+    encoded = encode_human_frame(opened)
+    assert b"path" not in encoded
+    assert decode_human_frame(encoded) == opened
+
+    result = ServerResultEnvelope(
+        "1" * 64,
+        2,
+        InstallationRecoveryResult("restore", "completed", 2, _DIGEST_A),
+    )
+    assert decode_human_frame(encode_human_frame(result)) == result
 
 
 def test_opened_binding_and_terminal_close_round_trip() -> None:

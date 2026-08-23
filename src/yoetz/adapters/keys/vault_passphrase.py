@@ -35,6 +35,7 @@ __all__ = [
     "create_vault_root_envelope",
     "derive_passphrase_subkeys",
     "unlock_vault_root_envelope",
+    "rewrap_vault_root_envelope",
     "validate_kdf_parameters",
     "validate_passphrase_view",
 ]
@@ -172,10 +173,45 @@ def create_vault_root_envelope(
 ) -> VaultRootEnvelope:
     """Consume one initialization secret and wrap one exact 32-byte IVK."""
 
+    return _wrap_vault_root_envelope(
+        ivk_handle,
+        initialize_handle,
+        installation_id=installation_id,
+        expected_purpose=SecretPurpose.VAULT_INITIALIZE,
+        consumer=SecretConsumer.VAULT_ROOT,
+    )
+
+
+def rewrap_vault_root_envelope(
+    ivk_handle: SecretHandle,
+    rewrap_handle: SecretHandle,
+    *,
+    installation_id: str,
+) -> VaultRootEnvelope:
+    """Wrap a recovered exact IVK in a newly authenticated passphrase envelope."""
+
+    return _wrap_vault_root_envelope(
+        ivk_handle,
+        rewrap_handle,
+        installation_id=installation_id,
+        expected_purpose=SecretPurpose.VAULT_REWRAP,
+        consumer=SecretConsumer.VAULT_REWRAPPER,
+    )
+
+
+def _wrap_vault_root_envelope(
+    ivk_handle: SecretHandle,
+    passphrase_handle: SecretHandle,
+    *,
+    installation_id: str,
+    expected_purpose: SecretPurpose,
+    consumer: SecretConsumer,
+) -> VaultRootEnvelope:
+
     validate_id(IdKind.INSTALLATION, installation_id)
     if ivk_handle.purpose is not SecretPurpose.VAULT_ROOT_KEY:
         raise VaultPassphraseError("secret_purpose_mismatch")
-    if initialize_handle.purpose is not SecretPurpose.VAULT_INITIALIZE:
+    if passphrase_handle.purpose is not expected_purpose:
         raise VaultPassphraseError("secret_purpose_mismatch")
     salt = os.urandom(_KDF_SALT_BYTES)
 
@@ -223,7 +259,7 @@ def create_vault_root_envelope(
             finally:
                 _overwrite(secret_copy)
 
-        return initialize_handle.consume(SecretConsumer.VAULT_ROOT, _with_secret)
+        return passphrase_handle.consume(consumer, _with_secret)
 
     return ivk_handle.consume(SecretConsumer.VAULT_ROOT, _with_ivk)
 
