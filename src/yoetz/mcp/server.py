@@ -58,6 +58,7 @@ from yoetz.observability.logging import (
     record_unexpected_exception_without_raising,
 )
 from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
+from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, safe_request_id_from
 from yoetz.protocol.models import (
@@ -198,6 +199,7 @@ class BridgeRuntime:
     descriptors: tuple[ToolDescriptor, ...]
     resources: tuple[GuidanceResource, ...]
     instructions: str
+    host_profile: Literal["generic", "cursor"] = "generic"
     workspace_locator: WorkspaceLocator = field(
         default_factory=lambda: WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True))),
         repr=False,
@@ -206,11 +208,17 @@ class BridgeRuntime:
     _slot: _ClientSlot = field(default_factory=_ClientSlot, repr=False, compare=False)
 
 
-def build_bridge_runtime(route_profile: McpRouteProfile = "policy") -> BridgeRuntime:
+def build_bridge_runtime(
+    route_profile: McpRouteProfile = "policy",
+    *,
+    host_profile: Literal["generic", "cursor"] = "generic",
+) -> BridgeRuntime:
     """Verify every agent-readable byte and construct an unconnected bridge runtime."""
 
     if route_profile not in TOOL_DESCRIPTORS:
         raise ValueError("mcp_route_profile_invalid")
+    if host_profile not in {"generic", "cursor"}:
+        raise ValueError("mcp_host_profile_invalid")
     resources = list_guidance_resources()
     instructions = server_instructions(route_profile)
     if not instructions:
@@ -222,7 +230,14 @@ def build_bridge_runtime(route_profile: McpRouteProfile = "policy") -> BridgeRun
         descriptor.output_schema
     build_last_resort_internal_error_result()
     workspace_locator = WorkspaceLocator(os.fspath(Path.cwd().resolve(strict=True)))
-    return BridgeRuntime(route_profile, descriptors, resources, instructions, workspace_locator)
+    return BridgeRuntime(
+        route_profile,
+        descriptors,
+        resources,
+        instructions,
+        host_profile,
+        workspace_locator,
+    )
 
 
 BRIDGE_RUNTIME: Final = build_bridge_runtime()
@@ -281,22 +296,56 @@ async def close_bridge_runtime(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> None:
         await _close_client(client)
 
 
-def result_from_public_model(result: object) -> types.CallToolResult:
-    """Validate and project one public result to structured content and weaker text."""
+def _result_text(
+    wire: Mapping[str, object],
+    *,
+    host_profile: Literal["generic", "cursor"] = "generic",
+) -> str:
+    """Project one result onto the model-visible text channel for the selected host.
+
+    Cursor 3.17.x does not reliably deliver MCP ``structuredContent`` to the model. Its native
+    plugin therefore opts into an exact canonical-JSON copy in ``content`` while retaining the
+    structured result. Other hosts keep the privacy-minimized bounded summary. The Cursor copy
+    adds no fields: it is byte-for-byte a second encoding of the already-authorized wire body.
+    """
+
+    if host_profile == "cursor":
+        return canonical_encode(cast(JsonValue, dict(wire))).decode("utf-8")
+    if host_profile != "generic":
+        raise ValueError("mcp_host_profile_invalid")
+    return render_safe_compact_summary(wire)
+
+
+def result_from_public_model(
+    result: object,
+    *,
+    host_profile: Literal["generic", "cursor"] = "generic",
+) -> types.CallToolResult:
+    """Validate and project one public result to structured plus host-compatible text."""
 
     wire = public_model_to_wire(result)
-    summary = render_safe_compact_summary(wire)
     return types.CallToolResult(
-        content=[types.TextContent(type="text", text=summary)],
+        content=[
+            types.TextContent(type="text", text=_result_text(wire, host_profile=host_profile))
+        ],
         structuredContent=cast(dict[str, object], wire),
         isError=wire.get("ok") is False,
     )
 
 
-def _result_from_wire(wire: Mapping[str, object]) -> types.CallToolResult:
+def _result_from_wire(
+    wire: Mapping[str, object],
+    *,
+    host_profile: Literal["generic", "cursor"] = "generic",
+) -> types.CallToolResult:
     structured = dict(wire)
     return types.CallToolResult(
-        content=[types.TextContent(type="text", text=render_safe_compact_summary(structured))],
+        content=[
+            types.TextContent(
+                type="text",
+                text=_result_text(structured, host_profile=host_profile),
+            )
+        ],
         structuredContent=structured,
         isError=True,
     )
@@ -325,6 +374,7 @@ def structured_error_result(
     details_reason_code: str | None = None,
     correlation_id: str | None = None,
     operation: str | None = None,
+    host_profile: Literal["generic", "cursor"] = "generic",
 ) -> types.CallToolResult:
     """Build a bounded structured tool error with a prevalidated nested fallback.
 
@@ -356,14 +406,19 @@ def structured_error_result(
             safe_details=safe_details,
             details_reason_code=details_reason_code,
         )
-        return _result_from_wire(wire)
+        return _result_from_wire(wire, host_profile=host_profile)
     except Exception:
         fallback = build_last_resort_internal_error_result()
         try:
-            return _result_from_wire(fallback)
+            return _result_from_wire(fallback, host_profile=host_profile)
         except Exception:
+            text = (
+                canonical_encode(cast(JsonValue, fallback)).decode("utf-8")
+                if host_profile == "cursor"
+                else "Error INTERNAL_ERROR."
+            )
             return types.CallToolResult(
-                content=[types.TextContent(type="text", text="Error INTERNAL_ERROR.")],
+                content=[types.TextContent(type="text", text=text)],
                 structuredContent=fallback,
                 isError=True,
             )
@@ -373,6 +428,8 @@ def _control_error_result(
     error: ControlError,
     request_id: str | None,
     operation: str,
+    *,
+    host_profile: Literal["generic", "cursor"] = "generic",
 ) -> types.CallToolResult:
     # Prefer the service-minted diagnostic id when present so the agent-facing public error
     # resolves the same durable sink record the daemon already wrote. Never mint a second id for
@@ -407,6 +464,7 @@ def _control_error_result(
             request_id=request_id,
             correlation_id=service_correlation_id,
             operation=operation,
+            host_profile=host_profile,
         )
     if error.reason == "request_cancelled":
         return structured_error_result(
@@ -415,6 +473,7 @@ def _control_error_result(
             request_id=request_id,
             correlation_id=service_correlation_id,
             operation=operation,
+            host_profile=host_profile,
         )
     if error.reason == "privacy_projection_blocked":
         return structured_error_result(
@@ -433,6 +492,7 @@ def _control_error_result(
                 "operation": "receipt",
                 "field": "format",
             },
+            host_profile=host_profile,
         )
     if error.reason == "response_projection_failed":
         # Accepted durable publish_work usually returns the reduced total-acceptance envelope
@@ -451,6 +511,7 @@ def _control_error_result(
             correlation_id=service_correlation_id,
             operation=operation,
             safe_details=details,
+            host_profile=host_profile,
         )
     if error.reason == "read_projection_failed":
         return structured_error_result(
@@ -461,6 +522,7 @@ def _control_error_result(
             correlation_id=service_correlation_id,
             operation=operation,
             safe_details=dict(_READ_PROJECTION_FAILED_DETAILS),
+            host_profile=host_profile,
         )
     if error.reason == "privacy_projection_unavailable":
         return structured_error_result(
@@ -471,6 +533,7 @@ def _control_error_result(
             correlation_id=service_correlation_id,
             operation=operation,
             safe_details={"reason_code": "privacy_projection_unavailable"},
+            host_profile=host_profile,
         )
     if error.reason == "request_timeout":
         if operation in _WRITE_OPERATIONS:
@@ -491,6 +554,7 @@ def _control_error_result(
             request_id=request_id,
             correlation_id=service_correlation_id,
             operation=operation,
+            host_profile=host_profile,
         )
     if error.reason in {"service_unavailable", "service_draining"}:
         return structured_error_result(
@@ -500,6 +564,7 @@ def _control_error_result(
             request_id=request_id,
             correlation_id=service_correlation_id,
             operation=operation,
+            host_profile=host_profile,
         )
     if service_correlation_id is not None:
         return structured_error_result(
@@ -507,6 +572,7 @@ def _control_error_result(
             "The bridge could not complete the operation.",
             request_id=request_id,
             correlation_id=service_correlation_id,
+            host_profile=host_profile,
         )
     correlation_id = record_unexpected_exception_without_raising(
         error,
@@ -519,6 +585,7 @@ def _control_error_result(
         "The bridge could not complete the operation.",
         request_id=request_id,
         correlation_id=correlation_id,
+        host_profile=host_profile,
     )
 
 
@@ -568,6 +635,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             request_id=request_id,
             safe_details=locations if locations else None,
             operation=operation,
+            host_profile=runtime.host_profile,
         )
     except Exception as exc:
         # Only non-ValidationError failures reach here, so the validator itself crashed. That is an
@@ -583,6 +651,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             "The bridge could not complete the operation.",
             request_id=request_id,
             correlation_id=correlation_id,
+            host_profile=runtime.host_profile,
         )
     # Invoke first. Once this returns, a write may already be durable; response shaping must not
     # collapse that into a non-retryable INTERNAL_ERROR that steers agents away from same-id resume.
@@ -604,7 +673,10 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
                     )
                 )
             )
-            return _result_from_wire(tool_error_envelope(bound, request_id=request_id))
+            return _result_from_wire(
+                tool_error_envelope(bound, request_id=request_id),
+                host_profile=runtime.host_profile,
+            )
         except Exception as mapping_exc:
             correlation_id = record_unexpected_exception_without_raising(
                 mapping_exc,
@@ -617,9 +689,15 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
                 "The bridge could not complete the operation.",
                 request_id=request_id,
                 correlation_id=correlation_id,
+                host_profile=runtime.host_profile,
             )
     except ControlError as exc:
-        return _control_error_result(exc, request_id, operation)
+        return _control_error_result(
+            exc,
+            request_id,
+            operation,
+            host_profile=runtime.host_profile,
+        )
     except Exception as exc:
         correlation_id = record_unexpected_exception_without_raising(
             exc,
@@ -632,12 +710,13 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             "The bridge could not complete the operation.",
             request_id=request_id,
             correlation_id=correlation_id,
+            host_profile=runtime.host_profile,
         )
 
     try:
         wire = public_model_to_wire(result)
         validated = result_type.model_validate(wire)
-        return result_from_public_model(validated)
+        return result_from_public_model(validated, host_profile=runtime.host_profile)
     except Exception as exc:
         correlation_id = record_unexpected_exception_without_raising(
             exc,
@@ -652,6 +731,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             request_id=request_id,
             correlation_id=correlation_id,
             safe_details=dict(_RESPONSE_PROJECTION_FAILED_DETAILS),
+            host_profile=runtime.host_profile,
         )
 
 
@@ -739,6 +819,8 @@ def _publish_is_declared_dry_run(arguments: Mapping[str, object]) -> bool:
 def _publish_validation_recovery_unavailable_result(
     request_id: str | None,
     locations: Sequence[Mapping[str, str]] = (),
+    *,
+    host_profile: Literal["generic", "cursor"] = "generic",
 ) -> types.CallToolResult:
     """Field-pointed INVALID_REQUEST primary, unreachable-oracle caveat alongside."""
 
@@ -755,6 +837,7 @@ def _publish_validation_recovery_unavailable_result(
             request_id=request_id,
             safe_details={"reason_code": _PUBLISH_RECOVERY_UNAVAILABLE_REASON},
             operation="publish_work_recovery_unavailable",
+            host_profile=host_profile,
         )
     return structured_error_result(
         PublicErrorCode.INVALID_REQUEST,
@@ -763,6 +846,7 @@ def _publish_validation_recovery_unavailable_result(
         safe_details=tuple(locations),
         details_reason_code=_PUBLISH_RECOVERY_UNAVAILABLE_REASON,
         operation="publish_work_recovery_unavailable",
+        host_profile=host_profile,
     )
 
 
@@ -859,6 +943,7 @@ async def _publish_recovery_from_envelope(
                     retryable=True,
                     request_id=recovery_request_id,
                     operation="publish_work_recovery",
+                    host_profile=runtime.host_profile,
                 ),
             )
         if state == "quarantined":
@@ -869,6 +954,7 @@ async def _publish_recovery_from_envelope(
                     "The stored operation is quarantined.",
                     request_id=recovery_request_id,
                     operation="publish_work_recovery",
+                    host_profile=runtime.host_profile,
                 ),
             )
         if state != "complete":
@@ -896,6 +982,7 @@ async def _publish_recovery_from_envelope(
                 request_id=recovery_request_id,
                 safe_details=details,
                 operation="publish_work_recovery",
+                host_profile=runtime.host_profile,
             ),
         )
     except Exception as exc:
@@ -925,13 +1012,18 @@ async def dispatch_publish_work(
             if recovery.kind is _PublishRecoveryKind.FOUND and recovery.result is not None:
                 return recovery.result
             if recovery.kind is _PublishRecoveryKind.UNAVAILABLE:
-                return _publish_validation_recovery_unavailable_result(request_id, locations)
+                return _publish_validation_recovery_unavailable_result(
+                    request_id,
+                    locations,
+                    host_profile=runtime.host_profile,
+                )
         return structured_error_result(
             PublicErrorCode.INVALID_REQUEST,
             invalid_request_message("publish_work", locations),
             request_id=request_id,
             safe_details=locations if locations else None,
             operation="publish_work",
+            host_profile=runtime.host_profile,
         )
     except Exception as exc:
         correlation_id = record_unexpected_exception_without_raising(
@@ -945,6 +1037,7 @@ async def dispatch_publish_work(
             "The bridge could not complete the operation.",
             request_id=request_id,
             correlation_id=correlation_id,
+            host_profile=runtime.host_profile,
         )
     return await _dispatch(
         arguments,
@@ -1021,7 +1114,6 @@ async def dispatch_read_guidance(
 ) -> types.CallToolResult:
     """Return one registered guidance document as tool text. Does not touch the service."""
 
-    _ = runtime
     extra_keys = sorted(str(key) for key in arguments if key != "uri")
     if extra_keys:
         return structured_error_result(
@@ -1029,6 +1121,7 @@ async def dispatch_read_guidance(
             "read_guidance rejects extra argument keys.",
             safe_details={"argument_count": len(arguments)},
             operation="read_guidance",
+            host_profile=runtime.host_profile,
         )
     raw_uri = arguments.get("uri")
     if type(raw_uri) is not str or not raw_uri:
@@ -1037,6 +1130,7 @@ async def dispatch_read_guidance(
             "read_guidance requires a registered guidance URI.",
             safe_details={"argument_count": len(arguments)},
             operation="read_guidance",
+            host_profile=runtime.host_profile,
         )
     resource = _GUIDANCE_BY_URI.get(raw_uri)
     if resource is None:
@@ -1045,6 +1139,7 @@ async def dispatch_read_guidance(
             "read_guidance rejects an unknown guidance URI.",
             safe_details={"argument_count": len(arguments)},
             operation="read_guidance",
+            host_profile=runtime.host_profile,
         )
     text = resource.text
     result = ReadGuidanceResult.model_validate(
@@ -1230,12 +1325,24 @@ def _bridge_logging_config() -> LoggingConfig:
         return LoggingConfig()
 
 
-def main(*, semantic: Literal["on", "off"] = "on") -> None:
+def main(
+    *,
+    semantic: Literal["on", "off"] = "on",
+    host: Literal["generic", "cursor"] = "generic",
+) -> None:
     """Run the MCP bridge on stdio using the SDK-supported latest protocol contract."""
 
     if semantic not in {"on", "off"}:
         raise ValueError("mcp_semantic_profile_invalid")
+    if host not in {"generic", "cursor"}:
+        raise ValueError("mcp_host_profile_invalid")
     if types.LATEST_PROTOCOL_VERSION not in SUPPORTED_PROTOCOL_VERSIONS:
         raise RuntimeError("mcp_sdk_protocol_registry_invalid")
     configure_logging(_bridge_logging_config(), LogMode.MCP_STDIO)
-    anyio.run(run_stdio, build_bridge_runtime("strict" if semantic == "off" else "policy"))
+    anyio.run(
+        run_stdio,
+        build_bridge_runtime(
+            "strict" if semantic == "off" else "policy",
+            host_profile=host,
+        ),
+    )

@@ -62,9 +62,13 @@ The local SDK precedence is:
 An inline/project/user `yoetz` server must not create a plugin-managed pass. Prove negative controls
 for each source, duplicate exact entries, a foreign same-name route, and the alternate strict/policy
 route. The exact plugin-managed routes are `yoetz mcp serve` (policy) and
-`yoetz mcp serve --semantic off` (strict), with no environment or secret fields. Raw initialize and
-tools/list prove only runtime registration. Require a correlated model-controlled `start` or
-`status` call for use.
+`yoetz mcp serve --semantic off` (strict) for the byte-identical portable carrier. The native
+Cursor target adds `--host cursor` (policy: `yoetz mcp serve --host cursor`; strict:
+`yoetz mcp serve --host cursor --semantic off`). That profile retains `structuredContent` and
+also repeats the exact canonical JSON body in text `content`, because pinned Cursor `3.17.x` can
+otherwise hide structured results from the model. It adds no environment or secret field and does
+not widen the service route. Raw initialize and tools/list prove only runtime registration.
+Require a correlated model-controlled `start` or `status` call for use.
 
 ## SDK TypeScript and Python
 
@@ -113,6 +117,7 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 | `tools/list` succeeds but owner is dual/ambiguous | source collision; do not choose silently |
 | SDK sees no plugin MCP | `plugins` missing from explicit setting sources |
 | SDK sees the wrong route | a higher-precedence inline/project/user source won |
+| Model sees only a compact sentence and loses structured fields | the native plugin is stale or a portable/external route won; verify the winning source includes `--host cursor`, reload the isolated app, and retry |
 | Installed MCP executable changed but Cursor still shows the old tool inventory | first run `Developer: Reload Window`; if the pinned IDE still reuses its shared MCP process, fully quit that exact Cursor testing app, verify its process exited, relaunch it with the same isolated profile, and re-prove discovery plus `tools/list` before claiming activation |
 | Hook fires but status stays published-only | configuration/trigger is not accepted observation evidence |
 | Strict route has no semantic review | expected route ceiling; authorize a separate policy route when intended |

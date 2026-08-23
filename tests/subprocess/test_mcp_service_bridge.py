@@ -18,7 +18,7 @@ from yoetz.config.models import LoggingConfig
 from yoetz.mcp.resources import read_resource
 from yoetz.observability.logging import LogMode, configure_logging
 from yoetz.ports.control import ControlError
-from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
@@ -272,6 +272,43 @@ async def test_exact_six_dispatchers_use_one_ordinary_client(
     assert client.closed is False
     await bridge.close_bridge_runtime(runtime)
     assert client.closed is True
+
+
+@pytest.mark.anyio
+async def test_cursor_host_profile_copies_exact_wire_json_into_model_visible_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient()
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime(host_profile="cursor")
+
+    result = await bridge.dispatch_status(_requests()["status"], runtime)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    block = result.content[0]
+    assert isinstance(block, types.TextContent)
+    assert block.text == canonical_encode(cast(JsonValue, result.structuredContent)).decode("utf-8")
+    assert json.loads(block.text) == result.structuredContent
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_generic_host_profile_keeps_bounded_weaker_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient()
+    _install_clients(monkeypatch, [client])
+    runtime = bridge.build_bridge_runtime()
+
+    result = await bridge.dispatch_status(_requests()["status"], runtime)
+
+    assert result.structuredContent is not None
+    block = result.content[0]
+    assert isinstance(block, types.TextContent)
+    assert block.text.startswith("Error SESSION_CONFLICT;")
+    assert block.text != canonical_encode(cast(JsonValue, result.structuredContent)).decode("utf-8")
+    await bridge.close_bridge_runtime(runtime)
 
 
 @pytest.mark.anyio

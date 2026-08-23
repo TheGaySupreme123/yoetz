@@ -148,6 +148,13 @@ The host-facing MCP `outputSchema` also projects fixed `prefixItems` tuples into
 only the declaration used by the host: every returned result is first validated against the exact
 immutable catalogue schema, which retains tuple order, length, and member identity.
 
+The native Cursor profile starts the same bridge with `--host cursor`. Cursor `3.17.x` does not
+reliably deliver `structuredContent` to its model, so this explicit host profile repeats the exact
+canonical JSON wire body as the single text `content` item while retaining `structuredContent`
+unchanged. It adds no field and grants no additional read authority: payload-bearing fields appear
+only when the ordinary service route already returned them. Generic and portable Agent Plugin
+routes keep the bounded weaker projection above, preserving the shared portable bundle bytes.
+
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
 `expected_frontier`. It names that field and is retryable because validation wrote no durable

@@ -1094,12 +1094,19 @@ def mcp_serve(
             help="Semantic route posture: on follows policy; off fixes a process-lifetime ceiling.",
         ),
     ] = "on",
+    host: Annotated[
+        Literal["generic", "cursor"],
+        typer.Option(
+            "--host",
+            help="MCP result presentation profile for the exact local host.",
+        ),
+    ] = "generic",
 ) -> None:
     """Run the MCP stdio bridge."""
 
     module = importlib.import_module("yoetz.mcp.server")
     mcp_main = cast(Callable[..., None], getattr(module, "main"))
-    mcp_main(semantic=semantic)
+    mcp_main(semantic=semantic, host=host)
 
 
 @state_app.command("capture")

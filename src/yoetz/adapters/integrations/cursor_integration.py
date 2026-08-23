@@ -476,7 +476,7 @@ def _inventory(members: Mapping[str, bytes]) -> tuple[ManagedPluginFile, ...]:
 
 
 def _mcp_json(route_profile: Literal["strict", "policy"]) -> bytes:
-    args = ["mcp", "serve"]
+    args = ["mcp", "serve", "--host", "cursor"]
     if route_profile == "strict":
         args.extend(("--semantic", "off"))
     return canonical_encode(
@@ -1221,11 +1221,18 @@ def _route_profile(entry: Mapping[str, JsonValue] | None) -> Literal["strict", "
     if any(entry.get(key) != value for key, value in expected_base.items()):
         return None
     args = entry.get("args")
-    if args in (["mcp", "serve"], ("mcp", "serve")):
+    if args in (
+        ["mcp", "serve"],
+        ("mcp", "serve"),
+        ["mcp", "serve", "--host", "cursor"],
+        ("mcp", "serve", "--host", "cursor"),
+    ):
         return "policy"
     if args in (
         ["mcp", "serve", "--semantic", "off"],
         ("mcp", "serve", "--semantic", "off"),
+        ["mcp", "serve", "--host", "cursor", "--semantic", "off"],
+        ("mcp", "serve", "--host", "cursor", "--semantic", "off"),
     ):
         return "strict"
     return None

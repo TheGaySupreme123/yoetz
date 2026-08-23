@@ -88,10 +88,22 @@ def test_plugin_managed_native_route_is_exact_and_external_omits_it() -> None:
     assert "mcp.json" not in external.members
     route = json.loads(managed.members["mcp.json"])["mcpServers"]["yoetz"]
     assert route == {
-        "args": ["mcp", "serve", "--semantic", "off"],
+        "args": ["mcp", "serve", "--host", "cursor", "--semantic", "off"],
         "command": "yoetz",
         "type": "stdio",
     }
+
+    policy = render_cursor_plugin(
+        PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
+        mcp_ownership=McpOwnership.PLUGIN_MANAGED,
+        route_profile="policy",
+    )
+    assert json.loads(policy.members["mcp.json"])["mcpServers"]["yoetz"]["args"] == [
+        "mcp",
+        "serve",
+        "--host",
+        "cursor",
+    ]
 
 
 def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: Path) -> None:
@@ -288,6 +300,24 @@ def test_mcp_precedence_negative_controls_never_create_false_plugin_pass(tmp_pat
     )
     assert plugin_only.ownership_state is McpOwnershipState.PLUGIN
     assert plugin_only.winning_source is CursorMcpSource.PLUGIN
+
+    cursor_exact = {
+        "mcpServers": {
+            "yoetz": {
+                "args": ["mcp", "serve", "--host", "cursor"],
+                "command": "yoetz",
+                "type": "stdio",
+            }
+        }
+    }
+    (plugin / "mcp.json").write_text(json.dumps(cursor_exact), encoding="utf-8")
+    cursor_plugin_only = observe_cursor_mcp(
+        plugin_root=plugin,
+        project_root=project,
+        user_config_root=user,
+    )
+    assert cursor_plugin_only.ownership_state is McpOwnershipState.PLUGIN
+    assert cursor_plugin_only.route_profile == "policy"
 
     inline = JsonObject(
         {"yoetz": JsonObject({"args": ["mcp", "serve"], "command": "yoetz", "type": "stdio"})}
