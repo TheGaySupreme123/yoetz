@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import Literal, cast
@@ -20,6 +19,7 @@ from yoetz.adapters.integrations.cursor_integration import (
 )
 from yoetz.domain.values import RequestId, request_id
 from yoetz.ports.plugin_artifacts import McpOwnership, PluginArtifactAction, PluginFormatProfile
+from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 
 __all__ = ["run_cursor_plugin_command"]
@@ -27,11 +27,11 @@ __all__ = ["run_cursor_plugin_command"]
 
 def _emit(value: dict[str, object], *, json_output: bool) -> None:
     if json_output:
-        sys.stdout.write(json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n")
+        sys.stdout.buffer.write(canonical_encode(cast(JsonValue, value)) + b"\n")
         return
     for key, item in value.items():
         rendered = (
-            json.dumps(item, separators=(",", ":"), sort_keys=True)
+            canonical_encode(cast(JsonValue, item)).decode("utf-8")
             if isinstance(item, (dict, list, tuple))
             else str(item)
         )
@@ -138,14 +138,14 @@ def run_cursor_plugin_command(
                 else PluginArtifactAction.REPLACE
             )
         else:
-            action = PluginArtifactAction(requested_action)
-            allowed_actions = {
-                PluginArtifactAction.INSTALL,
-                PluginArtifactAction.REPLACE,
-                *((PluginArtifactAction.REMOVE,) if command == "preview" else ()),
+            allowed_action_values = {
+                PluginArtifactAction.INSTALL.value,
+                PluginArtifactAction.REPLACE.value,
+                *((PluginArtifactAction.REMOVE.value,) if command == "preview" else ()),
             }
-            if action not in allowed_actions:
+            if requested_action not in allowed_action_values:
                 raise ValueError("cursor_plugin_action_invalid")
+            action = PluginArtifactAction(requested_action)
         preview = preview_cursor_plugin(request, target, action, artifact, project_root=project)
         if command == "preview":
             _emit(

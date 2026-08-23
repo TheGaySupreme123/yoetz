@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 from typer.testing import CliRunner
 
 from yoetz.cli.app import app
+from yoetz.protocol.canonical import JsonValue, canonical_encode
 
 
 def _args(config: Path, project: Path, command: str, *extra: str) -> list[str]:
@@ -42,6 +44,9 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
     preview_result = runner.invoke(app, _args(config, project, "preview"))
     assert preview_result.exit_code == 0, preview_result.output
     preview = json.loads(preview_result.stdout)
+    assert (
+        preview_result.stdout.encode("utf-8") == canonical_encode(cast(JsonValue, preview)) + b"\n"
+    )
     assert preview["state_before"] == "absent"
 
     installed = runner.invoke(
@@ -94,3 +99,15 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
     assert removed.exit_code == 0, removed.output
     assert json.loads(removed.stdout)["state_after"] == "absent"
     assert sentinel.read_text("utf-8") == "untouched\n"
+
+
+def test_cursor_plugin_cli_rejects_unknown_action_with_bounded_reason(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config = tmp_path / "cursor-testing-home" / ".cursor"
+    project = tmp_path / "project"
+    project.mkdir()
+
+    result = runner.invoke(app, _args(config, project, "preview", "--action", "bogus"))
+
+    assert result.exit_code == 1
+    assert result.stderr == "cursor_plugin_action_invalid\n"

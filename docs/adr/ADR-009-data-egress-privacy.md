@@ -421,7 +421,7 @@ always available.
 Local Cursor hooks are untrusted advisory inputs and add no provider, privacy, credential, approval,
 or enforcement authority. `cursor_hook` is a distinct observation source. Its ingress allowlist is
 limited to bounded session/generation/tool identifiers, exact Cursor/model/effort tokens,
-durations, booleans, result status, capability profile, and a one-way changed-path digest. The
+durations, capability profile, and an installation-keyed HMAC changed-path commitment. The
 ingress never persists or emits prompts, model thoughts/reasoning, response text, file paths,
 file contents or edits, tool/MCP arguments or results, transcripts, shell command/output, email,
 or workspace-root strings from Cursor payloads. Cursor stream/transcript reconciliation is

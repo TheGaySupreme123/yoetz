@@ -30,12 +30,18 @@ _DROPPED_GAP = "_local_stream_partial_dropped"
 _MAX_PARTIAL = local_mod._MAX_STREAM_PARTIAL_BYTES  # pyright: ignore[reportPrivateUsage]
 
 
-def _envelope(*, session: str, identity: str, ordinal: int = 1) -> ObservationEnvelope:
+def _envelope(
+    *,
+    session: str,
+    identity: str,
+    ordinal: int = 1,
+    source: ObservationSource = ObservationSource.CODEX_HOOK,
+) -> ObservationEnvelope:
     return ObservationEnvelope(
         session_commitment=session,
         event_kind="PreToolUse",
         source_identity=identity,
-        source=ObservationSource.CODEX_HOOK,
+        source=source,
         cursor=ObservationCursor(1, 0, ordinal, f"hmac-sha256:{'ab' * 32}", "codex-obs-hook/1.0.0"),
         receipt_time=Timestamp("2026-01-01T00:00:00.000Z"),
         structural_payload=JsonObject({"tool_name": "shell", "tool_call_id": f"c{ordinal}"}),
@@ -55,6 +61,22 @@ def _consented_store(tmp_path: Path) -> tuple[LocalObservationStore, str, str]:
 def _state_json(tmp_path: Path) -> dict[str, object]:
     path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
     return cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))
+
+
+def test_cursor_hook_updates_hook_liveness_not_stream_reconcile(tmp_path: Path) -> None:
+    store, _workspace, session = _consented_store(tmp_path)
+
+    store.ingest(
+        _envelope(
+            session=session,
+            identity="hook:cursor-live",
+            source=ObservationSource.CURSOR_HOOK,
+        )
+    )
+
+    persisted = _state_json(tmp_path)
+    assert isinstance(persisted["last_hook_receipt_mono_ms"], int)
+    assert persisted["last_stream_reconcile_mono_ms"] is None
 
 
 def test_stream_partial_round_trips_within_bound(tmp_path: Path) -> None:

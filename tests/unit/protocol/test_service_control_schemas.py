@@ -275,6 +275,58 @@ def test_v2_repository_privacy_bodies_are_closed_and_v1_is_retained() -> None:
     assert "expected_policy_digest" in v1_defs["privacy_propose_policy_body"]["properties"]
 
 
+def test_v21_appends_cursor_observation_wire_without_rewriting_v2() -> None:
+    request_v2 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.0.0.schema.json").read_bytes()),
+    )
+    request_v21 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.1.0.schema.json").read_bytes()),
+    )
+    result_v2 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-result-2.0.0.schema.json").read_bytes()),
+    )
+    result_v21 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-result-2.1.0.schema.json").read_bytes()),
+    )
+
+    request_v2_defs = cast(dict[str, dict[str, Any]], request_v2["$defs"])
+    request_v21_defs = cast(dict[str, dict[str, Any]], request_v21["$defs"])
+    source_v2 = request_v2_defs["observation_envelope"]["properties"]["source"]
+    source_v21 = request_v21_defs["observation_envelope"]["properties"]["source"]
+    assert source_v2["enum"] == ["codex_hook", "codex_session_stream"]
+    assert source_v21["enum"] == ["codex_hook", "codex_session_stream", "cursor_hook"]
+
+    changed_v2 = request_v2_defs["observation_envelope"]["properties"]["structural_payload"][
+        "properties"
+    ]["changed_paths_digest"]
+    changed_v21 = request_v21_defs["observation_envelope"]["properties"]["structural_payload"][
+        "properties"
+    ]["changed_paths_digest"]
+    assert changed_v2["pattern"] == "^sha256:[0-9a-f]{64}$"
+    assert [branch["pattern"] for branch in changed_v21["oneOf"]] == [
+        "^sha256:[0-9a-f]{64}$",
+        "^hmac-sha256:[0-9a-f]{64}$",
+    ]
+
+    result_v2_defs = cast(dict[str, dict[str, Any]], result_v2["$defs"])
+    result_v21_defs = cast(dict[str, dict[str, Any]], result_v21["$defs"])
+    coverage_v2 = result_v2_defs["observation_status"]["properties"]["source_coverage"]
+    coverage_v21 = result_v21_defs["observation_status"]["properties"]["source_coverage"]
+    assert set(coverage_v2["properties"]) == {"codex_hook", "codex_session_stream"}
+    assert set(coverage_v21["properties"]) == {
+        "codex_hook",
+        "codex_session_stream",
+        "cursor_hook",
+    }
+
+    for filename in ("control-request-2.1.0.schema.json", "control-result-2.1.0.schema.json"):
+        assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
+
+
 def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:
     request_schema = _schema("control-request")
     result_schema = _schema("control-result")

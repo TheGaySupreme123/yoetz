@@ -27,14 +27,14 @@ def _load(name: str) -> dict[str, Any]:
     return json.loads((_SERVICE / f"{name}-1.0.0.schema.json").read_text(encoding="utf-8"))
 
 
-def _with_v2_id(name: str, document: dict[str, Any]) -> dict[str, Any]:
+def _with_id(name: str, version: str, document: dict[str, Any]) -> dict[str, Any]:
     generated = copy.deepcopy(document)
-    generated["$id"] = f"https://schemas.yoetz.dev/0.1/service/{name}-2.0.0.schema.json"
+    generated["$id"] = f"https://schemas.yoetz.dev/0.1/service/{name}-{version}.schema.json"
     return generated
 
 
 def _hello() -> dict[str, Any]:
-    generated = _with_v2_id("control-hello", _load("control-hello"))
+    generated = _with_id("control-hello", "2.0.0", _load("control-hello"))
     generated["properties"]["workspace_locator"] = {
         "additionalProperties": False,
         "properties": {
@@ -65,7 +65,7 @@ def _hello() -> dict[str, Any]:
 
 
 def _request() -> dict[str, Any]:
-    generated = _with_v2_id("control-request", _load("control-request"))
+    generated = _with_id("control-request", "2.0.0", _load("control-request"))
     definitions = generated["$defs"]
     # Domain source identities are structural tokens and the hook mapper deliberately prefixes
     # them with ``hook:``. The legacy schema token omitted the admitted colon.
@@ -308,7 +308,7 @@ def _setup_result() -> dict[str, Any]:
 
 
 def _result() -> dict[str, Any]:
-    generated = _with_v2_id("control-result", _load("control-result"))
+    generated = _with_id("control-result", "2.0.0", _load("control-result"))
     definitions = generated["$defs"]
     # The ready observation handler returns the bounded domain result directly. The legacy
     # request/status wrapper was replaced when routing ownership moved to the service coordinator.
@@ -326,16 +326,54 @@ def _result() -> dict[str, Any]:
     return generated
 
 
+def _cursor_request() -> dict[str, Any]:
+    generated = _with_id("control-request", "2.1.0", _request())
+    envelope = generated["$defs"]["observation_envelope"]
+    envelope["properties"]["source"]["enum"].append("cursor_hook")
+    changed_paths_digest = copy.deepcopy(
+        envelope["properties"]["structural_payload"]["properties"]["changed_paths_digest"]
+    )
+    envelope["properties"]["structural_payload"]["properties"]["changed_paths_digest"] = {
+        "oneOf": [
+            changed_paths_digest,
+            {
+                "maxLength": 76,
+                "minLength": 76,
+                "pattern": "^hmac-sha256:[0-9a-f]{64}$",
+                "type": "string",
+            },
+        ]
+    }
+    return generated
+
+
+def _cursor_result() -> dict[str, Any]:
+    generated = _with_id("control-result", "2.1.0", _result())
+    source_coverage = generated["$defs"]["observation_status"]["properties"]["source_coverage"]
+    source_coverage["properties"]["cursor_hook"] = {"type": "boolean"}
+    return generated
+
+
 def _documents() -> dict[Path, bytes]:
     documents = {
-        "control-hello": _hello(),
-        "control-hello-result": _with_v2_id("control-hello-result", _load("control-hello-result")),
-        "control-request": _request(),
-        "control-result": _result(),
+        ("control-hello", "2.0.0"): _hello(),
+        ("control-hello-result", "2.0.0"): _with_id(
+            "control-hello-result", "2.0.0", _load("control-hello-result")
+        ),
+        ("control-request", "2.0.0"): _request(),
+        ("control-result", "2.0.0"): _result(),
+        ("control-hello", "2.1.0"): _with_id("control-hello", "2.1.0", _hello()),
+        ("control-hello-result", "2.1.0"): _with_id(
+            "control-hello-result",
+            "2.1.0",
+            _with_id("control-hello-result", "2.0.0", _load("control-hello-result")),
+        ),
+        ("control-request", "2.1.0"): _cursor_request(),
+        ("control-result", "2.1.0"): _cursor_result(),
     }
     return {
-        _SERVICE / f"{name}-2.0.0.schema.json": canonical_encode(document)
-        for name, document in documents.items()
+        _SERVICE / f"{name}-{version}.schema.json": canonical_encode(document)
+        for (name, version), document in documents.items()
     }
 
 
@@ -353,7 +391,8 @@ def _sync_manifest(documents: dict[Path, bytes], *, write: bool) -> list[Path]:
     mismatches: list[Path] = []
     for path, payload in documents.items():
         relative = path.relative_to(_ROOT / "schemas").as_posix()
-        name = path.name.removesuffix("-2.0.0.schema.json")
+        name_and_version = path.name.removesuffix(".schema.json")
+        name, version = name_and_version.rsplit("-", 1)
         expected = {
             "$id": f"https://schemas.yoetz.dev/0.1/{relative}",
             "artifact_role": "local-control",
@@ -362,7 +401,7 @@ def _sync_manifest(documents: dict[Path, bytes], *, write: bool) -> list[Path]:
             "owning_model": owning_models[name],
             "path": relative,
             "schema_kind": "request_result",
-            "schema_version": "2.0.0",
+            "schema_version": version,
             "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
         }
         existing = by_path.get(relative)

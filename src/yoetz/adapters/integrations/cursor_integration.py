@@ -129,6 +129,7 @@ _STAGE_PREFIX: Final = ".yoetz-cursor-plugin-stage-"
 _MAX_FILE_BYTES: Final = 262_144
 _MAX_FILES: Final = 64
 _MAX_PATH: Final = 4_096
+_MAX_CURSOR_IDENTITY_BYTES: Final = 4_096
 _GUIDANCE_NAMES: Final = (
     "agent-instructions.md",
     "coverage-and-receipts.md",
@@ -1292,7 +1293,8 @@ def observe_cursor_mcp(
     profiles = [(source, _route_profile(entry)) for source, entry in candidates]
     present = tuple(source for source, _profile in profiles)
     if any(profile is None for _source, profile in profiles):
-        return CursorMcpObservation(McpOwnershipState.FOREIGN, present[0], None, present, True)
+        foreign_source = next(source for source, profile in profiles if profile is None)
+        return CursorMcpObservation(McpOwnershipState.FOREIGN, foreign_source, None, present, True)
     plugin_profiles = [profile for source, profile in profiles if source is CursorMcpSource.PLUGIN]
     external_profiles = [
         profile for source, profile in profiles if source is not CursorMcpSource.PLUGIN
@@ -1382,7 +1384,13 @@ def discover_cursor_cli(executable: Path) -> CursorCapabilityIdentity:
         raise ValueError("cursor_cli_unavailable") from exc
     if completed.returncode != 0:
         raise ValueError("cursor_cli_unavailable")
-    version = completed.stdout[:4096].decode("utf-8", errors="strict").splitlines()[0].strip()
+    if len(completed.stdout) > _MAX_CURSOR_IDENTITY_BYTES:
+        raise ValueError("cursor_cli_identity_invalid")
+    try:
+        output = completed.stdout.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("cursor_cli_identity_invalid") from exc
+    version = next((line.strip() for line in output.splitlines() if line.strip()), "")
     if not version or len(version) > 128:
         raise ValueError("cursor_cli_identity_invalid")
     return CursorCapabilityIdentity(

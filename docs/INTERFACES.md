@@ -2742,6 +2742,11 @@ arm, both, or `None` after E-013 passes. For first-party Codex, observation is a
 capability once the exact cell is capability-proven; unproven or unprofiled cells keep
 `observation_events=()` and cannot emit `hook_observed` (ADR-005, ADR-010).
 
+The frozen v0.1 service operations `integration_preview` and `integration_execute` remain
+Codex-only despite `HarnessId` containing `cursor`: their required `harness` discriminator is
+exactly `codex`. Cursor lifecycle operations use the separate `PluginArtifactPort` surface and its
+path-explicit CLI adapter; they are not routed through `IntegrationsPort` or those service methods.
+
 `HarnessHookProfile` is the closed descriptor
 `(trigger_event, trigger_payload_profile_id, evidence_case_ids,
 trigger_action="reground_status", duplicate_policy="coalesce", loop_policy="single_flight",
@@ -3070,7 +3075,7 @@ the frozen precedence tuple, MCP ownership, sandbox boolean, and approval mode
 `ObservationSource` adds `cursor_hook`. The pinned native profile advertises only
 `sessionStart|sessionEnd|afterMCPExecution|afterFileEdit|stop`; `afterAgentThought` is excluded.
 Cursor ingress maps only bounded session/generation/tool IDs, exact Cursor/model/effort tokens,
-duration/boolean/result status, capability profile, and one-way changed-path digest. It discards
+duration, capability profile, and an installation-keyed HMAC changed-path commitment. It discards
 prompt, reasoning, response text, paths, file contents/edits, MCP/tool inputs/results, transcripts,
 commands/output, email, and workspace roots before storage and never reconciles a Cursor transcript
 stream. Hooks are fail-open and advisory; configuration/trigger-only state earns no observation

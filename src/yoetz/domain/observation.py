@@ -146,6 +146,7 @@ _STRUCTURAL_KEYS: Final = frozenset(
         "model_effort",
     }
 )
+_STRUCTURAL_TOKEN_KEYS: Final = frozenset({"cursor_version", "model_id", "model_effort"})
 
 _PROSE_KEYS: Final = frozenset(
     {
@@ -344,6 +345,8 @@ def _structural_payload(value: object) -> JsonObject:
     for key, item in payload.items():
         if key.endswith(("_path", "_paths", "_cwd", "_directory")):
             raise _invalid("unknown_payload_field")
+        if key in _STRUCTURAL_TOKEN_KEYS:
+            _token(item)
         _reject_path_like(item)
     encoded = canonical_encode(payload)
     if len(encoded) > _MAX_STRUCTURAL_BYTES:

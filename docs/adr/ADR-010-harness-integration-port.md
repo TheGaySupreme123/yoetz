@@ -157,6 +157,12 @@ text, paths, file contents/edits, tool arguments/results, transcripts, command o
 `afterAgentThought` is deliberately not registered. A declaration or `sessionStart` earns no
 observation coverage; only consented accepted `cursor_hook` envelopes can do so.
 
+The append-only local-control schema `2.1.0` admits `cursor_hook`, a keyed HMAC
+`changed_paths_digest`, and the Cursor source-coverage row while retaining `2.0.0` byte-for-byte.
+Cursor's documented `afterMCPExecution` result is content and is discarded; because the host does
+not publish a validated `success` or `result_status` field for that event, ingress never fabricates
+either value.
+
 **Amendment (ADR-012, 2026-07-21):** MCP server registration is added as a *sibling* port,
 `HarnessMcpPort` (`ports/harness_mcp.py`), with its own Codex adapters
 (`codex_discovery.py`, `codex_mcp.py`). It deliberately does not extend `IntegrationsPort`:

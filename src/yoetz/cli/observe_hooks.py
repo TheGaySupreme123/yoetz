@@ -199,6 +199,8 @@ _STRUCTURAL_ALLOW: Final = frozenset(
 _TOKEN_CHARS: Final = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/+-"
 )
+_MAX_TOKEN_CHARS: Final = 128
+_CURSOR_SESSION_PREFIX: Final = "cursor:"
 
 
 type AsyncRunner = Callable[[Callable[[], Awaitable[object]]], object]
@@ -256,7 +258,7 @@ def _now() -> Timestamp:
 
 
 def _token_or_none(value: object) -> str | None:
-    if type(value) is not str or not value or len(value) > 128:
+    if type(value) is not str or not value or len(value) > _MAX_TOKEN_CHARS:
         return None
     if any(ch not in _TOKEN_CHARS for ch in value):
         return None
@@ -1727,7 +1729,7 @@ def handle_cursor_observe(
         session = _token_or_none(payload.get("session_id")) or _token_or_none(
             payload.get("conversation_id")
         )
-        if session is None:
+        if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CURSOR_SESSION_PREFIX):
             return 0 if hook_io.stdout_json({}, stdout) else 0
         structural: dict[str, JsonValue] = {
             "action": (
@@ -1739,7 +1741,7 @@ def handle_cursor_observe(
             ),
             "capability_profile_id": "cursor-local-3.17",
             "hook_event_name": event_map[raw_event],
-            "session_id": f"cursor:{session}",
+            "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
         }
         for source_key, target_key in (
             ("cursor_version", "cursor_version"),
@@ -1753,12 +1755,12 @@ def handle_cursor_observe(
         duration = _int_or_none(payload.get("duration"))
         if duration is not None:
             structural["duration_ms"] = duration
-        if raw_event in {"afterFileEdit", "afterMCPExecution"}:
-            structural["result_status"] = "completed"
-            structural["success"] = True
         path_value = payload.get("file_path")
         if raw_event == "afterFileEdit" and type(path_value) is str and path_value:
-            structural["changed_paths_digest"] = canonical_digest({"file_path": path_value})
+            store = LocalObservationStore(_state=_state)
+            structural["changed_paths_digest"] = hook_source_commitment(
+                store.key_material(), f"cursor-path:{path_value}"
+            )
             structural.setdefault("tool_name", "cursor_file_edit")
         parameters = payload.get("model_params")
         if type(parameters) is list:

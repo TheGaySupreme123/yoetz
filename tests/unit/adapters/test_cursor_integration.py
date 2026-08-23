@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from yoetz.adapters.integrations.cursor_integration import (
     CursorSdkBinding,
     apply_cursor_plugin,
     build_cursor_sdk_profile,
+    discover_cursor_cli,
     discover_cursor_sdk,
     observe_cursor_mcp,
     preview_cursor_plugin,
@@ -341,6 +343,50 @@ def test_mcp_precedence_negative_controls_never_create_false_plugin_pass(tmp_pat
         user_config_root=user,
     )
     assert observed.ownership_state is McpOwnershipState.FOREIGN
+    assert observed.winning_source is CursorMcpSource.PROJECT
+
+
+def test_cursor_cli_discovery_uses_first_nonempty_complete_utf8_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "cursor-agent"
+    executable.write_bytes(b"binary")
+    executable.chmod(0o755)
+    output = b"\n\n2026.07.09-a3815c0\n"
+
+    def fake_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess((str(executable), "--version"), 0, output, b"")
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.subprocess.run",
+        fake_run,
+    )
+
+    identity = discover_cursor_cli(executable)
+
+    assert identity.version == "2026.07.09-a3815c0"
+
+
+@pytest.mark.parametrize("stdout", [b"", b"\xff", b"version\n" + b"x" * 4_096])
+def test_cursor_cli_discovery_normalizes_empty_and_invalid_utf8_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: bytes,
+) -> None:
+    executable = tmp_path / "cursor-agent"
+    executable.write_bytes(b"binary")
+    executable.chmod(0o755)
+
+    def fake_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess((str(executable), "--version"), 0, stdout, b"")
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.subprocess.run",
+        fake_run,
+    )
+
+    with pytest.raises(ValueError, match="^cursor_cli_identity_invalid$"):
+        discover_cursor_cli(executable)
 
 
 def test_unreadable_mcp_configuration_is_ambiguous_not_absent(tmp_path: Path) -> None:
