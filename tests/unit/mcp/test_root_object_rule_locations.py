@@ -156,6 +156,78 @@ def test_selected_payload_one_of_names_its_missing_co_required_field() -> None:
     assert "strength admits" not in message
 
 
+def test_selected_payload_any_of_required_names_metadata_only_alternatives() -> None:
+    """A metadata_only draft missing both description and reference must name the pair (#335)."""
+
+    base = deepcopy(cast(dict[str, object], cast(list[object], _PUBLISH_SCHEMA["examples"])[0]))
+    draft = cast(dict[str, object], cast(list[object], base["event_drafts"])[0])
+    draft["schema"] = {"name": "evidence_recorded", "version": "1.1.0"}
+    draft["payload"] = {
+        "evidence_id": "evd_00000000-0000-4000-8000-000000000001",
+        "evidence_kind": "artifact",
+        "strength": "metadata_only",
+        "observed_at": "2026-01-01T00:00:00.000Z",
+    }
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate(base)
+
+    locations = safe_validation_locations(captured.value)
+    assert locations == (
+        {
+            "field": "/event_drafts/0/payload/description",
+            "reason": "conditional_field_required",
+            "family": "evidence_recorded",
+            "family_version": "1.1.0",
+            "condition_field": "strength",
+            "condition_value": "metadata_only",
+        },
+        {
+            "field": "/event_drafts/0/payload/reference",
+            "reason": "conditional_field_required",
+            "family": "evidence_recorded",
+            "family_version": "1.1.0",
+            "condition_field": "strength",
+            "condition_value": "metadata_only",
+        },
+    )
+    message = invalid_request_message("publish_work", locations)
+    assert "strength metadata_only requires description or reference" in message
+    assert "each event_drafts entry requires" not in message
+    assert "strength admits" not in message
+
+
+def test_selected_payload_all_of_requires_digest_binding_with_content_digest() -> None:
+    """A content_digest draft missing digest_binding must name the allOf peer (#335)."""
+
+    base = deepcopy(cast(dict[str, object], cast(list[object], _PUBLISH_SCHEMA["examples"])[0]))
+    draft = cast(dict[str, object], cast(list[object], base["event_drafts"])[0])
+    draft["schema"] = {"name": "evidence_recorded", "version": "1.1.0"}
+    draft["payload"] = {
+        "evidence_id": "evd_00000000-0000-4000-8000-000000000001",
+        "evidence_kind": "artifact",
+        "strength": "content_digest",
+        "content_digest": "sha256:" + ("0" * 64),
+        "observed_at": "2026-01-01T00:00:00.000Z",
+        "description": "bounded evidence description",
+    }
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate(base)
+
+    locations = safe_validation_locations(captured.value)
+    assert locations == (
+        {
+            "field": "/event_drafts/0/payload/digest_binding",
+            "reason": "conditional_field_required",
+            "family": "evidence_recorded",
+            "family_version": "1.1.0",
+        },
+    )
+    message = invalid_request_message("publish_work", locations)
+    assert "content_digest requires digest_binding" in message
+    assert "each event_drafts entry requires" not in message
+    assert "strength admits" not in message
+
+
 def test_unselected_sibling_branch_contract_is_never_projected() -> None:
     """When const rejections cannot isolate one branch, no branch's contract is projected.
 

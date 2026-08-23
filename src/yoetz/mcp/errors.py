@@ -427,10 +427,11 @@ def safe_validation_locations(exc: object) -> tuple[dict[str, str], ...]:
         elif reason == _CONDITIONAL_FIELD_REQUIRED_REASON:
             family = _family_from_validation_item(source)
             family_version = _family_version_from_validation_item(source)
-            condition = _conditional_requirement_from_validation_item(source)
-            if family is not None and family_version is not None and condition is not None:
+            if family is not None and family_version is not None:
                 entry["family"] = family
                 entry["family_version"] = family_version
+            condition = _conditional_requirement_from_validation_item(source)
+            if condition is not None:
                 entry["condition_field"] = condition[0]
                 entry["condition_value"] = condition[1]
         projected.append(entry)
@@ -737,20 +738,17 @@ def _payload_schema(
 def _conditional_requirement_hint_parts(
     document: Mapping[str, JsonValue], locations: Sequence[Mapping[str, str]]
 ) -> list[tuple[str, tuple[str, str]]]:
-    """Render selected-oneOf repairs only after re-checking frozen schema metadata."""
+    """Render selected-oneOf, anyOf-of-required, and allOf peer repairs from frozen schema metadata."""
 
     parts: list[tuple[str, tuple[str, str]]] = []
+    seen: set[str] = set()
     for location in locations:
         if location.get("reason") != _CONDITIONAL_FIELD_REQUIRED_REASON:
             continue
         pointer = location.get("field")
-        condition_field = location.get("condition_field")
-        condition_value = location.get("condition_value")
         if (
             type(pointer) is not str
             or _EVENT_DRAFT_PAYLOAD_FIELD_POINTER.fullmatch(pointer) is None
-            or type(condition_field) is not str
-            or type(condition_value) is not str
         ):
             continue
         required = pointer.rsplit("/", 1)[-1]
@@ -762,35 +760,114 @@ def _conditional_requirement_hint_parts(
         if payload is None:
             continue
         properties = payload.get("properties")
-        options = payload.get("oneOf")
-        if (
-            not isinstance(properties, Mapping)
-            or condition_field not in properties
-            or required not in properties
-            or not isinstance(options, list)
-        ):
+        if not isinstance(properties, Mapping) or required not in properties:
             continue
-        for branch in cast(list[JsonValue], options):
-            if not isinstance(branch, Mapping):
-                continue
-            branch_properties = cast(Mapping[str, JsonValue], branch).get("properties")
-            branch_required = cast(Mapping[str, JsonValue], branch).get("required")
-            if not isinstance(branch_properties, Mapping) or not isinstance(branch_required, list):
-                continue
-            condition = cast(Mapping[str, JsonValue], branch_properties).get(condition_field)
-            if not isinstance(condition, Mapping):
-                continue
-            if (
-                cast(Mapping[str, JsonValue], condition).get("const") != condition_value
-                or required not in branch_required
-            ):
-                continue
-            text = f"{condition_field} {condition_value} requires {required}"
-            parts.append((text, (text, "")))
-            break
+        prop_names = cast(Mapping[str, JsonValue], properties)
+        text = _selected_branch_requirement_text(
+            payload,
+            prop_names,
+            location.get("condition_field"),
+            location.get("condition_value"),
+            required,
+        )
+        if text is None:
+            text = _allof_required_peer_text(payload, prop_names, required)
+        if text is None or text in seen:
+            continue
+        seen.add(text)
+        parts.append((text, (text, "")))
         if len(parts) == _MAX_HINT_FIELDS:
             break
     return parts
+
+
+def _selected_branch_requirement_text(
+    payload: Mapping[str, JsonValue],
+    prop_names: Mapping[str, JsonValue],
+    condition_field: object,
+    condition_value: object,
+    required: str,
+) -> str | None:
+    """Return the selected const-branch repair, including anyOf required alternatives."""
+
+    options = payload.get("oneOf")
+    if (
+        type(condition_field) is not str
+        or type(condition_value) is not str
+        or condition_field not in prop_names
+        or not isinstance(options, list)
+    ):
+        return None
+    for branch in cast(list[JsonValue], options):
+        if not isinstance(branch, Mapping):
+            continue
+        source = cast(Mapping[str, JsonValue], branch)
+        branch_properties = source.get("properties")
+        if not isinstance(branch_properties, Mapping):
+            continue
+        condition = cast(Mapping[str, JsonValue], branch_properties).get(condition_field)
+        if not isinstance(condition, Mapping):
+            continue
+        if cast(Mapping[str, JsonValue], condition).get("const") != condition_value:
+            continue
+        branch_required = source.get("required")
+        if isinstance(branch_required, list) and required in cast(list[object], branch_required):
+            return f"{condition_field} {condition_value} requires {required}"
+        alternatives = source.get("anyOf")
+        if not isinstance(alternatives, list):
+            continue
+        matched = False
+        names: list[str] = []
+        for alternative in cast(list[JsonValue], alternatives):
+            if not isinstance(alternative, Mapping):
+                continue
+            required_list = cast(Mapping[str, JsonValue], alternative).get("required")
+            text = _format_required_list(required_list, prop_names)
+            if not text:
+                continue
+            if text not in names:
+                names.append(text)
+            if isinstance(required_list, list) and required in cast(list[object], required_list):
+                matched = True
+        if matched and names:
+            return f"{condition_field} {condition_value} requires {' or '.join(names)}"
+    return None
+
+
+def _allof_required_peer_text(
+    payload: Mapping[str, JsonValue],
+    prop_names: Mapping[str, JsonValue],
+    missing: str,
+) -> str | None:
+    """Return a simple ``if required X then required Y`` allOf peer, or None."""
+
+    all_of = payload.get("allOf")
+    if not isinstance(all_of, list):
+        return None
+    for item in cast(list[JsonValue], all_of):
+        if not isinstance(item, Mapping):
+            continue
+        source = cast(Mapping[str, JsonValue], item)
+        if_node = source.get("if")
+        then_node = source.get("then")
+        if not isinstance(if_node, Mapping) or not isinstance(then_node, Mapping):
+            continue
+        if "properties" in if_node:
+            continue
+        if_required = cast(Mapping[str, JsonValue], if_node).get("required")
+        then_required = cast(Mapping[str, JsonValue], then_node).get("required")
+        if not isinstance(if_required, list) or len(cast(list[object], if_required)) != 1:
+            continue
+        present = _format_required_list(if_required, prop_names)
+        if (
+            not present
+            or not isinstance(then_required, list)
+            or missing not in cast(list[object], then_required)
+            or _format_required_list(then_required, prop_names) != missing
+        ):
+            continue
+        return f"{present} requires {missing}"
+    return None
 
 
 def _unknown_property_measure(count: object) -> str:
