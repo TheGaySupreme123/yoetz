@@ -6,6 +6,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from yoetz.ports.diagnostics import StartupCheckOutcome
+from yoetz.protocol.schemas import load_schema_catalog, request_result_schema_versions
 from yoetz.version import (
     REVIEWED_RESOURCE_COUNT,
     ResourceIntegrityError,
@@ -29,6 +30,9 @@ def test_development_manifest_is_truthful_and_complete() -> None:
         "mcp_capability_unverified",
     )
     assert len(manifest.request_result_schema_versions) == 40
+    assert dict(manifest.request_result_schema_versions) == dict(
+        request_result_schema_versions(load_schema_catalog())
+    )
     assert len(manifest.event_schema_versions) == 16
     counts = dict(manifest.resource_counts)
     assert len(manifest.resources) == REVIEWED_RESOURCE_COUNT == int(counts["total"])
