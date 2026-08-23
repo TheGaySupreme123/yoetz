@@ -3261,7 +3261,10 @@ facade and are never MCP tools.
   every catalogued schema-version branch for each advertised ordinary event family. Every shipped
   worked example validates against that presentation schema as well as catalog admission;
   `catalog_input_schema` / full catalog request schemas remain admission authority via
-  `*.model_validate`. `status` and `read_guidance` carry `readOnlyHint=true`; `receipt` carries
+  `*.model_validate`. `ToolDescriptor.output_schema` adds the MCP-required literal root
+  `type: object` to the equivalent success/error object union; `catalog_output_schema` preserves
+  the exact frozen catalogue bundle, and result admission remains owned by `*.model_validate`.
+  `status` and `read_guidance` carry `readOnlyHint=true`; `receipt` carries
   `readOnlyHint=false` because it stages an object and appends a `receipt_recorded` event. Every
   tool carries an explicit `idempotentHint=true`. Policy `check` carries `openWorldHint=true`;
   strict `check` carries `openWorldHint=false` and names the external-semantic ceiling. The hint is

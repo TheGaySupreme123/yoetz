@@ -1077,6 +1077,24 @@ def _mcp_schema(name: str, version: str) -> Mapping[str, JsonValue]:
 
 
 @cache
+def _mcp_output_presentation_schema(name: str, version: str) -> Mapping[str, JsonValue]:
+    """MCP-compatible object-root projection of one catalogued result schema.
+
+    MCP protocol versions through 2025-11-25 require ``outputSchema.type`` to be the
+    literal ``"object"``. Yoetz result schemas express the success/error object union
+    with a root ``oneOf``. Adding the shared object constraint preserves that union's
+    accepted instances while keeping the immutable catalogue bytes unchanged.
+    """
+
+    bundled_dict = dict(_mcp_schema(name, version))
+    root_type = bundled_dict.get("type")
+    if root_type not in (None, "object"):
+        raise RuntimeError("mcp_output_schema_root_not_object")
+    bundled_dict["type"] = "object"
+    return MappingProxyType(bundled_dict)
+
+
+@cache
 def _mcp_presentation_schema(name: str, version: str) -> Mapping[str, JsonValue]:
     """Agent-facing tools/list projection of a catalog request/result schema."""
 
@@ -1263,6 +1281,14 @@ class ToolDescriptor:
 
     @property
     def output_schema(self) -> Mapping[str, JsonValue]:
+        return _mcp_output_presentation_schema(
+            f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION
+        )
+
+    @property
+    def catalog_output_schema(self) -> Mapping[str, JsonValue]:
+        """Full catalog-bundled output schema before MCP root-object projection."""
+
         return _mcp_schema(f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION)
 
     @property

@@ -104,7 +104,13 @@ async def test_static_inventory_is_exact_and_verified() -> None:
     assert len(tools) == 7
     for tool, descriptor in zip(tools, descriptors, strict=True):
         assert tool.inputSchema == _plain_json(descriptor.input_schema)
+        assert tool.outputSchema is not None
         assert tool.outputSchema == _plain_json(descriptor.output_schema)
+        assert tool.outputSchema["type"] == "object"
+        assert "type" not in descriptor.catalog_output_schema
+        assert {
+            key: value for key, value in tool.outputSchema.items() if key != "type"
+        } == _plain_json(descriptor.catalog_output_schema)
         assert _external_schema_refs(tool.inputSchema) == ()
         assert _external_schema_refs(tool.outputSchema) == ()
         assert tool.annotations == types.ToolAnnotations(
