@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import selectors
+import signal
 import stat
 import subprocess
 import tempfile
@@ -258,6 +259,89 @@ def _bounded_communicate(
     return stdout, truncated
 
 
+def _wait_process(process: subprocess.Popen[bytes], timeout_seconds: float) -> bool:
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def _posix_process_group_id(process: subprocess.Popen[bytes]) -> int | None:
+    get_group = getattr(os, "getpgid", None)
+    get_self_group = getattr(os, "getpgrp", None)
+    if not callable(get_group) or not callable(get_self_group):
+        return None
+    try:
+        group_id = get_group(process.pid)
+        self_group = get_self_group()
+    except OSError, ProcessLookupError:
+        return None
+    if type(group_id) is not int or type(self_group) is not int:
+        return None
+    if group_id <= 1 or group_id == self_group:
+        return None
+    return group_id
+
+
+def _signal_posix_group(group_id: int, sig: int) -> bool:
+    kill_group = getattr(os, "killpg", None)
+    if not callable(kill_group):
+        return False
+    try:
+        kill_group(group_id, sig)
+    except OSError, ProcessLookupError:
+        return False
+    return True
+
+
+def _posix_group_exists(group_id: int) -> bool:
+    return _signal_posix_group(group_id, 0)
+
+
+def _reap_approved_check_process(
+    process: subprocess.Popen[bytes],
+    *,
+    process_group_id: int | None = None,
+) -> None:
+    """Terminate the isolated check tree, then wait until the leader is reaped."""
+
+    if os.name == "nt":
+        if process.poll() is None:
+            process.kill()
+        _wait_process(process, 5.0)
+        if process.poll() is None:
+            process.kill()
+            _wait_process(process, 5.0)
+        return
+
+    group_id = (
+        process_group_id if process_group_id is not None else _posix_process_group_id(process)
+    )
+    if group_id is None:
+        if process.poll() is None:
+            process.kill()
+        _wait_process(process, 5.0)
+        return
+
+    _signal_posix_group(group_id, signal.SIGTERM)
+    if not _wait_process(process, 0.5) or _posix_group_exists(group_id):
+        _signal_posix_group(group_id, signal.SIGKILL)
+        _wait_process(process, 5.0)
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and _posix_group_exists(group_id):
+        _signal_posix_group(group_id, signal.SIGKILL)
+        if _wait_process(process, 0.05):
+            time.sleep(0.01)
+            continue
+        time.sleep(0.01)
+
+    if process.poll() is None:
+        process.kill()
+        _wait_process(process, 1.0)
+
+
 class ApprovedCheckRunner:
     """Execute only commitment-approved argv under a consented workspace root."""
 
@@ -332,6 +416,7 @@ class ApprovedCheckRunner:
         home, tmpdir, temp_root = _owner_private_temp_dirs()
         started = time.monotonic()
         process: subprocess.Popen[bytes] | None = None
+        process_group_id: int | None = None
         try:
             env = _sanitized_env(home=home, tmpdir=tmpdir)
             launch = self._sandbox.prepare(
@@ -352,16 +437,35 @@ class ApprovedCheckRunner:
                     approval.approval_commitment,
                     int((time.monotonic() - started) * 1000),
                 )
-            process = subprocess.Popen(
-                list(launch.argv),
-                cwd=launch.cwd,
-                env=dict(launch.env),
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                close_fds=True,
-            )
+            if os.name == "nt":
+                process = subprocess.Popen(
+                    list(launch.argv),
+                    cwd=launch.cwd,
+                    env=dict(launch.env),
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    close_fds=True,
+                    creationflags=int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)),
+                )
+            else:
+                process = subprocess.Popen(
+                    list(launch.argv),
+                    cwd=launch.cwd,
+                    env=dict(launch.env),
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    close_fds=True,
+                    start_new_session=True,
+                )
+                # ``start_new_session`` makes the child's PID the new session and process-group
+                # ID.  Capture that identity without a post-launch ``getpgid`` lookup: the group
+                # can remain alive after a short-lived leader exits, and losing the leader must
+                # not make its descendants unaddressable at timeout.
+                process_group_id = process.pid
             stdout, truncated = _bounded_communicate(
                 process,
                 stdout_limit=_MAX_OUTPUT_BYTES,
@@ -399,8 +503,7 @@ class ApprovedCheckRunner:
             )
         except TimeoutError:
             if process is not None:
-                process.kill()
-                process.wait(timeout=5)
+                _reap_approved_check_process(process, process_group_id=process_group_id)
             return self._result(
                 ApprovedCheckStatus.TIMEOUT,
                 ApprovedCheckOutcome.TIMEOUT,

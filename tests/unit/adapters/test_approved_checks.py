@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import sys
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+
+import pytest
 
 from yoetz.adapters.approved_checks import (
     ApprovedCheckApproval,
@@ -40,13 +45,13 @@ class _ReadyCheckSandbox:
         )
 
 
-def _approval(argv: tuple[str, ...]) -> ApprovedCheckApproval:
+def _approval(argv: tuple[str, ...], *, timeout_seconds: float = 10.0) -> ApprovedCheckApproval:
     commitment = approval_commitment("pytest-unit", argv, allow_network=False)
     return ApprovedCheckApproval(
         approval_id="pytest-unit",
         argv=argv,
         allow_network=False,
-        timeout_seconds=10.0,
+        timeout_seconds=timeout_seconds,
         approval_commitment=commitment,
     )
 
@@ -118,3 +123,81 @@ def test_output_never_retained_as_secret_text(tmp_path: Path) -> None:
     assert result.output_digest is not None
     assert "secret-token-value" not in repr(result)
     assert "SECRET" not in repr(result)
+
+
+def test_nonforking_timeout_is_deterministic(tmp_path: Path) -> None:
+    handle = open_inspect_workspace(tmp_path)
+    sleep = shutil.which("sleep") or "/bin/sleep"
+    approval = _approval((sleep, "8"), timeout_seconds=0.3)
+    runner = ApprovedCheckRunner(
+        {approval.approval_commitment: approval},
+        sandbox=_ReadyCheckSandbox(),
+    )
+    started = time.monotonic()
+    result = runner.run(
+        ApprovedCheckCommand(
+            workspace=handle,
+            approval=approval,
+            subject_state_digest="sha256:" + "e" * 64,
+        )
+    )
+    elapsed = time.monotonic() - started
+    assert result.status is ApprovedCheckStatus.TIMEOUT
+    assert result.outcome is ApprovedCheckOutcome.TIMEOUT
+    assert result.exit_status is None
+    assert result.output_digest is None
+    assert result.output_bytes == 0
+    assert elapsed < 4.0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group reaping")
+def test_timeout_reaps_forked_descendant_before_result(tmp_path: Path) -> None:
+    handle = open_inspect_workspace(tmp_path)
+    pid_path = tmp_path / "desc.pid"
+    stop_path = tmp_path / "stop.flag"
+    leak_path = tmp_path / "leaked.txt"
+    script_path = tmp_path / "fork-check.sh"
+    script_path.write_text(
+        "#!/bin/sh\n"
+        "pid_file=$1\n"
+        "stop_file=$2\n"
+        "leak_file=$3\n"
+        "(\n"
+        "  trap '' TERM\n"
+        '  while [ ! -f "$stop_file" ]; do\n'
+        "    sleep 0.05\n"
+        "  done\n"
+        '  echo leaked > "$leak_file"\n'
+        ") &\n"
+        'echo $! > "$pid_file"\n'
+        # Exit the direct child while its descendant keeps the inherited output pipes open. This
+        # proves the runner retains the launch-time group identity instead of relying on a later
+        # lookup through a leader that may already be gone.
+        "exit 0\n",
+        encoding="ascii",
+    )
+    os.chmod(script_path, 0o700)
+    approval = _approval(
+        ("/bin/sh", str(script_path), str(pid_path), str(stop_path), str(leak_path)),
+        timeout_seconds=0.5,
+    )
+    runner = ApprovedCheckRunner(
+        {approval.approval_commitment: approval},
+        sandbox=_ReadyCheckSandbox(),
+    )
+    result = runner.run(
+        ApprovedCheckCommand(
+            workspace=handle,
+            approval=approval,
+            subject_state_digest="sha256:" + "f" * 64,
+        )
+    )
+    assert result.status is ApprovedCheckStatus.TIMEOUT
+    assert result.outcome is ApprovedCheckOutcome.TIMEOUT
+    assert pid_path.is_file()
+    descendant_pid = int(pid_path.read_text(encoding="ascii").strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(descendant_pid, 0)
+    stop_path.write_text("stop", encoding="ascii")
+    time.sleep(0.3)
+    assert not leak_path.exists()

@@ -2507,7 +2507,10 @@ Independent verification support (local control, not MCP):
 
 - Approved-check runner — executes only commitment-approved argv (`shell=False`, bounded
   time/output, sanitized env, no network unless separately authorized); binds results to the
-  observed subject-state digest so later edits stale prior success.
+  observed subject-state digest so later edits stale prior success. On POSIX the child is started
+  in a dedicated session/process group; a timeout signals that group (TERM, then KILL) and reaps
+  it before the TIMEOUT result is returned. Windows keeps CREATE_NEW_PROCESS_GROUP isolation and
+  TerminateProcess on the launched process.
 - `.yoetz/checks.toml` — fixed schema `yoetz.approved-check-policy/1`; raw bytes produce the trust
   digest. Repository content proposes no authority. One trusted-local exact-digest confirmation is
   retained as an encrypted workspace-scoped record. Any byte change is untrusted.
