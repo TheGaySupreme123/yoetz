@@ -230,7 +230,10 @@ def test_platform_verifiers_split_suites_and_bound_linux_alpha_claims() -> None:
     for verifier in (linux, macos):
         assert "uv run --locked pytest tests/packaging \\" in verifier
         assert 'tagged_uv_wrapper="${{ runner.temp }}/tagged-uv-bin"' in verifier
-        assert 'exec "${YOETZ_REAL_UV:?}" pip install --no-index "$@"' in verifier
+        assert 'if [[ "$argument" == "--no-index" ]]' in verifier
+        assert 'set -- --no-index "$@"' in verifier
+        assert 'exec "${YOETZ_REAL_UV:?}" pip install "$@"' in verifier
+        assert 'pip install --no-index "$@"' not in verifier
         assert 'PATH="$tagged_uv_wrapper:$PATH" \\' in verifier
         assert 'UV_CACHE_DIR="${{ runner.temp }}/tagged-offline-cache" \\' in verifier
         assert ".venv/bin/pytest \\" in verifier

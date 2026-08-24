@@ -485,7 +485,17 @@ jobs:
           set -euo pipefail
           if [[ "${1:-}" == "pip" && "${2:-}" == "install" ]]; then
             shift 2
-            exec "${YOETZ_REAL_UV:?}" pip install --no-index "$@"
+            has_no_index=false
+            for argument in "$@"; do
+              if [[ "$argument" == "--no-index" ]]; then
+                has_no_index=true
+                break
+              fi
+            done
+            if [[ "$has_no_index" == false ]]; then
+              set -- --no-index "$@"
+            fi
+            exec "${YOETZ_REAL_UV:?}" pip install "$@"
           fi
           exec "${YOETZ_REAL_UV:?}" "$@"
           UV_WRAPPER
@@ -595,7 +605,17 @@ jobs:
           set -euo pipefail
           if [[ "${1:-}" == "pip" && "${2:-}" == "install" ]]; then
             shift 2
-            exec "${YOETZ_REAL_UV:?}" pip install --no-index "$@"
+            has_no_index=false
+            for argument in "$@"; do
+              if [[ "$argument" == "--no-index" ]]; then
+                has_no_index=true
+                break
+              fi
+            done
+            if [[ "$has_no_index" == false ]]; then
+              set -- --no-index "$@"
+            fi
+            exec "${YOETZ_REAL_UV:?}" pip install "$@"
           fi
           exec "${YOETZ_REAL_UV:?}" "$@"
           UV_WRAPPER
