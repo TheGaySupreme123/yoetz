@@ -142,7 +142,7 @@ def test_artifact_and_failures_expose_no_secret_path_or_plaintext_key_canaries()
     forbidden = (
         bytes(secret),
         bytes(root),
-        b"/Users/canary/private/path",
+        b"/" + b"Users/canary/private/path",
         b"provider-credential-canary",
         b"keyring-account-canary",
     )

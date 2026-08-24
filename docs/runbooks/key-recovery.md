@@ -113,11 +113,27 @@ Provision compact and/or self-contained recovery while the service is ready:
 5. Re-run the clean-profile drill after rotation or a recovery-format/platform change.
 
 After unlock loss, run `yoetz service recovery status`. If the set is external, stop the daemon and
-run `yoetz service recovery import`; then run the exact reported
-`yoetz service recovery restore` command. Select the set only in an allowlisted native picker when
-that platform cell exists, otherwise in the trusted terminal. Enter the recovery secret and a
-distinct new vault passphrase there, then wait for the verified atomic switch. Agents show the
-exact command and suspend the original operation, but never receive the set path or either secret.
+run `yoetz service recovery import`. An imported archive is only *staged*: its header is not
+authenticated, so it never becomes the active generation on import and whatever generation was
+already in force stays usable if the import turns out to be the wrong one.
+
+Then run the exact reported `yoetz service recovery restore` command. Select the set only in an
+allowlisted native picker when that platform cell exists, otherwise in the trusted terminal.
+
+Restoring into a clean profile takes two invocations, because its phases need opposite things:
+
+1. With the daemon still stopped, `yoetz service recovery restore` installs the encrypted snapshot
+   into the empty profile. This step holds the service's singleton exclusion, so no daemon may be
+   running, and Yoetz never starts one for you. It reports `snapshot_installed` and stops there.
+2. Start the service (`yoetz service run`), then run `yoetz service recovery restore` again. This
+   invocation finds the installed marker, skips straight to the ceremony, and is where you enter
+   the recovery secret and a distinct new vault passphrase.
+
+The imported set is published as the active generation only after that ceremony authenticates it,
+at the same commit point as the installation marker. Wait for the verified atomic switch. A wrong
+secret changes nothing and is safe to retry, though repeated failures accumulate the same unlock
+delay an ordinary passphrase attempt does. Agents show the exact command and suspend the original
+operation, but never receive the set path or either secret.
 Rotation and revocation also require a new vault passphrase because both re-encrypt the vault under
 a new root. They are forward-only: a revoked set cannot open
 post-rotation state, while an old copied snapshot paired with its old valid material remains

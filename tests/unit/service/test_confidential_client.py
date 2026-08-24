@@ -22,6 +22,8 @@ from yoetz.service.confidential_protocol import (
     EmptyVaultTarget,
     HumanCeremonyBinding,
     HumanCeremonyKind,
+    InstallationRecoveryPreview,
+    InstallationRecoveryTarget,
     SecretIngressBinding,
     SecretRequiredPhase,
     ServerCloseEnvelope,
@@ -244,3 +246,138 @@ def test_confidential_clients_have_no_raw_endpoint_or_secret_constructor() -> No
         )(lambda: None, object(), _token=None)
     assert not hasattr(HumanControlClient, "connect_secret")
     assert "HumanEnvelope" in confidential_protocol.__all__
+
+
+class _RecoveryStream:
+    """Serves the exact frame the daemon opens a provision ceremony with: a reauth secret phase.
+
+    Provision, rotation, and revocation all reauthenticate against the ready vault before any
+    recovery secret is collected, so `SECURITY_REAUTHENTICATION` is the first purpose the client
+    ever sees for this ceremony. Omitting it from the per-kind allowlist made the trusted client
+    hang up with `correlation_mismatch` on the daemon's very first phase.
+    """
+
+    def __init__(self, purpose: ConfidentialSecretPurpose) -> None:
+        self.peer_identity = object()
+        self._purpose = purpose
+        self._incoming = bytearray()
+        self._ready = asyncio.Condition()
+        self.closed = False
+
+    async def receive(self, max_bytes: int) -> bytes:
+        async with self._ready:
+            await self._ready.wait_for(lambda: bool(self._incoming) or self.closed)
+            if not self._incoming:
+                return b""
+            size = min(max_bytes, len(self._incoming))
+            result = bytes(self._incoming[:size])
+            del self._incoming[:size]
+            return result
+
+    async def send_all(self, data: Buffer) -> None:
+        frame = decode_human_frame(bytes(data))
+        if type(frame) is not ClientOpenEnvelope:
+            return
+        target = cast(InstallationRecoveryTarget, frame.target)
+        opened = ServerOpenedEnvelope(
+            ceremony_id=_CEREMONY_ID,
+            step=1,
+            binding=HumanCeremonyBinding(
+                binding_version=1,
+                ceremony_id=_CEREMONY_ID,
+                connection_nonce=frame.connection_nonce,
+                ceremony_kind=frame.ceremony_kind,
+                service_instance_id=_SERVICE_ID,
+                service_generation=1,
+                vault_generation=2,
+                policy_generation=None,
+                target_digest=target.confirmed_plan_digest,
+                expires_at_monotonic_ms=_expiry(),
+            ),
+            preview=InstallationRecoveryPreview(
+                operation=target.operation,
+                request_id=target.request_id,
+                confirmed_plan_digest=target.confirmed_plan_digest,
+                recovery_generation=target.recovery_generation,
+                set_mode=target.set_mode,
+                secret_kind=target.secret_kind,
+                target_envelope=target.target_envelope,
+                item_count=1,
+                total_bytes=0,
+                native_prompt_available=False,
+            ),
+            phase=SecretRequiredPhase(
+                binding=SecretIngressBinding(
+                    binding_version=1,
+                    ceremony_id=_CEREMONY_ID,
+                    secret_challenge="3" * 64,
+                    purpose=self._purpose,
+                    service_instance_id=_SERVICE_ID,
+                    service_generation=1,
+                    vault_generation=2,
+                    policy_generation=None,
+                    target_digest=target.confirmed_plan_digest,
+                    expires_at_monotonic_ms=_expiry(),
+                )
+            ),
+        )
+        async with self._ready:
+            self._incoming.extend(encode_human_frame(opened))
+            self._ready.notify_all()
+
+    async def shutdown_write(self) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        async with self._ready:
+            self.closed = True
+            self._ready.notify_all()
+
+
+def _recovery_target() -> InstallationRecoveryTarget:
+    unbound = InstallationRecoveryTarget(
+        operation="provision",
+        request_id="req_00000000-0000-4000-8000-000000000009",
+        confirmed_plan_digest=_DIGEST,
+        recovery_generation=1,
+        set_mode="compact",
+        secret_kind="generated_code",
+        target_envelope="preserve",
+    )
+    return InstallationRecoveryTarget(
+        unbound.operation,
+        unbound.request_id,
+        unbound.plan_digest(),
+        unbound.recovery_generation,
+        unbound.set_mode,
+        unbound.secret_kind,
+        unbound.target_envelope,
+    )
+
+
+async def _open_recovery(purpose: ConfidentialSecretPurpose) -> None:
+    stream = _RecoveryStream(purpose)
+
+    async def connect_human() -> AuthenticatedUnixStream:
+        return cast(AuthenticatedUnixStream, stream)
+
+    async def connect_secret() -> AuthenticatedUnixStream:
+        raise AssertionError("no secret connection is opened while observing the first phase")
+
+    factory = getattr(HumanControlClient, "_with_connectors")
+    client = cast(HumanControlClient, factory(connect_human, connect_secret, timeout_seconds=1.0))
+    try:
+        await client.open(HumanCeremonyKind.INSTALLATION_RECOVERY, _recovery_target())
+    finally:
+        await client.close()
+
+
+@pytest.mark.anyio
+async def test_recovery_client_accepts_the_security_reauthentication_frame() -> None:
+    await _open_recovery(ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION)
+
+
+@pytest.mark.anyio
+async def test_recovery_client_still_refuses_a_purpose_this_ceremony_never_uses() -> None:
+    with pytest.raises(ConfidentialClientError, match="correlation_mismatch"):
+        await _open_recovery(ConfidentialSecretPurpose.PROVIDER_CREDENTIAL)

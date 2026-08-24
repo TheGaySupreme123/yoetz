@@ -9,6 +9,7 @@ import pytest
 
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.installation_recovery import (
+    InstallationRecoveryArtifact,
     InstallationRecoveryMetadata,
     InstallationRecoveryMode,
     InstallationRecoverySecretKind,
@@ -258,9 +259,7 @@ async def test_installation_recovery_verifies_metadata_and_selects_new_envelope(
     )
     with pytest.raises(VaultError, match="unlock_wrong"):
         await reopened.unlock(
-            reopened_memory.capture(
-                SecretPurpose.VAULT_UNLOCK, bytearray(b"correct horse battery")
-            )
+            reopened_memory.capture(SecretPurpose.VAULT_UNLOCK, bytearray(b"correct horse battery"))
         )
     assert (
         await reopened.unlock(
@@ -383,3 +382,75 @@ async def test_uninitialized_keyring_has_no_passphrase_fallback(tmp_path: Path) 
     assert status.mode is VaultMode.UNINITIALIZED
     assert status.state is VaultState.LOCKED
     assert status.reason == "keyring_unavailable"
+
+
+@pytest.mark.anyio
+async def test_the_pre_publication_drill_reopens_the_persisted_set(tmp_path: Path) -> None:
+    """ADR-024 step 5: prove the set opens this vault before anything advertises it.
+
+    Marking a generation `completed` without ever reopening it means a set that cannot actually
+    be opened is discovered during a real recovery, when the person who could redo the ceremony
+    is long gone.
+    """
+
+    memory = LocalSecretMemory()
+    service = _service(tmp_path, memory, _Clock())
+    await _initialize(service, memory)
+    secret = bytearray(b"correct horse battery staple")
+    persisted: list[InstallationRecoveryArtifact] = []
+
+    def _publish(built: InstallationRecoveryArtifact) -> InstallationRecoveryArtifact:
+        persisted.append(built)
+        return built
+
+    artifact = await service.build_and_verify_installation_recovery_artifact(
+        memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(secret)),
+        recovery_generation=1,
+        mode=InstallationRecoveryMode.COMPACT,
+        secret_kind=InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
+        snapshot_manifest_digest=None,
+        publish=_publish,
+    )
+    assert persisted == [artifact]
+    # The drill's own reopen is the proof, and the set stays usable afterwards.
+    recovered = unlock_installation_recovery_artifact(
+        artifact,
+        memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(secret)),
+    )
+    assert recovered.recovery_generation == 1
+    memory.close()
+
+
+@pytest.mark.anyio
+async def test_a_set_that_does_not_survive_staging_is_never_published(tmp_path: Path) -> None:
+    """The drill reopens what staging actually wrote, so corruption in between is caught."""
+
+    memory = LocalSecretMemory()
+    service = _service(tmp_path, memory, _Clock())
+    await _initialize(service, memory)
+    secret = bytearray(b"correct horse battery staple")
+
+    foreign = await service.build_installation_recovery_artifact(
+        memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(b"a different secret here")),
+        recovery_generation=1,
+        mode=InstallationRecoveryMode.COMPACT,
+        secret_kind=InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
+        snapshot_manifest_digest=None,
+    )
+
+    def _publish_something_else(
+        built: InstallationRecoveryArtifact,
+    ) -> InstallationRecoveryArtifact:
+        del built
+        return foreign
+
+    with pytest.raises(VaultError, match="recovery_artifact_invalid"):
+        await service.build_and_verify_installation_recovery_artifact(
+            memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(secret)),
+            recovery_generation=1,
+            mode=InstallationRecoveryMode.COMPACT,
+            secret_kind=InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
+            snapshot_manifest_digest=None,
+            publish=_publish_something_else,
+        )
+    memory.close()

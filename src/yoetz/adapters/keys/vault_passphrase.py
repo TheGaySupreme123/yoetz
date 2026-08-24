@@ -34,8 +34,8 @@ __all__ = [
     "VaultRootEnvelope",
     "create_vault_root_envelope",
     "derive_passphrase_subkeys",
-    "unlock_vault_root_envelope",
     "rewrap_vault_root_envelope",
+    "unlock_vault_root_envelope",
     "validate_kdf_parameters",
     "validate_passphrase_view",
 ]

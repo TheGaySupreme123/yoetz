@@ -101,9 +101,7 @@ def test_root_rotation_reencrypts_every_record_and_preserves_commitment_root(
         {"task_id": _TASK_ID, "key_slot": "bmk-test"},
         _capture(memory, b"bundle-key", SecretPurpose.VAULT_ROOT_KEY),
     )
-    before_mac_root = store.installation_mac_root().consume(
-        SecretConsumer.VAULT_ROOT, bytes
-    )
+    before_mac_root = store.installation_mac_root().consume(SecretConsumer.VAULT_ROOT, bytes)
 
     prepared = store.prepare_root_rotation(
         _capture(memory, new_root, SecretPurpose.VAULT_ROOT_KEY),
@@ -112,9 +110,7 @@ def test_root_rotation_reencrypts_every_record_and_preserves_commitment_root(
 
     old_candidate = EncryptedVaultStore(prepared.stage)
     with pytest.raises(EncryptedVaultError):
-        old_candidate.initialize(
-            _capture(memory, old_root, SecretPurpose.VAULT_ROOT_KEY)
-        )
+        old_candidate.initialize(_capture(memory, old_root, SecretPurpose.VAULT_ROOT_KEY))
 
     rotated = EncryptedVaultStore(prepared.stage)
     rotated.initialize(_capture(memory, new_root, SecretPurpose.VAULT_ROOT_KEY))
@@ -125,12 +121,9 @@ def test_root_rotation_reencrypts_every_record_and_preserves_commitment_root(
     )
     assert loaded.consume(SecretConsumer.VAULT_ROOT, bytes) == b"bundle-key"
     assert (
-        rotated.installation_mac_root().consume(SecretConsumer.VAULT_ROOT, bytes)
-        == before_mac_root
+        rotated.installation_mac_root().consume(SecretConsumer.VAULT_ROOT, bytes) == before_mac_root
     )
-    parsed_wrapper: object = json.loads(
-        (prepared.stage / "vault-index.json").read_bytes()
-    )
+    parsed_wrapper: object = json.loads((prepared.stage / "vault-index.json").read_bytes())
     assert type(parsed_wrapper) is dict
     wrapper = cast(dict[str, object], parsed_wrapper)
     assert type(wrapper["index"]) is dict
@@ -140,12 +133,15 @@ def test_root_rotation_reencrypts_every_record_and_preserves_commitment_root(
         salt=b"yoetz/vault-internal-root/v1",
         info=b"yoetz/vault-record-locator/v1",
     ).derive(old_root)
-    legacy_index_mac = "hmac-sha256:" + hmac.digest(
-        old_locator,
-        b"yoetz/vault-record-index/v1\x00"
-        + canonical_encode(cast(dict[str, JsonValue], wrapper["index"])),
-        "sha256",
-    ).hex()
+    legacy_index_mac = (
+        "hmac-sha256:"
+        + hmac.digest(
+            old_locator,
+            b"yoetz/vault-record-index/v1\x00"
+            + canonical_encode(cast(dict[str, JsonValue], wrapper["index"])),
+            "sha256",
+        ).hex()
+    )
     assert wrapper["index_mac"] != legacy_index_mac
 
     disk = b"".join(path.read_bytes() for path in prepared.stage.iterdir())

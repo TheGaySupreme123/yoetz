@@ -12,6 +12,7 @@ import os
 import secrets
 import sqlite3
 import stat
+import urllib.parse
 import zipfile
 from dataclasses import dataclass
 from enum import Enum
@@ -64,6 +65,7 @@ _SET_FORMAT: Final = "yoetz-installation-recovery-set/1"
 _DIGEST_DOMAIN: Final = b"yoetz/installation-recovery-state/v1\x00"
 _SWAP_DIGEST_DOMAIN: Final = b"yoetz/installation-recovery-swap/v1\x00"
 _SNAPSHOT_FORMAT: Final = "yoetz-installation-snapshot/1"
+_PENDING_FORMAT: Final = "yoetz-installation-recovery-pending/1"
 _ARCHIVE_FORMAT: Final = "yoetz-installation-recovery-set/1"
 _MAX_ARCHIVE_MEMBERS: Final = 100_000
 _MAX_ARCHIVE_MEMBER_BYTES: Final = 8 * 1024 * 1024 * 1024
@@ -243,14 +245,18 @@ class _StateRecord:
             source = cast(dict[str, JsonValue], value)
             if canonical_encode(source) != encoded[:-1]:
                 raise ValueError
-            if set(source) != {
-                "active_generation",
-                "available_modes",
-                "continuation_id",
-                "format",
-                "lifecycle",
-                "record_digest",
-            } or source["format"] != _STATE_FORMAT:
+            if (
+                set(source)
+                != {
+                    "active_generation",
+                    "available_modes",
+                    "continuation_id",
+                    "format",
+                    "lifecycle",
+                    "record_digest",
+                }
+                or source["format"] != _STATE_FORMAT
+            ):
                 raise ValueError
             modes = source["available_modes"]
             if type(modes) is not list or any(type(mode) is not str for mode in modes):
@@ -261,11 +267,7 @@ class _StateRecord:
             generation = source["active_generation"]
             lifecycle = source["lifecycle"]
             digest = source["record_digest"]
-            if (
-                type(generation) is not int
-                or type(lifecycle) is not str
-                or type(digest) is not str
-            ):
+            if type(generation) is not int or type(lifecycle) is not str or type(digest) is not str:
                 raise ValueError
             return cls(
                 generation,
@@ -292,8 +294,7 @@ def _clean_restore_record(metadata: InstallationRecoveryMetadata) -> bytes:
         "snapshot_manifest_digest": metadata.snapshot_manifest_digest,
     }
     body["record_digest"] = (
-        "sha256:"
-        + hashlib.sha256(_SWAP_DIGEST_DOMAIN + canonical_encode(body)).hexdigest()
+        "sha256:" + hashlib.sha256(_SWAP_DIGEST_DOMAIN + canonical_encode(body)).hexdigest()
     )
     return canonical_encode(body) + b"\n"
 
@@ -318,9 +319,7 @@ def _read_clean_restore_record(path: Path) -> InstallationRecoveryMetadata:
         raise ValueError("installation_clean_restore_invalid")
     body = dict(source)
     record = body.pop("record_digest")
-    expected = "sha256:" + hashlib.sha256(
-        _SWAP_DIGEST_DOMAIN + canonical_encode(body)
-    ).hexdigest()
+    expected = "sha256:" + hashlib.sha256(_SWAP_DIGEST_DOMAIN + canonical_encode(body)).hexdigest()
     if source["format"] != "yoetz-installation-clean-restore/1" or record != expected:
         raise ValueError("installation_clean_restore_invalid")
     generation = source["recovery_generation"]
@@ -345,6 +344,101 @@ def _read_clean_restore_record(path: Path) -> InstallationRecoveryMetadata:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingImport:
+    """One staged-but-unauthenticated imported generation and its in-flight restore, if any.
+
+    An imported archive header is not evidence: anyone able to write a file can offer a
+    higher-numbered set.  The pending record keeps that material addressable without letting it
+    become installation authority, so the previously active generation survives a wrong import.
+    """
+
+    metadata: InstallationRecoveryMetadata
+    continuation_id: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.metadata) is not InstallationRecoveryMetadata:
+            raise TypeError("installation_recovery_pending_invalid")
+        if self.continuation_id is not None and (
+            type(self.continuation_id) is not str or not self.continuation_id
+        ):
+            raise ValueError("installation_recovery_pending_invalid")
+
+    def body(self) -> dict[str, JsonValue]:
+        return {
+            "artifact_digest": self.metadata.artifact_digest,
+            "continuation_id": self.continuation_id,
+            "format": _PENDING_FORMAT,
+            "mode": self.metadata.mode.value,
+            "recovery_generation": self.metadata.recovery_generation,
+            "secret_kind": self.metadata.secret_kind.value,
+            "snapshot_manifest_digest": self.metadata.snapshot_manifest_digest,
+        }
+
+    def encode(self) -> bytes:
+        body = self.body()
+        body["record_digest"] = (
+            "sha256:" + hashlib.sha256(_SWAP_DIGEST_DOMAIN + canonical_encode(body)).hexdigest()
+        )
+        return canonical_encode(body) + b"\n"
+
+    @classmethod
+    def decode(cls, encoded: bytes) -> _PendingImport:
+        try:
+            if not encoded.endswith(b"\n") or encoded.endswith(b"\n\n"):
+                raise ValueError
+            value = strict_json_parse(encoded[:-1])
+            if type(value) is not dict:
+                raise ValueError
+            source = cast(dict[str, JsonValue], value)
+            if canonical_encode(source) != encoded[:-1] or set(source) != {
+                "artifact_digest",
+                "continuation_id",
+                "format",
+                "mode",
+                "record_digest",
+                "recovery_generation",
+                "secret_kind",
+                "snapshot_manifest_digest",
+            }:
+                raise ValueError
+            body = dict(source)
+            record = body.pop("record_digest")
+            expected = (
+                "sha256:" + hashlib.sha256(_SWAP_DIGEST_DOMAIN + canonical_encode(body)).hexdigest()
+            )
+            generation = source["recovery_generation"]
+            mode = source["mode"]
+            kind = source["secret_kind"]
+            artifact_digest = source["artifact_digest"]
+            snapshot = source["snapshot_manifest_digest"]
+            continuation = source["continuation_id"]
+            if (
+                source["format"] != _PENDING_FORMAT
+                or type(record) is not str
+                or record != expected
+                or type(generation) is not int
+                or type(mode) is not str
+                or type(kind) is not str
+                or type(artifact_digest) is not str
+                or (snapshot is not None and type(snapshot) is not str)
+                or (continuation is not None and type(continuation) is not str)
+            ):
+                raise ValueError
+            return cls(
+                InstallationRecoveryMetadata(
+                    generation,
+                    InstallationRecoveryMode(mode),
+                    InstallationRecoverySecretKind(kind),
+                    artifact_digest,
+                    snapshot,
+                ),
+                continuation,
+            )
+        except (ProtocolValueError, TypeError, ValueError) as exc:
+            raise ValueError("installation_recovery_pending_invalid") from exc
+
+
 class InstallationRecoverySetStore:
     """Crash-safe owner of daemon-managed recovery artifacts and their structural marker."""
 
@@ -353,6 +447,7 @@ class InstallationRecoverySetStore:
         self._sets = self._root / "sets"
         self._state_path = self._root / "state.json"
         self._clean_restore_path = self._root / "clean-restore.json"
+        self._pending_path = self._root / "pending-import.json"
 
     def publish(self, artifact: InstallationRecoveryArtifact) -> InstallationRecoveryMetadata:
         """Publish one verified artifact generation without overwriting any older generation."""
@@ -382,7 +477,14 @@ class InstallationRecoverySetStore:
         ensure_owner_only_dir(self._sets)
         target = self._sets / str(metadata.recovery_generation)
         if target.exists():
-            raise FileExistsError("installation_recovery_generation_exists")
+            # A failure or crash between staging and commit leaves a directory no durable marker
+            # points at.  Refusing it forever would wedge every later attempt at the same
+            # generation number, because the next attempt recomputes the same number, so reclaim
+            # orphaned material and refuse only a genuine collision with published authority.
+            if not self._generation_is_orphaned(metadata.recovery_generation):
+                raise FileExistsError("installation_recovery_generation_exists")
+            _remove_stage(target)
+            _fsync_dir(self._sets)
         stage = self._sets / f".{metadata.recovery_generation}.{secrets.token_hex(16)}.tmp"
         try:
             ensure_owner_only_dir(stage)
@@ -401,10 +503,37 @@ class InstallationRecoverySetStore:
                 raise OSError("installation_recovery_publish_verify_failed")
             return metadata
         finally:
-            try:
-                stage.rmdir()
-            except OSError:
-                pass
+            # The stage holds an artifact file (and, for a self-contained set, a whole snapshot
+            # tree) whenever publication failed part-way, so an empty-directory removal would
+            # silently leak it.
+            _remove_stage(stage)
+
+    def _generation_is_orphaned(self, recovery_generation: int) -> bool:
+        """Return whether no durable marker claims this staged generation."""
+
+        state = self._load_state_optional()
+        if state is not None and recovery_generation <= state.active_generation:
+            return False
+        pending = self._pending_import_optional()
+        return pending is None or pending.metadata.recovery_generation != recovery_generation
+
+    def discard_staged_generation(self, recovery_generation: int) -> None:
+        """Remove one staged-but-unpublished generation after a failed provision or rotation.
+
+        Material any durable marker still points at is never removed: only a stage nothing
+        advertises is disposable.  Without this, an interrupted attempt leaves a directory that
+        makes the identical retry fail with `installation_recovery_generation_exists` forever.
+        """
+
+        if type(recovery_generation) is not int or recovery_generation <= 0:
+            raise ValueError("recovery_generation_invalid")
+        if not self._generation_is_orphaned(recovery_generation):
+            return
+        target = self._sets / str(recovery_generation)
+        if not target.exists():
+            return
+        _remove_stage(target)
+        _fsync_dir(self._sets)
 
     def prepare_snapshot(
         self,
@@ -479,9 +608,7 @@ class InstallationRecoverySetStore:
             raise TypeError("installation_snapshot_invalid")
         _remove_stage(snapshot._stage)  # pyright: ignore[reportPrivateUsage]
 
-    def _bundle_files(
-        self, *, vault_override: Path | None = None
-    ) -> tuple[tuple[str, Path], ...]:
+    def _bundle_files(self, *, vault_override: Path | None = None) -> tuple[tuple[str, Path], ...]:
         members: list[tuple[str, Path]] = []
         allowed_top_level = {
             "catalog.sqlite3",
@@ -617,10 +744,11 @@ class InstallationRecoverySetStore:
         """Withdraw the active managed generation while retaining ciphertext for audit/rollback."""
 
         state = self._load_state()
-        if (
-            state.active_generation != recovery_generation
-            or state.lifecycle not in {"provisioned", "recovered", "revoked"}
-        ):
+        if state.active_generation != recovery_generation or state.lifecycle not in {
+            "provisioned",
+            "recovered",
+            "revoked",
+        }:
             raise RuntimeError("installation_recovery_state_conflict")
         if state.lifecycle == "revoked":
             return
@@ -738,8 +866,13 @@ class InstallationRecoverySetStore:
                 self._verify_prepared_snapshot(prepared)
             elif snapshot_names:
                 raise ValueError("installation_recovery_import_invalid")
+            # Only file contents were fsynced during extraction.  The snapshot tree is renamed
+            # into the published set by `stage`, so its directories must be durable first.
+            _fsync_tree(incoming)
             staged_metadata = self.stage(artifact, prepared)
-            self.activate(staged_metadata)
+            # Deliberately not activated: the archive header is unauthenticated, so an imported
+            # set stays pending until the restore ceremony proves it with a real secret.
+            self._write_pending(_PendingImport(staged_metadata, None))
             return staged_metadata
         except (OSError, ValueError, zipfile.BadZipFile) as exc:
             raise ValueError("installation_recovery_import_invalid") from exc
@@ -759,7 +892,10 @@ class InstallationRecoverySetStore:
         if (bundle / "installation-state.json").exists():
             artifact = self.load(recovery_generation)
             metadata = self.metadata(recovery_generation)
-            if self.admits_clean_restore(artifact) and metadata.snapshot_manifest_digest is not None:
+            if (
+                self.admits_clean_restore(artifact)
+                and metadata.snapshot_manifest_digest is not None
+            ):
                 return metadata.snapshot_manifest_digest
             raise RuntimeError("installation_recovery_target_not_pristine")
         metadata = self.metadata(recovery_generation)
@@ -770,11 +906,7 @@ class InstallationRecoverySetStore:
         item_count, _total_bytes, manifest_digest = _snapshot_facts(snapshot)
         if item_count <= 0 or manifest_digest != metadata.snapshot_manifest_digest:
             raise ValueError("installation_snapshot_manifest_invalid")
-        unexpected = [
-            path
-            for path in bundle.iterdir()
-            if path.name != "installation-recovery"
-        ]
+        unexpected = [path for path in bundle.iterdir() if path.name != "installation-recovery"]
         if unexpected:
             raise RuntimeError("installation_recovery_target_ambiguous")
         token = secrets.token_hex(16)
@@ -796,7 +928,11 @@ class InstallationRecoverySetStore:
             ensure_owner_only_dir(recovery_target)
             ensure_owner_only_dir(recovery_target / "sets")
             _copy_private_tree(source_set, recovery_target / "sets" / str(recovery_generation))
-            _copy_private_file(self._state_path, recovery_target / "state.json")
+            if self._state_path.exists():
+                _copy_private_file(self._state_path, recovery_target / "state.json")
+            pending = self._pending_import_optional()
+            if pending is not None:
+                _write_exclusive(recovery_target / "pending-import.json", pending.encode())
             _write_exclusive(
                 recovery_target / "clean-restore.json",
                 _clean_restore_record(metadata),
@@ -842,6 +978,14 @@ class InstallationRecoverySetStore:
             raise
 
     def begin_recovery(self, recovery_generation: int) -> str:
+        pending = self._pending_import_optional()
+        if pending is not None and pending.metadata.recovery_generation == recovery_generation:
+            # An imported set is not installation authority yet, so its ceremony is tracked on
+            # the pending record alone.  Nothing in `state.json` moves, which is what keeps a
+            # failed or abandoned attempt from disturbing the generation already in force.
+            continuation = secrets.token_hex(32)
+            self._write_pending(_PendingImport(pending.metadata, continuation))
+            return continuation
         state = self._load_state()
         if state.active_generation != recovery_generation or state.lifecycle not in {
             "provisioned",
@@ -861,6 +1005,13 @@ class InstallationRecoverySetStore:
         return continuation
 
     def finish_recovery(self, continuation_id: str, *, success: bool) -> None:
+        pending = self._pending_import_optional()
+        if pending is not None and pending.continuation_id == continuation_id:
+            # A successful restore already published the set at its marker-commit point, which
+            # clears the pending record; reaching here means the attempt did not commit, so the
+            # set simply returns to pending and stays retryable.
+            self._write_pending(_PendingImport(pending.metadata, None))
+            return
         state = self._load_state()
         if success and state.lifecycle == "recovered":
             return
@@ -880,33 +1031,38 @@ class InstallationRecoverySetStore:
         )
 
     def finalize_committed_recovery(self, recovery_generation: int) -> None:
-        """Idempotently finish state after the installation marker selected recovery."""
+        """Idempotently finish state after the installation marker selected recovery.
 
+        This runs at the marker-commit point, which is downstream of artifact authentication, so
+        it is the first moment an imported set has proven it belongs to this installation and the
+        only place an import is allowed to become the active generation.
+        """
+
+        published = False
+        pending = self._pending_import_optional()
+        if pending is not None and pending.metadata.recovery_generation == recovery_generation:
+            self.activate(pending.metadata)
+            self._clear_pending()
+            published = True
         state = self._load_state()
         if state.active_generation != recovery_generation:
             raise RuntimeError("installation_recovery_state_conflict")
         if state.lifecycle == "recovered":
             return
-        if state.lifecycle != "recovering":
+        if state.lifecycle != "recovering" and not (published and state.lifecycle == "provisioned"):
             raise RuntimeError("installation_recovery_state_conflict")
-        _write_atomic(
-            self._state_path,
-            _StateRecord.create(
-                state.active_generation,
-                state.available_modes,
-                "recovered",
-                None,
-            ).encode(),
-        )
-        try:
-            self._clean_restore_path.unlink()
-            _fsync_dir(self._root)
-        except FileNotFoundError:
-            pass
+        self._mark_recovered(state)
 
     def rollback_interrupted_recovery(self, recovery_generation: int) -> None:
         """Return an uncommitted restart-interrupted ceremony to provisioned state."""
 
+        pending = self._pending_import_optional()
+        if pending is not None and pending.metadata.recovery_generation == recovery_generation:
+            # Nothing was published, so the generation already in force is intact by
+            # construction; the import only stops claiming an attempt is under way.
+            if pending.continuation_id is not None:
+                self._write_pending(_PendingImport(pending.metadata, None))
+            return
         state = self._load_state()
         if state.active_generation != recovery_generation:
             raise RuntimeError("installation_recovery_state_conflict")
@@ -930,13 +1086,22 @@ class InstallationRecoverySetStore:
         try:
             observed = _read_clean_restore_record(self._clean_restore_path)
             metadata = _metadata_from_artifact(artifact)
-            state = self._load_state()
+            state = self._load_state_optional()
+            pending = self._pending_import_optional()
+            # A quarantine installed from a still-pending import has no published state yet, so
+            # either durable marker may name the generation this artifact belongs to.
+            selected = (
+                state is not None and state.active_generation == metadata.recovery_generation
+            ) or (
+                pending is not None
+                and pending.metadata.recovery_generation == metadata.recovery_generation
+            )
             return (
                 observed == metadata
-                and state.active_generation == metadata.recovery_generation
+                and selected
                 and metadata.mode is InstallationRecoveryMode.SELF_CONTAINED
             )
-        except (FileNotFoundError, OSError, TypeError, ValueError):
+        except FileNotFoundError, OSError, TypeError, ValueError:
             return False
 
     def status(
@@ -949,6 +1114,22 @@ class InstallationRecoverySetStore:
         proven_unrecoverable: bool = False,
     ) -> InstallationRecoveryStatus:
         state = self._load_state_optional()
+        pending = self._pending_import_optional()
+        if (
+            pending is not None
+            and not vault_ready
+            and (state is None or pending.metadata.recovery_generation > state.active_generation)
+        ):
+            # A pending import is the exact material the next restore consumes, so it must be
+            # visible; it is deliberately not reported as an active generation.
+            return InstallationRecoveryStatus(
+                InstallationRecoveryState.RECOVERY_MATERIAL_REQUIRED,
+                "imported_set_pending_restore",
+                pending.metadata.recovery_generation,
+                (pending.metadata.mode.value,),
+                pending.continuation_id,
+                "yoetz service recovery restore",
+            )
         if not installation_exists:
             if state is not None:
                 if state.lifecycle == "revoked":
@@ -1056,6 +1237,44 @@ class InstallationRecoverySetStore:
             None,
             "yoetz service recovery status",
         )
+
+    def pending_import(self) -> InstallationRecoveryMetadata | None:
+        """Return the staged-but-unauthenticated imported generation, when one exists."""
+
+        pending = self._pending_import_optional()
+        return None if pending is None else pending.metadata
+
+    def _pending_import_optional(self) -> _PendingImport | None:
+        try:
+            return _PendingImport.decode(_read_private(self._pending_path, _MAX_STATE_BYTES))
+        except FileNotFoundError:
+            return None
+
+    def _write_pending(self, pending: _PendingImport) -> None:
+        _write_atomic(self._pending_path, pending.encode())
+
+    def _clear_pending(self) -> None:
+        try:
+            self._pending_path.unlink()
+            _fsync_dir(self._root)
+        except FileNotFoundError:
+            pass
+
+    def _mark_recovered(self, state: _StateRecord) -> None:
+        _write_atomic(
+            self._state_path,
+            _StateRecord.create(
+                state.active_generation,
+                state.available_modes,
+                "recovered",
+                None,
+            ).encode(),
+        )
+        try:
+            self._clean_restore_path.unlink()
+            _fsync_dir(self._root)
+        except FileNotFoundError:
+            pass
 
     def _load_state(self) -> _StateRecord:
         state = self._load_state_optional()
@@ -1208,8 +1427,7 @@ def _write_swap_journal(
         "stage_name": stage_name,
     }
     body["record_digest"] = (
-        "sha256:"
-        + hashlib.sha256(_SWAP_DIGEST_DOMAIN + canonical_encode(body)).hexdigest()
+        "sha256:" + hashlib.sha256(_SWAP_DIGEST_DOMAIN + canonical_encode(body)).hexdigest()
     )
     data = canonical_encode(body) + b"\n"
     temp = path.parent / f".{path.name}.{secrets.token_hex(16)}.tmp"
@@ -1244,9 +1462,7 @@ def _read_swap_journal(path: Path) -> tuple[str, str, str, str]:
     record = source["record_digest"]
     body = dict(source)
     del body["record_digest"]
-    expected = "sha256:" + hashlib.sha256(
-        _SWAP_DIGEST_DOMAIN + canonical_encode(body)
-    ).hexdigest()
+    expected = "sha256:" + hashlib.sha256(_SWAP_DIGEST_DOMAIN + canonical_encode(body)).hexdigest()
     values = (
         source["bundle_name"],
         source["stage_name"],
@@ -1432,7 +1648,7 @@ def _snapshot_facts(snapshot: Path) -> tuple[int, int, str]:
 
 
 def _backup_sqlite(source: Path, destination: Path) -> None:
-    source_uri = f"file:{source.as_posix()}?mode=ro"
+    source_uri = "file:" + urllib.parse.quote(source.as_posix(), safe="/:") + "?mode=ro"
     source_connection = sqlite3.connect(source_uri, uri=True, timeout=30.0)
     destination_connection = sqlite3.connect(destination, timeout=30.0)
     try:

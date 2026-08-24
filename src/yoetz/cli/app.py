@@ -1671,9 +1671,7 @@ def service_recovery_rotate(
 ) -> None:
     """Replace the active recovery generation after local reauthentication."""
 
-    _finish(
-        run_async(lambda: _service_recovery_create("rotate", mode, secret_kind, json_output))
-    )
+    _finish(run_async(lambda: _service_recovery_create("rotate", mode, secret_kind, json_output)))
 
 
 @recovery_app.command("revoke")

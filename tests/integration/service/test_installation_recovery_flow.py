@@ -163,9 +163,7 @@ async def test_self_contained_clean_profile_restores_same_vault_authority(
     assert policy_app is not None
     policy_scope = AuthorizationScope(AuthorizationScopeKind.MACHINE, INSTALLATION_ID)
     original_policy = await policy_app.policy_store.effective_policy(policy_scope)
-    provider_binding = provider_credential_profile_binding(
-        "openai", "gpt-5", "responses", "1"
-    )
+    provider_binding = provider_credential_profile_binding("openai", "gpt-5", "responses", "1")
     provider_target = provider_binding.target_digest("set")
     await vault.store_provider_credential(
         "set",
@@ -245,9 +243,7 @@ async def test_self_contained_clean_profile_restores_same_vault_authority(
     continuation = clean_sets.begin_recovery(1)
     result = await recovered_vault.recover_passphrase(
         clean_sets.load(1),
-        clean_memory.capture(
-            SecretPurpose.INSTALLATION_RECOVERY, bytearray(recovery_secret)
-        ),
+        clean_memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(recovery_secret)),
         clean_memory.capture(
             SecretPurpose.VAULT_REWRAP,
             bytearray(b"clean profile new horse battery"),
@@ -282,9 +278,7 @@ async def test_self_contained_clean_profile_restores_same_vault_authority(
         assert objects >= 1
         recovered_policy_app = clean_app.privacy.policy_application
         assert recovered_policy_app is not None
-        recovered_policy = await recovered_policy_app.policy_store.effective_policy(
-            policy_scope
-        )
+        recovered_policy = await recovered_policy_app.policy_store.effective_policy(policy_scope)
         assert recovered_policy.effective_digest == original_policy.effective_digest
 
         checked = await clean_app.check(
@@ -335,9 +329,7 @@ async def test_self_contained_clean_profile_restores_same_vault_authority(
                 raise OSError("simulated_crash_after_recovery_marker_switch")
             original_finalize(recovery_generation)
 
-        monkeypatch.setattr(
-            clean_sets, "finalize_committed_recovery", _interrupted_finalize
-        )
+        monkeypatch.setattr(clean_sets, "finalize_committed_recovery", _interrupted_finalize)
         recovered_vault.commit_recovery_marker()
         assert finalize_attempts == 2
         clean_sets.finish_recovery(continuation, success=True)
@@ -385,17 +377,17 @@ async def test_self_contained_clean_profile_restores_same_vault_authority(
         secret_memory=reopened_memory,
     )(1, reopened_vault.generation)
     try:
-        reopened_routes, reopened_events, reopened_objects = (
-            await reopened_app.verify_recovery_candidate()
-        )
+        (
+            reopened_routes,
+            reopened_events,
+            reopened_objects,
+        ) = await reopened_app.verify_recovery_candidate()
         assert reopened_routes == 1
         assert reopened_events >= events
         assert reopened_objects >= objects
         reopened_policy_app = reopened_app.privacy.policy_application
         assert reopened_policy_app is not None
-        reopened_policy = await reopened_policy_app.policy_store.effective_policy(
-            policy_scope
-        )
+        reopened_policy = await reopened_policy_app.policy_store.effective_policy(policy_scope)
         assert reopened_policy.effective_digest == original_policy.effective_digest
     finally:
         await reopened_app.close()
@@ -499,12 +491,15 @@ async def test_rotation_reencrypts_live_vault_and_revokes_older_artifact(
 
     assert activation_attempts == 2
     assert not (bundle / "installation-recovery" / "root-rotation-journal.json").exists()
-    assert sets.status(
-        installation_exists=True,
-        vault_ready=True,
-        ordinary_unlock_available=True,
-        auto_unlock_repairable=False,
-    ).active_generation == 2
+    assert (
+        sets.status(
+            installation_exists=True,
+            vault_ready=True,
+            ordinary_unlock_available=True,
+            auto_unlock_repairable=False,
+        ).active_generation
+        == 2
+    )
     assert await vault.load_bundle_keys(TASK_ID)
     assert (
         vault.installation_mac_handle(MacKeyPurpose.CATALOG_LOOKUP).mac(
@@ -521,18 +516,11 @@ async def test_rotation_reencrypts_live_vault_and_revokes_older_artifact(
     try:
         rejected = EncryptedVaultStore(bundle / "vault")
         with pytest.raises(EncryptedVaultError):
-            rejected.initialize(
-                memory.capture(SecretPurpose.VAULT_ROOT_KEY, bytearray(old_root))
-            )
+            rejected.initialize(memory.capture(SecretPurpose.VAULT_ROOT_KEY, bytearray(old_root)))
     finally:
         old_root[:] = b"\x00" * len(old_root)
 
-    assert (
-        bundle
-        / "installation-recovery"
-        / "rollback-vaults"
-        / "rotate-generation-2"
-    ).is_dir()
+    assert (bundle / "installation-recovery" / "rollback-vaults" / "rotate-generation-2").is_dir()
     await vault.lock()
     unlocked = await vault.unlock(
         memory.capture(
@@ -618,12 +606,7 @@ async def test_rotation_reencrypts_live_vault_and_revokes_older_artifact(
     )
     assert revoked.reason == "recovery_material_revoked"
     assert revoked.available_modes == ()
-    assert (
-        bundle
-        / "installation-recovery"
-        / "rollback-vaults"
-        / "revoke-generation-2"
-    ).is_dir()
+    assert (bundle / "installation-recovery" / "rollback-vaults" / "revoke-generation-2").is_dir()
 
     rotated_material = unlock_installation_recovery_artifact(
         new_artifact,

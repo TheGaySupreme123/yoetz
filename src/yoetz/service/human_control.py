@@ -187,9 +187,7 @@ class _InstallationRecoveryEffects(Protocol):
 
     def finish_installation_restore(self, continuation_id: str, *, success: bool) -> None: ...
 
-    async def cancel_installation_recovery(
-        self, target: InstallationRecoveryTarget
-    ) -> None: ...
+    async def cancel_installation_recovery(self, target: InstallationRecoveryTarget) -> None: ...
 
 
 @dataclass(slots=True)
@@ -643,12 +641,8 @@ class HumanControlService:
         if session.request.ceremony_kind is HumanCeremonyKind.INSTALLATION_RECOVERY:
             target = cast(InstallationRecoveryTarget, session.request.target)
             if target.operation == "revoke":
-                return self._advance_to_secret(
-                    session, ConfidentialSecretPurpose.VAULT_REWRAP
-                )
-            return self._advance_to_secret(
-                session, ConfidentialSecretPurpose.INSTALLATION_RECOVERY
-            )
+                return self._advance_to_secret(session, ConfidentialSecretPurpose.VAULT_REWRAP)
+            return self._advance_to_secret(session, ConfidentialSecretPurpose.INSTALLATION_RECOVERY)
         return await self._commit_authorized_change(session)
 
     async def _commit_authorized_change(
@@ -709,14 +703,16 @@ class HumanControlService:
         self, session: _Ceremony, purpose: ConfidentialSecretPurpose
     ) -> SecretRequiredPhase:
         challenge = session.unlock_challenge
-        # Reauthentication and the provider credential are two distinct one-shot YZS1 frames.
-        # The credential frame must not reuse the unlock challenge consumed by the preceding
+        # Reauthentication and every secret that follows it are distinct one-shot YZS1 frames.
+        # A following frame must not reuse the unlock challenge consumed by the preceding
         # reauthentication frame, or replay protection rejects it before accepting the socket.
+        # The unlock challenge still binds the ceremony; this value is only the frame nonce.
         secret_challenge = (
             challenge.challenge
             if challenge is not None
             and purpose
             not in {
+                ConfidentialSecretPurpose.INSTALLATION_RECOVERY,
                 ConfidentialSecretPurpose.PROVIDER_CREDENTIAL,
                 ConfidentialSecretPurpose.VAULT_REWRAP,
             }

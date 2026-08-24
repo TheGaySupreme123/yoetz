@@ -168,11 +168,13 @@ class IdleRelockCliResult:
 
 @dataclass(frozen=True, slots=True)
 class InstallationRecoveryImportResult:
-    outcome: Literal["imported", "exported"]
+    outcome: Literal["imported", "exported", "snapshot_installed"]
     recovery_generation: int
     set_mode: Literal["compact", "self_contained"]
     next_command: Literal[
-        "yoetz service recovery restore", "yoetz service recovery status"
+        "yoetz service recovery restore",
+        "yoetz service recovery status",
+        "yoetz service run",
     ]
 
 
@@ -293,6 +295,10 @@ def _verify_preview(
             and type(target) is InstallationRecoveryTarget
             and preview.operation == target.operation
             and preview.request_id == target.request_id
+            # Both sides of the binding comparison are server-supplied, so it proves only
+            # internal consistency.  Bind the plan to the digest this client computed for its
+            # own target as well, or a server-chosen plan passes unnoticed.
+            and preview.confirmed_plan_digest == target.confirmed_plan_digest
             and preview.confirmed_plan_digest == opened.binding.target_digest
             and preview.recovery_generation == target.recovery_generation
             and preview.set_mode == target.set_mode
@@ -691,18 +697,23 @@ def _needs_confirmation(
     target: HumanOpenTarget,
     purpose: ConfidentialSecretPurpose,
 ) -> bool:
-    return purpose in {
-        ConfidentialSecretPurpose.VAULT_INITIALIZE,
-        ConfidentialSecretPurpose.VAULT_REWRAP,
-    } or (
-        kind is HumanCeremonyKind.PORTABLE_RECOVERY
-        and type(target) is PortableRecoveryTarget
-        and target.operation == "create"
-    ) or (
-        kind is HumanCeremonyKind.INSTALLATION_RECOVERY
-        and type(target) is InstallationRecoveryTarget
-        and target.operation in {"provision", "rotate", "revoke"}
-        and target.secret_kind == "argon2id_passphrase"
+    return (
+        purpose
+        in {
+            ConfidentialSecretPurpose.VAULT_INITIALIZE,
+            ConfidentialSecretPurpose.VAULT_REWRAP,
+        }
+        or (
+            kind is HumanCeremonyKind.PORTABLE_RECOVERY
+            and type(target) is PortableRecoveryTarget
+            and target.operation == "create"
+        )
+        or (
+            kind is HumanCeremonyKind.INSTALLATION_RECOVERY
+            and type(target) is InstallationRecoveryTarget
+            and target.operation in {"provision", "rotate", "revoke"}
+            and target.secret_kind == "argon2id_passphrase"
+        )
     )
 
 
@@ -1252,9 +1263,7 @@ async def export_installation_recovery_set(
         if destination.exists():
             raise HumanCeremonyCliError("input_invalid")
         config = load_config({}, os.environ, None)
-        store = InstallationRecoverySetStore(
-            bundle_root(_data_dir=config.storage.data_dir)
-        )
+        store = InstallationRecoverySetStore(bundle_root(_data_dir=config.storage.data_dir))
         metadata = store.metadata(recovery_generation)
         store.export_generation(recovery_generation, destination)
         terminal.write("Recovery set exported. Keep it separate from the recovery secret.\n")
@@ -1293,8 +1302,10 @@ async def import_installation_recovery_set() -> InstallationRecoveryImportResult
                 bundle_root(_data_dir=config.storage.data_dir)
             ).import_archive(source)
         terminal.write(
-            f"Recovery set generation {metadata.recovery_generation} imported. "
-            "Run 'yoetz service recovery restore'.\n"
+            f"Recovery set generation {metadata.recovery_generation} imported and staged. "
+            "It is not active yet: the archive is unauthenticated until the restore ceremony "
+            "opens it with your recovery secret, so any generation already in force is "
+            "untouched.\nRun 'yoetz service recovery restore'.\n"
         )
     return InstallationRecoveryImportResult(
         "imported",
@@ -1306,8 +1317,16 @@ async def import_installation_recovery_set() -> InstallationRecoveryImportResult
 
 async def restore_installation_recovery(
     target: InstallationRecoveryTarget,
-) -> InstallationRecoveryResult:
-    """Restore through the trusted terminal; both secrets stay on confidential ingress."""
+) -> InstallationRecoveryResult | InstallationRecoveryImportResult:
+    """Restore through the trusted terminal; both secrets stay on confidential ingress.
+
+    Installing a snapshot into a pristine profile is an *offline* step: it holds the daemon's
+    singleton exclusion, so it can only run while the service is stopped.  The ceremony that
+    follows needs a running daemon, and this helper never starts one.  The two phases are
+    therefore two invocations of the same command rather than one that opens a socket nobody is
+    listening on.  The second invocation finds the installed marker and goes straight to the
+    ceremony, so resuming is just running `yoetz service recovery restore` again.
+    """
 
     if target.operation != "restore":
         raise ValueError("installation_recovery_target_invalid")
@@ -1327,6 +1346,19 @@ async def restore_installation_recovery(
             InstallationRecoverySetStore(bundle).install_snapshot_into_pristine(
                 target.recovery_generation
             )
+        with _ForegroundTerminal() as terminal:
+            terminal.write(
+                "Encrypted state installed. It is still locked, and the imported set is not "
+                "active yet.\nStart the service with 'yoetz service run', then run "
+                "'yoetz service recovery restore' again to enter the recovery secret and a new "
+                "vault passphrase.\n"
+            )
+        return InstallationRecoveryImportResult(
+            "snapshot_installed",
+            target.recovery_generation,
+            target.set_mode,
+            "yoetz service run",
+        )
     result = await run_human_ceremony(HumanCeremonyKind.INSTALLATION_RECOVERY, target)
     return cast(InstallationRecoveryResult, result)
 

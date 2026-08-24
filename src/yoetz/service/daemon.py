@@ -32,6 +32,8 @@ from yoetz.adapters.control.unix_socket import (
 )
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
 from yoetz.adapters.keys.installation_recovery import (
+    InstallationRecoveryArtifact,
+    InstallationRecoveryMetadata,
     InstallationRecoveryMode,
     InstallationRecoverySecretKind,
 )
@@ -967,12 +969,25 @@ class ServiceDaemon:
         request: ControlCallRequest,
         repository_privacy_context: RepositoryPrivacyContext | None,
     ) -> object:
-        async with self._composition.maintenance_gate:
+        # A recovery ceremony holds this same lock across an unbounded human wait, so an
+        # unbounded acquire would hang every ordinary call for as long as someone stares at a
+        # confirmation prompt. The caller's own deadline decides how long it is willing to wait.
+        gate = self._composition.maintenance_gate
+        if request.deadline_ms is None:
+            await gate.acquire()
+        else:
+            try:
+                await asyncio.wait_for(gate.acquire(), request.deadline_ms / 1_000)
+            except TimeoutError as exc:
+                raise ControlError("request_timeout", retryable=True) from exc
+        try:
             return await self._dispatch_ready_under_maintenance_gate(
                 projection_context,
                 request,
                 repository_privacy_context,
             )
+        finally:
+            gate.release()
 
     async def _dispatch_ready_under_maintenance_gate(
         self,
@@ -2184,9 +2199,7 @@ class _InstallationStateStore:
         except BaseException:
             self._reconcile_recovery_marker()
             if hmac.compare_digest(
-                _bytes_digest(
-                    _read_private_file(self._path, _MAX_INSTALLATION_MARKER_BYTES)
-                ),
+                _bytes_digest(_read_private_file(self._path, _MAX_INSTALLATION_MARKER_BYTES)),
                 _bytes_digest(new_marker),
             ):
                 return
@@ -2290,9 +2303,7 @@ class _InstallationStateStore:
         vault = self._path.parent / "vault"
         if (
             staged_vault.parent != vault.parent
-            or not staged_vault.name.startswith(
-                f".{vault.name}.root-{recovery_generation}."
-            )
+            or not staged_vault.name.startswith(f".{vault.name}.root-{recovery_generation}.")
             or not staged_vault.name.endswith(".tmp")
             or not staged_vault.is_dir()
             or not vault.is_dir()
@@ -2309,10 +2320,7 @@ class _InstallationStateStore:
         old_marker = _read_private_file(self._path, _MAX_INSTALLATION_MARKER_BYTES)
         rollback_markers = recovery_root / "rollback-markers"
         ensure_owner_only_dir(rollback_markers)
-        rollback_marker = (
-            rollback_markers
-            / f"root-{action}-generation-{recovery_generation}.json"
-        )
+        rollback_marker = rollback_markers / f"root-{action}-generation-{recovery_generation}.json"
         if rollback_marker.exists():
             raise RuntimeError("installation_recovery_generation_exists")
         _write_private_atomic(rollback_marker, old_marker)
@@ -2355,9 +2363,7 @@ class _InstallationStateStore:
         except BaseException:
             self._reconcile_root_rotation()
             if hmac.compare_digest(
-                _bytes_digest(
-                    _read_private_file(self._path, _MAX_INSTALLATION_MARKER_BYTES)
-                ),
+                _bytes_digest(_read_private_file(self._path, _MAX_INSTALLATION_MARKER_BYTES)),
                 _bytes_digest(new_marker),
             ):
                 return
@@ -2408,11 +2414,7 @@ class _InstallationStateStore:
             return
         try:
             value = strict_json_parse(encoded[:-1])
-            if (
-                not encoded.endswith(b"\n")
-                or encoded.endswith(b"\n\n")
-                or type(value) is not dict
-            ):
+            if not encoded.endswith(b"\n") or encoded.endswith(b"\n\n") or type(value) is not dict:
                 raise ValueError
             source = cast(dict[str, JsonValue], value)
             if canonical_encode(source) + b"\n" != encoded or set(source) != {
@@ -2465,9 +2467,7 @@ class _InstallationStateStore:
             if hmac.compare_digest(marker_digest, new_digest):
                 if not vault.is_dir() or not backup.is_dir():
                     raise RuntimeError("installation_root_rotation_ambiguous")
-                self._finalize_root_rotation(
-                    cast(Literal["rotate", "revoke"], action), generation
-                )
+                self._finalize_root_rotation(cast(Literal["rotate", "revoke"], action), generation)
             elif hmac.compare_digest(marker_digest, old_digest):
                 if vault.exists() and backup.is_dir():
                     if stage.exists():
@@ -2634,7 +2634,7 @@ class _LockedHumanEffects:
                     raise HumanControlError("state_forbidden")
                 try:
                     artifact = self._recovery_sets.load(target.recovery_generation)
-                except (FileNotFoundError, OSError, TypeError, ValueError):
+                except FileNotFoundError, OSError, TypeError, ValueError:
                     raise HumanControlError("pending_unavailable") from None
                 item_count = 1
                 total_bytes = len(artifact.canonical_bytes)
@@ -2674,9 +2674,7 @@ class _LockedHumanEffects:
                         )
                         self._prepared_root_rotations[target.request_id] = vault_override
                     if target.operation == "revoke":
-                        item_count, total_bytes = _private_tree_facts(
-                            cast(Path, vault_override)
-                        )
+                        item_count, total_bytes = _private_tree_facts(cast(Path, vault_override))
                     elif target.set_mode == "self_contained":
                         snapshot = await asyncio.to_thread(
                             self._recovery_sets.prepare_snapshot,
@@ -2716,9 +2714,7 @@ class _LockedHumanEffects:
                 }
             )
             if target.operation != "restore":
-                self._prepared_recovery_plan_digests[target.request_id] = (
-                    confirmed_plan_digest
-                )
+                self._prepared_recovery_plan_digests[target.request_id] = confirmed_plan_digest
             return (
                 InstallationRecoveryPreview(
                     target.operation,
@@ -2933,9 +2929,8 @@ class _LockedHumanEffects:
         if self._recovery_sets is None:
             raise HumanControlError("ceremony_unsupported")
         snapshot = self._prepared_recovery_snapshots.pop(target.request_id, None)
-        confirmed_plan_digest = self._prepared_recovery_plan_digests.pop(
-            target.request_id, None
-        )
+        confirmed_plan_digest = self._prepared_recovery_plan_digests.pop(target.request_id, None)
+        staged_generation: int | None = None
         try:
             if confirmed_plan_digest is None:
                 raise HumanControlError("target_invalid")
@@ -2966,16 +2961,31 @@ class _LockedHumanEffects:
                     throttle_record_digest=throttle_digest,
                     action="rotate",
                 )
-            artifact = await self._vault.build_installation_recovery_artifact(
+            sets = self._recovery_sets
+            metadata: InstallationRecoveryMetadata | None = None
+
+            def _stage(
+                built: InstallationRecoveryArtifact,
+            ) -> InstallationRecoveryArtifact:
+                nonlocal metadata, staged_generation
+                metadata = sets.stage(built, snapshot)
+                staged_generation = metadata.recovery_generation
+                # Reopen what was actually persisted, not the in-memory bytes, so the drill also
+                # covers a set that staging truncated or corrupted.
+                return sets.load(metadata.recovery_generation)
+
+            # Build, stage, and run the ADR-024 step 5 pre-publication drill under one live
+            # candidate secret; nothing is advertised until the set has proven it opens this vault.
+            artifact = await self._vault.build_and_verify_installation_recovery_artifact(
                 secret,
                 recovery_generation=target.recovery_generation,
                 mode=mode,
                 secret_kind=InstallationRecoverySecretKind(target.secret_kind),
-                snapshot_manifest_digest=(
-                    None if snapshot is None else snapshot.manifest_digest
-                ),
+                snapshot_manifest_digest=(None if snapshot is None else snapshot.manifest_digest),
+                publish=_stage,
             )
-            metadata = self._recovery_sets.stage(artifact, snapshot)
+            if metadata is None:
+                raise HumanControlError("internal_error")
             await self._vault.commit_installation_recovery_metadata(metadata)
             if target.operation == "rotate":
                 await self._vault.commit_root_rotation()
@@ -2990,6 +3000,10 @@ class _LockedHumanEffects:
         except BaseException as exc:
             if snapshot is not None:
                 self._recovery_sets.discard_snapshot(snapshot)
+            if staged_generation is not None:
+                # Nothing published this generation and the retry recomputes the same number, so
+                # leaving the stage behind would make every later attempt fail as "exists".
+                self._recovery_sets.discard_staged_generation(staged_generation)
             await self._vault.cancel_root_rotation()
             if isinstance(exc, (HumanControlError, asyncio.CancelledError)):
                 raise
@@ -3007,9 +3021,7 @@ class _LockedHumanEffects:
     ) -> InstallationRecoveryResult:
         if target.operation != "revoke" or self._recovery_sets is None:
             raise HumanControlError("ceremony_unsupported")
-        confirmed_plan_digest = self._prepared_recovery_plan_digests.pop(
-            target.request_id, None
-        )
+        confirmed_plan_digest = self._prepared_recovery_plan_digests.pop(target.request_id, None)
         try:
             if confirmed_plan_digest is None:
                 raise HumanControlError("target_invalid")
@@ -3046,9 +3058,7 @@ class _LockedHumanEffects:
             self._prepared_root_rotations.pop(target.request_id, None)
             self._release_recovery_maintenance(target.request_id)
 
-    async def cancel_installation_recovery(
-        self, target: InstallationRecoveryTarget
-    ) -> None:
+    async def cancel_installation_recovery(self, target: InstallationRecoveryTarget) -> None:
         snapshot = self._prepared_recovery_snapshots.pop(target.request_id, None)
         self._prepared_recovery_plan_digests.pop(target.request_id, None)
         if snapshot is not None and self._recovery_sets is not None:
@@ -3058,9 +3068,7 @@ class _LockedHumanEffects:
             await self._vault.cancel_root_rotation()
         self._release_recovery_maintenance(target.request_id)
 
-    def begin_installation_restore(
-        self, target: InstallationRecoveryTarget
-    ) -> tuple[object, str]:
+    def begin_installation_restore(self, target: InstallationRecoveryTarget) -> tuple[object, str]:
         if target.operation != "restore":
             raise HumanControlError("kind_forbidden")
         if self._recovery_sets is None:
@@ -3810,10 +3818,7 @@ def _discard_orphan_vault_rotation_stages(bundle: Path) -> None:
     """Remove only trusted-name next-root quarantines after singleton acquisition."""
 
     for child in bundle.iterdir():
-        if not (
-            child.name.startswith(".vault.root-")
-            and child.name.endswith(".tmp")
-        ):
+        if not (child.name.startswith(".vault.root-") and child.name.endswith(".tmp")):
             continue
         if not child.is_dir() or child.is_symlink():
             raise RuntimeError("private_state_unsafe")

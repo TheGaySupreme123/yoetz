@@ -22,8 +22,11 @@ from yoetz.cli.unlock import (
 )
 from yoetz.service.confidential_client import HumanControlSession
 from yoetz.service.confidential_protocol import (
+    DecisionRequiredPhase,
     HumanCeremonyBinding,
     HumanCeremonyKind,
+    InstallationRecoveryPreview,
+    InstallationRecoveryTarget,
     ProviderCredentialRotatePreview,
     ProviderCredentialSetPreview,
     ProviderCredentialTarget,
@@ -140,3 +143,86 @@ def test_client_rejects_a_preview_whose_kind_does_not_match() -> None:
     )
     with pytest.raises(HumanCeremonyCliError, match="preview_invalid"):
         _verify_preview(HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, target, rotate_session)
+
+
+_REQUEST_ID = "req_00000000-0000-4000-8000-000000000002"
+
+
+def _recovery_target(generation: int = 1) -> InstallationRecoveryTarget:
+    unbound = InstallationRecoveryTarget(
+        operation="provision",
+        request_id=_REQUEST_ID,
+        confirmed_plan_digest=_DIGEST_A,
+        recovery_generation=generation,
+        set_mode="compact",
+        secret_kind="generated_code",
+        target_envelope="preserve",
+    )
+    return replace(unbound, confirmed_plan_digest=unbound.plan_digest())
+
+
+def _recovery_session(
+    target: InstallationRecoveryTarget,
+    *,
+    server_plan_digest: str,
+) -> HumanControlSession:
+    binding = HumanCeremonyBinding(
+        binding_version=1,
+        ceremony_id="1" * 64,
+        connection_nonce="0" * 64,
+        ceremony_kind=HumanCeremonyKind.INSTALLATION_RECOVERY,
+        service_instance_id=_SERVICE_ID,
+        service_generation=3,
+        vault_generation=4,
+        policy_generation=None,
+        # The service binds the ceremony to whatever plan it decided to preview.
+        target_digest=server_plan_digest,
+        expires_at_monotonic_ms=60_000,
+    )
+    opened = ServerOpenedEnvelope(
+        ceremony_id="1" * 64,
+        step=1,
+        binding=binding,
+        preview=InstallationRecoveryPreview(
+            operation=target.operation,
+            request_id=target.request_id,
+            confirmed_plan_digest=server_plan_digest,
+            recovery_generation=target.recovery_generation,
+            set_mode=target.set_mode,
+            secret_kind=target.secret_kind,
+            target_envelope=target.target_envelope,
+            item_count=1,
+            total_bytes=0,
+            native_prompt_available=False,
+        ),
+        phase=DecisionRequiredPhase(),
+    )
+    round_tripped = decode_human_frame(encode_human_frame(opened))
+    assert type(round_tripped) is ServerOpenedEnvelope
+    return cast(HumanControlSession, SimpleNamespace(opened=round_tripped))
+
+
+def test_client_accepts_a_recovery_preview_bound_to_its_own_plan() -> None:
+    target = _recovery_target()
+    session = _recovery_session(target, server_plan_digest=target.confirmed_plan_digest)
+
+    preview = _verify_preview(HumanCeremonyKind.INSTALLATION_RECOVERY, target, session)
+
+    assert type(preview) is InstallationRecoveryPreview
+    assert preview.confirmed_plan_digest == target.confirmed_plan_digest
+
+
+def test_client_rejects_a_recovery_preview_bound_to_a_server_chosen_plan() -> None:
+    """Comparing the preview only against the binding proves nothing: both come from the service.
+
+    A service that previews and binds a different plan than the one this client asked for is
+    internally consistent, so the client must also anchor the comparison to its own target.
+    """
+
+    target = _recovery_target()
+    elsewhere = _recovery_target(generation=2)
+    assert elsewhere.confirmed_plan_digest != target.confirmed_plan_digest
+    session = _recovery_session(target, server_plan_digest=elsewhere.confirmed_plan_digest)
+
+    with pytest.raises(HumanCeremonyCliError, match="preview_invalid"):
+        _verify_preview(HumanCeremonyKind.INSTALLATION_RECOVERY, target, session)

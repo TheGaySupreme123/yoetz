@@ -657,9 +657,7 @@ class Application:
         list_routes = getattr(self.start_catalog, "recovery_routes", None)
         if not callable(list_routes):
             raise TypeError("recovery_catalog_verifier_unavailable")
-        routes = await cast(
-            Callable[[], Awaitable[tuple[TaskRoute, ...]]], list_routes
-        )()
+        routes = await cast(Callable[[], Awaitable[tuple[TaskRoute, ...]]], list_routes)()
         if type(routes) is not tuple:
             raise TypeError("recovery_catalog_verifier_invalid")
         active_routes = 0

@@ -387,9 +387,7 @@ class EncryptedVaultStore:
                 )
                 candidate = EncryptedVaultStore(stage)
                 candidate.initialize(
-                    _OneShotVaultRecordHandle(
-                        bytearray(new_ivk), SecretPurpose.VAULT_ROOT_KEY
-                    )
+                    _OneShotVaultRecordHandle(bytearray(new_ivk), SecretPurpose.VAULT_ROOT_KEY)
                 )
                 updated: dict[str, _IndexEntry] = {}
                 for record_id in sorted(self._index):
@@ -629,9 +627,7 @@ class EncryptedVaultStore:
         }
         index_mac = (
             "hmac-sha256:"
-            + hmac.digest(
-                index_key, _INDEX_DOMAIN + canonical_encode(index_value), "sha256"
-            ).hex()
+            + hmac.digest(index_key, _INDEX_DOMAIN + canonical_encode(index_value), "sha256").hex()
         )
         data = canonical_encode({"index": index_value, "index_mac": index_mac})
         if expected_bytes is not None:
@@ -1060,9 +1056,7 @@ def _b64url_decode_bounded(value: str, maximum: int) -> bytes:
     if not value or len(value) > maximum * 2 or "=" in value:
         raise EncryptedVaultError("record_tampered")
     try:
-        decoded = base64.b64decode(
-            value + "=" * (-len(value) % 4), altchars=b"-_", validate=True
-        )
+        decoded = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
     except (ValueError, binascii.Error) as exc:
         raise EncryptedVaultError("record_tampered") from exc
     if not decoded or len(decoded) > maximum or _b64url_encode(decoded) != value:

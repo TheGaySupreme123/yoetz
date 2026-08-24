@@ -70,6 +70,10 @@ _SECRET_PURPOSES_BY_KIND: Final[
     HumanCeremonyKind.PORTABLE_RECOVERY: frozenset({ConfidentialSecretPurpose.PORTABLE_RECOVERY}),
     HumanCeremonyKind.INSTALLATION_RECOVERY: frozenset(
         {
+            # Provision/rotate/revoke reauthenticate against the ready vault before the
+            # recovery secret is collected, so the security reauthentication frame belongs to
+            # this ceremony exactly as much as the recovery and rewrap frames do.
+            ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION,
             ConfidentialSecretPurpose.INSTALLATION_RECOVERY,
             ConfidentialSecretPurpose.VAULT_REWRAP,
         }

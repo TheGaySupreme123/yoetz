@@ -486,6 +486,44 @@ class UnlockThrottleStore:
             self._repair_required = False
             return recovered
 
+    def prepare_recovery_record(self) -> UnlockThrottleRecord:
+        """Compute, without persisting, the clean generation a successful recovery installs.
+
+        The digest of this record is sealed into the recovered vault, so it has to exist before
+        verification runs.  Writing it there too would zero the passphrase failure counters before
+        anything was proven, which is how an attacker could clear an accumulated delay simply by
+        starting a recovery they cannot finish.  Persist it only once recovery actually
+        authenticated -- see `commit_recovery_record`.
+        """
+
+        with self._lock:
+            current = self.record
+            if current.record_generation >= _MAX_CANONICAL_INTEGER:
+                raise UnlockError("throttle_record_tampered")
+            return UnlockThrottleRecord.create(
+                installation_id=self._installation_id,
+                record_generation=current.record_generation + 1,
+                consecutive_failures=0,
+                attempt_in_progress=False,
+                last_failure_utc=None,
+                last_writer_instance_id=self._writer_instance_id,
+            )
+
+    def commit_recovery_record(self, record: UnlockThrottleRecord) -> UnlockThrottleRecord:
+        """Install a prepared clean generation, only after recovery verified its own secret."""
+
+        with self._lock:
+            if (
+                type(record) is not UnlockThrottleRecord
+                or record.installation_id != self._installation_id
+            ):
+                raise UnlockError("throttle_record_tampered")
+            self._write(record, replace_existing=True)
+            self._record = record
+            self._deadline = 0.0
+            self._repair_required = False
+            return record
+
     def _advance(
         self,
         *,
@@ -921,6 +959,10 @@ class UnlockCoordinator:
                 or self._vault_mode() == "uninitialized"
             ):
                 raise UnlockError("invalid_state")
+            # Recovery verifies a secret exactly like passphrase unlock does, so it is subject to
+            # the same accumulated delay. Without this it is an unthrottled guessing oracle.
+            if self._throttle.remaining_delay() > 0.0:
+                raise UnlockError("unlock_rate_limited")
             await self._lifecycle.transition(ServiceState.UNLOCKING)
             return self._new_challenge(
                 purpose="installation_recovery",
@@ -948,8 +990,12 @@ class UnlockCoordinator:
                 await self._lifecycle.transition(ServiceState.LOCKED)
                 raise UnlockError("secret_purpose_mismatch")
             try:
-                record = self._throttle.stage_recovery_record()
+                # Reserve first, so the attempt is charged against the live counters, and only
+                # then compute the clean generation this recovery would install. Nothing about
+                # the existing delay is cleared until `recover_passphrase` has actually verified
+                # the recovery secret.
                 self._throttle.reserve_attempt()
+                record = self._throttle.prepare_recovery_record()
                 await cast(_RecoveryVault, self._vault).recover_passphrase(
                     artifact,
                     recovery_secret,
@@ -958,7 +1004,7 @@ class UnlockCoordinator:
                 )
                 if not self._vault.ready:
                     raise UnlockError(self._vault_reason())
-                self._throttle.reset_success()
+                self._throttle.commit_recovery_record(record)
                 self._active = None
                 return await self._activate_fresh_ready()
             except Exception as exc:

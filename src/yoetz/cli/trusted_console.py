@@ -373,13 +373,17 @@ class _CtypesWindowsConsoleApi:
                 )
             )
             written = ctypes.c_uint32()
-            if converted != required or not self._kernel32.WriteConsoleW(
-                handle,
-                wide,
-                required,
-                ctypes.byref(written),
-                None,
-            ) or int(written.value) != required:
+            if (
+                converted != required
+                or not self._kernel32.WriteConsoleW(
+                    handle,
+                    wide,
+                    required,
+                    ctypes.byref(written),
+                    None,
+                )
+                or int(written.value) != required
+            ):
                 raise TrustedConsoleError("interrupted")
         finally:
             ctypes.memset(ctypes.addressof(wide), 0, ctypes.sizeof(wide))

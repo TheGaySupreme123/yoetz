@@ -186,12 +186,24 @@ class _Vault:
 
 
 class _SecretIngress:
+    """A stub that still enforces the one rule the real ingress enforces: one nonce, one frame.
+
+    The real `accept_once` refuses a `secret_challenge` it has already accepted. A stub that
+    ignored the binding entirely let the server hand two consecutive frames the same consumed
+    unlock challenge and still pass, which is exactly how the reauthentication chain shipped
+    unable to reach its second secret.
+    """
+
     def __init__(self, handles: list[SecretHandle]) -> None:
         self.handles = handles
         self.cancelled = 0
+        self.challenges: list[str] = []
 
     async def accept_once(self, expected_binding: object) -> SecretHandle:
-        del expected_binding
+        challenge = cast(str, getattr(expected_binding, "secret_challenge"))
+        if challenge in self.challenges:
+            raise AssertionError("secret_challenge_replayed")
+        self.challenges.append(challenge)
         return self.handles.pop(0)
 
     async def cancel_pending(self) -> None:
@@ -350,9 +362,7 @@ class _Effects:
             "revoke", "completed", target.recovery_generation, proof.target_digest
         )
 
-    def begin_installation_restore(
-        self, target: InstallationRecoveryTarget
-    ) -> tuple[object, str]:
+    def begin_installation_restore(self, target: InstallationRecoveryTarget) -> tuple[object, str]:
         assert target.operation == "restore"
         assert self.artifact is not None
         return self.artifact, "f" * 64
@@ -361,9 +371,7 @@ class _Effects:
         assert continuation_id == "f" * 64
         self.continuation_finished = success
 
-    async def cancel_installation_recovery(
-        self, target: InstallationRecoveryTarget
-    ) -> None:
+    async def cancel_installation_recovery(self, target: InstallationRecoveryTarget) -> None:
         del target
 
     async def store_provider_credential(
@@ -495,9 +503,7 @@ async def test_installation_recovery_uses_two_distinct_secret_frames(tmp_path: P
         secret_kind=InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
         snapshot_manifest_digest=None,
     )
-    recovery_handle = memory.capture(
-        SecretPurpose.INSTALLATION_RECOVERY, bytearray(recovery_bytes)
-    )
+    recovery_handle = memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(recovery_bytes))
     rewrap_handle = memory.capture(
         SecretPurpose.VAULT_REWRAP, bytearray(b"new correct horse battery")
     )

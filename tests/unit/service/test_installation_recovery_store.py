@@ -90,12 +90,15 @@ def test_recovery_continuation_is_opaque_restart_state(tmp_path: Path) -> None:
     assert active.continuation_id == continuation
 
     reopened = InstallationRecoverySetStore(tmp_path / "bundle")
-    assert reopened.status(
-        installation_exists=True,
-        vault_ready=False,
-        ordinary_unlock_available=False,
-        auto_unlock_repairable=False,
-    ).continuation_id == continuation
+    assert (
+        reopened.status(
+            installation_exists=True,
+            vault_ready=False,
+            ordinary_unlock_available=False,
+            auto_unlock_repairable=False,
+        ).continuation_id
+        == continuation
+    )
     reopened.finish_recovery(continuation, success=True)
     finished = reopened.status(
         installation_exists=True,
@@ -119,12 +122,15 @@ def test_wrong_continuation_cannot_finish_or_replace_owner(tmp_path: Path) -> No
         store.begin_recovery(1)
 
     store.finish_recovery(continuation, success=False)
-    assert store.status(
-        installation_exists=True,
-        vault_ready=False,
-        ordinary_unlock_available=False,
-        auto_unlock_repairable=False,
-    ).state is InstallationRecoveryState.RECOVERY_MATERIAL_REQUIRED
+    assert (
+        store.status(
+            installation_exists=True,
+            vault_ready=False,
+            ordinary_unlock_available=False,
+            auto_unlock_repairable=False,
+        ).state
+        is InstallationRecoveryState.RECOVERY_MATERIAL_REQUIRED
+    )
 
 
 def test_rotation_advances_active_generation_and_revoke_withdraws_it(tmp_path: Path) -> None:
@@ -133,12 +139,15 @@ def test_rotation_advances_active_generation_and_revoke_withdraws_it(tmp_path: P
     store.publish(_artifact(memory, 1))
     second = store.stage(_artifact(memory, 2))
     store.activate(second)
-    assert store.status(
-        installation_exists=True,
-        vault_ready=False,
-        ordinary_unlock_available=False,
-        auto_unlock_repairable=False,
-    ).active_generation == 2
+    assert (
+        store.status(
+            installation_exists=True,
+            vault_ready=False,
+            ordinary_unlock_available=False,
+            auto_unlock_repairable=False,
+        ).active_generation
+        == 2
+    )
     with pytest.raises(RuntimeError, match="installation_recovery_state_conflict"):
         store.begin_recovery(1)
 
@@ -162,7 +171,9 @@ def test_tampered_state_fails_closed_without_permanent_loss_claim(tmp_path: Path
     store.publish(_artifact(memory))
     state = tmp_path / "bundle" / "installation-recovery" / "state.json"
     encoded = bytearray(state.read_bytes())
-    encoded[-3] = ord("0") if encoded[-3] != ord("0") else ord("1")
+    # Flip the last hex character of `record_digest` itself. Touching the closing quote instead
+    # only produces a parse error, which would leave the digest comparison unexercised.
+    encoded[-4] = ord("0") if encoded[-4] != ord("0") else ord("1")
     state.write_bytes(encoded)
     state.chmod(0o600)
 
@@ -246,8 +257,7 @@ def test_self_contained_snapshot_uses_sqlite_backup_and_manifest_last(tmp_path: 
     finally:
         restored_database.close()
     assert any(
-        path.name.startswith(".imported.pristine-before-recovery.")
-        for path in tmp_path.iterdir()
+        path.name.startswith(".imported.pristine-before-recovery.") for path in tmp_path.iterdir()
     )
 
 
@@ -292,9 +302,7 @@ def test_snapshot_uses_quarantined_rotated_vault_instead_of_live_vault(
     )
     assert captured.read_bytes() == b"new-root-ciphertext"
     assert b"old-root-ciphertext" not in b"".join(
-        path.read_bytes()
-        for path in captured.parent.rglob("*")
-        if path.is_file()
+        path.read_bytes() for path in captured.parent.rglob("*") if path.is_file()
     )
 
 
@@ -316,7 +324,118 @@ def test_snapshot_rejects_unknown_plaintext_member_instead_of_exporting_it(
 
     recovery_root = bundle / "installation-recovery"
     assert not any(
-        canary in path.read_bytes()
-        for path in recovery_root.rglob("*")
-        if path.is_file()
+        canary in path.read_bytes() for path in recovery_root.rglob("*") if path.is_file()
+    )
+
+
+def test_orphaned_stage_does_not_wedge_the_identical_retry(tmp_path: Path) -> None:
+    """A crash between staging and commit must not make the same generation unusable forever.
+
+    The retry recomputes the same generation number, so a leftover directory that is refused
+    rather than reclaimed turns one interrupted provision into a permanently wedged operation.
+    """
+
+    memory = LocalSecretMemory()
+    store = _store(tmp_path)
+    sets = tmp_path / "bundle" / "installation-recovery" / "sets"
+
+    store.stage(_artifact(memory))
+    assert (sets / "1").is_dir()
+    assert (
+        store.status(
+            installation_exists=True,
+            vault_ready=False,
+            ordinary_unlock_available=False,
+            auto_unlock_repairable=False,
+        ).active_generation
+        is None
+    )
+
+    store.discard_staged_generation(1)
+    assert not (sets / "1").exists()
+
+    metadata = store.stage(_artifact(memory))
+    store.activate(metadata)
+    assert store.metadata(1).recovery_generation == 1
+
+    # An activated generation is published authority, never disposable material.
+    store.discard_staged_generation(1)
+    assert (sets / "1").is_dir()
+
+    # A stage left behind by a crash is reclaimed by the next attempt rather than refused.
+    store.stage(_artifact(memory, 2))
+    second = store.stage(_artifact(memory, 2))
+    store.activate(second)
+    assert store.metadata(2).recovery_generation == 2
+
+    with pytest.raises(FileExistsError, match="installation_recovery_generation_exists"):
+        store.stage(_artifact(memory, 2))
+
+
+def test_import_stages_pending_and_never_activates_on_its_own(tmp_path: Path) -> None:
+    """An archive header is unauthenticated, so importing one must not grant it authority."""
+
+    memory = LocalSecretMemory()
+    store = _store(tmp_path)
+    target_bundle = tmp_path / "target"
+    target_bundle.mkdir(mode=0o700)
+    target = InstallationRecoverySetStore(target_bundle)
+    good = target.publish(_artifact(memory, 7))
+
+    # A higher-numbered foreign set is offered; the good generation must survive it.
+    foreign = tmp_path / "foreign.yirs"
+    store.publish(_artifact(memory, 9))
+    store.export_generation(9, foreign)
+
+    imported = target.import_archive(foreign)
+    assert imported.recovery_generation == 9
+    assert target.pending_import() is not None
+    assert target.pending_import() == imported
+
+    # The previously active generation is still exactly the one in force.
+    status = target.status(
+        installation_exists=True,
+        vault_ready=True,
+        ordinary_unlock_available=True,
+        auto_unlock_repairable=False,
+    )
+    assert status.active_generation == good.recovery_generation
+
+    # While locked, the pending set is visible as the material a restore would consume.
+    locked = target.status(
+        installation_exists=True,
+        vault_ready=False,
+        ordinary_unlock_available=False,
+        auto_unlock_repairable=False,
+    )
+    assert locked.state is InstallationRecoveryState.RECOVERY_MATERIAL_REQUIRED
+    assert locked.reason == "imported_set_pending_restore"
+    assert locked.active_generation == 9
+    assert locked.next_command == "yoetz service recovery restore"
+
+    # A restore that does not authenticate leaves the good generation reactivatable.
+    continuation = target.begin_recovery(9)
+    target.finish_recovery(continuation, success=False)
+    assert target.pending_import() == imported
+    assert (
+        target.status(
+            installation_exists=True,
+            vault_ready=True,
+            ordinary_unlock_available=True,
+            auto_unlock_repairable=False,
+        ).active_generation
+        == good.recovery_generation
+    )
+
+    # Only the authenticated commit point publishes it.
+    target.finalize_committed_recovery(9)
+    assert target.pending_import() is None
+    assert (
+        target.status(
+            installation_exists=True,
+            vault_ready=True,
+            ordinary_unlock_available=True,
+            auto_unlock_repairable=False,
+        ).active_generation
+        == 9
     )
