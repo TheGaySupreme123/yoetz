@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import ctypes
+import functools
 import hashlib
 import os
 import selectors
+import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -41,6 +45,15 @@ _MAX_ARG_BYTES: Final = 512
 _TOKEN_CHARS: Final = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/+-="
 )
+_REAP_DEADLINE_SECONDS: Final = 5.0
+# Once the leader is reaped and no group member is waitable by us, the only way the group can
+# still disappear is an external reaper (init/launchd). Give that a short grace window instead
+# of burning the whole deadline against zombies we are structurally unable to reap.
+_REAP_NO_PROGRESS_SECONDS: Final = 0.5
+# Teardown bound for a check that returned on its own: the tree is normally already gone,
+# so this only pays for stragglers the check left behind.
+_COMPLETED_DRAIN_SECONDS: Final = 1.0
+_PR_SET_CHILD_SUBREAPER: Final = 36
 
 
 class ApprovedCheckStatus(str, Enum):  # noqa: UP042 - exact wire enum
@@ -252,10 +265,221 @@ def _bounded_communicate(
                     else:
                         stdout.extend(chunk)
                 # stderr is discarded after consumption; never retained for advice/status.
-        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            # End-of-file on both pipes is not exit: a check may close its own stdout/stderr
+            # and keep running. ``TimeoutExpired`` is a ``SubprocessError``, so letting it
+            # escape would skip the runner's timeout result *and* its group reaping, leaking
+            # the whole tree. Translate it into the timeout contract the runner handles.
+            raise TimeoutError from None
     finally:
         selector.close()
     return stdout, truncated
+
+
+def _wait_process(process: subprocess.Popen[bytes], timeout_seconds: float) -> bool:
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def _posix_process_group_id(process: subprocess.Popen[bytes]) -> int | None:
+    get_group = getattr(os, "getpgid", None)
+    get_self_group = getattr(os, "getpgrp", None)
+    if not callable(get_group) or not callable(get_self_group):
+        return None
+    try:
+        group_id = get_group(process.pid)
+        self_group = get_self_group()
+    except OSError:
+        return None
+    if type(group_id) is not int or type(self_group) is not int:
+        return None
+    if group_id <= 1 or group_id == self_group:
+        return None
+    return group_id
+
+
+def _signal_posix_group(group_id: int, sig: int) -> bool:
+    kill_group = getattr(os, "killpg", None)
+    if not callable(kill_group):
+        return False
+    try:
+        kill_group(group_id, sig)
+    except OSError:
+        return False
+    return True
+
+
+def _posix_group_exists(group_id: int) -> bool:
+    return _signal_posix_group(group_id, 0)
+
+
+@functools.cache
+def _enable_child_subreaper() -> bool:
+    """Best-effort ``PR_SET_CHILD_SUBREAPER`` so orphaned check descendants stay waitable.
+
+    Under a container PID 1 that never calls ``wait()``, a killed grandchild that outlived its
+    parent reparents to PID 1 and stays ``<defunct>`` forever: the process group keeps existing,
+    ``killpg(group, 0)`` keeps succeeding, and the reaper below would spin against zombies it
+    cannot reap while PIDs leak. As a subreaper this process inherits those orphans instead, so
+    ``waitpid(-group, ...)`` can actually clear them. Linux-only; ignored everywhere else.
+    """
+
+    if sys.platform != "linux":
+        return False
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        prctl = libc.prctl
+        prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        prctl.restype = ctypes.c_int
+        return prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0
+    except OSError, AttributeError, ValueError:
+        # Best effort only: a missing libc symbol or a seccomp-blocked prctl must never fail
+        # the check run; the reap loop below degrades to its bounded no-progress exit.
+        return False
+
+
+def _reap_posix_group_members(group_id: int) -> tuple[int, bool]:
+    """Reap every waitable member of ``group_id``; return (reaped_count, waitable_remaining).
+
+    ``waitpid(-group_id, WNOHANG)`` is scoped to the isolated check's own process group, so it
+    can never steal an unrelated child of this runner. It may reap the leader out from under its
+    ``Popen``; that is harmless because ``Popen`` treats ``ChildProcessError`` as "already
+    exited" and the timeout result never reports an exit status.
+    """
+
+    if os.name == "nt" or not hasattr(os, "waitpid"):
+        return 0, False
+    reaped = 0
+    while True:
+        try:
+            pid, _status = os.waitpid(-group_id, os.WNOHANG)
+        except ChildProcessError:
+            # No member of the group is a child of ours: nothing here is waitable.
+            return reaped, False
+        except OSError:
+            return reaped, reaped > 0
+        if pid == 0:
+            # Live children remain but none has exited yet.
+            return reaped, True
+        reaped += 1
+
+
+def _taskkill_tree(pid: int) -> bool:
+    """Kill a Windows process *tree*; ``TerminateProcess`` alone spares grandchildren."""
+
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, output discarded
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            check=False,
+            timeout=5.0,
+        )
+    except OSError, subprocess.SubprocessError:
+        return False
+    # A nonzero code (access denied, no such pid) means the tree is still standing: report the
+    # failure so the caller falls back to ``kill`` now instead of after a five-second wait.
+    return completed.returncode == 0
+
+
+def _reap_windows_process_tree(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None and not _taskkill_tree(process.pid):
+        process.kill()
+    _wait_process(process, 5.0)
+    if process.poll() is None:
+        process.kill()
+        _wait_process(process, 5.0)
+
+
+def _drain_posix_group(
+    process: subprocess.Popen[bytes],
+    group_id: int,
+    *,
+    deadline_seconds: float,
+) -> None:
+    """Kill and reap every member of the check's process group until empty or the bound expires.
+
+    Known limitation: a descendant that calls ``setsid`` leaves the group and is not covered
+    here; containing that needs a PID namespace (follow-up: bwrap ``--unshare-pid``).
+    """
+
+    deadline = time.monotonic() + deadline_seconds
+    last_progress = time.monotonic()
+    while time.monotonic() < deadline:
+        if not _posix_group_exists(group_id):
+            break
+        _signal_posix_group(group_id, signal.SIGKILL)
+        reaped, waitable = _reap_posix_group_members(group_id)
+        leader_reaped = process.poll() is not None or _wait_process(process, 0.05)
+        if reaped:
+            last_progress = time.monotonic()
+            continue
+        if (
+            leader_reaped
+            and not waitable
+            and time.monotonic() - last_progress >= _REAP_NO_PROGRESS_SECONDS
+        ):
+            # Signals are delivered and nothing left in the group belongs to us: the remainder
+            # are zombies owned by a parent that may never reap them. Stop instead of spending
+            # the full deadline on every timed-out check.
+            break
+        time.sleep(0.01)
+
+
+def _drain_completed_check_group(process: subprocess.Popen[bytes], group_id: int | None) -> None:
+    """Tear the group down after a check returns on its own, not only after a timeout.
+
+    A member the check leaves running would otherwise outlive its result -- and because this
+    process is a child subreaper, such an orphan reparents here when its parent exits and stays
+    ``<defunct>`` for the lifetime of a long-lived service. ``group_id`` is ``None`` on Windows
+    and wherever the launch could not claim a group, where there is nothing to drain.
+    """
+
+    if group_id is None:
+        return
+    _drain_posix_group(process, group_id, deadline_seconds=_COMPLETED_DRAIN_SECONDS)
+
+
+def _reap_approved_check_process(
+    process: subprocess.Popen[bytes],
+    *,
+    process_group_id: int | None = None,
+) -> None:
+    """Terminate the isolated check tree, then wait until its members are reaped."""
+
+    if os.name == "nt":
+        _reap_windows_process_tree(process)
+        return
+
+    group_id = (
+        process_group_id if process_group_id is not None else _posix_process_group_id(process)
+    )
+    if group_id is None:
+        if process.poll() is None:
+            process.kill()
+        _wait_process(process, 5.0)
+        return
+
+    _signal_posix_group(group_id, signal.SIGTERM)
+    if not _wait_process(process, 0.5) or _posix_group_exists(group_id):
+        _signal_posix_group(group_id, signal.SIGKILL)
+        _wait_process(process, 5.0)
+
+    _drain_posix_group(process, group_id, deadline_seconds=_REAP_DEADLINE_SECONDS)
+
+    if process.poll() is None:
+        process.kill()
+        _wait_process(process, 1.0)
 
 
 class ApprovedCheckRunner:
@@ -332,6 +556,7 @@ class ApprovedCheckRunner:
         home, tmpdir, temp_root = _owner_private_temp_dirs()
         started = time.monotonic()
         process: subprocess.Popen[bytes] | None = None
+        process_group_id: int | None = None
         try:
             env = _sanitized_env(home=home, tmpdir=tmpdir)
             launch = self._sandbox.prepare(
@@ -352,21 +577,46 @@ class ApprovedCheckRunner:
                     approval.approval_commitment,
                     int((time.monotonic() - started) * 1000),
                 )
-            process = subprocess.Popen(
-                list(launch.argv),
-                cwd=launch.cwd,
-                env=dict(launch.env),
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                close_fds=True,
-            )
+            if os.name == "nt":
+                process = subprocess.Popen(
+                    list(launch.argv),
+                    cwd=launch.cwd,
+                    env=dict(launch.env),
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    close_fds=True,
+                    # Console-signal isolation, the Windows counterpart of ``start_new_session``:
+                    # a Ctrl-C on our console must not race the reaper for this tree. Killing the
+                    # tree does not go through the group (see ``_reap_windows_process_tree``).
+                    creationflags=int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)),
+                )
+            else:
+                # Adopt orphaned descendants (Linux) so the reaper can actually clear them.
+                _enable_child_subreaper()
+                process = subprocess.Popen(
+                    list(launch.argv),
+                    cwd=launch.cwd,
+                    env=dict(launch.env),
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    close_fds=True,
+                    start_new_session=True,
+                )
+                # ``start_new_session`` makes the child's PID the new session and process-group
+                # ID.  Capture that identity without a post-launch ``getpgid`` lookup: the group
+                # can remain alive after a short-lived leader exits, and losing the leader must
+                # not make its descendants unaddressable at timeout.
+                process_group_id = process.pid
             stdout, truncated = _bounded_communicate(
                 process,
                 stdout_limit=_MAX_OUTPUT_BYTES,
                 timeout_seconds=approval.timeout_seconds,
             )
+            _drain_completed_check_group(process, process_group_id)
             duration_ms = int((time.monotonic() - started) * 1000)
             exit_status = int(process.returncode or 0)
             safe_output, _redacted = redact_sensitive_content(bytes(stdout))
@@ -399,8 +649,7 @@ class ApprovedCheckRunner:
             )
         except TimeoutError:
             if process is not None:
-                process.kill()
-                process.wait(timeout=5)
+                _reap_approved_check_process(process, process_group_id=process_group_id)
             return self._result(
                 ApprovedCheckStatus.TIMEOUT,
                 ApprovedCheckOutcome.TIMEOUT,

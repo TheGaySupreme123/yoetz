@@ -2507,7 +2507,15 @@ Independent verification support (local control, not MCP):
 
 - Approved-check runner — executes only commitment-approved argv (`shell=False`, bounded
   time/output, sanitized env, no network unless separately authorized); binds results to the
-  observed subject-state digest so later edits stale prior success.
+  observed subject-state digest so later edits stale prior success. On POSIX the child is started
+  in a dedicated session/process group, and that group is killed and reaped before any result is
+  returned -- on timeout (TERM, then KILL) and equally after a check exits on its own, so a member
+  it leaves running never outlives its result. Orphaned descendants are adopted as a child
+  subreaper on Linux so a non-reaping PID 1 cannot strand them. A descendant that calls `setsid`
+  leaves the group and is not covered; containing that needs a PID namespace. A check that closes
+  its own stdout/stderr and keeps running still times out rather than escaping the runner. On
+  Windows the launched tree is terminated (`taskkill /T /F`, falling back to TerminateProcess)
+  under CREATE_NEW_PROCESS_GROUP console isolation.
 - `.yoetz/checks.toml` — fixed schema `yoetz.approved-check-policy/1`; raw bytes produce the trust
   digest. Repository content proposes no authority. One trusted-local exact-digest confirmation is
   retained as an encrypted workspace-scoped record. Any byte change is untrusted.
