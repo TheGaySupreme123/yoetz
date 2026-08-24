@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -79,14 +81,27 @@ def _private_dir(path: Path) -> None:
     path.chmod(0o700)
 
 
+@pytest.fixture
+def private_test_root() -> Iterator[Path]:
+    """Keep synthetic installation state outside pytest's shared temporary root."""
+
+    with tempfile.TemporaryDirectory(
+        prefix=".yoetz-installation-recovery-",
+        dir=Path.home(),
+    ) as temporary:
+        root = Path(temporary)
+        root.chmod(0o700)
+        yield root
+
+
 @pytest.mark.anyio
 async def test_self_contained_clean_profile_restores_same_vault_authority(
-    tmp_path: Path,
+    private_test_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = _Clock()
-    original_bundle = tmp_path / "original"
-    original_state = tmp_path / "original-state"
+    original_bundle = private_test_root / "original"
+    original_state = private_test_root / "original-state"
     _private_dir(original_bundle)
     _private_dir(original_state)
     original_throttle = UnlockThrottleStore(
@@ -201,11 +216,11 @@ async def test_self_contained_clean_profile_restores_same_vault_authority(
     metadata = sets.stage(artifact, snapshot)
     await vault.commit_installation_recovery_metadata(metadata)
     sets.activate(metadata)
-    archive = tmp_path / "installation-recovery.yirs"
+    archive = private_test_root / "installation-recovery.yirs"
     sets.export_generation(1, archive)
 
-    clean_bundle = tmp_path / "clean"
-    clean_state = tmp_path / "clean-state"
+    clean_bundle = private_test_root / "clean"
+    clean_state = private_test_root / "clean-state"
     _private_dir(clean_bundle)
     _private_dir(clean_state)
     clean_sets = InstallationRecoverySetStore(clean_bundle)
