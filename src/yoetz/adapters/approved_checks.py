@@ -50,6 +50,9 @@ _REAP_DEADLINE_SECONDS: Final = 5.0
 # still disappear is an external reaper (init/launchd). Give that a short grace window instead
 # of burning the whole deadline against zombies we are structurally unable to reap.
 _REAP_NO_PROGRESS_SECONDS: Final = 0.5
+# Teardown bound for a check that returned on its own: the tree is normally already gone,
+# so this only pays for stragglers the check left behind.
+_COMPLETED_DRAIN_SECONDS: Final = 1.0
 _PR_SET_CHILD_SUBREAPER: Final = 36
 
 
@@ -376,7 +379,7 @@ def _taskkill_tree(pid: int) -> bool:
     """Kill a Windows process *tree*; ``TerminateProcess`` alone spares grandchildren."""
 
     try:
-        subprocess.run(  # noqa: S603 - fixed argv, no shell, output discarded
+        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, output discarded
             ["taskkill", "/PID", str(pid), "/T", "/F"],
             capture_output=True,
             check=False,
@@ -384,7 +387,9 @@ def _taskkill_tree(pid: int) -> bool:
         )
     except OSError, subprocess.SubprocessError:
         return False
-    return True
+    # A nonzero code (access denied, no such pid) means the tree is still standing: report the
+    # failure so the caller falls back to ``kill`` now instead of after a five-second wait.
+    return completed.returncode == 0
 
 
 def _reap_windows_process_tree(process: subprocess.Popen[bytes]) -> None:
@@ -394,6 +399,55 @@ def _reap_windows_process_tree(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is None:
         process.kill()
         _wait_process(process, 5.0)
+
+
+def _drain_posix_group(
+    process: subprocess.Popen[bytes],
+    group_id: int,
+    *,
+    deadline_seconds: float,
+) -> None:
+    """Kill and reap every member of the check's process group until empty or the bound expires.
+
+    Known limitation: a descendant that calls ``setsid`` leaves the group and is not covered
+    here; containing that needs a PID namespace (follow-up: bwrap ``--unshare-pid``).
+    """
+
+    deadline = time.monotonic() + deadline_seconds
+    last_progress = time.monotonic()
+    while time.monotonic() < deadline:
+        if not _posix_group_exists(group_id):
+            break
+        _signal_posix_group(group_id, signal.SIGKILL)
+        reaped, waitable = _reap_posix_group_members(group_id)
+        leader_reaped = process.poll() is not None or _wait_process(process, 0.05)
+        if reaped:
+            last_progress = time.monotonic()
+            continue
+        if (
+            leader_reaped
+            and not waitable
+            and time.monotonic() - last_progress >= _REAP_NO_PROGRESS_SECONDS
+        ):
+            # Signals are delivered and nothing left in the group belongs to us: the remainder
+            # are zombies owned by a parent that may never reap them. Stop instead of spending
+            # the full deadline on every timed-out check.
+            break
+        time.sleep(0.01)
+
+
+def _drain_completed_check_group(process: subprocess.Popen[bytes], group_id: int | None) -> None:
+    """Tear the group down after a check returns on its own, not only after a timeout.
+
+    A member the check leaves running would otherwise outlive its result -- and because this
+    process is a child subreaper, such an orphan reparents here when its parent exits and stays
+    ``<defunct>`` for the lifetime of a long-lived service. ``group_id`` is ``None`` on Windows
+    and wherever the launch could not claim a group, where there is nothing to drain.
+    """
+
+    if group_id is None:
+        return
+    _drain_posix_group(process, group_id, deadline_seconds=_COMPLETED_DRAIN_SECONDS)
 
 
 def _reap_approved_check_process(
@@ -421,27 +475,7 @@ def _reap_approved_check_process(
         _signal_posix_group(group_id, signal.SIGKILL)
         _wait_process(process, 5.0)
 
-    deadline = time.monotonic() + _REAP_DEADLINE_SECONDS
-    last_progress = time.monotonic()
-    while time.monotonic() < deadline:
-        if not _posix_group_exists(group_id):
-            break
-        _signal_posix_group(group_id, signal.SIGKILL)
-        reaped, waitable = _reap_posix_group_members(group_id)
-        leader_reaped = process.poll() is not None or _wait_process(process, 0.05)
-        if reaped:
-            last_progress = time.monotonic()
-            continue
-        if (
-            leader_reaped
-            and not waitable
-            and time.monotonic() - last_progress >= _REAP_NO_PROGRESS_SECONDS
-        ):
-            # Signals are delivered and nothing left in the group belongs to us: the remainder
-            # are zombies owned by a parent that may never reap them. Stop instead of spending
-            # the full deadline on every timed-out check.
-            break
-        time.sleep(0.01)
+    _drain_posix_group(process, group_id, deadline_seconds=_REAP_DEADLINE_SECONDS)
 
     if process.poll() is None:
         process.kill()
@@ -582,6 +616,7 @@ class ApprovedCheckRunner:
                 stdout_limit=_MAX_OUTPUT_BYTES,
                 timeout_seconds=approval.timeout_seconds,
             )
+            _drain_completed_check_group(process, process_group_id)
             duration_ms = int((time.monotonic() - started) * 1000)
             exit_status = int(process.returncode or 0)
             safe_output, _redacted = redact_sensitive_content(bytes(stdout))

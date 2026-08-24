@@ -23,6 +23,7 @@ from yoetz.adapters.approved_checks import (
     ApprovedCheckStatus,
     _reap_approved_check_process,  # pyright: ignore[reportPrivateUsage]
     _reap_posix_group_members,  # pyright: ignore[reportPrivateUsage]
+    _taskkill_tree,  # pyright: ignore[reportPrivateUsage]
     approval_commitment,
 )
 from yoetz.adapters.workspace_inspect import open_inspect_workspace
@@ -216,15 +217,18 @@ class _FakeLeader:
         self.pid = pid
         self.running = running
         self.kill_calls = 0
+        self.events: list[str] = []
 
     def poll(self) -> int | None:
         return None if self.running else 0
 
     def kill(self) -> None:
         self.kill_calls += 1
+        self.events.append("kill")
         self.running = False
 
     def wait(self, timeout: float | None = None) -> int:
+        self.events.append(f"wait:{timeout}")
         if self.running:
             raise subprocess.TimeoutExpired(cmd="fake-check", timeout=timeout or 0.0)
         return 0
@@ -376,13 +380,81 @@ def test_windows_reaper_kills_the_process_tree(monkeypatch: pytest.MonkeyPatch) 
     assert leader.kill_calls == 0
 
 
-def test_windows_reaper_falls_back_to_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_windows_reaper_falls_back_to_kill_on_taskkill_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     leader = _FakeLeader(pid=4_321, running=True)
+    commands: list[list[str]] = []
 
-    def _fake_taskkill(pid: int) -> bool:
-        return False
+    def _fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        commands.append(argv)
+        # taskkill reports access denied rather than raising; the tree is still standing.
+        return subprocess.CompletedProcess(argv, 1, b"", b"ERROR: Access is denied.")
 
     monkeypatch.setattr(approved_checks.os, "name", "nt")
-    monkeypatch.setattr(approved_checks, "_taskkill_tree", _fake_taskkill)
+    monkeypatch.setattr(approved_checks.subprocess, "run", _fake_run)
     _reap_approved_check_process(cast("subprocess.Popen[bytes]", leader))
+    assert commands == [["taskkill", "/PID", "4321", "/T", "/F"]]
+    # The nonzero code must fall back immediately: kill before any wait, not five seconds later.
+    assert leader.events[0] == "kill"
     assert leader.kill_calls == 1
+
+
+def test_taskkill_tree_reports_the_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    codes = [0, 1]
+
+    def _fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(argv, codes.pop(0), b"", b"")
+
+    monkeypatch.setattr(approved_checks.subprocess, "run", _fake_run)
+    assert _taskkill_tree(4_321) is True
+    assert _taskkill_tree(4_321) is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group reaping")
+def test_completed_check_tears_down_leftover_group_members(tmp_path: Path) -> None:
+    handle = open_inspect_workspace(tmp_path)
+    leader_path = tmp_path / "leader.pid"
+    child_path = tmp_path / "child.pid"
+    script_path = tmp_path / "orphan-check.sh"
+    script_path.write_text(
+        "#!/bin/sh\n"
+        'echo $$ > "$1"\n'
+        # The background member drops the inherited pipes so the check can return normally,
+        # then outlives its parent. Without an unconditional teardown it survives the PASSED
+        # result -- and where this process is a child subreaper it later reparents here and
+        # becomes an unreapable zombie for the lifetime of a long-lived service.
+        "sleep 30 >/dev/null 2>&1 &\n"
+        'echo $! > "$2"\n'
+        "exit 0\n",
+        encoding="ascii",
+    )
+    os.chmod(script_path, 0o700)
+    approval = _approval(
+        ("/bin/sh", str(script_path), str(leader_path), str(child_path)),
+        timeout_seconds=5.0,
+    )
+    runner = ApprovedCheckRunner(
+        {approval.approval_commitment: approval},
+        sandbox=_ReadyCheckSandbox(),
+    )
+    started = time.monotonic()
+    result = runner.run(
+        ApprovedCheckCommand(
+            workspace=handle,
+            approval=approval,
+            subject_state_digest="sha256:" + "2" * 64,
+        )
+    )
+    elapsed = time.monotonic() - started
+    # The outcome contract is unchanged: the check itself succeeded.
+    assert result.status is ApprovedCheckStatus.PASSED
+    assert result.outcome is ApprovedCheckOutcome.SUCCESS
+    assert result.exit_status == 0
+    assert elapsed < 4.0
+    group_id = int(leader_path.read_text(encoding="ascii").strip())
+    descendant_pid = int(child_path.read_text(encoding="ascii").strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(descendant_pid, 0)
+    with pytest.raises(ProcessLookupError):
+        os.killpg(group_id, 0)
