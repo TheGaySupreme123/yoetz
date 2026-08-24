@@ -10,6 +10,7 @@ from asyncio import Lock
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from threading import Lock as ThreadLock
 from typing import Final, Literal, cast
 
@@ -19,7 +20,17 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from yoetz.adapters.keys.encrypted_vault import (
     EncryptedVaultError,
     EncryptedVaultStore,
+    PreparedVaultRootRotation,
     VaultRecordKind,
+)
+from yoetz.adapters.keys.installation_recovery import (
+    InstallationRecoveryArtifact,
+    InstallationRecoveryArtifactError,
+    InstallationRecoveryMetadata,
+    InstallationRecoveryMode,
+    InstallationRecoverySecretKind,
+    create_installation_recovery_artifact,
+    unlock_installation_recovery_artifact,
 )
 from yoetz.adapters.keys.os_keyring import (
     KeyringInitializationBinding,
@@ -32,6 +43,7 @@ from yoetz.adapters.keys.vault_passphrase import (
     VaultPassphraseError,
     VaultRootEnvelope,
     create_vault_root_envelope,
+    rewrap_vault_root_envelope,
     unlock_vault_root_envelope,
 )
 from yoetz.domain.values import validate_sha256_digest
@@ -123,6 +135,8 @@ _VAULT_REASONS: Final = frozenset(
         "vault_tampered",
         "record_missing",
         "record_binding_mismatch",
+        "recovery_artifact_invalid",
+        "recovery_generation_stale",
         "secret_purpose_mismatch",
         "credential_invalid",
         "initialization_forbidden",
@@ -269,6 +283,20 @@ class VaultStatus:
             raise ValueError("vault_status_invalid")
 
 
+@dataclass(slots=True, repr=False)
+class _PendingRootRotation:
+    prepared: PreparedVaultRootRotation
+    old_root: bytearray
+    new_root: bytearray
+    envelope: VaultRootEnvelope | None = None
+    throttle_record_digest: str | None = None
+    action: Literal["rotate", "revoke"] | None = None
+
+    def wipe(self) -> None:
+        _overwrite(self.old_root)
+        _overwrite(self.new_root)
+
+
 class VaultService:
     """The only owner of IVK-derived operations and encrypted vault records.
 
@@ -291,6 +319,13 @@ class VaultService:
         runtime_support: Mapping[str, JsonValue] | None = None,
         pristine_state_digest: str | None = None,
         publish_mode: Callable[[VaultMode, VaultRootEnvelope | None, str], None] | None = None,
+        replace_mode: Callable[[VaultMode, VaultRootEnvelope, str, int], None] | None = None,
+        replace_root: Callable[
+            [VaultMode, VaultRootEnvelope, str, int, Path, Literal["rotate", "revoke"]],
+            None,
+        ]
+        | None = None,
+        snapshot_recovery_admission: Callable[[InstallationRecoveryArtifact], bool] | None = None,
     ) -> None:
         self._installation_id = validate_id(IdKind.INSTALLATION, installation_id)
         if type(service_generation) is not int or service_generation <= 0:
@@ -317,6 +352,21 @@ class VaultService:
         self._runtime_support = dict(runtime_support or {})
         self._pristine_state_digest = pristine_state_digest
         self._publish_mode = publish_mode
+        self._replace_mode = replace_mode
+        self._replace_root = replace_root
+        self._snapshot_recovery_admission = snapshot_recovery_admission
+        self._pending_recovery: (
+            tuple[
+                VaultMode,
+                VaultRootEnvelope | None,
+                VaultRootEnvelope,
+                str,
+                int,
+                InstallationRecoveryMetadata | None,
+            ]
+            | None
+        ) = None
+        self._pending_root_rotation: _PendingRootRotation | None = None
         self._store: EncryptedVaultStore | None = None
         self._bundle_handles: list[_GenerationHandle] = []
         self._installation_handles: dict[MacKeyPurpose, _MacHandle] = {}
@@ -339,6 +389,10 @@ class VaultService:
     @property
     def ready(self) -> bool:
         return self._state is VaultState.READY
+
+    @property
+    def recovery_pending(self) -> bool:
+        return self._pending_recovery is not None
 
     @property
     def status(self) -> VaultStatus:
@@ -444,6 +498,169 @@ class VaultService:
                 raise VaultError("unlock_wrong") from exc
             return self.status
 
+    async def recover_passphrase(
+        self,
+        artifact: InstallationRecoveryArtifact,
+        recovery_secret: SecretHandle,
+        rewrap_secret: SecretHandle,
+        *,
+        throttle_record_digest: str,
+    ) -> VaultStatus:
+        """Recover one provisioned generation and atomically select a new passphrase envelope.
+
+        The recovered root is accepted only after the live vault sentinel and the encrypted
+        recovery metadata both authenticate.  Marker replacement is injected by the daemon so the
+        old envelope can be retained for rollback without exposing it here.
+        """
+
+        validate_sha256_digest(throttle_record_digest)
+        if type(artifact) is not InstallationRecoveryArtifact:
+            raise TypeError("installation_recovery_artifact_invalid")
+        async with self._mutex:
+            self._require_not_closed()
+            if self.ready or self._mode is VaultMode.UNINITIALIZED:
+                raise VaultError("initialization_forbidden")
+            if recovery_secret.purpose is not SecretPurpose.INSTALLATION_RECOVERY:
+                raise VaultError("secret_purpose_mismatch")
+            if rewrap_secret.purpose is not SecretPurpose.VAULT_REWRAP:
+                raise VaultError("secret_purpose_mismatch")
+            replace_mode = self._replace_mode
+            if replace_mode is None:
+                raise VaultError("initialization_forbidden")
+            self._state = VaultState.UNLOCKING
+            material = None
+            root = bytearray()
+            try:
+                material = unlock_installation_recovery_artifact(artifact, recovery_secret)
+                root = material.consume_ivk(lambda view: bytearray(view))
+                self._open_existing_store(root)
+                store = self._store
+                if store is None:
+                    raise VaultError("vault_tampered")
+                metadata: InstallationRecoveryMetadata | None = None
+                try:
+                    metadata_handle = store.load_record(
+                        VaultRecordKind.RECOVERY_METADATA,
+                        {
+                            "installation_id": self._installation_id,
+                            "recovery_generation": str(material.recovery_generation),
+                        },
+                    )
+                    raw_metadata = metadata_handle.consume(
+                        SecretConsumer.VAULT_ROOT, lambda view: bytes(view)
+                    )
+                    metadata = InstallationRecoveryMetadata.parse(raw_metadata)
+                except EncryptedVaultError as exc:
+                    admitted = self._snapshot_recovery_admission
+                    if exc.reason != "record_missing" or admitted is None or not admitted(artifact):
+                        raise VaultError("recovery_artifact_invalid") from exc
+                except InstallationRecoveryArtifactError as exc:
+                    raise VaultError("recovery_artifact_invalid") from exc
+                if metadata is not None and (
+                    metadata.recovery_generation != material.recovery_generation
+                    or metadata.mode is not material.mode
+                    or metadata.secret_kind is not material.secret_kind
+                    or metadata.snapshot_manifest_digest != material.snapshot_manifest_digest
+                    or metadata.artifact_digest != artifact.artifact_digest
+                ):
+                    raise VaultError("recovery_generation_stale")
+                envelope = rewrap_vault_root_envelope(
+                    self._root_handle(bytearray(root)),
+                    rewrap_secret,
+                    installation_id=self._installation_id,
+                )
+                self._pending_recovery = (
+                    self._mode,
+                    self._root_envelope,
+                    envelope,
+                    throttle_record_digest,
+                    material.recovery_generation,
+                    None
+                    if metadata is not None
+                    else InstallationRecoveryMetadata(
+                        material.recovery_generation,
+                        material.mode,
+                        material.secret_kind,
+                        artifact.artifact_digest,
+                        material.snapshot_manifest_digest,
+                    ),
+                )
+                self._mode = VaultMode.PASSPHRASE
+                self._root_envelope = envelope
+                self._become_ready(root)
+            except VaultError:
+                self._close_store()
+                self._rollback_pending_recovery()
+                self._state = VaultState.LOCKED
+                raise
+            except (
+                EncryptedVaultError,
+                InstallationRecoveryArtifactError,
+                SecretMemoryError,
+                VaultPassphraseError,
+                OSError,
+            ) as exc:
+                self._close_store()
+                self._rollback_pending_recovery()
+                self._state = VaultState.LOCKED
+                raise VaultError("recovery_artifact_invalid") from exc
+            finally:
+                _overwrite(root)
+            return self.status
+
+    def commit_recovery_marker(self) -> None:
+        """Publish the recovered envelope only after ready-application verification succeeded."""
+
+        pending = self._pending_recovery
+        if pending is None:
+            return
+        replace_mode = self._replace_mode
+        if replace_mode is None or not self.ready:
+            raise VaultError("initialization_forbidden")
+        (
+            _old_mode,
+            _old_envelope,
+            envelope,
+            throttle_digest,
+            recovery_generation,
+            missing_metadata,
+        ) = pending
+        if missing_metadata is not None:
+            store = self._store
+            if store is None:
+                raise VaultError("vault_tampered")
+            try:
+                store.create_record(
+                    VaultRecordKind.RECOVERY_METADATA,
+                    {
+                        "installation_id": self._installation_id,
+                        "recovery_generation": str(recovery_generation),
+                    },
+                    self._root_handle(bytearray(missing_metadata.canonical_bytes())),
+                )
+            except EncryptedVaultError as exc:
+                if exc.reason != "record_exists":
+                    raise VaultError("vault_tampered") from exc
+                try:
+                    existing = store.load_record(
+                        VaultRecordKind.RECOVERY_METADATA,
+                        {
+                            "installation_id": self._installation_id,
+                            "recovery_generation": str(recovery_generation),
+                        },
+                    ).consume(SecretConsumer.VAULT_ROOT, lambda view: bytes(view))
+                    if InstallationRecoveryMetadata.parse(existing) != missing_metadata:
+                        raise VaultError("recovery_generation_stale")
+                except (EncryptedVaultError, InstallationRecoveryArtifactError) as load_exc:
+                    raise VaultError("vault_tampered") from load_exc
+        replace_mode(
+            VaultMode.PASSPHRASE,
+            envelope,
+            throttle_digest,
+            recovery_generation,
+        )
+        self._pending_recovery = None
+
     async def lock(self) -> VaultStatus:
         async with self._mutex:
             self._require_not_closed()
@@ -452,6 +669,8 @@ class VaultService:
             self._state = VaultState.CLOSING
             self._invalidate_handles()
             self._close_store()
+            self._rollback_pending_recovery()
+            self._discard_pending_root_rotation()
             self._vault_generation += 1
             self._state = VaultState.LOCKED
             self._reason = "vault_locked"
@@ -464,6 +683,8 @@ class VaultService:
             self._state = VaultState.CLOSING
             self._invalidate_handles()
             self._close_store()
+            self._rollback_pending_recovery()
+            self._discard_pending_root_rotation()
             self._vault_generation += 1
             self._state = VaultState.CLOSED
             self._reason = "closed"
@@ -530,6 +751,316 @@ class VaultService:
                 )
             except EncryptedVaultError as exc:
                 raise KeyStoreError(KeyStoreReason.KEY_MISSING) from exc
+
+    async def build_installation_recovery_artifact(
+        self,
+        recovery_secret: SecretHandle,
+        *,
+        recovery_generation: int,
+        mode: InstallationRecoveryMode,
+        secret_kind: InstallationRecoverySecretKind,
+        snapshot_manifest_digest: str | None,
+    ) -> InstallationRecoveryArtifact:
+        """Build one artifact while the IVK stays behind the service boundary."""
+
+        async with self._mutex:
+            store, _generation = self._ready_store()
+            try:
+                return self._create_recovery_artifact_locked(
+                    store,
+                    recovery_secret,
+                    recovery_generation=recovery_generation,
+                    mode=mode,
+                    secret_kind=secret_kind,
+                    snapshot_manifest_digest=snapshot_manifest_digest,
+                )
+            except (EncryptedVaultError, InstallationRecoveryArtifactError) as exc:
+                raise VaultError("vault_tampered") from exc
+
+    def _create_recovery_artifact_locked(
+        self,
+        store: EncryptedVaultStore,
+        recovery_secret: SecretHandle,
+        *,
+        recovery_generation: int,
+        mode: InstallationRecoveryMode,
+        secret_kind: InstallationRecoverySecretKind,
+        snapshot_manifest_digest: str | None,
+    ) -> InstallationRecoveryArtifact:
+        pending = self._pending_root_rotation
+        root = (
+            self._root_handle(bytearray(pending.new_root))
+            if pending is not None and pending.prepared.recovery_generation == recovery_generation
+            else store.installation_recovery_root()
+        )
+        return create_installation_recovery_artifact(
+            root,
+            recovery_secret,
+            recovery_generation=recovery_generation,
+            mode=mode,
+            secret_kind=secret_kind,
+            snapshot_manifest_digest=snapshot_manifest_digest,
+        )
+
+    def _authoritative_recovery_root(
+        self, store: EncryptedVaultStore, recovery_generation: int
+    ) -> bytearray:
+        pending = self._pending_root_rotation
+        if pending is not None and pending.prepared.recovery_generation == recovery_generation:
+            return bytearray(pending.new_root)
+        return store.installation_recovery_root().consume(
+            SecretConsumer.VAULT_ROOT, lambda view: bytearray(view)
+        )
+
+    async def build_and_verify_installation_recovery_artifact(
+        self,
+        recovery_secret: SecretHandle,
+        *,
+        recovery_generation: int,
+        mode: InstallationRecoveryMode,
+        secret_kind: InstallationRecoverySecretKind,
+        snapshot_manifest_digest: str | None,
+        publish: Callable[[InstallationRecoveryArtifact], InstallationRecoveryArtifact],
+    ) -> InstallationRecoveryArtifact:
+        """Build one artifact, let the caller persist it, then reopen the persisted bytes.
+
+        ADR-024 step 5 requires proving the set actually opens this installation *before* it is
+        published, while the person who could redo the ceremony is still present.  A set that only
+        turns out to be unopenable during a real recovery is not recovery material at all.  The
+        candidate secret therefore has to outlive the build, so it is held in one protected
+        allocation inside this boundary and overwritten as soon as the drill finishes.
+        """
+
+        async with self._mutex:
+            store, _generation = self._ready_store()
+            candidate = recovery_secret.consume(
+                SecretConsumer.INSTALLATION_RECOVERY, lambda view: bytearray(view)
+            )
+            expected_root = bytearray()
+            recovered_root = bytearray()
+            try:
+                artifact = self._create_recovery_artifact_locked(
+                    store,
+                    self._secret_memory.capture(
+                        SecretPurpose.INSTALLATION_RECOVERY, bytearray(candidate)
+                    ),
+                    recovery_generation=recovery_generation,
+                    mode=mode,
+                    secret_kind=secret_kind,
+                    snapshot_manifest_digest=snapshot_manifest_digest,
+                )
+                stored = publish(artifact)
+                if type(stored) is not InstallationRecoveryArtifact:
+                    raise VaultError("recovery_artifact_invalid")
+                material = unlock_installation_recovery_artifact(
+                    stored,
+                    self._secret_memory.capture(
+                        SecretPurpose.INSTALLATION_RECOVERY, bytearray(candidate)
+                    ),
+                )
+                recovered_root = material.consume_ivk(lambda view: bytearray(view))
+                expected_root = self._authoritative_recovery_root(store, recovery_generation)
+                if not hmac.compare_digest(bytes(recovered_root), bytes(expected_root)):
+                    raise VaultError("recovery_artifact_invalid")
+                if material.recovery_generation != recovery_generation:
+                    raise VaultError("recovery_artifact_invalid")
+                if self._pending_root_rotation is None:
+                    # The recovered root is byte-identical to the live root, so the sentinel this
+                    # verifies is exactly the one the recovered root would authenticate.
+                    store.verify_sentinel({"installation_id": self._installation_id})
+                return stored
+            except (
+                EncryptedVaultError,
+                InstallationRecoveryArtifactError,
+                SecretMemoryError,
+            ) as exc:
+                raise VaultError("recovery_artifact_invalid") from exc
+            finally:
+                _overwrite(candidate)
+                _overwrite(expected_root)
+                _overwrite(recovered_root)
+
+    async def commit_installation_recovery_metadata(
+        self, metadata: InstallationRecoveryMetadata
+    ) -> None:
+        """Record a verified, externally published recovery generation exactly once."""
+
+        if type(metadata) is not InstallationRecoveryMetadata:
+            raise TypeError("installation_recovery_metadata_invalid")
+        async with self._mutex:
+            store, _generation = self._ready_store()
+            try:
+                pending = self._pending_root_rotation
+                if (
+                    pending is not None
+                    and pending.prepared.recovery_generation == metadata.recovery_generation
+                ):
+                    candidate = EncryptedVaultStore(pending.prepared.stage)
+                    try:
+                        candidate.initialize(self._root_handle(bytearray(pending.new_root)))
+                        candidate.create_record(
+                            VaultRecordKind.RECOVERY_METADATA,
+                            {
+                                "installation_id": self._installation_id,
+                                "recovery_generation": str(metadata.recovery_generation),
+                            },
+                            self._root_handle(bytearray(metadata.canonical_bytes())),
+                        )
+                    finally:
+                        candidate.close()
+                    return
+                store.create_record(
+                    VaultRecordKind.RECOVERY_METADATA,
+                    {
+                        "installation_id": self._installation_id,
+                        "recovery_generation": str(metadata.recovery_generation),
+                    },
+                    self._root_handle(bytearray(metadata.canonical_bytes())),
+                )
+            except EncryptedVaultError as exc:
+                reason = (
+                    "record_binding_mismatch" if exc.reason == "record_exists" else "vault_tampered"
+                )
+                raise VaultError(reason) from exc
+
+    async def stage_root_rotation(self, recovery_generation: int) -> Path:
+        """Prepare a complete next-root vault without mutating active authority."""
+
+        if type(recovery_generation) is not int or recovery_generation <= 0:
+            raise ValueError("recovery_generation_invalid")
+        async with self._mutex:
+            store, _generation = self._ready_store()
+            if self._pending_root_rotation is not None:
+                raise VaultError("already_ready")
+            old_root = store.installation_recovery_root().consume(
+                SecretConsumer.VAULT_ROOT, lambda view: bytearray(view)
+            )
+            new_root = bytearray(os.urandom(32))
+            try:
+                prepared = store.prepare_root_rotation(
+                    self._root_handle(bytearray(new_root)),
+                    recovery_generation=recovery_generation,
+                )
+            except BaseException:
+                _overwrite(old_root)
+                _overwrite(new_root)
+                raise
+            self._pending_root_rotation = _PendingRootRotation(
+                prepared,
+                old_root,
+                new_root,
+            )
+            return prepared.stage
+
+    async def prepare_root_rotation_envelope(
+        self,
+        rewrap_secret: SecretHandle,
+        *,
+        throttle_record_digest: str,
+        action: Literal["rotate", "revoke"],
+    ) -> None:
+        """Bind the quarantined next root to a new passphrase after authorization."""
+
+        validate_sha256_digest(throttle_record_digest)
+        if action not in {"rotate", "revoke"}:
+            raise ValueError("installation_recovery_action_invalid")
+        if rewrap_secret.purpose is not SecretPurpose.VAULT_REWRAP:
+            raise VaultError("secret_purpose_mismatch")
+        async with self._mutex:
+            self._ready_store()
+            pending = self._pending_root_rotation
+            if pending is None or pending.envelope is not None:
+                raise VaultError("initialization_forbidden")
+            pending.envelope = rewrap_vault_root_envelope(
+                self._root_handle(bytearray(pending.new_root)),
+                rewrap_secret,
+                installation_id=self._installation_id,
+            )
+            pending.throttle_record_digest = throttle_record_digest
+            pending.action = action
+
+    async def commit_root_rotation(self) -> None:
+        """Switch the verified vault and marker through the daemon's crash journal."""
+
+        async with self._mutex:
+            store, _generation = self._ready_store()
+            pending = self._pending_root_rotation
+            replace_root = self._replace_root
+            if (
+                pending is None
+                or pending.envelope is None
+                or pending.throttle_record_digest is None
+                or pending.action is None
+                or replace_root is None
+            ):
+                raise VaultError("initialization_forbidden")
+            store.close()
+            self._store = None
+            try:
+                replace_root(
+                    VaultMode.PASSPHRASE,
+                    pending.envelope,
+                    pending.throttle_record_digest,
+                    pending.prepared.recovery_generation,
+                    pending.prepared.stage,
+                    pending.action,
+                )
+                self._mode = VaultMode.PASSPHRASE
+                self._root_envelope = pending.envelope
+                replacement = self._vault_store_factory()
+                replacement.initialize(self._root_handle(bytearray(pending.new_root)))
+                replacement.verify_sentinel({"installation_id": self._installation_id})
+                self._store = replacement
+                self._pending_root_rotation = None
+                pending.wipe()
+            except BaseException:
+                try:
+                    restored = self._vault_store_factory()
+                    restored.initialize(self._root_handle(bytearray(pending.old_root)))
+                    restored.verify_sentinel({"installation_id": self._installation_id})
+                    self._store = restored
+                except Exception:
+                    self._state = VaultState.LOCKED
+                    self._reason = "vault_tampered"
+                raise
+
+    async def cancel_root_rotation(self) -> None:
+        """Discard a not-yet-committed root candidate and wipe held roots."""
+
+        async with self._mutex:
+            pending, self._pending_root_rotation = self._pending_root_rotation, None
+            if pending is None:
+                return
+            _remove_rotation_stage(pending.prepared.stage)
+            pending.wipe()
+
+    async def load_installation_recovery_metadata(
+        self, recovery_generation: int
+    ) -> InstallationRecoveryMetadata:
+        """Load one encrypted recovery generation while ready."""
+
+        if (
+            type(recovery_generation) is not int
+            or not 1 <= recovery_generation <= 9_007_199_254_740_991
+        ):
+            raise ValueError("recovery_generation_invalid")
+        async with self._mutex:
+            store, _generation = self._ready_store()
+            try:
+                handle = store.load_record(
+                    VaultRecordKind.RECOVERY_METADATA,
+                    {
+                        "installation_id": self._installation_id,
+                        "recovery_generation": str(recovery_generation),
+                    },
+                )
+                raw = handle.consume(SecretConsumer.VAULT_ROOT, lambda view: bytes(view))
+                return InstallationRecoveryMetadata.parse(raw)
+            except InstallationRecoveryArtifactError as exc:
+                raise VaultError("vault_tampered") from exc
+            except EncryptedVaultError as exc:
+                reason = "record_missing" if exc.reason == "record_missing" else "vault_tampered"
+                raise VaultError(reason) from exc
 
     def installation_mac_handle(self, purpose: MacKeyPurpose) -> MacKeyHandle:
         if purpose not in _INSTALLATION_INFO:
@@ -816,16 +1347,25 @@ class VaultService:
         self._vault_generation += 1
         generation = self._vault_generation
         handles: dict[MacKeyPurpose, _MacHandle] = {}
-        for purpose, info in _INSTALLATION_INFO.items():
-            key = _derive(ivk, _INSTALLATION_SALT, info)
-            handles[purpose] = _MacHandle(
-                self,
-                generation,
-                purpose,
-                key,
-                _INSTALLATION_DOMAINS[purpose],
-                bundle_domains=False,
-            )
+        store = self._store
+        if store is None:
+            raise VaultError("vault_tampered")
+        mac_root = store.installation_mac_root().consume(
+            SecretConsumer.VAULT_ROOT, lambda view: bytearray(view)
+        )
+        try:
+            for purpose, info in _INSTALLATION_INFO.items():
+                key = _derive(mac_root, _INSTALLATION_SALT, info)
+                handles[purpose] = _MacHandle(
+                    self,
+                    generation,
+                    purpose,
+                    key,
+                    _INSTALLATION_DOMAINS[purpose],
+                    bundle_domains=False,
+                )
+        finally:
+            _overwrite(mac_root)
         self._installation_handles = handles
         self._state = VaultState.READY
         self._reason = None
@@ -860,6 +1400,7 @@ class VaultService:
             "provider_credential_rotate": SecretPurpose.PROVIDER_REAUTHENTICATION,
             "privacy_policy_widen": SecretPurpose.PRIVACY_REAUTHENTICATION,
             "idle_relock_policy_change": SecretPurpose.SECURITY_REAUTHENTICATION,
+            "installation_recovery_change": SecretPurpose.SECURITY_REAUTHENTICATION,
         }.get(challenge.purpose)
         if (
             expected is None
@@ -912,6 +1453,21 @@ class VaultService:
         if self._store is not None:
             self._store.close()
             self._store = None
+
+    def _rollback_pending_recovery(self) -> None:
+        pending, self._pending_recovery = self._pending_recovery, None
+        if pending is None:
+            return
+        old_mode, old_envelope, _new_envelope, _digest, _generation, _metadata = pending
+        self._mode = old_mode
+        self._root_envelope = old_envelope
+
+    def _discard_pending_root_rotation(self) -> None:
+        pending, self._pending_root_rotation = self._pending_root_rotation, None
+        if pending is None:
+            return
+        _remove_rotation_stage(pending.prepared.stage)
+        pending.wipe()
 
     def _require_not_closed(self) -> None:
         if self._state in {VaultState.CLOSING, VaultState.CLOSED}:
@@ -1121,6 +1677,23 @@ def _validated_provider_credential(view: memoryview) -> bytearray:
 
 def _overwrite(value: bytearray) -> None:
     value[:] = b"\x00" * len(value)
+
+
+def _remove_rotation_stage(path: Path) -> None:
+    if not path.exists():
+        return
+    for member in sorted(path.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        try:
+            if member.is_dir():
+                member.rmdir()
+            else:
+                member.unlink()
+        except FileNotFoundError:
+            pass
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        pass
 
 
 def _raise_tampered() -> None:

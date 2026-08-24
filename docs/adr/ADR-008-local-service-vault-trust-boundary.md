@@ -4,6 +4,8 @@
 bundle-scoped passphrase auto-unlock through an allowlisted platform credential store. Binding for
 v0.1 specification work; independent security review remains required before the first non-alpha
 release (maintainer decision, 2026-08-19), and no public surface claims a reviewed boundary.
+Amended 2026-08-23 by ADR-024 for installation-vault recovery, zero-secret agent handoff, and
+platform-native prompt cells.
 **Related:** ADR-001 owns single-writer lifecycle; ADR-004 owns cryptography and recovery; ADR-006
 and the privacy protocol own outbound data authorization.
 
@@ -74,6 +76,12 @@ Later unlock uses the distinct `vault_unlock` purpose. Initialization can never 
 existing vault or act as fallback for a missing keyring entry; crash ambiguity fails closed without
 deleting or replacing data.
 
+If an existing vault loses every ordinary unlock path, initialization remains forbidden. The
+service classifies only bounded ADR-024 recovery status and may accept one exact installation
+recovery ceremony when provisioned metadata and a valid external set are available. Recovery uses
+a generated quarantined target and an atomic authority switch; it never opens workflows early,
+replaces active files in place, or treats an absent secret as empty state.
+
 **2026-07-25 auto-unlock amendment.** Passphrase mode may use one allowlisted platform credential
 store entry named `yoetz.auto-unlock.v1`, scoped by the SHA-256 digest of the absolute service
 bundle path. Interactive first-run setup generates a high-entropy passphrase into a mutable buffer,
@@ -138,6 +146,10 @@ service bridge: its process owns MCP framing but no application, key, storage, o
 The CLI is the same kind of client except for `service run` (the daemon entrypoint) and
 `service unlock` (the dedicated human helper). A future UI uses the same normal protocol; a future
 trusted unlock prompt must use the separately typed unlock contract.
+ADR-024 permits an ordinary client or agent to request only a zero-secret recovery handoff. It may
+receive a closed structural state, opaque continuation identity, expiry, and exact trusted command;
+it never receives set paths, artifact bytes, secret facts, keyring identity, or a vault capability.
+Only an allowlisted platform adapter may turn that handoff into a native local-human prompt.
 
 The service may hold decrypted state and opaque key or provider-credential handles only in process
 memory. Clients never receive them. All secret buffers cross the swappable `SecretMemoryPort`:
@@ -182,11 +194,14 @@ creates a challenge. Ordinary control/MCP schemas and their import graphs expose
 confidential client. This is not a claim that arbitrary malicious same-UID code with socket access
 cannot emulate a YZH1 client; that limitation is explicit below and in resolved decision F-011.
 
-The confidential secret-ingress channel is separately typed by a closed seven-value `SecretPurpose`
+The confidential secret-ingress channel is separately typed by a closed nine-value `SecretPurpose`
 registry: `vault_initialize`, `vault_unlock`, `portable_recovery`,
 `provider_reauthentication`, `provider_credential`, `privacy_reauthentication`, and
-`security_reauthentication`. The seventh value is used only by an exact idle-relock-policy target;
-it cannot substitute for provider/privacy authority. The channel accepts
+`security_reauthentication`, plus `installation_recovery` and `vault_rewrap`. The seventh value is
+used only by an exact idle-relock-policy target; the eighth accepts one provisioned installation
+recovery secret, and the ninth accepts a new passphrase only after the old IVK and staged target are
+fully authenticated. Neither recovery purpose can initialize a vault, unwrap a BMK, authorize a
+provider, or weaken privacy policy. The channel accepts
 only one-shot material for the exact live ceremony without placing bytes in the ordinary control
 envelope.
 Initialize is available only for a pristine uninitialized installation and accepts one passphrase

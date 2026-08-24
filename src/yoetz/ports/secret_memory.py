@@ -43,6 +43,8 @@ class SecretPurpose(str, Enum):  # noqa: UP042 - exact internal enum base
     VAULT_UNLOCK = "vault_unlock"
     VAULT_ROOT_KEY = "vault_root_key"
     PORTABLE_RECOVERY = "portable_recovery"
+    INSTALLATION_RECOVERY = "installation_recovery"
+    VAULT_REWRAP = "vault_rewrap"
     OBJECT_PAYLOAD = "object_payload"
     PROVIDER_REAUTHENTICATION = "provider_reauthentication"
     PROVIDER_CREDENTIAL = "provider_credential"
@@ -53,6 +55,8 @@ class SecretPurpose(str, Enum):  # noqa: UP042 - exact internal enum base
 class SecretConsumer(str, Enum):  # noqa: UP042 - exact internal enum base
     VAULT_ROOT = "vault_root"
     RECOVERY_WRAPPER = "recovery_wrapper"
+    INSTALLATION_RECOVERY = "installation_recovery"
+    VAULT_REWRAPPER = "vault_rewrapper"
     OBJECT_CRYPTO = "object_crypto"
     PROVIDER_AUTHORIZER = "provider_authorizer"
     PRIVACY_AUTHORIZER = "privacy_authorizer"

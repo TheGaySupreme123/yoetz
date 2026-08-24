@@ -523,6 +523,10 @@ async def test_ready_factory_starts_and_reads_repository_bound_setup(tmp_path: P
         assert result.ok is True
         assert result.outcome == "created"
         assert result.frontier.sequence == "1"
+        verified_routes, replayed_events, verified_objects = await app.verify_recovery_candidate()
+        assert verified_routes == 1
+        assert replayed_events >= 1
+        assert verified_objects >= 1
         assert isinstance(projected, StartResult)
         assert projected.root.ok is True
         assert projected.root.request_id == request.request_id

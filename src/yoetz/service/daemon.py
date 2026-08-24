@@ -12,11 +12,11 @@ import stat
 import struct
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Never, Protocol, cast
+from typing import Final, Literal, Never, Protocol, cast
 
 import anyio
 from pydantic import BaseModel
@@ -31,6 +31,12 @@ from yoetz.adapters.control.unix_socket import (
     remove_stale_endpoint,
 )
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
+from yoetz.adapters.keys.installation_recovery import (
+    InstallationRecoveryArtifact,
+    InstallationRecoveryMetadata,
+    InstallationRecoveryMode,
+    InstallationRecoverySecretKind,
+)
 from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
 from yoetz.adapters.keys.vault_passphrase import VaultRootEnvelope
@@ -129,6 +135,9 @@ from yoetz.service.confidential_protocol import (
     HumanPreview,
     IdleRelockPolicyResult,
     IdleRelockPolicyTarget,
+    InstallationRecoveryPreview,
+    InstallationRecoveryResult,
+    InstallationRecoveryTarget,
     KeyringRetryPreview,
     PortableRecoveryResult,
     PortableRecoveryTarget,
@@ -165,6 +174,10 @@ from yoetz.service.control_protocol import (
     write_control_frame,
 )
 from yoetz.service.human_control import HumanControlError, HumanControlService
+from yoetz.service.installation_recovery import (
+    InstallationRecoverySetStore,
+    PreparedInstallationSnapshot,
+)
 from yoetz.service.lifecycle import (
     SINGLETON_LOCK_NAME,
     Admission,
@@ -523,6 +536,7 @@ class ServiceComposition:
     privacy_policy_app_relay: _PrivacyPolicyAppRelay | None = None
     auto_unlock_reason: str = "none"
     auto_unlock_bundle: Path | None = None
+    maintenance_gate: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     def __repr__(self) -> str:
         return "ServiceComposition(<redacted>)"
@@ -687,6 +701,25 @@ class ServiceDaemon:
                 or self._composition.vault.generation != vault_generation
             ):
                 raise LifecycleError("invalid_transition")
+            if getattr(self._composition.vault, "recovery_pending", False) is True:
+                verify_recovery = getattr(partial, "verify_recovery_candidate", None)
+                if not callable(verify_recovery):
+                    raise RuntimeError("installation_recovery_verifier_unavailable")
+                observed_verification = await cast(
+                    Callable[[], Awaitable[object]], verify_recovery
+                )()
+                if (
+                    type(observed_verification) is not tuple
+                    or len(cast(tuple[object, ...], observed_verification)) != 3
+                    or any(
+                        type(value) is not int or value < 0
+                        for value in cast(tuple[object, ...], observed_verification)
+                    )
+                ):
+                    raise RuntimeError("installation_recovery_verifier_invalid")
+            commit_recovery = getattr(self._composition.vault, "commit_recovery_marker", None)
+            if callable(commit_recovery):
+                commit_recovery()
             self._application = partial
             await lifecycle.transition(
                 ServiceState.READY,
@@ -931,6 +964,32 @@ class ServiceDaemon:
         )
 
     async def _dispatch_ready(
+        self,
+        projection_context: ClientProjectionContext,
+        request: ControlCallRequest,
+        repository_privacy_context: RepositoryPrivacyContext | None,
+    ) -> object:
+        # A recovery ceremony holds this same lock across an unbounded human wait, so an
+        # unbounded acquire would hang every ordinary call for as long as someone stares at a
+        # confirmation prompt. The caller's own deadline decides how long it is willing to wait.
+        gate = self._composition.maintenance_gate
+        if request.deadline_ms is None:
+            await gate.acquire()
+        else:
+            try:
+                await asyncio.wait_for(gate.acquire(), request.deadline_ms / 1_000)
+            except TimeoutError as exc:
+                raise ControlError("request_timeout", retryable=True) from exc
+        try:
+            return await self._dispatch_ready_under_maintenance_gate(
+                projection_context,
+                request,
+                repository_privacy_context,
+            )
+        finally:
+            gate.release()
+
+    async def _dispatch_ready_under_maintenance_gate(
         self,
         projection_context: ClientProjectionContext,
         request: ControlCallRequest,
@@ -1501,10 +1560,11 @@ class ServiceDaemon:
                 await self._note_sweep_liveness(summary)
             if recommendation_refresh is not None:
                 try:
-                    await asyncio.wait_for(
-                        recommendation_refresh(),
-                        timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
-                    )
+                    async with self._composition.maintenance_gate:
+                        await asyncio.wait_for(
+                            recommendation_refresh(),
+                            timeout=_READY_RECOMMENDATION_REFRESH_DEADLINE_SECONDS,
+                        )
                 except Exception:
                     # Recommendations are advisory and must never unpublish READY.
                     pass
@@ -1551,6 +1611,14 @@ class ServiceDaemon:
         self, observation_sweep: Callable[[], Awaitable[ObservationDrainSummary]]
     ) -> ObservationDrainSummary | None:
         """Run one deadline-bounded sweep, naming why it produced no summary."""
+
+        async with self._composition.maintenance_gate:
+            return await self._bounded_observation_sweep_under_gate(observation_sweep)
+
+    async def _bounded_observation_sweep_under_gate(
+        self, observation_sweep: Callable[[], Awaitable[ObservationDrainSummary]]
+    ) -> ObservationDrainSummary | None:
+        """Run one sweep while installation-wide snapshot/rotation work is excluded."""
 
         raised_inside = False
 
@@ -1983,12 +2051,22 @@ class _ProductionListeners:
 
 
 class _InstallationStateStore:
-    def __init__(self, path: Path, throttle_path: Path, generation_path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        throttle_path: Path,
+        generation_path: Path,
+        recovery_sets: InstallationRecoverySetStore | None = None,
+    ) -> None:
         self._path = path
         self._throttle_path = throttle_path
         self._generation_path = generation_path
+        self._recovery_sets = recovery_sets
 
-    def load(self) -> _InstallationState | None:
+    def load(self, *, reconcile: bool = True) -> _InstallationState | None:
+        if reconcile:
+            self._reconcile_root_rotation()
+            self._reconcile_recovery_marker()
         try:
             encoded = _read_private_file(self._path, _MAX_INSTALLATION_MARKER_BYTES)
         except FileNotFoundError:
@@ -2065,6 +2143,354 @@ class _InstallationStateStore:
             throttle.installation_id if throttle is not None else self.select_installation_id(None)
         )
         state = _InstallationState(installation_id, mode, envelope, mode_binding_digest)
+        _write_private_atomic(self._path, self._encode(state))
+
+    def replace_after_recovery(
+        self,
+        mode: VaultMode,
+        envelope: VaultRootEnvelope,
+        mode_binding_digest: str,
+        recovery_generation: int,
+    ) -> None:
+        """Atomically select a recovered passphrase envelope and retain the old marker."""
+
+        if mode is not VaultMode.PASSPHRASE or type(envelope) is not VaultRootEnvelope:
+            raise RuntimeError("installation_recovery_marker_invalid")
+        if type(recovery_generation) is not int or recovery_generation <= 0:
+            raise RuntimeError("installation_recovery_generation_invalid")
+        current = self.load()
+        if current is None:
+            raise RuntimeError("installation_recovery_marker_missing")
+        recovery_sets = self._recovery_sets
+        if recovery_sets is None:
+            raise RuntimeError("installation_recovery_store_unavailable")
+        throttle = self._provisional_throttle()
+        if throttle is None or throttle.record_digest != mode_binding_digest:
+            raise RuntimeError("installation_throttle_binding_invalid")
+        rollback_root = self._path.parent / "installation-recovery" / "rollback-markers"
+        ensure_owner_only_dir(rollback_root.parent)
+        ensure_owner_only_dir(rollback_root)
+        rollback = rollback_root / f"generation-{recovery_generation}.json"
+        if rollback.exists():
+            raise RuntimeError("installation_recovery_generation_exists")
+        _write_private_atomic(rollback, self._encode(current))
+        recovered = _InstallationState(
+            current.installation_id,
+            VaultMode.PASSPHRASE,
+            envelope,
+            mode_binding_digest,
+        )
+        old_marker = self._encode(current)
+        new_marker = self._encode(recovered)
+        journal = rollback_root.parent / "marker-recovery-journal.json"
+        if journal.exists():
+            raise RuntimeError("installation_recovery_generation_exists")
+        self._write_recovery_marker_journal(
+            journal,
+            recovery_generation=recovery_generation,
+            old_marker_digest=_bytes_digest(old_marker),
+            new_marker_digest=_bytes_digest(new_marker),
+        )
+        try:
+            _write_private_atomic(self._path, new_marker)
+            recovery_sets.finalize_committed_recovery(recovery_generation)
+            journal.unlink()
+            _fsync_directory(journal.parent)
+        except BaseException:
+            self._reconcile_recovery_marker()
+            if hmac.compare_digest(
+                _bytes_digest(_read_private_file(self._path, _MAX_INSTALLATION_MARKER_BYTES)),
+                _bytes_digest(new_marker),
+            ):
+                return
+            raise
+
+    @staticmethod
+    def _write_recovery_marker_journal(
+        path: Path,
+        *,
+        recovery_generation: int,
+        old_marker_digest: str,
+        new_marker_digest: str,
+    ) -> None:
+        body: dict[str, JsonValue] = {
+            "format": "yoetz-installation-recovery-marker/1",
+            "new_marker_digest": new_marker_digest,
+            "old_marker_digest": old_marker_digest,
+            "recovery_generation": recovery_generation,
+        }
+        body["record_digest"] = canonical_digest(body)
+        _write_private_atomic(path, canonical_encode(body) + b"\n")
+
+    def _reconcile_recovery_marker(self) -> None:
+        recovery_sets = self._recovery_sets
+        journal = self._path.parent / "installation-recovery" / "marker-recovery-journal.json"
+        try:
+            encoded = _read_private_file(journal, 16_384)
+        except FileNotFoundError:
+            return
+        if recovery_sets is None:
+            raise RuntimeError("installation_recovery_store_unavailable")
+        try:
+            if not encoded.endswith(b"\n") or encoded.endswith(b"\n\n"):
+                raise ValueError
+            value = strict_json_parse(encoded[:-1])
+            if type(value) is not dict:
+                raise ValueError
+            source = cast(dict[str, JsonValue], value)
+            if canonical_encode(source) + b"\n" != encoded or set(source) != {
+                "format",
+                "new_marker_digest",
+                "old_marker_digest",
+                "record_digest",
+                "recovery_generation",
+            }:
+                raise ValueError
+            body = dict(source)
+            record_digest = body.pop("record_digest")
+            generation = source["recovery_generation"]
+            old_digest = source["old_marker_digest"]
+            new_digest = source["new_marker_digest"]
+            if (
+                source["format"] != "yoetz-installation-recovery-marker/1"
+                or type(record_digest) is not str
+                or not hmac.compare_digest(record_digest, canonical_digest(body))
+                or type(generation) is not int
+                or generation <= 0
+                or type(old_digest) is not str
+                or type(new_digest) is not str
+            ):
+                raise ValueError
+            marker_digest = _bytes_digest(
+                _read_private_file(self._path, _MAX_INSTALLATION_MARKER_BYTES)
+            )
+            if hmac.compare_digest(marker_digest, new_digest):
+                recovery_sets.finalize_committed_recovery(generation)
+            elif hmac.compare_digest(marker_digest, old_digest):
+                recovery_sets.rollback_interrupted_recovery(generation)
+            else:
+                raise RuntimeError("installation_recovery_marker_ambiguous")
+            journal.unlink()
+            _fsync_directory(journal.parent)
+        except (OSError, TypeError, ValueError) as exc:
+            raise RuntimeError("installation_recovery_marker_journal_invalid") from exc
+
+    def replace_after_root_rotation(
+        self,
+        mode: VaultMode,
+        envelope: VaultRootEnvelope,
+        mode_binding_digest: str,
+        recovery_generation: int,
+        staged_vault: Path,
+        action: Literal["rotate", "revoke"],
+    ) -> None:
+        """Switch a fully re-encrypted vault and marker with restart reconciliation."""
+
+        if (
+            mode is not VaultMode.PASSPHRASE
+            or type(envelope) is not VaultRootEnvelope
+            or type(recovery_generation) is not int
+            or recovery_generation <= 0
+            or action not in {"rotate", "revoke"}
+        ):
+            raise RuntimeError("installation_root_rotation_invalid")
+        current = self.load()
+        if current is None:
+            raise RuntimeError("installation_recovery_marker_missing")
+        throttle = self._provisional_throttle()
+        if throttle is None or throttle.record_digest != mode_binding_digest:
+            raise RuntimeError("installation_throttle_binding_invalid")
+        vault = self._path.parent / "vault"
+        if (
+            staged_vault.parent != vault.parent
+            or not staged_vault.name.startswith(f".{vault.name}.root-{recovery_generation}.")
+            or not staged_vault.name.endswith(".tmp")
+            or not staged_vault.is_dir()
+            or not vault.is_dir()
+        ):
+            raise RuntimeError("installation_root_rotation_stage_invalid")
+        recovery_root = self._path.parent / "installation-recovery"
+        rollback_root = recovery_root / "rollback-vaults"
+        ensure_owner_only_dir(recovery_root)
+        ensure_owner_only_dir(rollback_root)
+        backup = rollback_root / f"{action}-generation-{recovery_generation}"
+        journal = recovery_root / "root-rotation-journal.json"
+        if backup.exists() or journal.exists():
+            raise RuntimeError("installation_recovery_generation_exists")
+        old_marker = _read_private_file(self._path, _MAX_INSTALLATION_MARKER_BYTES)
+        rollback_markers = recovery_root / "rollback-markers"
+        ensure_owner_only_dir(rollback_markers)
+        rollback_marker = rollback_markers / f"root-{action}-generation-{recovery_generation}.json"
+        if rollback_marker.exists():
+            raise RuntimeError("installation_recovery_generation_exists")
+        _write_private_atomic(rollback_marker, old_marker)
+        next_state = _InstallationState(
+            current.installation_id,
+            VaultMode.PASSPHRASE,
+            envelope,
+            mode_binding_digest,
+        )
+        new_marker = self._encode(next_state)
+        self._write_root_rotation_journal(
+            journal,
+            action=action,
+            recovery_generation=recovery_generation,
+            stage_name=staged_vault.name,
+            backup_name=backup.name,
+            old_marker_digest=_bytes_digest(old_marker),
+            new_marker_digest=_bytes_digest(new_marker),
+            phase="prepared",
+        )
+        try:
+            os.rename(vault, backup)
+            _fsync_directory(vault.parent)
+            os.rename(staged_vault, vault)
+            _fsync_directory(vault.parent)
+            _write_private_atomic(self._path, new_marker)
+            self._write_root_rotation_journal(
+                journal,
+                action=action,
+                recovery_generation=recovery_generation,
+                stage_name=staged_vault.name,
+                backup_name=backup.name,
+                old_marker_digest=_bytes_digest(old_marker),
+                new_marker_digest=_bytes_digest(new_marker),
+                phase="marker_committed",
+            )
+            self._finalize_root_rotation(action, recovery_generation)
+            journal.unlink()
+            _fsync_directory(journal.parent)
+        except BaseException:
+            self._reconcile_root_rotation()
+            if hmac.compare_digest(
+                _bytes_digest(_read_private_file(self._path, _MAX_INSTALLATION_MARKER_BYTES)),
+                _bytes_digest(new_marker),
+            ):
+                return
+            raise
+
+    def _finalize_root_rotation(
+        self, action: Literal["rotate", "revoke"], recovery_generation: int
+    ) -> None:
+        recovery_sets = self._recovery_sets
+        if recovery_sets is None:
+            raise RuntimeError("installation_recovery_store_unavailable")
+        if action == "rotate":
+            recovery_sets.activate(recovery_sets.metadata(recovery_generation))
+        else:
+            recovery_sets.revoke(recovery_generation)
+
+    @staticmethod
+    def _write_root_rotation_journal(
+        path: Path,
+        *,
+        action: Literal["rotate", "revoke"],
+        recovery_generation: int,
+        stage_name: str,
+        backup_name: str,
+        old_marker_digest: str,
+        new_marker_digest: str,
+        phase: Literal["prepared", "marker_committed"],
+    ) -> None:
+        body: dict[str, JsonValue] = {
+            "action": action,
+            "backup_name": backup_name,
+            "format": "yoetz-installation-root-rotation/1",
+            "new_marker_digest": new_marker_digest,
+            "old_marker_digest": old_marker_digest,
+            "phase": phase,
+            "recovery_generation": recovery_generation,
+            "stage_name": stage_name,
+        }
+        body["record_digest"] = canonical_digest(body)
+        _write_private_atomic(path, canonical_encode(body) + b"\n")
+
+    def _reconcile_root_rotation(self) -> None:
+        recovery_root = self._path.parent / "installation-recovery"
+        journal = recovery_root / "root-rotation-journal.json"
+        try:
+            encoded = _read_private_file(journal, 16_384)
+        except FileNotFoundError:
+            return
+        try:
+            value = strict_json_parse(encoded[:-1])
+            if not encoded.endswith(b"\n") or encoded.endswith(b"\n\n") or type(value) is not dict:
+                raise ValueError
+            source = cast(dict[str, JsonValue], value)
+            if canonical_encode(source) + b"\n" != encoded or set(source) != {
+                "action",
+                "backup_name",
+                "format",
+                "new_marker_digest",
+                "old_marker_digest",
+                "phase",
+                "record_digest",
+                "recovery_generation",
+                "stage_name",
+            }:
+                raise ValueError
+            body = dict(source)
+            record_digest = body.pop("record_digest")
+            if (
+                source["format"] != "yoetz-installation-root-rotation/1"
+                or type(record_digest) is not str
+                or not hmac.compare_digest(record_digest, canonical_digest(body))
+            ):
+                raise ValueError
+            action = source["action"]
+            phase = source["phase"]
+            generation = source["recovery_generation"]
+            stage_name = source["stage_name"]
+            backup_name = source["backup_name"]
+            old_digest = source["old_marker_digest"]
+            new_digest = source["new_marker_digest"]
+            if (
+                action not in {"rotate", "revoke"}
+                or phase not in {"prepared", "marker_committed"}
+                or type(generation) is not int
+                or generation <= 0
+                or type(stage_name) is not str
+                or not stage_name.startswith(f".vault.root-{generation}.")
+                or not stage_name.endswith(".tmp")
+                or type(backup_name) is not str
+                or backup_name != f"{action}-generation-{generation}"
+                or type(old_digest) is not str
+                or type(new_digest) is not str
+            ):
+                raise ValueError
+            vault = self._path.parent / "vault"
+            stage = vault.parent / stage_name
+            backup = recovery_root / "rollback-vaults" / backup_name
+            marker_digest = _bytes_digest(
+                _read_private_file(self._path, _MAX_INSTALLATION_MARKER_BYTES)
+            )
+            if hmac.compare_digest(marker_digest, new_digest):
+                if not vault.is_dir() or not backup.is_dir():
+                    raise RuntimeError("installation_root_rotation_ambiguous")
+                self._finalize_root_rotation(cast(Literal["rotate", "revoke"], action), generation)
+            elif hmac.compare_digest(marker_digest, old_digest):
+                if vault.exists() and backup.is_dir():
+                    if stage.exists():
+                        raise RuntimeError("installation_root_rotation_ambiguous")
+                    os.rename(vault, stage)
+                    _fsync_directory(vault.parent)
+                if not vault.exists() and backup.is_dir():
+                    os.rename(backup, vault)
+                    _fsync_directory(vault.parent)
+                if not vault.is_dir():
+                    raise RuntimeError("installation_root_rotation_ambiguous")
+                if stage.exists():
+                    _remove_private_tree(stage)
+                    _fsync_directory(stage.parent)
+            else:
+                raise RuntimeError("installation_root_rotation_ambiguous")
+            journal.unlink()
+            _fsync_directory(journal.parent)
+        except (OSError, TypeError, ValueError) as exc:
+            raise RuntimeError("installation_root_rotation_journal_invalid") from exc
+
+    @staticmethod
+    def _encode(state: _InstallationState) -> bytes:
         body: dict[str, JsonValue] = {
             "schema_version": "1",
             "installation_id": state.installation_id,
@@ -2077,7 +2503,7 @@ class _InstallationStateStore:
             "mode_binding_digest": state.mode_binding_digest,
         }
         body["record_digest"] = _installation_digest(body)
-        _write_private_atomic(self._path, canonical_encode(body) + b"\n")
+        return canonical_encode(body) + b"\n"
 
     def _provisional_throttle(self) -> UnlockThrottleRecord | None:
         try:
@@ -2125,10 +2551,32 @@ class _LockedHumanEffects:
         lifecycle: ServiceLifecycle,
         vault: VaultService,
         privacy_relay: _PrivacyPolicyAppRelay,
+        recovery_sets: InstallationRecoverySetStore | None = None,
+        unlock: UnlockCoordinator | None = None,
+        maintenance_gate: asyncio.Lock | None = None,
     ) -> None:
         self._lifecycle = lifecycle
         self._vault = vault
         self._privacy_relay = privacy_relay
+        self._recovery_sets = recovery_sets
+        self._unlock = unlock
+        self._maintenance_gate = maintenance_gate or asyncio.Lock()
+        self._maintenance_request_id: str | None = None
+        self._prepared_recovery_snapshots: dict[str, PreparedInstallationSnapshot] = {}
+        self._prepared_root_rotations: dict[str, Path] = {}
+        self._prepared_recovery_plan_digests: dict[str, str] = {}
+
+    async def _acquire_recovery_maintenance(self, request_id: str) -> None:
+        if self._maintenance_request_id is not None:
+            raise HumanControlError("state_forbidden")
+        await self._maintenance_gate.acquire()
+        self._maintenance_request_id = request_id
+
+    def _release_recovery_maintenance(self, request_id: str) -> None:
+        if self._maintenance_request_id != request_id:
+            return
+        self._maintenance_request_id = None
+        self._maintenance_gate.release()
 
     def _privacy_app(self) -> object:
         coordinator = self._privacy_relay.get()
@@ -2174,6 +2622,115 @@ class _LockedHumanEffects:
             else:
                 preview = ProviderCredentialRotatePreview(target)
             return preview, digest, None
+        if type(target) is InstallationRecoveryTarget:
+            if self._recovery_sets is None:
+                raise HumanControlError("ceremony_unsupported")
+            if request.ceremony_kind is not HumanCeremonyKind.INSTALLATION_RECOVERY:
+                raise HumanControlError("kind_forbidden")
+            if target.confirmed_plan_digest != target.plan_digest():
+                raise HumanControlError("target_invalid")
+            if target.operation == "restore":
+                if self._vault.ready or mode == "uninitialized":
+                    raise HumanControlError("state_forbidden")
+                try:
+                    artifact = self._recovery_sets.load(target.recovery_generation)
+                except FileNotFoundError, OSError, TypeError, ValueError:
+                    raise HumanControlError("pending_unavailable") from None
+                item_count = 1
+                total_bytes = len(artifact.canonical_bytes)
+            else:
+                if not self._vault.ready:
+                    raise HumanControlError("state_forbidden")
+                recovery_status = self._recovery_sets.status(
+                    installation_exists=True,
+                    vault_ready=True,
+                    ordinary_unlock_available=True,
+                    auto_unlock_repairable=False,
+                )
+                active_generation = recovery_status.active_generation
+                if (
+                    target.operation == "provision"
+                    and active_generation is not None
+                    or target.operation == "rotate"
+                    and (
+                        active_generation is None
+                        or target.recovery_generation != active_generation + 1
+                    )
+                    or target.operation == "revoke"
+                    and (
+                        target.recovery_generation != active_generation
+                        or recovery_status.reason == "recovery_material_revoked"
+                    )
+                ):
+                    raise HumanControlError("target_invalid")
+                if target.request_id in self._prepared_recovery_snapshots:
+                    raise HumanControlError("state_forbidden")
+                await self._acquire_recovery_maintenance(target.request_id)
+                try:
+                    vault_override: Path | None = None
+                    if target.operation in {"rotate", "revoke"}:
+                        vault_override = await self._vault.stage_root_rotation(
+                            target.recovery_generation
+                        )
+                        self._prepared_root_rotations[target.request_id] = vault_override
+                    if target.operation == "revoke":
+                        item_count, total_bytes = _private_tree_facts(cast(Path, vault_override))
+                    elif target.set_mode == "self_contained":
+                        snapshot = await asyncio.to_thread(
+                            self._recovery_sets.prepare_snapshot,
+                            target.recovery_generation,
+                            vault_override=vault_override,
+                        )
+                        self._prepared_recovery_snapshots[target.request_id] = snapshot
+                        item_count = snapshot.item_count + 1
+                        total_bytes = snapshot.total_bytes
+                    else:
+                        if vault_override is None:
+                            item_count = 1
+                            total_bytes = 0
+                        else:
+                            vault_items, vault_bytes = _private_tree_facts(vault_override)
+                            item_count = vault_items + 1
+                            total_bytes = vault_bytes
+                except BaseException:
+                    try:
+                        await self._vault.cancel_root_rotation()
+                    finally:
+                        self._prepared_root_rotations.pop(target.request_id, None)
+                        self._release_recovery_maintenance(target.request_id)
+                    raise
+            snapshot_digest = (
+                None
+                if target.request_id not in self._prepared_recovery_snapshots
+                else self._prepared_recovery_snapshots[target.request_id].manifest_digest
+            )
+            confirmed_plan_digest = canonical_digest(
+                {
+                    "item_count": item_count,
+                    "requested_plan_digest": target.plan_digest(),
+                    "snapshot_manifest_digest": snapshot_digest,
+                    "total_bytes": total_bytes,
+                    "vault_generation": self._vault.generation,
+                }
+            )
+            if target.operation != "restore":
+                self._prepared_recovery_plan_digests[target.request_id] = confirmed_plan_digest
+            return (
+                InstallationRecoveryPreview(
+                    target.operation,
+                    target.request_id,
+                    confirmed_plan_digest,
+                    target.recovery_generation,
+                    target.set_mode,
+                    target.secret_kind,
+                    target.target_envelope,
+                    item_count,
+                    total_bytes,
+                    False,
+                ),
+                confirmed_plan_digest,
+                None,
+            )
         if type(target) is PrivacyPendingTarget:
             # Recording an already-bounded disclosure decision does not widen policy, change a
             # credential, or grant new authority — it answers a proposal the running policy
@@ -2358,6 +2915,178 @@ class _LockedHumanEffects:
     ) -> PortableRecoveryResult:
         del target, secret
         raise HumanControlError("kind_forbidden")
+
+    async def complete_installation_provision(
+        self,
+        target: InstallationRecoveryTarget,
+        secret: SecretHandle,
+        rewrap_secret: SecretHandle | None,
+        proof: HumanAuthorizationProof,
+        now_monotonic: float,
+    ) -> InstallationRecoveryResult:
+        if target.operation not in {"provision", "rotate"}:
+            raise HumanControlError("ceremony_unsupported")
+        if self._recovery_sets is None:
+            raise HumanControlError("ceremony_unsupported")
+        snapshot = self._prepared_recovery_snapshots.pop(target.request_id, None)
+        confirmed_plan_digest = self._prepared_recovery_plan_digests.pop(target.request_id, None)
+        staged_generation: int | None = None
+        try:
+            if confirmed_plan_digest is None:
+                raise HumanControlError("target_invalid")
+            if (target.operation == "rotate") != (rewrap_secret is not None):
+                raise HumanControlError("target_invalid")
+            if (target.set_mode == "self_contained") != (snapshot is not None):
+                raise HumanControlError("target_invalid")
+            mode = (
+                InstallationRecoveryMode.SELF_CONTAINED
+                if snapshot is not None
+                else InstallationRecoveryMode.COMPACT
+            )
+            proof.consume(
+                "installation_recovery_change",
+                confirmed_plan_digest,
+                self._lifecycle.instance.generation,
+                self._vault.generation,
+                None,
+                now_monotonic,
+            )
+            if target.operation == "rotate":
+                unlock = self._unlock
+                if unlock is None or rewrap_secret is None:
+                    raise HumanControlError("ceremony_unsupported")
+                throttle_digest = await unlock.stage_root_rotation_throttle()
+                await self._vault.prepare_root_rotation_envelope(
+                    rewrap_secret,
+                    throttle_record_digest=throttle_digest,
+                    action="rotate",
+                )
+            sets = self._recovery_sets
+            metadata: InstallationRecoveryMetadata | None = None
+
+            def _stage(
+                built: InstallationRecoveryArtifact,
+            ) -> InstallationRecoveryArtifact:
+                nonlocal metadata, staged_generation
+                metadata = sets.stage(built, snapshot)
+                staged_generation = metadata.recovery_generation
+                # Reopen what was actually persisted, not the in-memory bytes, so the drill also
+                # covers a set that staging truncated or corrupted.
+                return sets.load(metadata.recovery_generation)
+
+            # Build, stage, and run the ADR-024 step 5 pre-publication drill under one live
+            # candidate secret; nothing is advertised until the set has proven it opens this vault.
+            artifact = await self._vault.build_and_verify_installation_recovery_artifact(
+                secret,
+                recovery_generation=target.recovery_generation,
+                mode=mode,
+                secret_kind=InstallationRecoverySecretKind(target.secret_kind),
+                snapshot_manifest_digest=(None if snapshot is None else snapshot.manifest_digest),
+                publish=_stage,
+            )
+            if metadata is None:
+                raise HumanControlError("internal_error")
+            await self._vault.commit_installation_recovery_metadata(metadata)
+            if target.operation == "rotate":
+                await self._vault.commit_root_rotation()
+            else:
+                self._recovery_sets.activate(metadata)
+            return InstallationRecoveryResult(
+                target.operation,
+                "completed",
+                target.recovery_generation,
+                artifact.artifact_digest,
+            )
+        except BaseException as exc:
+            if snapshot is not None:
+                self._recovery_sets.discard_snapshot(snapshot)
+            if staged_generation is not None:
+                # Nothing published this generation and the retry recomputes the same number, so
+                # leaving the stage behind would make every later attempt fail as "exists".
+                self._recovery_sets.discard_staged_generation(staged_generation)
+            await self._vault.cancel_root_rotation()
+            if isinstance(exc, (HumanControlError, asyncio.CancelledError)):
+                raise
+            raise HumanControlError("internal_error") from exc
+        finally:
+            self._prepared_root_rotations.pop(target.request_id, None)
+            self._release_recovery_maintenance(target.request_id)
+
+    async def revoke_installation_recovery(
+        self,
+        target: InstallationRecoveryTarget,
+        rewrap_secret: SecretHandle,
+        proof: HumanAuthorizationProof,
+        now_monotonic: float,
+    ) -> InstallationRecoveryResult:
+        if target.operation != "revoke" or self._recovery_sets is None:
+            raise HumanControlError("ceremony_unsupported")
+        confirmed_plan_digest = self._prepared_recovery_plan_digests.pop(target.request_id, None)
+        try:
+            if confirmed_plan_digest is None:
+                raise HumanControlError("target_invalid")
+            proof.consume(
+                "installation_recovery_change",
+                confirmed_plan_digest,
+                self._lifecycle.instance.generation,
+                self._vault.generation,
+                None,
+                now_monotonic,
+            )
+            unlock = self._unlock
+            if unlock is None:
+                raise HumanControlError("ceremony_unsupported")
+            throttle_digest = await unlock.stage_root_rotation_throttle()
+            await self._vault.prepare_root_rotation_envelope(
+                rewrap_secret,
+                throttle_record_digest=throttle_digest,
+                action="revoke",
+            )
+            await self._vault.commit_root_rotation()
+            return InstallationRecoveryResult(
+                "revoke",
+                "completed",
+                target.recovery_generation,
+                confirmed_plan_digest,
+            )
+        except BaseException as exc:
+            await self._vault.cancel_root_rotation()
+            if isinstance(exc, (HumanControlError, asyncio.CancelledError)):
+                raise
+            raise HumanControlError("internal_error") from exc
+        finally:
+            self._prepared_root_rotations.pop(target.request_id, None)
+            self._release_recovery_maintenance(target.request_id)
+
+    async def cancel_installation_recovery(self, target: InstallationRecoveryTarget) -> None:
+        snapshot = self._prepared_recovery_snapshots.pop(target.request_id, None)
+        self._prepared_recovery_plan_digests.pop(target.request_id, None)
+        if snapshot is not None and self._recovery_sets is not None:
+            self._recovery_sets.discard_snapshot(snapshot)
+        if target.request_id in self._prepared_root_rotations:
+            self._prepared_root_rotations.pop(target.request_id, None)
+            await self._vault.cancel_root_rotation()
+        self._release_recovery_maintenance(target.request_id)
+
+    def begin_installation_restore(self, target: InstallationRecoveryTarget) -> tuple[object, str]:
+        if target.operation != "restore":
+            raise HumanControlError("kind_forbidden")
+        if self._recovery_sets is None:
+            raise HumanControlError("ceremony_unsupported")
+        try:
+            artifact = self._recovery_sets.load(target.recovery_generation)
+            continuation = self._recovery_sets.begin_recovery(target.recovery_generation)
+            return artifact, continuation
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+            raise HumanControlError("pending_unavailable") from exc
+
+    def finish_installation_restore(self, continuation_id: str, *, success: bool) -> None:
+        if self._recovery_sets is None:
+            raise HumanControlError("ceremony_unsupported")
+        try:
+            self._recovery_sets.finish_recovery(continuation_id, success=success)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HumanControlError("internal_error") from exc
 
     async def store_provider_credential(
         self,
@@ -2779,12 +3508,17 @@ async def _production_composition(
     config = _config or load_config({}, os.environ, None)
     paths = _paths or _ProductionPaths.canonical(config)
     ensure_owner_only_dir(paths.bundle)
+    recovery_sets = InstallationRecoverySetStore(paths.bundle)
     marker_store = _InstallationStateStore(
         paths.bundle / _INSTALLATION_MARKER_NAME,
         paths.throttle,
         paths.generation,
+        recovery_sets,
     )
-    marker = marker_store.load()
+    # Initial identity discovery is read-only. Reconciliation mutates retained authority and must
+    # wait until this process owns the singleton; otherwise a losing second start could interfere
+    # with the live service's recovery transaction.
+    marker = marker_store.load(reconcile=False)
     installation_id = marker_store.select_installation_id(marker)
     clock = _SystemClock()
     production_binders = _binders is None
@@ -2811,6 +3545,11 @@ async def _production_composition(
     vault: VaultService | None = None
     try:
         instance = await lifecycle.acquire_singleton()
+        reconciled_marker = marker_store.load()
+        if marker_store.select_installation_id(reconciled_marker) != installation_id:
+            raise RuntimeError("installation_identity_mismatch")
+        marker = reconciled_marker
+        _discard_orphan_vault_rotation_stages(paths.bundle)
         secret_memory = LocalSecretMemory()
         mode = VaultMode.UNINITIALIZED if marker is None else marker.vault_mode
         vault = VaultService(
@@ -2829,6 +3568,9 @@ async def _production_composition(
                 else None
             ),
             publish_mode=marker_store.publish,
+            replace_mode=marker_store.replace_after_recovery,
+            replace_root=marker_store.replace_after_root_rotation,
+            snapshot_recovery_admission=recovery_sets.admits_clean_restore,
         )
         throttle = UnlockThrottleStore(
             paths.throttle,
@@ -2907,13 +3649,21 @@ async def _production_composition(
             activate_ready=relay,
         )
         privacy_relay = _PrivacyPolicyAppRelay()
+        maintenance_gate = asyncio.Lock()
         human = HumanControlService(
             clock=clock,
             lifecycle=lifecycle,
             vault=vault,
             unlock=unlock,
             secret_ingress=secret_ingress,
-            effects=_LockedHumanEffects(lifecycle, vault, privacy_relay),
+            effects=_LockedHumanEffects(
+                lifecycle,
+                vault,
+                privacy_relay,
+                recovery_sets,
+                unlock,
+                maintenance_gate,
+            ),
             user_presence=None,
         )
         return ServiceComposition(
@@ -2925,6 +3675,7 @@ async def _production_composition(
             session_monitor=SessionEventMonitor(),
             vault=vault,
             ready_application_factory=ready_application_factory,
+            maintenance_gate=maintenance_gate,
             secret_ingress_service=secret_ingress,
             unlock_service=unlock,
             secret_memory=secret_memory,
@@ -3016,6 +3767,63 @@ def _write_private_atomic(path: Path, encoded: bytes) -> None:
         except OSError:
             pass
         raise
+
+
+def _bytes_digest(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _private_tree_facts(path: Path) -> tuple[int, int]:
+    items = 0
+    total = 0
+    for member in path.rglob("*"):
+        facts = member.lstat()
+        if stat.S_ISLNK(facts.st_mode) or not (
+            stat.S_ISDIR(facts.st_mode) or stat.S_ISREG(facts.st_mode)
+        ):
+            raise RuntimeError("private_state_unsafe")
+        if stat.S_ISREG(facts.st_mode):
+            if facts.st_nlink != 1 or stat.S_IMODE(facts.st_mode) & 0o077:
+                raise RuntimeError("private_state_unsafe")
+            items += 1
+            total += facts.st_size
+    if items <= 0:
+        raise RuntimeError("private_state_empty")
+    return items, total
+
+
+def _remove_private_tree(path: Path) -> None:
+    for member in sorted(path.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        facts = member.lstat()
+        if stat.S_ISLNK(facts.st_mode):
+            raise RuntimeError("private_state_unsafe")
+        if stat.S_ISDIR(facts.st_mode):
+            member.rmdir()
+        elif stat.S_ISREG(facts.st_mode):
+            member.unlink()
+        else:
+            raise RuntimeError("private_state_unsafe")
+    path.rmdir()
+
+
+def _discard_orphan_vault_rotation_stages(bundle: Path) -> None:
+    """Remove only trusted-name next-root quarantines after singleton acquisition."""
+
+    for child in bundle.iterdir():
+        if not (child.name.startswith(".vault.root-") and child.name.endswith(".tmp")):
+            continue
+        if not child.is_dir() or child.is_symlink():
+            raise RuntimeError("private_state_unsafe")
+        _remove_private_tree(child)
+    _fsync_directory(bundle)
 
 
 async def _read_human_envelope(stream: ControlStream) -> object:

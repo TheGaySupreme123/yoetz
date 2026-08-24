@@ -28,7 +28,12 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_pa
 from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.ids import IdKind, validate_id
 
-__all__ = ["EncryptedVaultError", "EncryptedVaultStore", "VaultRecordKind"]
+__all__ = [
+    "EncryptedVaultError",
+    "EncryptedVaultStore",
+    "PreparedVaultRootRotation",
+    "VaultRecordKind",
+]
 
 _FRAME_MAGIC: Final = b"YZV1"
 _FRAME_VERSION: Final = 1
@@ -38,6 +43,12 @@ _LOCATOR_SALT: Final = b"yoetz/vault-internal-root/v1"
 _LOCATOR_INFO: Final = b"yoetz/vault-record-locator/v1"
 _BINDING_DOMAIN: Final = b"yoetz/vault-record-binding/v1\x00"
 _INDEX_DOMAIN: Final = b"yoetz/vault-record-index/v1\x00"
+_INDEX_AUTH_SALT: Final = b"yoetz/vault-index-auth-root/v1"
+_INDEX_AUTH_INFO: Final = b"yoetz/vault-index-auth/v1"
+_ROOT_STATE_DOMAIN: Final = b"yoetz/vault-root-state/v1\x00"
+_ROOT_STATE_NAME: Final = "vault-root-state.yzr"
+_ROOT_STATE_FORMAT: Final = "yoetz-vault-root-state/1"
+_MAX_ROOT_STATE_BYTES: Final = 16_384
 _IDENTITY = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$", re.ASCII)
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.ASCII)
 _PURPOSE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", re.ASCII)
@@ -109,6 +120,21 @@ class _DecodedRecord:
     header_bytes: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedVaultRootRotation:
+    """One verified, quarantined vault encrypted by the next root."""
+
+    recovery_generation: int
+    root_epoch: int
+    stage: Path
+
+    def __post_init__(self) -> None:
+        if type(self.recovery_generation) is not int or self.recovery_generation <= 0:
+            raise ValueError("recovery_generation_invalid")
+        if type(self.root_epoch) is not int or self.root_epoch <= 1:
+            raise ValueError("vault_root_epoch_invalid")
+
+
 class EncryptedVaultStore:
     """One owner-only encrypted record directory and authenticated current index."""
 
@@ -117,6 +143,9 @@ class EncryptedVaultStore:
         self._index_path = vault_dir / "vault-index.json"
         self._ivk: bytearray | None = None
         self._locator_key: bytearray | None = None
+        self._index_key: bytearray | None = None
+        self._installation_mac_root: bytearray | None = None
+        self._root_epoch = 0
         self._index: dict[str, _IndexEntry] = {}
         self._lock = Lock()
         self._closed = False
@@ -130,23 +159,29 @@ class EncryptedVaultStore:
                 raise EncryptedVaultError("already_initialized")
             ensure_owner_only_dir(self._vault_dir)
 
-            def _capture(view: memoryview) -> tuple[bytearray, bytearray]:
+            def _capture(view: memoryview) -> bytearray:
                 if view.nbytes != 32:
                     raise EncryptedVaultError("record_binding_invalid")
-                ivk = bytearray(view)
-                locator = bytearray(
-                    HKDF(
-                        algorithm=hashes.SHA256(),
-                        length=32,
-                        salt=_LOCATOR_SALT,
-                        info=_LOCATOR_INFO,
-                    ).derive(bytes(ivk))
-                )
-                return ivk, locator
+                return bytearray(view)
 
-            ivk, locator = ivk_handle.consume(SecretConsumer.VAULT_ROOT, _capture)
+            ivk = ivk_handle.consume(SecretConsumer.VAULT_ROOT, _capture)
+            root_state_path = self._vault_dir / _ROOT_STATE_NAME
+            if root_state_path.exists():
+                locator, mac_root, root_epoch = _read_root_state(root_state_path, ivk)
+                index_key = _derive_index_key(ivk)
+            else:
+                locator = _derive_locator(ivk)
+                # Pre-rotation vault-index/1 used the locator directly. The first root rotation
+                # republishes the same index under a root-specific key, preserving backward read
+                # while revoking an old artifact's ability to authenticate a new index.
+                index_key = bytearray(locator)
+                mac_root = bytearray(ivk)
+                root_epoch = 1
             self._ivk = ivk
             self._locator_key = locator
+            self._index_key = index_key
+            self._installation_mac_root = mac_root
+            self._root_epoch = root_epoch
             try:
                 if self._index_path.exists():
                     self._index = self._read_index()
@@ -156,8 +191,13 @@ class EncryptedVaultStore:
             except Exception:
                 _overwrite(ivk)
                 _overwrite(locator)
+                _overwrite(index_key)
+                _overwrite(mac_root)
                 self._ivk = None
                 self._locator_key = None
+                self._index_key = None
+                self._installation_mac_root = None
+                self._root_epoch = 0
                 raise
 
     def create_record(
@@ -284,6 +324,123 @@ class EncryptedVaultStore:
             current = self._index.get(record_id)
             return None if current is None else current.generation
 
+    def installation_recovery_root(self) -> SecretHandle:
+        """Return one opaque IVK copy for the in-service recovery wrapper only."""
+
+        with self._lock:
+            ivk, _locator = self._ready_keys()
+            return _OneShotVaultRecordHandle(bytearray(ivk), SecretPurpose.VAULT_ROOT_KEY)
+
+    def installation_mac_root(self) -> SecretHandle:
+        """Return the stable installation commitment root without exposing it publicly."""
+
+        with self._lock:
+            self._ready_keys()
+            root = self._installation_mac_root
+            if root is None:
+                raise EncryptedVaultError("not_initialized")
+            return _OneShotVaultRecordHandle(bytearray(root), SecretPurpose.VAULT_ROOT_KEY)
+
+    def prepare_root_rotation(
+        self,
+        new_ivk_handle: SecretHandle,
+        *,
+        recovery_generation: int,
+    ) -> PreparedVaultRootRotation:
+        """Re-encrypt every current record into a verified sibling quarantine.
+
+        Record locators and installation commitment roots stay stable so existing catalog rows do
+        not need unavailable plaintext references.  Only the vault encryption root rotates: an
+        older recovery artifact can still derive opaque historical commitments, but it cannot
+        unwrap any record in this candidate vault.
+        """
+
+        if type(recovery_generation) is not int or recovery_generation <= 0:
+            raise EncryptedVaultError("record_binding_invalid")
+        if new_ivk_handle.purpose is not SecretPurpose.VAULT_ROOT_KEY:
+            raise EncryptedVaultError("record_binding_invalid")
+        with self._lock:
+            old_ivk, locator = self._ready_keys()
+            mac_root = self._installation_mac_root
+            if mac_root is None or self._root_epoch <= 0:
+                raise EncryptedVaultError("not_initialized")
+            new_ivk = new_ivk_handle.consume(
+                SecretConsumer.VAULT_ROOT, lambda view: bytearray(view)
+            )
+            if len(new_ivk) != 32 or hmac.compare_digest(new_ivk, old_ivk):
+                _overwrite(new_ivk)
+                raise EncryptedVaultError("record_binding_invalid")
+            stage = self._vault_dir.parent / (
+                f".{self._vault_dir.name}.root-{recovery_generation}.{os.urandom(16).hex()}.tmp"
+            )
+            candidate: EncryptedVaultStore | None = None
+            try:
+                ensure_owner_only_dir(stage)
+                _write_private_exclusive(
+                    stage / _ROOT_STATE_NAME,
+                    _encode_root_state(
+                        new_ivk,
+                        locator,
+                        mac_root,
+                        root_epoch=self._root_epoch + 1,
+                    ),
+                )
+                candidate = EncryptedVaultStore(stage)
+                candidate.initialize(
+                    _OneShotVaultRecordHandle(bytearray(new_ivk), SecretPurpose.VAULT_ROOT_KEY)
+                )
+                updated: dict[str, _IndexEntry] = {}
+                for record_id in sorted(self._index):
+                    entry = self._index[record_id]
+                    decoded = _decode_frame(self._read_record_frame(entry))
+                    plaintext = _decrypt_record(old_ivk, decoded)
+                    try:
+                        frame = _encrypt_frame(
+                            new_ivk,
+                            decoded.kind,
+                            decoded.record_id,
+                            decoded.binding_digest,
+                            decoded.generation,
+                            plaintext,
+                        )
+                    finally:
+                        _overwrite(plaintext)
+                    candidate._publish_record(  # pyright: ignore[reportPrivateUsage]
+                        record_id, entry.generation, frame
+                    )
+                    updated[record_id] = _IndexEntry(
+                        record_id,
+                        entry.generation,
+                        f"sha256:{hashlib.sha256(frame).hexdigest()}",
+                    )
+                expected = candidate._index_path.read_bytes()  # pyright: ignore[reportPrivateUsage]
+                candidate._publish_index(  # pyright: ignore[reportPrivateUsage]
+                    updated, expected_bytes=expected
+                )
+                candidate._index = updated  # pyright: ignore[reportPrivateUsage]
+                observed = candidate._read_index()  # pyright: ignore[reportPrivateUsage]
+                if observed != updated:
+                    raise EncryptedVaultError("record_tampered")
+                for entry in observed.values():
+                    decoded = _decode_frame(
+                        candidate._read_record_frame(entry)  # pyright: ignore[reportPrivateUsage]
+                    )
+                    plaintext = _decrypt_record(new_ivk, decoded)
+                    _overwrite(plaintext)
+                _fsync_dir(stage)
+                return PreparedVaultRootRotation(
+                    recovery_generation,
+                    self._root_epoch + 1,
+                    stage,
+                )
+            except BaseException:
+                _remove_private_tree(stage)
+                raise
+            finally:
+                if candidate is not None:
+                    candidate.close()
+                _overwrite(new_ivk)
+
     def verify_sentinel(self, structural_binding: Mapping[str, str]) -> None:
         handle = self.load_record(VaultRecordKind.VAULT_SENTINEL, structural_binding)
         handle.consume(SecretConsumer.VAULT_ROOT, lambda view: None)
@@ -330,8 +487,15 @@ class EncryptedVaultStore:
                 _overwrite(self._ivk)
             if self._locator_key is not None:
                 _overwrite(self._locator_key)
+            if self._index_key is not None:
+                _overwrite(self._index_key)
+            if self._installation_mac_root is not None:
+                _overwrite(self._installation_mac_root)
             self._ivk = None
             self._locator_key = None
+            self._index_key = None
+            self._installation_mac_root = None
+            self._root_epoch = 0
             self._index = {}
 
     def _require_open(self) -> None:
@@ -340,9 +504,21 @@ class EncryptedVaultStore:
 
     def _ready_keys(self) -> tuple[bytearray, bytearray]:
         self._require_open()
-        if self._ivk is None or self._locator_key is None:
+        if (
+            self._ivk is None
+            or self._locator_key is None
+            or self._index_key is None
+            or self._installation_mac_root is None
+            or self._root_epoch <= 0
+        ):
             raise EncryptedVaultError("not_initialized")
         return self._ivk, self._locator_key
+
+    def _ready_index_key(self) -> bytearray:
+        self._ready_keys()
+        if self._index_key is None:
+            raise EncryptedVaultError("not_initialized")
+        return self._index_key
 
     def _read_record_frame(self, entry: _IndexEntry) -> bytes:
         path = self._vault_dir / f"{entry.record_id}.{entry.generation}.yzv"
@@ -400,10 +576,10 @@ class EncryptedVaultStore:
         records = index["records"]
         if type(records) is not list:
             raise EncryptedVaultError("index_tampered")
-        _, locator = self._ready_keys()
+        index_key = self._ready_index_key()
         expected_mac = (
             "hmac-sha256:"
-            + hmac.digest(locator, _INDEX_DOMAIN + canonical_encode(index), "sha256").hex()
+            + hmac.digest(index_key, _INDEX_DOMAIN + canonical_encode(index), "sha256").hex()
         )
         if not hmac.compare_digest(wrapper["index_mac"], expected_mac):
             raise EncryptedVaultError("index_tampered")
@@ -444,14 +620,14 @@ class EncryptedVaultStore:
         *,
         expected_bytes: bytes | None,
     ) -> None:
-        _, locator = self._ready_keys()
+        index_key = self._ready_index_key()
         index_value: dict[str, JsonValue] = {
             "format": "yoetz-vault-index/1",
             "records": [entries[key].value() for key in sorted(entries)],
         }
         index_mac = (
             "hmac-sha256:"
-            + hmac.digest(locator, _INDEX_DOMAIN + canonical_encode(index_value), "sha256").hex()
+            + hmac.digest(index_key, _INDEX_DOMAIN + canonical_encode(index_value), "sha256").hex()
         )
         data = canonical_encode({"index": index_value, "index_mac": index_mac})
         if expected_bytes is not None:
@@ -490,6 +666,149 @@ def _record_identity(
     binding_bytes = canonical_encode({"kind": kind.value, "structural_binding": dict(binding)})
     digest = hmac.digest(locator, _BINDING_DOMAIN + binding_bytes, "sha256").hex()
     return binding_bytes, f"hmac-sha256:{digest}", f"vrec_{digest}"
+
+
+def _derive_locator(root: bytes | bytearray) -> bytearray:
+    return bytearray(
+        HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=_LOCATOR_SALT,
+            info=_LOCATOR_INFO,
+        ).derive(bytes(root))
+    )
+
+
+def _derive_index_key(root: bytes | bytearray) -> bytearray:
+    return bytearray(
+        HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=_INDEX_AUTH_SALT,
+            info=_INDEX_AUTH_INFO,
+        ).derive(bytes(root))
+    )
+
+
+def _encode_root_state(
+    active_root: bytes | bytearray,
+    locator_root: bytes | bytearray,
+    installation_mac_root: bytes | bytearray,
+    *,
+    root_epoch: int,
+) -> bytes:
+    if (
+        len(active_root) != 32
+        or len(locator_root) != 32
+        or len(installation_mac_root) != 32
+        or type(root_epoch) is not int
+        or root_epoch <= 1
+    ):
+        raise EncryptedVaultError("record_binding_invalid")
+    plaintext = bytearray(
+        canonical_encode(
+            {
+                "installation_mac_root": _b64url_encode(installation_mac_root),
+                "locator_root": _b64url_encode(locator_root),
+                "root_epoch": root_epoch,
+            }
+        )
+    )
+    nonce = os.urandom(12)
+    try:
+        ciphertext = AESGCM(bytes(active_root)).encrypt(
+            nonce,
+            bytes(plaintext),
+            _ROOT_STATE_DOMAIN,
+        )
+    finally:
+        _overwrite(plaintext)
+    return canonical_encode(
+        {
+            "ciphertext": _b64url_encode(ciphertext),
+            "format": _ROOT_STATE_FORMAT,
+            "nonce": _b64url_encode(nonce),
+        }
+    )
+
+
+def _read_root_state(
+    path: Path, active_root: bytes | bytearray
+) -> tuple[bytearray, bytearray, int]:
+    try:
+        _verify_private_file(path)
+        encoded = path.read_bytes()
+        if not 1 <= len(encoded) <= _MAX_ROOT_STATE_BYTES:
+            raise ValueError
+        value = strict_json_parse(encoded)
+        if type(value) is not dict:
+            raise ValueError
+        source = cast(dict[str, JsonValue], value)
+        if canonical_encode(source) != encoded:
+            raise ValueError
+        if set(source) != {"ciphertext", "format", "nonce"}:
+            raise ValueError
+        if source["format"] != _ROOT_STATE_FORMAT:
+            raise ValueError
+        nonce = _b64url_decode(source["nonce"], 12)
+        ciphertext_value = source["ciphertext"]
+        if type(ciphertext_value) is not str:
+            raise ValueError
+        ciphertext = _b64url_decode_bounded(ciphertext_value, _MAX_ROOT_STATE_BYTES)
+        plaintext = bytearray(
+            AESGCM(bytes(active_root)).decrypt(nonce, ciphertext, _ROOT_STATE_DOMAIN)
+        )
+        try:
+            body = strict_json_parse(bytes(plaintext))
+            if type(body) is not dict:
+                raise ValueError
+            state = cast(dict[str, JsonValue], body)
+            if canonical_encode(state) != bytes(plaintext):
+                raise ValueError
+            if set(state) != {"installation_mac_root", "locator_root", "root_epoch"}:
+                raise ValueError
+            epoch = state["root_epoch"]
+            if type(epoch) is not int or epoch <= 1:
+                raise ValueError
+            locator = bytearray(_b64url_decode(state["locator_root"], 32))
+            mac_root = bytearray(_b64url_decode(state["installation_mac_root"], 32))
+            return locator, mac_root, epoch
+        finally:
+            _overwrite(plaintext)
+    except (InvalidTag, OSError, ProtocolValueError, TypeError, ValueError) as exc:
+        raise EncryptedVaultError("record_tampered") from exc
+
+
+def _write_private_exclusive(path: Path, data: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _verify_private_file(path)
+    except EncryptedVaultError:
+        raise
+    except OSError as exc:
+        raise EncryptedVaultError("io_failure") from exc
+
+
+def _remove_private_tree(path: Path) -> None:
+    if not path.exists():
+        return
+    for member in sorted(path.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        try:
+            if member.is_dir():
+                member.rmdir()
+            else:
+                member.unlink()
+        except FileNotFoundError:
+            pass
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        pass
 
 
 def _encrypt_frame(
@@ -635,7 +954,7 @@ def _validate_binding(kind: VaultRecordKind, binding: Mapping[str, str]) -> dict
             "purpose_digest",
         }
     else:
-        expected = {"task_id", "recovery_artifact_digest"}
+        expected = {"installation_id", "recovery_generation"}
     if set(source) != expected or any(type(value) is not str for value in source.values()):
         raise EncryptedVaultError("record_binding_invalid")
     try:
@@ -645,6 +964,16 @@ def _validate_binding(kind: VaultRecordKind, binding: Mapping[str, str]) -> dict
             validate_id(IdKind.TASK, source["task_id"])
         if "key_slot" in source and _KEY_SLOT.fullmatch(source["key_slot"]) is None:
             raise ValueError
+        if "recovery_generation" in source:
+            generation = source["recovery_generation"]
+            if (
+                not generation.isascii()
+                or not generation.isdecimal()
+                or str(int(generation)) != generation
+            ):
+                raise ValueError
+            if not 1 <= int(generation) <= 9_007_199_254_740_991:
+                raise ValueError
         if "provider_id" in source and _IDENTITY.fullmatch(source["provider_id"]) is None:
             raise ValueError
         if "model_id" in source and _MODEL.fullmatch(source["model_id"]) is None:
@@ -661,7 +990,7 @@ def _validate_binding(kind: VaultRecordKind, binding: Mapping[str, str]) -> dict
             raise ValueError
         if "purpose" in source and _PURPOSE.fullmatch(source["purpose"]) is None:
             raise ValueError
-        for field in ("authorization_scope_digest", "purpose_digest", "recovery_artifact_digest"):
+        for field in ("authorization_scope_digest", "purpose_digest"):
             if field in source:
                 validate_sha256_digest(source[field])
     except (ProtocolValueError, ValueError) as exc:
@@ -719,6 +1048,18 @@ def _b64url_decode(value: JsonValue, expected_length: int) -> bytes:
     except (ValueError, binascii.Error) as exc:
         raise EncryptedVaultError("record_tampered") from exc
     if len(decoded) != expected_length or _b64url_encode(decoded) != value:
+        raise EncryptedVaultError("record_tampered")
+    return decoded
+
+
+def _b64url_decode_bounded(value: str, maximum: int) -> bytes:
+    if not value or len(value) > maximum * 2 or "=" in value:
+        raise EncryptedVaultError("record_tampered")
+    try:
+        decoded = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise EncryptedVaultError("record_tampered") from exc
+    if not decoded or len(decoded) > maximum or _b64url_encode(decoded) != value:
         raise EncryptedVaultError("record_tampered")
     return decoded
 

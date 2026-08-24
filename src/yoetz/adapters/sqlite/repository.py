@@ -487,6 +487,28 @@ class SqliteLedger:
             if task.done() and self._recovery_task is task:
                 self._recovery_task = None
 
+    async def verify_recovery_objects(self) -> int:
+        """Authenticate every object that the replayed ledger still declares present."""
+
+        await self._ensure_recovered()
+        objects = self._objects
+        if objects is None:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+        verified: set[str] = set()
+        try:
+            for record in self._state.records:
+                if record.redaction is not RedactionState.PRESENT:
+                    continue
+                ref = self._state.object_refs.get(record.payload_ref.object_id)
+                if ref is None:
+                    raise ValueError("object_reference_missing")
+                async for _chunk in objects.open_verified(ref):
+                    pass
+                verified.add(ref.object_id)
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+        return len(verified)
+
     async def _recover_once(self) -> None:
         """Latch a terminal recovery verdict so it is reached at most once."""
 

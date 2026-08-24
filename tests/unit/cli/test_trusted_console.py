@@ -106,6 +106,7 @@ class _WindowsApi:
         self.closed: list[int] = []
         self.hidden_reads: list[bool] = []
         self.writes: list[str] = []
+        self.secret_writes: list[bytes] = []
 
     def open_input(self) -> int:
         return 101
@@ -125,6 +126,10 @@ class _WindowsApi:
     def write(self, handle: int, value: str) -> None:
         del handle
         self.writes.append(value)
+
+    def write_secret(self, handle: int, value: memoryview) -> None:
+        del handle
+        self.secret_writes.append(bytes(value))
 
     def read_line(self, handle: int, maximum: int, *, hidden: bool) -> bytearray:
         del handle, maximum
@@ -168,6 +173,24 @@ def test_windows_reads_secrets_without_echo_through_console_api() -> None:
     assert api.hidden_reads == [True]
     assert api.writes == ["Secret: ", "\n"]
     assert api.closed == [202, 101]
+
+
+def test_windows_writes_generated_code_through_mutable_secret_api() -> None:
+    api = _WindowsApi()
+    adapter = trusted_console._WindowsConsoleAdapter(api)  # pyright: ignore[reportPrivateUsage]
+    source = bytearray(b"YRK1-TEST")
+    adapter.open()
+    try:
+        view = memoryview(source)
+        try:
+            adapter.write_secret(view)
+        finally:
+            view.release()
+    finally:
+        adapter.close()
+    source[:] = b"\x00" * len(source)
+    assert api.secret_writes == [b"YRK1-TEST"]
+    assert source == bytearray(b"\x00" * len(source))
 
 
 def test_windows_empty_input_is_distinct_and_bounded() -> None:

@@ -6,6 +6,7 @@ import ctypes
 import hmac
 import os
 import sys
+from pathlib import Path
 from types import TracebackType
 from typing import Final, Protocol, Self, cast
 
@@ -51,6 +52,8 @@ class _ConsoleAdapter(Protocol):
     def close(self) -> None: ...
 
     def write(self, value: str) -> None: ...
+
+    def write_secret(self, value: memoryview) -> None: ...
 
     def read_line(self, prompt: str, maximum: int, *, hidden: bool) -> bytearray: ...
 
@@ -105,6 +108,19 @@ class _PosixConsoleAdapter:
         while position < len(encoded):
             try:
                 written = os.write(self.fd, encoded[position:])
+            except OSError as exc:
+                raise TrustedConsoleError("interrupted") from exc
+            if written <= 0:
+                raise TrustedConsoleError("interrupted")
+            position += written
+
+    def write_secret(self, value: memoryview) -> None:
+        if value.ndim != 1 or not value.contiguous:
+            raise TypeError("console_secret_invalid")
+        position = 0
+        while position < value.nbytes:
+            try:
+                written = os.write(self.fd, value[position:])
             except OSError as exc:
                 raise TrustedConsoleError("interrupted") from exc
             if written <= 0:
@@ -175,6 +191,8 @@ class _WindowsConsoleApi(Protocol):
     def attached_process_ids(self) -> tuple[int, ...]: ...
 
     def write(self, handle: int, value: str) -> None: ...
+
+    def write_secret(self, handle: int, value: memoryview) -> None: ...
 
     def read_line(self, handle: int, maximum: int, *, hidden: bool) -> bytearray: ...
 
@@ -254,6 +272,15 @@ class _CtypesWindowsConsoleApi:
             ctypes.c_void_p,
         )
         kernel32.WideCharToMultiByte.restype = ctypes.c_int
+        kernel32.MultiByteToWideChar.argtypes = (
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        )
+        kernel32.MultiByteToWideChar.restype = ctypes.c_int
         kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
         kernel32.CloseHandle.restype = ctypes.c_int
         self._kernel32 = kernel32
@@ -316,6 +343,50 @@ class _CtypesWindowsConsoleApi:
             None,
         ) or int(written.value) != len(value):
             raise TrustedConsoleError("interrupted")
+
+    def write_secret(self, handle: int, value: memoryview) -> None:
+        if value.ndim != 1 or not value.contiguous:
+            raise TypeError("console_secret_invalid")
+        source = (ctypes.c_char * value.nbytes).from_buffer(value)
+        required = int(
+            self._kernel32.MultiByteToWideChar(
+                self._CP_UTF8,
+                0x00000008,  # MB_ERR_INVALID_CHARS
+                source,
+                value.nbytes,
+                None,
+                0,
+            )
+        )
+        if required <= 0:
+            raise TrustedConsoleError("input_invalid")
+        wide = (ctypes.c_wchar * required)()
+        try:
+            converted = int(
+                self._kernel32.MultiByteToWideChar(
+                    self._CP_UTF8,
+                    0x00000008,
+                    source,
+                    value.nbytes,
+                    wide,
+                    required,
+                )
+            )
+            written = ctypes.c_uint32()
+            if (
+                converted != required
+                or not self._kernel32.WriteConsoleW(
+                    handle,
+                    wide,
+                    required,
+                    ctypes.byref(written),
+                    None,
+                )
+                or int(written.value) != required
+            ):
+                raise TrustedConsoleError("interrupted")
+        finally:
+            ctypes.memset(ctypes.addressof(wide), 0, ctypes.sizeof(wide))
 
     def read_line(self, handle: int, maximum: int, *, hidden: bool) -> bytearray:
         original = ctypes.c_uint32()
@@ -438,6 +509,11 @@ class _WindowsConsoleAdapter:
             raise TrustedConsoleError(_TRUST_FAILURE)
         self._api.write(self._output, value)
 
+    def write_secret(self, value: memoryview) -> None:
+        if not self._output:
+            raise TrustedConsoleError(_TRUST_FAILURE)
+        self._api.write_secret(self._output, value)
+
     def read_line(self, prompt: str, maximum: int, *, hidden: bool) -> bytearray:
         if type(maximum) is not int or maximum <= 0:
             raise TypeError("console_bound_invalid")
@@ -485,6 +561,15 @@ class TrustedForegroundConsole:
     def write(self, value: str) -> None:
         self._adapter.write(value)
 
+    def write_secret(self, value: bytearray) -> None:
+        if type(value) is not bytearray:
+            raise TypeError("console_secret_invalid")
+        view = memoryview(value)
+        try:
+            self._adapter.write_secret(view)
+        finally:
+            view.release()
+
     def read_choice(self, prompt: str, allowed: tuple[bytes, ...]) -> bytes:
         if (
             type(allowed) is not tuple
@@ -503,3 +588,19 @@ class TrustedForegroundConsole:
 
     def read_secret(self, prompt: str, maximum: int) -> bytearray:
         return self._adapter.read_line(prompt, maximum, hidden=True)
+
+    def read_path(self, prompt: str, maximum: int = 4_096) -> Path:
+        """Read one nonsecret path from the verified console, never redirected stdin."""
+
+        encoded = self._adapter.read_line(prompt, maximum, hidden=False)
+        try:
+            try:
+                value = encoded.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise TrustedConsoleError("input_invalid") from exc
+            if not value or "\x00" in value or "\n" in value or "\r" in value:
+                raise TrustedConsoleError("input_invalid")
+            path = Path(value).expanduser()
+            return path if path.is_absolute() else Path.cwd() / path
+        finally:
+            _overwrite(encoded)

@@ -1632,8 +1632,8 @@ wire union. No nullable result, port-method alias, plaintext, or object-derefere
 the control boundary.
 
 `ServiceLifecycle` owns the one per-user instance and the exact
-`starting -> locked|ready|failed`, `locked -> unlocking|draining|failed`,
-`unlocking -> ready|locked|failed`, `ready -> draining|failed`,
+`starting -> locked|ready|failed`, `locked -> unlocking|recovering|draining|failed`,
+`unlocking -> ready|locked|failed`, `recovering -> ready|locked|failed`, `ready -> draining|failed`,
 `draining -> locked|failed|final close`, and `failed -> draining|final close` transitions. “Final
 close” is terminal process teardown, not a serializable `ServiceState`. Only a ready
 service constructs `Application`, `BundleRuntimePort`, storage/key/provider adapters, the privacy
@@ -1655,11 +1655,20 @@ values are `VaultMode` (`uninitialized|os_keyring|passphrase`), `VaultState`
 (`locked|unlocking|ready|closing|closed`), `VaultStatus`, `ProviderCredentialBinding`, and
 `VaultError`. Client-visible status never contains a PID, path, username, key locator, provider
 credential presence, user content, or timing history.
+Ordinary `ServiceStatus` remains schema 1.0.0 and carries no artifact fact. The dedicated trusted
+`yoetz service recovery status` projection returns `InstallationRecoveryStatus` with
+`recovery_state` exactly
+`pristine_setup|temporarily_locked|auto_unlock_repairable|recovery_material_required|
+recovery_in_progress|recovered|permanently_unrecoverable`. A continuation contains only an opaque
+operation id and exact constant trusted command. It contains no path, artifact/secret fact,
+keyring identity, or user content. Ordinary CLI/MCP locked errors point agents at that exact status
+command and never accept a recovery secret or set path.
 `ServiceStatus.state_reason` is the closed registry `none`,
 `auto_unlock_backend_unavailable`, `auto_unlock_rejected`, `auto_unlock_stale`, `keyring_locked`,
 `keyring_unavailable`, `passphrase_required`, `human_authority_unavailable`,
 `vault_uninitialized`, `unlock_failed`, `explicit_lock`, `idle_relock`, `user_session_locked`,
-`system_suspend`, `monitor_lost`, `shutdown_requested`, or `internal_error`. `keyring_locked`
+`system_suspend`, `monitor_lost`, `recovery_material_required`, `recovery_in_progress`,
+`recovery_failed`, `permanently_unrecoverable`, `shutdown_requested`, or `internal_error`. `keyring_locked`
 applies only to `vault_mode=os_keyring`.
 Passphrase startup with no scoped entry reports `passphrase_required`; a validly encoded entry that
 does not authenticate the current envelope reports `auto_unlock_stale`; structural platform access
@@ -1696,10 +1705,11 @@ human-known passphrase rewrap, so generated-passphrase installations cannot be s
 
 `SecretMemoryPort` exposes `capability`, `capture`, `allocate`, and `close` over opaque one-shot
 `SecretHandle` values. `SecretPurpose` is exactly `vault_initialize`, `vault_unlock`,
-`vault_root_key`, `portable_recovery`, `object_payload`, `provider_reauthentication`, `provider_credential`,
-`privacy_reauthentication`, or `security_reauthentication`; `SecretConsumer` is exactly
-`vault_root`, `recovery_wrapper`, `object_crypto`, `provider_authorizer`, `privacy_authorizer`, or
-`security_authorizer`. Shared types are
+`vault_root_key`, `portable_recovery`, `installation_recovery`, `vault_rewrap`, `object_payload`,
+`provider_reauthentication`, `provider_credential`, `privacy_reauthentication`, or
+`security_reauthentication`; `SecretConsumer` is exactly `vault_root`, `recovery_wrapper`,
+`installation_recovery`, `vault_rewrapper`, `object_crypto`, `provider_authorizer`,
+`privacy_authorizer`, or `security_authorizer`. Shared types are
 `SecretMemoryCapability`, `ProviderAttemptAuthBinding`, `ProviderAuthTransportCallback`,
 `ProviderCredentialHandle`, `HumanAuthorizationProof`, `UserPresenceChallenge`,
 `UserPresenceAttestation`, `UserPresenceCapability`, and `UserPresencePort`. Strong OS presence is
@@ -1778,7 +1788,7 @@ receive or retain the real credential; HTTP/TLS internals may copy header bytes,
 zero-copy claim is made.
 
 Pure `service/confidential_protocol.py` owns both closed client-safe wire contracts. YZH1 is the
-multi-phase structural channel with `HUMAN_PROTOCOL_MAGIC`, version/cap, exact nine
+multi-phase structural channel with `HUMAN_PROTOCOL_MAGIC`, version/cap, exact ten
 `HumanCeremonyKind` values, `HumanOpenTarget`/`HumanPreview`/`HumanAction`/`HumanPhase`/
 `HumanResult` unions, ceremony/decision bindings, eight correlated envelope types, bounded errors,
 and terminal close. YZS1 is the one-secret binary channel with `SECRET_PROTOCOL_MAGIC`, version/
@@ -1796,14 +1806,15 @@ Every serialized YZH1 ceremony/decision binding and YZS1 `SecretIngressBinding` 
 monotonic sample with the same floor rule.
 
 `HumanCeremonyKind` is exactly `vault_initialize`, `vault_unlock`, `keyring_retry`,
-`portable_recovery`, `provider_credential_set`, `provider_credential_rotate`,
+`portable_recovery`, `installation_recovery`, `provider_credential_set`, `provider_credential_rotate`,
 `privacy_policy_decision`, `privacy_disclosure_decision`, and `idle_relock_policy_change`.
 `CEREMONY_EXPIRY_SECONDS = 300` is the one YZH1/YZS1 challenge/binding expiry. It bounds a whole
 human ceremony, including the trip to a provider console to mint an API key, so it is a five-minute
-span rather than a keystroke timeout. The seven fixed
+span rather than a keystroke timeout. The nine fixed
 `ConfidentialSecretPurpose` wire codes are `1=vault_initialize`, `2=vault_unlock`,
 `3=portable_recovery`, `4=provider_reauthentication`, `5=provider_credential`,
-`6=privacy_reauthentication`, and `7=security_reauthentication`.
+`6=privacy_reauthentication`, `7=security_reauthentication`,
+`8=installation_recovery`, and `9=vault_rewrap`.
 
 `PrivacyPolicyDecisionPreview` is exactly `{kind, pending_id, diff_digest, changes, members}`.
 For a single-layer transition, `changes` is the complete substantive policy diff as closed

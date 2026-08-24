@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
+from yoetz.adapters.keys.installation_recovery import (
+    InstallationRecoveryArtifact,
+    InstallationRecoveryMetadata,
+    InstallationRecoveryMode,
+    InstallationRecoverySecretKind,
+    unlock_installation_recovery_artifact,
+)
 from yoetz.adapters.keys.secret_memory import LocalSecretMemory
+from yoetz.adapters.keys.vault_passphrase import VaultRootEnvelope
 from yoetz.ports.keys import (
     REPOSITORY_PRIVACY_MAC_DOMAIN,
     KeyStoreError,
@@ -42,7 +51,14 @@ class _Clock:
         raise AssertionError("wall clock forbidden")
 
 
-def _service(tmp_path: Path, memory: LocalSecretMemory, clock: _Clock) -> VaultService:
+def _service(
+    tmp_path: Path,
+    memory: LocalSecretMemory,
+    clock: _Clock,
+    *,
+    publish_mode: Callable[[VaultMode, VaultRootEnvelope | None, str], None] | None = None,
+    replace_mode: Callable[[VaultMode, VaultRootEnvelope, str, int], None] | None = None,
+) -> VaultService:
     vault_dir = tmp_path / "vault"
     return VaultService(
         installation_id=_INSTALLATION_ID,
@@ -52,6 +68,8 @@ def _service(tmp_path: Path, memory: LocalSecretMemory, clock: _Clock) -> VaultS
         clock=clock,  # pyright: ignore[reportArgumentType] - wall clock is not sampled by vault
         vault_store_factory=lambda: EncryptedVaultStore(vault_dir),
         pristine_state_digest="sha256:" + "1" * 64,
+        publish_mode=publish_mode,
+        replace_mode=replace_mode,
     )
 
 
@@ -129,6 +147,127 @@ async def test_create_bundle_is_once_and_load_derives_equivalent_operations(tmp_
     loaded = await service.load_bundle_keys(_TASK_ID)
     domain = b"yoetz/object/result/v1\x00"
     assert created.commitment_key.mac(domain, b"same") == loaded.commitment_key.mac(domain, b"same")
+
+
+@pytest.mark.anyio
+async def test_installation_recovery_artifact_keeps_ivk_inside_vault_boundary(
+    tmp_path: Path,
+) -> None:
+    memory = LocalSecretMemory()
+    service = _service(tmp_path, memory, _Clock())
+    await _initialize(service, memory)
+    secret = bytearray(b"correct horse battery staple")
+    artifact = await service.build_installation_recovery_artifact(
+        memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(secret)),
+        recovery_generation=1,
+        mode=InstallationRecoveryMode.COMPACT,
+        secret_kind=InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
+        snapshot_manifest_digest=None,
+    )
+    metadata = InstallationRecoveryMetadata(
+        1,
+        InstallationRecoveryMode.COMPACT,
+        InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
+        artifact.artifact_digest,
+        None,
+    )
+    await service.commit_installation_recovery_metadata(metadata)
+    assert await service.load_installation_recovery_metadata(1) == metadata
+    recovered = unlock_installation_recovery_artifact(
+        artifact,
+        memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(secret)),
+    )
+    assert recovered.consume_ivk(bytes) != bytes(32)
+    with pytest.raises(VaultError, match="record_binding_mismatch"):
+        await service.commit_installation_recovery_metadata(metadata)
+    memory.close()
+
+
+@pytest.mark.anyio
+async def test_installation_recovery_verifies_metadata_and_selects_new_envelope(
+    tmp_path: Path,
+) -> None:
+    memory = LocalSecretMemory()
+    published: list[VaultRootEnvelope] = []
+    replaced: list[tuple[VaultRootEnvelope, str, int]] = []
+
+    def publish(mode: VaultMode, envelope: VaultRootEnvelope | None, digest: str) -> None:
+        assert mode is VaultMode.PASSPHRASE
+        assert envelope is not None
+        assert digest.startswith("sha256:")
+        published.append(envelope)
+
+    def replace(
+        mode: VaultMode,
+        envelope: VaultRootEnvelope,
+        digest: str,
+        generation: int,
+    ) -> None:
+        assert mode is VaultMode.PASSPHRASE
+        replaced.append((envelope, digest, generation))
+
+    service = _service(
+        tmp_path,
+        memory,
+        _Clock(),
+        publish_mode=publish,
+        replace_mode=replace,
+    )
+    await _initialize(service, memory)
+    await service.create_bundle_keys(_TASK_ID)
+    recovery_secret = bytearray(b"recovery horse battery staple")
+    artifact = await service.build_installation_recovery_artifact(
+        memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(recovery_secret)),
+        recovery_generation=1,
+        mode=InstallationRecoveryMode.COMPACT,
+        secret_kind=InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
+        snapshot_manifest_digest=None,
+    )
+    await service.commit_installation_recovery_metadata(
+        InstallationRecoveryMetadata(
+            1,
+            InstallationRecoveryMode.COMPACT,
+            InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
+            artifact.artifact_digest,
+            None,
+        )
+    )
+    await service.lock()
+
+    recovered = await service.recover_passphrase(
+        artifact,
+        memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(recovery_secret)),
+        memory.capture(SecretPurpose.VAULT_REWRAP, bytearray(b"new correct horse battery")),
+        throttle_record_digest="sha256:" + "3" * 64,
+    )
+    assert recovered.state is VaultState.READY
+    assert replaced == []
+    service.commit_recovery_marker()
+    assert replaced[0][1:] == ("sha256:" + "3" * 64, 1)
+    assert await service.load_bundle_keys(_TASK_ID)
+
+    await service.close()
+    reopened_memory = LocalSecretMemory()
+    reopened = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=8,
+        mode=VaultMode.PASSPHRASE,
+        secret_memory=reopened_memory,
+        clock=_Clock(),  # pyright: ignore[reportArgumentType]
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        root_envelope=replaced[0][0],
+    )
+    with pytest.raises(VaultError, match="unlock_wrong"):
+        await reopened.unlock(
+            reopened_memory.capture(SecretPurpose.VAULT_UNLOCK, bytearray(b"correct horse battery"))
+        )
+    assert (
+        await reopened.unlock(
+            reopened_memory.capture(
+                SecretPurpose.VAULT_UNLOCK, bytearray(b"new correct horse battery")
+            )
+        )
+    ).state is VaultState.READY
 
 
 @pytest.mark.anyio
@@ -243,3 +382,75 @@ async def test_uninitialized_keyring_has_no_passphrase_fallback(tmp_path: Path) 
     assert status.mode is VaultMode.UNINITIALIZED
     assert status.state is VaultState.LOCKED
     assert status.reason == "keyring_unavailable"
+
+
+@pytest.mark.anyio
+async def test_the_pre_publication_drill_reopens_the_persisted_set(tmp_path: Path) -> None:
+    """ADR-024 step 5: prove the set opens this vault before anything advertises it.
+
+    Marking a generation `completed` without ever reopening it means a set that cannot actually
+    be opened is discovered during a real recovery, when the person who could redo the ceremony
+    is long gone.
+    """
+
+    memory = LocalSecretMemory()
+    service = _service(tmp_path, memory, _Clock())
+    await _initialize(service, memory)
+    secret = bytearray(b"correct horse battery staple")
+    persisted: list[InstallationRecoveryArtifact] = []
+
+    def _publish(built: InstallationRecoveryArtifact) -> InstallationRecoveryArtifact:
+        persisted.append(built)
+        return built
+
+    artifact = await service.build_and_verify_installation_recovery_artifact(
+        memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(secret)),
+        recovery_generation=1,
+        mode=InstallationRecoveryMode.COMPACT,
+        secret_kind=InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
+        snapshot_manifest_digest=None,
+        publish=_publish,
+    )
+    assert persisted == [artifact]
+    # The drill's own reopen is the proof, and the set stays usable afterwards.
+    recovered = unlock_installation_recovery_artifact(
+        artifact,
+        memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(secret)),
+    )
+    assert recovered.recovery_generation == 1
+    memory.close()
+
+
+@pytest.mark.anyio
+async def test_a_set_that_does_not_survive_staging_is_never_published(tmp_path: Path) -> None:
+    """The drill reopens what staging actually wrote, so corruption in between is caught."""
+
+    memory = LocalSecretMemory()
+    service = _service(tmp_path, memory, _Clock())
+    await _initialize(service, memory)
+    secret = bytearray(b"correct horse battery staple")
+
+    foreign = await service.build_installation_recovery_artifact(
+        memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(b"a different secret here")),
+        recovery_generation=1,
+        mode=InstallationRecoveryMode.COMPACT,
+        secret_kind=InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
+        snapshot_manifest_digest=None,
+    )
+
+    def _publish_something_else(
+        built: InstallationRecoveryArtifact,
+    ) -> InstallationRecoveryArtifact:
+        del built
+        return foreign
+
+    with pytest.raises(VaultError, match="recovery_artifact_invalid"):
+        await service.build_and_verify_installation_recovery_artifact(
+            memory.capture(SecretPurpose.INSTALLATION_RECOVERY, bytearray(secret)),
+            recovery_generation=1,
+            mode=InstallationRecoveryMode.COMPACT,
+            secret_kind=InstallationRecoverySecretKind.ARGON2ID_PASSPHRASE,
+            snapshot_manifest_digest=None,
+            publish=_publish_something_else,
+        )
+    memory.close()

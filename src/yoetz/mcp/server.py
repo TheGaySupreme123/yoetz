@@ -445,7 +445,9 @@ def _control_error_result(
                 "The local service vault is soft-locked or a transient unlock attempt just "
                 "failed; it re-opens automatically. Retry this operation shortly. If the "
                 "error persists, on a local terminal run `yoetz service unlock` or "
-                "`yoetz service auto-unlock repair`. Never send secrets over MCP."
+                "`yoetz service auto-unlock repair`. If those no longer work, run "
+                "`yoetz service recovery status` for the supported zero-secret handoff. "
+                "Never send secrets or recovery paths over MCP."
             )
         else:
             message = (
@@ -453,7 +455,10 @@ def _control_error_result(
                 "platform auto-unlock, soft locks (idle/session) re-open automatically; this "
                 "error means a hard lock or missing setup. On a local terminal run "
                 "`yoetz service unlock` (uses the platform credential store when provisioned) "
-                "or `yoetz service auto-unlock repair` if that entry is stale. If still "
+                "or `yoetz service auto-unlock repair` if that entry is stale. If unlock "
+                "authority may be lost, run `yoetz service recovery status`; follow only its "
+                "exact trusted command and never send a secret or recovery path through the "
+                "agent. If still "
                 "uninitialized, run `yoetz setup` or prepare `vault_initialize` via "
                 "`yoetz consent catalog` / `prepare` (ADR-015). Never send secrets over MCP."
             )

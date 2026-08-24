@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hmac
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
 from yoetz.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
@@ -29,6 +31,9 @@ from yoetz.service.confidential_protocol import (
     IdleRelockPolicyChangePreview,
     IdleRelockPolicyResult,
     IdleRelockPolicyTarget,
+    InstallationRecoveryPreview,
+    InstallationRecoveryResult,
+    InstallationRecoveryTarget,
     KeyringRetryPhase,
     KeyringRetryPreview,
     KeyringRetryResult,
@@ -60,8 +65,14 @@ __all__ = [
     "HumanCeremonyCliError",
     "IdleRelockCliPolicyValue",
     "IdleRelockCliResult",
+    "InstallationRecoveryImportResult",
     "change_idle_relock_policy",
+    "export_installation_recovery_set",
     "initialize_passphrase_vault",
+    "import_installation_recovery_set",
+    "provision_installation_recovery",
+    "revoke_installation_recovery",
+    "restore_installation_recovery",
     "portable_recovery",
     "read_vault_passphrase_for_auto_unlock",
     "retry_keyring",
@@ -155,6 +166,18 @@ class IdleRelockCliResult:
             raise ValueError("idle_relock_cli_result_invalid")
 
 
+@dataclass(frozen=True, slots=True)
+class InstallationRecoveryImportResult:
+    outcome: Literal["imported", "exported", "snapshot_installed"]
+    recovery_generation: int
+    set_mode: Literal["compact", "self_contained"]
+    next_command: Literal[
+        "yoetz service recovery restore",
+        "yoetz service recovery status",
+        "yoetz service run",
+    ]
+
+
 def overwrite_secret_buffer(value: bytearray) -> None:
     for index in range(len(value)):
         value[index] = 0
@@ -178,6 +201,12 @@ class _ForegroundTerminal(TrustedForegroundConsole):
         except TrustedConsoleError as exc:
             raise HumanCeremonyCliError(exc.reason) from exc
 
+    def write_secret(self, value: bytearray) -> None:
+        try:
+            super().write_secret(value)
+        except TrustedConsoleError as exc:
+            raise HumanCeremonyCliError(exc.reason) from exc
+
     def read_choice(self, prompt: str, allowed: tuple[bytes, ...]) -> bytes:
         try:
             return super().read_choice(prompt, allowed)
@@ -190,11 +219,19 @@ class _ForegroundTerminal(TrustedForegroundConsole):
         except TrustedConsoleError as exc:
             raise HumanCeremonyCliError(exc.reason) from exc
 
+    def read_path(self, prompt: str, maximum: int = 4_096) -> Path:
+        try:
+            return super().read_path(prompt, maximum)
+        except TrustedConsoleError as exc:
+            raise HumanCeremonyCliError(exc.reason) from exc
+
 
 class _CeremonyTerminal(Protocol):
     """Small terminal surface shared by prompted and fully supplied ceremonies."""
 
     def write(self, value: str) -> None: ...
+
+    def write_secret(self, value: bytearray) -> None: ...
 
     def read_choice(self, prompt: str, allowed: tuple[bytes, ...]) -> bytes: ...
 
@@ -209,6 +246,10 @@ class _SuppliedSecretTerminal:
     def write(self, value: str) -> None:
         if type(value) is not str:
             raise TypeError("terminal_text_invalid")
+
+    def write_secret(self, value: bytearray) -> None:
+        if type(value) is not bytearray:
+            raise TypeError("terminal_secret_invalid")
 
     def read_choice(self, prompt: str, allowed: tuple[bytes, ...]) -> bytes:
         del prompt, allowed
@@ -225,9 +266,14 @@ def _verify_preview(
     session: HumanControlSession,
 ) -> HumanPreview:
     opened = session.opened
-    if opened.binding.target_digest != canonical_digest(human_target_json(target)):
-        raise HumanCeremonyCliError("preview_invalid")
     preview = opened.preview
+    expected_binding = (
+        preview.confirmed_plan_digest
+        if type(preview) is InstallationRecoveryPreview
+        else canonical_digest(human_target_json(target))
+    )
+    if opened.binding.target_digest != expected_binding:
+        raise HumanCeremonyCliError("preview_invalid")
     valid = False
     if kind is HumanCeremonyKind.VAULT_INITIALIZE:
         valid = type(preview) is VaultInitializePreview
@@ -242,6 +288,22 @@ def _verify_preview(
             and preview.operation == target.operation
             and preview.request_id == target.request_id
             and preview.confirmed_plan_digest == target.confirmed_plan_digest
+        )
+    elif kind is HumanCeremonyKind.INSTALLATION_RECOVERY:
+        valid = (
+            type(preview) is InstallationRecoveryPreview
+            and type(target) is InstallationRecoveryTarget
+            and preview.operation == target.operation
+            and preview.request_id == target.request_id
+            # Both sides of the binding comparison are server-supplied, so it proves only
+            # internal consistency.  Bind the plan to the digest this client computed for its
+            # own target as well, or a server-chosen plan passes unnoticed.
+            and preview.confirmed_plan_digest == target.confirmed_plan_digest
+            and preview.confirmed_plan_digest == opened.binding.target_digest
+            and preview.recovery_generation == target.recovery_generation
+            and preview.set_mode == target.set_mode
+            and preview.secret_kind == target.secret_kind
+            and preview.target_envelope == target.target_envelope
         )
     elif kind is HumanCeremonyKind.PROVIDER_CREDENTIAL_SET:
         valid = (
@@ -572,6 +634,18 @@ def _render_preview(terminal: _CeremonyTerminal, preview: HumanPreview) -> None:
             f"Content commitment: {preview.content_commitment}\n"
             f"Items: {preview.item_count}; bytes: {preview.total_bytes}\n"
         )
+    elif type(preview) is InstallationRecoveryPreview:
+        terminal.write(
+            f"Action: installation recovery {preview.operation}\n"
+            f"Request: {preview.request_id}\n"
+            f"Plan digest: {preview.confirmed_plan_digest}\n"
+            f"Generation: {preview.recovery_generation}\n"
+            f"Set: {preview.set_mode}; secret: {preview.secret_kind}\n"
+            f"Target envelope: {preview.target_envelope}\n"
+            f"Destination: "
+            f"{'create-only local .yirs file; path stays in this helper' if preview.operation in {'provision', 'rotate'} else 'no export'}\n"
+            f"Items: {preview.item_count}; bytes: {preview.total_bytes}\n"
+        )
     elif type(preview) in {ProviderCredentialSetPreview, ProviderCredentialRotatePreview}:
         provider = cast(ProviderCredentialSetPreview | ProviderCredentialRotatePreview, preview)
         terminal.write(
@@ -623,10 +697,23 @@ def _needs_confirmation(
     target: HumanOpenTarget,
     purpose: ConfidentialSecretPurpose,
 ) -> bool:
-    return purpose is ConfidentialSecretPurpose.VAULT_INITIALIZE or (
-        kind is HumanCeremonyKind.PORTABLE_RECOVERY
-        and type(target) is PortableRecoveryTarget
-        and target.operation == "create"
+    return (
+        purpose
+        in {
+            ConfidentialSecretPurpose.VAULT_INITIALIZE,
+            ConfidentialSecretPurpose.VAULT_REWRAP,
+        }
+        or (
+            kind is HumanCeremonyKind.PORTABLE_RECOVERY
+            and type(target) is PortableRecoveryTarget
+            and target.operation == "create"
+        )
+        or (
+            kind is HumanCeremonyKind.INSTALLATION_RECOVERY
+            and type(target) is InstallationRecoveryTarget
+            and target.operation in {"provision", "rotate", "revoke"}
+            and target.secret_kind == "argon2id_passphrase"
+        )
     )
 
 
@@ -640,6 +727,10 @@ def _read_secret(
     label = (
         "Provider credential: "
         if purpose is ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
+        else "Recovery code or passphrase: "
+        if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
+        else "New vault passphrase: "
+        if purpose is ConfidentialSecretPurpose.VAULT_REWRAP
         else "Passphrase: "
     )
     first = terminal.read_secret(label, maximum)
@@ -647,7 +738,12 @@ def _read_secret(
         _validate_secret(first, purpose)
         if not _needs_confirmation(kind, target, purpose):
             return first
-        confirmation = terminal.read_secret("Confirm passphrase: ", maximum)
+        confirmation = terminal.read_secret(
+            "Confirm recovery passphrase: "
+            if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
+            else "Confirm passphrase: ",
+            maximum,
+        )
         try:
             _validate_secret(confirmation, purpose)
             if not hmac.compare_digest(first, confirmation):
@@ -680,6 +776,8 @@ def _expected_result_type(kind: HumanCeremonyKind) -> type[HumanResult]:
         return KeyringRetryResult
     if kind is HumanCeremonyKind.PORTABLE_RECOVERY:
         return PortableRecoveryResult
+    if kind is HumanCeremonyKind.INSTALLATION_RECOVERY:
+        return InstallationRecoveryResult
     if kind in {
         HumanCeremonyKind.PROVIDER_CREDENTIAL_SET,
         HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE,
@@ -709,6 +807,8 @@ async def _drive_session(
     provider_credential: bytearray | None = None,
     passphrase: bytearray | None = None,
     provider_reauthentication: bytearray | None = None,
+    installation_recovery_secret: bytearray | None = None,
+    vault_rewrap_secret: bytearray | None = None,
 ) -> tuple[HumanResult, Literal["approve", "deny"] | None]:
     decision: Literal["approve", "deny"] | None = None
     for _ in range(8):
@@ -724,6 +824,10 @@ async def _drive_session(
                 ConfidentialSecretPurpose.VAULT_UNLOCK,
             }:
                 supplied = passphrase
+            elif purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY:
+                supplied = installation_recovery_secret
+            elif purpose is ConfidentialSecretPurpose.VAULT_REWRAP:
+                supplied = vault_rewrap_secret
             elif purpose in {
                 ConfidentialSecretPurpose.PROVIDER_REAUTHENTICATION,
                 ConfidentialSecretPurpose.PRIVACY_REAUTHENTICATION,
@@ -735,9 +839,30 @@ async def _drive_session(
                     if purpose is ConfidentialSecretPurpose.PROVIDER_REAUTHENTICATION
                     else passphrase
                 )
+                if (
+                    supplied is None
+                    and purpose is ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION
+                    and type(target) is InstallationRecoveryTarget
+                ):
+                    supplied = _load_scoped_auto_unlock_passphrase()
             if supplied is not None:
                 _validate_secret(supplied, purpose)
                 secret_buffer = supplied
+            elif (
+                purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
+                and type(target) is InstallationRecoveryTarget
+                and target.operation in {"provision", "rotate", "revoke"}
+                and target.secret_kind == "generated_code"
+            ):
+                from yoetz.adapters.keys.installation_recovery import generate_recovery_code
+
+                secret_buffer = generate_recovery_code()
+                terminal.write(
+                    "Write down this recovery code now. It is displayed once and is not copied "
+                    "to the clipboard:\n"
+                )
+                terminal.write_secret(secret_buffer)
+                terminal.write("\n")
             else:
                 secret_buffer = _read_secret(terminal, kind, target, purpose)
             await _send_secret(session, current, secret_buffer)
@@ -778,6 +903,8 @@ async def _complete_human_ceremony(
     provider_credential: bytearray | None,
     passphrase: bytearray | None,
     provider_reauthentication: bytearray | None,
+    installation_recovery_secret: bytearray | None,
+    vault_rewrap_secret: bytearray | None,
 ) -> HumanResult:
     session = await client.open(kind, target)
     async with session:
@@ -793,6 +920,8 @@ async def _complete_human_ceremony(
                 provider_credential,
                 passphrase,
                 provider_reauthentication,
+                installation_recovery_secret,
+                vault_rewrap_secret,
             )
             return result
         except BaseException:
@@ -805,7 +934,9 @@ def _validate_supplied_secrets(
     provider_credential: bytearray | None,
     passphrase: bytearray | None,
     provider_reauthentication: bytearray | None,
-) -> tuple[bool, bool]:
+    installation_recovery_secret: bytearray | None,
+    vault_rewrap_secret: bytearray | None,
+) -> tuple[bool, bool, bool]:
     if type(kind) is not HumanCeremonyKind:
         raise TypeError("human_ceremony_kind_invalid")
     provider_kind = kind in {
@@ -816,16 +947,25 @@ def _validate_supplied_secrets(
         HumanCeremonyKind.VAULT_INITIALIZE,
         HumanCeremonyKind.VAULT_UNLOCK,
     }
+    recovery_kind = kind is HumanCeremonyKind.INSTALLATION_RECOVERY
     if (
         (provider_credential is not None and not provider_kind)
         or (provider_reauthentication is not None and not provider_kind)
         or (passphrase is not None and not passphrase_kind)
+        or (installation_recovery_secret is not None and not recovery_kind)
+        or (vault_rewrap_secret is not None and not recovery_kind)
     ):
-        for supplied in (provider_credential, passphrase, provider_reauthentication):
+        for supplied in (
+            provider_credential,
+            passphrase,
+            provider_reauthentication,
+            installation_recovery_secret,
+            vault_rewrap_secret,
+        ):
             if supplied is not None:
                 overwrite_secret_buffer(supplied)
         raise ValueError("provider_credential_target_invalid")
-    return provider_kind, passphrase_kind
+    return provider_kind, passphrase_kind, recovery_kind
 
 
 async def run_human_ceremony(
@@ -834,21 +974,40 @@ async def run_human_ceremony(
     provider_credential: bytearray | None = None,
     passphrase: bytearray | None = None,
     provider_reauthentication: bytearray | None = None,
+    installation_recovery_secret: bytearray | None = None,
+    vault_rewrap_secret: bytearray | None = None,
 ) -> HumanResult:
     """Run one exact foreground YZH1/YZS1 ceremony and return structural state only."""
 
-    provider_kind, passphrase_kind = _validate_supplied_secrets(
+    provider_kind, passphrase_kind, recovery_kind = _validate_supplied_secrets(
         kind,
         provider_credential,
         passphrase,
         provider_reauthentication,
+        installation_recovery_secret,
+        vault_rewrap_secret,
     )
     fully_supplied = (
         passphrase is not None
         if passphrase_kind
-        else provider_kind
-        and provider_credential is not None
-        and provider_reauthentication is not None
+        else (
+            recovery_kind
+            and type(target) is InstallationRecoveryTarget
+            and (
+                target.operation == "provision"
+                and installation_recovery_secret is not None
+                or target.operation in {"rotate", "restore"}
+                and installation_recovery_secret is not None
+                and vault_rewrap_secret is not None
+                or target.operation == "revoke"
+                and vault_rewrap_secret is not None
+            )
+        )
+        or (
+            provider_kind
+            and provider_credential is not None
+            and provider_reauthentication is not None
+        )
     )
     client = HumanControlClient()
 
@@ -862,6 +1021,8 @@ async def run_human_ceremony(
                 provider_credential,
                 passphrase,
                 provider_reauthentication,
+                installation_recovery_secret,
+                vault_rewrap_secret,
             )
         with _ForegroundTerminal() as terminal:
             return await _complete_human_ceremony(
@@ -872,15 +1033,20 @@ async def run_human_ceremony(
                 provider_credential,
                 passphrase,
                 provider_reauthentication,
+                installation_recovery_secret,
+                vault_rewrap_secret,
             )
     finally:
         await client.close()
-        if provider_credential is not None:
-            overwrite_secret_buffer(provider_credential)
-        if passphrase is not None:
-            overwrite_secret_buffer(passphrase)
-        if provider_reauthentication is not None:
-            overwrite_secret_buffer(provider_reauthentication)
+        for supplied in (
+            provider_credential,
+            passphrase,
+            provider_reauthentication,
+            installation_recovery_secret,
+            vault_rewrap_secret,
+        ):
+            if supplied is not None:
+                overwrite_secret_buffer(supplied)
 
 
 async def run_human_ceremony_on_terminal(
@@ -891,6 +1057,8 @@ async def run_human_ceremony_on_terminal(
     provider_credential: bytearray | None = None,
     passphrase: bytearray | None = None,
     provider_reauthentication: bytearray | None = None,
+    installation_recovery_secret: bytearray | None = None,
+    vault_rewrap_secret: bytearray | None = None,
 ) -> HumanResult:
     """Run a ceremony on an already verified console owned by the trusted helper."""
 
@@ -899,6 +1067,8 @@ async def run_human_ceremony_on_terminal(
         provider_credential,
         passphrase,
         provider_reauthentication,
+        installation_recovery_secret,
+        vault_rewrap_secret,
     )
     client = HumanControlClient()
     try:
@@ -910,10 +1080,18 @@ async def run_human_ceremony_on_terminal(
             provider_credential,
             passphrase,
             provider_reauthentication,
+            installation_recovery_secret,
+            vault_rewrap_secret,
         )
     finally:
         await client.close()
-        for supplied in (provider_credential, passphrase, provider_reauthentication):
+        for supplied in (
+            provider_credential,
+            passphrase,
+            provider_reauthentication,
+            installation_recovery_secret,
+            vault_rewrap_secret,
+        ):
             if supplied is not None:
                 overwrite_secret_buffer(supplied)
 
@@ -1034,6 +1212,155 @@ async def retry_keyring(
 async def portable_recovery(target: PortableRecoveryTarget) -> PortableRecoveryResult:
     result = await run_human_ceremony(HumanCeremonyKind.PORTABLE_RECOVERY, target)
     return cast(PortableRecoveryResult, result)
+
+
+async def provision_installation_recovery(
+    target: InstallationRecoveryTarget,
+) -> InstallationRecoveryResult:
+    """Provision one set without ever accepting the recovery secret from argv or stdio."""
+
+    if target.operation not in {"provision", "rotate"}:
+        raise ValueError("installation_recovery_target_invalid")
+    with _ForegroundTerminal() as terminal:
+        destination = terminal.read_path("Recovery-set destination (.yirs): ")
+        if destination.exists():
+            raise HumanCeremonyCliError("input_invalid")
+        result = await run_human_ceremony_on_terminal(
+            terminal,
+            HumanCeremonyKind.INSTALLATION_RECOVERY,
+            target,
+        )
+        from yoetz.config.load import load_config
+        from yoetz.config.paths import bundle_root
+        from yoetz.service.installation_recovery import InstallationRecoverySetStore
+
+        config = load_config({}, os.environ, None)
+        try:
+            InstallationRecoverySetStore(
+                bundle_root(_data_dir=config.storage.data_dir)
+            ).export_generation(target.recovery_generation, destination)
+        except BaseException:
+            terminal.write(
+                "The recovery generation is retained, but export did not complete. "
+                "Run 'yoetz service recovery export' and choose a new destination.\n"
+            )
+            raise
+        terminal.write("Recovery set exported. Keep it separate from the recovery secret.\n")
+    return cast(InstallationRecoveryResult, result)
+
+
+async def export_installation_recovery_set(
+    recovery_generation: int,
+) -> InstallationRecoveryImportResult:
+    """Export the active encrypted set through a create-only trusted-console path."""
+
+    from yoetz.config.load import load_config
+    from yoetz.config.paths import bundle_root
+    from yoetz.service.installation_recovery import InstallationRecoverySetStore
+
+    with _ForegroundTerminal() as terminal:
+        destination = terminal.read_path("Recovery-set destination (.yirs): ")
+        if destination.exists():
+            raise HumanCeremonyCliError("input_invalid")
+        config = load_config({}, os.environ, None)
+        store = InstallationRecoverySetStore(bundle_root(_data_dir=config.storage.data_dir))
+        metadata = store.metadata(recovery_generation)
+        store.export_generation(recovery_generation, destination)
+        terminal.write("Recovery set exported. Keep it separate from the recovery secret.\n")
+    return InstallationRecoveryImportResult(
+        "exported",
+        metadata.recovery_generation,
+        metadata.mode.value,
+        "yoetz service recovery status",
+    )
+
+
+async def revoke_installation_recovery(
+    target: InstallationRecoveryTarget,
+) -> InstallationRecoveryResult:
+    if target.operation != "revoke":
+        raise ValueError("installation_recovery_target_invalid")
+    result = await run_human_ceremony(HumanCeremonyKind.INSTALLATION_RECOVERY, target)
+    return cast(InstallationRecoveryResult, result)
+
+
+async def import_installation_recovery_set() -> InstallationRecoveryImportResult:
+    """Import one set selected locally while holding the daemon's singleton exclusion."""
+
+    from yoetz.config.load import load_config
+    from yoetz.config.paths import bundle_root, state_dir
+    from yoetz.service.installation_recovery import (
+        InstallationRecoverySetStore,
+        OfflineInstallationRecoveryLease,
+    )
+
+    with _ForegroundTerminal() as terminal:
+        source = terminal.read_path("Recovery-set archive (.yirs): ")
+        config = load_config({}, os.environ, None)
+        with OfflineInstallationRecoveryLease(state_dir() / "service.lock"):
+            metadata = InstallationRecoverySetStore(
+                bundle_root(_data_dir=config.storage.data_dir)
+            ).import_archive(source)
+        terminal.write(
+            f"Recovery set generation {metadata.recovery_generation} imported and staged. "
+            "It is not active yet: the archive is unauthenticated until the restore ceremony "
+            "opens it with your recovery secret, so any generation already in force is "
+            "untouched.\nRun 'yoetz service recovery restore'.\n"
+        )
+    return InstallationRecoveryImportResult(
+        "imported",
+        metadata.recovery_generation,
+        metadata.mode.value,
+        "yoetz service recovery restore",
+    )
+
+
+async def restore_installation_recovery(
+    target: InstallationRecoveryTarget,
+) -> InstallationRecoveryResult | InstallationRecoveryImportResult:
+    """Restore through the trusted terminal; both secrets stay on confidential ingress.
+
+    Installing a snapshot into a pristine profile is an *offline* step: it holds the daemon's
+    singleton exclusion, so it can only run while the service is stopped.  The ceremony that
+    follows needs a running daemon, and this helper never starts one.  The two phases are
+    therefore two invocations of the same command rather than one that opens a socket nobody is
+    listening on.  The second invocation finds the installed marker and goes straight to the
+    ceremony, so resuming is just running `yoetz service recovery restore` again.
+    """
+
+    if target.operation != "restore":
+        raise ValueError("installation_recovery_target_invalid")
+    from yoetz.config.load import load_config
+    from yoetz.config.paths import bundle_root, state_dir
+    from yoetz.service.installation_recovery import (
+        InstallationRecoverySetStore,
+        OfflineInstallationRecoveryLease,
+    )
+
+    config = load_config({}, os.environ, None)
+    bundle = bundle_root(_data_dir=config.storage.data_dir)
+    if not (bundle / "installation-state.json").exists():
+        if target.set_mode != "self_contained":
+            raise HumanCeremonyCliError("input_invalid")
+        with OfflineInstallationRecoveryLease(state_dir() / "service.lock"):
+            InstallationRecoverySetStore(bundle).install_snapshot_into_pristine(
+                target.recovery_generation
+            )
+        with _ForegroundTerminal() as terminal:
+            terminal.write(
+                "Encrypted state installed. It is still locked, and the imported set is not "
+                "active yet.\nStart the service with 'yoetz service run', then run "
+                "'yoetz service recovery restore' again to enter the recovery secret and a new "
+                "vault passphrase.\n"
+            )
+        return InstallationRecoveryImportResult(
+            "snapshot_installed",
+            target.recovery_generation,
+            target.set_mode,
+            "yoetz service run",
+        )
+    result = await run_human_ceremony(HumanCeremonyKind.INSTALLATION_RECOVERY, target)
+    return cast(InstallationRecoveryResult, result)
 
 
 async def set_provider_credential(

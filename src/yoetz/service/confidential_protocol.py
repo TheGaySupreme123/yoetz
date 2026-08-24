@@ -64,6 +64,9 @@ __all__ = [
     "IdleRelockPolicyChangePreview",
     "IdleRelockPolicyResult",
     "IdleRelockPolicyTarget",
+    "InstallationRecoveryPreview",
+    "InstallationRecoveryResult",
+    "InstallationRecoveryTarget",
     "KeyringRetryPhase",
     "KeyringRetryPreview",
     "KeyringRetryResult",
@@ -161,6 +164,7 @@ class HumanCeremonyKind(str, Enum):  # noqa: UP042 - fixed wire strings
     VAULT_UNLOCK = "vault_unlock"
     KEYRING_RETRY = "keyring_retry"
     PORTABLE_RECOVERY = "portable_recovery"
+    INSTALLATION_RECOVERY = "installation_recovery"
     PROVIDER_CREDENTIAL_SET = "provider_credential_set"
     PROVIDER_CREDENTIAL_ROTATE = "provider_credential_rotate"
     PRIVACY_POLICY_DECISION = "privacy_policy_decision"
@@ -176,6 +180,8 @@ class ConfidentialSecretPurpose(IntEnum):
     PROVIDER_CREDENTIAL = 5
     PRIVACY_REAUTHENTICATION = 6
     SECURITY_REAUTHENTICATION = 7
+    INSTALLATION_RECOVERY = 8
+    VAULT_REWRAP = 9
 
 
 def _require_exact_type(value: object, expected: type[object], reason: str) -> None:
@@ -253,6 +259,58 @@ class PortableRecoveryTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class InstallationRecoveryTarget:
+    operation: Literal["provision", "rotate", "revoke", "restore"]
+    request_id: str
+    confirmed_plan_digest: str
+    recovery_generation: int
+    set_mode: Literal["compact", "self_contained"]
+    secret_kind: Literal["generated_code", "argon2id_passphrase"]
+    target_envelope: Literal["preserve", "passphrase", "platform_auto_unlock"]
+    kind: Literal["installation_recovery"] = "installation_recovery"
+
+    def __post_init__(self) -> None:
+        if self.kind != "installation_recovery" or self.operation not in {
+            "provision",
+            "rotate",
+            "revoke",
+            "restore",
+        }:
+            raise ValueError("installation_recovery_target_invalid")
+        validate_id(IdKind.REQUEST, self.request_id)
+        _require_digest(self.confirmed_plan_digest, "installation_recovery_target_invalid")
+        _require_positive(self.recovery_generation, "installation_recovery_target_invalid")
+        if self.set_mode not in {"compact", "self_contained"} or self.secret_kind not in {
+            "generated_code",
+            "argon2id_passphrase",
+        }:
+            raise ValueError("installation_recovery_target_invalid")
+        expected = (
+            {"preserve"}
+            if self.operation == "provision"
+            else {"passphrase", "platform_auto_unlock"}
+            if self.operation == "restore"
+            else {"passphrase"}
+        )
+        if self.target_envelope not in expected:
+            raise ValueError("installation_recovery_target_invalid")
+
+    def plan_digest(self) -> str:
+        """Bind the human preview to the exact nonsecret recovery choices."""
+
+        return canonical_digest(
+            {
+                "operation": self.operation,
+                "recovery_generation": self.recovery_generation,
+                "request_id": self.request_id,
+                "secret_kind": self.secret_kind,
+                "set_mode": self.set_mode,
+                "target_envelope": self.target_envelope,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderCredentialTarget:
     action: Literal["set", "rotate"]
     provider_id: str
@@ -324,6 +382,7 @@ class IdleRelockPolicyTarget:
 type HumanOpenTarget = (
     EmptyVaultTarget
     | PortableRecoveryTarget
+    | InstallationRecoveryTarget
     | ProviderCredentialTarget
     | PrivacyPendingTarget
     | IdleRelockPolicyTarget
@@ -472,6 +531,38 @@ class PortableRecoveryPreview:
             _require_digest(value, "portable_recovery_preview_invalid")
         _require_nonnegative(self.item_count, "portable_recovery_preview_invalid")
         _require_nonnegative(self.total_bytes, "portable_recovery_preview_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class InstallationRecoveryPreview:
+    operation: Literal["provision", "rotate", "revoke", "restore"]
+    request_id: str
+    confirmed_plan_digest: str
+    recovery_generation: int
+    set_mode: Literal["compact", "self_contained"]
+    secret_kind: Literal["generated_code", "argon2id_passphrase"]
+    target_envelope: Literal["preserve", "passphrase", "platform_auto_unlock"]
+    item_count: int
+    total_bytes: int
+    native_prompt_available: bool
+    kind: Literal["installation_recovery"] = "installation_recovery"
+
+    def __post_init__(self) -> None:
+        target = InstallationRecoveryTarget(
+            self.operation,
+            self.request_id,
+            self.confirmed_plan_digest,
+            self.recovery_generation,
+            self.set_mode,
+            self.secret_kind,
+            self.target_envelope,
+        )
+        if target.kind != self.kind:
+            raise ValueError("installation_recovery_preview_invalid")
+        _require_nonnegative(self.item_count, "installation_recovery_preview_invalid")
+        _require_nonnegative(self.total_bytes, "installation_recovery_preview_invalid")
+        if type(self.native_prompt_available) is not bool:
+            raise ValueError("installation_recovery_preview_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,6 +736,7 @@ type HumanPreview = (
     | VaultUnlockPreview
     | KeyringRetryPreview
     | PortableRecoveryPreview
+    | InstallationRecoveryPreview
     | ProviderCredentialSetPreview
     | ProviderCredentialRotatePreview
     | PrivacyPolicyDecisionPreview
@@ -787,6 +879,29 @@ class PortableRecoveryResult:
 
 
 @dataclass(frozen=True, slots=True)
+class InstallationRecoveryResult:
+    operation: Literal["provision", "rotate", "revoke", "restore"]
+    status: Literal["completed", "failed"]
+    recovery_generation: int
+    result_commitment: str
+    kind: Literal["installation_recovery"] = "installation_recovery"
+
+    def __post_init__(self) -> None:
+        if self.operation not in {
+            "provision",
+            "rotate",
+            "revoke",
+            "restore",
+        } or self.status not in {
+            "completed",
+            "failed",
+        }:
+            raise ValueError("installation_recovery_result_invalid")
+        _require_positive(self.recovery_generation, "installation_recovery_result_invalid")
+        _require_digest(self.result_commitment, "installation_recovery_result_invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderCredentialResult:
     action: Literal["set", "rotate"]
     stored_generation: int
@@ -835,6 +950,7 @@ type HumanResult = (
     VaultStateResult
     | KeyringRetryResult
     | PortableRecoveryResult
+    | InstallationRecoveryResult
     | ProviderCredentialResult
     | PrivacyDecisionResult
     | IdleRelockPolicyResult
@@ -1055,6 +1171,8 @@ def _validate_open_combination(kind: HumanCeremonyKind, target: HumanOpenTarget)
         expected = EmptyVaultTarget
     elif kind is HumanCeremonyKind.PORTABLE_RECOVERY:
         expected = PortableRecoveryTarget
+    elif kind is HumanCeremonyKind.INSTALLATION_RECOVERY:
+        expected = InstallationRecoveryTarget
     elif kind in {
         HumanCeremonyKind.PROVIDER_CREDENTIAL_SET,
         HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE,
@@ -1283,6 +1401,17 @@ def human_target_json(target: HumanOpenTarget) -> dict[str, JsonValue]:
             "operation": target.operation,
             "request_id": target.request_id,
         }
+    if type(target) is InstallationRecoveryTarget:
+        return {
+            "confirmed_plan_digest": target.confirmed_plan_digest,
+            "kind": target.kind,
+            "operation": target.operation,
+            "recovery_generation": target.recovery_generation,
+            "request_id": target.request_id,
+            "secret_kind": target.secret_kind,
+            "set_mode": target.set_mode,
+            "target_envelope": target.target_envelope,
+        }
     if type(target) is ProviderCredentialTarget:
         return {
             "action": target.action,
@@ -1326,6 +1455,38 @@ def _target_from_json(value: JsonValue) -> HumanOpenTarget:
             operation=cast(Literal["create", "restore"], source["operation"]),
             request_id=cast(str, source["request_id"]),
             confirmed_plan_digest=cast(str, source["confirmed_plan_digest"]),
+        )
+    if kind == "installation_recovery":
+        _keys(
+            source,
+            {
+                "confirmed_plan_digest",
+                "kind",
+                "operation",
+                "recovery_generation",
+                "request_id",
+                "secret_kind",
+                "set_mode",
+                "target_envelope",
+            },
+        )
+        return InstallationRecoveryTarget(
+            operation=cast(
+                Literal["provision", "rotate", "revoke", "restore"],
+                source["operation"],
+            ),
+            request_id=cast(str, source["request_id"]),
+            confirmed_plan_digest=cast(str, source["confirmed_plan_digest"]),
+            recovery_generation=cast(int, source["recovery_generation"]),
+            set_mode=cast(Literal["compact", "self_contained"], source["set_mode"]),
+            secret_kind=cast(
+                Literal["generated_code", "argon2id_passphrase"],
+                source["secret_kind"],
+            ),
+            target_envelope=cast(
+                Literal["preserve", "passphrase", "platform_auto_unlock"],
+                source["target_envelope"],
+            ),
         )
     if kind == "provider_credential":
         _keys(
@@ -1700,6 +1861,20 @@ def _preview_to_json(value: HumanPreview) -> dict[str, JsonValue]:
             "request_id": value.request_id,
             "total_bytes": value.total_bytes,
         }
+    if type(value) is InstallationRecoveryPreview:
+        return {
+            "confirmed_plan_digest": value.confirmed_plan_digest,
+            "item_count": value.item_count,
+            "kind": value.kind,
+            "native_prompt_available": value.native_prompt_available,
+            "operation": value.operation,
+            "recovery_generation": value.recovery_generation,
+            "request_id": value.request_id,
+            "secret_kind": value.secret_kind,
+            "set_mode": value.set_mode,
+            "target_envelope": value.target_envelope,
+            "total_bytes": value.total_bytes,
+        }
     if type(value) in {ProviderCredentialSetPreview, ProviderCredentialRotatePreview}:
         provider = cast(ProviderCredentialSetPreview | ProviderCredentialRotatePreview, value)
         return {"kind": provider.kind, "target": human_target_json(provider.target)}
@@ -1779,6 +1954,44 @@ def _preview_from_json(value: JsonValue) -> HumanPreview:
             content_commitment=cast(str, source["content_commitment"]),
             item_count=cast(int, source["item_count"]),
             total_bytes=cast(int, source["total_bytes"]),
+        )
+    if kind == "installation_recovery":
+        _keys(
+            source,
+            {
+                "confirmed_plan_digest",
+                "item_count",
+                "kind",
+                "native_prompt_available",
+                "operation",
+                "recovery_generation",
+                "request_id",
+                "secret_kind",
+                "set_mode",
+                "target_envelope",
+                "total_bytes",
+            },
+        )
+        return InstallationRecoveryPreview(
+            operation=cast(
+                Literal["provision", "rotate", "revoke", "restore"],
+                source["operation"],
+            ),
+            request_id=cast(str, source["request_id"]),
+            confirmed_plan_digest=cast(str, source["confirmed_plan_digest"]),
+            recovery_generation=cast(int, source["recovery_generation"]),
+            set_mode=cast(Literal["compact", "self_contained"], source["set_mode"]),
+            secret_kind=cast(
+                Literal["generated_code", "argon2id_passphrase"],
+                source["secret_kind"],
+            ),
+            target_envelope=cast(
+                Literal["preserve", "passphrase", "platform_auto_unlock"],
+                source["target_envelope"],
+            ),
+            item_count=cast(int, source["item_count"]),
+            total_bytes=cast(int, source["total_bytes"]),
+            native_prompt_available=cast(bool, source["native_prompt_available"]),
         )
     if kind in {"provider_credential_set", "provider_credential_rotate"}:
         _keys(source, {"kind", "target"})
@@ -1932,6 +2145,14 @@ def _result_to_json(value: HumanResult) -> dict[str, JsonValue]:
             "result_commitment": value.result_commitment,
             "status": value.status,
         }
+    if type(value) is InstallationRecoveryResult:
+        return {
+            "kind": value.kind,
+            "operation": value.operation,
+            "recovery_generation": value.recovery_generation,
+            "result_commitment": value.result_commitment,
+            "status": value.status,
+        }
     if type(value) is ProviderCredentialResult:
         return {
             "action": value.action,
@@ -1970,6 +2191,20 @@ def _result_from_json(value: JsonValue) -> HumanResult:
         return PortableRecoveryResult(
             cast(Literal["create", "restore"], source["operation"]),
             cast(Literal["completed", "failed"], source["status"]),
+            cast(str, source["result_commitment"]),
+        )
+    if kind == "installation_recovery":
+        _keys(
+            source,
+            {"kind", "operation", "recovery_generation", "result_commitment", "status"},
+        )
+        return InstallationRecoveryResult(
+            cast(
+                Literal["provision", "rotate", "revoke", "restore"],
+                source["operation"],
+            ),
+            cast(Literal["completed", "failed"], source["status"]),
+            cast(int, source["recovery_generation"]),
             cast(str, source["result_commitment"]),
         )
     if kind == "provider_credential":

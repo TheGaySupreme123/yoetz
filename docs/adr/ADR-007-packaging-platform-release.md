@@ -21,14 +21,19 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
 4. **Console script:** distribution and executable both `yoetz`
    (`yoetz.cli.app:main`). `python -m yoetz` delegates to the same entry.
 5. **Wheel strategy:** yoetz itself is a pure-Python wheel; platform specificity comes from
-   the pinned APSW dependency wheels. Advertised platform matrix v0.1: macOS 11.0+ arm64
-   (`macosx_11_0_arm64`) and glibc 2.28+ x86-64 (`manylinux_2_28_x86_64`). No musl, Windows, or
-   macOS x86-64 claims. Primary install:
+   the pinned APSW dependency wheels. Advertised platform matrix remains macOS 11.0+ arm64
+   (`macosx_11_0_arm64`) and glibc 2.28+ x86-64 (`manylinux_2_28_x86_64`) until exact release
+   evidence expands it. ADR-024 adds Windows 11+ x86-64 (`win_amd64`) as a candidate that may be
+   advertised only after the complete Windows service transport, peer identity, storage, keyring,
+   secret-memory, native-prompt, recovery, clean-install, and cross-platform drill gates pass. A
+   portable console unit test is not that proof. No musl, Windows arm64, or macOS x86-64 claims.
+   Primary install:
    `uv tool install --managed-python --python 3.14.6 "yoetz==0.1.0"`.
 6. **Keys, semantic readiness, and compatibility extras:** the certified standard install includes
    direct pinned
    `cryptography` (AES-GCM, RFC 3394 AES Key Wrap, HKDF/HMAC) and `keyring` plus the approved
-   macOS/Linux secure-backend dependencies because object/vault crypto, the Cryptography Argon2id
+   secure-backend dependencies for each advertised cell because object/vault crypto, the
+   Cryptography Argon2id
    passphrase KDF, and OS-keyring-first service startup are v0.1 core behavior.
    Founder-authorized amendment (2026-07-29): `argon2-cffi`, `httpx`, and `openai` are also standard
    direct dependencies because first run offers both passphrase storage and semantic review and must

@@ -40,6 +40,7 @@ from yoetz.ports.control import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
+from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import (
     CheckAwaitingHumanModel,
     CheckRequest,
@@ -124,6 +125,10 @@ service_app = typer.Typer(help="Manage the foreground local service.", no_args_i
 auto_unlock_app = typer.Typer(
     help="Inspect or repair restart-safe passphrase unlock.", no_args_is_help=True
 )
+recovery_app = typer.Typer(
+    help="Provision or use installation-vault recovery without exposing secrets to agents.",
+    no_args_is_help=True,
+)
 provider_app = typer.Typer(help="Manage provider setup.", no_args_is_help=True)
 credential_app = typer.Typer(
     help="Provision credentials through a trusted ceremony.", no_args_is_help=True
@@ -168,6 +173,7 @@ integrate_app.add_typer(integrate_plugin_app, name="plugin")
 app.add_typer(setup_app, name="setup")
 app.add_typer(service_app, name="service")
 service_app.add_typer(auto_unlock_app, name="auto-unlock")
+service_app.add_typer(recovery_app, name="recovery")
 app.add_typer(provider_app, name="provider")
 provider_app.add_typer(credential_app, name="credential")
 app.add_typer(privacy_app, name="privacy")
@@ -475,6 +481,7 @@ def _control_failure(error: ControlError) -> int:
             "vault_locked: run `yoetz service unlock` on a local terminal "
             "(uses the platform credential store when setup provisioned auto-unlock); "
             "if auto-unlock is stale, run `yoetz service auto-unlock repair`; "
+            "if ordinary unlock authority may be lost, run `yoetz service recovery status`; "
             "if uninitialized with no TTY, prepare `vault_initialize`, then "
             "`yoetz consent review` on a trusted console"
         ),
@@ -1384,6 +1391,16 @@ async def _trusted_call(operation: Callable[[], Awaitable[object]], json_output:
         raise
 
 
+def _recovery_store_read[T](operation: Callable[[], T]) -> tuple[T | None, int | None]:
+    """Run one local recovery-store read behind a bounded public CLI outcome."""
+
+    try:
+        return operation(), None
+    except OSError, ProtocolValueError, RuntimeError, ValueError:
+        _stderr("storage_corrupt: the installation recovery set could not be read")
+        return None, exit_code_for(PublicErrorCode.STORAGE_CORRUPT)
+
+
 def _trusted_exception_failure(error: Exception) -> int | None:
     """Map trusted-ceremony failures to bounded public CLI outcomes."""
 
@@ -1577,6 +1594,305 @@ async def _service_auto_unlock_repair(json_output: bool) -> int:
     }
     _human_or_json(report, json_output=json_output)
     return 0
+
+
+def _installation_recovery_store() -> Any:
+    from yoetz.config.load import load_config
+    from yoetz.config.paths import bundle_root
+    from yoetz.service.installation_recovery import InstallationRecoverySetStore
+
+    config = load_config({}, os.environ, None)
+    return InstallationRecoverySetStore(bundle_root(_data_dir=config.storage.data_dir))
+
+
+def _installation_recovery_target(
+    *,
+    operation: Literal["provision", "rotate", "revoke", "restore"],
+    recovery_generation: int,
+    set_mode: Literal["compact", "self_contained"],
+    secret_kind: Literal["generated_code", "argon2id_passphrase"],
+) -> object:
+    from yoetz.service.confidential_protocol import InstallationRecoveryTarget
+
+    target_envelope: Literal["preserve", "passphrase"] = (
+        "preserve" if operation == "provision" else "passphrase"
+    )
+    provisional = InstallationRecoveryTarget(
+        operation,
+        new_id(IdKind.REQUEST),
+        "sha256:" + "0" * 64,
+        recovery_generation,
+        set_mode,
+        secret_kind,
+        target_envelope,
+    )
+    return dataclasses.replace(provisional, confirmed_plan_digest=provisional.plan_digest())
+
+
+@recovery_app.command("status")
+def service_recovery_status(json_output: _JSON = False) -> None:
+    """Report only bounded structural recovery state and an exact trusted next command."""
+
+    _finish(run_async(lambda: _service_recovery_status(json_output)))
+
+
+async def _service_recovery_status(json_output: bool) -> int:
+    from yoetz.config.load import load_config
+    from yoetz.config.paths import bundle_root
+
+    config = load_config({}, os.environ, None)
+    root = bundle_root(_data_dir=config.storage.data_dir)
+    service_state: str | None = None
+    service_reason: str | None = None
+    vault_mode: str | None = None
+    try:
+        client = await build_service_client()
+        try:
+            live = await client.service_status()
+            service_state = live.state.value
+            service_reason = live.state_reason
+            vault_mode = live.vault_mode
+        finally:
+            await client.close()
+    except ControlError:
+        pass
+    status = _installation_recovery_store().status(
+        installation_exists=(root / "installation-state.json").exists(),
+        vault_ready=service_state == "ready",
+        ordinary_unlock_available=(
+            vault_mode in {"os_keyring", "passphrase"}
+            and service_reason
+            not in {
+                "auto_unlock_rejected",
+                "auto_unlock_stale",
+                "keyring_unavailable",
+                "unlock_failed",
+            }
+        ),
+        auto_unlock_repairable=service_reason in {"auto_unlock_rejected", "auto_unlock_stale"},
+    )
+    report: JsonValue = {
+        "schema": "yoetz.installation-recovery-status/1",
+        "state": status.state.value,
+        "reason": status.reason,
+        "active_generation": status.active_generation,
+        "available_modes": list(status.available_modes),
+        "continuation_id": status.continuation_id,
+        "next_command": status.next_command,
+        "service_state": service_state,
+    }
+    _human_or_json(report, json_output=json_output)
+    return 0
+
+
+@recovery_app.command("import")
+def service_recovery_import(json_output: _JSON = False) -> None:
+    """Import an archive chosen on the trusted console; the daemon must be stopped."""
+
+    module = importlib.import_module("yoetz.cli.unlock")
+    operation = cast(Callable[[], Awaitable[object]], module.import_installation_recovery_set)
+    _finish(run_async(lambda: _trusted_call(operation, json_output)))
+
+
+@recovery_app.command("export")
+def service_recovery_export(json_output: _JSON = False) -> None:
+    """Export the active set to a create-only path selected on the trusted console."""
+
+    _finish(run_async(lambda: _service_recovery_export(json_output)))
+
+
+async def _service_recovery_export(json_output: bool) -> int:
+    store, failure = _recovery_store_read(_installation_recovery_store)
+    if failure is not None:
+        return failure
+    assert store is not None
+    status, failure = _recovery_store_read(
+        lambda: store.status(
+            installation_exists=True,
+            vault_ready=True,
+            ordinary_unlock_available=True,
+            auto_unlock_repairable=False,
+        )
+    )
+    if failure is not None:
+        return failure
+    assert status is not None
+    generation = status.active_generation
+    if generation is None or status.reason == "recovery_material_revoked":
+        _stderr("recovery_not_provisioned")
+        return 20
+    module = importlib.import_module("yoetz.cli.unlock")
+    operation = cast(Callable[[int], Awaitable[object]], module.export_installation_recovery_set)
+    return await _trusted_call(lambda: operation(generation), json_output)
+
+
+@recovery_app.command("provision")
+def service_recovery_provision(
+    mode: Annotated[str, typer.Option("--mode", help="compact or self-contained.")] = "compact",
+    secret_kind: Annotated[
+        str,
+        typer.Option("--secret-kind", help="generated-code or argon2id-passphrase."),
+    ] = "generated-code",
+    json_output: _JSON = False,
+) -> None:
+    """Provision recovery while ready; the secret is generated or entered on the trusted console."""
+
+    _finish(run_async(lambda: _service_recovery_provision(mode, secret_kind, json_output)))
+
+
+async def _service_recovery_provision(mode: str, secret_kind: str, json_output: bool) -> int:
+    return await _service_recovery_create("provision", mode, secret_kind, json_output)
+
+
+async def _service_recovery_create(
+    operation_name: Literal["provision", "rotate"],
+    mode: str,
+    secret_kind: str,
+    json_output: bool,
+) -> int:
+    normalized_mode = mode.replace("-", "_")
+    normalized_secret = secret_kind.replace("-", "_")
+    if normalized_mode not in {"compact", "self_contained"} or normalized_secret not in {
+        "generated_code",
+        "argon2id_passphrase",
+    }:
+        return _usage_failure()
+    store, failure = _recovery_store_read(_installation_recovery_store)
+    if failure is not None:
+        return failure
+    assert store is not None
+    current, failure = _recovery_store_read(
+        lambda: store.status(
+            installation_exists=True,
+            vault_ready=True,
+            ordinary_unlock_available=True,
+            auto_unlock_repairable=False,
+        )
+    )
+    if failure is not None:
+        return failure
+    assert current is not None
+    generation = 1 if current.active_generation is None else current.active_generation + 1
+    if operation_name == "provision" and current.active_generation is not None:
+        _stderr("recovery_already_provisioned: run 'yoetz service recovery rotate'")
+        return 20
+    if operation_name == "rotate" and current.active_generation is None:
+        _stderr("recovery_not_provisioned: run 'yoetz service recovery provision'")
+        return 20
+    target = _installation_recovery_target(
+        operation=operation_name,
+        recovery_generation=generation,
+        set_mode=cast(Literal["compact", "self_contained"], normalized_mode),
+        secret_kind=cast(Literal["generated_code", "argon2id_passphrase"], normalized_secret),
+    )
+    module = importlib.import_module("yoetz.cli.unlock")
+    operation = cast(Callable[[object], Awaitable[object]], module.provision_installation_recovery)
+    return await _trusted_call(lambda: operation(target), json_output)
+
+
+@recovery_app.command("rotate")
+def service_recovery_rotate(
+    mode: Annotated[str, typer.Option("--mode", help="compact or self-contained.")] = "compact",
+    secret_kind: Annotated[
+        str,
+        typer.Option("--secret-kind", help="generated-code or argon2id-passphrase."),
+    ] = "generated-code",
+    json_output: _JSON = False,
+) -> None:
+    """Replace the active recovery generation after local reauthentication."""
+
+    _finish(run_async(lambda: _service_recovery_create("rotate", mode, secret_kind, json_output)))
+
+
+@recovery_app.command("revoke")
+def service_recovery_revoke(json_output: _JSON = False) -> None:
+    """Withdraw the active managed recovery generation after local reauthentication."""
+
+    _finish(run_async(lambda: _service_recovery_revoke(json_output)))
+
+
+async def _service_recovery_revoke(json_output: bool) -> int:
+    store, failure = _recovery_store_read(_installation_recovery_store)
+    if failure is not None:
+        return failure
+    assert store is not None
+    status, failure = _recovery_store_read(
+        lambda: store.status(
+            installation_exists=True,
+            vault_ready=True,
+            ordinary_unlock_available=True,
+            auto_unlock_repairable=False,
+        )
+    )
+    if failure is not None:
+        return failure
+    assert status is not None
+    generation = status.active_generation
+    if generation is None:
+        _stderr("recovery_not_provisioned")
+        return 20
+    if status.reason == "recovery_material_revoked":
+        _stderr("recovery_already_revoked: run 'yoetz service recovery rotate'")
+        return 20
+    metadata, failure = _recovery_store_read(lambda: store.metadata(generation))
+    if failure is not None:
+        return failure
+    assert metadata is not None
+    target = _installation_recovery_target(
+        operation="revoke",
+        recovery_generation=generation,
+        set_mode=cast(Literal["compact", "self_contained"], metadata.mode.value),
+        secret_kind=cast(
+            Literal["generated_code", "argon2id_passphrase"], metadata.secret_kind.value
+        ),
+    )
+    module = importlib.import_module("yoetz.cli.unlock")
+    operation = cast(Callable[[object], Awaitable[object]], module.revoke_installation_recovery)
+    return await _trusted_call(lambda: operation(target), json_output)
+
+
+@recovery_app.command("restore")
+def service_recovery_restore(json_output: _JSON = False) -> None:
+    """Recover the active managed generation and choose a new passphrase locally."""
+
+    _finish(run_async(lambda: _service_recovery_restore(json_output)))
+
+
+async def _service_recovery_restore(json_output: bool) -> int:
+    store, failure = _recovery_store_read(_installation_recovery_store)
+    if failure is not None:
+        return failure
+    assert store is not None
+    status, failure = _recovery_store_read(
+        lambda: store.status(
+            installation_exists=True,
+            vault_ready=False,
+            ordinary_unlock_available=False,
+            auto_unlock_repairable=False,
+        )
+    )
+    if failure is not None:
+        return failure
+    assert status is not None
+    generation = status.active_generation
+    if generation is None:
+        _stderr("recovery_material_required: no provisioned managed recovery generation")
+        return exit_code_for(PublicErrorCode.VAULT_LOCKED)
+    metadata, failure = _recovery_store_read(lambda: store.metadata(generation))
+    if failure is not None:
+        return failure
+    assert metadata is not None
+    target = _installation_recovery_target(
+        operation="restore",
+        recovery_generation=generation,
+        set_mode=cast(Literal["compact", "self_contained"], metadata.mode.value),
+        secret_kind=cast(
+            Literal["generated_code", "argon2id_passphrase"], metadata.secret_kind.value
+        ),
+    )
+    module = importlib.import_module("yoetz.cli.unlock")
+    operation = cast(Callable[[object], Awaitable[object]], module.restore_installation_recovery)
+    return await _trusted_call(lambda: operation(target), json_output)
 
 
 @service_app.command("initialize-passphrase")

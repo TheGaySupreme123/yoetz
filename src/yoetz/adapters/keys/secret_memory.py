@@ -5,11 +5,15 @@ from __future__ import annotations
 import ctypes
 import mmap
 import os
-import resource
 import sys
 from collections.abc import Callable, Mapping
 from threading import Lock
 from typing import Final
+
+if sys.platform == "win32":
+    resource = None
+else:
+    import resource
 
 from yoetz.ports.secret_memory import (
     SecretConsumer,
@@ -28,6 +32,10 @@ _PURPOSE_CONSUMERS: Final[Mapping[SecretPurpose, frozenset[SecretConsumer]]] = {
     SecretPurpose.VAULT_UNLOCK: frozenset({SecretConsumer.VAULT_ROOT}),
     SecretPurpose.VAULT_ROOT_KEY: frozenset({SecretConsumer.VAULT_ROOT}),
     SecretPurpose.PORTABLE_RECOVERY: frozenset({SecretConsumer.RECOVERY_WRAPPER}),
+    SecretPurpose.INSTALLATION_RECOVERY: frozenset({SecretConsumer.INSTALLATION_RECOVERY}),
+    SecretPurpose.VAULT_REWRAP: frozenset(
+        {SecretConsumer.VAULT_ROOT, SecretConsumer.VAULT_REWRAPPER}
+    ),
     SecretPurpose.OBJECT_PAYLOAD: frozenset({SecretConsumer.OBJECT_CRYPTO}),
     SecretPurpose.PROVIDER_REAUTHENTICATION: frozenset(
         {SecretConsumer.VAULT_ROOT, SecretConsumer.PROVIDER_AUTHORIZER}
@@ -302,6 +310,8 @@ def _exclude_from_core_dump(mapping: mmap.mmap, size: int) -> None:
 
 
 def _suppress_core_dumps() -> bool:
+    if resource is None:
+        return False
     try:
         _, hard = resource.getrlimit(resource.RLIMIT_CORE)
         resource.setrlimit(resource.RLIMIT_CORE, (0, hard))
