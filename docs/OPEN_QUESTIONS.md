@@ -291,10 +291,12 @@ affected claim, and for the first non-alpha release regardless.
   carry-forward entitlement without reapproval. New repositories remain Private.
 - **F-015:** Harness integration is a port and Codex is its first adapter (ADR-010). Agent guidance
   is owned once, harness-neutrally, under `guidance/` with exactly one packaged copy;
-  `IntegrationsPort` is parameterized by a closed `HarnessId` (v0.1: exactly `codex`) plus a
-  reviewed `HarnessProfile`. Adding a first-party harness is one `HarnessId` value plus one adapter
-  and requires no port, registry, guidance, or schema change, so a fork can do it without touching
-  the core. `HarnessProfile.hooks_by_capability_profile` binds every exact profile ID to either
+  `IntegrationsPort` is parameterized by a closed `HarnessId` (exactly `codex|cursor`) plus a
+  reviewed `HarnessProfile`. At the port layer, adding a first-party harness is one `HarnessId`
+  value plus one adapter and requires no new port or guidance fork. The frozen v0.1 service methods
+  `integration_preview|integration_execute` remain Codex-only; Cursor lifecycle uses the sibling
+  `PluginArtifactPort` surface instead. `HarnessProfile.hooks_by_capability_profile` binds every
+  exact profile ID to either
   `None` or, after E-013 passes, a descriptor that may declare a trigger arm and/or a nonempty
   closed `observation_events` set. For first-party Codex, observation is a required v0.1
   capability once capability-proven: it earns `hook_observed` only from real observation evidence,

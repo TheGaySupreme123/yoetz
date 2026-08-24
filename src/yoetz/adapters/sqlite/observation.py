@@ -1013,6 +1013,7 @@ class SqliteObservationStore:
         coverage = {
             ObservationSource.CODEX_HOOK: False,
             ObservationSource.CODEX_SESSION_STREAM: False,
+            ObservationSource.CURSOR_HOOK: False,
         }
         gaps: set[str] = set()
         unsupported: set[str] = set()

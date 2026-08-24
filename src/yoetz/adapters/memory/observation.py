@@ -359,6 +359,7 @@ class MemoryObservationStore:
         coverage = {
             ObservationSource.CODEX_HOOK: False,
             ObservationSource.CODEX_SESSION_STREAM: False,
+            ObservationSource.CURSOR_HOOK: False,
         }
         for workspace, envelope in self._state.envelopes:
             if workspace == workspace_commitment:

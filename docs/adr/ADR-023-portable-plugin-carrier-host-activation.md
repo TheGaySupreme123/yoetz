@@ -88,8 +88,9 @@ becomes host-derived.
    activation, MCP ownership, trigger events, observation events, observability limits, and
    evidence fixture IDs. Speaking the Agent Plugins format earns no first-party identity, no
    populated capability cell, and no coverage — ADR-005's rule becomes more load-bearing as format
-   compatibility gets cheaper, not less. `HarnessId` membership is unchanged (exactly `codex` in
-   v0.1). Fixed terminology: a Cursor surface consuming the portable artifact is a **portable**
+   compatibility gets cheaper, not less. At this ADR's acceptance `HarnessId` remained exactly
+   `codex`; the acknowledged issue #153 amendment adds `cursor` with one local adapter and no port
+   change. Fixed terminology: a Cursor surface consuming the portable artifact is a **portable**
    cell and one consuming a generated native projection is a **native** cell — separate cells even
    on the same product; Claude Code is a **native dual-target** host whose project-scope and
    user-scope install targets are separate cells, with only project scope in initial design scope.

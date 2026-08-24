@@ -116,6 +116,25 @@ def test_envelope_accepts_allowlisted_structural_facts() -> None:
     assert observation_envelope_from_json(wire).event_kind == "PostToolUse"
 
 
+@pytest.mark.parametrize("field", ["cursor_version", "model_id", "model_effort"])
+def test_envelope_rejects_free_form_cursor_identity_tokens(field: str) -> None:
+    with pytest.raises(ProtocolValueError):
+        _envelope(structural_payload=JsonObject({field: "private value with spaces"}))
+
+
+def test_envelope_accepts_bounded_cursor_identity_tokens() -> None:
+    envelope = _envelope(
+        structural_payload=JsonObject(
+            {
+                "cursor_version": "3.17.8",
+                "model_id": "cursor-grok-4.6-medium",
+                "model_effort": "medium",
+            }
+        )
+    )
+    assert envelope.structural_payload["cursor_version"] == "3.17.8"
+
+
 def test_cursor_json_round_trip() -> None:
     cursor = _cursor(generation=3, byte_pos=99, event_pos=7)
     assert observation_cursor_from_json(observation_cursor_to_json(cursor)) == cursor

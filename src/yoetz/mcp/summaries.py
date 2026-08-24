@@ -23,6 +23,7 @@ __all__ = [
 
 _MAX_SUMMARY_BYTES: Final = 512
 _SAFE_TOKEN: Final = re.compile(r"^[A-Za-z0-9_+.-]{1,128}$", re.ASCII)
+_GAP_CODE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
 # Closed shape for the frozen field and family tokens the repair clause may carry (issue #266).
 _FIELD_NAME: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
 _SAFE_COUNT: Final = re.compile(r"^(?:0|[1-9][0-9]{0,18})$", re.ASCII)
@@ -130,11 +131,18 @@ def _finding_identity_clause(source: Mapping[str, JsonValue], *, byte_budget: in
     if not finding_ids:
         return ""
 
-    prefix = "finding IDs: "
+    return _bounded_list_clause("finding IDs: ", finding_ids, byte_budget=byte_budget)
+
+
+def _bounded_list_clause(prefix: str, values: Sequence[str], *, byte_budget: int) -> str:
+    """Render a bounded structural-token list with an exact omitted-item count."""
+
+    if not values or byte_budget <= 0:
+        return ""
     selected: list[str] = []
-    for finding_id in finding_ids:
-        selected.append(finding_id)
-        remaining = len(finding_ids) - len(selected)
+    for value in values:
+        selected.append(value)
+        remaining = len(values) - len(selected)
         suffix = f"; +{remaining} more" if remaining else ""
         clause = f"{prefix}{', '.join(selected)}{suffix}; "
         if len(clause.encode("ascii")) > byte_budget:
@@ -142,9 +150,52 @@ def _finding_identity_clause(source: Mapping[str, JsonValue], *, byte_budget: in
             break
     if not selected:
         return ""
-    remaining = len(finding_ids) - len(selected)
+    remaining = len(values) - len(selected)
     suffix = f"; +{remaining} more" if remaining else ""
     return f"{prefix}{', '.join(selected)}{suffix}; "
+
+
+def _obligation_ids_from_status(source: Mapping[str, JsonValue], view: str) -> tuple[str, ...]:
+    page = source.get("page")
+    if not isinstance(page, Mapping):
+        return ()
+    typed_page = cast(Mapping[str, JsonValue], page)
+    raw_items: object = typed_page.get("items")
+    if view == "compact":
+        item = _first_page_item(source)
+        raw_items = item.get("open_obligations") if item is not None else None
+    if not isinstance(raw_items, list | tuple):
+        return ()
+    return tuple(
+        cast(str, item.get("obligation_id"))
+        for item in raw_items
+        if isinstance(item, Mapping) and is_valid_id(IdKind.OBLIGATION, item.get("obligation_id"))
+    )
+
+
+def _open_obligation_ids_from_receipt(source: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    raw_items = source.get("obligations")
+    if not isinstance(raw_items, list | tuple):
+        return ()
+    return tuple(
+        cast(str, item.get("obligation_id"))
+        for item in raw_items
+        if isinstance(item, Mapping)
+        and item.get("status") == "open"
+        and is_valid_id(IdKind.OBLIGATION, item.get("obligation_id"))
+    )
+
+
+def _safe_gap_codes(source: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    coverage = source.get("coverage")
+    if not isinstance(coverage, Mapping):
+        return ()
+    raw_gaps = cast(Mapping[str, JsonValue], coverage).get("known_gaps")
+    if not isinstance(raw_gaps, list | tuple):
+        return ()
+    return tuple(
+        gap for gap in raw_gaps if type(gap) is str and _GAP_CODE.fullmatch(gap) is not None
+    )
 
 
 def _bounded(summary: str) -> str:
@@ -296,11 +347,21 @@ def summary_for_status(envelope: object) -> str:
     view = _safe_token(source.get("view"))
     freshness, obligations, unanswered, receipt_blocking = _compact_status_fields(source, view)
     gaps = _item_count(source.get("gaps"))
-    return _bounded(
+    prefix = (
         f"Status view: {view}; {_frontier_clause(source)}; freshness: {freshness}; "
-        f"open obligations: {obligations}; unanswered findings: {unanswered}; "
+        f"open obligations: {obligations}; "
+    )
+    suffix = (
+        f"unanswered findings: {unanswered}; "
         f"receipt-blocking findings: {receipt_blocking}; reported gaps: {gaps}."
     )
+    obligation_ids = _obligation_ids_from_status(source, view)
+    clause = _bounded_list_clause(
+        "obligation IDs: ",
+        obligation_ids,
+        byte_budget=_MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii")),
+    )
+    return _bounded(prefix + clause + suffix)
 
 
 def summary_for_receipt(envelope: object) -> str:
@@ -312,10 +373,22 @@ def summary_for_receipt(envelope: object) -> str:
         typed_coverage = cast(Mapping[str, JsonValue], coverage)
         limitations = _item_count(typed_coverage.get("known_gaps"))
     suppressed = _safe_count(source.get("suppressed_finding_count"))
-    return _bounded(
+    prefix = (
         f"Receipt conclusion: {conclusion}; {_frontier_clause(source)}; "
-        f"coverage limitations: {limitations}; suppressed findings: {suppressed}."
+        f"coverage limitations: {limitations}; "
     )
+    suffix = f"suppressed findings: {suppressed}."
+    remaining = _MAX_SUMMARY_BYTES - len((prefix + suffix).encode("ascii"))
+    gap_codes = _safe_gap_codes(source)
+    obligation_budget = remaining // 2 if gap_codes else remaining
+    obligation_clause = _bounded_list_clause(
+        "open obligation IDs: ",
+        _open_obligation_ids_from_receipt(source),
+        byte_budget=obligation_budget,
+    )
+    remaining -= len(obligation_clause.encode("ascii"))
+    gap_clause = _bounded_list_clause("gap codes: ", gap_codes, byte_budget=remaining)
+    return _bounded(prefix + obligation_clause + gap_clause + suffix)
 
 
 def _summary_for_other_success(source: Mapping[str, JsonValue]) -> str:

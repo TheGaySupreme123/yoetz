@@ -1077,6 +1077,67 @@ def _mcp_schema(name: str, version: str) -> Mapping[str, JsonValue]:
 
 
 @cache
+def _mcp_output_presentation_schema(name: str, version: str) -> Mapping[str, JsonValue]:
+    """MCP-compatible object-root projection of one catalogued result schema.
+
+    MCP protocol versions through 2025-11-25 require ``outputSchema.type`` to be the
+    literal ``"object"``. Yoetz result schemas express the success/error object union
+    with a root ``oneOf``. Adding the shared object constraint preserves that union's
+    accepted instances while keeping the immutable catalogue bytes unchanged.
+    """
+
+    bundled = _legacy_compatible_output_arrays(_mutable_json(_mcp_schema(name, version)))
+    if not isinstance(bundled, dict):
+        raise RuntimeError("mcp_output_schema_invalid")
+    bundled_dict = bundled
+    root_type = bundled_dict.get("type")
+    if root_type not in (None, "object"):
+        raise RuntimeError("mcp_output_schema_root_not_object")
+    bundled_dict["type"] = "object"
+    return MappingProxyType(bundled_dict)
+
+
+def _legacy_compatible_output_arrays(candidate: JsonValue) -> JsonValue:
+    """Project tuple arrays for hosts whose validator ignores 2020-12 ``prefixItems``.
+
+    Cursor currently validates declared MCP output schemas with legacy ``items`` semantics: it
+    ignores ``prefixItems`` and therefore treats the catalogue's companion ``items: false`` as a
+    rejection of every returned tuple member. Result bytes have already passed the immutable
+    catalogue schema, so this host-facing declaration may safely weaken tuple position constraints
+    to one ``items.anyOf`` while preserving item count bounds and every member schema.
+    """
+
+    if isinstance(candidate, Mapping):
+        mapping = {
+            key: _legacy_compatible_output_arrays(item)
+            for key, item in cast(Mapping[str, JsonValue], candidate).items()
+        }
+        prefix_items = mapping.pop("prefixItems", None)
+        if not isinstance(prefix_items, list):
+            return mapping
+        if not prefix_items:
+            return mapping
+        raw_items = mapping.get("items")
+        max_items = mapping.get("maxItems")
+        fixed_prefix = type(max_items) is int and max_items == len(prefix_items)
+        alternatives = list(cast(list[JsonValue], prefix_items))
+        if not fixed_prefix and isinstance(raw_items, Mapping):
+            alternatives.append(cast(JsonValue, raw_items))
+        if fixed_prefix or raw_items is False or isinstance(raw_items, Mapping):
+            mapping["items"] = (
+                alternatives[0] if len(alternatives) == 1 else {"anyOf": alternatives}
+            )
+        else:
+            # Later members are unconstrained, so the compatible declaration must be too.
+            mapping["items"] = {}
+        return mapping
+    if isinstance(candidate, tuple | list):
+        sequence = cast(tuple[JsonValue, ...] | list[JsonValue], candidate)
+        return [_legacy_compatible_output_arrays(item) for item in sequence]
+    return candidate
+
+
+@cache
 def _mcp_presentation_schema(name: str, version: str) -> Mapping[str, JsonValue]:
     """Agent-facing tools/list projection of a catalog request/result schema."""
 
@@ -1263,6 +1324,14 @@ class ToolDescriptor:
 
     @property
     def output_schema(self) -> Mapping[str, JsonValue]:
+        return _mcp_output_presentation_schema(
+            f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION
+        )
+
+    @property
+    def catalog_output_schema(self) -> Mapping[str, JsonValue]:
+        """Full catalog-bundled output schema before MCP root-object projection."""
+
         return _mcp_schema(f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION)
 
     @property

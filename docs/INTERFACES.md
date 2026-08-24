@@ -141,9 +141,25 @@ include any returned, kind-valid `task_id`, `session_id`, and `writer_id`; in pa
 `start` text alone carries the identifiers and frontier needed to author the next request. A
 `check` projection includes as many returned, kind-valid `finding_id` values as fit and reports a
 `+N more` remainder when any valid finding IDs do not fit, so the text fallback can author the
-required `respond` request. Caller-controlled prose, malformed identifiers, and malformed digests
-are never admitted to this text channel. A deterministic finding's structured `detail` may name
-only its closed policy facts and typed server IDs; it never copies ledger-authored prose.
+required `respond` request. Status `compact`/`obligations` projections likewise carry as many
+kind-valid obligation IDs as fit, and receipt projections carry open obligation IDs plus
+schema-gated ASCII-safe coverage gap codes, so a text-only host can recover closure work and name
+an honest limitation without copying obligation or gap prose. Caller-controlled prose, malformed
+identifiers, and malformed digests are never admitted to this text channel. A deterministic
+finding's structured `detail` may name only its closed policy facts and typed server IDs; it never
+copies ledger-authored prose.
+
+The host-facing MCP `outputSchema` also projects fixed `prefixItems` tuples into a bounded
+`items.anyOf` declaration for validators that still apply legacy `items` semantics. This weakens
+only the declaration used by the host: every returned result is first validated against the exact
+immutable catalogue schema, which retains tuple order, length, and member identity.
+
+The native Cursor profile starts the same bridge with `--host cursor`. Cursor `3.17.x` does not
+reliably deliver `structuredContent` to its model, so this explicit host profile repeats the exact
+canonical JSON wire body as the single text `content` item while retaining `structuredContent`
+unchanged. It adds no field and grants no additional read authority: payload-bearing fields appear
+only when the ordinary service route already returned them. Generic and portable Agent Plugin
+routes keep the bounded weaker projection above, preserving the shared portable bundle bytes.
 
 Protocol reason
 `expected_frontier_required` marks a state-sensitive `publish_work` batch that omitted
@@ -2442,7 +2458,7 @@ payload itself carries an explicitly admitted `claim_kind`.
 
 Shared closed types:
 
-- `ObservationSource` — exactly `codex_hook | codex_session_stream`. Hooks are the primary
+- `ObservationSource` — exactly `codex_hook | codex_session_stream | cursor_hook`. Hooks are the primary
   low-latency source; session-stream reconciliation is selective and secondary.
 - `ObservationEnvelope` — Codex session identity (commitment, never raw path), event kind (exact
   closed identifier from the capability cell, or an opaque unsupported token), stable source
@@ -2728,7 +2744,7 @@ Shared types are `HarnessId`, `HarnessProfile`, `HarnessHookProfile`, `Integrati
 `IntegrationFile`, `SkillPreviewCommand`, `SkillApplyCommand`, `SkillStatusCommand`,
 `IntegrationPreview`, `IntegrationStatus`, `IntegrationResult`, and `IntegrationError`.
 
-`HarnessId` is a closed enum whose v0.1 membership is exactly `codex`. `HarnessProfile` is the
+`HarnessId` is a closed enum whose membership is exactly `codex|cursor`. `HarnessProfile` is the
 frozen per-harness descriptor: `harness_id`, `skill_root` (the exact relative install directory),
 `frontmatter_profile` (the harness's required skill-header shape), `capability_profile_ids`,
 `supported_versions`, and `hooks_by_capability_profile: Mapping[str, HarnessHookProfile | None]`.
@@ -2739,6 +2755,11 @@ or range-derived entries are invalid. A v0.1 exact cell may select a trigger arm
 arm, both, or `None` after E-013 passes. For first-party Codex, observation is a required v0.1
 capability once the exact cell is capability-proven; unproven or unprofiled cells keep
 `observation_events=()` and cannot emit `hook_observed` (ADR-005, ADR-010).
+
+The frozen v0.1 service operations `integration_preview` and `integration_execute` remain
+Codex-only despite `HarnessId` containing `cursor`: their required `harness` discriminator is
+exactly `codex`. Cursor lifecycle operations use the separate `PluginArtifactPort` surface and its
+path-explicit CLI adapter; they are not routed through `IntegrationsPort` or those service methods.
 
 `HarnessHookProfile` is the closed descriptor
 `(trigger_event, trigger_payload_profile_id, evidence_case_ids,
@@ -2931,8 +2952,8 @@ versions (Agent Plugins spec pin `1.0.0` plus the plan renderer version); and th
 managed-file inventory with relative paths, sizes, and SHA-256 digests. Agent Plugin JSON is never
 the input for another host's manifest; projections share only the plan (ADR-023).
 
-- `PluginFormatProfile` is a closed enum; initial membership is exactly
-  `agent_plugins_1|codex_plugin_native`. A new member requires a reviewed projection design and
+- `PluginFormatProfile` is a closed enum; membership is exactly
+  `agent_plugins_1|codex_plugin_native|cursor_plugin_native`. A new member requires a reviewed projection design and
   ADR-023-conformant root registration before any render targets it.
 - `McpOwnership` is exactly `external_registration|plugin_managed`. `McpOwnershipState` is the
   closed observed-owner state `absent|external|plugin|dual|foreign|ambiguous`; `dual`, `foreign`,
@@ -2940,8 +2961,8 @@ the input for another host's manifest; projections share only the plan (ADR-023)
   ADR-023). Child-issue shorthand does not add members: `owned` resolves to `external|plugin` from
   the observed source, and `foreign_present` projects to `foreign`.
 - `HostSurface` is the closed host-product enum
-  `codex_cli|chatgpt_desktop|cursor_ide|cursor_cli|cursor_cloud|claude_code`, used only to key
-  evidence cells. It is distinct from `HarnessId` (v0.1 membership still exactly `codex`); format
+  `codex_cli|chatgpt_desktop|cursor_ide|cursor_cli|cursor_sdk_local|cursor_cloud|claude_code`, used only to key
+  evidence cells. It is distinct from `HarnessId` (`codex|cursor`); format
   compatibility earns no `HostSurface` support claim, first-party identity, or coverage (ADR-005,
   ADR-023). A Cursor surface consuming the portable artifact is a *portable* cell; one consuming a
   generated native projection is a *native* cell; Claude Code is a *native dual-target* host whose
@@ -3017,6 +3038,88 @@ The `yoetz.portable-plugin-install/1` marker contains only schema, format profil
 renderer versions, exact MCP ownership and optional route profile, artifact digest, complete sorted managed-file rows
 (`relative_path`, `size`, `sha256`), and its canonical marker digest. It contains no project path,
 user value, timestamp, credential, secret reference, transcript, host-activation claim, or receipt.
+
+### Cursor local harness contract (issue #153)
+
+`HarnessId` membership is `codex|cursor`. Adding Cursor changes no method on `IntegrationsPort`,
+`PluginArtifactPort`, `HarnessMcpPort`, `ObservationPort`, or the six workflow operations.
+`PluginFormatProfile` membership adds `cursor_plugin_native`; `HostSurface` adds
+`cursor_sdk_local` beside the existing `cursor_ide|cursor_cli|cursor_cloud`. Cursor Cloud remains an
+unpopulated evidence cell.
+
+`CursorPluginTarget` is an explicit absolute Cursor configuration root plus scope exactly `user`.
+It is redacted in representations and never inferred from regular Cursor, `$HOME`, caches, or a
+single installed candidate. The managed destination is `plugins/local/yoetz` below that selected
+root. `CursorPluginArtifact` contains one `PortablePluginPlan`, one sorted member mapping, and one
+artifact digest. Its format is exactly `agent_plugins_1` or `cursor_plugin_native`; one artifact
+never contains both root `plugin.json` and `.cursor-plugin/plugin.json`.
+
+`CursorPluginPreview` carries request ID, effective action, before state, exact format, target
+identity digest, current-state digest, artifact digest, preview digest, intended MCP ownership,
+observed `McpOwnershipState`, optional exact route, and sorted warnings. `CursorPluginStatus`
+carries artifact/operation state, detected format, artifact/installed digests, marker validity,
+rollback availability, one `CursorMcpObservation`, and every independent `PluginProofFacet`.
+`CursorPluginResult` carries request/action/operation, before/after states, format,
+preview/artifact/installed digests, and sorted changed members. The marker schema is
+`yoetz.cursor-plugin-install/1`; it contains format, renderer/Yoetz versions, hook mapping version,
+MCP owner/route, artifact digest, exact managed inventory, and marker digest, with no path, content,
+credential, transcript, timestamp, activation, coverage, or receipt claim.
+
+Cursor lifecycle is exact-preview bound and whole-directory atomic. Install, replace, and remove
+consume the ADR-016 `review_only` single-shot trusted review of `plugin_artifact_apply` prepared
+for that exact preview digest, exactly as the portable artifact path does. `--accept` is operator
+acceptance of a digest, never authority: the CLI passes the pending-bound `ArtifactAuthority` to
+the adapter, which refuses with `authority_required` when none is presented and, because the
+packaged runtime advertises no verified action-bound `UserPresencePort`, fails closed with
+`human_authority_unavailable` before any mutation.
+
+Install and remove replays are idempotent at the selected state: a committed operation whose
+result was lost reconciles instead of refusing, touching no bytes and consuming no second review.
+Replace is deliberately not reconciled — the accepted digest bound the pre-commit tree, which the
+replacement destroyed, so a replace replay after commit reports `preview_stale` and the caller
+reconciles through `status`. Install reconciles when the destination is marker-valid at the
+accepted format and artifact digest and the accepted preview digest equals a digest an `absent`
+preview would produce for that artifact and target at an admitted MCP ownership state; remove
+reconciles at `absent`, whose pre-commit tree digest no longer exists to re-prove. Neither
+recognition is request-bound: the preview digest is a pure function of its inputs, so a caller may
+recompute one for a request that committed nothing and obtain the same answer. Both branches are
+read-only equivalents of `status` — no mutation, no authority consumed, no state claimed that is
+not on disk — so that reachability is admitted rather than load-bearing. Every other state still
+refuses. Install or replace refuses modified, unmanaged, symlinked, dual,
+foreign, ambiguous, stale-preview, or recovery-required state without overwrite or automatic
+repair. Remove accepts only marker-valid managed bytes; an independently present MCP source does
+not block removal because the operation preserves that source. Removal also preserves ledgers,
+vault/keyring/provider/privacy state, unrelated settings, and Cursor caches.
+
+`CursorMcpSource` is exactly
+`inline_send|inline_create|plugin|project|user`. `CursorMcpObservation` carries observed
+`McpOwnershipState`, winning source or null, exact route or null, ordered present sources, and an
+observation boolean. SDK precedence is exactly that enum order. A higher-precedence or duplicate
+same-name source cannot create a plugin-managed pass: plugin plus external is `dual`, multiple
+same-class sources are `ambiguous`, and any non-exact same-name entry is `foreign`. Route
+recognition is key-set exact — exactly `command`, `type`, `args` — so an entry carrying any
+additional key such as `env` or `cwd` is foreign however compatible its values look.
+
+`CursorSdkBinding` is exactly `typescript|python`. `CursorArtifactIdentity` carries binding,
+package version/digest, bridge protocol exactly `sdk.v1`, and optional bridge digest.
+`CursorSdkProfile` carries that identity, explicit unique `plugins|project|user` setting sources,
+the frozen precedence tuple, MCP ownership, sandbox boolean, and approval mode
+`default|allowlist|full`. Plugin-managed requires `plugins`; external registration requires
+`project` or `user`. Inline sources are never ambiently accepted as ownership evidence.
+
+The 2.1.0 control-request wire admits `cursor_version`, `model_id`, and `model_effort` in
+`observation_envelope.structural_payload` beside `codex_version`, on the same bounded 1..128 token
+alphabet the domain enforces for them. `structural_payload` is closed, so those three keys are
+what makes a Cursor observation deliverable rather than a lenient default.
+
+`ObservationSource` adds `cursor_hook`. The pinned native profile advertises only
+`sessionStart|sessionEnd|afterMCPExecution|afterFileEdit|stop`; `afterAgentThought` is excluded.
+Cursor ingress maps only bounded session/generation/tool IDs, exact Cursor/model/effort tokens,
+duration, capability profile, and an installation-keyed HMAC changed-path commitment. It discards
+prompt, reasoning, response text, paths, file contents/edits, MCP/tool inputs/results, transcripts,
+commands/output, email, and workspace roots before storage and never reconciles a Cursor transcript
+stream. Hooks are fail-open and advisory; configuration/trigger-only state earns no observation
+coverage.
 
 ## 11. Application (`application/`)
 
@@ -3219,7 +3322,10 @@ facade and are never MCP tools.
   every catalogued schema-version branch for each advertised ordinary event family. Every shipped
   worked example validates against that presentation schema as well as catalog admission;
   `catalog_input_schema` / full catalog request schemas remain admission authority via
-  `*.model_validate`. `status` and `read_guidance` carry `readOnlyHint=true`; `receipt` carries
+  `*.model_validate`. `ToolDescriptor.output_schema` adds the MCP-required literal root
+  `type: object` to the equivalent success/error object union; `catalog_output_schema` preserves
+  the exact frozen catalogue bundle, and result admission remains owned by `*.model_validate`.
+  `status` and `read_guidance` carry `readOnlyHint=true`; `receipt` carries
   `readOnlyHint=false` because it stages an object and appends a `receipt_recorded` event. Every
   tool carries an explicit `idempotentHint=true`. Policy `check` carries `openWorldHint=true`;
   strict `check` carries `openWorldHint=false` and names the external-semantic ceiling. The hint is

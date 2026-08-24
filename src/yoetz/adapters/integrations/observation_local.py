@@ -2139,7 +2139,10 @@ class LocalObservationStore:
             state.last_receipt = envelope.receipt_time
             mono_ms = int(self._now_mono() * 1000)
             state.monotonic_epoch = self._boot_epoch()
-            if envelope.source is ObservationSource.CODEX_HOOK:
+            if envelope.source in {
+                ObservationSource.CODEX_HOOK,
+                ObservationSource.CURSOR_HOOK,
+            }:
                 state.last_hook_receipt_mono_ms = mono_ms
             else:
                 state.last_stream_reconcile_mono_ms = mono_ms
@@ -2606,6 +2609,7 @@ class LocalObservationStore:
         coverage = {
             ObservationSource.CODEX_HOOK: False,
             ObservationSource.CODEX_SESSION_STREAM: False,
+            ObservationSource.CURSOR_HOOK: False,
         }
         assert state.envelopes is not None
         assert state.gaps is not None

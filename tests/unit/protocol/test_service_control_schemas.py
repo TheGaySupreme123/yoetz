@@ -275,6 +275,120 @@ def test_v2_repository_privacy_bodies_are_closed_and_v1_is_retained() -> None:
     assert "expected_policy_digest" in v1_defs["privacy_propose_policy_body"]["properties"]
 
 
+def test_v21_appends_cursor_observation_wire_without_rewriting_v2() -> None:
+    request_v2 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.0.0.schema.json").read_bytes()),
+    )
+    request_v21 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.1.0.schema.json").read_bytes()),
+    )
+    result_v2 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-result-2.0.0.schema.json").read_bytes()),
+    )
+    result_v21 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-result-2.1.0.schema.json").read_bytes()),
+    )
+
+    request_v2_defs = cast(dict[str, dict[str, Any]], request_v2["$defs"])
+    request_v21_defs = cast(dict[str, dict[str, Any]], request_v21["$defs"])
+    source_v2 = request_v2_defs["observation_envelope"]["properties"]["source"]
+    source_v21 = request_v21_defs["observation_envelope"]["properties"]["source"]
+    assert source_v2["enum"] == ["codex_hook", "codex_session_stream"]
+    assert source_v21["enum"] == ["codex_hook", "codex_session_stream", "cursor_hook"]
+
+    changed_v2 = request_v2_defs["observation_envelope"]["properties"]["structural_payload"][
+        "properties"
+    ]["changed_paths_digest"]
+    changed_v21 = request_v21_defs["observation_envelope"]["properties"]["structural_payload"][
+        "properties"
+    ]["changed_paths_digest"]
+    assert changed_v2["pattern"] == "^sha256:[0-9a-f]{64}$"
+    assert [branch["pattern"] for branch in changed_v21["oneOf"]] == [
+        "^sha256:[0-9a-f]{64}$",
+        "^hmac-sha256:[0-9a-f]{64}$",
+    ]
+
+    result_v2_defs = cast(dict[str, dict[str, Any]], result_v2["$defs"])
+    result_v21_defs = cast(dict[str, dict[str, Any]], result_v21["$defs"])
+    coverage_v2 = result_v2_defs["observation_status"]["properties"]["source_coverage"]
+    coverage_v21 = result_v21_defs["observation_status"]["properties"]["source_coverage"]
+    assert set(coverage_v2["properties"]) == {"codex_hook", "codex_session_stream"}
+    assert set(coverage_v21["properties"]) == {
+        "codex_hook",
+        "codex_session_stream",
+        "cursor_hook",
+    }
+
+    for filename in ("control-request-2.1.0.schema.json", "control-result-2.1.0.schema.json"):
+        assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
+
+
+def _cursor_ingest_frame(structural: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "body": {
+            "codex_session_id": "cursor:session-1",
+            "envelope": {
+                "content_object_refs": [],
+                "cursor": {
+                    "byte_position": 0,
+                    "event_position": 1,
+                    "last_source_commitment": "hmac-sha256:" + "0" * 64,
+                    "mapping_version": "cursor-local-3.17",
+                    "source_generation": 1,
+                },
+                "event_kind": "session_start",
+                "gap_codes": [],
+                "receipt_time": "2026-08-24T00:00:00.000Z",
+                "session_commitment": "hmac-sha256:" + "1" * 64,
+                "source": "cursor_hook",
+                "source_identity": "hook:cursor",
+                "structural_payload": structural,
+            },
+        },
+        "kind": "call",
+        "method": "observation_ingest",
+        "protocol_version": "1.0",
+        "rpc_id": _RPC_ID,
+        "service_generation": "1",
+        "service_instance_id": _INSTANCE_ID,
+    }
+
+
+def test_v21_wire_admits_the_exact_cursor_structural_tokens_hook_ingress_sends() -> None:
+    """The 2.1.0 request wire must carry every structural key Cursor ingress can emit.
+
+    ``structural_payload`` is ``additionalProperties: false``, so an omitted key here is not a
+    lenient default: it makes the observation undeliverable at the boundary.
+    """
+
+    frame = _cursor_ingest_frame(
+        {
+            "capability_profile_id": "cursor-local-3.17",
+            "cursor_version": "3.17.8",
+            "hook_name": "sessionStart",
+            "model_effort": "medium",
+            "model_id": "claude-4.5-sonnet",
+        }
+    )
+
+    validate_schema_instance("control-request", "2.1.0", cast(JsonValue, frame))
+
+    # The domain admits ``:`` in these three structural tokens, so the wire must too or the same
+    # class of undeliverable observation returns for a namespaced model identity.
+    colon_bearing = _cursor_ingest_frame(
+        {"model_id": "anthropic:claude-4.5-sonnet", "model_effort": "high"}
+    )
+    validate_schema_instance("control-request", "2.1.0", cast(JsonValue, colon_bearing))
+
+    unknown = _cursor_ingest_frame({"cursor_version": "3.17.8", "cursor_workspace_path": "/tmp"})
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.1.0", cast(JsonValue, unknown))
+
+
 def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:
     request_schema = _schema("control-request")
     result_schema = _schema("control-result")

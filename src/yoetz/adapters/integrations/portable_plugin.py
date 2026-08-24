@@ -50,6 +50,7 @@ from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
     "AGENT_PLUGIN_ROOT",
+    "ArtifactUserPresencePort",
     "ManifestValidation",
     "McpConfigValidation",
     "PluginManagedMcpObservation",

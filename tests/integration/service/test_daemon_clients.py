@@ -1390,7 +1390,34 @@ async def test_connected_control_session_carries_trusted_presentation_to_daemon_
 
 
 @pytest.mark.anyio
-async def test_connected_client_observation_ingest_uses_current_domain_wire() -> None:
+@pytest.mark.parametrize(
+    ("source", "session_id", "mapping_version", "structural_payload"),
+    [
+        (
+            ObservationSource.CODEX_HOOK,
+            "019ff5c8-real-client",
+            "codex-obs-hook/1.0.0",
+            JsonObject({"tool_name": "shell"}),
+        ),
+        (
+            ObservationSource.CURSOR_HOOK,
+            "cursor:019ff5c8-real-client",
+            "cursor-hooks-3.17-v1",
+            JsonObject(
+                {
+                    "changed_paths_digest": "hmac-sha256:" + "3" * 64,
+                    "tool_name": "cursor_file_edit",
+                }
+            ),
+        ),
+    ],
+)
+async def test_connected_client_observation_ingest_uses_current_domain_wire(
+    source: ObservationSource,
+    session_id: str,
+    mapping_version: str,
+    structural_payload: JsonObject,
+) -> None:
     daemon, application, _vault, _listener = _daemon()
     await daemon.start()
     client_stream, server_stream = _connected_control_pair()
@@ -1407,22 +1434,20 @@ async def test_connected_client_observation_ingest_uses_current_domain_wire() ->
             session_commitment="hmac-sha256:" + "1" * 64,
             event_kind="PostToolUse",
             source_identity="hook:real-client-boundary",
-            source=ObservationSource.CODEX_HOOK,
+            source=source,
             cursor=ObservationCursor(
                 1,
                 0,
                 1,
                 "hmac-sha256:" + "2" * 64,
-                "codex-obs-hook/1.0.0",
+                mapping_version,
             ),
             receipt_time=Timestamp("2026-08-12T12:00:00.000Z"),
-            structural_payload=JsonObject({"tool_name": "shell"}),
+            structural_payload=structural_payload,
             content_object_refs=(),
             gap_codes=(),
         )
-        body = observation_ingest_request_to_json(
-            ObservationIngestRequest("019ff5c8-real-client", envelope)
-        )
+        body = observation_ingest_request_to_json(ObservationIngestRequest(session_id, envelope))
 
         raw = await service_client.observation_ingest(body, deadline_ms=3_000)
 

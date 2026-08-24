@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Final, Protocol, cast
+from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol, cast
 
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
@@ -73,6 +73,7 @@ __all__ = [
     "ADVICE_SAFE_EVENTS",
     "STANDING_ADVICE_CADENCE_EVENTS",
     "SUPPORTED_HOOK_EVENTS",
+    "handle_cursor_observe",
     "handle_observe",
     "handle_spool",
     "map_hook_payload_to_envelope",
@@ -190,11 +191,16 @@ _STRUCTURAL_ALLOW: Final = frozenset(
         "mapping_hint",
         "capability_profile_id",
         "codex_version",
+        "cursor_version",
+        "model_id",
+        "model_effort",
     }
 )
 _TOKEN_CHARS: Final = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/+-"
 )
+_MAX_TOKEN_CHARS: Final = 128
+_CURSOR_SESSION_PREFIX: Final = "cursor:"
 
 
 type AsyncRunner = Callable[[Callable[[], Awaitable[object]]], object]
@@ -252,7 +258,7 @@ def _now() -> Timestamp:
 
 
 def _token_or_none(value: object) -> str | None:
-    if type(value) is not str or not value or len(value) > 128:
+    if type(value) is not str or not value or len(value) > _MAX_TOKEN_CHARS:
         return None
     if any(ch not in _TOKEN_CHARS for ch in value):
         return None
@@ -346,6 +352,9 @@ def _extract_structural(payload: Mapping[str, JsonValue], event_name: str) -> Js
         "mapping_hint",
         "capability_profile_id",
         "codex_version",
+        "cursor_version",
+        "model_id",
+        "model_effort",
     ):
         token = _token_or_none(payload.get(key))
         if token is not None and key in _STRUCTURAL_ALLOW:
@@ -456,6 +465,7 @@ def map_hook_payload_to_envelope(
     key_material: bytes,
     source_generation: int = 1,
     gap_codes: tuple[str, ...] = (),
+    source: ObservationSource = ObservationSource.CODEX_HOOK,
 ) -> ObservationEnvelope:
     """Map a bounded hook payload to a structural ObservationEnvelope."""
 
@@ -469,7 +479,7 @@ def map_hook_payload_to_envelope(
             session_commitment=session_commitment,
             event_kind=_token_or_none(event_name) or "unsupported_event",
             source_identity=identity,
-            source=ObservationSource.CODEX_HOOK,
+            source=source,
             cursor=ObservationCursor(
                 source_generation=source_generation,
                 byte_position=0,
@@ -491,7 +501,7 @@ def map_hook_payload_to_envelope(
         session_commitment=session_commitment,
         event_kind=event_name,
         source_identity=identity,
-        source=ObservationSource.CODEX_HOOK,
+        source=source,
         cursor=ObservationCursor(
             source_generation=source_generation,
             byte_position=0,
@@ -995,6 +1005,7 @@ async def _try_auto_start(
     codex_session_id: str,
     *,
     _state: Path | None,
+    harness_id: Literal["codex", "cursor"] = "codex",
 ) -> LifecycleMapping | None:
     """Best-effort service start for consented SessionStart auto-attach.
 
@@ -1016,17 +1027,22 @@ async def _try_auto_start(
                 "protocol_version": "0.1",
                 "schema_version": "1.0.0",
                 "request_id": new_id(IdKind.REQUEST),
-                "actor": {"actor_id": "yoetz:codex-observe", "actor_type": "harness"},
+                "actor": {
+                    "actor_id": f"yoetz:{harness_id}-observe",
+                    "actor_type": "harness",
+                },
                 "client": {
                     "kind": "yoetz_cli",
                     "version": __version__,
                     "integration": "local_cli",
                 },
                 "mode": "create_or_attach",
-                "task_title": "Codex observation auto-attach",
+                "task_title": f"{harness_id.title()} observation auto-attach",
                 "requested_view": "compact",
                 "session_id": None,
-                "external_ref": f"codex-session:{codex_session_id}",
+                "external_ref": (
+                    f"{harness_id}-session:{codex_session_id.removeprefix(f'{harness_id}:')}"
+                ),
                 "workspace_ref": None,
             }
         )
@@ -1112,6 +1128,7 @@ def handle_observe(
     _entry_monotonic: float | None = None,
     _monotonic: Callable[[], float] = time.monotonic,
     _workspace_commitment: str | None = None,
+    source: ObservationSource = ObservationSource.CODEX_HOOK,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -1158,6 +1175,9 @@ def handle_observe(
             return emitted
 
         payload = read_hook_payload(stdin_bytes)
+        harness_id: Literal["codex", "cursor"] = (
+            "cursor" if source is ObservationSource.CURSOR_HOOK else "codex"
+        )
         raw_event = event_name or payload.get("hook_event_name")
         if type(raw_event) is not str or not raw_event:
             _stdout_json({}, stdout)
@@ -1284,13 +1304,20 @@ def handle_observe(
                 key_material=store.key_material(),
                 source_generation=source_generation,
                 gap_codes=tuple(sorted(set(gap_codes), key=str.encode)),
+                source=source,
             )
-            content_chunks, content_truncated = _visible_content_chunks(
-                resolved_event,
-                payload,
-                envelope=envelope,
-                workspace_locator=workspace_locator,
-            )
+            # Cursor publishes structural observation only. Its hook payloads
+            # contain prompts, responses, transcript paths, file contents, and
+            # MCP arguments/results that must never enter Yoetz content capture.
+            if source is ObservationSource.CURSOR_HOOK:
+                content_chunks, content_truncated = (), False
+            else:
+                content_chunks, content_truncated = _visible_content_chunks(
+                    resolved_event,
+                    payload,
+                    envelope=envelope,
+                    workspace_locator=workspace_locator,
+                )
             if content_truncated:
                 envelope = replace(
                     envelope,
@@ -1326,32 +1353,34 @@ def handle_observe(
                         generation=source_generation,
                     )
 
-            # Selective secondary stream reconciliation (path never persisted/disclosed).
-            with contextlib.suppress(Exception):
-                from yoetz.adapters.integrations.codex_session_stream import (
-                    CodexSessionStreamLocator,
-                    reconcile_session_stream,
-                    resolve_codex_home,
-                    should_trigger_stream_reconcile,
-                )
-
-                hook_path = payload.get("session_file") or payload.get("transcript_path")
-                hook_path_token = hook_path if type(hook_path) is str else None
-                session_source = payload.get("source")
-                if should_trigger_stream_reconcile(
-                    resolved_event,
-                    last_reconcile_mono=store.last_stream_reconcile_mono(workspace_commitment),
-                    session_source=session_source if type(session_source) is str else None,
-                ):
-                    locator = CodexSessionStreamLocator(resolve_codex_home())
-                    reconcile_session_stream(
-                        store,
-                        workspace_commitment=workspace_commitment,
-                        session_commitment=session_commitment,
-                        codex_session_id=codex_session_id,
-                        locator=locator,
-                        hook_provided_path=hook_path_token,
+            # Cursor transcripts are outside its structural observation contract.
+            # Only the Codex hook source may reconcile the secondary JSONL stream.
+            if source is ObservationSource.CODEX_HOOK:
+                with contextlib.suppress(Exception):
+                    from yoetz.adapters.integrations.codex_session_stream import (
+                        CodexSessionStreamLocator,
+                        reconcile_session_stream,
+                        resolve_codex_home,
+                        should_trigger_stream_reconcile,
                     )
+
+                    hook_path = payload.get("session_file") or payload.get("transcript_path")
+                    hook_path_token = hook_path if type(hook_path) is str else None
+                    session_source = payload.get("source")
+                    if should_trigger_stream_reconcile(
+                        resolved_event,
+                        last_reconcile_mono=store.last_stream_reconcile_mono(workspace_commitment),
+                        session_source=session_source if type(session_source) is str else None,
+                    ):
+                        locator = CodexSessionStreamLocator(resolve_codex_home())
+                        reconcile_session_stream(
+                            store,
+                            workspace_commitment=workspace_commitment,
+                            session_commitment=session_commitment,
+                            codex_session_id=codex_session_id,
+                            locator=locator,
+                            hook_provided_path=hook_path_token,
+                        )
 
             # Deterministic advice from retained envelopes (works with zero MCP publications).
             advice_started = _monotonic()
@@ -1370,8 +1399,8 @@ def handle_observe(
         mapping: LifecycleMapping | None = load_mapping(codex_session_id, _state=_state)
         drain_started = _monotonic()
         if resolved_event == "SessionStart":
-            source = payload.get("source")
-            if source != "clear":
+            session_source_value = payload.get("source")
+            if session_source_value != "clear":
                 # SessionStart-only status/attach helpers: they drag protocol.models
                 # and service.client, which no other event needs (#242).
                 from yoetz.cli.hooks import (
@@ -1391,7 +1420,13 @@ def handle_observe(
                             if not skip_service:
 
                                 async def _attach() -> LifecycleMapping | None:
-                                    return await _try_auto_start(codex_session_id, _state=_state)
+                                    if harness_id == "codex":
+                                        return await _try_auto_start(
+                                            codex_session_id, _state=_state
+                                        )
+                                    return await _try_auto_start(
+                                        codex_session_id, _state=_state, harness_id="cursor"
+                                    )
 
                                 mapping = cast(LifecycleMapping | None, _resolve_runner()(_attach))
                             if mapping is None:
@@ -1413,7 +1448,11 @@ def handle_observe(
                                     "hooks_cli.ServiceConnector",
                                     connect if connect is not None else _connect_service(),
                                 )
-                                return await _read_status(active_mapping, connect=connector)
+                                return await _read_status(
+                                    active_mapping,
+                                    connect=connector,
+                                    actor_id=f"yoetz:{harness_id}-hooks",
+                                )
 
                             kind, updated = cast(
                                 tuple[str, LifecycleMapping | None], _resolve_runner()(_status)
@@ -1476,8 +1515,17 @@ def handle_observe(
                         async def _attach_retry() -> LifecycleMapping | None:
                             import asyncio
 
+                            attach = (
+                                _try_auto_start(codex_session_id, _state=_state)
+                                if harness_id == "codex"
+                                else _try_auto_start(
+                                    codex_session_id,
+                                    _state=_state,
+                                    harness_id="cursor",
+                                )
+                            )
                             return await asyncio.wait_for(
-                                _try_auto_start(codex_session_id, _state=_state),
+                                attach,
                                 timeout=_AUTO_ATTACH_RETRY_BUDGET_SECONDS,
                             )
 
@@ -1644,6 +1692,98 @@ def handle_observe(
                 record_hook_diagnostic(
                     "stdout_write_failed", event_name or "observe", _state=_state
                 )
+        return 0
+
+
+def handle_cursor_observe(
+    *,
+    event_name: str | None,
+    stdin_bytes: bytes | None = None,
+    stdout: BinaryIO | None = None,
+    workspace: str | None = None,
+    _state: Path | None = None,
+    connect: ServiceConnector | None = None,
+    run_async: AsyncRunner | None = None,
+    skip_service: bool = False,
+) -> int:
+    """Normalize one Cursor hook into structural-only Yoetz observation.
+
+    Cursor supplies prompts, transcript paths, file paths/edits, MCP inputs/results,
+    response text, email, and other user-controlled content in the same envelope.
+    This boundary copies none of those values. Only bounded identifiers, exact host/
+    model tokens, durations, booleans, and a one-way changed-path digest survive.
+    """
+
+    event_map = {
+        "afterFileEdit": "PostToolUse",
+        "afterMCPExecution": "PostToolUse",
+        "sessionEnd": "SessionEnd",
+        "sessionStart": "SessionStart",
+        "stop": "Stop",
+    }
+    try:
+        payload = read_hook_payload(stdin_bytes)
+        raw_event = event_name or payload.get("hook_event_name")
+        if type(raw_event) is not str or raw_event not in event_map:
+            return 0 if hook_io.stdout_json({}, stdout) else 0
+        session = _token_or_none(payload.get("session_id")) or _token_or_none(
+            payload.get("conversation_id")
+        )
+        if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CURSOR_SESSION_PREFIX):
+            return 0 if hook_io.stdout_json({}, stdout) else 0
+        structural: dict[str, JsonValue] = {
+            "action": (
+                "cursor_file_edit"
+                if raw_event == "afterFileEdit"
+                else "cursor_mcp"
+                if raw_event == "afterMCPExecution"
+                else "cursor_lifecycle"
+            ),
+            "capability_profile_id": "cursor-local-3.17",
+            "hook_event_name": event_map[raw_event],
+            "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
+        }
+        for source_key, target_key in (
+            ("cursor_version", "cursor_version"),
+            ("generation_id", "correlation_id"),
+            ("model_id", "model_id"),
+            ("tool_name", "tool_name"),
+        ):
+            value = _token_or_none(payload.get(source_key))
+            if value is not None:
+                structural[target_key] = value
+        duration = _int_or_none(payload.get("duration"))
+        if duration is not None:
+            structural["duration_ms"] = duration
+        path_value = payload.get("file_path")
+        if raw_event == "afterFileEdit" and type(path_value) is str and path_value:
+            store = LocalObservationStore(_state=_state)
+            structural["changed_paths_digest"] = hook_source_commitment(
+                store.key_material(), f"cursor-path:{path_value}"
+            )
+            structural.setdefault("tool_name", "cursor_file_edit")
+        parameters = payload.get("model_params")
+        if type(parameters) is list:
+            for item in parameters:
+                if isinstance(item, Mapping) and item.get("id") == "effort":
+                    effort = _token_or_none(item.get("value"))
+                    if effort is not None:
+                        structural["model_effort"] = effort
+                    break
+        return handle_observe(
+            event_name=event_map[raw_event],
+            stdin_bytes=canonical_encode(structural),
+            stdout=stdout,
+            workspace=workspace,
+            _state=_state,
+            connect=connect,
+            run_async=run_async,
+            skip_service=skip_service,
+            source=ObservationSource.CURSOR_HOOK,
+        )
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            hook_io.stdout_json({}, stdout)
         return 0
 
 

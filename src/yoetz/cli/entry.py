@@ -105,12 +105,51 @@ def _spool_fast_path(arguments: list[str]) -> int | None:
     return 0
 
 
+def _cursor_observe_fast_path(arguments: list[str]) -> int | None:
+    """Run ``hooks cursor-observe`` without loading typer."""
+
+    event: str | None = None
+    workspace: str | None = None
+    index = 0
+    while index < len(arguments):
+        if index + 1 >= len(arguments):
+            return None
+        token, value = arguments[index], arguments[index + 1]
+        if value.startswith("-"):
+            return None
+        if token == "--event" and event is None:
+            event = value
+        elif token == "--workspace" and workspace is None:
+            workspace = value
+        else:
+            return None
+        index += 2
+    if event is None:
+        return None
+    try:
+        from yoetz.cli.observe_hooks import handle_cursor_observe
+
+        return handle_cursor_observe(event_name=event, workspace=workspace)
+    except BaseException:
+        try:
+            from yoetz.cli.hook_io import stdout_json
+
+            stdout_json({})
+        except BaseException:
+            pass
+    return 0
+
+
 def main() -> None:
     """Installed console entry point."""
 
     argv = sys.argv[1:]
     if len(argv) >= 2 and argv[0] == "hooks" and argv[1] == "observe":
         code = _observe_fast_path(argv[2:])
+        if code is not None:
+            raise SystemExit(code)
+    if len(argv) >= 2 and argv[0] == "hooks" and argv[1] == "cursor-observe":
+        code = _cursor_observe_fast_path(argv[2:])
         if code is not None:
             raise SystemExit(code)
     if len(argv) >= 2 and argv[0] == "hooks" and argv[1] == "spool":
