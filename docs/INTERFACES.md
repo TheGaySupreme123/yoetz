@@ -2509,8 +2509,11 @@ Independent verification support (local control, not MCP):
   time/output, sanitized env, no network unless separately authorized); binds results to the
   observed subject-state digest so later edits stale prior success. On POSIX the child is started
   in a dedicated session/process group; a timeout signals that group (TERM, then KILL) and reaps
-  it before the TIMEOUT result is returned. Windows keeps CREATE_NEW_PROCESS_GROUP isolation and
-  TerminateProcess on the launched process.
+  its members before the TIMEOUT result is returned, adopting orphaned descendants as a child
+  subreaper on Linux so a non-reaping PID 1 cannot strand them. A check that closes its own
+  stdout/stderr and keeps running still times out rather than escaping the runner. On Windows the
+  launched tree is terminated (`taskkill /T /F`, falling back to TerminateProcess) under
+  CREATE_NEW_PROCESS_GROUP console isolation.
 - `.yoetz/checks.toml` — fixed schema `yoetz.approved-check-policy/1`; raw bytes produce the trust
   digest. Repository content proposes no authority. One trusted-local exact-digest confirmation is
   retained as an encrypted workspace-scoped record. Any byte change is untrusted.

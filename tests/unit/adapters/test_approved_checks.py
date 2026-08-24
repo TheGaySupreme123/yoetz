@@ -4,19 +4,25 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from yoetz.adapters import approved_checks
 from yoetz.adapters.approved_checks import (
     ApprovedCheckApproval,
     ApprovedCheckCommand,
     ApprovedCheckOutcome,
     ApprovedCheckRunner,
     ApprovedCheckStatus,
+    _reap_approved_check_process,  # pyright: ignore[reportPrivateUsage]
+    _reap_posix_group_members,  # pyright: ignore[reportPrivateUsage]
     approval_commitment,
 )
 from yoetz.adapters.workspace_inspect import open_inspect_workspace
@@ -201,3 +207,182 @@ def test_timeout_reaps_forked_descendant_before_result(tmp_path: Path) -> None:
     stop_path.write_text("stop", encoding="ascii")
     time.sleep(0.3)
     assert not leak_path.exists()
+
+
+class _FakeLeader:
+    """Stand-in for the leader ``Popen`` in reaper unit tests."""
+
+    def __init__(self, *, pid: int = 424_242, running: bool = False) -> None:
+        self.pid = pid
+        self.running = running
+        self.kill_calls = 0
+
+    def poll(self) -> int | None:
+        return None if self.running else 0
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        self.running = False
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.running:
+            raise subprocess.TimeoutExpired(cmd="fake-check", timeout=timeout or 0.0)
+        return 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group reaping")
+def test_closed_output_pipes_still_time_out_and_reap_group(tmp_path: Path) -> None:
+    handle = open_inspect_workspace(tmp_path)
+    leader_path = tmp_path / "leader.pid"
+    child_path = tmp_path / "child.pid"
+    script_path = tmp_path / "closed-fds-check.sh"
+    script_path.write_text(
+        "#!/bin/sh\n"
+        'echo $$ > "$1"\n'
+        # Closing both output pipes hands the runner EOF while the tree keeps running, so the
+        # selector loop finishes early and only the final wait can observe the overrun. That
+        # wait must not escape as ``subprocess.TimeoutExpired``: it would skip both the timeout
+        # result and the group reaping, leaking the whole tree.
+        "exec 1>&- 2>&-\n"
+        "sleep 30 &\n"
+        'echo $! > "$2"\n'
+        "wait\n",
+        encoding="ascii",
+    )
+    os.chmod(script_path, 0o700)
+    approval = _approval(
+        ("/bin/sh", str(script_path), str(leader_path), str(child_path)),
+        timeout_seconds=0.5,
+    )
+    runner = ApprovedCheckRunner(
+        {approval.approval_commitment: approval},
+        sandbox=_ReadyCheckSandbox(),
+    )
+    started = time.monotonic()
+    result = runner.run(
+        ApprovedCheckCommand(
+            workspace=handle,
+            approval=approval,
+            subject_state_digest="sha256:" + "1" * 64,
+        )
+    )
+    elapsed = time.monotonic() - started
+    assert result.status is ApprovedCheckStatus.TIMEOUT
+    assert result.outcome is ApprovedCheckOutcome.TIMEOUT
+    assert result.exit_status is None
+    assert elapsed < 4.0
+    group_id = int(leader_path.read_text(encoding="ascii").strip())
+    descendant_pid = int(child_path.read_text(encoding="ascii").strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(descendant_pid, 0)
+    with pytest.raises(ProcessLookupError):
+        os.killpg(group_id, 0)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group reaping")
+def test_group_reaper_drains_exited_members() -> None:
+    sleep = shutil.which("sleep") or "/bin/sleep"
+    process = subprocess.Popen(
+        [sleep, "30"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    group_id = process.pid
+    try:
+        os.killpg(group_id, signal.SIGKILL)
+        reaped = 0
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and reaped == 0:
+            reaped, _waitable = _reap_posix_group_members(group_id)
+            if reaped == 0:
+                time.sleep(0.01)
+        assert reaped == 1
+        # Drained: no member of the group is waitable by us any more.
+        assert _reap_posix_group_members(group_id) == (0, False)
+    finally:
+        process.wait(timeout=5.0)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group reaping")
+def test_reaper_waits_on_the_group_and_returns_when_it_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader = _FakeLeader()
+    alive = [True]
+    waitpid_calls: list[tuple[int, int]] = []
+
+    def _fake_signal(group_id: int, sig: int) -> bool:
+        assert group_id == 7_777
+        return alive[0]
+
+    def _fake_waitpid(pid: int, options: int) -> tuple[int, int]:
+        waitpid_calls.append((pid, options))
+        if len(waitpid_calls) == 1:
+            return (8_888, 0)
+        alive[0] = False
+        raise ChildProcessError
+
+    monkeypatch.setattr(approved_checks, "_signal_posix_group", _fake_signal)
+    monkeypatch.setattr(approved_checks.os, "waitpid", _fake_waitpid)
+    started = time.monotonic()
+    _reap_approved_check_process(cast("subprocess.Popen[bytes]", leader), process_group_id=7_777)
+    elapsed = time.monotonic() - started
+    assert waitpid_calls[0] == (-7_777, os.WNOHANG)
+    assert elapsed < 1.0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group reaping")
+def test_reaper_stops_early_when_group_members_are_unreapable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader = _FakeLeader()
+    signals: list[int] = []
+
+    def _fake_signal(group_id: int, sig: int) -> bool:
+        assert group_id == 9_999
+        signals.append(sig)
+        # A non-reaping PID 1 keeps the killed members ``<defunct>``: the group never goes away.
+        return True
+
+    def _fake_waitpid(pid: int, options: int) -> tuple[int, int]:
+        raise ChildProcessError
+
+    monkeypatch.setattr(approved_checks, "_signal_posix_group", _fake_signal)
+    monkeypatch.setattr(approved_checks.os, "waitpid", _fake_waitpid)
+    started = time.monotonic()
+    _reap_approved_check_process(cast("subprocess.Popen[bytes]", leader), process_group_id=9_999)
+    elapsed = time.monotonic() - started
+    assert signal.SIGKILL in signals
+    # Bounded no-progress exit, not the full reap deadline burned on every timed-out check.
+    assert elapsed < 2.0
+
+
+def test_windows_reaper_kills_the_process_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    leader = _FakeLeader(pid=4_321, running=True)
+    killed: list[int] = []
+
+    def _fake_taskkill(pid: int) -> bool:
+        killed.append(pid)
+        leader.running = False
+        return True
+
+    monkeypatch.setattr(approved_checks.os, "name", "nt")
+    monkeypatch.setattr(approved_checks, "_taskkill_tree", _fake_taskkill)
+    _reap_approved_check_process(cast("subprocess.Popen[bytes]", leader))
+    # ``TerminateProcess`` on the direct child alone would spare its grandchildren.
+    assert killed == [4_321]
+    assert leader.kill_calls == 0
+
+
+def test_windows_reaper_falls_back_to_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    leader = _FakeLeader(pid=4_321, running=True)
+
+    def _fake_taskkill(pid: int) -> bool:
+        return False
+
+    monkeypatch.setattr(approved_checks.os, "name", "nt")
+    monkeypatch.setattr(approved_checks, "_taskkill_tree", _fake_taskkill)
+    _reap_approved_check_process(cast("subprocess.Popen[bytes]", leader))
+    assert leader.kill_calls == 1
