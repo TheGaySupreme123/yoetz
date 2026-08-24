@@ -9,8 +9,10 @@ import pytest
 from typer.testing import CliRunner
 
 from yoetz.cli import app as cli
+from yoetz.cli.exits import exit_code_for
 from yoetz.cli.unlock import InstallationRecoveryImportResult
 from yoetz.ports.control import ControlError
+from yoetz.protocol.errors import PublicErrorCode
 from yoetz.service.confidential_protocol import InstallationRecoveryTarget
 from yoetz.service.installation_recovery import (
     InstallationRecoveryState,
@@ -52,6 +54,76 @@ def test_recovery_cli_surface_and_target_envelopes_are_explicit() -> None:
     assert rotate.target_envelope == "passphrase"
     assert provision.confirmed_plan_digest == provision.plan_digest()
     assert rotate.confirmed_plan_digest == rotate.plan_digest()
+
+
+@pytest.mark.anyio
+async def test_recovery_commands_bound_store_status_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _Store:
+        def status(self, **_kwargs: object) -> InstallationRecoveryStatus:
+            raise OSError("private-path-detail")
+
+    monkeypatch.setattr(cli, "_installation_recovery_store", lambda: _Store())
+    operations = (
+        lambda: cli._service_recovery_export(False),  # pyright: ignore[reportPrivateUsage]
+        lambda: cli._service_recovery_create(  # pyright: ignore[reportPrivateUsage]
+            "provision", "compact", "generated-code", False
+        ),
+        lambda: cli._service_recovery_create(  # pyright: ignore[reportPrivateUsage]
+            "rotate", "compact", "generated-code", False
+        ),
+        lambda: cli._service_recovery_revoke(False),  # pyright: ignore[reportPrivateUsage]
+        lambda: cli._service_recovery_restore(False),  # pyright: ignore[reportPrivateUsage]
+    )
+
+    for operation in operations:
+        assert await operation() == exit_code_for(PublicErrorCode.STORAGE_CORRUPT)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "storage_corrupt: the installation recovery set could not be read"
+    ] * len(operations)
+    assert "private-path-detail" not in captured.err
+
+
+@pytest.mark.anyio
+async def test_recovery_commands_bound_store_metadata_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _Store:
+        def status(self, **_kwargs: object) -> InstallationRecoveryStatus:
+            return InstallationRecoveryStatus(
+                InstallationRecoveryState.RECOVERY_MATERIAL_REQUIRED,
+                "provisioned_recovery_available",
+                4,
+                ("compact",),
+                None,
+                "yoetz service recovery restore",
+            )
+
+        def metadata(self, _generation: int) -> object:
+            raise ValueError("private-metadata-detail")
+
+    monkeypatch.setattr(cli, "_installation_recovery_store", lambda: _Store())
+
+    assert await cli._service_recovery_revoke(False) == exit_code_for(  # pyright: ignore[reportPrivateUsage]
+        PublicErrorCode.STORAGE_CORRUPT
+    )
+    assert await cli._service_recovery_restore(False) == exit_code_for(  # pyright: ignore[reportPrivateUsage]
+        PublicErrorCode.STORAGE_CORRUPT
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "storage_corrupt: the installation recovery set could not be read",
+        "storage_corrupt: the installation recovery set could not be read",
+    ]
+    assert "private-metadata-detail" not in captured.err
 
 
 @pytest.mark.anyio

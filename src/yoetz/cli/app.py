@@ -1288,6 +1288,16 @@ async def _trusted_call(operation: Callable[[], Awaitable[object]], json_output:
         raise
 
 
+def _recovery_store_read[T](operation: Callable[[], T]) -> tuple[T | None, int | None]:
+    """Run one local recovery-store read behind a bounded public CLI outcome."""
+
+    try:
+        return operation(), None
+    except OSError, ProtocolValueError, RuntimeError, ValueError:
+        _stderr("storage_corrupt: the installation recovery set could not be read")
+        return None, exit_code_for(PublicErrorCode.STORAGE_CORRUPT)
+
+
 def _trusted_exception_failure(error: Exception) -> int | None:
     """Map trusted-ceremony failures to bounded public CLI outcomes."""
 
@@ -1589,12 +1599,21 @@ def service_recovery_export(json_output: _JSON = False) -> None:
 
 
 async def _service_recovery_export(json_output: bool) -> int:
-    status = _installation_recovery_store().status(
-        installation_exists=True,
-        vault_ready=True,
-        ordinary_unlock_available=True,
-        auto_unlock_repairable=False,
+    store, failure = _recovery_store_read(_installation_recovery_store)
+    if failure is not None:
+        return failure
+    assert store is not None
+    status, failure = _recovery_store_read(
+        lambda: store.status(
+            installation_exists=True,
+            vault_ready=True,
+            ordinary_unlock_available=True,
+            auto_unlock_repairable=False,
+        )
     )
+    if failure is not None:
+        return failure
+    assert status is not None
     generation = status.active_generation
     if generation is None or status.reason == "recovery_material_revoked":
         _stderr("recovery_not_provisioned")
@@ -1635,13 +1654,21 @@ async def _service_recovery_create(
         "argon2id_passphrase",
     }:
         return _usage_failure()
-    store = _installation_recovery_store()
-    current = store.status(
-        installation_exists=True,
-        vault_ready=True,
-        ordinary_unlock_available=True,
-        auto_unlock_repairable=False,
+    store, failure = _recovery_store_read(_installation_recovery_store)
+    if failure is not None:
+        return failure
+    assert store is not None
+    current, failure = _recovery_store_read(
+        lambda: store.status(
+            installation_exists=True,
+            vault_ready=True,
+            ordinary_unlock_available=True,
+            auto_unlock_repairable=False,
+        )
     )
+    if failure is not None:
+        return failure
+    assert current is not None
     generation = 1 if current.active_generation is None else current.active_generation + 1
     if operation_name == "provision" and current.active_generation is not None:
         _stderr("recovery_already_provisioned: run 'yoetz service recovery rotate'")
@@ -1682,13 +1709,21 @@ def service_recovery_revoke(json_output: _JSON = False) -> None:
 
 
 async def _service_recovery_revoke(json_output: bool) -> int:
-    store = _installation_recovery_store()
-    status = store.status(
-        installation_exists=True,
-        vault_ready=True,
-        ordinary_unlock_available=True,
-        auto_unlock_repairable=False,
+    store, failure = _recovery_store_read(_installation_recovery_store)
+    if failure is not None:
+        return failure
+    assert store is not None
+    status, failure = _recovery_store_read(
+        lambda: store.status(
+            installation_exists=True,
+            vault_ready=True,
+            ordinary_unlock_available=True,
+            auto_unlock_repairable=False,
+        )
     )
+    if failure is not None:
+        return failure
+    assert status is not None
     generation = status.active_generation
     if generation is None:
         _stderr("recovery_not_provisioned")
@@ -1696,7 +1731,10 @@ async def _service_recovery_revoke(json_output: bool) -> int:
     if status.reason == "recovery_material_revoked":
         _stderr("recovery_already_revoked: run 'yoetz service recovery rotate'")
         return 20
-    metadata = store.metadata(generation)
+    metadata, failure = _recovery_store_read(lambda: store.metadata(generation))
+    if failure is not None:
+        return failure
+    assert metadata is not None
     target = _installation_recovery_target(
         operation="revoke",
         recovery_generation=generation,
@@ -1718,18 +1756,29 @@ def service_recovery_restore(json_output: _JSON = False) -> None:
 
 
 async def _service_recovery_restore(json_output: bool) -> int:
-    store = _installation_recovery_store()
-    status = store.status(
-        installation_exists=True,
-        vault_ready=False,
-        ordinary_unlock_available=False,
-        auto_unlock_repairable=False,
+    store, failure = _recovery_store_read(_installation_recovery_store)
+    if failure is not None:
+        return failure
+    assert store is not None
+    status, failure = _recovery_store_read(
+        lambda: store.status(
+            installation_exists=True,
+            vault_ready=False,
+            ordinary_unlock_available=False,
+            auto_unlock_repairable=False,
+        )
     )
+    if failure is not None:
+        return failure
+    assert status is not None
     generation = status.active_generation
     if generation is None:
         _stderr("recovery_material_required: no provisioned managed recovery generation")
         return exit_code_for(PublicErrorCode.VAULT_LOCKED)
-    metadata = store.metadata(generation)
+    metadata, failure = _recovery_store_read(lambda: store.metadata(generation))
+    if failure is not None:
+        return failure
+    assert metadata is not None
     target = _installation_recovery_target(
         operation="restore",
         recovery_generation=generation,
