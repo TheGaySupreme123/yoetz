@@ -3051,8 +3051,21 @@ preview/artifact/installed digests, and sorted changed members. The marker schem
 MCP owner/route, artifact digest, exact managed inventory, and marker digest, with no path, content,
 credential, transcript, timestamp, activation, coverage, or receipt claim.
 
-Cursor lifecycle is exact-preview bound and whole-directory atomic. Same request/digest replays are
-idempotent at the selected state. Install or replace refuses modified, unmanaged, symlinked, dual,
+Cursor lifecycle is exact-preview bound and whole-directory atomic. Install, replace, and remove
+consume the ADR-016 `review_only` single-shot trusted review of `plugin_artifact_apply` prepared
+for that exact preview digest, exactly as the portable artifact path does. `--accept` is operator
+acceptance of a digest, never authority: the CLI passes the pending-bound `ArtifactAuthority` to
+the adapter, which refuses with `authority_required` when none is presented and, because the
+packaged runtime advertises no verified action-bound `UserPresencePort`, fails closed with
+`human_authority_unavailable` before any mutation.
+
+Same request/digest replays are idempotent at the selected state. A committed operation whose
+result was lost reconciles instead of refusing, and reconciliation touches no bytes and consumes
+no second review. Install reconciles only when the destination is marker-valid at the accepted
+format and artifact digest and the accepted preview digest equals the digest the pre-commit
+`absent` preview would have produced for that exact request, artifact, and target; remove
+reconciles only at `absent`, whose pre-commit tree digest no longer exists to re-prove. Every
+other state still refuses. Install or replace refuses modified, unmanaged, symlinked, dual,
 foreign, ambiguous, stale-preview, or recovery-required state without overwrite or automatic
 repair. Remove accepts only marker-valid managed bytes; an independently present MCP source does
 not block removal because the operation preserves that source. Removal also preserves ledgers,
@@ -3063,7 +3076,9 @@ vault/keyring/provider/privacy state, unrelated settings, and Cursor caches.
 `McpOwnershipState`, winning source or null, exact route or null, ordered present sources, and an
 observation boolean. SDK precedence is exactly that enum order. A higher-precedence or duplicate
 same-name source cannot create a plugin-managed pass: plugin plus external is `dual`, multiple
-same-class sources are `ambiguous`, and any non-exact same-name entry is `foreign`.
+same-class sources are `ambiguous`, and any non-exact same-name entry is `foreign`. Route
+recognition is key-set exact — exactly `command`, `type`, `args` — so an entry carrying any
+additional key such as `env` or `cwd` is foreign however compatible its values look.
 
 `CursorSdkBinding` is exactly `typescript|python`. `CursorArtifactIdentity` carries binding,
 package version/digest, bridge protocol exactly `sdk.v1`, and optional bridge digest.
@@ -3071,6 +3086,11 @@ package version/digest, bridge protocol exactly `sdk.v1`, and optional bridge di
 the frozen precedence tuple, MCP ownership, sandbox boolean, and approval mode
 `default|allowlist|full`. Plugin-managed requires `plugins`; external registration requires
 `project` or `user`. Inline sources are never ambiently accepted as ownership evidence.
+
+The 2.1.0 control-request wire admits `cursor_version`, `model_id`, and `model_effort` in
+`observation_envelope.structural_payload` beside `codex_version`, on the same bounded 1..128 token
+alphabet the domain enforces for them. `structural_payload` is closed, so those three keys are
+what makes a Cursor observation deliverable rather than a lenient default.
 
 `ObservationSource` adds `cursor_hook`. The pinned native profile advertises only
 `sessionStart|sessionEnd|afterMCPExecution|afterFileEdit|stop`; `afterAgentThought` is excluded.

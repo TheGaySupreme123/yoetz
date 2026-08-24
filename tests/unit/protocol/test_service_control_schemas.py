@@ -327,6 +327,68 @@ def test_v21_appends_cursor_observation_wire_without_rewriting_v2() -> None:
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
 
 
+def _cursor_ingest_frame(structural: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "body": {
+            "codex_session_id": "cursor:session-1",
+            "envelope": {
+                "content_object_refs": [],
+                "cursor": {
+                    "byte_position": 0,
+                    "event_position": 1,
+                    "last_source_commitment": "hmac-sha256:" + "0" * 64,
+                    "mapping_version": "cursor-local-3.17",
+                    "source_generation": 1,
+                },
+                "event_kind": "session_start",
+                "gap_codes": [],
+                "receipt_time": "2026-08-24T00:00:00.000Z",
+                "session_commitment": "hmac-sha256:" + "1" * 64,
+                "source": "cursor_hook",
+                "source_identity": "hook:cursor",
+                "structural_payload": structural,
+            },
+        },
+        "kind": "call",
+        "method": "observation_ingest",
+        "protocol_version": "1.0",
+        "rpc_id": _RPC_ID,
+        "service_generation": "1",
+        "service_instance_id": _INSTANCE_ID,
+    }
+
+
+def test_v21_wire_admits_the_exact_cursor_structural_tokens_hook_ingress_sends() -> None:
+    """The 2.1.0 request wire must carry every structural key Cursor ingress can emit.
+
+    ``structural_payload`` is ``additionalProperties: false``, so an omitted key here is not a
+    lenient default: it makes the observation undeliverable at the boundary.
+    """
+
+    frame = _cursor_ingest_frame(
+        {
+            "capability_profile_id": "cursor-local-3.17",
+            "cursor_version": "3.17.8",
+            "hook_name": "sessionStart",
+            "model_effort": "medium",
+            "model_id": "claude-4.5-sonnet",
+        }
+    )
+
+    validate_schema_instance("control-request", "2.1.0", cast(JsonValue, frame))
+
+    # The domain admits ``:`` in these three structural tokens, so the wire must too or the same
+    # class of undeliverable observation returns for a namespaced model identity.
+    colon_bearing = _cursor_ingest_frame(
+        {"model_id": "anthropic:claude-4.5-sonnet", "model_effort": "high"}
+    )
+    validate_schema_instance("control-request", "2.1.0", cast(JsonValue, colon_bearing))
+
+    unknown = _cursor_ingest_frame({"cursor_version": "3.17.8", "cursor_workspace_path": "/tmp"})
+    with pytest.raises(ProtocolValueError):
+        validate_schema_instance("control-request", "2.1.0", cast(JsonValue, unknown))
+
+
 def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:
     request_schema = _schema("control-request")
     result_schema = _schema("control-result")

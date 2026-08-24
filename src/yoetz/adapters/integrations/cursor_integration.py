@@ -32,13 +32,16 @@ from yoetz.domain.values import JsonObject, RequestId
 from yoetz.domain.values import request_id as validate_request_id
 from yoetz.ports.integrations import HarnessHookProfile, HarnessId, HarnessProfile
 from yoetz.ports.plugin_artifacts import (
+    ArtifactAuthority,
     ManagedPluginFile,
     McpOwnership,
     McpOwnershipState,
     PluginArtifactAction,
+    PluginArtifactError,
     PluginArtifactReason,
     PluginArtifactState,
     PluginFormatProfile,
+    PluginMutationReviewPort,
     PluginOperationState,
     PluginProofFacet,
     PluginProofStatus,
@@ -835,6 +838,51 @@ def _inspect(target: CursorPluginTarget, artifact: CursorPluginArtifact) -> _Ins
     )
 
 
+_ABSENT_STATE_DIGEST: Final = canonical_digest({"state": "absent"})
+
+_PREVIEW_WARNINGS: Final = (
+    "activation_not_inferred_from_installation",
+    "cursor_cloud_not_supported",
+    "mcp_handshake_does_not_prove_model_use",
+    "observation_requires_separate_consent",
+    "sdk_setting_sources_must_be_explicit",
+)
+
+
+def _admissible_owner_states(artifact: CursorPluginArtifact) -> set[McpOwnershipState]:
+    """Return the MCP ownership states an install or replace may legitimately observe."""
+
+    if artifact.plan.mcp_ownership is McpOwnership.EXTERNAL_REGISTRATION:
+        # Replacement may be the operation that installs plugin-managed MCP.  The
+        # currently installed exact external artifact legitimately observes absent.
+        return {McpOwnershipState.EXTERNAL, McpOwnershipState.ABSENT}
+    return {McpOwnershipState.ABSENT, McpOwnershipState.PLUGIN}
+
+
+def _preview_digest(
+    request: RequestId,
+    effective: PluginArtifactAction,
+    artifact: CursorPluginArtifact,
+    *,
+    current_state_digest: str,
+    mcp_ownership_state: McpOwnershipState,
+    target_identity: str,
+) -> str:
+    return canonical_digest(
+        {
+            "action": effective.value,
+            "artifact_digest": artifact.artifact_digest,
+            "current_state_digest": current_state_digest,
+            "format_profile": artifact.plan.format_profile.value,
+            "mcp_ownership": artifact.plan.mcp_ownership.value,
+            "mcp_ownership_state": mcp_ownership_state.value,
+            "mcp_route_profile": artifact.plan.mcp_route_profile,
+            "request_id": request,
+            "target_identity": target_identity,
+        }
+    )
+
+
 def _preview_from_inspection(
     request: RequestId,
     action: PluginArtifactAction,
@@ -866,15 +914,7 @@ def _preview_from_inspection(
     ):
         raise _error(PluginArtifactReason.REMOVE_REFUSED)
     if action is not PluginArtifactAction.REMOVE:
-        allowed = (
-            {McpOwnershipState.EXTERNAL}
-            if artifact.plan.mcp_ownership is McpOwnership.EXTERNAL_REGISTRATION
-            else {McpOwnershipState.ABSENT, McpOwnershipState.PLUGIN}
-        )
-        # Replacement may be the operation that installs plugin-managed MCP.  The
-        # currently installed exact external artifact legitimately observes absent.
-        if artifact.plan.mcp_ownership is McpOwnership.EXTERNAL_REGISTRATION:
-            allowed.add(McpOwnershipState.ABSENT)
+        allowed = _admissible_owner_states(artifact)
         if mcp_observation.ownership_state not in allowed:
             raise _error(
                 PluginArtifactReason.MCP_OWNERSHIP_CONFLICT,
@@ -890,30 +930,14 @@ def _preview_from_inspection(
         if exact and action in {PluginArtifactAction.INSTALL, PluginArtifactAction.REPLACE}
         else action
     )
-    warnings = tuple(
-        sorted(
-            {
-                "activation_not_inferred_from_installation",
-                "cursor_cloud_not_supported",
-                "mcp_handshake_does_not_prove_model_use",
-                "observation_requires_separate_consent",
-                "sdk_setting_sources_must_be_explicit",
-            },
-            key=str.encode,
-        )
-    )
-    preview_digest = canonical_digest(
-        {
-            "action": effective.value,
-            "artifact_digest": artifact.artifact_digest,
-            "current_state_digest": inspection.current_state_digest,
-            "format_profile": artifact.plan.format_profile.value,
-            "mcp_ownership": artifact.plan.mcp_ownership.value,
-            "mcp_ownership_state": mcp_observation.ownership_state.value,
-            "mcp_route_profile": artifact.plan.mcp_route_profile,
-            "request_id": request,
-            "target_identity": inspection.target_identity,
-        }
+    warnings = tuple(sorted(set(_PREVIEW_WARNINGS), key=str.encode))
+    preview_digest = _preview_digest(
+        request,
+        effective,
+        artifact,
+        current_state_digest=inspection.current_state_digest,
+        mcp_ownership_state=mcp_observation.ownership_state,
+        target_identity=inspection.target_identity,
     )
     return CursorPluginPreview(
         request,
@@ -1007,6 +1031,131 @@ def _stage(parent: Path, artifact: CursorPluginArtifact, request: RequestId) -> 
         raise
 
 
+class _DenyStandaloneCursorReview:
+    """Default authority port: an unwired caller can prove no consent at all.
+
+    ADR-016/ADR-023 are explicit that a TTY confirmation, ``--accept``, or a same-UID process is
+    not ``UserPresencePort`` authority, so the default here refuses instead of trusting the
+    ``ArtifactAuthority`` discriminator that the caller itself constructed.
+    """
+
+    def consume_setup_authority(self, authority: ArtifactAuthority, preview_digest: str) -> None:
+        del authority, preview_digest
+        raise _error(PluginArtifactReason.AUTHORITY_REQUIRED)
+
+    def consume_artifact_review(self, authority: ArtifactAuthority, preview_digest: str) -> None:
+        del authority, preview_digest
+        raise _error(PluginArtifactReason.HUMAN_AUTHORITY_UNAVAILABLE)
+
+
+def _consume_authority(
+    review: PluginMutationReviewPort | None,
+    authority: ArtifactAuthority | None,
+    accepted_preview_digest: str,
+) -> None:
+    """Consume exactly one injected authority bound to the accepted preview digest."""
+
+    if type(authority) is not ArtifactAuthority:
+        raise _error(PluginArtifactReason.AUTHORITY_REQUIRED)
+    if authority.target_digest != accepted_preview_digest:
+        raise _error(PluginArtifactReason.AUTHORITY_REQUIRED)
+    port: PluginMutationReviewPort = _DenyStandaloneCursorReview() if review is None else review
+    try:
+        if authority.channel == "review_only":
+            port.consume_artifact_review(authority, accepted_preview_digest)
+        else:
+            port.consume_setup_authority(authority, accepted_preview_digest)
+    except PluginArtifactError as exc:
+        # The shared elevated-bootstrap review port raises the neutral artifact error. Keep one
+        # error type on the Cursor surface without inventing a reason the port did not choose.
+        raise _error(exc.reason) from exc
+
+
+def _reconciled_install(
+    request: RequestId,
+    action: PluginArtifactAction,
+    inspection: _Inspection,
+    artifact: CursorPluginArtifact,
+    accepted_preview_digest: str,
+) -> CursorPluginResult | None:
+    """Recognize a committed install whose result was lost, without touching any bytes.
+
+    A same-request replay of an install that already committed must reconcile at the selected
+    state rather than refuse with ``destination_conflict``. The recognition is stateless and
+    exact: the destination must be marker-valid at the accepted artifact digest and format, and
+    the accepted preview digest must equal the digest the pre-commit ``absent`` preview would
+    have produced for this exact request, artifact, and target. Only the observed MCP ownership
+    state is unknown after the fact, and it is bounded to the states that preview already
+    admits, so genuinely different content, targets, or requests still fail closed.
+    """
+
+    if action is not PluginArtifactAction.INSTALL:
+        return None
+    if (
+        not inspection.marker_valid
+        or inspection.format_profile is not artifact.plan.format_profile
+        or inspection.installed_digest != artifact.artifact_digest
+    ):
+        return None
+    committed = {
+        _preview_digest(
+            request,
+            PluginArtifactAction.INSTALL,
+            artifact,
+            current_state_digest=_ABSENT_STATE_DIGEST,
+            mcp_ownership_state=owner_state,
+            target_identity=inspection.target_identity,
+        )
+        for owner_state in _admissible_owner_states(artifact)
+    }
+    if accepted_preview_digest not in committed:
+        return None
+    return CursorPluginResult(
+        request,
+        PluginArtifactAction.NOOP,
+        PluginOperationState.COMPLETED,
+        inspection.state,
+        inspection.state,
+        artifact.plan.format_profile,
+        accepted_preview_digest,
+        artifact.artifact_digest,
+        inspection.installed_digest,
+        (),
+    )
+
+
+def _reconciled_remove(
+    request: RequestId,
+    inspection: _Inspection,
+    artifact: CursorPluginArtifact,
+    accepted_preview_digest: str,
+) -> CursorPluginResult | None:
+    """Recognize a committed remove whose result was lost.
+
+    Removal's entire effect is that the managed destination is absent, and that is exactly what
+    is observed here, so the replay reports the reconciled no-op instead of ``remove_refused``.
+    The pre-commit tree digest that the accepted preview bound is gone with the tree, so this
+    path deliberately cannot re-prove that binding; it also mutates nothing, spends no review,
+    and never reports removal of bytes that are still present -- every other ``remove_refused``
+    state (modified, unmanaged, native/portable managed) still refuses.
+    """
+
+    if inspection.state is not PluginArtifactState.ABSENT:
+        return None
+    return CursorPluginResult(
+        request,
+        PluginArtifactAction.NOOP,
+        PluginOperationState.COMPLETED,
+        PluginArtifactState.ABSENT,
+        PluginArtifactState.ABSENT,
+        artifact.plan.format_profile,
+        accepted_preview_digest,
+        artifact.artifact_digest,
+        None,
+        (),
+    )
+
+
 def apply_cursor_plugin(
     request: RequestId,
     target: CursorPluginTarget,
@@ -1014,21 +1163,38 @@ def apply_cursor_plugin(
     artifact: CursorPluginArtifact,
     *,
     accepted_preview_digest: str,
-    explicitly_accepted: bool,
+    authority: ArtifactAuthority | None,
+    review: PluginMutationReviewPort | None = None,
     project_root: Path | None = None,
 ) -> CursorPluginResult:
-    if not explicitly_accepted:
-        raise _error(PluginArtifactReason.AUTHORITY_REQUIRED)
     _validate_digest(accepted_preview_digest)
-    preview = preview_cursor_plugin(
-        request,
-        target,
-        action,
-        artifact,
-        project_root=project_root,
-    )
+    request = validate_request_id(request)
+    try:
+        preview = preview_cursor_plugin(
+            request,
+            target,
+            action,
+            artifact,
+            project_root=project_root,
+        )
+    except CursorIntegrationError as exc:
+        if exc.reason is not PluginArtifactReason.DESTINATION_CONFLICT:
+            raise
+        # Reconcile before authority: an already-committed state must not require a second
+        # single-shot review, and this branch mutates nothing.
+        reconciled = _reconciled_install(
+            request,
+            action,
+            _inspect(target, artifact),
+            artifact,
+            accepted_preview_digest,
+        )
+        if reconciled is None:
+            raise
+        return reconciled
     if preview.preview_digest != accepted_preview_digest:
         raise _error(PluginArtifactReason.PREVIEW_STALE)
+    _consume_authority(review, authority, accepted_preview_digest)
     if preview.action is PluginArtifactAction.NOOP:
         return CursorPluginResult(
             preview.request_id,
@@ -1103,20 +1269,36 @@ def remove_cursor_plugin(
     artifact: CursorPluginArtifact,
     *,
     accepted_preview_digest: str,
-    explicitly_accepted: bool,
+    authority: ArtifactAuthority | None,
+    review: PluginMutationReviewPort | None = None,
     project_root: Path | None = None,
 ) -> CursorPluginResult:
-    if not explicitly_accepted:
-        raise _error(PluginArtifactReason.AUTHORITY_REQUIRED)
-    preview = preview_cursor_plugin(
-        request,
-        target,
-        PluginArtifactAction.REMOVE,
-        artifact,
-        project_root=project_root,
-    )
+    _validate_digest(accepted_preview_digest)
+    request = validate_request_id(request)
+    try:
+        preview = preview_cursor_plugin(
+            request,
+            target,
+            PluginArtifactAction.REMOVE,
+            artifact,
+            project_root=project_root,
+        )
+    except CursorIntegrationError as exc:
+        if exc.reason is not PluginArtifactReason.REMOVE_REFUSED:
+            raise
+        # Reconcile before authority: see _reconciled_remove.
+        reconciled = _reconciled_remove(
+            request,
+            _inspect(target, artifact),
+            artifact,
+            accepted_preview_digest,
+        )
+        if reconciled is None:
+            raise
+        return reconciled
     if preview.preview_digest != accepted_preview_digest:
         raise _error(PluginArtifactReason.PREVIEW_STALE)
+    _consume_authority(review, authority, accepted_preview_digest)
     root, _identity = _target_path(target)
     destination = root / CURSOR_PLUGIN_RELATIVE_ROOT
     rollback = destination.parent / _ROLLBACK_NAME
@@ -1217,6 +1399,12 @@ def _config_entry(path: Path) -> tuple[Mapping[str, JsonValue] | None, bool]:
 
 def _route_profile(entry: Mapping[str, JsonValue] | None) -> Literal["strict", "policy"] | None:
     if entry is None:
+        return None
+    # Any non-exact same-name entry is foreign, so recognition is key-set exact and not merely
+    # value-compatible. An extra ``env``, ``cwd``, or any other key changes what the host will
+    # actually launch, and treating such an entry as a known route would silently attribute a
+    # foreign registration to Yoetz.
+    if set(entry) != {"args", "command", "type"}:
         return None
     expected_base = {"command": "yoetz", "type": "stdio"}
     if any(entry.get(key) != value for key, value in expected_base.items()):

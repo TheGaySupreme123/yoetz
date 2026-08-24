@@ -17,12 +17,60 @@ from yoetz.adapters.integrations.cursor_integration import (
     render_cursor_plugin,
     status_cursor_plugin,
 )
+from yoetz.adapters.integrations.portable_plugin import (
+    ArtifactUserPresencePort,
+    ElevatedPortableArtifactReview,
+)
 from yoetz.domain.values import RequestId, request_id
-from yoetz.ports.plugin_artifacts import McpOwnership, PluginArtifactAction, PluginFormatProfile
+from yoetz.ports.plugin_artifacts import (
+    ArtifactAuthority,
+    McpOwnership,
+    PluginArtifactAction,
+    PluginFormatProfile,
+    PluginMutationReviewPort,
+)
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 
 __all__ = ["run_cursor_plugin_command"]
+
+
+class _NoProductionUserPresence:
+    """Fail closed until a production action-bound ``UserPresencePort`` cell exists.
+
+    ADR-016 decision 6 and ADR-023 decision 11 are explicit that ``--accept``, a controlling TTY,
+    a pseudo-terminal, or a same-UID process is not and cannot silently become human authority.
+    The packaged runtime advertises no verified presence adapter, so the standalone Cursor
+    install/remove lane refuses here and stays render/preview/status-only in practice.
+    """
+
+    def verify_artifact_review(self, authority: ArtifactAuthority) -> None:
+        del authority
+        raise RuntimeError("human_authority_unavailable")
+
+
+def _artifact_authority(
+    accepted_preview_digest: str, *, state: Path | None
+) -> ArtifactAuthority | None:
+    """Bind the exact ``plugin_artifact_apply`` pending review to the accepted preview digest.
+
+    Returning ``None`` when no matching pending exists keeps the refusal inside the adapter,
+    which reconciles an already-committed replay before it asks for authority at all.
+    """
+
+    from yoetz.service.elevated_bootstrap import ElevatedBootstrapError, load_pending
+
+    try:
+        pending = load_pending(_state=state)
+    except ElevatedBootstrapError:
+        return None
+    if (
+        pending is None
+        or pending.operation != "plugin_artifact_apply"
+        or pending.target_digest != accepted_preview_digest
+    ):
+        return None
+    return ArtifactAuthority("review_only", accepted_preview_digest, pending.pending_id)
 
 
 def _emit(value: dict[str, object], *, json_output: bool) -> None:
@@ -113,6 +161,8 @@ def run_cursor_plugin_command(
     preview_digest: str | None,
     accept: bool,
     json_output: bool,
+    _state: Path | None = None,
+    _presence: ArtifactUserPresencePort | None = None,
 ) -> int:
     """Run one path-explicit Cursor operation without reading ambient Cursor state."""
 
@@ -146,8 +196,10 @@ def run_cursor_plugin_command(
             if requested_action not in allowed_action_values:
                 raise ValueError("cursor_plugin_action_invalid")
             action = PluginArtifactAction(requested_action)
-        preview = preview_cursor_plugin(request, target, action, artifact, project_root=project)
         if command == "preview":
+            # Only the preview command renders a plan. Computing one here for install/remove
+            # would also refuse an already-committed replay before the adapter can reconcile it.
+            preview = preview_cursor_plugin(request, target, action, artifact, project_root=project)
             _emit(
                 {
                     "action": preview.action.value,
@@ -168,13 +220,22 @@ def run_cursor_plugin_command(
         if not accept or preview_digest is None:
             sys.stderr.write("cursor_plugin_exact_preview_acceptance_required\n")
             return 3
+        # ``--accept`` only proves the operator typed the exact preview digest. The mutation
+        # itself consumes the ADR-016 ``review_only`` single-shot trusted review prepared for
+        # this exact digest; the adapter refuses when that authority is absent or unproven.
+        review: PluginMutationReviewPort = ElevatedPortableArtifactReview(
+            _NoProductionUserPresence() if _presence is None else _presence,
+            _state=_state,
+        )
+        authority = _artifact_authority(preview_digest, state=_state)
         result = (
             remove_cursor_plugin(
                 request,
                 target,
                 artifact,
                 accepted_preview_digest=preview_digest,
-                explicitly_accepted=True,
+                authority=authority,
+                review=review,
                 project_root=project,
             )
             if command == "remove"
@@ -184,7 +245,8 @@ def run_cursor_plugin_command(
                 action,
                 artifact,
                 accepted_preview_digest=preview_digest,
-                explicitly_accepted=True,
+                authority=authority,
+                review=review,
                 project_root=project,
             )
         )

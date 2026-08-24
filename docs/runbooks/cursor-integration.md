@@ -37,6 +37,14 @@ yoetz integrate cursor plugin preview \
 Review `request_id`, `preview_digest`, target scope, format, before state, MCP owner state, route,
 artifact digest, and warnings. Apply with the same request and digest. A stale preview, modified or
 unmanaged copy, symlink, rollback residue, or conflicting MCP source refuses without overwrite.
+
+`--accept` binds the exact digest you reviewed; it is not authority. Install and remove consume the
+single-shot `plugin_artifact_apply` trusted review prepared for that same digest, so an apply
+without one refuses with `authority_required`. Until a production action-bound presence adapter
+ships, the standalone lane then fails closed with `human_authority_unavailable` (ADR-016 decision
+6, ADR-023 decision 11) and Cursor install/remove stays preview/status-only in practice. Replaying
+the same request and digest after a committed operation whose result was lost reconciles at the
+already-selected state without mutating bytes or spending a second review.
 Portable uses root `plugin.json`; native uses `.cursor-plugin/plugin.json`. One installed tree may
 contain only one of those manifests.
 
@@ -122,6 +130,9 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 | Hook fires but status stays published-only | configuration/trigger is not accepted observation evidence |
 | Strict route has no semantic review | expected route ceiling; authorize a separate policy route when intended |
 | Modified plugin cannot remove | preserved local change; inspect and resolve manually |
+| Install refuses `authority_required` after `--accept` | no `plugin_artifact_apply` review is prepared for that exact digest |
+| Install refuses `human_authority_unavailable` | expected: no production presence cell exists yet |
+| MCP entry looks right but reads `foreign` | route recognition is key-set exact; an extra `env`/`cwd` key is a foreign entry |
 
 Always report what is proven and the remaining cells/gaps. A clean local test never proves Cursor
 Cloud, a neighboring version, regular-profile isolation without a before/after check, provider

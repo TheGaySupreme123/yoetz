@@ -344,6 +344,19 @@ def _cursor_request() -> dict[str, Any]:
             },
         ]
     }
+    # Cursor ingress admits three additional bounded structural tokens beside ``codex_version``.
+    # ``structural_payload`` is ``additionalProperties: false``, so omitting them here would make
+    # every Cursor observation that carries a Cursor/model identity undeliverable on the wire.
+    # The domain validates exactly these three through its structural-token rule, whose token
+    # alphabet admits ``:``; the wire pattern must not be narrower or the same class of
+    # undeliverable observation returns for a colon-bearing model identity.
+    for name in ("cursor_version", "model_id", "model_effort"):
+        envelope["properties"]["structural_payload"]["properties"][name] = {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$",
+            "type": "string",
+        }
     return generated
 
 

@@ -26,17 +26,38 @@ from yoetz.adapters.integrations.cursor_integration import (
 )
 from yoetz.domain.values import JsonObject, request_id
 from yoetz.ports.plugin_artifacts import (
+    ArtifactAuthority,
     McpOwnership,
     McpOwnershipState,
     PluginArtifactAction,
     PluginArtifactReason,
     PluginArtifactState,
     PluginFormatProfile,
+    PluginOperationState,
     PluginProofFacet,
 )
 from yoetz.version import read_verified_resource
 
 _REQUEST = request_id("req_10000000-0000-4000-8000-000000000001")
+_REVIEW_ID = "a" * 64
+
+
+class _AcceptingReview:
+    """Stand in for one already-approved single-shot trusted review."""
+
+    def __init__(self) -> None:
+        self.artifact_reviews: list[tuple[ArtifactAuthority, str]] = []
+        self.setup_authorities: list[tuple[ArtifactAuthority, str]] = []
+
+    def consume_setup_authority(self, authority: ArtifactAuthority, preview_digest: str) -> None:
+        self.setup_authorities.append((authority, preview_digest))
+
+    def consume_artifact_review(self, authority: ArtifactAuthority, preview_digest: str) -> None:
+        self.artifact_reviews.append((authority, preview_digest))
+
+
+def _authority(preview_digest: str) -> ArtifactAuthority:
+    return ArtifactAuthority("review_only", preview_digest, _REVIEW_ID)
 
 
 def test_cursor_profile_and_all_four_cells_are_resource_registered() -> None:
@@ -125,7 +146,8 @@ def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: 
         PluginArtifactAction.INSTALL,
         artifact,
         accepted_preview_digest=preview.preview_digest,
-        explicitly_accepted=True,
+        authority=_authority(preview.preview_digest),
+        review=_AcceptingReview(),
     )
     assert result.state_after is PluginArtifactState.NATIVE_MANAGED
 
@@ -148,7 +170,8 @@ def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: 
         target,
         artifact,
         accepted_preview_digest=remove_preview.preview_digest,
-        explicitly_accepted=True,
+        authority=_authority(remove_preview.preview_digest),
+        review=_AcceptingReview(),
     )
     assert removed.state_after is PluginArtifactState.ABSENT
     assert not (tmp_path / ".cursor" / "plugins" / "local" / "yoetz").exists()
@@ -169,7 +192,8 @@ def test_remove_preserves_separately_registered_mcp_route(tmp_path: Path) -> Non
         PluginArtifactAction.INSTALL,
         artifact,
         accepted_preview_digest=preview.preview_digest,
-        explicitly_accepted=True,
+        authority=_authority(preview.preview_digest),
+        review=_AcceptingReview(),
     )
     (tmp_path / ".cursor" / "mcp.json").write_text(
         json.dumps(
@@ -197,7 +221,8 @@ def test_remove_preserves_separately_registered_mcp_route(tmp_path: Path) -> Non
         target,
         artifact,
         accepted_preview_digest=remove_preview.preview_digest,
-        explicitly_accepted=True,
+        authority=_authority(remove_preview.preview_digest),
+        review=_AcceptingReview(),
     )
 
     assert (tmp_path / ".cursor" / "mcp.json").is_file()
@@ -219,7 +244,8 @@ def test_post_commit_cleanup_failure_preserves_new_and_old_trees_for_recovery(
         PluginArtifactAction.INSTALL,
         portable,
         accepted_preview_digest=installed.preview_digest,
-        explicitly_accepted=True,
+        authority=_authority(installed.preview_digest),
+        review=_AcceptingReview(),
     )
     replacement = preview_cursor_plugin(
         request_id("req_10000000-0000-4000-8000-000000000005"),
@@ -246,7 +272,8 @@ def test_post_commit_cleanup_failure_preserves_new_and_old_trees_for_recovery(
             PluginArtifactAction.REPLACE,
             native,
             accepted_preview_digest=replacement.preview_digest,
-            explicitly_accepted=True,
+            authority=_authority(replacement.preview_digest),
+            review=_AcceptingReview(),
         )
 
     assert raised.value.reason is PluginArtifactReason.WRITE_FAILED
@@ -266,7 +293,8 @@ def test_modified_managed_copy_is_preserved_and_remove_refused(tmp_path: Path) -
         PluginArtifactAction.INSTALL,
         artifact,
         accepted_preview_digest=preview.preview_digest,
-        explicitly_accepted=True,
+        authority=_authority(preview.preview_digest),
+        review=_AcceptingReview(),
     )
     skill = tmp_path / ".cursor" / "plugins" / "local" / "yoetz" / "skills" / "yoetz" / "SKILL.md"
     skill.write_text("locally modified\n", encoding="utf-8")
@@ -436,3 +464,200 @@ def test_sdk_profiles_require_explicit_sources_and_pin_bridge_protocol(tmp_path:
             sandbox_enabled=True,
             approval_mode="default",
         )
+
+
+def test_cursor_mutation_requires_a_consumed_review_and_accept_alone_is_not_authority(
+    tmp_path: Path,
+) -> None:
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    artifact = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
+    preview = preview_cursor_plugin(_REQUEST, target, PluginArtifactAction.INSTALL, artifact)
+    destination = tmp_path / ".cursor" / "plugins" / "local" / "yoetz"
+
+    with pytest.raises(CursorIntegrationError) as no_authority:
+        apply_cursor_plugin(
+            _REQUEST,
+            target,
+            PluginArtifactAction.INSTALL,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=None,
+        )
+    assert no_authority.value.reason is PluginArtifactReason.AUTHORITY_REQUIRED
+    assert not destination.exists()
+
+    # An unwired caller cannot self-authorize by constructing the discriminator itself.
+    with pytest.raises(CursorIntegrationError) as unwired:
+        apply_cursor_plugin(
+            _REQUEST,
+            target,
+            PluginArtifactAction.INSTALL,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=_authority(preview.preview_digest),
+        )
+    assert unwired.value.reason is PluginArtifactReason.HUMAN_AUTHORITY_UNAVAILABLE
+    assert not destination.exists()
+
+    # An authority bound to a different digest never authorizes this preview.
+    other = preview_cursor_plugin(
+        request_id("req_10000000-0000-4000-8000-000000000021"),
+        target,
+        PluginArtifactAction.INSTALL,
+        artifact,
+    )
+    with pytest.raises(CursorIntegrationError) as mismatched:
+        apply_cursor_plugin(
+            _REQUEST,
+            target,
+            PluginArtifactAction.INSTALL,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=_authority(other.preview_digest),
+            review=_AcceptingReview(),
+        )
+    assert mismatched.value.reason is PluginArtifactReason.AUTHORITY_REQUIRED
+    assert not destination.exists()
+
+    review = _AcceptingReview()
+    result = apply_cursor_plugin(
+        _REQUEST,
+        target,
+        PluginArtifactAction.INSTALL,
+        artifact,
+        accepted_preview_digest=preview.preview_digest,
+        authority=_authority(preview.preview_digest),
+        review=review,
+    )
+    assert result.state_after is PluginArtifactState.NATIVE_MANAGED
+    assert [digest for _authority_value, digest in review.artifact_reviews] == [
+        preview.preview_digest
+    ]
+    assert review.setup_authorities == []
+
+
+def test_wedged_install_replay_reconciles_without_conflict_or_a_second_review(
+    tmp_path: Path,
+) -> None:
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    artifact = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
+    preview = preview_cursor_plugin(_REQUEST, target, PluginArtifactAction.INSTALL, artifact)
+    committed = apply_cursor_plugin(
+        _REQUEST,
+        target,
+        PluginArtifactAction.INSTALL,
+        artifact,
+        accepted_preview_digest=preview.preview_digest,
+        authority=_authority(preview.preview_digest),
+        review=_AcceptingReview(),
+    )
+    assert committed.operation_state is PluginOperationState.COMPLETED
+
+    # The commit succeeded but its result was lost. The same request and digest must reconcile at
+    # the selected state, and must not need a second single-shot review to do it.
+    replay = apply_cursor_plugin(
+        _REQUEST,
+        target,
+        PluginArtifactAction.INSTALL,
+        artifact,
+        accepted_preview_digest=preview.preview_digest,
+        authority=None,
+    )
+    assert replay.action is PluginArtifactAction.NOOP
+    assert replay.operation_state is PluginOperationState.COMPLETED
+    assert replay.state_before is PluginArtifactState.NATIVE_MANAGED
+    assert replay.state_after is PluginArtifactState.NATIVE_MANAGED
+    assert replay.installed_digest == artifact.artifact_digest
+    assert replay.changed_files == ()
+
+    # A different request never borrows the reconcile, and neither does a different artifact.
+    with pytest.raises(CursorIntegrationError) as other_request:
+        apply_cursor_plugin(
+            request_id("req_10000000-0000-4000-8000-000000000022"),
+            target,
+            PluginArtifactAction.INSTALL,
+            artifact,
+            accepted_preview_digest=preview.preview_digest,
+            authority=None,
+        )
+    assert other_request.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+    portable = render_cursor_plugin(PluginFormatProfile.AGENT_PLUGINS_1)
+    with pytest.raises(CursorIntegrationError) as other_artifact:
+        apply_cursor_plugin(
+            _REQUEST,
+            target,
+            PluginArtifactAction.INSTALL,
+            portable,
+            accepted_preview_digest=preview.preview_digest,
+            authority=None,
+        )
+    assert other_artifact.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+
+
+def test_wedged_remove_replay_reconciles_at_absent_instead_of_remove_refused(
+    tmp_path: Path,
+) -> None:
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    artifact = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
+    install_preview = preview_cursor_plugin(
+        _REQUEST, target, PluginArtifactAction.INSTALL, artifact
+    )
+    apply_cursor_plugin(
+        _REQUEST,
+        target,
+        PluginArtifactAction.INSTALL,
+        artifact,
+        accepted_preview_digest=install_preview.preview_digest,
+        authority=_authority(install_preview.preview_digest),
+        review=_AcceptingReview(),
+    )
+    remove_request = request_id("req_10000000-0000-4000-8000-000000000023")
+    remove_preview = preview_cursor_plugin(
+        remove_request, target, PluginArtifactAction.REMOVE, artifact
+    )
+    removed = remove_cursor_plugin(
+        remove_request,
+        target,
+        artifact,
+        accepted_preview_digest=remove_preview.preview_digest,
+        authority=_authority(remove_preview.preview_digest),
+        review=_AcceptingReview(),
+    )
+    assert removed.state_after is PluginArtifactState.ABSENT
+
+    replay = remove_cursor_plugin(
+        remove_request,
+        target,
+        artifact,
+        accepted_preview_digest=remove_preview.preview_digest,
+        authority=None,
+    )
+    assert replay.action is PluginArtifactAction.NOOP
+    assert replay.operation_state is PluginOperationState.COMPLETED
+    assert replay.state_before is PluginArtifactState.ABSENT
+    assert replay.state_after is PluginArtifactState.ABSENT
+    assert replay.installed_digest is None
+    assert replay.changed_files == ()
+
+
+@pytest.mark.parametrize("extra_key", ["cwd", "env"])
+def test_same_name_entry_with_any_extra_key_is_foreign_not_a_recognized_route(
+    tmp_path: Path, extra_key: str
+) -> None:
+    plugin = tmp_path / "plugin"
+    user = tmp_path / "user"
+    plugin.mkdir()
+    user.mkdir()
+    entry: dict[str, object] = {
+        "args": ["mcp", "serve", "--host", "cursor"],
+        "command": "yoetz",
+        "type": "stdio",
+        extra_key: {"YOETZ_TOKEN": "leak"} if extra_key == "env" else "/tmp",
+    }
+    (user / "mcp.json").write_text(json.dumps({"mcpServers": {"yoetz": entry}}), encoding="utf-8")
+
+    observation = observe_cursor_mcp(plugin_root=plugin, project_root=None, user_config_root=user)
+
+    assert observation.ownership_state is McpOwnershipState.FOREIGN
+    assert observation.route_profile is None
+    assert observation.winning_source is CursorMcpSource.USER
