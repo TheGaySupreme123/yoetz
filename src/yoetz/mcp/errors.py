@@ -839,7 +839,12 @@ def _allof_required_peer_text(
     prop_names: Mapping[str, JsonValue],
     missing: str,
 ) -> str | None:
-    """Return a simple ``if required X then required Y`` allOf peer, or None."""
+    """Return a single-condition ``if``/``then`` allOf peer for the missing field, or None.
+
+    Both frozen shapes are rendered: ``if required X then required Y`` (``content_digest requires
+    digest_binding``) and the single-property ``if properties.X const V then required Y``
+    (``action_kind command requires command``).
+    """
 
     all_of = payload.get("allOf")
     if not isinstance(all_of, list):
@@ -852,22 +857,31 @@ def _allof_required_peer_text(
         then_node = source.get("then")
         if not isinstance(if_node, Mapping) or not isinstance(then_node, Mapping):
             continue
-        if "properties" in if_node:
-            continue
-        if_required = cast(Mapping[str, JsonValue], if_node).get("required")
         then_required = cast(Mapping[str, JsonValue], then_node).get("required")
-        if not isinstance(if_required, list) or len(cast(list[object], if_required)) != 1:
-            continue
-        present = _format_required_list(if_required, prop_names)
         if (
-            not present
-            or not isinstance(then_required, list)
+            not isinstance(then_required, list)
             or missing not in cast(list[object], then_required)
             or _format_required_list(then_required, prop_names) != missing
         ):
             continue
+        present = _allof_peer_condition_text(cast(Mapping[str, JsonValue], if_node), prop_names)
+        if present is None:
+            continue
         return f"{present} requires {missing}"
     return None
+
+
+def _allof_peer_condition_text(
+    if_node: Mapping[str, JsonValue], prop_names: Mapping[str, JsonValue]
+) -> str | None:
+    """Name an allOf peer condition: a const-valued property, else a single required key."""
+
+    if isinstance(if_node.get("properties"), Mapping):
+        return _if_const_condition(if_node, prop_names)
+    if_required = if_node.get("required")
+    if not isinstance(if_required, list) or len(cast(list[object], if_required)) != 1:
+        return None
+    return _format_required_list(if_required, prop_names) or None
 
 
 def _unknown_property_measure(count: object) -> str:

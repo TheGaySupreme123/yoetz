@@ -1110,7 +1110,17 @@ def _project_selected_one_of_required_locations_impl(
     payload_properties = _payload_property_names_from_option(option_values[selected_index])
     if payload_properties is None:
         return None
-    ordered = _missing_required_locations(selected, base_path, payload_properties)
+    # No discriminator picked this branch's contract, so only rules the schema itself marks
+    # conditional (``anyOf``/``allOf`` of ``required``) may be reported as conditional. A plain
+    # top-level ``required`` failure here is an unconditional payload field: projecting it would
+    # both mislabel the reason and strand the caller with a repair sentence no rule can render.
+    ordered = _missing_required_locations(
+        selected,
+        base_path,
+        payload_properties,
+        wrappers_only=True,
+        branch_schema_path=parent_schema_path + (selected_index,),
+    )
     if not ordered:
         return None
     identity = _selected_family_for(exc) or _family_from_option(option_values[selected_index])
@@ -1192,12 +1202,21 @@ def _missing_required_locations(
     errors: Sequence[ValidationError],
     base_path: tuple[str | int, ...],
     admitted: frozenset[str],
+    *,
+    wrappers_only: bool = False,
+    branch_schema_path: tuple[object, ...] = (),
 ) -> list[tuple[tuple[str | int, ...], str]]:
     """Collect missing schema-named required fields from one already-selected branch.
 
     Direct ``required`` errors and ``anyOf``/``allOf`` wrappers of ``required`` are in scope.
     Nested ``oneOf`` is left to the discriminator-selecting caller so sibling contracts stay
     unprojected.
+
+    ``wrappers_only`` narrows the collection to ``required`` rules that sit under an
+    ``anyOf``/``allOf`` inside ``branch_schema_path``. Every location this collection yields is
+    reported as ``conditional_field_required``, so a caller that has not proved the whole branch
+    conditional on a matched discriminator must pass it: an unconditional payload ``required``
+    would otherwise be labelled conditional and carry no repair sentence at all.
     """
 
     ordered: list[tuple[tuple[str | int, ...], str]] = []
@@ -1207,6 +1226,8 @@ def _missing_required_locations(
             return
         validator = error.validator
         if validator == "required":
+            if wrappers_only and not _is_wrapped_required(error, branch_schema_path):
+                return
             _append_missing_required(error, base_path, admitted, ordered)
             return
         if validator == "anyOf":
@@ -1222,6 +1243,26 @@ def _missing_required_locations(
         if len(ordered) >= _MAX_PROJECTED_OBJECT_LOCATIONS:
             break
     return ordered
+
+
+_CONDITIONAL_SCHEMA_WRAPPERS: Final = frozenset({"anyOf", "allOf"})
+
+
+def _is_wrapped_required(error: ValidationError, branch_schema_path: tuple[object, ...]) -> bool:
+    """True when a ``required`` rule sits under an ``anyOf``/``allOf`` inside the given branch.
+
+    ``$ref``-resolved payload rules arrive flat rather than nested under a wrapper error, so the
+    schema location is what distinguishes ``allOf/0/then/required`` from the payload's own
+    unconditional ``required``.
+    """
+
+    schema_path = tuple(error.absolute_schema_path)
+    if schema_path[: len(branch_schema_path)] != branch_schema_path:
+        return False
+    return any(
+        segment in _CONDITIONAL_SCHEMA_WRAPPERS
+        for segment in schema_path[len(branch_schema_path) :]
+    )
 
 
 def _append_missing_required(

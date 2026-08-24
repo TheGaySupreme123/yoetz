@@ -228,6 +228,78 @@ def test_selected_payload_all_of_requires_digest_binding_with_content_digest() -
     assert "strength admits" not in message
 
 
+def _action_recorded_locations(payload: dict[str, object]) -> tuple[dict[str, str], ...]:
+    base = deepcopy(cast(dict[str, object], cast(list[object], _PUBLISH_SCHEMA["examples"])[0]))
+    draft = cast(dict[str, object], cast(list[object], base["event_drafts"])[0])
+    draft["schema"] = {"name": "action_recorded", "version": "1.0.0"}
+    draft["payload"] = payload
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate(base)
+    return safe_validation_locations(captured.value)
+
+
+def test_unconditional_payload_required_is_not_reported_as_conditional() -> None:
+    """A plain missing payload field must keep an actionable envelope hint, not a bare pointer.
+
+    Without a discriminator to select the branch, a top-level ``required`` failure carries no
+    activating condition, so no repair sentence can be rendered for it. Projecting it as
+    ``conditional_field_required`` therefore both mislabelled the rule and produced an empty hint.
+    """
+
+    locations = _action_recorded_locations(
+        {"action_kind": "edit", "description": "bounded action description"}
+    )
+    assert all(item.get("reason") != "conditional_field_required" for item in locations)
+    assert locations == ({"field": "/event_drafts/0/payload", "reason": "invalid_type_or_value"},)
+
+    hint = authoring_hint(_PUBLISH_SCHEMA, locations)
+    assert "each event_drafts entry requires" in hint
+    assert "payload" in hint
+    message = invalid_request_message("publish_work", locations)
+    assert "each event_drafts entry requires" in message
+
+
+def test_selected_payload_all_of_property_const_names_its_required_peer() -> None:
+    """A command action missing ``command`` must name the const condition that activated it."""
+
+    locations = _action_recorded_locations(
+        {
+            "action_id": "act_00000000-0000-4000-8000-000000000001",
+            "action_kind": "command",
+            "description": "bounded action description",
+        }
+    )
+    assert locations == (
+        {
+            "field": "/event_drafts/0/payload/command",
+            "reason": "conditional_field_required",
+            "family": "action_recorded",
+            "family_version": "1.0.0",
+        },
+    )
+    message = invalid_request_message("publish_work", locations)
+    assert "action_kind command requires command" in message
+    assert "action_kind admits" not in message
+
+
+def test_mixed_payload_requireds_report_only_the_conditional_peer() -> None:
+    """An unconditional miss beside a conditional one must not borrow the conditional token."""
+
+    locations = _action_recorded_locations(
+        {"action_kind": "command", "description": "bounded action description"}
+    )
+    assert all(item.get("field") != "/event_drafts/0/payload/action_id" for item in locations)
+    assert locations == (
+        {
+            "field": "/event_drafts/0/payload/command",
+            "reason": "conditional_field_required",
+            "family": "action_recorded",
+            "family_version": "1.0.0",
+        },
+    )
+    assert "action_kind command requires command" in authoring_hint(_PUBLISH_SCHEMA, locations)
+
+
 def test_unselected_sibling_branch_contract_is_never_projected() -> None:
     """When const rejections cannot isolate one branch, no branch's contract is projected.
 
