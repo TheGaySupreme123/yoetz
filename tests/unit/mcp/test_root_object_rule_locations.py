@@ -156,6 +156,150 @@ def test_selected_payload_one_of_names_its_missing_co_required_field() -> None:
     assert "strength admits" not in message
 
 
+def test_selected_payload_any_of_required_names_metadata_only_alternatives() -> None:
+    """A metadata_only draft missing both description and reference must name the pair (#335)."""
+
+    base = deepcopy(cast(dict[str, object], cast(list[object], _PUBLISH_SCHEMA["examples"])[0]))
+    draft = cast(dict[str, object], cast(list[object], base["event_drafts"])[0])
+    draft["schema"] = {"name": "evidence_recorded", "version": "1.1.0"}
+    draft["payload"] = {
+        "evidence_id": "evd_00000000-0000-4000-8000-000000000001",
+        "evidence_kind": "artifact",
+        "strength": "metadata_only",
+        "observed_at": "2026-01-01T00:00:00.000Z",
+    }
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate(base)
+
+    locations = safe_validation_locations(captured.value)
+    assert locations == (
+        {
+            "field": "/event_drafts/0/payload/description",
+            "reason": "conditional_field_required",
+            "family": "evidence_recorded",
+            "family_version": "1.1.0",
+            "condition_field": "strength",
+            "condition_value": "metadata_only",
+        },
+        {
+            "field": "/event_drafts/0/payload/reference",
+            "reason": "conditional_field_required",
+            "family": "evidence_recorded",
+            "family_version": "1.1.0",
+            "condition_field": "strength",
+            "condition_value": "metadata_only",
+        },
+    )
+    message = invalid_request_message("publish_work", locations)
+    assert "strength metadata_only requires description or reference" in message
+    assert "each event_drafts entry requires" not in message
+    assert "strength admits" not in message
+
+
+def test_selected_payload_all_of_requires_digest_binding_with_content_digest() -> None:
+    """A content_digest draft missing digest_binding must name the allOf peer (#335)."""
+
+    base = deepcopy(cast(dict[str, object], cast(list[object], _PUBLISH_SCHEMA["examples"])[0]))
+    draft = cast(dict[str, object], cast(list[object], base["event_drafts"])[0])
+    draft["schema"] = {"name": "evidence_recorded", "version": "1.1.0"}
+    draft["payload"] = {
+        "evidence_id": "evd_00000000-0000-4000-8000-000000000001",
+        "evidence_kind": "artifact",
+        "strength": "content_digest",
+        "content_digest": "sha256:" + ("0" * 64),
+        "observed_at": "2026-01-01T00:00:00.000Z",
+        "description": "bounded evidence description",
+    }
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate(base)
+
+    locations = safe_validation_locations(captured.value)
+    assert locations == (
+        {
+            "field": "/event_drafts/0/payload/digest_binding",
+            "reason": "conditional_field_required",
+            "family": "evidence_recorded",
+            "family_version": "1.1.0",
+        },
+    )
+    message = invalid_request_message("publish_work", locations)
+    assert "content_digest requires digest_binding" in message
+    assert "each event_drafts entry requires" not in message
+    assert "strength admits" not in message
+
+
+def _action_recorded_locations(payload: dict[str, object]) -> tuple[dict[str, str], ...]:
+    base = deepcopy(cast(dict[str, object], cast(list[object], _PUBLISH_SCHEMA["examples"])[0]))
+    draft = cast(dict[str, object], cast(list[object], base["event_drafts"])[0])
+    draft["schema"] = {"name": "action_recorded", "version": "1.0.0"}
+    draft["payload"] = payload
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate(base)
+    return safe_validation_locations(captured.value)
+
+
+def test_unconditional_payload_required_is_not_reported_as_conditional() -> None:
+    """A plain missing payload field must keep an actionable envelope hint, not a bare pointer.
+
+    Without a discriminator to select the branch, a top-level ``required`` failure carries no
+    activating condition, so no repair sentence can be rendered for it. Projecting it as
+    ``conditional_field_required`` therefore both mislabelled the rule and produced an empty hint.
+    """
+
+    locations = _action_recorded_locations(
+        {"action_kind": "edit", "description": "bounded action description"}
+    )
+    assert all(item.get("reason") != "conditional_field_required" for item in locations)
+    assert locations == ({"field": "/event_drafts/0/payload", "reason": "invalid_type_or_value"},)
+
+    hint = authoring_hint(_PUBLISH_SCHEMA, locations)
+    assert "each event_drafts entry requires" in hint
+    assert "payload" in hint
+    message = invalid_request_message("publish_work", locations)
+    assert "each event_drafts entry requires" in message
+
+
+def test_selected_payload_all_of_property_const_names_its_required_peer() -> None:
+    """A command action missing ``command`` must name the const condition that activated it."""
+
+    locations = _action_recorded_locations(
+        {
+            "action_id": "act_00000000-0000-4000-8000-000000000001",
+            "action_kind": "command",
+            "description": "bounded action description",
+        }
+    )
+    assert locations == (
+        {
+            "field": "/event_drafts/0/payload/command",
+            "reason": "conditional_field_required",
+            "family": "action_recorded",
+            "family_version": "1.0.0",
+        },
+    )
+    message = invalid_request_message("publish_work", locations)
+    assert "action_kind command requires command" in message
+    assert "action_kind admits" not in message
+
+
+def test_mixed_payload_requireds_report_only_the_conditional_peer() -> None:
+    """An unconditional miss beside a conditional one must not borrow the conditional token."""
+
+    locations = _action_recorded_locations(
+        {"action_kind": "command", "description": "bounded action description"}
+    )
+    assert all(item.get("field") != "/event_drafts/0/payload/action_id" for item in locations)
+    assert locations == (
+        {
+            "field": "/event_drafts/0/payload/command",
+            "reason": "conditional_field_required",
+            "family": "action_recorded",
+            "family_version": "1.0.0",
+        },
+    )
+    assert "action_kind command requires command" in authoring_hint(_PUBLISH_SCHEMA, locations)
+
+
 def test_unselected_sibling_branch_contract_is_never_projected() -> None:
     """When const rejections cannot isolate one branch, no branch's contract is projected.
 

@@ -997,14 +997,25 @@ def _project_root_object_rule_locations(
 
 def _project_selected_one_of_required_locations(
     exc: ValidationError,
-) -> tuple[tuple[tuple[tuple[str | int, ...], str], ...], str, str, tuple[str, str] | None] | None:
+) -> (
+    tuple[
+        tuple[tuple[tuple[str | int, ...], str], ...],
+        str | None,
+        str | None,
+        tuple[str, str] | None,
+    ]
+    | None
+):
     """Project required peers from exactly one const-discriminated ``oneOf`` branch.
 
     A failed ``oneOf`` normally has an empty instance path.  Flattening all of its branches would
     name fields from alternatives the caller did not choose, while selecting the parent error
     loses the actual missing peer.  This picks a branch only when sibling const rejections prove
-    that every other branch was ruled out by the same schema-authored property.  Projection is
-    best-effort: an unexpected error-tree shape degrades to the generic best-path rule.
+    that every other branch was ruled out by the same schema-authored property.  The selected
+    branch's own ``required`` list, ``anyOf``-of-``required`` alternatives, and sibling ``allOf``
+    ``if``/``then`` required peers are all eligible once the branch is uniquely selected.
+    Projection is best-effort: an unexpected error-tree shape degrades to the generic best-path
+    rule.
     """
 
     try:
@@ -1015,7 +1026,15 @@ def _project_selected_one_of_required_locations(
 
 def _project_selected_one_of_required_locations_impl(
     exc: ValidationError,
-) -> tuple[tuple[tuple[tuple[str | int, ...], str], ...], str, str, tuple[str, str] | None] | None:
+) -> (
+    tuple[
+        tuple[tuple[tuple[str | int, ...], str], ...],
+        str | None,
+        str | None,
+        tuple[str, str] | None,
+    ]
+    | None
+):
     if exc.validator != "oneOf" or not isinstance(exc.schema, Mapping):
         return None
     branches: dict[int, list[ValidationError]] = {}
@@ -1072,21 +1091,7 @@ def _project_selected_one_of_required_locations_impl(
         if len(survivors) != 1:
             continue
         selected_index, selected_value = survivors[0]
-        ordered: list[tuple[tuple[str | int, ...], str]] = []
-        for error in branches[selected_index]:
-            validator_value = cast(object, error.validator_value)
-            if error.validator != "required" or not isinstance(validator_value, list):
-                continue
-            instance = error.instance
-            if not isinstance(instance, Mapping):
-                continue
-            for item in cast(list[object], validator_value):
-                required = _safe_schema_field(item, root_properties)
-                if required is None or required in instance:
-                    continue
-                location = (base_path + (required,), _OBJECT_RULE_CONDITIONAL)
-                if location not in ordered:
-                    ordered.append(location)
+        ordered = _missing_required_locations(branches[selected_index], base_path, root_properties)
         if ordered:
             return (tuple(ordered), field, selected_value, _selected_family_for(exc))
     # Descend only into a branch the discriminator proved selected. Recursing into
@@ -1099,7 +1104,189 @@ def _project_selected_one_of_required_locations_impl(
         projected = _project_selected_one_of_required_locations_impl(nested)
         if projected is not None:
             return projected
-    return None
+    selected_index = _shared_branch_index(parent_schema_path, selected)
+    if selected_index is None or not 0 <= selected_index < len(option_values):
+        return None
+    payload_properties = _payload_property_names_from_option(option_values[selected_index])
+    if payload_properties is None:
+        return None
+    # No discriminator picked this branch's contract, so only rules the schema itself marks
+    # conditional (``anyOf``/``allOf`` of ``required``) may be reported as conditional. A plain
+    # top-level ``required`` failure here is an unconditional payload field: projecting it would
+    # both mislabel the reason and strand the caller with a repair sentence no rule can render.
+    ordered = _missing_required_locations(
+        selected,
+        base_path,
+        payload_properties,
+        wrappers_only=True,
+        branch_schema_path=parent_schema_path + (selected_index,),
+    )
+    if not ordered:
+        return None
+    identity = _selected_family_for(exc) or _family_from_option(option_values[selected_index])
+    return (tuple(ordered), None, None, identity)
+
+
+def _shared_branch_index(
+    parent_schema_path: tuple[object, ...], errors: Sequence[ValidationError]
+) -> int | None:
+    """Return the one child index shared by every selected error, or None if mixed."""
+
+    indices: set[int] = set()
+    for error in errors:
+        schema_path = tuple(error.absolute_schema_path)
+        if len(schema_path) <= len(parent_schema_path):
+            return None
+        index = schema_path[len(parent_schema_path)]
+        if type(index) is not int:
+            return None
+        indices.add(index)
+    return next(iter(indices)) if len(indices) == 1 else None
+
+
+def _payload_property_names_from_option(option: object) -> frozenset[str] | None:
+    """Return payload property names from one event-draft union option, resolving ``$ref``."""
+
+    if not isinstance(option, Mapping):
+        return None
+    properties = cast(Mapping[str, JsonValue], option).get("properties")
+    if not isinstance(properties, Mapping):
+        return None
+    return _schema_property_names(
+        _resolve_schema_mapping(cast(Mapping[str, JsonValue], properties).get("payload"))
+    )
+
+
+def _family_from_option(option: object) -> tuple[str, str] | None:
+    """Name the family whose payload ``$ref`` this event-draft option carries."""
+
+    payload = _resolve_schema_mapping(_option_payload_node(option))
+    if payload is None:
+        return None
+    schema_id = payload.get("$id")
+    if type(schema_id) is not str:
+        return None
+    document = _load_catalog_state().catalog.by_id.get(schema_id)
+    if document is None:
+        return None
+    family = document.schema_name.replace("-", "_")
+    version = document.schema_version
+    if family not in _load_catalog_state().catalog.event_schema_versions:
+        return None
+    return (family, version) if SCHEMA_VERSION_PATTERN.fullmatch(version) is not None else None
+
+
+def _option_payload_node(option: object) -> object:
+    if not isinstance(option, Mapping):
+        return None
+    properties = cast(Mapping[str, JsonValue], option).get("properties")
+    if not isinstance(properties, Mapping):
+        return None
+    return cast(Mapping[str, JsonValue], properties).get("payload")
+
+
+def _resolve_schema_mapping(node: object) -> Mapping[str, JsonValue] | None:
+    """Return a schema object, following a same-catalog ``$ref`` when that is the node."""
+
+    if not isinstance(node, Mapping):
+        return None
+    source = cast(Mapping[str, JsonValue], node)
+    ref = source.get("$ref")
+    if type(ref) is not str:
+        return source
+    target = _load_catalog_state().plain_by_id.get(ref)
+    return target if isinstance(target, dict) else None
+
+
+def _missing_required_locations(
+    errors: Sequence[ValidationError],
+    base_path: tuple[str | int, ...],
+    admitted: frozenset[str],
+    *,
+    wrappers_only: bool = False,
+    branch_schema_path: tuple[object, ...] = (),
+) -> list[tuple[tuple[str | int, ...], str]]:
+    """Collect missing schema-named required fields from one already-selected branch.
+
+    Direct ``required`` errors and ``anyOf``/``allOf`` wrappers of ``required`` are in scope.
+    Nested ``oneOf`` is left to the discriminator-selecting caller so sibling contracts stay
+    unprojected.
+
+    ``wrappers_only`` narrows the collection to ``required`` rules that sit under an
+    ``anyOf``/``allOf`` inside ``branch_schema_path``. Every location this collection yields is
+    reported as ``conditional_field_required``, so a caller that has not proved the whole branch
+    conditional on a matched discriminator must pass it: an unconditional payload ``required``
+    would otherwise be labelled conditional and carry no repair sentence at all.
+    """
+
+    ordered: list[tuple[tuple[str | int, ...], str]] = []
+
+    def consider(error: ValidationError) -> None:
+        if len(ordered) >= _MAX_PROJECTED_OBJECT_LOCATIONS:
+            return
+        validator = error.validator
+        if validator == "required":
+            if wrappers_only and not _is_wrapped_required(error, branch_schema_path):
+                return
+            _append_missing_required(error, base_path, admitted, ordered)
+            return
+        if validator == "anyOf":
+            for nested in error.context or ():
+                consider(nested)
+            return
+        if validator == "allOf":
+            for nested in error.context or ():
+                consider(nested)
+
+    for error in errors:
+        consider(error)
+        if len(ordered) >= _MAX_PROJECTED_OBJECT_LOCATIONS:
+            break
+    return ordered
+
+
+_CONDITIONAL_SCHEMA_WRAPPERS: Final = frozenset({"anyOf", "allOf"})
+
+
+def _is_wrapped_required(error: ValidationError, branch_schema_path: tuple[object, ...]) -> bool:
+    """True when a ``required`` rule sits under an ``anyOf``/``allOf`` inside the given branch.
+
+    ``$ref``-resolved payload rules arrive flat rather than nested under a wrapper error, so the
+    schema location is what distinguishes ``allOf/0/then/required`` from the payload's own
+    unconditional ``required``.
+    """
+
+    schema_path = tuple(error.absolute_schema_path)
+    if schema_path[: len(branch_schema_path)] != branch_schema_path:
+        return False
+    return any(
+        segment in _CONDITIONAL_SCHEMA_WRAPPERS
+        for segment in schema_path[len(branch_schema_path) :]
+    )
+
+
+def _append_missing_required(
+    error: ValidationError,
+    base_path: tuple[str | int, ...],
+    admitted: frozenset[str],
+    ordered: list[tuple[tuple[str | int, ...], str]],
+) -> None:
+    validator_value = cast(object, error.validator_value)
+    instance = error.instance
+    if not isinstance(validator_value, list) or not isinstance(instance, Mapping):
+        return
+    object_path = _path_items_from(error)
+    if object_path is None:
+        object_path = base_path
+    for item in cast(list[object], validator_value):
+        required = _safe_schema_field(item, admitted)
+        if required is None or required in instance:
+            continue
+        location = (object_path + (required,), _OBJECT_RULE_CONDITIONAL)
+        if location not in ordered:
+            ordered.append(location)
+        if len(ordered) >= _MAX_PROJECTED_OBJECT_LOCATIONS:
+            return
 
 
 def _project_root_object_rule_locations_impl(
