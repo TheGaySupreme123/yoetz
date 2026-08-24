@@ -1080,13 +1080,20 @@ def _reconciled_install(
 ) -> CursorPluginResult | None:
     """Recognize a committed install whose result was lost, without touching any bytes.
 
-    A same-request replay of an install that already committed must reconcile at the selected
-    state rather than refuse with ``destination_conflict``. The recognition is stateless and
-    exact: the destination must be marker-valid at the accepted artifact digest and format, and
-    the accepted preview digest must equal the digest the pre-commit ``absent`` preview would
-    have produced for this exact request, artifact, and target. Only the observed MCP ownership
-    state is unknown after the fact, and it is bounded to the states that preview already
-    admits, so genuinely different content, targets, or requests still fail closed.
+    A replay of an install that already committed reconciles at the selected state rather than
+    refusing with ``destination_conflict``. The destination must be marker-valid at the accepted
+    artifact digest and format, and the accepted preview digest must equal the digest an
+    ``absent`` preview would produce for that artifact and target at one of the MCP ownership
+    states preview already admits.
+
+    Recognition is stateless, so it is not request-bound and must not be read as one. The preview
+    digest is a pure function of request ID, action, artifact digest, the ``absent`` state digest,
+    owner state, and target identity, so any caller can recompute an accepted digest for a request
+    ID that never committed anything and reach this result. That is deliberate rather than a
+    bypass: this branch is a read-only equivalent of ``status``. It mutates nothing, consumes no
+    authority, spends no review, and reports only the state already on disk. What it cannot do is
+    claim a state that is not there -- a different artifact, format, target, or an unmarked,
+    modified, or absent destination still fails closed.
     """
 
     if action is not PluginArtifactAction.INSTALL:

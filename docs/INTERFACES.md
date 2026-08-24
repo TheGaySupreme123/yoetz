@@ -3059,13 +3059,19 @@ the adapter, which refuses with `authority_required` when none is presented and,
 packaged runtime advertises no verified action-bound `UserPresencePort`, fails closed with
 `human_authority_unavailable` before any mutation.
 
-Same request/digest replays are idempotent at the selected state. A committed operation whose
-result was lost reconciles instead of refusing, and reconciliation touches no bytes and consumes
-no second review. Install reconciles only when the destination is marker-valid at the accepted
-format and artifact digest and the accepted preview digest equals the digest the pre-commit
-`absent` preview would have produced for that exact request, artifact, and target; remove
-reconciles only at `absent`, whose pre-commit tree digest no longer exists to re-prove. Every
-other state still refuses. Install or replace refuses modified, unmanaged, symlinked, dual,
+Install and remove replays are idempotent at the selected state: a committed operation whose
+result was lost reconciles instead of refusing, touching no bytes and consuming no second review.
+Replace is deliberately not reconciled — the accepted digest bound the pre-commit tree, which the
+replacement destroyed, so a replace replay after commit reports `preview_stale` and the caller
+reconciles through `status`. Install reconciles when the destination is marker-valid at the
+accepted format and artifact digest and the accepted preview digest equals a digest an `absent`
+preview would produce for that artifact and target at an admitted MCP ownership state; remove
+reconciles at `absent`, whose pre-commit tree digest no longer exists to re-prove. Neither
+recognition is request-bound: the preview digest is a pure function of its inputs, so a caller may
+recompute one for a request that committed nothing and obtain the same answer. Both branches are
+read-only equivalents of `status` — no mutation, no authority consumed, no state claimed that is
+not on disk — so that reachability is admitted rather than load-bearing. Every other state still
+refuses. Install or replace refuses modified, unmanaged, symlinked, dual,
 foreign, ambiguous, stale-preview, or recovery-required state without overwrite or automatic
 repair. Remove accepts only marker-valid managed bytes; an independently present MCP source does
 not block removal because the operation preserves that source. Removal also preserves ledgers,

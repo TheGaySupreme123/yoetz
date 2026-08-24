@@ -42,9 +42,14 @@ unmanaged copy, symlink, rollback residue, or conflicting MCP source refuses wit
 single-shot `plugin_artifact_apply` trusted review prepared for that same digest, so an apply
 without one refuses with `authority_required`. Until a production action-bound presence adapter
 ships, the standalone lane then fails closed with `human_authority_unavailable` (ADR-016 decision
-6, ADR-023 decision 11) and Cursor install/remove stays preview/status-only in practice. Replaying
-the same request and digest after a committed operation whose result was lost reconciles at the
-already-selected state without mutating bytes or spending a second review.
+6, ADR-023 decision 11) and Cursor install/remove stays preview/status-only in practice.
+
+Replaying the same request and digest after a committed install or remove whose result was lost
+reconciles at the already-selected state without mutating bytes or spending a second review. Pass
+`--action install` on an install replay: the tree now exists, so the inferred default becomes
+`replace`, and a replace replay reports `preview_stale` because the accepted digest bound the tree
+the commit already destroyed. Reconcile a wedged replace through `status`, never by re-applying.
+
 Portable uses root `plugin.json`; native uses `.cursor-plugin/plugin.json`. One installed tree may
 contain only one of those manifests.
 
@@ -132,6 +137,7 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 | Modified plugin cannot remove | preserved local change; inspect and resolve manually |
 | Install refuses `authority_required` after `--accept` | no `plugin_artifact_apply` review is prepared for that exact digest |
 | Install refuses `human_authority_unavailable` | expected: no production presence cell exists yet |
+| Install replay reports `preview_stale` | the inferred action became `replace`; replay with `--action install` |
 | MCP entry looks right but reads `foreign` | route recognition is key-set exact; an extra `env`/`cwd` key is a foreign entry |
 
 Always report what is proven and the remaining cells/gaps. A clean local test never proves Cursor

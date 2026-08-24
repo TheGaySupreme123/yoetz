@@ -570,8 +570,9 @@ def test_wedged_install_replay_reconciles_without_conflict_or_a_second_review(
     assert replay.installed_digest == artifact.artifact_digest
     assert replay.changed_files == ()
 
-    # A different request never borrows the reconcile, and neither does a different artifact.
-    with pytest.raises(CursorIntegrationError) as other_request:
+    # A foreign request replaying somebody else's accepted digest still fails closed, because
+    # the request ID is part of the digest it would have to match.
+    with pytest.raises(CursorIntegrationError) as borrowed_digest:
         apply_cursor_plugin(
             request_id("req_10000000-0000-4000-8000-000000000022"),
             target,
@@ -580,7 +581,55 @@ def test_wedged_install_replay_reconciles_without_conflict_or_a_second_review(
             accepted_preview_digest=preview.preview_digest,
             authority=None,
         )
-    assert other_request.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+    assert borrowed_digest.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+
+    # Recognition is stateless, not request-bound, and this pins that honestly: the preview
+    # digest is a pure function of its inputs, so a request that never committed anything can
+    # recompute one and reach the same reconciled result. That is a read-only equivalent of
+    # ``status`` -- no bytes move, no review is consumed -- so it is admitted, not a bypass.
+    from yoetz.adapters.integrations.cursor_integration import (
+        _ABSENT_STATE_DIGEST,  # pyright: ignore[reportPrivateUsage]
+        _admissible_owner_states,  # pyright: ignore[reportPrivateUsage]
+        _preview_digest,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    never_committed = request_id("req_10000000-0000-4000-8000-000000000024")
+    recomputed = _preview_digest(
+        never_committed,
+        PluginArtifactAction.INSTALL,
+        artifact,
+        current_state_digest=_ABSENT_STATE_DIGEST,
+        mcp_ownership_state=preview.mcp_ownership_state,
+        target_identity=preview.target_identity,
+    )
+    assert preview.mcp_ownership_state in _admissible_owner_states(artifact)
+    installed_bytes = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path / ".cursor").rglob("*")
+        if path.is_file()
+    }
+    review = _AcceptingReview()
+    foreign = apply_cursor_plugin(
+        never_committed,
+        target,
+        PluginArtifactAction.INSTALL,
+        artifact,
+        accepted_preview_digest=recomputed,
+        authority=None,
+        review=review,
+    )
+    assert foreign.action is PluginArtifactAction.NOOP
+    assert foreign.operation_state is PluginOperationState.COMPLETED
+    assert foreign.changed_files == ()
+    assert review.artifact_reviews == []
+    assert review.setup_authorities == []
+    assert {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path / ".cursor").rglob("*")
+        if path.is_file()
+    } == installed_bytes
+
+    # What the reconcile cannot do is claim a state that is not on disk.
     portable = render_cursor_plugin(PluginFormatProfile.AGENT_PLUGINS_1)
     with pytest.raises(CursorIntegrationError) as other_artifact:
         apply_cursor_plugin(
