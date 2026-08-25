@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -91,6 +92,18 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
         preview_result.stdout.encode("utf-8") == canonical_encode(cast(JsonValue, preview)) + b"\n"
     )
     assert preview["state_before"] == "absent"
+    assert preview["authorization"] == {
+        "operation": "plugin_artifact_apply",
+        "prepare_command": [
+            "yoetz",
+            "consent",
+            "prepare",
+            "plugin_artifact_apply",
+            "--target-digest",
+            preview["preview_digest"],
+        ],
+        "requires_os_authenticated_prompt": True,
+    }
 
     state = tmp_path / "private-state"
     presence = _Presence()
@@ -114,6 +127,36 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
     status_body = json.loads(status.stdout)
     assert status_body["state"] == "native_managed"
     assert status_body["mcp"]["ownership_state"] == "plugin"
+
+    replace_preview_result = runner.invoke(
+        app,
+        _args(
+            config,
+            project,
+            "preview",
+            "--action",
+            "replace",
+            "--request-id",
+            "req_10000000-0000-4000-8000-000000000009",
+        ),
+    )
+    assert replace_preview_result.exit_code == 0
+    replace_preview = json.loads(replace_preview_result.stdout)
+    prepare_portable_artifact_review(replace_preview["preview_digest"], _state=state)
+    assert (
+        _mutate(
+            "install",
+            config,
+            project,
+            request_value=replace_preview["request_id"],
+            preview_digest=replace_preview["preview_digest"],
+            state=state,
+            presence=presence,
+            requested_action="replace",
+        )
+        == 0
+    )
+    assert len(presence.seen) == 2
 
     remove_preview_result = runner.invoke(
         app,
@@ -142,7 +185,7 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
         )
         == 0
     )
-    assert len(presence.seen) == 2
+    assert len(presence.seen) == 3
     assert not (config / "plugins" / "local" / "yoetz").exists()
     assert sentinel.read_text("utf-8") == "untouched\n"
 
@@ -160,7 +203,7 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
         )
         == 1
     )
-    assert len(presence.seen) == 2
+    assert len(presence.seen) == 3
 
 
 def test_cursor_plugin_cli_rejects_unknown_action_with_bounded_reason(tmp_path: Path) -> None:
@@ -209,8 +252,8 @@ def test_accept_without_a_prepared_review_cannot_mutate_through_the_typer_surfac
     assert not (config / "plugins" / "local" / "yoetz").exists()
 
 
-def test_prepared_review_without_a_presence_cell_fails_closed_before_any_mutation(
-    tmp_path: Path,
+def test_prepared_review_denied_by_os_presence_fails_closed_before_any_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = tmp_path / "cursor-testing-home" / ".cursor"
     project = tmp_path / "project"
@@ -221,8 +264,16 @@ def test_prepared_review_without_a_presence_cell_fails_closed_before_any_mutatio
     preview = json.loads(runner.invoke(app, _args(config, project, "preview")).stdout)
     prepare_portable_artifact_review(preview["preview_digest"], _state=state)
 
-    # No presence override: this is the packaged wiring, which advertises no verified
-    # action-bound UserPresencePort (ADR-016 decision 6, ADR-023 decision 11).
+    def deny_presence(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess([], 0, b"denied\n", b"")
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.macos_artifact_presence.subprocess.run",
+        deny_presence,
+    )
+
+    # No presence override uses the packaged macOS adapter. A denied/cancelled OS prompt cannot
+    # consume the pending or move any target bytes.
     assert (
         _mutate(
             "install",

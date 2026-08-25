@@ -168,7 +168,10 @@ manifest.
 Cursor is the second first-party harness and remains local-only. The adapter at
 `adapters/integrations/cursor_integration.py` owns exact IDE/CLI/SDK identity capture, the
 Agent Plugins and Cursor-native projections, explicit user-scope lifecycle, MCP source precedence,
-and the pinned `sdk.v1` TypeScript/Python profiles. Cursor-native hooks enter through
+and the pinned `sdk.v1` TypeScript/Python profiles. The pinned macOS lifecycle consumes one exact
+`plugin_artifact_apply` pending only after the scoped `macos_artifact_presence.py` adapter obtains
+a fresh Apple LocalAuthentication device-owner result; this does not populate the service-wide
+presence cell. Cursor-native hooks enter through
 `hooks cursor-observe`; that boundary retains only allowlisted structural scalars and a one-way
 changed-path digest. It drops prompts, reasoning, response text, file paths and contents, edits,
 MCP arguments/results, transcripts, command output, and email before observation storage. The

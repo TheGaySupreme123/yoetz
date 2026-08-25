@@ -28,5 +28,8 @@ The normal sequence is:
 
 A portable plugin is a carrier only. Its presence, validation, installation, discovery, or host
 activation grants no privacy authority, provider authority, observation consent, semantic-review
-coverage, or completion proof. Existing host registration remains the MCP owner for this
-skills-only bundle; this artifact intentionally contains no `mcp.json`.
+coverage, or completion proof. MCP ownership is mode-specific and exclusive:
+
+- `external_registration` omits `mcp.json`; the existing host registration remains the sole owner.
+- `plugin_managed` includes the selected `mcp.json` route; this plugin is the sole owner, so do not
+  keep a duplicate native, project, user, or global registration.

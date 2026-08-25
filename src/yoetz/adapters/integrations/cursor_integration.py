@@ -104,10 +104,7 @@ _CURSOR_CAPABILITY_PROFILE_IDS: Final = (
 _CURSOR_HOOK_PROFILE: Final = HarnessHookProfile(
     trigger_event="sessionStart",
     trigger_payload_profile_id="cursor-hooks-common-3.17-v1",
-    evidence_case_ids=(
-        "cursor-cli-portable-2026.07.09-a3815c0-macos-arm64",
-        "cursor-ide-native-3.17.8-macos-arm64",
-    ),
+    evidence_case_ids=("cursor-ide-native-3.17.8-macos-arm64",),
     observation_events=CURSOR_HOOK_EVENTS,
 )
 CURSOR_HARNESS_PROFILE: Final = HarnessProfile(
@@ -117,10 +114,10 @@ CURSOR_HARNESS_PROFILE: Final = HarnessProfile(
     capability_profile_ids=_CURSOR_CAPABILITY_PROFILE_IDS,
     supported_versions=("1.0.23", "1.0.24", "2026.07.09-a3815c0", "3.17.8"),
     hooks_by_capability_profile={
-        "cursor-cli-2026.07.09-a3815c0": _CURSOR_HOOK_PROFILE,
+        "cursor-cli-2026.07.09-a3815c0": None,
         "cursor-ide-3.17.8": _CURSOR_HOOK_PROFILE,
-        "cursor-sdk-python-1.0.24": _CURSOR_HOOK_PROFILE,
-        "cursor-sdk-typescript-1.0.23": _CURSOR_HOOK_PROFILE,
+        "cursor-sdk-python-1.0.24": None,
+        "cursor-sdk-typescript-1.0.23": None,
     },
 )
 

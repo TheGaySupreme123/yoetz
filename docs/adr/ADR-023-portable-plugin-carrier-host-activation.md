@@ -154,9 +154,13 @@ becomes host-derived.
     owns the first implementation of that operation-specific prepare/consume boundary; this
     design-only change does not make any new mutation available. An
     ordinary TTY confirmation, `--accept`, a same-UID process, or a host marketplace prompt is not
-    and cannot silently become `UserPresencePort` authority; until a production presence adapter
-    exists, standalone console review fails closed with `human_authority_unavailable`, leaving
-    those standalone paths render/preview/status-only in practice. Before #150 implements the
+    and cannot silently become `UserPresencePort` authority. Issue #409 adds a scoped production
+    adapter for the pinned macOS Cursor cell: Apple LocalAuthentication authenticates one fresh
+    device owner against a prompt naming the exact operation, preview digest, and pending review;
+    only then may the already-bound single-shot pending be consumed. Cancellation, timeout,
+    unavailable policy, non-macOS hosts, and every binding mismatch fail before mutation. Other
+    standalone paths remain render/preview/status-only until they wire an independently proven
+    authority cell. Before #150 implements the
     boundary they do not exist at all. The ADR-012 setup wizard's
     already-authorized digest-bound composition remains the separately authorized install path and
     is unchanged. Agent preparation is never trusted human review (ADR-015/ADR-016).
@@ -191,9 +195,10 @@ top-level/component/server failure boundaries. Provider status combines external
 observations conservatively; no host cell or activation claim is created by this implementation.
 
 The exact standalone mutation operation is `plugin_artifact_apply`, risk class `review_only`,
-bound to the complete preview digest. Agent-chat authorization is forbidden. Without an
-action-bound production user-presence adapter it fails closed before target mutation. The
-ADR-012 setup composition remains the separate existing authority path. The Codex native tree
+bound to the complete preview digest. Agent-chat authorization is forbidden. The pinned macOS
+Cursor CLI uses the issue #409 LocalAuthentication adapter; a host without that exact production
+cell fails closed before target mutation. The ADR-012 setup composition remains the separate
+existing authority path. The Codex native tree
 continues to ship as the active control; #150 adds the portable renderer and whole-directory
 migration/rollback implementation but makes no discovery or activation claim.
 The exact Codex project root/scope and skills-only member inventory are registered by fixture
@@ -252,7 +257,10 @@ trusted-project file semantics that artifact and activation state must not reuse
 **Treat a host marketplace prompt or `--accept` as review authority.** Rejected: ADR-016's
 presence rule exists precisely because same-UID automation can fabricate both; a standing trust
 change needs the single-shot digest-bound review lane or the already-authorized setup ceremony.
+Issue #409's macOS adapter therefore creates a fresh LocalAuthentication context with reuse
+disabled for every exact pending.
 
 **Ship phase 1 render/preview/status-only and defer the authority question.** Rejected by
 maintainer decision: the `review_only` lane is designed now so implementation does not later
-improvise authority; the practical effect is the same until a production presence adapter exists.
+improvise authority. Issue #409 makes only the exact pinned macOS Cursor cell usable; neighboring
+cells remain unavailable rather than inheriting that proof.

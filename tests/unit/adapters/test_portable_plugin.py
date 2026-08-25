@@ -63,9 +63,11 @@ def _setup_authority(preview_digest: str) -> ArtifactAuthority:
 class _Presence:
     def __init__(self, *, allowed: bool = True) -> None:
         self.allowed = allowed
+        self.calls = 0
         self.seen: ArtifactAuthority | None = None
 
     def verify_artifact_review(self, authority: ArtifactAuthority) -> None:
+        self.calls += 1
         self.seen = authority
         if not self.allowed:
             raise RuntimeError("presence unavailable")
@@ -154,6 +156,9 @@ def test_portable_tree_is_skills_only_and_guidance_is_byte_identical() -> None:
     assert rendered.plan.format_profile is PluginFormatProfile.AGENT_PLUGINS_1
     assert rendered.plan.mcp_ownership is McpOwnership.EXTERNAL_REGISTRATION
     assert rendered.plan.mcp_route_profile is None
+    skill = tree["skills/yoetz/SKILL.md"].decode("utf-8")
+    assert "`external_registration` omits `mcp.json`" in skill
+    assert "existing host registration remains the sole owner" in skill
     for name in (
         "agent-instructions.md",
         "coverage-and-receipts.md",
@@ -179,6 +184,9 @@ def test_plugin_managed_mcp_variants_are_exact_and_offline_valid(
         mcp_route_profile=cast(Any, route_profile),
     )
     mcp_raw = rendered.members["mcp.json"]
+    skill = rendered.members["skills/yoetz/SKILL.md"].decode("utf-8")
+    assert "`plugin_managed` includes the selected `mcp.json` route" in skill
+    assert "this plugin is the sole owner" in skill
     mcp = strict_json_parse(mcp_raw)
     assert mcp == {
         "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
@@ -706,7 +714,13 @@ async def test_review_only_prepare_and_consume_is_exact_and_single_shot(
     )
     assert result.state_after is PluginArtifactState.PORTABLE_EXACT
     assert presence.seen == authority
+    assert presence.calls == 1
     assert load_pending(_state=state) is None
+
+    with pytest.raises(PluginArtifactError) as reused:
+        review.consume_artifact_review(authority, preview.preview_digest)
+    assert reused.value.reason is PluginArtifactReason.AUTHORITY_REQUIRED
+    assert presence.calls == 1
 
 
 @pytest.mark.anyio

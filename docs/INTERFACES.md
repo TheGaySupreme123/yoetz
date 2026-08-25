@@ -3080,9 +3080,16 @@ Cursor lifecycle is exact-preview bound and whole-directory atomic. Install, rep
 consume the ADR-016 `review_only` single-shot trusted review of `plugin_artifact_apply` prepared
 for that exact preview digest, exactly as the portable artifact path does. `--accept` is operator
 acceptance of a digest, never authority: the CLI passes the pending-bound `ArtifactAuthority` to
-the adapter, which refuses with `authority_required` when none is presented and, because the
-packaged runtime advertises no verified action-bound `UserPresencePort`, fails closed with
-`human_authority_unavailable` before any mutation.
+the adapter, which refuses with `authority_required` when none is presented. In the pinned macOS
+Cursor cell, `MacOSArtifactUserPresence` invokes the SIP-protected `/usr/bin/osascript` with a
+fixed JavaScript-for-Automation LocalAuthentication program, a minimal environment, no shell, and
+a fresh `deviceOwnerAuthentication` context with authentication reuse disabled. The OS prompt
+names `plugin_artifact_apply`, the full preview digest, and pending review ID. Only the exact
+stdout token `approved` may release the pending for atomic consumption; cancellation, unavailable
+policy, timeout, malformed output, nonzero exit, non-macOS hosts, or binding mismatch becomes
+`human_authority_unavailable` before mutation. This scoped adapter is not the service-wide
+`UserPresencePort` and grants no authority for vault, credential, privacy, setup, or another
+plugin operation.
 
 Install and remove replays are idempotent at the selected state: a committed operation whose
 result was lost reconciles instead of refusing, touching no bytes and consuming no second review.
@@ -3125,6 +3132,11 @@ what makes a Cursor observation deliverable rather than a lenient default.
 
 `ObservationSource` adds `cursor_hook`. The pinned native profile advertises only
 `sessionStart|sessionEnd|afterMCPExecution|afterFileEdit|stop`; `afterAgentThought` is excluded.
+`CURSOR_HARNESS_PROFILE.hooks_by_capability_profile` binds that nonempty profile only to
+`cursor-ide-3.17.8`. The portable CLI cell and both SDK cells are exactly `None`: Agent Plugins do
+not carry hooks, and the SDKs' file-based hook loading has no independent installed-artifact,
+event-delivery, privacy-filtering, failure-behavior, and accepted-observation proof. Native IDE
+rendering or schema validity cannot populate those neighboring cells.
 Cursor ingress maps only bounded session/generation/tool IDs, exact Cursor/model/effort tokens,
 duration, capability profile, and an installation-keyed HMAC changed-path commitment. It discards
 prompt, reasoning, response text, paths, file contents/edits, MCP/tool inputs/results, transcripts,
