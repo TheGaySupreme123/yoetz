@@ -38,11 +38,21 @@ Review `request_id`, `preview_digest`, target scope, format, before state, MCP o
 artifact digest, and warnings. Apply with the same request and digest. A stale preview, modified or
 unmanaged copy, symlink, rollback residue, or conflicting MCP source refuses without overwrite.
 
-`--accept` binds the exact digest you reviewed; it is not authority. Install and remove consume the
-single-shot `plugin_artifact_apply` trusted review prepared for that same digest, so an apply
-without one refuses with `authority_required`. Until a production action-bound presence adapter
-ships, the standalone lane then fails closed with `human_authority_unavailable` (ADR-016 decision
-6, ADR-023 decision 11) and Cursor install/remove stays preview/status-only in practice.
+The preview output includes an exact argv-shaped `authorization.prepare_command`. Run it without
+editing the digest:
+
+```text
+yoetz consent prepare plugin_artifact_apply --target-digest <preview_digest> --json
+```
+
+Then apply with the same request and digest plus `--accept`. `--accept` binds the digest you
+reviewed; it is not authority. On the pinned macOS cell, apply presents a fresh Apple
+LocalAuthentication device-owner prompt that names the exact operation, full preview digest, and
+pending review ID. Successful authentication consumes that pending once before install, replace,
+or remove. Cancellation, unavailable policy, timeout, stale/reused/mismatched pending, non-macOS
+hosts, TTY-only input, or `--accept` alone fails before mutation. This proof is installation
+authority only; it does not prove discovery, activation, skill delivery, MCP runtime/model use,
+hooks, observation, semantic review, or workflow completion.
 
 Replaying the same request and digest after a committed install or remove whose result was lost
 reconciles at the already-selected state without mutating bytes or spending a second review. Pass
@@ -97,10 +107,11 @@ call, and its own final result row.
 
 ## Hooks and observation
 
-The native plugin advertises only `sessionStart`, `sessionEnd`, `afterMCPExecution`,
+The native IDE plugin advertises only `sessionStart`, `sessionEnd`, `afterMCPExecution`,
 `afterFileEdit`, and `stop` for the pinned local profile. It intentionally excludes
-`afterAgentThought`. Hooks call `yoetz hooks cursor-observe`, are fail-open, and never enforce Cursor
-work.
+`afterAgentThought`. The portable CLI artifact advertises no hooks, and both SDK hook capability
+cells remain `None`; the SDKs' file-based hook contract is not execution evidence. Hooks call
+`yoetz hooks cursor-observe`, are fail-open, and never enforce Cursor work.
 
 Before local storage the adapter discards prompts, reasoning, response text, file paths/content/
 edits, MCP arguments/results, transcripts, command output, email, and workspace roots. Fixtures
@@ -114,6 +125,12 @@ revoke, restart/replay, dedupe, and explicit gaps.
 Upgrade is a whole-directory previewed replacement. The preview binds the current tree digest,
 future inventory, format, MCP owner/route, target identity, artifact digest, and request identity.
 Do not mutate Cursor caches to force selection. Reload and re-prove source after replacement.
+
+When the `yoetz` runtime itself is upgraded, stop the running Yoetz service with the old runtime
+before replacing it, then let the installed bridge start the matching successor. A service that
+survives a schema-manifest-changing upgrade must fail the new client handshake; restart that exact
+service through the user-selected supervisor before retrying Cursor. Runtime replacement, service
+restart, and Cursor/plugin activation are separate proof facets.
 
 Removal moves only an exact marker-verified managed tree and deletes it after the directory swap is
 durable. Modified plugin bytes or recovery residue are preserved for review. Foreign, dual, or
@@ -132,11 +149,12 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 | SDK sees the wrong route | a higher-precedence inline/project/user source won |
 | Model sees only a compact sentence and loses structured fields | the native plugin is stale or a portable/external route won; verify the winning source includes `--host cursor`, reload the isolated app, and retry |
 | Installed MCP executable changed but Cursor still shows the old tool inventory | first run `Developer: Reload Window`; if the pinned IDE still reuses its shared MCP process, fully quit that exact Cursor testing app, verify its process exited, relaunch it with the same isolated profile, and re-prove discovery plus `tools/list` before claiming activation |
+| MCP resources load but every workflow call fails after a runtime upgrade | a pre-upgrade Yoetz service may still own the fixed endpoint; restart that exact service through the user-selected supervisor, then retry and require a returned task/session before claiming use |
 | Hook fires but status stays published-only | configuration/trigger is not accepted observation evidence |
 | Strict route has no semantic review | expected route ceiling; authorize a separate policy route when intended |
 | Modified plugin cannot remove | preserved local change; inspect and resolve manually |
 | Install refuses `authority_required` after `--accept` | no `plugin_artifact_apply` review is prepared for that exact digest |
-| Install refuses `human_authority_unavailable` | expected: no production presence cell exists yet |
+| Install refuses `human_authority_unavailable` | LocalAuthentication was cancelled, unavailable, timed out, or the host is outside the pinned macOS authority cell; no mutation occurred |
 | Install replay reports `preview_stale` | the inferred action became `replace`; replay with `--action install` |
 | MCP entry looks right but reads `foreign` | route recognition is key-set exact; an extra `env`/`cwd` key is a foreign entry |
 

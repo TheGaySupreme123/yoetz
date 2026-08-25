@@ -17,6 +17,7 @@ from yoetz.adapters.integrations.cursor_integration import (
     render_cursor_plugin,
     status_cursor_plugin,
 )
+from yoetz.adapters.integrations.macos_artifact_presence import MacOSArtifactUserPresence
 from yoetz.adapters.integrations.portable_plugin import (
     ArtifactUserPresencePort,
     ElevatedPortableArtifactReview,
@@ -33,20 +34,6 @@ from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 
 __all__ = ["run_cursor_plugin_command"]
-
-
-class _NoProductionUserPresence:
-    """Fail closed until a production action-bound ``UserPresencePort`` cell exists.
-
-    ADR-016 decision 6 and ADR-023 decision 11 are explicit that ``--accept``, a controlling TTY,
-    a pseudo-terminal, or a same-UID process is not and cannot silently become human authority.
-    The packaged runtime advertises no verified presence adapter, so the standalone Cursor
-    install/remove lane refuses here and stays render/preview/status-only in practice.
-    """
-
-    def verify_artifact_review(self, authority: ArtifactAuthority) -> None:
-        del authority
-        raise RuntimeError("human_authority_unavailable")
 
 
 def _artifact_authority(
@@ -204,6 +191,18 @@ def run_cursor_plugin_command(
                 {
                     "action": preview.action.value,
                     "artifact_digest": preview.artifact_digest,
+                    "authorization": {
+                        "operation": "plugin_artifact_apply",
+                        "prepare_command": [
+                            "yoetz",
+                            "consent",
+                            "prepare",
+                            "plugin_artifact_apply",
+                            "--target-digest",
+                            preview.preview_digest,
+                        ],
+                        "requires_os_authenticated_prompt": True,
+                    },
                     "format_profile": preview.format_profile.value,
                     "mcp_ownership": preview.mcp_ownership.value,
                     "mcp_ownership_state": preview.mcp_ownership_state.value,
@@ -224,7 +223,7 @@ def run_cursor_plugin_command(
         # itself consumes the ADR-016 ``review_only`` single-shot trusted review prepared for
         # this exact digest; the adapter refuses when that authority is absent or unproven.
         review: PluginMutationReviewPort = ElevatedPortableArtifactReview(
-            _NoProductionUserPresence() if _presence is None else _presence,
+            MacOSArtifactUserPresence() if _presence is None else _presence,
             _state=_state,
         )
         authority = _artifact_authority(preview_digest, state=_state)

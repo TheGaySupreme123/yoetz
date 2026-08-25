@@ -68,6 +68,14 @@ def test_cursor_profile_and_all_four_cells_are_resource_registered() -> None:
         "cursor-sdk-python-1.0.24",
         "cursor-sdk-typescript-1.0.23",
     )
+    hooks = dict(CURSOR_HARNESS_PROFILE.hooks_by_capability_profile)
+    assert hooks["cursor-cli-2026.07.09-a3815c0"] is None
+    assert hooks["cursor-sdk-python-1.0.24"] is None
+    assert hooks["cursor-sdk-typescript-1.0.23"] is None
+    native_hooks = hooks["cursor-ide-3.17.8"]
+    assert native_hooks is not None
+    assert native_hooks.observation_events == CURSOR_HOOK_EVENTS
+    assert native_hooks.evidence_case_ids == ("cursor-ide-native-3.17.8-macos-arm64",)
     for name in (
         "cursor-cli-portable-2026.07.09.case.json",
         "cursor-ide-native-3.17.8.case.json",
@@ -84,9 +92,11 @@ def test_portable_and_native_reuse_exact_skill_bytes_but_keep_manifests_disjoint
 
     assert portable.members["skills/yoetz/SKILL.md"] == native.members["skills/yoetz/SKILL.md"]
     assert "plugin.json" in portable.members
+    assert "hooks/hooks.json" not in portable.members
     assert ".cursor-plugin/plugin.json" not in portable.members
     assert ".cursor-plugin/plugin.json" in native.members
     assert "plugin.json" not in native.members
+    assert "hooks/hooks.json" in native.members
     assert native.plan.host_extension_profile == "cursor-native-3.17"
 
     manifest = json.loads(native.members[".cursor-plugin/plugin.json"])

@@ -88,9 +88,13 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    class's single-shot trusted review of the exact plan digest under all existing rules — one
    pending request, atomic claim, verified presence before console review. An ordinary TTY
    confirmation, `--accept`, a same-UID process, or a host marketplace prompt is not and cannot
-   silently become `UserPresencePort` authority, so
-   until a production presence adapter exists these standalone paths fail closed with
-   `human_authority_unavailable` and remain render/preview/status-only in practice. The
+   silently become `UserPresencePort` authority. Issue #409 adds one production path for the
+   pinned macOS Cursor cell only: a fresh Apple LocalAuthentication
+   `deviceOwnerAuthentication` prompt whose displayed reason names the exact operation, preview
+   digest, and pending review. The pending is matched before the prompt and atomically consumed
+   after successful authentication; cancellation, unavailable policy, timeout, non-macOS hosts,
+   stale/mismatched authority, or subprocess failure still returns
+   `human_authority_unavailable` before mutation. The
    agent-attested current-chat authorize lane (decision 5) is deliberately **not** extended to
    them. The ADR-012 setup wizard's already-authorized digest-bound composition is a separate,
    unchanged authority and does not route through this class.
@@ -98,10 +102,10 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    Issue #150 implements the artifact half as the exact `plugin_artifact_apply` operation. Its
    target digest is the complete portable artifact preview digest, its risk class is
    `review_only`, and agent-chat authorization is disabled. Preparation and single-shot
-   consumption exist, but the packaged runtime still has no production action-bound
-   `UserPresencePort`, so the standalone lane fails closed before mutation with
-   `human_authority_unavailable`. Generic `skill_install`, host activation apply, and harness MCP
-   registration remain catalogued but unimplemented.
+   consumption exist. Issue #409 wires the scoped macOS LocalAuthentication adapter into the
+   standalone Cursor CLI; it does not create a service-wide `UserPresencePort`, authorize another
+   operation, or make generic portable-plugin mutation available. Generic `skill_install`, host
+   activation apply, and harness MCP registration remain catalogued but unimplemented.
 
 ## Consequences
 
