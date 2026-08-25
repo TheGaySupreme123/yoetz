@@ -47,7 +47,11 @@ def _emit(value: dict[str, object], *, json_output: bool) -> None:
 
 def _target(project_root: Path | None) -> IntegrationTarget:
     root = Path.cwd() if project_root is None else project_root
-    return IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, os.fspath(root.resolve()))
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    # Preserve the lexical path so the adapter can reject a symlinked project
+    # root instead of silently authorizing its resolved target.
+    return IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, os.fspath(root.absolute()))
 
 
 def _skill_tree_state(target: IntegrationTarget) -> str:
@@ -57,6 +61,9 @@ def _skill_tree_state(target: IntegrationTarget) -> str:
 def _preview_body(preview: RemovalPreview) -> dict[str, object]:
     return {
         "action": preview.outcome.value,
+        "cache_preimages": [
+            {"digest": digest, "version": version} for version, digest in preview.cache_digests
+        ],
         "cache_versions": list(preview.cache_versions),
         "codex_version": preview.codex_version,
         "config_preimage_digest": preview.config_preimage_digest,

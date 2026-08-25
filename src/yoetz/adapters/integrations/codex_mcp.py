@@ -336,9 +336,7 @@ class CodexMcpAdapter:
                 preview.state_before,
                 preview.preview_digest,
             )
-        remove_output = self._run(
-            (binary.executable_path, "mcp", "remove", MCP_SERVER_NAME)
-        )
+        remove_output = self._run((binary.executable_path, "mcp", "remove", MCP_SERVER_NAME))
         if remove_output.exit_code != 0:
             raise McpRegistrationError(
                 McpRegistrationReason.REGISTRATION_FAILED,

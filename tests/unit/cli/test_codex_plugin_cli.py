@@ -33,6 +33,7 @@ def _preview(home: Path, executable: Path) -> RemovalPreview:
         True,
         True,
         ("0.1.0",),
+        (("0.1.0", "sha256:" + "e" * 64),),
         "absent",
         executable,
         "sha256:" + "b" * 64,
@@ -50,6 +51,25 @@ def _preview(home: Path, executable: Path) -> RemovalPreview:
     )
 
 
+def test_codex_plugin_cli_preserves_symlinked_project_root_for_adapter_rejection(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir(mode=0o700)
+    project_link = tmp_path / "project-link"
+    project_link.symlink_to(project, target_is_directory=True)
+    home = tmp_path / "codex-home"
+    home.mkdir(mode=0o700)
+
+    import yoetz.cli.codex_plugin as module
+
+    target = module._target(project_link)  # pyright: ignore[reportPrivateUsage]
+    assert Path(target.project_root) == project_link.absolute()
+    with pytest.raises(IntegrationError) as caught:
+        module.preview_removal(target, executable_path="codex", codex_home=home)
+    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+
+
 def test_codex_plugin_cli_preview_status_and_remove(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -61,29 +81,28 @@ def test_codex_plugin_cli_preview_status_and_remove(
     preview = _preview(home, executable)
 
     def fake_discover(*, _probe: object = None) -> tuple[HarnessBinary, ...]:
-        return (
-            HarnessBinary(HarnessId.CODEX, str(executable), "0.148.0-alpha.6", "untested"),
+        return (HarnessBinary(HarnessId.CODEX, str(executable), "0.148.0-alpha.6", "untested"),)
+
+    def fake_preview(*_args: object, **_kwargs: object) -> RemovalPreview:
+        return preview
+
+    def fake_inspection(*_args: object, **_kwargs: object) -> ActivationInspection:
+        return preview.inspection
+
+    def fake_apply(*_args: object, **_kwargs: object) -> RemovalResult:
+        return RemovalResult(
+            RemovalOutcome.REMOVE,
+            ActivationInspection(True, False, ActivationState.INSTALLED_NOT_ACTIVATED),
+            "absent",
+            False,
         )
 
     import yoetz.cli.codex_plugin as module
 
     monkeypatch.setattr(module, "discover_codex_binaries", fake_discover)
-    monkeypatch.setattr(module, "preview_removal", lambda *args, **kwargs: preview)
-    monkeypatch.setattr(
-        module,
-        "inspect_activation",
-        lambda *args, **kwargs: preview.inspection,
-    )
-    monkeypatch.setattr(
-        module,
-        "apply_removal",
-        lambda *args, **kwargs: RemovalResult(
-            RemovalOutcome.REMOVE,
-            ActivationInspection(True, False, ActivationState.INSTALLED_NOT_ACTIVATED),
-            "absent",
-            False,
-        ),
-    )
+    monkeypatch.setattr(module, "preview_removal", fake_preview)
+    monkeypatch.setattr(module, "inspect_activation", fake_inspection)
+    monkeypatch.setattr(module, "apply_removal", fake_apply)
 
     status = _RUNNER.invoke(
         app,
@@ -100,6 +119,7 @@ def test_codex_plugin_cli_preview_status_and_remove(
     body = json.loads(shown.stdout)
     assert body["preview_digest"] == _DIGEST
     assert body["action"] == "remove"
+    assert body["cache_preimages"] == [{"digest": "sha256:" + "e" * 64, "version": "0.1.0"}]
 
     removed = _RUNNER.invoke(
         app,
@@ -130,9 +150,7 @@ def test_codex_plugin_cli_names_remove_refused_conflict(
     executable.chmod(0o700)
 
     def fake_discover(*, _probe: object = None) -> tuple[HarnessBinary, ...]:
-        return (
-            HarnessBinary(HarnessId.CODEX, str(executable), "0.148.0-alpha.6", "untested"),
-        )
+        return (HarnessBinary(HarnessId.CODEX, str(executable), "0.148.0-alpha.6", "untested"),)
 
     def refuse(*_args: object, **_kwargs: object) -> RemovalPreview:
         raise IntegrationError(IntegrationReason.REMOVE_REFUSED, {"conflict": "cache"})
@@ -160,25 +178,23 @@ def test_codex_plugin_cli_status_reports_foreign_without_previewing_removal(
     executable.chmod(0o700)
 
     def fake_discover(*, _probe: object = None) -> tuple[HarnessBinary, ...]:
-        return (
-            HarnessBinary(HarnessId.CODEX, str(executable), "0.148.0-alpha.6", "untested"),
-        )
+        return (HarnessBinary(HarnessId.CODEX, str(executable), "0.148.0-alpha.6", "untested"),)
 
     def refuse(*_args: object, **_kwargs: object) -> RemovalPreview:
         raise IntegrationError(IntegrationReason.REMOVE_REFUSED, {"conflict": "cache"})
 
+    def foreign_inspection(*_args: object, **_kwargs: object) -> ActivationInspection:
+        return ActivationInspection(False, False, ActivationState.FOREIGN)
+
+    def absent_skill(_target: object) -> str:
+        return "absent"
+
     import yoetz.cli.codex_plugin as module
 
     monkeypatch.setattr(module, "discover_codex_binaries", fake_discover)
-    monkeypatch.setattr(
-        module,
-        "inspect_activation",
-        lambda *args, **kwargs: ActivationInspection(
-            False, False, ActivationState.FOREIGN
-        ),
-    )
+    monkeypatch.setattr(module, "inspect_activation", foreign_inspection)
     monkeypatch.setattr(module, "preview_removal", refuse)
-    monkeypatch.setattr(module, "_skill_tree_state", lambda _target: "absent")
+    monkeypatch.setattr(module, "_skill_tree_state", absent_skill)
 
     result = _RUNNER.invoke(
         app,
@@ -199,14 +215,15 @@ def test_codex_plugin_cli_remove_requires_exact_preview_acceptance(
     preview = _preview(home, executable)
 
     def fake_discover(*, _probe: object = None) -> tuple[HarnessBinary, ...]:
-        return (
-            HarnessBinary(HarnessId.CODEX, str(executable), "0.148.0-alpha.6", "untested"),
-        )
+        return (HarnessBinary(HarnessId.CODEX, str(executable), "0.148.0-alpha.6", "untested"),)
+
+    def fake_preview(*_args: object, **_kwargs: object) -> RemovalPreview:
+        return preview
 
     import yoetz.cli.codex_plugin as module
 
     monkeypatch.setattr(module, "discover_codex_binaries", fake_discover)
-    monkeypatch.setattr(module, "preview_removal", lambda *args, **kwargs: preview)
+    monkeypatch.setattr(module, "preview_removal", fake_preview)
 
     result = _RUNNER.invoke(
         app,

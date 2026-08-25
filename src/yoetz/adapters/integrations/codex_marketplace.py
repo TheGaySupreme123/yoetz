@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import tomllib
@@ -14,7 +15,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, Never, cast
 
 from yoetz import __version__
 from yoetz.adapters.integrations.codex_plugin import (
@@ -145,6 +146,7 @@ class RemovalPreview:
     marketplace_remove_planned: bool
     marketplace_json_planned: bool
     cache_versions: tuple[str, ...]
+    cache_digests: tuple[tuple[str, str], ...]
     skill_tree_state: str
     executable_path: Path
     executable_digest: str
@@ -504,6 +506,17 @@ def _cache_root(home: Path) -> Path:
     return home / "plugins" / "cache" / _MARKETPLACE_NAME / "yoetz"
 
 
+def _cache_root_has_entries(home: Path) -> bool:
+    root = _cache_root(home)
+    if not root.exists() and not root.is_symlink():
+        return False
+    _validate_descendant_ancestors(home, Path("plugins/cache/yoetz/yoetz"))
+    try:
+        return next(root.iterdir(), None) is not None
+    except OSError as exc:
+        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+
+
 def _cache_version_path(root: Path, version: str) -> Path:
     if _VERSION_RE.fullmatch(version) is None:
         raise _error(IntegrationReason.SOURCE_INVALID)
@@ -736,12 +749,12 @@ def inspect_activation(
                         _cache_version_path(_cache_root(home), version),
                         cache_members,
                     ) == _members_digest(cache_members)
-                elif _cache_root(home).exists():
+                elif _cache_root_has_entries(home):
                     cache_foreign = True
             elif local_digest is not None:
                 # Preview is mutation-free: a canonical inventory command is reserved for apply.
                 plugin_cached = False
-            elif _cache_root(home).exists():
+            elif _cache_root_has_entries(home):
                 cache_foreign = True
         except IntegrationError as exc:
             if exc.reason in {
@@ -1306,19 +1319,16 @@ class _RemovalPlan:
     config_before: bytes | None
     config_after: bytes
     cache_members: Mapping[str, bytes]
+    cache_digests: tuple[tuple[str, str], ...]
     binary: _CodexBinaryProbe
 
 
-def _refuse_conflict(candidate: str) -> None:
+def _refuse_conflict(candidate: str) -> Never:
     raise _error(IntegrationReason.REMOVE_REFUSED, {"conflict": candidate})
 
 
 def _expected_marketplace_table(project: Path) -> str:
-    return (
-        f'[marketplaces.yoetz]\n'
-        f'source_type = "local"\n'
-        f'source = {_toml_string(str(project))}\n'
-    )
+    return f'[marketplaces.yoetz]\nsource_type = "local"\nsource = {_toml_string(str(project))}\n'
 
 
 def _canonical_marketplace_bytes() -> bytes:
@@ -1329,17 +1339,52 @@ def _skill_tree_state(target: IntegrationTarget) -> str:
     return inspect_destination(target, load_packaged_skill_source()).state.value
 
 
-def _exact_table_present(raw: bytes, table: str) -> bool:
-    return table.encode("utf-8") in raw
+_TOML_TABLE_HEADER_RE: Final = re.compile(rb"[ \t]*\[\[?[^\r\n\]]+\]\]?[ \t]*(?:#[^\r\n]*)?")
 
 
-def _strip_exact_block(raw: bytes, block: str) -> bytes:
-    needle = block.encode("utf-8")
-    index = raw.find(needle)
-    if index < 0:
+def _exact_table_span(raw: bytes, table: str) -> tuple[int, int] | None:
+    """Return the whole byte span only when one TOML table is exact.
+
+    Matching a generated prefix is insufficient: an owner-added key would then
+    survive removal at the parent scope. Blank separator lines are outside the
+    table identity, but comments and fields before the next header are not.
+    """
+
+    expected = table.encode("utf-8")
+    header = expected.splitlines(keepends=True)[0]
+    lines = raw.splitlines(keepends=True)
+    offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        if line == header:
+            offsets.append(offset)
+        offset += len(line)
+    if len(offsets) != 1:
+        return None
+    start = offsets[0]
+    end = len(raw)
+    offset = 0
+    seen = False
+    for line in lines:
+        if offset == start:
+            seen = True
+        elif seen and _TOML_TABLE_HEADER_RE.fullmatch(line.rstrip(b"\r\n")):
+            end = offset
+            break
+        offset += len(line)
+    candidate = raw[start:end].rstrip(b"\r\n") + b"\n"
+    if candidate != expected:
+        return None
+    return start, end
+
+
+def _strip_exact_table(raw: bytes, table: str) -> bytes:
+    span = _exact_table_span(raw, table)
+    if span is None:
         return raw
-    before = raw[:index]
-    after = raw[index + len(needle) :]
+    start, end = span
+    before = raw[:start]
+    after = raw[end:]
     if before.endswith(b"\n") and after.startswith(b"\n"):
         after = after[1:]
     merged = before + after
@@ -1361,7 +1406,7 @@ def _config_table_plan(
     conflict, never a candidate for whole-table removal.
     """
 
-    configured, _enabled, foreign = _config_state(config, project)
+    _configured, _enabled, foreign = _config_state(config, project)
     if foreign:
         marketplaces = _table(config, "marketplaces")
         marketplace = None if marketplaces is None else marketplaces.get(_MARKETPLACE_NAME)
@@ -1369,19 +1414,32 @@ def _config_table_plan(
             _refuse_conflict("config_marketplace")
         _refuse_conflict("config_plugin")
     plugins = _table(config, "plugins")
-    plugin_present = plugins is not None and _PLUGIN_ID in plugins
-    plugin_owned = plugin_present and _exact_table_present(raw, _PLUGIN_TABLE)
+    plugin = None if plugins is None else plugins.get(_PLUGIN_ID)
+    plugin_present = plugin is not None
+    plugin_owned = (
+        isinstance(plugin, Mapping)
+        and dict(cast(Mapping[str, object], plugin)) == {"enabled": True}
+        and _exact_table_span(raw, _PLUGIN_TABLE) is not None
+    )
     if plugin_present and not plugin_owned:
         _refuse_conflict("config_plugin")
     marketplace_table = _expected_marketplace_table(project)
-    marketplace_owned = configured and _exact_table_present(raw, marketplace_table)
-    if configured and not marketplace_owned:
+    marketplaces = _table(config, "marketplaces")
+    marketplace = None if marketplaces is None else marketplaces.get(_MARKETPLACE_NAME)
+    marketplace_present = marketplace is not None
+    marketplace_owned = (
+        isinstance(marketplace, Mapping)
+        and dict(cast(Mapping[str, object], marketplace))
+        == {"source_type": "local", "source": str(project)}
+        and _exact_table_span(raw, marketplace_table) is not None
+    )
+    if marketplace_present and not marketplace_owned:
         _refuse_conflict("config_marketplace")
     after = raw
     if plugin_owned:
-        after = _strip_exact_block(after, _PLUGIN_TABLE)
+        after = _strip_exact_table(after, _PLUGIN_TABLE)
     if marketplace_owned:
-        after = _strip_exact_block(after, marketplace_table)
+        after = _strip_exact_table(after, marketplace_table)
     if after != raw:
         try:
             parsed = tomllib.loads(after.decode("utf-8") if after else "")
@@ -1408,7 +1466,7 @@ def _marketplace_json_owned(path: Path) -> bool:
 
 def _managed_cache_versions(
     root: Path, expected: Mapping[str, bytes], *, include_all_managed: bool
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, str], ...]:
     """List yoetz-managed version dirs that this removal may delete.
 
     Foreign or unexpected members refuse. Other-version managed trees require
@@ -1419,7 +1477,7 @@ def _managed_cache_versions(
         return ()
     if root.is_symlink() or not root.is_dir():
         raise _error(IntegrationReason.TARGET_UNSAFE)
-    versions: list[str] = []
+    versions: list[tuple[str, str]] = []
     try:
         children = sorted(root.iterdir(), key=lambda path: path.name.encode("utf-8"))
     except OSError as exc:
@@ -1440,7 +1498,7 @@ def _managed_cache_versions(
         if digest is None:
             _refuse_conflict("cache")
         if child.name == __version__ or include_all_managed:
-            versions.append(child.name)
+            versions.append((child.name, digest))
         else:
             _refuse_conflict("cache")
     return tuple(versions)
@@ -1498,10 +1556,13 @@ def _removal_plan(
     )
     cache_members = render_plugin_install_tree(codex_version=binary.codex_version)
     cache_root = _cache_root(home)
-    cache_versions = _managed_cache_versions(
+    _validate_descendant_ancestors(home, Path("plugins/cache/yoetz/yoetz"))
+    cache_digests = _managed_cache_versions(
         cache_root, cache_members, include_all_managed=purge_cache
     )
-    cache_root_planned = cache_root.exists()
+    if cache_digests:
+        _require_safe_cache_removal_primitives()
+    cache_versions = tuple(version for version, _digest in cache_digests)
     inventory_owned = _inventory_owned(binary, project, _run=_run)
     inspection = inspect_activation(
         target,
@@ -1515,7 +1576,6 @@ def _removal_plan(
         or marketplace_table_owned
         or marketplace_json_planned
         or bool(cache_versions)
-        or cache_root_planned
     )
     outcome = RemovalOutcome.REMOVE if planned else RemovalOutcome.ALREADY_ABSENT
     digest_body = (
@@ -1537,9 +1597,9 @@ def _removal_plan(
         + b"\0"
         + (b"1" if marketplace_json_planned else b"0")
         + b"\0"
-        + canonical_encode(list(cache_versions))
-        + b"\0"
-        + (b"1" if cache_root_planned else b"0")
+        + canonical_encode(
+            [{"version": version, "digest": digest} for version, digest in cache_digests]
+        )
         + b"\0"
         + str(binary.executable_path).encode("utf-8")
         + b"\0"
@@ -1573,6 +1633,7 @@ def _removal_plan(
         marketplace_table_owned,
         marketplace_json_planned,
         cache_versions,
+        cache_digests,
         _skill_tree_state(target),
         binary.executable_path,
         binary.executable_digest,
@@ -1594,6 +1655,7 @@ def _removal_plan(
         config_before,
         config_after if planned else config_bytes,
         cache_members,
+        cache_digests,
         binary,
     )
 
@@ -1617,28 +1679,152 @@ def preview_removal(
     ).preview
 
 
-def _delete_managed_cache_versions(root: Path, versions: tuple[str, ...]) -> None:
-    for version in versions:
-        path = _cache_version_path(root, version)
-        if not path.exists():
-            continue
-        if path.is_symlink() or not path.is_dir():
-            raise _error(IntegrationReason.TARGET_UNSAFE)
+def _owned_stat_not_writable(facts: os.stat_result, *, directory: bool) -> None:
+    expected = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected(facts.st_mode):
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+    if hasattr(os, "geteuid") and facts.st_uid != os.geteuid():
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+    if facts.st_mode & 0o022:
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+
+
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _require_safe_cache_removal_primitives() -> None:
+    required = (os.open, os.rename, os.stat)
+    if (
+        not getattr(os, "O_NOFOLLOW", 0)
+        or any(function not in os.supports_dir_fd for function in required)
+        or not getattr(shutil.rmtree, "avoids_symlink_attacks", False)
+    ):
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+
+
+def _read_managed_tree_fd(root_fd: int) -> dict[str, bytes]:
+    members: dict[str, bytes] = {}
+
+    def walk(directory_fd: int, prefix: str) -> None:
         try:
-            shutil.rmtree(path)
-        except OSError as exc:
-            raise _error(IntegrationReason.WRITE_FAILED) from exc
-    if root.exists():
-        try:
-            remaining = list(root.iterdir())
+            names = sorted(os.listdir(directory_fd), key=lambda name: os.fsencode(name))
         except OSError as exc:
             raise _error(IntegrationReason.TARGET_UNSAFE) from exc
-        if remaining:
+        for name in names:
+            if type(name) is not str or name in {"", ".", ".."} or "/" in name:
+                raise _error(IntegrationReason.TARGET_UNSAFE)
+            relative = name if not prefix else f"{prefix}/{name}"
+            try:
+                facts = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+            if stat.S_ISDIR(facts.st_mode):
+                _owned_stat_not_writable(facts, directory=True)
+                try:
+                    child_fd = os.open(name, _directory_open_flags(), dir_fd=directory_fd)
+                except OSError as exc:
+                    raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+                try:
+                    _owned_stat_not_writable(os.fstat(child_fd), directory=True)
+                    walk(child_fd, relative)
+                finally:
+                    os.close(child_fd)
+                continue
+            _owned_stat_not_writable(facts, directory=False)
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(name, flags, dir_fd=directory_fd)
+            except OSError as exc:
+                raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+            try:
+                _owned_stat_not_writable(os.fstat(descriptor), directory=False)
+                chunks: list[bytes] = []
+                while chunk := os.read(descriptor, 1024 * 1024):
+                    chunks.append(chunk)
+                members[relative] = b"".join(chunks)
+            except OSError as exc:
+                raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+            finally:
+                os.close(descriptor)
+
+    walk(root_fd, "")
+    return members
+
+
+def _managed_cache_digest_at(
+    root_fd: int, name: str, expected_members: Mapping[str, bytes]
+) -> str | None:
+    try:
+        descriptor = os.open(name, _directory_open_flags(), dir_fd=root_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    try:
+        _owned_stat_not_writable(os.fstat(descriptor), directory=True)
+        actual = _read_managed_tree_fd(descriptor)
+    finally:
+        os.close(descriptor)
+    if actual != dict(expected_members) and not plugin_tree_matches_marker(actual):
+        raise _error(IntegrationReason.PREVIEW_STALE)
+    return _members_digest(actual)
+
+
+def _delete_managed_cache_versions(
+    root: Path,
+    cache_digests: tuple[tuple[str, str], ...],
+    expected_members: Mapping[str, bytes],
+) -> None:
+    if not cache_digests or not root.exists():
+        return
+    _require_safe_cache_removal_primitives()
+    try:
+        root_fd = os.open(root, _directory_open_flags())
+    except OSError as exc:
+        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    try:
+        _owned_stat_not_writable(os.fstat(root_fd), directory=True)
+        for version, expected_digest in cache_digests:
+            current_digest = _managed_cache_digest_at(root_fd, version, expected_members)
+            if current_digest is None:
+                continue
+            if current_digest != expected_digest:
+                raise _error(IntegrationReason.PREVIEW_STALE)
+            quarantine = f".yoetz-cache-remove-{os.urandom(8).hex()}"
+            try:
+                os.rename(
+                    version,
+                    quarantine,
+                    src_dir_fd=root_fd,
+                    dst_dir_fd=root_fd,
+                )
+            except OSError as exc:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+            if _managed_cache_digest_at(root_fd, quarantine, expected_members) != expected_digest:
+                try:
+                    os.rename(
+                        quarantine,
+                        version,
+                        src_dir_fd=root_fd,
+                        dst_dir_fd=root_fd,
+                    )
+                except OSError as exc:
+                    raise _error(IntegrationReason.WRITE_FAILED) from exc
+                raise _error(IntegrationReason.PREVIEW_STALE)
+            try:
+                shutil.rmtree(quarantine, dir_fd=root_fd)
+            except OSError as exc:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+        if os.listdir(root_fd):
             raise _error(IntegrationReason.WRITE_FAILED)
-        try:
-            shutil.rmtree(root)
-        except OSError as exc:
-            raise _error(IntegrationReason.WRITE_FAILED) from exc
+    finally:
+        os.close(root_fd)
 
 
 def _assert_yoetz_tables_absent(config_path: Path, project: Path) -> None:
@@ -1713,9 +1899,7 @@ def apply_removal(
         if current_config is None:
             current_config = b""
         try:
-            parsed_config = tomllib.loads(
-                current_config.decode("utf-8") if current_config else ""
-            )
+            parsed_config = tomllib.loads(current_config.decode("utf-8") if current_config else "")
         except (UnicodeError, tomllib.TOMLDecodeError) as exc:
             raise _error(IntegrationReason.SOURCE_INVALID) from exc
         _, _, stripped = _config_table_plan(
@@ -1740,7 +1924,7 @@ def apply_removal(
                 marketplace_path.unlink()
             except OSError as exc:
                 raise _error(IntegrationReason.WRITE_FAILED) from exc
-        _delete_managed_cache_versions(_cache_root(home), preview.cache_versions)
+        _delete_managed_cache_versions(_cache_root(home), plan.cache_digests, plan.cache_members)
         installed, _version = _plugin_inventory(plan.binary, project, _run=_run)
         if installed:
             raise _error(IntegrationReason.WRITE_FAILED)

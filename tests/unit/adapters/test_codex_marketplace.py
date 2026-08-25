@@ -1043,10 +1043,10 @@ def test_preview_and_apply_removal_of_managed_activation(tmp_path: Path) -> None
     parsed = tomllib.loads(config.read_text(encoding="utf-8") if config.exists() else "")
     assert "yoetz" not in parsed.get("marketplaces", {})
     assert "yoetz@yoetz" not in parsed.get("plugins", {})
-    assert not (home / "plugins/cache/yoetz/yoetz").exists()
+    cache_root = home / "plugins/cache/yoetz/yoetz"
+    assert not cache_root.exists() or not any(cache_root.iterdir())
     assert (
-        inspect_activation(target, codex_home=home).state
-        is ActivationState.INSTALLED_NOT_ACTIVATED
+        inspect_activation(target, codex_home=home).state is ActivationState.INSTALLED_NOT_ACTIVATED
     )
     second = preview_removal(target, codex_home=home)
     assert second.outcome is RemovalOutcome.ALREADY_ABSENT
@@ -1088,6 +1088,98 @@ def test_removal_refuses_modified_plugin_table(tmp_path: Path) -> None:
     assert config.read_bytes() == before
 
 
+def test_removal_refuses_plugin_table_with_additional_field(tmp_path: Path) -> None:
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    config = home / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "enabled = true\n", "enabled = true\nowner_note = true\n"
+        ),
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+    with pytest.raises(IntegrationError) as caught:
+        preview_removal(target, codex_home=home)
+    assert caught.value.reason is IntegrationReason.REMOVE_REFUSED
+    assert caught.value.safe_details["conflict"] == "config_plugin"
+    assert config.read_bytes() == before
+
+
+def test_removal_refuses_marketplace_table_with_additional_field(tmp_path: Path) -> None:
+    target, project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    config = home / "config.toml"
+    expected = f'source = "{project}"\n'
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(expected, f"{expected}owner_note = true\n"),
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+    with pytest.raises(IntegrationError) as caught:
+        preview_removal(target, codex_home=home)
+    assert caught.value.reason is IntegrationReason.REMOVE_REFUSED
+    assert caught.value.safe_details["conflict"] == "config_marketplace"
+    assert config.read_bytes() == before
+
+
+def test_cache_removal_revalidates_digest_immediately_before_delete(
+    tmp_path: Path,
+) -> None:
+    from yoetz.adapters.integrations.codex_marketplace import (
+        _delete_managed_cache_versions,  # pyright: ignore[reportPrivateUsage]
+        _installed_cache_digest,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    root = tmp_path / "cache"
+    version = root / "0.1.0"
+    expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
+    for relative, payload in expected.items():
+        destination = version / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    digest = _installed_cache_digest(version, expected)
+    assert digest is not None
+    hooks = version / "hooks/hooks.json"
+    hooks.write_bytes(hooks.read_bytes() + b"\n")
+
+    with pytest.raises(IntegrationError) as caught:
+        _delete_managed_cache_versions(root, (("0.1.0", digest),), expected)
+    assert caught.value.reason is IntegrationReason.PREVIEW_STALE
+    assert hooks.exists()
+
+
+def test_cache_removal_refuses_replaced_symlink_root(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations.codex_marketplace import (
+        _delete_managed_cache_versions,  # pyright: ignore[reportPrivateUsage]
+        _installed_cache_digest,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    root = tmp_path / "cache"
+    version = root / "0.1.0"
+    expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
+    for relative, payload in expected.items():
+        destination = version / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    digest = _installed_cache_digest(version, expected)
+    assert digest is not None
+    outside = tmp_path / "outside"
+    root.rename(outside)
+    root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(IntegrationError) as caught:
+        _delete_managed_cache_versions(root, (("0.1.0", digest),), expected)
+    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+    assert (outside / "0.1.0/hooks/hooks.json").exists()
+
+
 def test_purge_cache_deletes_other_managed_versions(tmp_path: Path) -> None:
     target, _project, home = _target(tmp_path)
     _install(target)
@@ -1109,4 +1201,5 @@ def test_purge_cache_deletes_other_managed_versions(tmp_path: Path) -> None:
     )
     assert result.outcome is RemovalOutcome.REMOVE
     assert not extra.exists()
-    assert not (home / "plugins/cache/yoetz/yoetz").exists()
+    cache_root = home / "plugins/cache/yoetz/yoetz"
+    assert not cache_root.exists() or not any(cache_root.iterdir())
