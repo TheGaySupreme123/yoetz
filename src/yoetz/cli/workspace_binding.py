@@ -151,6 +151,8 @@ def _git_marker(path: Path) -> bool | None:
     if stat.S_ISLNK(facts.st_mode):
         return None
     if stat.S_ISDIR(facts.st_mode) or stat.S_ISREG(facts.st_mode):
+        if (hasattr(os, "geteuid") and facts.st_uid != os.geteuid()) or facts.st_mode & 0o022:
+            return None
         return True
     return None
 

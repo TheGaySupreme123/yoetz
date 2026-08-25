@@ -144,6 +144,19 @@ def test_symlinked_git_marker_is_refused(tmp_path: Path) -> None:
     )
 
 
+def test_group_writable_git_marker_is_refused(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    repository = tmp_path / "repo"
+    current = repository / "src"
+    current.mkdir(parents=True)
+    _git(repository)
+    (repository / ".git").chmod(0o777)
+
+    assert (
+        resolve_workspace_locator(explicit=os.fspath(current), payload={}, env=_env(home)) is None
+    )
+
+
 def test_symlinked_ancestor_is_refused(tmp_path: Path) -> None:
     home = tmp_path / "home"
     real = tmp_path / "real"
