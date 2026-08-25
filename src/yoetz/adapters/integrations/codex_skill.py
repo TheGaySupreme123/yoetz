@@ -12,11 +12,11 @@ from importlib import resources
 from pathlib import Path
 from typing import Protocol, cast
 
-from yoetz.domain.values import JsonObject
 from yoetz.adapters.integrations.codex_capability_cells import (
     CODEX_ROLLOUT_CAPABILITY_PROFILE_ID,
     CODEX_ROLLOUT_SUPPORTED_VERSIONS,
 )
+from yoetz.domain.values import JsonObject
 from yoetz.ports.integrations import (
     HarnessId,
     HarnessProfile,

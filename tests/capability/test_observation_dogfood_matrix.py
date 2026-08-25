@@ -10,7 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from builders.codex_rollout import completed_shell_rollout
 from tests.capability.evidence import (
     CapabilityCase,
     EvidenceOutcome,
@@ -22,6 +21,7 @@ from tests.capability.evidence import (
     runtime_capability_context,
 )
 
+from builders.codex_rollout import completed_shell_rollout
 from yoetz.adapters.importers.codex_jsonl import (
     SUPPORTED_CODEX_PROFILES,
     CodexCapabilityProfile,

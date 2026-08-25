@@ -121,8 +121,7 @@ def test_a_real_install_reproduces_the_committed_tree(tmp_path: Path) -> None:
     install_plugin(
         IntegrationTarget(scope=IntegrationScope.TRUSTED_PROJECT, project_root=str(tmp_path)),
         replace_modified=True,
-        # Codex has no tested capability set yet (E-002); installing anyway is exactly what the
-        # observation setup path does, and is what produced the committed tree.
+        # Installing the generated contributor tree is what produced this committed copy.
         allow_untested=True,
     )
     installed_root = tmp_path / PLUGIN_ROOT
