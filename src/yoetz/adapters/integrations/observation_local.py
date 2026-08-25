@@ -106,6 +106,7 @@ _MAX_QUARANTINE_AGE_DAYS: Final = 14
 # is reachable. Not imported, to keep this module free of a cycle with the
 # reader that imports it; ``test_observation_state_bounds`` fences the drift.
 _MAX_STREAM_PARTIAL_BYTES: Final = 262_144
+_MAX_STREAM_CALL_TOOLS: Final = 256
 # Parse-cache entry bound: hooks touch one workspace, the daemon's sweep loop
 # touches all of them — without a cap the daemon would retain a parsed object
 # graph per workspace forever.
@@ -472,6 +473,7 @@ class _WorkspaceState:
     open_pre: dict[str, str] | None = None
     stream_cursors: dict[str, ObservationCursor] | None = None
     stream_partials: dict[str, bytes] | None = None
+    stream_call_tools: dict[str, dict[str, str]] | None = None
     stream_partial_dropped_sessions: set[str] | None = None
     hook_sequences: dict[str, int] | None = None
     last_stream_reconcile_mono_ms: int | None = None
@@ -518,6 +520,8 @@ class _WorkspaceState:
             self.stream_cursors = {}
         if self.stream_partials is None:
             self.stream_partials = {}
+        if self.stream_call_tools is None:
+            self.stream_call_tools = {}
         if self.stream_partial_dropped_sessions is None:
             self.stream_partial_dropped_sessions = set()
         if self.hook_sequences is None:
@@ -683,6 +687,9 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         open_pre=dict(state.open_pre or {}),
         stream_cursors=dict(state.stream_cursors or {}),
         stream_partials=dict(state.stream_partials or {}),
+        stream_call_tools={
+            session: dict(tools) for session, tools in (state.stream_call_tools or {}).items()
+        },
         stream_partial_dropped_sessions=set(state.stream_partial_dropped_sessions or ()),
         hook_sequences=dict(state.hook_sequences or {}),
         pending_outbox=list(state.pending_outbox or ()),
@@ -1468,6 +1475,50 @@ class LocalObservationStore:
             state = self._load(workspace)
             assert state.stream_cursors is not None
             state.stream_cursors[session_commitment] = cursor
+            self._save(workspace, state)
+
+    def stream_call_tools_for_session(
+        self, workspace: str, session_commitment: str
+    ) -> dict[str, str]:
+        with self._lock:
+            state = self._load(workspace)
+            assert state.stream_call_tools is not None
+            return dict(state.stream_call_tools.get(session_commitment, {}))
+
+    def replace_stream_call_tools(
+        self,
+        workspace: str,
+        session_commitment: str,
+        call_tools: Mapping[str, str],
+    ) -> None:
+        clean: dict[str, str] = {}
+        for call_id, tool_name in call_tools.items():
+            if (
+                type(call_id) is not str
+                or type(tool_name) is not str
+                or not call_id
+                or not tool_name
+                or len(call_id) > 128
+                or len(tool_name) > 128
+            ):
+                raise ProtocolValueError("invalid_event_value_type")
+            if len(clean) >= _MAX_STREAM_CALL_TOOLS:
+                break
+            clean[call_id] = tool_name
+        with self._lock:
+            state = self._load(workspace)
+            assert state.stream_call_tools is not None
+            state.stream_call_tools.pop(session_commitment, None)
+            retained = sum(len(tools) for tools in state.stream_call_tools.values())
+            while retained + len(clean) > _MAX_STREAM_CALL_TOOLS and state.stream_call_tools:
+                oldest_session = next(iter(state.stream_call_tools))
+                oldest_tools = state.stream_call_tools[oldest_session]
+                oldest_tools.pop(next(iter(oldest_tools)))
+                retained -= 1
+                if not oldest_tools:
+                    del state.stream_call_tools[oldest_session]
+            if clean:
+                state.stream_call_tools[session_commitment] = clean
             self._save(workspace, state)
 
     def get_stream_partial(self, workspace: str, session_commitment: str) -> bytes:
@@ -2760,6 +2811,7 @@ class LocalObservationStore:
         assert state.unsupported_events is not None
         assert state.open_pre is not None
         assert state.stream_cursors is not None
+        assert state.stream_call_tools is not None
         assert state.codex_session_bindings is not None
         consent_json: JsonValue = None
         if consent is not None:
@@ -2772,12 +2824,13 @@ class LocalObservationStore:
                 }
             )
         payload: dict[str, JsonValue] = {
+            # /8 persists bounded call-id to tool-name pairing for rollout outputs.
             # /7 attributes dropped stream-partial gaps per session. /6 adds one-shot
             # task-frontier motion notices. /5 adds terminal
             # corruption-session tracking. /3 added quarantined_at per
             # quarantine entry and the reclaimed counter. Readers tolerate both directions:
             # unknown keys are ignored and missing keys default safely.
-            "schema": "yoetz.observation-local/7",
+            "schema": "yoetz.observation-local/8",
             "workspace_commitment": workspace,
             "consent": consent_json,
             "session_workspaces": JsonObject(
@@ -2959,6 +3012,22 @@ class LocalObservationStore:
             payload["stream_partial_dropped_sessions"] = tuple(
                 sorted(state.stream_partial_dropped_sessions, key=str.encode)
             )
+        if state.stream_call_tools:
+            payload["stream_call_tools"] = JsonObject(
+                {
+                    session: JsonObject(
+                        {
+                            call_id: tool_name
+                            for call_id, tool_name in sorted(
+                                tools.items(), key=lambda item: item[0].encode()
+                            )
+                        }
+                    )
+                    for session, tools in sorted(
+                        state.stream_call_tools.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
         return payload
 
     def _state_from_json(self, raw: Mapping[str, JsonValue]) -> _WorkspaceState:
@@ -3040,6 +3109,31 @@ class LocalObservationStore:
                 )
             except ValueError, OSError:
                 continue
+        stream_call_tools: dict[str, dict[str, str]] = {}
+        remaining_call_tools = _MAX_STREAM_CALL_TOOLS
+        stream_call_tools_raw = raw.get("stream_call_tools")
+        if isinstance(stream_call_tools_raw, Mapping):
+            for session, values in cast(Mapping[str, JsonValue], stream_call_tools_raw).items():
+                if remaining_call_tools == 0:
+                    break
+                if type(session) is not str or not isinstance(values, Mapping):
+                    continue
+                tools: dict[str, str] = {}
+                for call_id, tool_name in cast(Mapping[str, JsonValue], values).items():
+                    if (
+                        remaining_call_tools == 0
+                        or type(call_id) is not str
+                        or type(tool_name) is not str
+                        or not call_id
+                        or not tool_name
+                        or len(call_id) > 128
+                        or len(tool_name) > 128
+                    ):
+                        continue
+                    tools[call_id] = tool_name
+                    remaining_call_tools -= 1
+                if tools:
+                    stream_call_tools[session] = tools
         dropped_sessions_raw = raw.get("stream_partial_dropped_sessions")
         stream_partial_dropped_sessions: set[str]
         if isinstance(dropped_sessions_raw, (list, tuple)):
@@ -3248,6 +3342,7 @@ class LocalObservationStore:
             open_pre=open_pre,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,
+            stream_call_tools=stream_call_tools,
             stream_partial_dropped_sessions=stream_partial_dropped_sessions,
             hook_sequences=hook_sequences,
             last_stream_reconcile_mono_ms=last_reconcile,

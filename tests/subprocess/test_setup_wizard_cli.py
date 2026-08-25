@@ -779,7 +779,9 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
     assert "Selected Codex config target:" in result.stdout
     assert "Standing-trust warning:" in result.stdout
     assert wizard_env["activation_apply_calls"] == 1
-    assert "Skill support: tested profiles: 0.148.0" in result.stdout
+    assert "Skill support: no tested capability profile; automatic activation not tested" in (
+        result.stdout
+    )
     assert "Plugin source files:" in result.stdout
     assert "Project skill installation:" in result.stdout
     assert "Hook installation:" in result.stdout
@@ -807,7 +809,9 @@ def test_interactive_registration_n_declines_without_mutation(
     assert result.exit_code == 0, (result.output, result.exception)
     assert "Confirm Codex project setup? [Y/N]" in result.stdout
     assert "MCP registration: declined" in result.stdout
-    assert "Skill support: tested profiles: 0.148.0" in result.stdout
+    assert "Skill support: no tested capability profile; automatic activation not tested" in (
+        result.stdout
+    )
     for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
         assert all(call[1:3] in {("mcp", "get"), ("mcp", "list")} for call in calls)
 
@@ -1134,12 +1138,12 @@ def test_setup_status_is_read_only(wizard_env: dict[str, object]) -> None:
         },
         "plugin": {"digest": None, "presence": "absent"},
         "skill": {
-            "automatic_activation_tested": True,
-            "compatibility": "supported",
+            "automatic_activation_tested": False,
+            "compatibility": "unsupported",
             "installed_digest": None,
             "presence": "absent",
             "source_state": "verified",
-            "tested_profiles": ["0.148.0"],
+            "tested_profiles": [],
         },
     }
     assert not cast(Path, wizard_env["marker"]).exists()

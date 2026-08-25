@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, cast
@@ -593,6 +593,31 @@ def should_trigger_stream_reconcile(
     return (current - last_reconcile_mono) >= PERIODIC_RECONCILE_SECONDS
 
 
+def _pair_stream_tool_name(
+    envelope: ObservationEnvelope, call_tools: dict[str, str]
+) -> ObservationEnvelope:
+    structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    action = structural.get("action")
+    call_id = _token(structural.get("tool_call_id"))
+    tool_name = _token(structural.get("tool_name"))
+    if call_id is None:
+        return envelope
+    if action in {"function_call", "custom_tool_call"} and tool_name is not None:
+        if call_id not in call_tools and len(call_tools) >= 256:
+            call_tools.pop(next(iter(call_tools)))
+        call_tools[call_id] = tool_name
+        return envelope
+    if action not in {"function_call_output", "custom_tool_call_output"} or tool_name is not None:
+        return envelope
+    paired = call_tools.get(call_id)
+    if paired is None:
+        return envelope
+    return replace(
+        envelope,
+        structural_payload=JsonObject({**dict(structural), "tool_name": paired}),
+    )
+
+
 def reconcile_session_stream(
     store: LocalObservationStore,
     *,
@@ -627,15 +652,23 @@ def reconcile_session_stream(
             "resolved": True,
         }
     existing = store.get_stream_cursor(workspace_commitment, session_commitment)
-    if existing is None:
+    mapping_reset = existing is not None and existing.mapping_version != STREAM_MAPPING_VERSION
+    if existing is None or mapping_reset:
         existing = ObservationCursor(
-            source_generation=1,
+            source_generation=(1 if existing is None else existing.source_generation + 1),
             byte_position=0,
             event_position=0,
             last_source_commitment=_EMPTY_COMMITMENT,
             mapping_version=STREAM_MAPPING_VERSION,
         )
-    partial = store.get_stream_partial(workspace_commitment, session_commitment)
+    partial = (
+        b"" if mapping_reset else store.get_stream_partial(workspace_commitment, session_commitment)
+    )
+    call_tools = (
+        {}
+        if mapping_reset
+        else store.stream_call_tools_for_session(workspace_commitment, session_commitment)
+    )
     reader = SessionStreamReader(
         session_commitment=session_commitment,
         profile=default_stream_profile(),
@@ -648,7 +681,8 @@ def reconcile_session_stream(
     duplicates = 0
     overflow = False
     committed_cursor = existing
-    for envelope in advance.envelopes:
+    for unpaired_envelope in advance.envelopes:
+        envelope = _pair_stream_tool_name(unpaired_envelope, call_tools)
         result = store.ingest(envelope)
         if result.disposition.value not in {"accepted", "duplicate"}:
             break
@@ -668,6 +702,7 @@ def reconcile_session_stream(
             duplicates += 1
     if not overflow:
         committed_cursor = advance.cursor
+    store.replace_stream_call_tools(workspace_commitment, session_commitment, call_tools)
     store.set_stream_cursor(workspace_commitment, session_commitment, committed_cursor)
     # A partial tail belongs to ``advance.cursor``. When overflow leaves the
     # cursor behind, discard that tail and reread from the last queued line.

@@ -22,11 +22,9 @@ from yoetz.adapters.importers.codex_rollout_jsonl import (
     profile_for_rollout_version,
 )
 from yoetz.adapters.integrations.codex_capability_cells import (
-    CODEX_ROLLOUT_CAPABILITY_PROFILE_ID,
     CODEX_ROLLOUT_CLI_VERSION,
     CODEX_ROLLOUT_EVIDENCE_CASE_IDS,
     CODEX_ROLLOUT_IMPORTER_PROFILE_ID,
-    CODEX_ROLLOUT_SUPPORTED_VERSIONS,
 )
 from yoetz.adapters.integrations.codex_skill import CODEX_HARNESS_PROFILE
 from yoetz.ports.importer import ImportLineStatus
@@ -152,6 +150,17 @@ def test_wrong_cli_version_is_unsupported_format() -> None:
     assert all(status is ImportLineStatus.UNSUPPORTED for status in parsed.statuses)
 
 
+def test_unknown_item_type_is_not_mapped_as_clean_coverage() -> None:
+    parsed = parse_codex_rollout_jsonl(
+        encode_lines(session_meta(), response_item({"type": "future_tool_result"})),
+        profile_for_rollout_version("0.148.0"),
+        require_admission=True,
+    )
+    assert ImportLineStatus.UNKNOWN in parsed.statuses
+    assert "unknown_item_type" in parsed.reason_codes
+    assert all(record.item_type != "future_tool_result" for record in parsed.records)
+
+
 def test_exec_jsonl_is_unsupported_codex_profile() -> None:
     profile = profile_for_rollout_version("0.148.0")
     source = (
@@ -164,12 +173,9 @@ def test_exec_jsonl_is_unsupported_codex_profile() -> None:
     assert all(status is ImportLineStatus.UNSUPPORTED for status in parsed.statuses)
 
 
-def test_harness_profile_matches_rollout_cell() -> None:
-    assert CODEX_HARNESS_PROFILE.capability_profile_ids == (CODEX_ROLLOUT_CAPABILITY_PROFILE_ID,)
-    assert CODEX_HARNESS_PROFILE.supported_versions == CODEX_ROLLOUT_SUPPORTED_VERSIONS
-    assert (
-        CODEX_HARNESS_PROFILE.hooks_by_capability_profile[CODEX_ROLLOUT_CAPABILITY_PROFILE_ID]
-        is None
-    )
+def test_rollout_fixture_cell_does_not_promote_harness_support() -> None:
+    assert CODEX_HARNESS_PROFILE.capability_profile_ids == ()
+    assert CODEX_HARNESS_PROFILE.supported_versions == ()
+    assert dict(CODEX_HARNESS_PROFILE.hooks_by_capability_profile) == {}
     assert CODEX_ROLLOUT_CLI_VERSION == "0.148.0"
     assert CODEX_ROLLOUT_EVIDENCE_CASE_IDS == ("IMP-006", "IMP-007", "IMP-008", "IMP-009")

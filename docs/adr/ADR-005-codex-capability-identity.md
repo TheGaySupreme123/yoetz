@@ -13,12 +13,13 @@ skill files under `skills/codex/`, and `tests/capability/`.
 
 1. **Supported Codex range:** exact cells only, never a continuous range. The `codex exec --json`
    importer remains pinned at `0.139.0` (`codex-exec-jsonl/0.139.0/v1`). The session-stream
-   reconciler is a different surface and is pinned at rollout `0.148.0`
-   (`codex-rollout-jsonl/0.148.0/v1`, capability id `codex-cli-rollout-0.148.0`) from reviewed
-   grammar fixtures covering `legacy` and `paginated` history modes. Neighbors including `0.149.1`
-   stay untested, not supported. The full skill/MCP/hook matrix in `runtime-support.json` remains
-   unfrozen until those facets have independent installed-artifact evidence. The release manifest
-   records min/max/denied from accepted cells only.
+   reconciler is a different surface and has a parser-only rollout grammar profile for `0.148.0`
+   (`codex-rollout-jsonl/0.148.0/v1`) covering constructed `legacy` and `paginated` fixtures.
+   Those fixtures are not an isolated installed-artifact capture and therefore do not populate
+   `CODEX_HARNESS_PROFILE`, the skill manifest's tested/supported bounds, or `yoetz version`
+   capability profiles. Neighbors including `0.149.1` stay untested. The full skill/MCP/hook
+   matrix in `runtime-support.json` and issue #413 remain unfrozen until those facets have
+   independent installed-artifact evidence.
 2. **Integration posture:** Codex is the MCP client; Yoetz is a local stdio server registered via
    `codex mcp add yoetz -- yoetz mcp serve`, default `required = false`. Yoetz first runs `codex mcp
    get yoetz --json`; because a nonzero named lookup is ambiguous, only a successful strict parse

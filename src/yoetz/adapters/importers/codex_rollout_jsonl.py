@@ -347,4 +347,6 @@ def _validate_wrapper(value: dict[str, object]) -> tuple[ImportLineStatus, str |
     if "ordinal" in value and type(value.get("ordinal")) is not int:
         return ImportLineStatus.UNSUPPORTED, None, "wrapper_shape_unsupported"
     item_type = _item_type_of(value)
+    if item_type is not None and item_type not in _ITEM_TYPES:
+        return ImportLineStatus.UNKNOWN, item_type, "unknown_item_type"
     return ImportLineStatus.MAPPED, item_type, None

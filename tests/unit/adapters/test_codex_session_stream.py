@@ -152,6 +152,94 @@ def test_reconcile_enqueues_recovered_envelopes_into_outbox(tmp_path: Path) -> N
     assert store.pending_outbox_count(workspace) == accepted
 
 
+def test_reconcile_resets_cursor_when_stream_mapping_changes(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions" / "2026" / "07" / "23"
+    sessions.mkdir(parents=True)
+    session_id = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+    target = sessions / f"rollout-2026-07-23T12-00-00-{session_id}.jsonl"
+    target.write_bytes(failed_shell_rollout())
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    store.set_stream_cursor(
+        workspace,
+        session,
+        ObservationCursor(
+            source_generation=4,
+            byte_position=target.stat().st_size,
+            event_position=9,
+            last_source_commitment=_EMPTY,
+            mapping_version="codex-obs-stream/1.0.0",
+        ),
+    )
+
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+    cursor = store.get_stream_cursor(workspace, session)
+    assert result["accepted"]
+    assert cursor is not None
+    assert cursor.mapping_version == STREAM_MAPPING_VERSION
+    assert cursor.source_generation == 5
+    assert cursor.byte_position > 0
+
+
+def test_function_call_name_pairs_with_output_across_reconcile_passes(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    session_id = "stream-pair-across-passes"
+    target = sessions / f"rollout-{session_id}.jsonl"
+    target.write_bytes(
+        encode_lines(
+            session_meta(),
+            function_call(name="shell", call_id="call-shell-cross-pass"),
+        )
+    )
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    locator = CodexSessionStreamLocator(home)
+    first = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+    assert first["accepted"] == 2
+    target.write_bytes(
+        target.read_bytes()
+        + encode_lines(function_call_output(call_id="call-shell-cross-pass", exit_code=0))
+    )
+    second = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+    assert second["accepted"] == 1
+    outputs = [
+        row.envelope
+        for row in store.list_pending_outbox_rows(workspace)
+        if row.envelope.structural_payload.get("action") == "function_call_output"
+    ]
+    assert len(outputs) == 1
+    assert outputs[0].structural_payload.get("tool_name") == "shell"
+    batch = materialize_observation_envelope(outputs[0], task_id="task_stream_pair")
+    assert tuple(item.role for item in batch.drafts) == ("action", "result")
+
+
 def test_locator_matches_reverted_thread_filename(tmp_path: Path) -> None:
     home = tmp_path / "codex-home"
     sessions = home / "sessions" / "2026" / "08" / "22"

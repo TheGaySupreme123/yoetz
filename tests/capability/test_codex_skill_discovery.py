@@ -218,7 +218,7 @@ async def test_preview_and_modified_copy_protection_in_isolated_repo(tmp_path: P
 
     status = await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
     assert status.state in {IntegrationState.ABSENT, IntegrationState.INCOMPATIBLE}
-    assert status.compatibility == "supported"
+    assert status.compatibility == "unsupported"
 
     preview = await adapter.preview_skill(
         HarnessId.CODEX,
@@ -249,7 +249,7 @@ async def test_preview_and_modified_copy_protection_in_isolated_repo(tmp_path: P
     )
     with pytest.raises(IntegrationError) as caught:
         await adapter.install_skill(HarnessId.CODEX, apply)
-    assert caught.value.reason is IntegrationReason.PREVIEW_STALE
+    assert caught.value.reason is IntegrationReason.VERSION_INCOMPATIBLE
     assert (skill_dir / "SKILL.md").read_bytes() == before
 
     context = runtime_capability_context(
@@ -286,8 +286,8 @@ async def test_preview_and_modified_copy_protection_in_isolated_repo(tmp_path: P
 def test_app_server_discovery_claim_unsupported_while_unprofiled(tmp_path: Path) -> None:
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir(mode=0o700)
-    assert CODEX_HARNESS_PROFILE.capability_profile_ids == ("codex-cli-rollout-0.148.0",)
-    assert CODEX_HARNESS_PROFILE.supported_versions == ("0.148.0",)
+    assert CODEX_HARNESS_PROFILE.capability_profile_ids == ()
+    assert CODEX_HARNESS_PROFILE.supported_versions == ()
     context = runtime_capability_context(
         fixture_digest=bytes_digest(b"skills-list-unprofiled"),
         test_revision=_TEST_REVISION,

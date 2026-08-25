@@ -945,7 +945,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.last_reason == ObservationGapCode.MAPPING_MISSING.value
     assert durable.last_attempt_at == attempted_at
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
-        "yoetz.observation-local/7"
+        "yoetz.observation-local/8"
     )
 
 
