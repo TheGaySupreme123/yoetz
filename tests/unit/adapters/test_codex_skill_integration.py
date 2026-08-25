@@ -187,7 +187,7 @@ def test_source_mutation_fails_closed_without_checkout_fallback() -> None:
 
 
 @pytest.mark.anyio
-def test_status_separates_filesystem_state_from_capability_compatibility(
+async def test_status_separates_filesystem_state_from_capability_compatibility(
     tmp_path: Path,
 ) -> None:
     tmp_path.chmod(0o700)
