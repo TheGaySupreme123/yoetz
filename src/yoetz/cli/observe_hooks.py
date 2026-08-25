@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import shlex
 import sys
 import time
@@ -35,11 +36,15 @@ from yoetz.cli.hook_io import (
     context_output as _context_output,
 )
 from yoetz.cli.hook_io import (
+    cursor_context_output as _cursor_context_output,
+)
+from yoetz.cli.hook_io import (
     read_hook_payload,
 )
 from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
 )
+from yoetz.cli.workspace_binding import resolve_workspace_locator
 from yoetz.domain.observation import (
     ObservationContentChunk,
     ObservationContentKind,
@@ -201,6 +206,11 @@ _TOKEN_CHARS: Final = frozenset(
 )
 _MAX_TOKEN_CHARS: Final = 128
 _CURSOR_SESSION_PREFIX: Final = "cursor:"
+_CURSOR_UNTESTED_PROFILE_ID: Final = "untested"
+_CURSOR_VERSION_TO_PROFILE: Final = {
+    "3.17.8": "cursor-ide-3.17.8",
+    "2026.07.09-a3815c0": "cursor-cli-2026.07.09-a3815c0",
+}
 
 
 type AsyncRunner = Callable[[Callable[[], Awaitable[object]]], object]
@@ -277,6 +287,42 @@ def _int_or_none(value: object) -> int | None:
 
 def _bool_or_none(value: object) -> bool | None:
     return value if type(value) is bool else None
+
+
+def _cursor_capability_profile_id(cursor_version: object) -> str:
+    """Map an exact Cursor version to its reviewed profile, else stay untested.
+
+    Hook payloads may report a version from any Cursor surface.  The native
+    integration owns the reviewed profile IDs, but importing that adapter on
+    every hook would pull in the full plugin/rendering stack.  Keep this
+    bounded table local to the lightweight ingress and never infer support for
+    a neighboring version.
+    """
+
+    version = _token_or_none(cursor_version)
+    if version is None:
+        return _CURSOR_UNTESTED_PROFILE_ID
+    return _CURSOR_VERSION_TO_PROFILE.get(version, _CURSOR_UNTESTED_PROFILE_ID)
+
+
+def _resolve_cursor_workspace(
+    payload: Mapping[str, JsonValue], explicit_workspace: str | None
+) -> str | None:
+    """Resolve a Cursor workspace without retaining the host's root list.
+
+    ``workspace_binding`` owns the validation and source precedence.  This
+    wrapper returns one resolved path and no payload data.
+    """
+
+    resolved = resolve_workspace_locator(
+        explicit=explicit_workspace,
+        payload=payload,
+        env=os.environ,
+    )
+    # The sibling resolver already performs bounded lexical normalization and
+    # rejects symlinked components.  Do not resolve the returned path again:
+    # that would re-open the exact symlink race this boundary closes.
+    return resolved if type(resolved) is str and resolved else None
 
 
 def _routine_read_action(payload: Mapping[str, JsonValue]) -> bool:
@@ -1129,6 +1175,7 @@ def handle_observe(
     _monotonic: Callable[[], float] = time.monotonic,
     _workspace_commitment: str | None = None,
     source: ObservationSource = ObservationSource.CODEX_HOOK,
+    _output_event_name: str | None = None,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -1174,6 +1221,16 @@ def handle_observe(
                     sys.stdout.close()
             return emitted
 
+        def _render_context(additional_context: str) -> dict[str, JsonValue]:
+            """Render advice for the receiving host, retaining Cursor's raw event name."""
+
+            if source is ObservationSource.CURSOR_HOOK:
+                raw_cursor_event = _output_event_name
+                if raw_cursor_event is None:
+                    return {}
+                return _cursor_context_output(raw_cursor_event, additional_context)
+            return _context_output(resolved_event, additional_context)
+
         payload = read_hook_payload(stdin_bytes)
         harness_id: Literal["codex", "cursor"] = (
             "cursor" if source is ObservationSource.CURSOR_HOOK else "codex"
@@ -1206,9 +1263,7 @@ def handle_observe(
                 additional = ""
                 with contextlib.suppress(Exception):
                     additional = _cached_recommendation_context(_state=_state)
-                _stdout_json(
-                    _context_output(resolved_event, additional) if additional else {}, stdout
-                )
+                _stdout_json(_render_context(additional) if additional else {}, stdout)
             else:
                 _stdout_json({}, stdout)
             return 0
@@ -1227,8 +1282,14 @@ def handle_observe(
             workspace_commitment = _workspace_commitment
         elif workspace is not None:
             try:
-                # Resolve '.' / relative paths locally; never log or persist plaintext.
-                workspace_locator = str(Path(workspace).expanduser().resolve(strict=False))
+                # Cursor already passed through the bounded, symlink-refusing
+                # workspace resolver. Codex retains its historical local
+                # normalization for '.' and relative paths.
+                workspace_locator = (
+                    workspace
+                    if source is ObservationSource.CURSOR_HOOK
+                    else str(Path(workspace).expanduser().resolve(strict=False))
+                )
                 workspace_commitment = store.workspace_commitment(workspace_locator)
                 consent_probe = store.consent_for(workspace_commitment)
                 if consent_probe is None or not consent_probe.active:
@@ -1240,11 +1301,15 @@ def handle_observe(
         if workspace_commitment is None:
             # Bind only via an existing Codex-session→workspace map for this session.
             # Never guess a single "active" workspace across consented projects.
-            workspace_commitment = store.find_workspace_for_codex_session(codex_session_id)
-            workspace_locator = None
+            if source is not ObservationSource.CURSOR_HOOK or workspace is None:
+                workspace_commitment = store.find_workspace_for_codex_session(codex_session_id)
+                workspace_locator = None
         consent = None if workspace_commitment is None else store.consent_for(workspace_commitment)
         if consent is None or not consent.active:
             # Consent missing/paused/revoked: no ingest, no spool; still exit 0.
+            if source is ObservationSource.CURSOR_HOOK and workspace is not None:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic("workspace_unconsented", resolved_event, _state=_state)
             _stdout_json({}, stdout)
             return 0
 
@@ -1601,6 +1666,9 @@ def handle_observe(
             and resolved_event in ADVICE_SAFE_EVENTS
             and not skip_advice_loop
             and not stop_already_active
+            and (
+                source is not ObservationSource.CURSOR_HOOK or _output_event_name == "sessionStart"
+            )
         )
         delivery_gate = (
             store.advice_delivery_lease(workspace_commitment)
@@ -1630,15 +1698,25 @@ def handle_observe(
 
             # Release recommendations are read from one bounded local cache only.
             # Existing task/receipt advice always wins this shared context channel.
-            if not additional and resolved_event == "SessionStart" and not skip_advice_loop:
+            if (
+                not additional
+                and resolved_event == "SessionStart"
+                and not skip_advice_loop
+                and (
+                    source is not ObservationSource.CURSOR_HOOK
+                    or _output_event_name == "sessionStart"
+                )
+            ):
                 with contextlib.suppress(Exception):
                     additional = _cached_recommendation_context(_state=_state)
 
+            rendered_output = _render_context(additional) if additional else {}
+            host_consumable = bool(rendered_output)
             if additional:
-                emitted = _stdout_json(_context_output(resolved_event, additional), stdout)
+                emitted = _stdout_json(rendered_output, stdout)
             else:
                 emitted = _stdout_json({}, stdout)
-            if emitted and pending_delivery is not None:
+            if emitted and host_consumable and pending_delivery is not None:
                 # Strictly after the write: delivered-but-unrecorded costs one
                 # redelivery, recorded-but-undelivered would cost the advice.
                 # Nothing past the emission may raise — the outer handler would
@@ -1650,7 +1728,7 @@ def handle_observe(
                         yoetz_session_id=delivery_session_id,
                         session_commitment=session_commitment,
                     )
-            if emitted and pending_frontier_notice is not None:
+            if emitted and host_consumable and pending_frontier_notice is not None:
                 with contextlib.suppress(BaseException):
                     store.commit_frontier_motion_delivery(
                         workspace_commitment,
@@ -1731,6 +1809,17 @@ def handle_cursor_observe(
         )
         if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CURSOR_SESSION_PREFIX):
             return 0 if hook_io.stdout_json({}, stdout) else 0
+        resolved_workspace = _resolve_cursor_workspace(payload, workspace)
+        if resolved_workspace is None:
+            # No structural envelope is created until the workspace locator
+            # is resolved.  In particular, Cursor's workspace_roots list is
+            # never forwarded to the observation path or persisted.
+            with contextlib.suppress(Exception):
+                record_hook_diagnostic(
+                    "workspace_unresolvable", event_map[raw_event], _state=_state
+                )
+            return 0 if hook_io.stdout_json({}, stdout) else 0
+        cursor_version = _token_or_none(payload.get("cursor_version"))
         structural: dict[str, JsonValue] = {
             "action": (
                 "cursor_file_edit"
@@ -1739,7 +1828,7 @@ def handle_cursor_observe(
                 if raw_event == "afterMCPExecution"
                 else "cursor_lifecycle"
             ),
-            "capability_profile_id": "cursor-local-3.17",
+            "capability_profile_id": _cursor_capability_profile_id(cursor_version),
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
         }
@@ -1774,12 +1863,13 @@ def handle_cursor_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
             stdout=stdout,
-            workspace=workspace,
+            workspace=resolved_workspace,
             _state=_state,
             connect=connect,
             run_async=run_async,
             skip_service=skip_service,
             source=ObservationSource.CURSOR_HOOK,
+            _output_event_name=raw_event,
         )
     except BaseException:
         with contextlib.suppress(BaseException):

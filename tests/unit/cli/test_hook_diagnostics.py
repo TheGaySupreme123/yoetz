@@ -28,6 +28,22 @@ def test_record_is_structural_and_owner_only(tmp_path: Path) -> None:
     assert path.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_workspace_binding_reasons_are_distinct_closed_tokens(tmp_path: Path) -> None:
+    for reason in ("workspace_unresolvable", "workspace_unconsented"):
+        record_hook_diagnostic(reason, "SessionStart", _state=tmp_path)
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "observation/hook-diagnostics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["reason"] for row in rows] == [
+        "workspace_unresolvable",
+        "workspace_unconsented",
+    ]
+
+
 def test_invalid_plaintext_is_not_persisted(tmp_path: Path) -> None:
     record_hook_diagnostic("customer private repository", "payload\ntext", _state=tmp_path)
     row = json.loads((tmp_path / "observation/hook-diagnostics.jsonl").read_text(encoding="utf-8"))

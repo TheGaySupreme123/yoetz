@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from yoetz.cli.hook_io import context_output
+import io
+
+from yoetz.cli.hook_io import context_output, cursor_context_output, stdout_json
 
 
 def test_session_start_and_post_tool_use_emit_additional_context() -> None:
@@ -30,3 +32,38 @@ def test_session_end_and_unknown_events_emit_empty_object() -> None:
     assert context_output("PreCompact", "never an advice channel") == {}
     assert context_output("Stop", "   ") == {}
     assert context_output("SessionStart", "") == {}
+
+
+def test_cursor_session_start_emits_cursor_native_additional_context() -> None:
+    assert cursor_context_output("sessionStart", "  bounded advice  ") == {
+        "additional_context": "bounded advice"
+    }
+
+
+def test_cursor_stop_does_not_auto_submit_a_followup_message() -> None:
+    assert cursor_context_output("stop", "submit this as a new user message") == {}
+
+
+def test_cursor_stop_followup_is_explicitly_opt_in() -> None:
+    assert cursor_context_output(
+        "stop", "  submit this as a new user message  ", allow_stop_followup=True
+    ) == {"followup_message": "submit this as a new user message"}
+
+
+def test_cursor_outputless_and_unknown_events_emit_empty_object() -> None:
+    for event in ("afterFileEdit", "afterMCPExecution", "sessionEnd", "unknown"):
+        assert cursor_context_output(event, "advice that has no output channel") == {}
+
+
+def test_cursor_context_is_bounded_by_the_codex_context_limit() -> None:
+    advice = "x" * 2_001
+    assert cursor_context_output("sessionStart", advice) == {"additional_context": "x" * 2_000}
+
+
+def test_codex_context_output_keeps_canonical_stdout_bytes() -> None:
+    stream = io.BytesIO()
+    assert stdout_json(context_output("SessionStart", "bounded advice"), stream)
+    assert (
+        stream.getvalue() == b'{"hookSpecificOutput":{"additionalContext":"bounded advice",'
+        b'"hookEventName":"SessionStart"}}\n'
+    )

@@ -350,11 +350,12 @@ whole-directory atomic operations; modified, unmanaged, dual, foreign, ambiguous
 recovery-required state is preserved and refused.
 
 The wizard never searches regular Cursor state to configure an isolated target and never mutates
-Cursor caches. SDK configuration is a separate explicit row: TypeScript and Python package
-versions, `sdk.v1`, local sandbox/approval mode, and `settingSources` are previewed; plugin-managed
-MCP requires `plugins`, while external registration requires `project` or `user`. Inline send/create
-servers remain higher precedence and make a same-name plugin proof fail rather than silently pass.
-Observation consent remains a later independent decision and is not implied by plugin installation.
+Cursor caches. For planned `0.2`, issue #412 defers operational SDK configuration: retained
+TypeScript/Python package, `sdk.v1`, sandbox/approval, precedence, and `settingSources` facts are
+metadata-only experimental fixtures and the wizard does not present them as a configurable or
+supported cell. A future design-gated amendment may restore a separate explicit SDK row only with
+operational proof. Observation consent remains a later independent decision and is not implied by
+plugin installation.
 
 A new user's path is now: `npx yoetz` or `uvx yoetz` → interactive wizard → detected-harness
 selection (Codex in v0.1) → installation selection when needed → explicit `Y`/`N` confirmation →

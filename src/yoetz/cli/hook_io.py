@@ -19,6 +19,7 @@ __all__ = [
     "ADDITIONAL_CONTEXT_EVENTS",
     "STOP_CONTROL_EVENTS",
     "context_output",
+    "cursor_context_output",
     "read_hook_payload",
     "stderr_line",
     "stdout_json",
@@ -84,6 +85,34 @@ def context_output(event_name: str, additional_context: str) -> dict[str, JsonVa
                 "additionalContext": text,
             }
         }
+    return {}
+
+
+def cursor_context_output(
+    raw_event: str,
+    text: str,
+    *,
+    allow_stop_followup: bool = False,
+) -> dict[str, JsonValue]:
+    """Return the Cursor-native stdout object for one raw hook event.
+
+    Cursor's output contract is independent from the Codex hook contract:
+    ``sessionStart`` accepts ``additional_context``, while ``stop`` can
+    optionally submit a ``followup_message``.  Stop follow-ups are disabled
+    by default because Cursor treats them as a new user message.  The other
+    Cursor hook events currently have no consumable output channel and emit
+    ``{}``.
+    """
+
+    bounded = text.strip()
+    if not bounded:
+        return {}
+    if len(bounded) > _MAX_CONTEXT_CHARS:
+        bounded = bounded[:_MAX_CONTEXT_CHARS]
+    if raw_event == "sessionStart":
+        return {"additional_context": bounded}
+    if raw_event == "stop" and allow_stop_followup:
+        return {"followup_message": bounded}
     return {}
 
 

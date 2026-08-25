@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -36,6 +37,7 @@ from yoetz.ports.plugin_artifacts import (
     PluginOperationState,
     PluginProofFacet,
 )
+from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.version import read_verified_resource
 
 _REQUEST = request_id("req_10000000-0000-4000-8000-000000000001")
@@ -60,18 +62,23 @@ def _authority(preview_digest: str) -> ArtifactAuthority:
     return ArtifactAuthority("review_only", preview_digest, _REVIEW_ID)
 
 
-def test_cursor_profile_and_all_four_cells_are_resource_registered() -> None:
+def test_cursor_profile_exposes_only_supported_ide_and_cli_cells() -> None:
     assert CURSOR_HARNESS_PROFILE.harness_id.value == "cursor"
     assert CURSOR_HARNESS_PROFILE.capability_profile_ids == (
         "cursor-cli-2026.07.09-a3815c0",
         "cursor-ide-3.17.8",
-        "cursor-sdk-python-1.0.24",
-        "cursor-sdk-typescript-1.0.23",
     )
+    assert CURSOR_HARNESS_PROFILE.supported_versions == (
+        "2026.07.09-a3815c0",
+        "3.17.8",
+    )
+    assert not any(
+        profile_id.startswith("cursor-sdk-")
+        for profile_id in CURSOR_HARNESS_PROFILE.capability_profile_ids
+    )
+    assert not {"1.0.23", "1.0.24"}.intersection(CURSOR_HARNESS_PROFILE.supported_versions)
     hooks = dict(CURSOR_HARNESS_PROFILE.hooks_by_capability_profile)
     assert hooks["cursor-cli-2026.07.09-a3815c0"] is None
-    assert hooks["cursor-sdk-python-1.0.24"] is None
-    assert hooks["cursor-sdk-typescript-1.0.23"] is None
     native_hooks = hooks["cursor-ide-3.17.8"]
     assert native_hooks is not None
     assert native_hooks.observation_events == CURSOR_HOOK_EVENTS
@@ -84,9 +91,24 @@ def test_cursor_profile_and_all_four_cells_are_resource_registered() -> None:
     ):
         fixture = json.loads(read_verified_resource(f"fixtures/agent-plugins/{name}"))
         assert fixture["schema"].startswith("yoetz.cursor-")
+        if name.startswith("cursor-sdk-"):
+            assert fixture["proof_limits"] == ["metadata_only", "not_a_support_claim"]
 
 
-def test_portable_and_native_reuse_exact_skill_bytes_but_keep_manifests_disjoint() -> None:
+def test_portable_and_native_reuse_exact_skill_bytes_but_keep_manifests_disjoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "bin" / "yoetz"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
+    executable.chmod(0o755)
+
+    def find_executable(command: str) -> str | None:
+        return str(executable) if command == "yoetz" else None
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.shutil.which", find_executable
+    )
     portable = render_cursor_plugin(PluginFormatProfile.AGENT_PLUGINS_1)
     native = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
 
@@ -104,10 +126,36 @@ def test_portable_and_native_reuse_exact_skill_bytes_but_keep_manifests_disjoint
     assert manifest["hooks"] == "hooks/hooks.json"
     assert tuple(sorted(hooks["hooks"])) == CURSOR_HOOK_EVENTS
     assert "afterAgentThought" not in hooks["hooks"]
+    resolved = str(executable.resolve())
+    assert native.yoetz_executable == resolved
     assert all(
-        definition[0]["command"].startswith("yoetz hooks cursor-observe ")
+        definition[0]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
         for definition in hooks["hooks"].values()
     )
+    assert {event: definition[0]["timeout"] for event, definition in hooks["hooks"].items()} == {
+        "afterFileEdit": 5,
+        "afterMCPExecution": 5,
+        "sessionEnd": 3,
+        "sessionStart": 10,
+        "stop": 10,
+    }
+    command = hooks["hooks"]["sessionStart"][0]["command"]
+    completed = subprocess.run(
+        shlex.split(command),
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert completed.returncode == 0
+    assert completed.stdout.splitlines() == [
+        "hooks",
+        "cursor-observe",
+        "--workspace",
+        ".",
+        "--event",
+        "sessionStart",
+    ]
 
 
 def test_plugin_managed_native_route_is_exact_and_external_omits_it() -> None:
@@ -139,6 +187,19 @@ def test_plugin_managed_native_route_is_exact_and_external_omits_it() -> None:
     ]
 
 
+def test_native_render_fails_closed_when_yoetz_console_is_not_discoverable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def find_executable(_name: str) -> str | None:
+        return None
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.shutil.which", find_executable
+    )
+    with pytest.raises(ValueError, match="^yoetz_executable_unavailable$"):
+        render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
+
+
 def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: Path) -> None:
     target = CursorPluginTarget(str(tmp_path / ".cursor"))
     artifact = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
@@ -160,6 +221,19 @@ def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: 
         review=_AcceptingReview(),
     )
     assert result.state_after is PluginArtifactState.NATIVE_MANAGED
+    marker = json.loads(
+        (
+            tmp_path
+            / ".cursor"
+            / "plugins"
+            / "local"
+            / "yoetz"
+            / ".yoetz-cursor-plugin-install.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert marker["yoetz_executable"] == artifact.yoetz_executable
+    assert marker["schema"] == "yoetz.cursor-plugin-install/2"
+    assert marker["renderer_version"] == "cursor-plugin/0.2.0"
 
     status = status_cursor_plugin(target, artifact)
     assert status.state is PluginArtifactState.NATIVE_MANAGED
@@ -186,6 +260,142 @@ def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: 
     assert removed.state_after is PluginArtifactState.ABSENT
     assert not (tmp_path / ".cursor" / "plugins" / "local" / "yoetz").exists()
     assert status_cursor_plugin(target, artifact).operation_state.value == "not_started"
+
+
+def _rewrite_native_marker_as_legacy_v1(destination: Path) -> None:
+    marker_path = destination / ".yoetz-cursor-plugin-install.json"
+    marker = json.loads(marker_path.read_bytes())
+    marker.pop("yoetz_executable")
+    marker["schema"] = "yoetz.cursor-plugin-install/1"
+    body = {key: value for key, value in marker.items() if key != "marker_digest"}
+    marker["marker_digest"] = canonical_digest(body)
+    marker_path.write_bytes(canonical_encode(marker))
+
+
+def test_legacy_native_v1_marker_has_a_safe_replace_path(tmp_path: Path) -> None:
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    artifact = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
+    installed = preview_cursor_plugin(_REQUEST, target, PluginArtifactAction.INSTALL, artifact)
+    apply_cursor_plugin(
+        _REQUEST,
+        target,
+        PluginArtifactAction.INSTALL,
+        artifact,
+        accepted_preview_digest=installed.preview_digest,
+        authority=_authority(installed.preview_digest),
+        review=_AcceptingReview(),
+    )
+    destination = tmp_path / ".cursor" / "plugins" / "local" / "yoetz"
+    _rewrite_native_marker_as_legacy_v1(destination)
+
+    status = status_cursor_plugin(target, artifact)
+    assert status.state is PluginArtifactState.MODIFIED
+    assert status.marker_valid is True
+    replacement = preview_cursor_plugin(
+        request_id("req_10000000-0000-4000-8000-000000000025"),
+        target,
+        PluginArtifactAction.REPLACE,
+        artifact,
+    )
+    replaced = apply_cursor_plugin(
+        replacement.request_id,
+        target,
+        PluginArtifactAction.REPLACE,
+        artifact,
+        accepted_preview_digest=replacement.preview_digest,
+        authority=_authority(replacement.preview_digest),
+        review=_AcceptingReview(),
+    )
+    assert replaced.state_after is PluginArtifactState.NATIVE_MANAGED
+    marker = json.loads((destination / ".yoetz-cursor-plugin-install.json").read_bytes())
+    assert marker["schema"] == "yoetz.cursor-plugin-install/2"
+
+
+def test_portable_v1_marker_remains_exact_and_removable(tmp_path: Path) -> None:
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    artifact = render_cursor_plugin(PluginFormatProfile.AGENT_PLUGINS_1)
+    installed = preview_cursor_plugin(_REQUEST, target, PluginArtifactAction.INSTALL, artifact)
+    apply_cursor_plugin(
+        _REQUEST,
+        target,
+        PluginArtifactAction.INSTALL,
+        artifact,
+        accepted_preview_digest=installed.preview_digest,
+        authority=_authority(installed.preview_digest),
+        review=_AcceptingReview(),
+    )
+    destination = tmp_path / ".cursor" / "plugins" / "local" / "yoetz"
+    marker = json.loads((destination / ".yoetz-cursor-plugin-install.json").read_bytes())
+    assert marker["schema"] == "yoetz.cursor-plugin-install/1"
+    status = status_cursor_plugin(target, artifact)
+    assert status.state is PluginArtifactState.PORTABLE_EXACT
+    assert status.marker_valid is True
+    preview_cursor_plugin(
+        request_id("req_10000000-0000-4000-8000-000000000026"),
+        target,
+        PluginArtifactAction.REMOVE,
+        artifact,
+    )
+
+
+def test_native_executable_drift_is_modified_and_replaceable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first" / "yoetz"
+    second = tmp_path / "second" / "yoetz"
+    for executable in (first, second):
+        executable.parent.mkdir()
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o755)
+
+    def find_first(_command: str) -> str | None:
+        return str(first)
+
+    monkeypatch.setattr("yoetz.adapters.integrations.cursor_integration.shutil.which", find_first)
+    installed_artifact = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
+    target = CursorPluginTarget(str(tmp_path / ".cursor"))
+    installed = preview_cursor_plugin(
+        _REQUEST, target, PluginArtifactAction.INSTALL, installed_artifact
+    )
+    apply_cursor_plugin(
+        _REQUEST,
+        target,
+        PluginArtifactAction.INSTALL,
+        installed_artifact,
+        accepted_preview_digest=installed.preview_digest,
+        authority=_authority(installed.preview_digest),
+        review=_AcceptingReview(),
+    )
+
+    def find_second(_command: str) -> str | None:
+        return str(second)
+
+    monkeypatch.setattr("yoetz.adapters.integrations.cursor_integration.shutil.which", find_second)
+    desired = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
+    status = status_cursor_plugin(target, desired)
+    assert status.state is PluginArtifactState.MODIFIED
+    assert status.marker_valid is True
+    replacement = preview_cursor_plugin(
+        request_id("req_10000000-0000-4000-8000-000000000027"),
+        target,
+        PluginArtifactAction.REPLACE,
+        desired,
+    )
+    assert replacement.state_before is PluginArtifactState.MODIFIED
+    replaced = apply_cursor_plugin(
+        replacement.request_id,
+        target,
+        PluginArtifactAction.REPLACE,
+        desired,
+        accepted_preview_digest=replacement.preview_digest,
+        authority=_authority(replacement.preview_digest),
+        review=_AcceptingReview(),
+    )
+    assert replaced.state_after is PluginArtifactState.NATIVE_MANAGED
+    marker_path = (
+        tmp_path / ".cursor" / "plugins" / "local" / "yoetz" / ".yoetz-cursor-plugin-install.json"
+    )
+    assert json.loads(marker_path.read_bytes())["yoetz_executable"] == str(second.resolve())
 
 
 def test_remove_preserves_separately_registered_mcp_route(tmp_path: Path) -> None:
@@ -464,6 +674,10 @@ def test_sdk_profiles_require_explicit_sources_and_pin_bridge_protocol(tmp_path:
     )
     assert profile.identity.package_version == "1.0.23"
     assert profile.identity.bridge_protocol == "sdk.v1"
+    assert profile.identity.proof_limits == ("metadata_only", "not_a_support_claim")
+    assert profile.proof_limits == ("metadata_only", "not_a_support_claim")
+    assert profile.metadata_only is True
+    assert profile.support_claim is False
     assert profile.mcp_precedence[0] is CursorMcpSource.INLINE_SEND
 
     with pytest.raises(ValueError, match="cursor_sdk_plugin_source_required"):
