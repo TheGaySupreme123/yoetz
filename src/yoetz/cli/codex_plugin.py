@@ -18,7 +18,10 @@ from yoetz.adapters.integrations.codex_skill import (
     inspect_destination,
     load_packaged_skill_source,
 )
-from yoetz.cli.setup import _UsageExit, _choose_binary
+from yoetz.cli.setup import (
+    _choose_binary,  # pyright: ignore[reportPrivateUsage]
+    _UsageExit,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.ports.integrations import (
     IntegrationError,
     IntegrationScope,

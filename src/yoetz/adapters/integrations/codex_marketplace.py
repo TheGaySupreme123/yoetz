@@ -23,11 +23,11 @@ from yoetz.adapters.integrations.codex_plugin import (
     plugin_tree_matches_marker,
     render_plugin_install_tree,
 )
+from yoetz.adapters.integrations.codex_session_stream import resolve_codex_home
 from yoetz.adapters.integrations.codex_skill import (
     inspect_destination,
     load_packaged_skill_source,
 )
-from yoetz.adapters.integrations.codex_session_stream import resolve_codex_home
 from yoetz.ports.integrations import (
     IntegrationError,
     IntegrationReason,
@@ -192,7 +192,7 @@ class _CodexBinaryProbe:
 
 def _error(
     reason: IntegrationReason,
-    details: Mapping[str, JsonValue] | None = None,
+    details: Mapping[str, str] | None = None,
 ) -> IntegrationError:
     return IntegrationError(reason, {} if details is None else dict(details))
 
