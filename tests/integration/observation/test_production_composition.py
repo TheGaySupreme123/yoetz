@@ -356,22 +356,23 @@ async def test_hook_and_stream_copies_materialize_once(tmp_path: Path) -> None:
         )
         await pipeline.drain_to_task_bundle()
         session = pipeline.local.session_commitment("dedupe-1")
-        # Stream copy of the same logical command
+        # Stream copy of the same logical command, in rollout JSONL grammar.
         record = CodexParsedRecord(
             1,
             0,
             80,
-            "item.completed",
-            "command_execution",
+            "response_item",
+            "function_call_output",
             JsonObject(
                 {
-                    "type": "item.completed",
-                    "item": {
-                        "id": "shared-1",
-                        "type": "command_execution",
+                    "payload": {
+                        "call_id": "shared-1",
                         "exit_code": 1,
+                        "name": "shell",
                         "status": "completed",
+                        "type": "function_call_output",
                     },
+                    "type": "response_item",
                 }
             ),
         )
@@ -407,8 +408,8 @@ async def test_hook_and_stream_copies_materialize_once(tmp_path: Path) -> None:
             for item in pipeline.sqlite.list_envelopes(pipeline.workspace)
             if item.source is ObservationSource.CODEX_HOOK and item.event_kind == "PostToolUse"
         )
-        # The hook Post and the stream item.completed for one host call must
-        # collapse to one canonical identity, materialize the same paired
+        # The hook Post and the stream function_call_output for one host call
+        # must collapse to one canonical identity, materialize the same paired
         # action+result roles, and share one role-scoped claim so the
         # coordinator appends once and unions source coverage (issue #309).
         assert canonical_logical_identity(hook_post) == canonical_logical_identity(stream_env)

@@ -9,7 +9,10 @@ from pathlib import Path
 import pytest
 
 from yoetz.adapters.integrations import codex_plugin as plugin_mod
-from yoetz.adapters.integrations.codex_capability_cells import skill_manifest_capability_fields
+from yoetz.adapters.integrations.codex_capability_cells import (
+    CODEX_ROLLOUT_SUPPORTED_VERSIONS,
+    skill_manifest_capability_fields,
+)
 from yoetz.adapters.integrations.codex_plugin import (
     PluginHookPresence,
     codex_supports_async_hooks,
@@ -301,17 +304,53 @@ def test_unsupported_or_unknown_hosts_keep_all_ingress_handlers_synchronous(
         assert handler["timeout"] == 10
 
 
-def test_install_refuses_when_tested_set_empty(tmp_path: Path) -> None:
+def test_install_refuses_when_tested_set_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     tmp_path.chmod(0o700)
-    source = load_packaged_skill_source(_resources())
-    assert source.harness_tested_set == ()
+    resources = _resources()
+    packaged = load_packaged_skill_source(resources)
+    assert packaged.harness_tested_set == CODEX_ROLLOUT_SUPPORTED_VERSIONS
+    empty_source = SkillSource(
+        HarnessId.CODEX,
+        "0.1.0",
+        "0.1",
+        (),
+        "sha256:" + "a" * 64,
+        (
+            IntegrationFile(
+                "SKILL.md",
+                len(resources.files["skills/codex/yoetz/SKILL.md"]),
+                "sha256:" + "b" * 64,
+                "text/markdown",
+            ),
+        ),
+    )
+
+    def _fake_load(_resource_source: SkillResourceSource | None = None) -> SkillSource:
+        return empty_source
+
+    monkeypatch.setattr(plugin_mod, "load_packaged_skill_source", _fake_load)
     with pytest.raises(IntegrationError) as caught:
         install_plugin(
             IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path)),
-            resource_source=_resources(),
+            resource_source=resources,
         )
     assert caught.value.reason is IntegrationReason.VERSION_INCOMPATIBLE
     assert not (tmp_path / ".agents").exists()
+
+
+def test_install_succeeds_when_tested_set_is_populated(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    source = load_packaged_skill_source(_resources())
+    assert source.harness_tested_set == CODEX_ROLLOUT_SUPPORTED_VERSIONS
+    inspection = install_plugin(
+        IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path)),
+        resource_source=_resources(),
+    )
+    assert inspection.presence is PluginHookPresence.INSTALLED
+    assert inspection.state is IntegrationState.INSTALLED_EXACT
+    assert (tmp_path / ".agents/plugins/yoetz/hooks/hooks.json").is_file()
 
 
 def test_install_allow_untested_installs_hooks(tmp_path: Path) -> None:

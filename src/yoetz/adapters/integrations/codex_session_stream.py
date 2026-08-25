@@ -67,6 +67,7 @@ _MATERIAL_HOOK_EVENTS: Final = frozenset(
 
 
 _JSONL_SUFFIXES: Final = (".jsonl", ".jsonl.zst")
+_ROLLOUT_ITEM_TYPES: Final = frozenset(SUPPORTED_ROLLOUT_PROFILES["0.148.0"].item_types)
 
 
 def default_stream_profile() -> CodexCapabilityProfile:
@@ -280,11 +281,10 @@ def structural_from_stream_record(record: CodexParsedRecord) -> tuple[JsonObject
             gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
     body = _structural_body(record)
     if body is not None:
-        tool = (
-            _normalize_tool_name(body.get("tool"))
-            or _normalize_tool_name(body.get("name"))
-            or _normalize_tool_name(body.get("type"))
-        )
+        tool = _normalize_tool_name(body.get("tool")) or _normalize_tool_name(body.get("name"))
+        type_token = _token(body.get("type"))
+        if tool is None and type_token is not None and type_token not in _ROLLOUT_ITEM_TYPES:
+            tool = _normalize_tool_name(type_token)
         if tool is not None:
             fields["tool_name"] = tool
         status = _token(body.get("status")) or _token(body.get("result_status"))

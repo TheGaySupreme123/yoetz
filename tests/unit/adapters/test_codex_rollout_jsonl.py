@@ -73,7 +73,10 @@ def test_legacy_and_paginated_fixtures_map_without_unknown_lines() -> None:
             assert parsed.records
             expected = cast(dict[str, JsonValue], expected_variants[name])
             assert unknown == expected["unknown_count"]
-            dumped = json.dumps(dict(record.value), default=str)
+            dumped = json.dumps(
+                [dict(record.value) for record in parsed.records],
+                default=str,
+            )
             assert _CANARY_SECRET not in dumped
 
 

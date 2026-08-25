@@ -46,6 +46,7 @@ from yoetz.application.observation_materialize import (
     observation_operation_digest,
     observation_writer_id,
     stable_observation_id,
+    stream_event_is_completed_tool,
 )
 from yoetz.application.observation_verification import (
     CompletedApprovedCheck,
@@ -1250,7 +1251,9 @@ class ObservationCoordinator:
     ) -> ObservationVerificationWorker | None:
         """Build a worker and enqueue if subject state changed; never run checks here."""
 
-        if envelope.event_kind not in {"PostToolUse", "item.completed"}:
+        if envelope.event_kind != "PostToolUse" and not stream_event_is_completed_tool(
+            envelope.event_kind, envelope.structural_payload
+        ):
             return None
         required = (
             "workspace_locator_descriptor",

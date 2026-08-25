@@ -13,10 +13,12 @@ from builders.codex_rollout import (
     function_call_output,
     session_meta,
 )
+from yoetz.adapters.importers.codex_jsonl import CodexParsedRecord
 from yoetz.adapters.integrations.codex_session_stream import (
     CodexSessionStreamLocator,
     SessionStreamReader,
     default_stream_profile,
+    envelope_from_stream_record,
     reconcile_session_stream,
     should_trigger_stream_reconcile,
 )
@@ -24,12 +26,14 @@ from yoetz.adapters.integrations.observation_local import (
     STREAM_MAPPING_VERSION,
     LocalObservationStore,
 )
+from yoetz.application.observation_materialize import materialize_observation_envelope
 from yoetz.domain.observation import (
     ObservationCursor,
     ObservationGapCode,
     ObservationSource,
     ObservationStatusQuery,
 )
+from yoetz.domain.values import JsonObject
 
 _EMPTY = "hmac-sha256:" + ("0" * 64)
 _KEY = b"k" * 32
@@ -299,3 +303,42 @@ def test_should_trigger_stream_reconcile_events() -> None:
         should_trigger_stream_reconcile("UserPromptSubmit", last_reconcile_mono=0.0, now_mono=40.0)
         is True
     )
+
+
+def test_function_call_output_maps_completed_tool_without_unknown_gap() -> None:
+    record = CodexParsedRecord(
+        1,
+        0,
+        80,
+        "response_item",
+        "function_call_output",
+        JsonObject(
+            {
+                "payload": {
+                    "call_id": "call-shell-1",
+                    "exit_code": 1,
+                    "name": "shell",
+                    "status": "completed",
+                    "type": "function_call_output",
+                },
+                "type": "response_item",
+            }
+        ),
+    )
+    envelope = envelope_from_stream_record(
+        record,
+        session_commitment="hmac-sha256:" + ("ab" * 32),
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=80,
+            event_position=1,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+    )
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value not in envelope.gap_codes
+    assert envelope.structural_payload.get("tool_name") == "shell"
+    assert envelope.structural_payload.get("tool_call_id") == "call-shell-1"
+    assert envelope.structural_payload.get("exit_status") == 1
+    batch = materialize_observation_envelope(envelope, task_id="task_stream_map")
+    assert tuple(item.role for item in batch.drafts) == ("action", "result")

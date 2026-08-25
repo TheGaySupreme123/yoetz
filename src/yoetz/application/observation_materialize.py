@@ -61,11 +61,13 @@ __all__ = [
     "MATERIALIZATION_MAPPING_VERSION",
     "MaterializedObservationBatch",
     "MaterializedObservationDraft",
+    "STREAM_COMPLETED_EVENT_KINDS",
     "canonical_logical_identity",
     "materialize_observation_envelope",
     "observation_claim_identity",
     "observation_writer_id",
     "stable_observation_id",
+    "stream_event_is_completed_tool",
 ]
 
 MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.2.0"
@@ -110,6 +112,23 @@ _COMPLETION_KINDS: Final = frozenset(
 _PERMISSION_KINDS: Final = frozenset({"PermissionRequest", "PermissionDecision"})
 _SUBAGENT_START: Final = frozenset({"SubagentStart"})
 _SUBAGENT_STOP: Final = frozenset({"SubagentStop"})
+STREAM_COMPLETED_EVENT_KINDS: Final = frozenset(
+    {
+        "custom_tool_call_output",
+        "function_call_output",
+        "item.completed",
+        "item_completed",
+    }
+)
+
+
+def stream_event_is_completed_tool(kind: str, structural: Mapping[str, JsonValue]) -> bool:
+    """True when a session-stream envelope is a completed host tool call."""
+
+    if kind in STREAM_COMPLETED_EVENT_KINDS:
+        return True
+    action = structural.get("action")
+    return kind == "response_item" and type(action) is str and action in STREAM_COMPLETED_EVENT_KINDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,13 +339,15 @@ def materialize_observation_envelope(
     channel = PublicationChannel.HOOK_OBSERVED
     mapping = envelope.cursor.mapping_version or MATERIALIZATION_MAPPING_VERSION
     kind = envelope.event_kind
-    # Codex hook ``PostToolUse`` and session-stream ``item.completed`` are two
-    # observations of the same completed host call. Normalize the stream form
+    # Codex hook ``PostToolUse`` and a completed session-stream tool record
+    # (rollout ``function_call_output``, historically exec ``item.completed``)
+    # are two observations of the same host call. Normalize the stream form
     # before choosing ledger roles so both sources produce the same
     # action/result batch and therefore the same operation digest.
+    completed_stream = stream_event_is_completed_tool(kind, structural)
     if (
         envelope.source is ObservationSource.CODEX_SESSION_STREAM
-        and kind == "item.completed"
+        and completed_stream
         and _correlation(structural) is not None
     ):
         kind = "PostToolUse"
@@ -705,7 +726,7 @@ def materialize_observation_envelope(
 def canonical_logical_identity(envelope: ObservationEnvelope) -> str:
     """Return the canonical logical-observation identity for one envelope.
 
-    Hook ``PostToolUse`` and stream ``item.completed`` copies of the same host
+    Hook ``PostToolUse`` and stream completed-tool copies of the same host
     call collapse to one identity (session + host call/correlation id + tool
     family), so cross-source duplicates materialize a single ledger action or
     result. Consecutive identical commands with *different* host ids stay

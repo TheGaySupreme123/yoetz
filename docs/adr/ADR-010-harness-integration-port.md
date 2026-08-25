@@ -267,7 +267,8 @@ Observation consent is project-level and separate from egress consent. The plain
 records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
 identities—never raw task content or a raw path in logs/status/SQLite.
 
-Hook `PostToolUse` and stream `item.completed` for one host call normalize before materialization to
+Hook `PostToolUse` and a completed session-stream tool record (rollout `function_call_output`,
+historically exec-JSONL `item.completed`) for one host call normalize before materialization to
 the same semantic kind, correlation identity, roles, operation digest, and ledger IDs. The canonical
 host-call identity remains the content and ledger-dedup key; the durable claim identity additionally
 binds the materialization version and exact draft-role tuple. Thus distinct phases such as
