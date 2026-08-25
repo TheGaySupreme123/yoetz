@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
 
-from yoetz.domain.values import JsonValue
+from yoetz.protocol.canonical import JsonValue
 
 __all__ = [
     "CODEX_ROLLOUT_CAPABILITY_PROFILE_ID",
@@ -42,17 +42,16 @@ CODEX_ROLLOUT_EVIDENCE_CASE_IDS: Final = ("IMP-006", "IMP-007", "IMP-008", "IMP-
 def skill_manifest_capability_fields() -> Mapping[str, JsonValue]:
     """Return the skill-manifest bounds owned by the rollout cell."""
 
-    return MappingProxyType(
-        {
-            "capability_profile_ids": [CODEX_ROLLOUT_CAPABILITY_PROFILE_ID],
-            "codex_version_bounds": {
-                "denied": list(CODEX_ROLLOUT_DENIED_VERSIONS),
-                "supported": list(CODEX_ROLLOUT_SUPPORTED_VERSIONS),
-                "tested": list(CODEX_ROLLOUT_SUPPORTED_VERSIONS),
-            },
-            "hooks_by_capability_profile": {CODEX_ROLLOUT_CAPABILITY_PROFILE_ID: None},
-        }
-    )
+    body: dict[str, JsonValue] = {
+        "capability_profile_ids": [CODEX_ROLLOUT_CAPABILITY_PROFILE_ID],
+        "codex_version_bounds": {
+            "denied": list(CODEX_ROLLOUT_DENIED_VERSIONS),
+            "supported": list(CODEX_ROLLOUT_SUPPORTED_VERSIONS),
+            "tested": list(CODEX_ROLLOUT_SUPPORTED_VERSIONS),
+        },
+        "hooks_by_capability_profile": {CODEX_ROLLOUT_CAPABILITY_PROFILE_ID: None},
+    }
+    return MappingProxyType(body)
 
 
 def codex_version_manifest_profiles() -> tuple[Mapping[str, JsonValue], ...]:
@@ -64,15 +63,12 @@ def codex_version_manifest_profiles() -> tuple[Mapping[str, JsonValue], ...]:
     observation or trigger hooks.
     """
 
-    return (
-        MappingProxyType(
-            {
-                "capability_profile_id": CODEX_ROLLOUT_CAPABILITY_PROFILE_ID,
-                "capability_profile_version": CODEX_ROLLOUT_IMPORTER_PROFILE_ID,
-                "codex_version": CODEX_ROLLOUT_CLI_VERSION,
-                "integration_modes": ["local_cli"],
-                "observation_hook_status": "absent",
-                "trigger_hook_status": "absent",
-            }
-        ),
-    )
+    profile: dict[str, JsonValue] = {
+        "capability_profile_id": CODEX_ROLLOUT_CAPABILITY_PROFILE_ID,
+        "capability_profile_version": CODEX_ROLLOUT_IMPORTER_PROFILE_ID,
+        "codex_version": CODEX_ROLLOUT_CLI_VERSION,
+        "integration_modes": ["local_cli"],
+        "observation_hook_status": "absent",
+        "trigger_hook_status": "absent",
+    }
+    return (MappingProxyType(profile),)
