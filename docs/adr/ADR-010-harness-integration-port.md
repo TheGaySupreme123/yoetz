@@ -217,7 +217,7 @@ not authority: tiers 0 and 1 are byte-for-byte unchanged, guidance stays owned o
 `guidance/` with no byte variation per ADR-010 decision 1, and a host consuming the portable format
 still earns exactly the coverage its evidence cell proves. Following the `HarnessMcpPort`
 precedent above, `PluginArtifactPort` (preview/install/status/remove of a rendered artifact) and
-`HostActivationPort` (discovery/activation observation and authorized preview/apply) are sibling
+`HostActivationPort` (discovery/activation observation and authorized preview/apply/remove) are sibling
 ports, never `IntegrationsPort` overloads; a host adapter may compose them but cannot collapse
 their state or authority. The fork guarantee is extended, not weakened: a standards-compliant host
 is reached by a projection plus a host profile, still with no shared-type edits.

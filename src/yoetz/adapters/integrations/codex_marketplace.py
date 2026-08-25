@@ -23,6 +23,10 @@ from yoetz.adapters.integrations.codex_plugin import (
     plugin_tree_matches_marker,
     render_plugin_install_tree,
 )
+from yoetz.adapters.integrations.codex_skill import (
+    inspect_destination,
+    load_packaged_skill_source,
+)
 from yoetz.adapters.integrations.codex_session_stream import resolve_codex_home
 from yoetz.ports.integrations import (
     IntegrationError,
@@ -42,9 +46,14 @@ __all__ = [
     "ActivationInspection",
     "ActivationPreview",
     "ActivationState",
+    "RemovalOutcome",
+    "RemovalPreview",
+    "RemovalResult",
     "apply_activation",
+    "apply_removal",
     "inspect_activation",
     "preview_activation",
+    "preview_removal",
     "resolve_codex_home_for_binary",
 ]
 
@@ -62,6 +71,15 @@ _MAX_EXECUTABLE_BYTES: Final = 256 * 1024 * 1024
 _ACTIVATION_LOCK: Final = ".yoetz-marketplace-activation.lock"
 _PLUGIN_ADD_COMMAND: Final = ("plugin", "add", _PLUGIN_ID, "--json")
 _PLUGIN_LIST_COMMAND: Final = ("plugin", "list", "--marketplace", _MARKETPLACE_NAME, "--json")
+_PLUGIN_REMOVE_COMMAND: Final = ("plugin", "remove", _PLUGIN_ID, "--json")
+_MARKETPLACE_REMOVE_COMMAND: Final = (
+    "plugin",
+    "marketplace",
+    "remove",
+    _MARKETPLACE_NAME,
+    "--json",
+)
+_PLUGIN_TABLE: Final = '[plugins."yoetz@yoetz"]\nenabled = true\n'
 _VERSION_RE: Final = re.compile(
     r"\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\b", re.ASCII
 )
@@ -110,6 +128,49 @@ class ActivationPreview:
     cache_mutation_planned: bool
 
 
+class RemovalOutcome(str, Enum):  # noqa: UP042 - exact structural enum
+    REMOVE = "remove"
+    ALREADY_ABSENT = "already_absent"
+
+
+@dataclass(frozen=True, slots=True)
+class RemovalPreview:
+    """Exact removal bytes shown before the owner approves mutation."""
+
+    preview_digest: str
+    inspection: ActivationInspection
+    outcome: RemovalOutcome
+    purge_cache: bool
+    plugin_remove_planned: bool
+    marketplace_remove_planned: bool
+    marketplace_json_planned: bool
+    cache_versions: tuple[str, ...]
+    skill_tree_state: str
+    executable_path: Path
+    executable_digest: str
+    codex_version: str
+    codex_home: Path
+    probe_command: tuple[str, ...]
+    inventory_command: tuple[str, ...]
+    plugin_remove_command: tuple[str, ...]
+    marketplace_remove_command: tuple[str, ...]
+    probe_environment: str
+    activation_environment: tuple[tuple[str, str], ...]
+    marketplace_preimage_digest: str
+    config_preimage_digest: str
+    config_toml_block: str
+
+
+@dataclass(frozen=True, slots=True)
+class RemovalResult:
+    """Verified post-removal classification for one approved preview."""
+
+    outcome: RemovalOutcome
+    inspection: ActivationInspection
+    skill_tree_state: str
+    purge_cache: bool
+
+
 @dataclass(frozen=True, slots=True)
 class _ActivationPlan:
     preview: ActivationPreview
@@ -129,8 +190,11 @@ class _CodexBinaryProbe:
     codex_home: Path
 
 
-def _error(reason: IntegrationReason) -> IntegrationError:
-    return IntegrationError(reason, {})
+def _error(
+    reason: IntegrationReason,
+    details: Mapping[str, JsonValue] | None = None,
+) -> IntegrationError:
+    return IntegrationError(reason, {} if details is None else dict(details))
 
 
 def _sha_file(path: Path) -> str:
@@ -1233,3 +1297,467 @@ def apply_activation(
         if inspection.state is not ActivationState.ACTIVE:
             raise _error(IntegrationReason.WRITE_FAILED)
     return inspection
+
+
+@dataclass(frozen=True, slots=True)
+class _RemovalPlan:
+    preview: RemovalPreview
+    marketplace_before: bytes | None
+    config_before: bytes | None
+    config_after: bytes
+    cache_members: Mapping[str, bytes]
+    binary: _CodexBinaryProbe
+
+
+def _refuse_conflict(candidate: str) -> None:
+    raise _error(IntegrationReason.REMOVE_REFUSED, {"conflict": candidate})
+
+
+def _expected_marketplace_table(project: Path) -> str:
+    return (
+        f'[marketplaces.yoetz]\n'
+        f'source_type = "local"\n'
+        f'source = {_toml_string(str(project))}\n'
+    )
+
+
+def _canonical_marketplace_bytes() -> bytes:
+    return canonical_encode(cast(JsonValue, _marketplace_document())) + b"\n"
+
+
+def _skill_tree_state(target: IntegrationTarget) -> str:
+    return inspect_destination(target, load_packaged_skill_source()).state.value
+
+
+def _exact_table_present(raw: bytes, table: str) -> bool:
+    return table.encode("utf-8") in raw
+
+
+def _strip_exact_block(raw: bytes, block: str) -> bytes:
+    needle = block.encode("utf-8")
+    index = raw.find(needle)
+    if index < 0:
+        return raw
+    before = raw[:index]
+    after = raw[index + len(needle) :]
+    if before.endswith(b"\n") and after.startswith(b"\n"):
+        after = after[1:]
+    merged = before + after
+    while b"\n\n\n" in merged:
+        merged = merged.replace(b"\n\n\n", b"\n\n")
+    if merged in {b"", b"\n"}:
+        return b""
+    if not merged.endswith(b"\n"):
+        merged += b"\n"
+    return merged
+
+
+def _config_table_plan(
+    raw: bytes, config: Mapping[str, object], project: Path
+) -> tuple[bool, bool, bytes]:
+    """Return ``(plugin_table_owned, marketplace_table_owned, config_after)``.
+
+    A same-named table that is not byte-identical to the yoetz render is a
+    conflict, never a candidate for whole-table removal.
+    """
+
+    configured, _enabled, foreign = _config_state(config, project)
+    if foreign:
+        marketplaces = _table(config, "marketplaces")
+        marketplace = None if marketplaces is None else marketplaces.get(_MARKETPLACE_NAME)
+        if marketplace is not None:
+            _refuse_conflict("config_marketplace")
+        _refuse_conflict("config_plugin")
+    plugins = _table(config, "plugins")
+    plugin_present = plugins is not None and _PLUGIN_ID in plugins
+    plugin_owned = plugin_present and _exact_table_present(raw, _PLUGIN_TABLE)
+    if plugin_present and not plugin_owned:
+        _refuse_conflict("config_plugin")
+    marketplace_table = _expected_marketplace_table(project)
+    marketplace_owned = configured and _exact_table_present(raw, marketplace_table)
+    if configured and not marketplace_owned:
+        _refuse_conflict("config_marketplace")
+    after = raw
+    if plugin_owned:
+        after = _strip_exact_block(after, _PLUGIN_TABLE)
+    if marketplace_owned:
+        after = _strip_exact_block(after, marketplace_table)
+    if after != raw:
+        try:
+            parsed = tomllib.loads(after.decode("utf-8") if after else "")
+        except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+            raise _error(IntegrationReason.WRITE_FAILED) from exc
+        remaining_configured, remaining_enabled, remaining_foreign = _config_state(
+            cast(Mapping[str, object], parsed), project
+        )
+        if remaining_configured or remaining_enabled or remaining_foreign:
+            raise _error(IntegrationReason.WRITE_FAILED)
+    return plugin_owned, marketplace_owned, after
+
+
+def _marketplace_json_owned(path: Path) -> bool:
+    snapshot = _load_marketplace(path)
+    if snapshot is None:
+        return False
+    raw, document = snapshot
+    registered, foreign = _classify_manifest(document)
+    if foreign or (registered and raw != _canonical_marketplace_bytes()):
+        _refuse_conflict("repository_marketplace")
+    return raw == _canonical_marketplace_bytes()
+
+
+def _managed_cache_versions(
+    root: Path, expected: Mapping[str, bytes], *, include_all_managed: bool
+) -> tuple[str, ...]:
+    """List yoetz-managed version dirs that this removal may delete.
+
+    Foreign or unexpected members refuse. Other-version managed trees require
+    ``--purge-cache`` so default removal cannot delete extra version dirs.
+    """
+
+    if not root.exists():
+        return ()
+    if root.is_symlink() or not root.is_dir():
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+    versions: list[str] = []
+    try:
+        children = sorted(root.iterdir(), key=lambda path: path.name.encode("utf-8"))
+    except OSError as exc:
+        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    if not children:
+        return ()
+    for child in children:
+        if child.is_symlink():
+            raise _error(IntegrationReason.TARGET_UNSAFE)
+        if not child.is_dir() or _VERSION_RE.fullmatch(child.name) is None:
+            _refuse_conflict("cache")
+        try:
+            digest = _installed_cache_digest(child, expected)
+        except IntegrationError as exc:
+            if exc.reason is IntegrationReason.DESTINATION_CONFLICT:
+                _refuse_conflict("cache")
+            raise
+        if digest is None:
+            _refuse_conflict("cache")
+        if child.name == __version__ or include_all_managed:
+            versions.append(child.name)
+        else:
+            _refuse_conflict("cache")
+    return tuple(versions)
+
+
+def _inventory_owned(
+    binary: _CodexBinaryProbe,
+    project: Path,
+    *,
+    _run: Callable[..., subprocess.CompletedProcess[bytes]],
+) -> bool:
+    try:
+        installed, _version = _plugin_inventory(binary, project, _run=_run)
+    except IntegrationError as exc:
+        if exc.reason is IntegrationReason.DESTINATION_CONFLICT:
+            _refuse_conflict("inventory")
+        raise
+    return installed
+
+
+def _removed_tables_block(plugin_owned: bool, marketplace_owned: bool, project: Path) -> str:
+    blocks: list[str] = []
+    if marketplace_owned:
+        blocks.append(_expected_marketplace_table(project))
+    if plugin_owned:
+        blocks.append(_PLUGIN_TABLE)
+    return "\n".join(blocks)
+
+
+def _removal_plan(
+    target: IntegrationTarget,
+    *,
+    executable_path: str,
+    codex_home: Path | str | None = None,
+    purge_cache: bool = False,
+    _run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+) -> _RemovalPlan:
+    binary = _probe_codex_binary(executable_path, codex_home=codex_home, _run=_run)
+    if codex_home is not None and _codex_root(codex_home) != binary.codex_home:
+        raise _error(IntegrationReason.PREVIEW_STALE)
+    project, home, marketplace_path, config_path = _paths(target, binary.codex_home)
+    personal_path = home / _MARKETPLACE_RELATIVE_PATH
+    if personal_path != marketplace_path:
+        personal_snapshot = _load_marketplace(personal_path)
+        personal_document = None if personal_snapshot is None else personal_snapshot[1]
+        if _personal_manifest_conflicts(personal_document):
+            _refuse_conflict("personal_marketplace")
+    marketplace_json_planned = _marketplace_json_owned(marketplace_path)
+    marketplace_snapshot = _load_marketplace(marketplace_path)
+    marketplace_before = None if marketplace_snapshot is None else marketplace_snapshot[0]
+    config_bytes, config = _load_config(config_path)
+    config_before = config_bytes if config_path.exists() else None
+    plugin_table_owned, marketplace_table_owned, config_after = _config_table_plan(
+        config_bytes, config, project
+    )
+    cache_members = render_plugin_install_tree(codex_version=binary.codex_version)
+    cache_root = _cache_root(home)
+    cache_versions = _managed_cache_versions(
+        cache_root, cache_members, include_all_managed=purge_cache
+    )
+    cache_root_planned = cache_root.exists()
+    inventory_owned = _inventory_owned(binary, project, _run=_run)
+    inspection = inspect_activation(
+        target,
+        executable_path=executable_path,
+        codex_home=home,
+        _run=_run,
+    )
+    planned = (
+        inventory_owned
+        or plugin_table_owned
+        or marketplace_table_owned
+        or marketplace_json_planned
+        or bool(cache_versions)
+        or cache_root_planned
+    )
+    outcome = RemovalOutcome.REMOVE if planned else RemovalOutcome.ALREADY_ABSENT
+    digest_body = (
+        b"yoetz.codex-marketplace-removal/1\0"
+        + str(home).encode("utf-8")
+        + b"\0"
+        + (b"1" if purge_cache else b"0")
+        + b"\0"
+        + _sha(b"" if marketplace_before is None else marketplace_before).encode()
+        + b"\0"
+        + (b"present:" if config_before is not None else b"absent:")
+        + _sha(config_bytes).encode()
+        + b"\0"
+        + (b"1" if inventory_owned else b"0")
+        + b"\0"
+        + (b"1" if plugin_table_owned else b"0")
+        + b"\0"
+        + (b"1" if marketplace_table_owned else b"0")
+        + b"\0"
+        + (b"1" if marketplace_json_planned else b"0")
+        + b"\0"
+        + canonical_encode(list(cache_versions))
+        + b"\0"
+        + (b"1" if cache_root_planned else b"0")
+        + b"\0"
+        + str(binary.executable_path).encode("utf-8")
+        + b"\0"
+        + binary.executable_digest.encode("ascii")
+        + b"\0"
+        + binary.codex_version.encode("ascii")
+        + b"\0"
+        + canonical_encode(["--version"])
+        + b"\0"
+        + b"temporary_owner_private_home"
+        + b"\0"
+        + canonical_encode(
+            {
+                "CODEX_HOME": str(home),
+                "CODEX_TESTING_HOME": str(home),
+            }
+        )
+        + b"\0"
+        + canonical_encode(list(_PLUGIN_LIST_COMMAND))
+        + b"\0"
+        + canonical_encode(list(_PLUGIN_REMOVE_COMMAND))
+        + b"\0"
+        + canonical_encode(list(_MARKETPLACE_REMOVE_COMMAND))
+    )
+    preview = RemovalPreview(
+        _sha(digest_body),
+        inspection,
+        outcome,
+        purge_cache,
+        inventory_owned,
+        marketplace_table_owned,
+        marketplace_json_planned,
+        cache_versions,
+        _skill_tree_state(target),
+        binary.executable_path,
+        binary.executable_digest,
+        binary.codex_version,
+        home,
+        ("--version",),
+        _PLUGIN_LIST_COMMAND,
+        _PLUGIN_REMOVE_COMMAND,
+        _MARKETPLACE_REMOVE_COMMAND,
+        "temporary_owner_private_home",
+        (("CODEX_HOME", str(home)), ("CODEX_TESTING_HOME", str(home))),
+        _sha(b"" if marketplace_before is None else marketplace_before),
+        _sha(config_bytes),
+        _removed_tables_block(plugin_table_owned, marketplace_table_owned, project),
+    )
+    return _RemovalPlan(
+        preview,
+        marketplace_before,
+        config_before,
+        config_after if planned else config_bytes,
+        cache_members,
+        binary,
+    )
+
+
+def preview_removal(
+    target: IntegrationTarget,
+    *,
+    executable_path: str,
+    codex_home: Path | str | None = None,
+    purge_cache: bool = False,
+    _run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+) -> RemovalPreview:
+    """Return the exact proposed removal plan and stale-safe digest."""
+
+    return _removal_plan(
+        target,
+        executable_path=executable_path,
+        codex_home=codex_home,
+        purge_cache=purge_cache,
+        _run=_run,
+    ).preview
+
+
+def _delete_managed_cache_versions(root: Path, versions: tuple[str, ...]) -> None:
+    for version in versions:
+        path = _cache_version_path(root, version)
+        if not path.exists():
+            continue
+        if path.is_symlink() or not path.is_dir():
+            raise _error(IntegrationReason.TARGET_UNSAFE)
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            raise _error(IntegrationReason.WRITE_FAILED) from exc
+    if root.exists():
+        try:
+            remaining = list(root.iterdir())
+        except OSError as exc:
+            raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+        if remaining:
+            raise _error(IntegrationReason.WRITE_FAILED)
+        try:
+            shutil.rmtree(root)
+        except OSError as exc:
+            raise _error(IntegrationReason.WRITE_FAILED) from exc
+
+
+def _assert_yoetz_tables_absent(config_path: Path, project: Path) -> None:
+    raw, config = _load_config(config_path)
+    configured, enabled, foreign = _config_state(config, project)
+    if configured or enabled or foreign:
+        raise _error(IntegrationReason.WRITE_FAILED)
+    del raw
+
+
+def apply_removal(
+    target: IntegrationTarget,
+    *,
+    approved_digest: str,
+    executable_path: str,
+    codex_home: Path | str | None = None,
+    purge_cache: bool = False,
+    _run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+) -> RemovalResult:
+    """Apply one exact approved removal preview, refusing stale or foreign state."""
+
+    binary = _probe_codex_binary(executable_path, codex_home=codex_home, _run=_run)
+    if codex_home is not None and _codex_root(codex_home) != binary.codex_home:
+        raise _error(IntegrationReason.PREVIEW_STALE)
+    with _ActivationLock(target, binary.codex_home):
+        plan = _removal_plan(
+            target,
+            executable_path=executable_path,
+            codex_home=codex_home,
+            purge_cache=purge_cache,
+            _run=_run,
+        )
+        preview = plan.preview
+        if approved_digest != preview.preview_digest:
+            raise _error(IntegrationReason.PREVIEW_STALE)
+        project, home, marketplace_path, config_path = _paths(target, binary.codex_home)
+        if preview.outcome is RemovalOutcome.ALREADY_ABSENT:
+            inspection = inspect_activation(
+                target,
+                executable_path=executable_path,
+                codex_home=home,
+                _run=_run,
+            )
+            if inspection.state is ActivationState.ACTIVE:
+                raise _error(IntegrationReason.WRITE_FAILED)
+            if inspection.state is ActivationState.FOREIGN:
+                _refuse_conflict("cache")
+            return RemovalResult(
+                RemovalOutcome.ALREADY_ABSENT,
+                inspection,
+                preview.skill_tree_state,
+                purge_cache,
+            )
+        _assert_snapshot(marketplace_path, plan.marketplace_before)
+        _assert_snapshot(config_path, plan.config_before)
+        _assert_binary_probe(plan.binary, _run=_run)
+        if preview.plugin_remove_planned:
+            _run_json_command(
+                plan.binary,
+                preview.plugin_remove_command,
+                _run=_run,
+                timeout=_PLUGIN_ADD_TIMEOUT_SECONDS,
+            )
+        if preview.marketplace_remove_planned:
+            _run_json_command(
+                plan.binary,
+                preview.marketplace_remove_command,
+                _run=_run,
+                timeout=_PLUGIN_ADD_TIMEOUT_SECONDS,
+            )
+        current_config = _current_bytes(config_path)
+        if current_config is None:
+            current_config = b""
+        try:
+            parsed_config = tomllib.loads(
+                current_config.decode("utf-8") if current_config else ""
+            )
+        except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+            raise _error(IntegrationReason.SOURCE_INVALID) from exc
+        _, _, stripped = _config_table_plan(
+            current_config,
+            cast(Mapping[str, object], parsed_config),
+            project,
+        )
+        if stripped != current_config:
+            if plan.config_before is None and not stripped:
+                if config_path.exists():
+                    try:
+                        config_path.unlink()
+                    except OSError as exc:
+                        raise _error(IntegrationReason.WRITE_FAILED) from exc
+            else:
+                _atomic_write(config_path, stripped)
+        if preview.marketplace_json_planned:
+            current_marketplace = _current_bytes(marketplace_path)
+            if current_marketplace != _canonical_marketplace_bytes():
+                raise _error(IntegrationReason.PREVIEW_STALE)
+            try:
+                marketplace_path.unlink()
+            except OSError as exc:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+        _delete_managed_cache_versions(_cache_root(home), preview.cache_versions)
+        installed, _version = _plugin_inventory(plan.binary, project, _run=_run)
+        if installed:
+            raise _error(IntegrationReason.WRITE_FAILED)
+        _assert_yoetz_tables_absent(config_path, project)
+        if preview.marketplace_json_planned and marketplace_path.exists():
+            raise _error(IntegrationReason.WRITE_FAILED)
+        inspection = inspect_activation(
+            target,
+            executable_path=executable_path,
+            codex_home=home,
+            _run=_run,
+        )
+        if inspection.state is ActivationState.ACTIVE:
+            raise _error(IntegrationReason.WRITE_FAILED)
+        if inspection.state is ActivationState.FOREIGN:
+            raise _error(IntegrationReason.WRITE_FAILED)
+        skill_state = _skill_tree_state(target)
+        if skill_state != preview.skill_tree_state:
+            raise _error(IntegrationReason.WRITE_FAILED)
+    return RemovalResult(RemovalOutcome.REMOVE, inspection, skill_state, purge_cache)

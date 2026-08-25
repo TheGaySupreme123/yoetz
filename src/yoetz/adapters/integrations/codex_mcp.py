@@ -258,3 +258,104 @@ class CodexMcpAdapter:
             state_after,
             preview.preview_digest,
         )
+
+    def _unregistration_preview_for(
+        self,
+        binary: HarnessBinary,
+        state: McpRegistrationState,
+        current_command: tuple[str, ...] | None,
+    ) -> McpRegistrationPreview:
+        action = (
+            McpRegistrationAction.NOOP
+            if state is McpRegistrationState.ABSENT
+            else McpRegistrationAction.UNREGISTER
+        )
+        warnings: tuple[str, ...] = ()
+        if state is McpRegistrationState.FOREIGN_PRESENT:
+            warnings = ("foreign_entry_present",)
+        if (
+            state is McpRegistrationState.YOETZ_OWNED
+            and current_command is not None
+            and current_command in _ROUTE_PROFILE_BY_COMMAND
+        ):
+            serve_command = current_command
+            route_profile = _ROUTE_PROFILE_BY_COMMAND[current_command]
+        else:
+            # Never copy a foreign argv into the preview shape. The digest still
+            # binds ``state_before``, so apply refuses the same-name entry.
+            serve_command = self._serve_command
+            route_profile = self._route_profile
+        digest = canonical_digest(
+            {
+                "action": action.value,
+                "executable_path": binary.executable_path,
+                "harness": binary.harness_id.value,
+                "schema": "yoetz.mcp-unregistration-preview/1",
+                "serve_command": list(serve_command),
+                "server_name": MCP_SERVER_NAME,
+                "state_before": state.value,
+            }
+        )
+        return McpRegistrationPreview(
+            binary.harness_id,
+            action,
+            state,
+            warnings,
+            digest,
+            serve_command,
+            route_profile,
+        )
+
+    async def preview_unregistration(self, binary: HarnessBinary) -> McpRegistrationPreview:
+        self._require_codex(binary)
+        state, current_command = self._classify_get(
+            self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
+        )
+        return self._unregistration_preview_for(binary, state, current_command)
+
+    async def apply_unregistration(
+        self,
+        binary: HarnessBinary,
+        command: McpRegistrationCommand,
+    ) -> McpRegistrationResult:
+        self._require_codex(binary)
+        if type(command) is not McpRegistrationCommand:
+            raise McpRegistrationError(McpRegistrationReason.CONFIRMATION_REQUIRED, {})
+        if not command.explicitly_accepted:
+            raise McpRegistrationError(McpRegistrationReason.CONFIRMATION_REQUIRED, {})
+        preview = await self.preview_unregistration(binary)
+        if command.preview_digest != preview.preview_digest:
+            raise McpRegistrationError(McpRegistrationReason.PREVIEW_STALE, {})
+        if preview.state_before is McpRegistrationState.FOREIGN_PRESENT:
+            raise McpRegistrationError(McpRegistrationReason.FOREIGN_ENTRY_PRESENT, {})
+        if preview.action is McpRegistrationAction.NOOP:
+            return McpRegistrationResult(
+                binary.harness_id,
+                McpRegistrationAction.NOOP,
+                preview.state_before,
+                preview.state_before,
+                preview.preview_digest,
+            )
+        remove_output = self._run(
+            (binary.executable_path, "mcp", "remove", MCP_SERVER_NAME)
+        )
+        if remove_output.exit_code != 0:
+            raise McpRegistrationError(
+                McpRegistrationReason.REGISTRATION_FAILED,
+                {"exit_code_class": "nonzero"},
+            )
+        state_after, _command_after = self._classify_get(
+            self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
+        )
+        if state_after is not McpRegistrationState.ABSENT:
+            raise McpRegistrationError(
+                McpRegistrationReason.REGISTRATION_FAILED,
+                {"verified_state": state_after.value},
+            )
+        return McpRegistrationResult(
+            binary.harness_id,
+            McpRegistrationAction.UNREGISTER,
+            preview.state_before,
+            state_after,
+            preview.preview_digest,
+        )

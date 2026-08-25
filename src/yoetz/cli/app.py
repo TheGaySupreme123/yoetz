@@ -1264,20 +1264,20 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
     return command
 
 
-for _mcp_action in ("preview", "install", "status"):
+for _mcp_action in ("preview", "install", "status", "remove"):
     integrate_mcp_app.command(_mcp_action)(_integration_mcp_command(_mcp_action))
 
 
-def _cursor_plugin_command(command_name: str) -> Callable[..., None]:
+def _plugin_command(command_name: str) -> Callable[..., None]:
     def command(
         context: typer.Context,
         cursor_config_root: Annotated[
-            Path,
+            Path | None,
             typer.Option(
                 "--cursor-config-root",
                 help="Exact isolated Cursor ~/.cursor configuration root.",
             ),
-        ],
+        ] = None,
         project_root: Annotated[
             Path | None,
             typer.Option("--project-root", help="Exact trusted project for MCP source checks."),
@@ -1303,10 +1303,43 @@ def _cursor_plugin_command(command_name: str) -> Callable[..., None]:
             str | None,
             typer.Option("--preview-digest", help="Exact digest returned by preview."),
         ] = None,
+        codex_path: _CODEX_PATH = None,
+        codex_home: Annotated[
+            Path | None,
+            typer.Option("--codex-home", help="Exact Codex home to bind plugin removal to."),
+        ] = None,
+        purge_cache: Annotated[
+            bool,
+            typer.Option(
+                "--purge-cache",
+                help="Also delete other digest-matched yoetz cache versions.",
+            ),
+        ] = False,
         accept: _ACCEPT = False,
         json_output: _JSON = False,
     ) -> None:
         harness = cast(str, context.find_root().find_object(str) or context.obj)
+        if harness == "codex":
+            module = importlib.import_module("yoetz.cli.codex_plugin")
+            operation = cast(Callable[..., int], getattr(module, "run_codex_plugin_command"))
+            _finish(
+                operation(
+                    command_name,
+                    harness=harness,
+                    project_root=project_root,
+                    codex_path=codex_path,
+                    codex_home=codex_home,
+                    purge_cache=purge_cache,
+                    preview_digest=preview_digest,
+                    accept=accept,
+                    json_output=json_output,
+                )
+            )
+            return
+        if cursor_config_root is None:
+            sys.stderr.write("cursor_config_root_required\n")
+            _finish(2)
+            return
         module = importlib.import_module("yoetz.cli.cursor_integration")
         operation = cast(Callable[..., int], getattr(module, "run_cursor_plugin_command"))
         _finish(
@@ -1330,7 +1363,7 @@ def _cursor_plugin_command(command_name: str) -> Callable[..., None]:
 
 
 for _plugin_action in ("preview", "install", "status", "remove"):
-    integrate_plugin_app.command(_plugin_action)(_cursor_plugin_command(_plugin_action))
+    integrate_plugin_app.command(_plugin_action)(_plugin_command(_plugin_action))
 
 
 @setup_app.command("run")

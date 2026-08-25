@@ -96,7 +96,7 @@ exactly those contracts and connects the steps without weakening any existing tr
    `yoetz setup run`. An unsafe or unreadable state directory never triggers the wizard.
 
 3. **MCP registration becomes a first-class preview-gated operation** (`yoetz integrate <harness>
-   mcp status|preview|install`), automating the exact two-command sequence the Codex runbook
+   mcp status|preview|install|remove`), automating the exact two-command sequence the Codex runbook
    already mandates: `codex mcp get yoetz --json` first; `codex mcp add yoetz -- yoetz mcp serve`
    only when no entry exists; a foreign same-name entry is preserved and refused with
    `foreign_entry_present` — there is no force path. Success is verified by re-reading state, not
@@ -209,6 +209,23 @@ exactly those contracts and connects the steps without weakening any existing tr
    bound home/config path and the actual activation failure reason instead of resetting to
    `codex_home_required`, and unobserved readiness facts are reported as null rather than asserted
    `false`.
+
+   **Amended 2026-08-25 — consent-gated Codex marketplace and MCP removal (issue #419).** Setup
+   writes remain reversible through the same digest-bound `--accept` lane as activation and MCP
+   install, not through `plugin_artifact_apply`. `yoetz integrate codex plugin
+   preview|status|remove` classifies ownership with `inspect_activation`, then runs
+   `codex plugin remove yoetz@yoetz --json` and, when the `[marketplaces.yoetz]` table
+   byte-matches the yoetz render, `codex plugin marketplace remove yoetz --json`. It deletes
+   repository `.agents/plugins/marketplace.json` only when that file byte-matches, and it deletes
+   only digest-matched versioned cache trees. `--purge-cache` is required to delete other
+   yoetz-managed version directories; it is default-off. Foreign, modified, dual, or otherwise
+   conflicting entries refuse with `remove_refused` and name the conflicting surface. A second
+   removal is `already_absent`. The skill tree, consent records, and observation store are
+   intentionally left in place. `yoetz integrate <harness> mcp remove` unregisters an owned
+   external `yoetz` MCP entry with `codex mcp remove yoetz`, refuses a foreign same-name entry,
+   and treats an already-absent entry as `noop`. After activation removal, observe/inspect reports
+   `installed_not_activated` when the managed plugin source remains (issue #387) and
+   `not_installed` only when that source is also absent.
 
 The short `yoetz --set --fireworks --model MODEL` and `yoetz --set --grok --model MODEL` paths are
 provider-only entries into the same setup ceremonies. They derive internal provider bindings and

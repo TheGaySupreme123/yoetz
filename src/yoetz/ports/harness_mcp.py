@@ -56,6 +56,7 @@ class McpRegistrationState(str, Enum):  # noqa: UP042 - exact wire-valued Enum i
 class McpRegistrationAction(str, Enum):  # noqa: UP042 - exact wire-valued Enum is required
     REGISTER = "register"
     REREGISTER = "reregister"
+    UNREGISTER = "unregister"
     NOOP = "noop"
 
 
@@ -232,6 +233,14 @@ class HarnessMcpPort(Protocol):
     async def preview_registration(self, binary: HarnessBinary) -> McpRegistrationPreview: ...
 
     async def apply_registration(
+        self,
+        binary: HarnessBinary,
+        command: McpRegistrationCommand,
+    ) -> McpRegistrationResult: ...
+
+    async def preview_unregistration(self, binary: HarnessBinary) -> McpRegistrationPreview: ...
+
+    async def apply_unregistration(
         self,
         binary: HarnessBinary,
         command: McpRegistrationCommand,

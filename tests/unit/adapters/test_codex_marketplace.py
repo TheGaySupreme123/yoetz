@@ -16,16 +16,25 @@ from yoetz.adapters.integrations.codex_marketplace import (
     ActivationInspection,
     ActivationPreview,
     ActivationState,
+    RemovalOutcome,
+    RemovalPreview,
+    RemovalResult,
     resolve_codex_home_for_binary,
 )
 from yoetz.adapters.integrations.codex_marketplace import (
     apply_activation as _apply_activation,
 )
 from yoetz.adapters.integrations.codex_marketplace import (
+    apply_removal as _apply_removal,
+)
+from yoetz.adapters.integrations.codex_marketplace import (
     inspect_activation as _inspect_activation,
 )
 from yoetz.adapters.integrations.codex_marketplace import (
     preview_activation as _preview_activation,
+)
+from yoetz.adapters.integrations.codex_marketplace import (
+    preview_removal as _preview_removal,
 )
 from yoetz.adapters.integrations.codex_plugin import install_plugin
 from yoetz.ports.integrations import (
@@ -123,6 +132,24 @@ class _FakeCodex:
                 "version": "0.1.0",
                 "installedPath": str(destination),
             }
+        elif args == ("plugin", "remove", "yoetz@yoetz", "--json"):
+            destination = self.home / "plugins/cache/yoetz/yoetz/0.1.0"
+            if destination.is_dir():
+                shutil.rmtree(destination)
+            body = {"pluginId": "yoetz@yoetz"}
+        elif args == ("plugin", "marketplace", "remove", "yoetz", "--json"):
+            config = self.home / "config.toml"
+            if config.exists():
+                text = config.read_text(encoding="utf-8")
+                marker = "[marketplaces.yoetz]\n"
+                start = text.find(marker)
+                if start >= 0:
+                    rest = text[start + len(marker) :]
+                    next_table = rest.find("\n[")
+                    end = start + len(marker) + (len(rest) if next_table < 0 else next_table + 1)
+                    text = text[:start] + text[end:]
+                    config.write_text(text, encoding="utf-8")
+            body = {"name": "yoetz"}
         else:
             raise AssertionError(command)
         return subprocess.CompletedProcess(
@@ -180,6 +207,42 @@ def apply_activation(
         executable_path=str(runner.executable),
         approved_digest=approved_digest,
         codex_home=home,
+        _run=runner,
+    )
+
+
+def preview_removal(
+    target: IntegrationTarget,
+    *,
+    codex_home: Path | str | None = None,
+    purge_cache: bool = False,
+) -> RemovalPreview:
+    home = _selected_home(codex_home)
+    runner = _FakeCodex(target, home)
+    return _preview_removal(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        purge_cache=purge_cache,
+        _run=runner,
+    )
+
+
+def apply_removal(
+    target: IntegrationTarget,
+    *,
+    approved_digest: str,
+    codex_home: Path | str | None = None,
+    purge_cache: bool = False,
+) -> RemovalResult:
+    home = _selected_home(codex_home)
+    runner = _FakeCodex(target, home)
+    return _apply_removal(
+        target,
+        executable_path=str(runner.executable),
+        approved_digest=approved_digest,
+        codex_home=home,
+        purge_cache=purge_cache,
         _run=runner,
     )
 
@@ -957,3 +1020,93 @@ def test_unreadable_cache_member_normalizes_to_integration_error(tmp_path: Path)
     finally:
         member.chmod(0o600)
     assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+
+
+def test_preview_and_apply_removal_of_managed_activation(tmp_path: Path) -> None:
+    target, project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    assert inspect_activation(target, codex_home=home).state is ActivationState.ACTIVE
+
+    preview = preview_removal(target, codex_home=home)
+    assert preview.outcome is RemovalOutcome.REMOVE
+    assert preview.plugin_remove_planned is True
+    assert preview.marketplace_remove_planned is True
+    assert preview.marketplace_json_planned is True
+    assert preview.skill_tree_state == "absent"
+    result = apply_removal(target, codex_home=home, approved_digest=preview.preview_digest)
+    assert result.outcome is RemovalOutcome.REMOVE
+    assert result.inspection.state is ActivationState.INSTALLED_NOT_ACTIVATED
+    assert not (project / ".agents/plugins/marketplace.json").exists()
+    config = home / "config.toml"
+    parsed = tomllib.loads(config.read_text(encoding="utf-8") if config.exists() else "")
+    assert "yoetz" not in parsed.get("marketplaces", {})
+    assert "yoetz@yoetz" not in parsed.get("plugins", {})
+    assert not (home / "plugins/cache/yoetz/yoetz").exists()
+    assert (
+        inspect_activation(target, codex_home=home).state
+        is ActivationState.INSTALLED_NOT_ACTIVATED
+    )
+    second = preview_removal(target, codex_home=home)
+    assert second.outcome is RemovalOutcome.ALREADY_ABSENT
+    replay = apply_removal(target, codex_home=home, approved_digest=second.preview_digest)
+    assert replay.outcome is RemovalOutcome.ALREADY_ABSENT
+
+
+def test_removal_refuses_foreign_marketplace_and_names_conflict(tmp_path: Path) -> None:
+    target, project, home = _target(tmp_path)
+    _install(target)
+    marketplace = project / ".agents/plugins/marketplace.json"
+    marketplace.parent.mkdir(parents=True, exist_ok=True)
+    marketplace.write_text(
+        '{"name":"other","plugins":[{"name":"yoetz","source":{"source":"local","path":"./"}}]}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(IntegrationError) as caught:
+        preview_removal(target, codex_home=home)
+    assert caught.value.reason is IntegrationReason.REMOVE_REFUSED
+    assert caught.value.safe_details["conflict"] == "repository_marketplace"
+    assert marketplace.is_file()
+
+
+def test_removal_refuses_modified_plugin_table(tmp_path: Path) -> None:
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    config = home / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace("enabled = true", "enabled = false"),
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+    with pytest.raises(IntegrationError) as caught:
+        preview_removal(target, codex_home=home)
+    assert caught.value.reason is IntegrationReason.REMOVE_REFUSED
+    assert caught.value.safe_details["conflict"] == "config_plugin"
+    assert config.read_bytes() == before
+
+
+def test_purge_cache_deletes_other_managed_versions(tmp_path: Path) -> None:
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    extra = home / "plugins/cache/yoetz/yoetz/0.0.1"
+    shutil.copytree(home / "plugins/cache/yoetz/yoetz/0.1.0", extra)
+    with pytest.raises(IntegrationError) as caught:
+        preview_removal(target, codex_home=home)
+    assert caught.value.reason is IntegrationReason.REMOVE_REFUSED
+    assert caught.value.safe_details["conflict"] == "cache"
+    preview = preview_removal(target, codex_home=home, purge_cache=True)
+    assert "0.0.1" in preview.cache_versions
+    result = apply_removal(
+        target,
+        codex_home=home,
+        approved_digest=preview.preview_digest,
+        purge_cache=True,
+    )
+    assert result.outcome is RemovalOutcome.REMOVE
+    assert not extra.exists()
+    assert not (home / "plugins/cache/yoetz/yoetz").exists()

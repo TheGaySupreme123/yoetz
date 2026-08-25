@@ -4,7 +4,8 @@
 console review; amended 2026-08-09 for agent-attested current-chat authorize (issue #164); amended
 2026-08-18 for atomic concurrent review claims (issue #344); amended 2026-08-21 to assign portable
 plugin artifact and host-activation mutation to `review_only` (issue #149, ADR-023; implementation
-owned by #150).
+owned by #150); amended 2026-08-25 to keep Codex marketplace/MCP removal on the ADR-012
+digest-bound `--accept` lane rather than `plugin_artifact_apply` (issue #419).
 **Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
 `src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`,
 `src/yoetz/protocol/consent.py`, `src/yoetz/protocol/chat_user_authority.py`, and
@@ -104,8 +105,19 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    `review_only`, and agent-chat authorization is disabled. Preparation and single-shot
    consumption exist. Issue #409 wires the scoped macOS LocalAuthentication adapter into the
    standalone Cursor CLI; it does not create a service-wide `UserPresencePort`, authorize another
-   operation, or make generic portable-plugin mutation available. Generic `skill_install`, host
-   activation apply, and harness MCP registration remain catalogued but unimplemented.
+   operation, or make generic portable-plugin mutation available. Generic `skill_install`, Cursor
+   host-activation apply, and catalogued-but-unimplemented harness MCP registration remain
+   unimplemented as `review_only` consumers.
+
+   **Amendment (2026-08-25, issue #419).** Codex marketplace activation already ships as the
+   ADR-012 digest-bound `--accept` composition, not as `plugin_artifact_apply`. Codex marketplace
+   removal (`preview_removal` / `apply_removal`) and external MCP unregistration
+   (`preview_unregistration` / `apply_unregistration`) use that same lane: exact preview digest
+   plus explicit `--accept` or the interactive confirmation already used by
+   `yoetz integrate codex mcp install`. They do not prepare or consume `plugin_artifact_apply`,
+   because that cell is the macOS Cursor portable-artifact presence path and would fail closed
+   here. Cache purge is default-off (`--purge-cache`). Agent-chat authorize is not extended to
+   these commands. Cursor standalone activation apply is unchanged.
 
 ## Consequences
 

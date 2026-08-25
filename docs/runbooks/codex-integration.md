@@ -112,7 +112,7 @@ exact Yoetz-owned registration being intentionally replaced. Current Codex `mcp 
 replaces a same-name global entry, so this preflight check matters.
 
 This check-then-add sequence is also available as
-`yoetz integrate codex mcp status|preview|install` and is what `yoetz setup run` performs after
+`yoetz integrate codex mcp status|preview|install|remove` and is what `yoetz setup run` performs after
 Codex discovery (ADR-012). Automating it changes no rule above — it is the same two commands,
 gated by an explicit digest-bound confirmation, run by Yoetz instead of by hand; an existing
 foreign entry is still preserved and refused, success is verified by re-reading the entry, and
@@ -237,6 +237,12 @@ evidence boundary explicitly.
 
 ## 8. Remove
 
+Skill removal and activation/MCP removal are separate, consent-gated operations. Skill removal
+never deletes marketplace, `config.toml`, cache, or MCP entries. Activation removal never deletes
+the skill tree.
+
+### Skill tree
+
 ```text
 yoetz integrate codex skill preview --json
 yoetz integrate codex skill remove --json
@@ -245,8 +251,49 @@ yoetz integrate codex skill remove --json
 Confirm the exact preview digest. Removal deletes only a valid managed marker plus its byte-exact
 file inventory. Modified, partial, or unmanaged content is refused and preserved — there is no
 force-remove in v0.1. Removal never uninstalls the Yoetz package, deletes MCP configuration, deletes
-ledger/key data, or touches other skills. Verify `status` shows `absent` afterward, and separately
-manage any MCP configuration yourself if you want it removed too.
+ledger/key data, or touches other skills. Verify `status` shows `absent` afterward.
+
+### Plugin, marketplace, and `config.toml`
+
+```text
+yoetz integrate codex plugin preview --codex-home <home> --json
+yoetz integrate codex plugin remove --codex-home <home> --accept --preview-digest <digest> --json
+```
+
+The Codex plugin command uses the same preview → explicit accept → apply shape as Codex
+activation and MCP install: the mutation is bound to the exact preview digest. It does **not**
+consume the Cursor `plugin_artifact_apply` OS-presence cell; that cell remains the standalone
+portable-artifact authority and would fail closed on this host. Cache purge is default-off.
+`--purge-cache` additionally deletes other version directories under
+`<codex-home>/plugins/cache/yoetz/yoetz/<ver>` whose trees byte-match a yoetz render or their own
+valid `yoetz.codex-plugin-install/1` marker. Foreign or modified cache directories are refused
+(`remove_refused`, conflict `cache`) and left untouched.
+
+Apply runs `codex plugin remove yoetz@yoetz --json`, then `codex plugin marketplace remove yoetz
+--json` when `[marketplaces.yoetz]` byte-matches the yoetz render, then deletes
+`<repo>/.agents/plugins/marketplace.json` only when that file byte-matches the yoetz render, then
+deletes the bound current-version cache. Whole-table TOML edits are verified by re-parse. A second
+removal is a no-op (`already_absent`). Foreign, modified, dual, or otherwise conflicting entries
+refuse with `remove_refused` and name the conflicting surface (`repository_marketplace`,
+`personal_marketplace`, `config_marketplace`, `config_plugin`, `inventory`, or `cache`).
+
+After a successful removal, `codex plugin list --marketplace yoetz --json` is empty and
+`config.toml` has no yoetz tables. `yoetz observe status` reports the existing activation
+classification: `installed_not_activated` when the managed plugin source at
+`.agents/plugins/yoetz` remains (issue #387), or `not_installed` when that source is also absent.
+The command reports whether the skill tree remains; it does not remove it. Consent records and the
+observation store are intentionally left in place.
+
+### External MCP registration
+
+```text
+yoetz integrate codex mcp remove --accept --preview-digest <digest> --json
+```
+
+This removes an `external_registration` Codex MCP entry by running `codex mcp remove yoetz` only
+when the registered argv is an exact Yoetz serve command. A foreign same-name entry is preserved
+and refused. An already-absent entry is a no-op. Plugin-managed MCP is not this command: it goes
+away with the plugin artifact, not with `codex mcp remove`.
 
 ## 9. Troubleshooting and recovery
 

@@ -1255,6 +1255,45 @@ def test_integrate_mcp_refuses_foreign_entry(wizard_env: dict[str, object]) -> N
     assert "foreign_entry_present" in result.stderr
 
 
+def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None:
+    wizard_env["outputs"] = [_yoetz_entry()]
+    refused = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "remove", "--json"])
+    assert refused.exit_code == 2
+    assert "confirmation_required" in refused.stderr
+
+    wizard_env["outputs"] = [
+        _yoetz_entry(),
+        _yoetz_entry(),
+        CommandOutput(0, b""),
+        CommandOutput(1, b""),
+    ]
+    result = _RUNNER.invoke(
+        cli.app,
+        ["integrate", "codex", "mcp", "remove", "--accept", "--json"],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    body = json.loads(result.stdout)
+    assert body["action"] == "unregister"
+    assert body["state_after"] == "absent"
+
+
+def test_integrate_mcp_remove_absent_entry_is_noop(wizard_env: dict[str, object]) -> None:
+    wizard_env["outputs"] = [CommandOutput(1, b"")]
+    result = _RUNNER.invoke(
+        cli.app,
+        ["integrate", "codex", "mcp", "remove", "--accept", "--json"],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert json.loads(result.stdout)["action"] == "noop"
+
+
+def test_integrate_mcp_remove_refuses_foreign_entry(wizard_env: dict[str, object]) -> None:
+    wizard_env["outputs"] = [CommandOutput(0, json.dumps({"command": "other"}).encode())]
+    result = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "remove", "--accept", "--json"])
+    assert result.exit_code == 2
+    assert "foreign_entry_present" in result.stderr
+
+
 def test_non_interactive_accept_preserves_existing_policy_route(
     wizard_env: dict[str, object],
 ) -> None:
