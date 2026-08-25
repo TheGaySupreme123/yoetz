@@ -613,9 +613,7 @@ def reconcile_session_stream(
             "resolved": False,
         }
     if path.name.lower().endswith(".jsonl.zst"):
-        store.note_coverage_gap(
-            workspace_commitment, ObservationGapCode.UNSUPPORTED_FORMAT.value
-        )
+        store.note_coverage_gap(workspace_commitment, ObservationGapCode.UNSUPPORTED_FORMAT.value)
         store.note_stream_reconcile(workspace_commitment)
         return {
             "accepted": 0,
@@ -681,9 +679,7 @@ def reconcile_session_stream(
     store.note_stream_reconcile(workspace_commitment)
     gaps = advance.gaps
     if ObservationGapCode.UNSUPPORTED_FORMAT.value in gaps:
-        store.note_coverage_gap(
-            workspace_commitment, ObservationGapCode.UNSUPPORTED_FORMAT.value
-        )
+        store.note_coverage_gap(workspace_commitment, ObservationGapCode.UNSUPPORTED_FORMAT.value)
     if overflow and ObservationGapCode.OUTBOX_OVERFLOW.value not in gaps:
         gaps = (*gaps, ObservationGapCode.OUTBOX_OVERFLOW.value)
     return {

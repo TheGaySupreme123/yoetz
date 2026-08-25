@@ -128,7 +128,9 @@ def stream_event_is_completed_tool(kind: str, structural: Mapping[str, JsonValue
     if kind in STREAM_COMPLETED_EVENT_KINDS:
         return True
     action = structural.get("action")
-    return kind == "response_item" and type(action) is str and action in STREAM_COMPLETED_EVENT_KINDS
+    return (
+        kind == "response_item" and type(action) is str and action in STREAM_COMPLETED_EVENT_KINDS
+    )
 
 
 @dataclass(frozen=True, slots=True)

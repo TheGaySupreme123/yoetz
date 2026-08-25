@@ -82,7 +82,9 @@ def test_legacy_and_paginated_fixtures_map_without_unknown_lines() -> None:
 
 def test_truncated_fixture_holds_final_line() -> None:
     loader = _loader()
-    case = cast(dict[str, JsonValue], loader.load_json("imports/codex/rollout-truncated-0.148.0.case.json"))
+    case = cast(
+        dict[str, JsonValue], loader.load_json("imports/codex/rollout-truncated-0.148.0.case.json")
+    )
     variants = cast(dict[str, JsonValue], cast(dict[str, JsonValue], case["input"])["variants"])
     source_block = cast(dict[str, JsonValue], variants["unterminated"])["source"]
     raw = base64.b64decode(
@@ -98,7 +100,9 @@ def test_truncated_fixture_holds_final_line() -> None:
 
 def test_compressed_fixture_is_not_jsonl() -> None:
     loader = _loader()
-    case = cast(dict[str, JsonValue], loader.load_json("imports/codex/rollout-zst-0.148.0.case.json"))
+    case = cast(
+        dict[str, JsonValue], loader.load_json("imports/codex/rollout-zst-0.148.0.case.json")
+    )
     variants = cast(dict[str, JsonValue], cast(dict[str, JsonValue], case["input"])["variants"])
     source_block = cast(dict[str, JsonValue], variants["compressed"])["source"]
     raw = base64.b64decode(
@@ -163,6 +167,9 @@ def test_exec_jsonl_is_unsupported_codex_profile() -> None:
 def test_harness_profile_matches_rollout_cell() -> None:
     assert CODEX_HARNESS_PROFILE.capability_profile_ids == (CODEX_ROLLOUT_CAPABILITY_PROFILE_ID,)
     assert CODEX_HARNESS_PROFILE.supported_versions == CODEX_ROLLOUT_SUPPORTED_VERSIONS
-    assert CODEX_HARNESS_PROFILE.hooks_by_capability_profile[CODEX_ROLLOUT_CAPABILITY_PROFILE_ID] is None
+    assert (
+        CODEX_HARNESS_PROFILE.hooks_by_capability_profile[CODEX_ROLLOUT_CAPABILITY_PROFILE_ID]
+        is None
+    )
     assert CODEX_ROLLOUT_CLI_VERSION == "0.148.0"
     assert CODEX_ROLLOUT_EVIDENCE_CASE_IDS == ("IMP-006", "IMP-007", "IMP-008", "IMP-009")

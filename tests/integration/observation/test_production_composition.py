@@ -37,6 +37,7 @@ from tests.integration.observation.composition_harness import (
     setup_returns_early_when_mcp_registered,
 )
 
+from builders.codex_rollout import failed_shell_rollout
 from yoetz.adapters.approved_checks import (
     ApprovedCheckApproval,
     ApprovedCheckCommand,
@@ -45,7 +46,6 @@ from yoetz.adapters.approved_checks import (
     ApprovedCheckStatus,
     approval_commitment,
 )
-from builders.codex_rollout import failed_shell_rollout
 from yoetz.adapters.importers.codex_jsonl import CodexParsedRecord
 from yoetz.adapters.integrations.codex_session_stream import (
     SessionStreamReader,

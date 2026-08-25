@@ -276,7 +276,9 @@ def test_auto_reconcile_helper_persists_partial_and_cursor(tmp_path: Path) -> No
     assert result["accepted"] == 1
     partial = store.get_stream_partial(workspace, session)
     assert partial.startswith(b'{"payload":')
-    path.write_bytes(path.read_bytes() + b"\n" + encode_lines(function_call_output(call_id="i1", exit_code=0)))
+    path.write_bytes(
+        path.read_bytes() + b"\n" + encode_lines(function_call_output(call_id="i1", exit_code=0))
+    )
     result2 = reconcile_session_stream(
         store,
         workspace_commitment=workspace,
