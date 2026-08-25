@@ -30,8 +30,8 @@ _VERSION = "0.139.0"
 def test_multi_agent_claim_unsupported_while_profiles_unfrozen(tmp_path: Path) -> None:
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir(mode=0o700)
-    assert CODEX_HARNESS_PROFILE.capability_profile_ids == ()
-    assert CODEX_HARNESS_PROFILE.supported_versions == ()
+    assert CODEX_HARNESS_PROFILE.capability_profile_ids == ("codex-cli-rollout-0.148.0",)
+    assert CODEX_HARNESS_PROFILE.supported_versions == ("0.148.0",)
     context = runtime_capability_context(
         fixture_digest=bytes_digest(b"parent-subagents-unprofiled"),
         test_revision=_TEST_REVISION,
@@ -62,7 +62,7 @@ def test_multi_agent_claim_unsupported_while_profiles_unfrozen(tmp_path: Path) -
         context,
         (
             Observation("profiles_frozen", boolean_value=False),
-            Observation("harness_profile_empty", boolean_value=True),
+            Observation("harness_profile_empty", boolean_value=False),
             Observation("simulated_propagation", boolean_value=False),
         ),
         EvidenceOutcome.UNSUPPORTED,

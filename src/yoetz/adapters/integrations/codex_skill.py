@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from yoetz.domain.values import JsonObject
+from yoetz.adapters.integrations.codex_capability_cells import (
+    CODEX_ROLLOUT_CAPABILITY_PROFILE_ID,
+    CODEX_ROLLOUT_SUPPORTED_VERSIONS,
+)
 from yoetz.ports.integrations import (
     HarnessId,
     HarnessProfile,
@@ -73,9 +77,9 @@ CODEX_HARNESS_PROFILE = HarnessProfile(
     HarnessId.CODEX,
     ".agents/skills/yoetz/",
     "codex_skill_frontmatter_v1",
-    (),
-    (),
-    {},
+    (CODEX_ROLLOUT_CAPABILITY_PROFILE_ID,),
+    CODEX_ROLLOUT_SUPPORTED_VERSIONS,
+    {CODEX_ROLLOUT_CAPABILITY_PROFILE_ID: None},
 )
 
 

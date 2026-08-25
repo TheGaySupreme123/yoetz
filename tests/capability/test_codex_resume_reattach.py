@@ -139,7 +139,9 @@ def anyio_backend() -> str:
 def test_trigger_hooks_absent_while_unprofiled(tmp_path: Path) -> None:
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir(mode=0o700)
-    assert dict(CODEX_HARNESS_PROFILE.hooks_by_capability_profile) == {}
+    assert dict(CODEX_HARNESS_PROFILE.hooks_by_capability_profile) == {
+        "codex-cli-rollout-0.148.0": None
+    }
     context = runtime_capability_context(
         fixture_digest=bytes_digest(b"resume-hooks-absent"),
         test_revision=_TEST_REVISION,

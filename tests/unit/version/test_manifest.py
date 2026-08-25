@@ -22,7 +22,16 @@ def test_development_manifest_is_truthful_and_complete() -> None:
 
     assert manifest.support_status == "development_unverified"
     assert manifest.mcp_protocol_supported == ()
-    assert manifest.codex_capability_profiles == ()
+    assert [dict(item) for item in manifest.codex_capability_profiles] == [
+        {
+            "capability_profile_id": "codex-cli-rollout-0.148.0",
+            "capability_profile_version": "codex-rollout-jsonl/0.148.0/v1",
+            "codex_version": "0.148.0",
+            "integration_modes": ["local_cli"],
+            "observation_hook_status": "absent",
+            "trigger_hook_status": "absent",
+        }
+    ]
     assert manifest.service_capabilities == ()
     assert dict(manifest.subject_state_capabilities) == {"status": "absent"}
     assert manifest.limitations == (
@@ -87,16 +96,16 @@ def test_guidance_and_skill_source_package_bytes_are_identical() -> None:
         assert read_verified_resource(logical_name) == Path(logical_name).read_bytes()
 
 
-def test_skill_advertises_no_untested_codex_profile_or_hook() -> None:
+def test_skill_advertises_exact_rollout_cell_without_unproven_hooks() -> None:
     document = json.loads(read_verified_resource("skills/codex/yoetz/manifest.json"))
 
     assert document["codex_version_bounds"] == {
         "denied": [],
-        "supported": [],
-        "tested": [],
+        "supported": ["0.148.0"],
+        "tested": ["0.148.0"],
     }
-    assert document["capability_profile_ids"] == []
-    assert document["hooks_by_capability_profile"] == {}
+    assert document["capability_profile_ids"] == ["codex-cli-rollout-0.148.0"]
+    assert document["hooks_by_capability_profile"] == {"codex-cli-rollout-0.148.0": None}
 
 
 def test_resource_reader_is_a_closed_logical_name_lookup() -> None:

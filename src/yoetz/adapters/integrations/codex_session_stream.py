@@ -11,14 +11,17 @@ from pathlib import Path
 from typing import Final, cast
 
 from yoetz.adapters.importers.codex_jsonl import (
-    SUPPORTED_CODEX_PROFILES,
     CodexCapabilityProfile,
     CodexParsedRecord,
-    parse_codex_jsonl_from_offset,
-    profile_for_codex_version,
+)
+from yoetz.adapters.importers.codex_rollout_jsonl import (
+    SUPPORTED_ROLLOUT_PROFILES,
+    parse_codex_rollout_jsonl_from_offset,
+    profile_for_rollout_version,
 )
 from yoetz.adapters.integrations.observation_local import (
     STREAM_MAPPING_VERSION,
+    YOETZ_TOOL_NAMES,
     LocalObservationStore,
 )
 from yoetz.domain.observation import (
@@ -63,12 +66,16 @@ _MATERIAL_HOOK_EVENTS: Final = frozenset(
 )
 
 
+_JSONL_SUFFIXES: Final = (".jsonl", ".jsonl.zst")
+
+
 def default_stream_profile() -> CodexCapabilityProfile:
-    # Prefer the pinned supported profile; fall back to the sole registered one.
+    """Return the pinned rollout profile used by session-stream reconciliation."""
+
     try:
-        return profile_for_codex_version("0.139.0")
+        return profile_for_rollout_version("0.148.0")
     except ValueError:
-        return next(iter(SUPPORTED_CODEX_PROFILES.values()))
+        return next(iter(SUPPORTED_ROLLOUT_PROFILES.values()))
 
 
 def _now() -> Timestamp:
@@ -196,13 +203,16 @@ class CodexSessionStreamLocator:
             return None
         if not self._is_beneath(resolved, home):
             return None
-        if resolved.suffix.lower() != ".jsonl":
-            return None
         if session_id not in resolved.name:
             return None
         if not self._owner_safe(resolved):
             return None
-        # Unsupported / non-JSONL formats: require an opening JSON object byte.
+        lower_name = resolved.name.lower()
+        if not any(lower_name.endswith(suffix) for suffix in _JSONL_SUFFIXES):
+            return None
+        compressed = lower_name.endswith(".jsonl.zst")
+        if compressed:
+            return resolved
         try:
             with resolved.open("rb") as handle:
                 head = handle.read(1)
@@ -232,6 +242,30 @@ class CodexSessionStreamLocator:
         return True
 
 
+def _normalize_tool_name(value: object) -> str | None:
+    token = _token(value)
+    if token is None:
+        return None
+    if token.startswith("mcp__yoetz__") and token in YOETZ_TOOL_NAMES:
+        return token
+    if token in YOETZ_TOOL_NAMES:
+        return token
+    return token
+
+
+def _structural_body(record: CodexParsedRecord) -> JsonObject | None:
+    payload = record.value.get("payload")
+    if isinstance(payload, JsonObject):
+        inner = payload.get("item")
+        if isinstance(inner, JsonObject):
+            return inner
+        return payload
+    item = record.value.get("item")
+    if isinstance(item, JsonObject):
+        return item
+    return None
+
+
 def structural_from_stream_record(record: CodexParsedRecord) -> tuple[JsonObject, tuple[str, ...]]:
     """Map a parsed stream record to allowlisted structural fields + opaque gaps."""
 
@@ -244,31 +278,25 @@ def structural_from_stream_record(record: CodexParsedRecord) -> tuple[JsonObject
             fields["action"] = token
         else:
             gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
-    item = record.value.get("item")
-    if isinstance(item, JsonObject):
-        tool = _token(item.get("tool")) or _token(item.get("name")) or _token(item.get("type"))
+    body = _structural_body(record)
+    if body is not None:
+        tool = (
+            _normalize_tool_name(body.get("tool"))
+            or _normalize_tool_name(body.get("name"))
+            or _normalize_tool_name(body.get("type"))
+        )
         if tool is not None:
             fields["tool_name"] = tool
-        status = _token(item.get("status")) or _token(item.get("result_status"))
+        status = _token(body.get("status")) or _token(body.get("result_status"))
         if status is not None:
             fields["result_status"] = status
-        exit_code = item.get("exit_code")
+        exit_code = body.get("exit_code")
         if type(exit_code) is int and not isinstance(exit_code, bool) and 0 <= exit_code <= 2**31:
             fields["exit_status"] = exit_code
-        call_id = _token(item.get("id")) or _token(item.get("call_id"))
+        call_id = _token(body.get("id")) or _token(body.get("call_id"))
         if call_id is not None:
             fields["tool_call_id"] = call_id
-    # Unknown future wrapper/item shapes: keep envelope, never invent success.
-    known_wrappers = {
-        "error",
-        "item.completed",
-        "item.started",
-        "item.updated",
-        "thread.started",
-        "turn.completed",
-        "turn.failed",
-        "turn.started",
-    }
+    known_wrappers = frozenset(SUPPORTED_ROLLOUT_PROFILES["0.148.0"].wrapper_types)
     if record.wrapper_type not in known_wrappers:
         gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
     return JsonObject(fields), tuple(sorted(gaps, key=str.encode))
@@ -282,10 +310,10 @@ def envelope_from_stream_record(
 ) -> ObservationEnvelope:
     structural, gaps = structural_from_stream_record(record)
     host_ids: dict[str, JsonValue] = {}
-    item = record.value.get("item")
-    if isinstance(item, JsonObject):
+    body = _structural_body(record)
+    if body is not None:
         for key in ("id", "call_id", "tool_call_id", "event_id"):
-            token = _token(item.get(key))
+            token = _token(body.get(key))
             if token is not None:
                 host_ids[key] = token
     event_id = _token(record.value.get("event_id")) or _token(record.value.get("id"))
@@ -449,8 +477,14 @@ class SessionStreamReader:
                 (), cursor, b"", tuple(sorted(gaps)), restarted, truncated, rotated
             )
 
+        require_admission = byte_position == 0 and event_position == 0 and not self.partial_line
         try:
-            parsed = parse_codex_jsonl_from_offset(data, self.profile, start_ordinal=1)
+            parsed = parse_codex_rollout_jsonl_from_offset(
+                data,
+                self.profile,
+                start_ordinal=1,
+                require_admission=require_admission,
+            )
         except ValueError:
             gaps.add(ObservationGapCode.TRUNCATED_PAYLOAD.value)
             cursor = ObservationCursor(
@@ -489,7 +523,10 @@ class SessionStreamReader:
                 None,
             )
             if record is None:
-                if index < len(parsed.statuses):
+                reason = parsed.reason_codes[index] if index < len(parsed.reason_codes) else None
+                if reason == "unsupported_codex_profile":
+                    gaps.add(ObservationGapCode.UNSUPPORTED_FORMAT.value)
+                elif index < len(parsed.statuses):
                     gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
                 continue
             # Rewrite record ordinal to the absolute event position for identity stability.
@@ -522,6 +559,8 @@ class SessionStreamReader:
         for gap in parsed.stream_gaps:
             if gap in {"truncated_final_line", "final_newline_absent"}:
                 gaps.add(ObservationGapCode.TRUNCATED_PAYLOAD.value)
+            elif gap == "unsupported_codex_profile":
+                gaps.add(ObservationGapCode.UNSUPPORTED_FORMAT.value)
         return SessionStreamAdvance(
             tuple(envelopes),
             cursor,
@@ -572,6 +611,22 @@ def reconcile_session_stream(
             "duplicates": 0,
             "gaps": (ObservationGapCode.SOURCE_LAG.value,),
             "resolved": False,
+        }
+    if path.name.lower().endswith(".jsonl.zst"):
+        store.note_coverage_gap(
+            workspace_commitment, ObservationGapCode.UNSUPPORTED_FORMAT.value
+        )
+        store.note_stream_reconcile(workspace_commitment)
+        return {
+            "accepted": 0,
+            "duplicates": 0,
+            "gaps": (ObservationGapCode.UNSUPPORTED_FORMAT.value,),
+            "byte_position": 0,
+            "event_position": 0,
+            "generation": 1,
+            "rotated": False,
+            "truncated": False,
+            "resolved": True,
         }
     existing = store.get_stream_cursor(workspace_commitment, session_commitment)
     if existing is None:
@@ -625,6 +680,10 @@ def reconcile_session_stream(
     )
     store.note_stream_reconcile(workspace_commitment)
     gaps = advance.gaps
+    if ObservationGapCode.UNSUPPORTED_FORMAT.value in gaps:
+        store.note_coverage_gap(
+            workspace_commitment, ObservationGapCode.UNSUPPORTED_FORMAT.value
+        )
     if overflow and ObservationGapCode.OUTBOX_OVERFLOW.value not in gaps:
         gaps = (*gaps, ObservationGapCode.OUTBOX_OVERFLOW.value)
     return {

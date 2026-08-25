@@ -45,6 +45,7 @@ from yoetz.adapters.approved_checks import (
     ApprovedCheckStatus,
     approval_commitment,
 )
+from builders.codex_rollout import failed_shell_rollout
 from yoetz.adapters.importers.codex_jsonl import CodexParsedRecord
 from yoetz.adapters.integrations.codex_session_stream import (
     SessionStreamReader,
@@ -156,10 +157,7 @@ async def test_dod_zero_coop_durable_observation_advice_composition(tmp_path: Pa
         # Selective session stream also contributes (no cooperative publish_work)
         session = restarted.local.session_commitment("dod-session-1")
         stream_path = tmp_path / "session.jsonl"
-        stream_path.write_bytes(
-            b'{"type":"item.completed","item":{"id":"stream-1","type":"command_execution",'
-            b'"command":"echo","aggregated_output":"","exit_code":1,"status":"completed"}}\n'
-        )
+        stream_path.write_bytes(failed_shell_rollout())
         reader = SessionStreamReader(
             session_commitment=session,
             profile=default_stream_profile(),
@@ -436,10 +434,7 @@ def test_automatic_stream_reconciliation_repairs_missed_hook(tmp_path: Path) -> 
         pipeline.auto_attach("stream-repair")
         session = pipeline.local.session_commitment("stream-repair")
         path = tmp_path / "missed.jsonl"
-        path.write_bytes(
-            b'{"type":"item.completed","item":{"id":"missed-1","type":"command_execution",'
-            b'"command":"echo","aggregated_output":"","exit_code":1,"status":"completed"}}\n'
-        )
+        path.write_bytes(failed_shell_rollout())
         reader = SessionStreamReader(
             session_commitment=session,
             profile=default_stream_profile(),
@@ -453,9 +448,10 @@ def test_automatic_stream_reconciliation_repairs_missed_hook(tmp_path: Path) -> 
             key_material=pipeline.local.key_material(),
         )
         advance = reader.advance(path)
-        assert len(advance.envelopes) == 1
-        result = pipeline.local.ingest(advance.envelopes[0])
-        assert result.disposition.value in {"accepted", "duplicate"}
+        assert len(advance.envelopes) >= 1
+        for envelope in advance.envelopes:
+            result = pipeline.local.ingest(envelope)
+            assert result.disposition.value in {"accepted", "duplicate"}
         status = pipeline.local.status(ObservationStatusQuery(pipeline.workspace))
         assert status.source_coverage[ObservationSource.CODEX_SESSION_STREAM] is True
         surface = resolve_production_surface()

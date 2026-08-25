@@ -634,7 +634,7 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
         mcp_protocol_supported=(),
         provider_adapters=_provider_adapters(),
         service_capabilities=(),
-        codex_capability_profiles=(),
+        codex_capability_profiles=_codex_capability_profiles(),
         subject_state_capabilities=MappingProxyType({"status": "absent"}),
         resource_manifest_digest=manifest.resource_set_digest,
         resource_counts=_resource_counts(manifest.entries),
@@ -643,6 +643,14 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
         support_status="development_unverified",
         limitations=limitations,
     )
+
+
+def _codex_capability_profiles() -> tuple[Mapping[str, JsonValue], ...]:
+    from yoetz.adapters.integrations.codex_capability_cells import (
+        codex_version_manifest_profiles,
+    )
+
+    return codex_version_manifest_profiles()
 
 
 def _component_json(value: Mapping[str, str]) -> Mapping[str, JsonValue]:

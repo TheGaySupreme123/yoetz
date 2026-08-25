@@ -200,6 +200,7 @@ OBSERVATION_BACKPRESSURE_REASON: Final = "operation_pending"
 class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     UNPAIRED_EVENT = "unpaired_event"
     UNSUPPORTED_EVENT = "unsupported_event"
+    UNSUPPORTED_FORMAT = "unsupported_format"
     TRUNCATED_PAYLOAD = "truncated_payload"
     SERVICE_UNAVAILABLE = "service_unavailable"
     VAULT_LOCKED = "vault_locked"

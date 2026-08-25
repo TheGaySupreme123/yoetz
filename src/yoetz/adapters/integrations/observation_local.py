@@ -76,7 +76,7 @@ __all__ = [
 ]
 
 HOOK_MAPPING_VERSION: Final = "codex-obs-hook/1.0.0"
-STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.0.0"
+STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.1.0"
 _KEY_BYTES: Final = 32
 _MAX_STATE_BYTES: Final = 1_048_576
 _MAX_LEGACY_STATE_BYTES: Final = 36 * 1_048_576

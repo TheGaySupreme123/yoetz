@@ -3,14 +3,22 @@
 **Status:** Working decision for spec drafting (2026-07-13). Ratification requires the pinned
 capability matrix run from an installed artifact.
 **Implemented by:** `src/yoetz/adapters/mcp_stdio.py`,
-`src/yoetz/adapters/importers/codex_jsonl.py`, `src/yoetz/mcp/`, the Codex
+`src/yoetz/adapters/importers/codex_jsonl.py`,
+`src/yoetz/adapters/importers/codex_rollout_jsonl.py`,
+`src/yoetz/adapters/integrations/codex_session_stream.py`,
+`src/yoetz/adapters/integrations/codex_capability_cells.py`, `src/yoetz/mcp/`, the Codex
 skill files under `skills/codex/`, and `tests/capability/`.
 
 ## Decisions
 
-1. **Supported Codex range:** target/maximum-tested `0.144.5`; minimum supported set by the
-   capability run (candidate `0.139.0` as observed local fixture); anything newer than
-   maximum-tested is "untested", not "supported". The release manifest records min/max/denied.
+1. **Supported Codex range:** exact cells only, never a continuous range. The `codex exec --json`
+   importer remains pinned at `0.139.0` (`codex-exec-jsonl/0.139.0/v1`). The session-stream
+   reconciler is a different surface and is pinned at rollout `0.148.0`
+   (`codex-rollout-jsonl/0.148.0/v1`, capability id `codex-cli-rollout-0.148.0`) from reviewed
+   grammar fixtures covering `legacy` and `paginated` history modes. Neighbors including `0.149.1`
+   stay untested, not supported. The full skill/MCP/hook matrix in `runtime-support.json` remains
+   unfrozen until those facets have independent installed-artifact evidence. The release manifest
+   records min/max/denied from accepted cells only.
 2. **Integration posture:** Codex is the MCP client; Yoetz is a local stdio server registered via
    `codex mcp add yoetz -- yoetz mcp serve`, default `required = false`. Yoetz first runs `codex mcp
    get yoetz --json`; because a nonzero named lookup is ambiguous, only a successful strict parse

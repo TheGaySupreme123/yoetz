@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from yoetz.adapters.integrations.codex_capability_cells import (
+    CODEX_ROLLOUT_CAPABILITY_PROFILE_ID,
+    CODEX_ROLLOUT_SUPPORTED_VERSIONS,
+    skill_manifest_capability_fields,
+)
 from yoetz.adapters.integrations.codex_skill import (
     CODEX_HARNESS_PROFILE,
     CodexSkillIntegration,
@@ -57,11 +62,9 @@ def _resources() -> _Resources:
         b"metadata:\n  short-description: Yoetz guidance\n---\n\n# Yoetz\n"
     )
     skill_manifest_body: dict[str, JsonValue] = {
-        "capability_profile_ids": [],
-        "codex_version_bounds": {"tested": []},
+        **dict(skill_manifest_capability_fields()),
         "guidance_version": "0.1.0",
         "harness": "codex",
-        "hooks_by_capability_profile": {},
         "managed_members": [],
         "protocol_version": "0.1",
         "schema": "yoetz.codex-skill-manifest/1",
@@ -138,12 +141,14 @@ def _resources() -> _Resources:
     return _Resources(files)
 
 
-def test_profile_is_explicitly_unprofiled_until_e002_evidence_exists() -> None:
+def test_profile_publishes_exact_rollout_cell_with_absent_hooks() -> None:
     assert CODEX_HARNESS_PROFILE.harness_id is HarnessId.CODEX
     assert CODEX_HARNESS_PROFILE.skill_root == ".agents/skills/yoetz/"
-    assert CODEX_HARNESS_PROFILE.capability_profile_ids == ()
-    assert CODEX_HARNESS_PROFILE.supported_versions == ()
-    assert dict(CODEX_HARNESS_PROFILE.hooks_by_capability_profile) == {}
+    assert CODEX_HARNESS_PROFILE.capability_profile_ids == (CODEX_ROLLOUT_CAPABILITY_PROFILE_ID,)
+    assert CODEX_HARNESS_PROFILE.supported_versions == CODEX_ROLLOUT_SUPPORTED_VERSIONS
+    assert dict(CODEX_HARNESS_PROFILE.hooks_by_capability_profile) == {
+        CODEX_ROLLOUT_CAPABILITY_PROFILE_ID: None
+    }
     with pytest.raises(ProtocolValueError):
         HarnessProfile(
             HarnessId.CODEX,
@@ -158,7 +163,7 @@ def test_profile_is_explicitly_unprofiled_until_e002_evidence_exists() -> None:
 def test_injected_source_is_manifest_verified_and_marker_is_path_free() -> None:
     source = load_packaged_skill_source(_resources())
     assert source.harness_id is HarnessId.CODEX
-    assert source.harness_tested_set == ()
+    assert source.harness_tested_set == CODEX_ROLLOUT_SUPPORTED_VERSIONS
     assert tuple(file.relative_path for file in source.files) == (
         "SKILL.md",
         "manifest.json",
@@ -182,7 +187,7 @@ def test_source_mutation_fails_closed_without_checkout_fallback() -> None:
 
 
 @pytest.mark.anyio
-async def test_status_separates_filesystem_state_from_unprofiled_compatibility(
+def test_status_separates_filesystem_state_from_capability_compatibility(
     tmp_path: Path,
 ) -> None:
     tmp_path.chmod(0o700)
@@ -190,7 +195,7 @@ async def test_status_separates_filesystem_state_from_unprofiled_compatibility(
     target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
     status = await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
     assert status.state is IntegrationState.ABSENT
-    assert status.compatibility == "unsupported"
+    assert status.compatibility == "supported"
     assert not (tmp_path / ".agents").exists()
 
     command = SkillApplyCommand(
@@ -203,7 +208,7 @@ async def test_status_separates_filesystem_state_from_unprofiled_compatibility(
     )
     with pytest.raises(IntegrationError) as caught:
         await adapter.install_skill(HarnessId.CODEX, command)
-    assert caught.value.reason is IntegrationReason.VERSION_INCOMPATIBLE
+    assert caught.value.reason is IntegrationReason.PREVIEW_STALE
     assert not (tmp_path / ".agents").exists()
 
 
@@ -235,7 +240,7 @@ async def test_explicit_allow_untested_installs_discoverable_project_skill(
     assert result.state_after is IntegrationState.INSTALLED_EXACT
     status = await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
     assert status.state is IntegrationState.INSTALLED_EXACT
-    assert status.compatibility == "unsupported"
+    assert status.compatibility == "supported"
     assert (tmp_path / ".agents/skills/yoetz/SKILL.md").is_file()
 
 

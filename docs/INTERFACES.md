@@ -2480,7 +2480,12 @@ Shared closed types:
   flag, and bytes. At most 16 chunks and 700,000 aggregate input bytes keep the request below the
   ordinary 1 MiB control-frame cap; each assembled encrypted object remains below 4 MiB.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
-  mapping version. Cursors are crash-stable and generation-fenced.
+  mapping version. Codex session-stream cursors use `codex-obs-stream/1.1.0` (rollout JSONL
+  grammar). Cursors are crash-stable and generation-fenced.
+- `ObservationGapCode` — closed coverage tokens. `unsupported_event` is an admitted profile with
+  an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, unknown
+  `cli_version`, or compressed `rollout-*.jsonl.zst` that the hook pass does not decompress).
+  Unknown semantics never infer success.
 - `ObservationStatus` — lifecycle `active|degraded|stale|stopped`, source coverage, last
   observation, lag, currently true gaps, unsupported events, and the current `AdviceSnapshot`
   frontier identity. Per-code first/last-seen history is retained separately and does not make a
@@ -2580,7 +2585,9 @@ and untethered logs are excluded before storage. Secret spans are redacted in me
 encryption. SQLite/envelopes retain only encrypted object IDs, commitments, classifications, sizes,
 and relations. Vault/service failure records `content_capture_unavailable` and no plaintext spool.
 Unrecognized visible events accept an opaque stable envelope plus encrypted content and
-`unsupported_event`; unknown semantics never infer success.
+`unsupported_event`; a session-stream file that is the wrong grammar, an untested `cli_version`,
+or a compressed `.jsonl.zst` rollout records `unsupported_format` instead. Unknown semantics never
+infer success.
 
 Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
 

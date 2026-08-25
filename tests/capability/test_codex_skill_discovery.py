@@ -22,6 +22,7 @@ from capability.evidence import (
     record_and_write,
     runtime_capability_context,
 )
+from yoetz.adapters.integrations.codex_capability_cells import skill_manifest_capability_fields
 from yoetz.adapters.integrations.codex_skill import (
     CODEX_HARNESS_PROFILE,
     CodexSkillIntegration,
@@ -67,11 +68,9 @@ def _injectable_skill_resources() -> _Resources:
         b"metadata:\n  short-description: Yoetz guidance\n---\n\n# Yoetz\n"
     )
     skill_manifest_body: dict[str, JsonValue] = {
-        "capability_profile_ids": [],
-        "codex_version_bounds": {"tested": []},
+        **dict(skill_manifest_capability_fields()),
         "guidance_version": "0.1.0",
         "harness": "codex",
-        "hooks_by_capability_profile": {},
         "managed_members": [],
         "protocol_version": "0.1",
         "schema": "yoetz.codex-skill-manifest/1",
@@ -219,7 +218,7 @@ async def test_preview_and_modified_copy_protection_in_isolated_repo(tmp_path: P
 
     status = await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
     assert status.state in {IntegrationState.ABSENT, IntegrationState.INCOMPATIBLE}
-    assert status.compatibility == "unsupported"
+    assert status.compatibility == "supported"
 
     preview = await adapter.preview_skill(
         HarnessId.CODEX,
@@ -250,7 +249,7 @@ async def test_preview_and_modified_copy_protection_in_isolated_repo(tmp_path: P
     )
     with pytest.raises(IntegrationError) as caught:
         await adapter.install_skill(HarnessId.CODEX, apply)
-    assert caught.value.reason is IntegrationReason.VERSION_INCOMPATIBLE
+    assert caught.value.reason is IntegrationReason.PREVIEW_STALE
     assert (skill_dir / "SKILL.md").read_bytes() == before
 
     context = runtime_capability_context(
@@ -287,8 +286,8 @@ async def test_preview_and_modified_copy_protection_in_isolated_repo(tmp_path: P
 def test_app_server_discovery_claim_unsupported_while_unprofiled(tmp_path: Path) -> None:
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir(mode=0o700)
-    assert CODEX_HARNESS_PROFILE.capability_profile_ids == ()
-    assert CODEX_HARNESS_PROFILE.supported_versions == ()
+    assert CODEX_HARNESS_PROFILE.capability_profile_ids == ("codex-cli-rollout-0.148.0",)
+    assert CODEX_HARNESS_PROFILE.supported_versions == ("0.148.0",)
     context = runtime_capability_context(
         fixture_digest=bytes_digest(b"skills-list-unprofiled"),
         test_revision=_TEST_REVISION,
