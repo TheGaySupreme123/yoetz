@@ -70,6 +70,9 @@ _VERSION_TIMEOUT_SECONDS: Final = 5.0
 _PLUGIN_ADD_TIMEOUT_SECONDS: Final = 30.0
 _MAX_PLUGIN_OUTPUT_BYTES: Final = 262_144
 _MAX_EXECUTABLE_BYTES: Final = 256 * 1024 * 1024
+_MAX_MANAGED_CACHE_FILES: Final = 64
+_MAX_MANAGED_CACHE_MEMBER_BYTES: Final = 262_144
+_MAX_MANAGED_CACHE_TREE_BYTES: Final = 4 * 1024 * 1024
 _ACTIVATION_LOCK: Final = ".yoetz-marketplace-activation.lock"
 _PLUGIN_ADD_COMMAND: Final = ("plugin", "add", _PLUGIN_ID, "--json")
 _PLUGIN_LIST_COMMAND: Final = ("plugin", "list", "--marketplace", _MARKETPLACE_NAME, "--json")
@@ -1715,8 +1718,11 @@ def _require_safe_cache_removal_primitives() -> None:
 
 def _read_managed_tree_fd(root_fd: int) -> dict[str, bytes]:
     members: dict[str, bytes] = {}
+    file_count = 0
+    total_bytes = 0
 
     def walk(directory_fd: int, prefix: str) -> None:
+        nonlocal file_count, total_bytes
         try:
             names = sorted(os.listdir(directory_fd), key=lambda name: os.fsencode(name))
         except OSError as exc:
@@ -1742,16 +1748,38 @@ def _read_managed_tree_fd(root_fd: int) -> dict[str, bytes]:
                     os.close(child_fd)
                 continue
             _owned_stat_not_writable(facts, directory=False)
+            file_count += 1
+            if file_count > _MAX_MANAGED_CACHE_FILES:
+                raise _error(IntegrationReason.PREVIEW_STALE)
             flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
             try:
                 descriptor = os.open(name, flags, dir_fd=directory_fd)
             except OSError as exc:
                 raise _error(IntegrationReason.TARGET_UNSAFE) from exc
             try:
-                _owned_stat_not_writable(os.fstat(descriptor), directory=False)
+                opened_facts = os.fstat(descriptor)
+                _owned_stat_not_writable(opened_facts, directory=False)
+                if (
+                    opened_facts.st_size < 0
+                    or opened_facts.st_size > _MAX_MANAGED_CACHE_MEMBER_BYTES
+                    or total_bytes + opened_facts.st_size > _MAX_MANAGED_CACHE_TREE_BYTES
+                ):
+                    raise _error(IntegrationReason.PREVIEW_STALE)
                 chunks: list[bytes] = []
-                while chunk := os.read(descriptor, 1024 * 1024):
+                file_bytes = 0
+                while chunk := os.read(descriptor, 64 * 1024):
+                    file_bytes += len(chunk)
+                    if (
+                        file_bytes > _MAX_MANAGED_CACHE_MEMBER_BYTES
+                        or total_bytes + file_bytes > _MAX_MANAGED_CACHE_TREE_BYTES
+                    ):
+                        raise _error(IntegrationReason.PREVIEW_STALE)
                     chunks.append(chunk)
+                final_facts = os.fstat(descriptor)
+                _owned_stat_not_writable(final_facts, directory=False)
+                if final_facts.st_size != file_bytes:
+                    raise _error(IntegrationReason.PREVIEW_STALE)
+                total_bytes += file_bytes
                 members[relative] = b"".join(chunks)
             except OSError as exc:
                 raise _error(IntegrationReason.TARGET_UNSAFE) from exc

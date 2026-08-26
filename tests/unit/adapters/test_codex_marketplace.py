@@ -1222,6 +1222,65 @@ def test_cache_removal_revalidates_digest_immediately_before_delete(
     assert hooks.exists()
 
 
+def test_cache_removal_bounds_replaced_member_before_reading_to_eof(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations.codex_marketplace import (
+        _MAX_MANAGED_CACHE_MEMBER_BYTES,  # pyright: ignore[reportPrivateUsage]
+        _delete_managed_cache_versions,  # pyright: ignore[reportPrivateUsage]
+        _installed_cache_digest,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    root = tmp_path / "cache"
+    version = root / "0.1.0"
+    expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
+    for relative, payload in expected.items():
+        destination = version / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    digest = _installed_cache_digest(version, expected)
+    assert digest is not None
+    replaced = version / "hooks/hooks.json"
+    os.truncate(replaced, _MAX_MANAGED_CACHE_MEMBER_BYTES + 1)
+
+    with pytest.raises(IntegrationError) as caught:
+        _delete_managed_cache_versions(root, (("0.1.0", digest),), expected)
+
+    assert caught.value.reason is IntegrationReason.PREVIEW_STALE
+    assert replaced.stat().st_size == _MAX_MANAGED_CACHE_MEMBER_BYTES + 1
+
+
+def test_cache_removal_bounds_aggregate_revalidation_bytes(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations.codex_marketplace import (
+        _MAX_MANAGED_CACHE_TREE_BYTES,  # pyright: ignore[reportPrivateUsage]
+        _delete_managed_cache_versions,  # pyright: ignore[reportPrivateUsage]
+        _installed_cache_digest,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    root = tmp_path / "cache"
+    version = root / "0.1.0"
+    expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
+    for relative, payload in expected.items():
+        destination = version / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    digest = _installed_cache_digest(version, expected)
+    assert digest is not None
+    overflow = version / "overflow"
+    overflow.mkdir()
+    member_size = _MAX_MANAGED_CACHE_TREE_BYTES // 16
+    for index in range(17):
+        member = overflow / f"{index:02d}.bin"
+        member.touch()
+        os.truncate(member, member_size)
+
+    with pytest.raises(IntegrationError) as caught:
+        _delete_managed_cache_versions(root, (("0.1.0", digest),), expected)
+
+    assert caught.value.reason is IntegrationReason.PREVIEW_STALE
+    assert version.is_dir()
+
+
 def test_cache_removal_refuses_replaced_symlink_root(tmp_path: Path) -> None:
     from yoetz.adapters.integrations.codex_marketplace import (
         _delete_managed_cache_versions,  # pyright: ignore[reportPrivateUsage]
