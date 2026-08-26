@@ -2689,14 +2689,20 @@ async def integrate_mcp(
     json_output: bool,
     route_profile: Literal["policy", "strict"] | None = None,
 ) -> int:
-    """Client-local ``integrate <harness> mcp status|preview|install|remove`` commands.
+    """Client-local MCP status, registration, and unregistration commands.
 
     ``route_profile`` is the explicit route input. When absent, an existing
     yoetz-owned registration keeps its observed profile (#389); only a fresh
     registration falls back to the structural configuration derivation.
     """
 
-    if harness != "codex" or action not in {"status", "preview", "install", "remove"}:
+    if harness != "codex" or action not in {
+        "status",
+        "preview",
+        "preview-remove",
+        "install",
+        "remove",
+    }:
         return _usage_failure("the harness or action is not supported")
     interactive = _is_interactive_terminal()
     binaries = discover_codex_binaries()
@@ -2720,12 +2726,28 @@ async def integrate_mcp(
                 json_output=json_output,
             )
             return 0
-        if action == "remove":
+        if action in {"preview-remove", "remove"}:
             preview = await service.preview_unregistration(chosen)
+            if action == "preview-remove":
+                _emit(
+                    {
+                        "action": preview.action.value,
+                        "harness": harness,
+                        "preview_digest": preview.preview_digest,
+                        "route_profile": preview.route_profile,
+                        "serve_command": list(preview.serve_command),
+                        "state_before": preview.state_before.value,
+                        "warnings": list(preview.warnings),
+                    },
+                    json_output=json_output,
+                )
+                return 0
             if preview_digest is not None and preview_digest != preview.preview_digest:
                 return _mcp_error_exit("preview_stale")
             if preview.state_before is McpRegistrationState.FOREIGN_PRESENT:
                 return _mcp_error_exit("foreign_entry_present")
+            if accept and preview_digest is None:
+                return _mcp_error_exit("confirmation_required")
             accepted = accept
             if interactive and not accepted:
                 typer.echo("Proposed change: remove the Yoetz-owned Codex MCP registration")

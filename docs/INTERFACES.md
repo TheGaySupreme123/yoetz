@@ -2896,9 +2896,11 @@ is surfaced before mutation: the wizard preview and report carry `route_profile_
 ordinary digest-bound re-registration.
 The setup-wizard
 schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
-`yoetz.setup-status/1`, and `yoetz.mcp-registration-preview/1`; the marker lives at
-`state_dir()/setup-wizard.json` via `config.paths.setup_marker_path`. The CLI surfaces are
-`yoetz setup run|status` and `yoetz integrate <harness> mcp status|preview|install|remove` (ADR-012).
+`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1`, and
+`yoetz.mcp-unregistration-preview/1`; the marker lives at `state_dir()/setup-wizard.json` via
+`config.paths.setup_marker_path`. The CLI surfaces are
+`yoetz setup run|status` and
+`yoetz integrate <harness> mcp status|preview|preview-remove|install|remove` (ADR-012).
 Standalone `yoetz provider endpoint` retains its explicit credential next command. When endpoint
 binding is embedded in the composed setup wizard, that standalone handoff is suppressed because
 the wizard still owns privacy consent and confidential ingress. Every visible yes/no prompt near

@@ -1207,7 +1207,7 @@ _CODEX_PATH = Annotated[
 ]
 _ACCEPT = Annotated[
     bool,
-    typer.Option("--accept", help="Explicitly accept the previewed registration."),
+    typer.Option("--accept", help="Explicitly accept the previewed MCP change."),
 ]
 _ROUTE_PROFILE = Annotated[
     str | None,
@@ -1264,7 +1264,7 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
     return command
 
 
-for _mcp_action in ("preview", "install", "status", "remove"):
+for _mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
     integrate_mcp_app.command(_mcp_action)(_integration_mcp_command(_mcp_action))
 
 

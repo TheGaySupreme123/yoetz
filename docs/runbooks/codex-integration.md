@@ -112,11 +112,11 @@ exact Yoetz-owned registration being intentionally replaced. Current Codex `mcp 
 replaces a same-name global entry, so this preflight check matters.
 
 This check-then-add sequence is also available as
-`yoetz integrate codex mcp status|preview|install|remove` and is what `yoetz setup run` performs after
-Codex discovery (ADR-012). Automating it changes no rule above — it is the same two commands,
-gated by an explicit digest-bound confirmation, run by Yoetz instead of by hand; an existing
-foreign entry is still preserved and refused, success is verified by re-reading the entry, and
-"registered" still never implies Codex will successfully connect at runtime.
+`yoetz integrate codex mcp status|preview|preview-remove|install|remove` and is what `yoetz setup
+run` performs after Codex discovery (ADR-012). Automating it changes no rule above — it is the
+same two commands, gated by an explicit digest-bound confirmation, run by Yoetz instead of by
+hand; an existing foreign entry is still preserved and refused, success is verified by re-reading
+the entry, and "registered" still never implies Codex will successfully connect at runtime.
 
 The accepted setup path composes four separately reported layers in order: it installs the project
 skill at `.agents/skills/yoetz`, installs managed structural plugin/hook sources at
@@ -287,13 +287,16 @@ observation store are intentionally left in place.
 ### External MCP registration
 
 ```text
+yoetz integrate codex mcp preview-remove --json
 yoetz integrate codex mcp remove --accept --preview-digest <digest> --json
 ```
 
-This removes an `external_registration` Codex MCP entry by running `codex mcp remove yoetz` only
-when the registered argv is an exact Yoetz serve command. A foreign same-name entry is preserved
-and refused. An already-absent entry is a no-op. Plugin-managed MCP is not this command: it goes
-away with the plugin artifact, not with `codex mcp remove`.
+The first command exposes the exact unregistration digest and current owned route without
+mutation. Noninteractive removal requires that digest plus `--accept`; `--accept` alone fails
+closed. Apply runs `codex mcp remove yoetz` only when the registered argv is an exact Yoetz serve
+command. A foreign same-name entry is preserved and refused. An already-absent entry is a no-op.
+Plugin-managed MCP is not this command: it goes away with the plugin artifact, not with `codex mcp
+remove`.
 
 ## 9. Troubleshooting and recovery
 

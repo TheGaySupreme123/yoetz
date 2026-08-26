@@ -96,13 +96,13 @@ exactly those contracts and connects the steps without weakening any existing tr
    `yoetz setup run`. An unsafe or unreadable state directory never triggers the wizard.
 
 3. **MCP registration becomes a first-class preview-gated operation** (`yoetz integrate <harness>
-   mcp status|preview|install|remove`), automating the exact two-command sequence the Codex runbook
-   already mandates: `codex mcp get yoetz --json` first; `codex mcp add yoetz -- yoetz mcp serve`
-   only when no entry exists; a foreign same-name entry is preserved and refused with
-   `foreign_entry_present` — there is no force path. Success is verified by re-reading state, not
-   by trusting the add exit code. Registration remains a fact separate from skill installation and
-   from Codex capability support (E-002/E-013 are untouched); "registered" never implies "Codex
-   will successfully connect".
+   mcp status|preview|preview-remove|install|remove`), automating the exact two-command sequence the
+   Codex runbook already mandates: `codex mcp get yoetz --json` first. It runs the exact
+   `codex mcp add yoetz -- yoetz mcp serve` command only when no entry exists; a foreign same-name
+   entry is preserved and refused with `foreign_entry_present` — there is no force path. Success is
+   verified by re-reading state, not by trusting the add exit code. Registration remains a fact
+   separate from skill installation and from Codex capability support (E-002/E-013 are untouched);
+   "registered" never implies "Codex will successfully connect".
 
    **Founder-authorized Codex activation repair (2026-08-03).** An accepted setup now also installs
    the packaged project skill at `.agents/skills/yoetz` before it installs the structural plugin
@@ -221,9 +221,11 @@ exactly those contracts and connects the steps without weakening any existing tr
    yoetz-managed version directories; it is default-off. Foreign, modified, dual, or otherwise
    conflicting entries refuse with `remove_refused` and name the conflicting surface. A second
    removal is `already_absent`. The skill tree, consent records, and observation store are
-   intentionally left in place. `yoetz integrate <harness> mcp remove` unregisters an owned
-   external `yoetz` MCP entry with `codex mcp remove yoetz`, refuses a foreign same-name entry,
-   and treats an already-absent entry as `noop`. After activation removal, observe/inspect reports
+   intentionally left in place. `yoetz integrate <harness> mcp preview-remove` exposes the exact
+   unregistration digest; noninteractive `remove` requires that digest plus `--accept` before it
+   unregisters an owned external `yoetz` MCP entry with `codex mcp remove yoetz`. It refuses a
+   foreign same-name entry and treats an already-absent entry as `noop`. After activation removal,
+   observe/inspect reports
    `installed_not_activated` when the managed plugin source remains (issue #387) and
    `not_installed` only when that source is also absent.
 

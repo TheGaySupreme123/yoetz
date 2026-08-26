@@ -1257,9 +1257,23 @@ def test_integrate_mcp_refuses_foreign_entry(wizard_env: dict[str, object]) -> N
 
 def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None:
     wizard_env["outputs"] = [_yoetz_entry()]
+    previewed = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview-remove", "--json"])
+    assert previewed.exit_code == 0, (previewed.output, previewed.exception)
+    preview = json.loads(previewed.stdout)
+    assert preview["action"] == "unregister"
+    assert preview["route_profile"] == "strict"
+    assert preview["serve_command"] == ["yoetz", "mcp", "serve", "--semantic", "off"]
+    assert preview["preview_digest"].startswith("sha256:")
+
+    wizard_env["outputs"] = [_yoetz_entry()]
     refused = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "remove", "--json"])
     assert refused.exit_code == 2
     assert "confirmation_required" in refused.stderr
+
+    wizard_env["outputs"] = [_yoetz_entry()]
+    unbound = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "remove", "--accept", "--json"])
+    assert unbound.exit_code == 2
+    assert "confirmation_required" in unbound.stderr
 
     wizard_env["outputs"] = [
         _yoetz_entry(),
@@ -1269,7 +1283,16 @@ def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None
     ]
     result = _RUNNER.invoke(
         cli.app,
-        ["integrate", "codex", "mcp", "remove", "--accept", "--json"],
+        [
+            "integrate",
+            "codex",
+            "mcp",
+            "remove",
+            "--accept",
+            "--preview-digest",
+            preview["preview_digest"],
+            "--json",
+        ],
     )
     assert result.exit_code == 0, (result.output, result.exception)
     body = json.loads(result.stdout)
@@ -1279,9 +1302,23 @@ def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None
 
 def test_integrate_mcp_remove_absent_entry_is_noop(wizard_env: dict[str, object]) -> None:
     wizard_env["outputs"] = [CommandOutput(1, b"")]
+    previewed = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview-remove", "--json"])
+    assert previewed.exit_code == 0, (previewed.output, previewed.exception)
+    preview_digest = json.loads(previewed.stdout)["preview_digest"]
+
+    wizard_env["outputs"] = [CommandOutput(1, b"")]
     result = _RUNNER.invoke(
         cli.app,
-        ["integrate", "codex", "mcp", "remove", "--accept", "--json"],
+        [
+            "integrate",
+            "codex",
+            "mcp",
+            "remove",
+            "--accept",
+            "--preview-digest",
+            preview_digest,
+            "--json",
+        ],
     )
     assert result.exit_code == 0, (result.output, result.exception)
     assert json.loads(result.stdout)["action"] == "noop"
@@ -1292,6 +1329,27 @@ def test_integrate_mcp_remove_refuses_foreign_entry(wizard_env: dict[str, object
     result = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "remove", "--accept", "--json"])
     assert result.exit_code == 2
     assert "foreign_entry_present" in result.stderr
+
+
+def test_integrate_mcp_remove_refuses_stale_preview_digest(
+    wizard_env: dict[str, object],
+) -> None:
+    wizard_env["outputs"] = [_yoetz_entry()]
+    result = _RUNNER.invoke(
+        cli.app,
+        [
+            "integrate",
+            "codex",
+            "mcp",
+            "remove",
+            "--accept",
+            "--preview-digest",
+            "sha256:" + "0" * 64,
+            "--json",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "preview_stale" in result.stderr
 
 
 def test_non_interactive_accept_preserves_existing_policy_route(
