@@ -74,6 +74,7 @@ class _FakeCodex:
         self.calls: list[tuple[str, ...]] = []
         self.environments: list[dict[str, str]] = []
         self.fail_add_after_copy = False
+        self.conflict_after_marketplace_remove = False
         self.codex_version = codex_version
 
     def __call__(
@@ -149,6 +150,11 @@ class _FakeCodex:
                     end = start + len(marker) + (len(rest) if next_table < 0 else next_table + 1)
                     text = text[:start] + text[end:]
                     config.write_text(text, encoding="utf-8")
+            if self.conflict_after_marketplace_remove and config.exists():
+                text = config.read_text(encoding="utf-8").replace(
+                    "enabled = true\n", "enabled = true\nowner_note = true\n"
+                )
+                config.write_text(text, encoding="utf-8")
             body = {"name": "yoetz"}
         else:
             raise AssertionError(command)
@@ -1052,6 +1058,68 @@ def test_preview_and_apply_removal_of_managed_activation(tmp_path: Path) -> None
     assert second.outcome is RemovalOutcome.ALREADY_ABSENT
     replay = apply_removal(target, codex_home=home, approved_digest=second.preview_digest)
     assert replay.outcome is RemovalOutcome.ALREADY_ABSENT
+
+
+def test_removal_preview_digest_binds_the_exact_project_root(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations.codex_marketplace import (
+        _canonical_marketplace_bytes,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    home = tmp_path / "codex-home"
+    home.mkdir(mode=0o700)
+    targets: list[IntegrationTarget] = []
+    marketplace_paths: list[Path] = []
+    for name in ("project-a", "project-b"):
+        project = tmp_path / name
+        project.mkdir(mode=0o700)
+        target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(project))
+        marketplace = project / ".agents/plugins/marketplace.json"
+        marketplace.parent.mkdir(parents=True, mode=0o700)
+        marketplace.write_bytes(_canonical_marketplace_bytes())
+        targets.append(target)
+        marketplace_paths.append(marketplace)
+
+    preview_a = preview_removal(targets[0], codex_home=home)
+    preview_b = preview_removal(targets[1], codex_home=home)
+    assert preview_a.preview_digest != preview_b.preview_digest
+
+    with pytest.raises(IntegrationError) as caught:
+        apply_removal(
+            targets[1],
+            codex_home=home,
+            approved_digest=preview_a.preview_digest,
+        )
+
+    assert caught.value.reason is IntegrationReason.PREVIEW_STALE
+    assert marketplace_paths[1].is_file()
+
+
+def test_post_host_mutation_config_conflict_is_write_failed(tmp_path: Path) -> None:
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    runner = _FakeCodex(target, home)
+    preview = _preview_removal(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        _run=runner,
+    )
+    runner.conflict_after_marketplace_remove = True
+
+    with pytest.raises(IntegrationError) as caught:
+        _apply_removal(
+            target,
+            executable_path=str(runner.executable),
+            approved_digest=preview.preview_digest,
+            codex_home=home,
+            _run=runner,
+        )
+
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
+    assert caught.value.safe_details["conflict"] == "config_plugin"
+    assert not (home / "plugins/cache/yoetz/yoetz/0.1.0").exists()
 
 
 def test_removal_refuses_foreign_marketplace_and_names_conflict(tmp_path: Path) -> None:

@@ -1207,7 +1207,7 @@ _CODEX_PATH = Annotated[
 ]
 _ACCEPT = Annotated[
     bool,
-    typer.Option("--accept", help="Explicitly accept the previewed MCP change."),
+    typer.Option("--accept", help="Explicitly accept the previewed change."),
 ]
 _ROUTE_PROFILE = Annotated[
     str | None,

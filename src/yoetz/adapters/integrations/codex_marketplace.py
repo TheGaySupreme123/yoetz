@@ -56,6 +56,7 @@ __all__ = [
     "preview_activation",
     "preview_removal",
     "resolve_codex_home_for_binary",
+    "skill_tree_state",
 ]
 
 _MARKETPLACE_NAME: Final = "yoetz"
@@ -80,7 +81,7 @@ _MARKETPLACE_REMOVE_COMMAND: Final = (
     _MARKETPLACE_NAME,
     "--json",
 )
-_PLUGIN_TABLE: Final = '[plugins."yoetz@yoetz"]\nenabled = true\n'
+_PLUGIN_TABLE: Final = f'[plugins."{_PLUGIN_ID}"]\nenabled = true\n'
 _VERSION_RE: Final = re.compile(
     r"\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\b", re.ASCII
 )
@@ -1335,7 +1336,9 @@ def _canonical_marketplace_bytes() -> bytes:
     return canonical_encode(cast(JsonValue, _marketplace_document())) + b"\n"
 
 
-def _skill_tree_state(target: IntegrationTarget) -> str:
+def skill_tree_state(target: IntegrationTarget) -> str:
+    """Return the packaged skill destination state used by preview, apply, and CLI status."""
+
     return inspect_destination(target, load_packaged_skill_source()).state.value
 
 
@@ -1580,6 +1583,8 @@ def _removal_plan(
     outcome = RemovalOutcome.REMOVE if planned else RemovalOutcome.ALREADY_ABSENT
     digest_body = (
         b"yoetz.codex-marketplace-removal/1\0"
+        + str(project).encode("utf-8")
+        + b"\0"
         + str(home).encode("utf-8")
         + b"\0"
         + (b"1" if purge_cache else b"0")
@@ -1634,7 +1639,7 @@ def _removal_plan(
         marketplace_json_planned,
         cache_versions,
         cache_digests,
-        _skill_tree_state(target),
+        skill_tree_state(target),
         binary.executable_path,
         binary.executable_digest,
         binary.codex_version,
@@ -1902,11 +1907,20 @@ def apply_removal(
             parsed_config = tomllib.loads(current_config.decode("utf-8") if current_config else "")
         except (UnicodeError, tomllib.TOMLDecodeError) as exc:
             raise _error(IntegrationReason.SOURCE_INVALID) from exc
-        _, _, stripped = _config_table_plan(
-            current_config,
-            cast(Mapping[str, object], parsed_config),
-            project,
-        )
+        try:
+            _, _, stripped = _config_table_plan(
+                current_config,
+                cast(Mapping[str, object], parsed_config),
+                project,
+            )
+        except IntegrationError as exc:
+            if exc.reason is IntegrationReason.REMOVE_REFUSED:
+                # A conflict discovered after the host removal subprocesses have already
+                # mutated state is a partial-apply failure, not a pre-mutation refusal.
+                conflict = exc.safe_details.get("conflict")
+                details = {"conflict": conflict} if type(conflict) is str else None
+                raise _error(IntegrationReason.WRITE_FAILED, details) from exc
+            raise
         if stripped != current_config:
             if plan.config_before is None and not stripped:
                 if config_path.exists():
@@ -1941,7 +1955,7 @@ def apply_removal(
             raise _error(IntegrationReason.WRITE_FAILED)
         if inspection.state is ActivationState.FOREIGN:
             raise _error(IntegrationReason.WRITE_FAILED)
-        skill_state = _skill_tree_state(target)
+        skill_state = skill_tree_state(target)
         if skill_state != preview.skill_tree_state:
             raise _error(IntegrationReason.WRITE_FAILED)
     return RemovalResult(RemovalOutcome.REMOVE, inspection, skill_state, purge_cache)

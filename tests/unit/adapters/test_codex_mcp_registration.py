@@ -341,6 +341,7 @@ def test_preview_unregistration_of_owned_entry() -> None:
     )
     assert preview.action is McpRegistrationAction.UNREGISTER
     assert preview.state_before is McpRegistrationState.YOETZ_OWNED
+    assert preview.warnings == ("host_remove_not_compare_and_swap",)
 
 
 def test_preview_unregistration_of_foreign_entry_warns_without_echoing_argv() -> None:
@@ -366,6 +367,7 @@ def test_apply_unregistration_removes_owned_entry() -> None:
     runner = _Runner(
         [
             CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, _yoetz_entry()),
             CommandOutput(0, b""),
             CommandOutput(1, b""),
         ]
@@ -377,7 +379,29 @@ def test_apply_unregistration_removes_owned_entry() -> None:
     )
     assert result.action is McpRegistrationAction.UNREGISTER
     assert result.state_after is McpRegistrationState.ABSENT
-    assert runner.calls[1] == ("/opt/harness/bin/codex", "mcp", "remove", "yoetz")
+    assert runner.calls[2] == ("/opt/harness/bin/codex", "mcp", "remove", "yoetz")
+
+
+def test_apply_unregistration_refuses_replacement_before_name_based_remove() -> None:
+    plan_adapter = CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())]))
+    preview = anyio.run(lambda: plan_adapter.preview_unregistration(_BINARY))
+    foreign = CommandOutput(0, json.dumps({"command": "other"}).encode("utf-8"))
+    runner = _Runner(
+        [
+            CommandOutput(0, _yoetz_entry()),
+            foreign,
+        ]
+    )
+
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(runner).apply_unregistration(
+                _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+            )
+        )
+
+    assert caught.value.reason is McpRegistrationReason.FOREIGN_ENTRY_PRESENT
+    assert all(call[1:3] == ("mcp", "get") for call in runner.calls)
 
 
 def test_apply_unregistration_refuses_foreign_entry() -> None:

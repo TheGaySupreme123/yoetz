@@ -273,6 +273,11 @@ class CodexMcpAdapter:
         warnings: tuple[str, ...] = ()
         if state is McpRegistrationState.FOREIGN_PRESENT:
             warnings = ("foreign_entry_present",)
+        elif state is McpRegistrationState.YOETZ_OWNED:
+            # Codex 0.149.x exposes a name-based remove command, not a compare-and-remove token.
+            # Apply narrows that host limitation with an immediate ownership recheck below and
+            # the preview must surface the remaining non-atomic boundary to the operator.
+            warnings = ("host_remove_not_compare_and_swap",)
         if (
             state is McpRegistrationState.YOETZ_OWNED
             and current_command is not None
@@ -336,6 +341,16 @@ class CodexMcpAdapter:
                 preview.state_before,
                 preview.preview_digest,
             )
+        state_before_remove, command_before_remove = self._classify_get(
+            self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
+        )
+        if state_before_remove is McpRegistrationState.FOREIGN_PRESENT:
+            raise McpRegistrationError(McpRegistrationReason.FOREIGN_ENTRY_PRESENT, {})
+        if (
+            state_before_remove is not McpRegistrationState.YOETZ_OWNED
+            or command_before_remove != preview.serve_command
+        ):
+            raise McpRegistrationError(McpRegistrationReason.PREVIEW_STALE, {})
         remove_output = self._run((binary.executable_path, "mcp", "remove", MCP_SERVER_NAME))
         if remove_output.exit_code != 0:
             raise McpRegistrationError(

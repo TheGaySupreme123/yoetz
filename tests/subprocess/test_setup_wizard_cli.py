@@ -1263,6 +1263,7 @@ def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None
     assert preview["action"] == "unregister"
     assert preview["route_profile"] == "strict"
     assert preview["serve_command"] == ["yoetz", "mcp", "serve", "--semantic", "off"]
+    assert preview["warnings"] == ["host_remove_not_compare_and_swap"]
     assert preview["preview_digest"].startswith("sha256:")
 
     wizard_env["outputs"] = [_yoetz_entry()]
@@ -1276,6 +1277,7 @@ def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None
     assert "confirmation_required" in unbound.stderr
 
     wizard_env["outputs"] = [
+        _yoetz_entry(),
         _yoetz_entry(),
         _yoetz_entry(),
         CommandOutput(0, b""),

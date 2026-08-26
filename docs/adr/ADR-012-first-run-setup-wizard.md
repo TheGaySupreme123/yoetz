@@ -219,12 +219,18 @@ exactly those contracts and connects the steps without weakening any existing tr
    repository `.agents/plugins/marketplace.json` only when that file byte-matches, and it deletes
    only digest-matched versioned cache trees. `--purge-cache` is required to delete other
    yoetz-managed version directories; it is default-off. Foreign, modified, dual, or otherwise
-   conflicting entries refuse with `remove_refused` and name the conflicting surface. A second
+   conflicting entries refuse with `remove_refused` and name the conflicting surface. The removal
+   preview binds the exact trusted project root as well as the selected executable, Codex
+   home, configuration/cache preimages, planned host commands, and cache-purge choice. A second
    removal is `already_absent`. The skill tree, consent records, and observation store are
    intentionally left in place. `yoetz integrate <harness> mcp preview-remove` exposes the exact
    unregistration digest; noninteractive `remove` requires that digest plus `--accept` before it
-   unregisters an owned external `yoetz` MCP entry with `codex mcp remove yoetz`. It refuses a
-   foreign same-name entry and treats an already-absent entry as `noop`. After activation removal,
+   unregisters an owned external `yoetz` MCP entry with `codex mcp remove yoetz`. Apply immediately
+   re-reads the entry and refuses a foreign replacement or changed owned route observed before the
+   name-based remove. Codex exposes no compare-and-remove token, so the preview warns
+   `host_remove_not_compare_and_swap`; the owner must quiesce concurrent MCP config writers and no
+   atomic exclusion is claimed inside the final subprocess window. An already-absent entry is
+   `noop`. After activation removal,
    observe/inspect reports
    `installed_not_activated` when the managed plugin source remains (issue #387) and
    `not_installed` only when that source is also absent.

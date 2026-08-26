@@ -2882,9 +2882,12 @@ diagnostics (`McpRegistrationDiagnostic`, `HarnessMcpDiagnosticSink`); every reg
 mutation is digest-bound to a freshly recomputed preview, a foreign same-name entry is
 preserved without any force path, and success is verified by re-reading state. Unregistration is
 the same digest-bound lifecycle for an owned external registration: `preview_unregistration` /
-`apply_unregistration` run `codex mcp remove yoetz` only when the registered argv is an exact
-Yoetz serve command, refuse a foreign same-name entry, and treat an already-absent entry as
-`noop`. The preview binds
+`apply_unregistration` re-read the current entry immediately before the name-based
+`codex mcp remove yoetz`, run it only when the observed argv is still the exact previewed Yoetz
+serve command, refuse an observed foreign replacement, and treat an already-absent entry as
+`noop`. Because Codex 0.149.x exposes no compare-and-remove token, an owned-entry preview carries
+`host_remove_not_compare_and_swap`; callers must quiesce concurrent host configuration writers,
+and the port does not claim atomic exclusion inside the final host subprocess window. The preview binds
 the exact command and `policy|strict` route profile. The route profile is explicit input:
 `yoetz setup run` and `yoetz integrate <harness> mcp preview|install` accept
 `--route-profile strict|policy`. Without that input, an existing yoetz-owned registration keeps
@@ -3020,7 +3023,9 @@ presence cell. The ADR-012 setup composition remains its own separately authoriz
 Codex `preview_removal` / `apply_removal` refuse foreign, modified, dual, or otherwise
 conflicting marketplace, config, inventory, or cache surfaces with `remove_refused` and a closed
 `conflict` token (`personal_marketplace|repository_marketplace|config_marketplace|config_plugin|
-inventory|cache`). Cache purge is default-off. After a successful removal, `codex plugin list
+inventory|cache`). Cache purge is default-off. The removal digest binds the exact trusted project
+root as well as the selected executable, Codex home, configuration/cache preimages, planned host
+commands, and cache-purge choice. After a successful removal, `codex plugin list
 --marketplace yoetz --json` is empty and `config.toml` has no yoetz tables;
 `inspect_activation` / observe status reports `installed_not_activated` when the managed plugin
 source at `.agents/plugins/yoetz` remains (issue #387) and `not_installed` only when that source

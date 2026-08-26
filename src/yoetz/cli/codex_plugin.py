@@ -13,10 +13,7 @@ from yoetz.adapters.integrations.codex_marketplace import (
     apply_removal,
     inspect_activation,
     preview_removal,
-)
-from yoetz.adapters.integrations.codex_skill import (
-    inspect_destination,
-    load_packaged_skill_source,
+    skill_tree_state,
 )
 from yoetz.cli.setup import (
     _choose_binary,  # pyright: ignore[reportPrivateUsage]
@@ -52,10 +49,6 @@ def _target(project_root: Path | None) -> IntegrationTarget:
     # Preserve the lexical path so the adapter can reject a symlinked project
     # root instead of silently authorizing its resolved target.
     return IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, os.fspath(root.absolute()))
-
-
-def _skill_tree_state(target: IntegrationTarget) -> str:
-    return inspect_destination(target, load_packaged_skill_source()).state.value
 
 
 def _preview_body(preview: RemovalPreview) -> dict[str, object]:
@@ -119,19 +112,19 @@ def run_codex_plugin_command(
             )
             _emit(
                 {
-                    "skill_tree": _skill_tree_state(target),
+                    "skill_tree": skill_tree_state(target),
                     "state": inspection.state.value,
                 },
                 json_output=json_output,
             )
             return 0
-        preview = preview_removal(
-            target,
-            executable_path=executable,
-            codex_home=codex_home,
-            purge_cache=purge_cache,
-        )
         if command == "preview":
+            preview = preview_removal(
+                target,
+                executable_path=executable,
+                codex_home=codex_home,
+                purge_cache=purge_cache,
+            )
             _emit(_preview_body(preview), json_output=json_output)
             return 0
         if not accept or preview_digest is None:

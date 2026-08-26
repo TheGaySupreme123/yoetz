@@ -25,29 +25,29 @@ _DIGEST = "sha256:" + "a" * 64
 
 def _preview(home: Path, executable: Path) -> RemovalPreview:
     return RemovalPreview(
-        _DIGEST,
-        ActivationInspection(True, True, ActivationState.ACTIVE),
-        RemovalOutcome.REMOVE,
-        False,
-        True,
-        True,
-        True,
-        ("0.1.0",),
-        (("0.1.0", "sha256:" + "e" * 64),),
-        "absent",
-        executable,
-        "sha256:" + "b" * 64,
-        "0.148.0-alpha.6",
-        home,
-        ("--version",),
-        ("plugin", "list", "--marketplace", "yoetz", "--json"),
-        ("plugin", "remove", "yoetz@yoetz", "--json"),
-        ("plugin", "marketplace", "remove", "yoetz", "--json"),
-        "temporary_owner_private_home",
-        (("CODEX_HOME", str(home)), ("CODEX_TESTING_HOME", str(home))),
-        "sha256:" + "c" * 64,
-        "sha256:" + "d" * 64,
-        '[marketplaces.yoetz]\nsource_type = "local"\n',
+        preview_digest=_DIGEST,
+        inspection=ActivationInspection(True, True, ActivationState.ACTIVE),
+        outcome=RemovalOutcome.REMOVE,
+        purge_cache=False,
+        plugin_remove_planned=True,
+        marketplace_remove_planned=True,
+        marketplace_json_planned=True,
+        cache_versions=("0.1.0",),
+        cache_digests=(("0.1.0", "sha256:" + "e" * 64),),
+        skill_tree_state="absent",
+        executable_path=executable,
+        executable_digest="sha256:" + "b" * 64,
+        codex_version="0.148.0-alpha.6",
+        codex_home=home,
+        probe_command=("--version",),
+        inventory_command=("plugin", "list", "--marketplace", "yoetz", "--json"),
+        plugin_remove_command=("plugin", "remove", "yoetz@yoetz", "--json"),
+        marketplace_remove_command=("plugin", "marketplace", "remove", "yoetz", "--json"),
+        probe_environment="temporary_owner_private_home",
+        activation_environment=(("CODEX_HOME", str(home)), ("CODEX_TESTING_HOME", str(home))),
+        marketplace_preimage_digest="sha256:" + "c" * 64,
+        config_preimage_digest="sha256:" + "d" * 64,
+        config_toml_block='[marketplaces.yoetz]\nsource_type = "local"\n',
     )
 
 
@@ -60,14 +60,17 @@ def test_codex_plugin_cli_preserves_symlinked_project_root_for_adapter_rejection
     project_link.symlink_to(project, target_is_directory=True)
     home = tmp_path / "codex-home"
     home.mkdir(mode=0o700)
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\nprintf 'codex-cli 0.149.1\\n'\n", encoding="utf-8")
+    executable.chmod(0o700)
 
     import yoetz.cli.codex_plugin as module
 
     target = module._target(project_link)  # pyright: ignore[reportPrivateUsage]
     assert Path(target.project_root) == project_link.absolute()
     with pytest.raises(IntegrationError) as caught:
-        module.preview_removal(target, executable_path="codex", codex_home=home)
-    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+        module.preview_removal(target, executable_path=str(executable), codex_home=home)
+    assert caught.value.reason is IntegrationReason.TARGET_UNTRUSTED
 
 
 def test_codex_plugin_cli_preview_status_and_remove(
@@ -194,7 +197,7 @@ def test_codex_plugin_cli_status_reports_foreign_without_previewing_removal(
     monkeypatch.setattr(module, "discover_codex_binaries", fake_discover)
     monkeypatch.setattr(module, "inspect_activation", foreign_inspection)
     monkeypatch.setattr(module, "preview_removal", refuse)
-    monkeypatch.setattr(module, "_skill_tree_state", absent_skill)
+    monkeypatch.setattr(module, "skill_tree_state", absent_skill)
 
     result = _RUNNER.invoke(
         app,

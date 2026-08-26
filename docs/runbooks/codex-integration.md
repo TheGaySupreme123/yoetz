@@ -111,12 +111,13 @@ entry already exists, preserve it and stop unless a separately reviewed operatio
 exact Yoetz-owned registration being intentionally replaced. Current Codex `mcp add` behavior
 replaces a same-name global entry, so this preflight check matters.
 
-This check-then-add sequence is also available as
-`yoetz integrate codex mcp status|preview|preview-remove|install|remove` and is what `yoetz setup
-run` performs after Codex discovery (ADR-012). Automating it changes no rule above — it is the
-same two commands, gated by an explicit digest-bound confirmation, run by Yoetz instead of by
-hand; an existing foreign entry is still preserved and refused, success is verified by re-reading
-the entry, and "registered" still never implies Codex will successfully connect at runtime.
+The registration check-then-add flow is available as
+`yoetz integrate codex mcp status|preview|install` and is what `yoetz setup run` performs after
+Codex discovery (ADR-012). The separate removal check-then-remove flow is
+`yoetz integrate codex mcp preview-remove|remove`. Both flows are gated by an explicit
+digest-bound confirmation, preserve entries already observed as foreign, and verify the final
+state by re-reading it. A "registered" result still never implies Codex will successfully connect
+at runtime.
 
 The accepted setup path composes four separately reported layers in order: it installs the project
 skill at `.agents/skills/yoetz`, installs managed structural plugin/hook sources at
@@ -132,8 +133,8 @@ selected executable path and SHA-256 and obtains its version by running only `--
 create scratch even for that command, so the temporary home is removed afterward. No selected-home
 inventory command runs before approval.
 
-The preview digest also binds the repository marketplace and selected-home config
-preimages/proposals, managed source-tree digest, cache root
+The preview digest also binds the trusted project root, repository marketplace, and selected-home
+config preimages/proposals, managed source-tree digest, cache root
 `<selected-home>/plugins/cache/yoetz/yoetz`, cache preimage/intended install-tree digest, the
 temporary-private-home probe environment, the forced selected-home environment for mutation, and
 the exact post-consent commands `plugin list --marketplace yoetz --json` and
@@ -293,8 +294,16 @@ yoetz integrate codex mcp remove --accept --preview-digest <digest> --json
 
 The first command exposes the exact unregistration digest and current owned route without
 mutation. Noninteractive removal requires that digest plus `--accept`; `--accept` alone fails
-closed. Apply runs `codex mcp remove yoetz` only when the registered argv is an exact Yoetz serve
-command. A foreign same-name entry is preserved and refused. An already-absent entry is a no-op.
+closed. Apply re-reads the current entry immediately before it runs `codex mcp remove yoetz` and
+refuses a foreign replacement or changed Yoetz route observed at that boundary. An
+already-absent entry is a no-op.
+
+Codex 0.149.x exposes a name-based remove command, not a compare-and-remove token. The owned-entry
+preview therefore includes `host_remove_not_compare_and_swap`: the owner must keep concurrent
+Codex MCP configuration writers quiescent during the accepted apply. The immediate pre-remove
+recheck narrows the host limitation, but cannot atomically exclude a non-cooperating replacement
+inside the final subprocess scheduling window. Post-apply verification still fails closed if the
+entry is not absent.
 Plugin-managed MCP is not this command: it goes away with the plugin artifact, not with `codex mcp
 remove`.
 
