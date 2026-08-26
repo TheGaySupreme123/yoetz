@@ -1281,6 +1281,61 @@ def test_cache_removal_bounds_aggregate_revalidation_bytes(tmp_path: Path) -> No
     assert version.is_dir()
 
 
+def test_cache_removal_does_not_reopen_replaced_quarantine_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.adapters.integrations import codex_marketplace as module
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    root = tmp_path / "cache"
+    version = root / "0.1.0"
+    expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
+    for relative, payload in expected.items():
+        destination = version / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    digest = module._installed_cache_digest(version, expected)  # pyright: ignore[reportPrivateUsage]
+    assert digest is not None
+    original_remove = module._remove_validated_directory  # pyright: ignore[reportPrivateUsage]
+
+    def replace_before_remove(root_fd: int, name: str, descriptor: int) -> None:
+        moved = f"{name}-moved"
+        os.rename(name, moved, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.mkdir(name, mode=0o700, dir_fd=root_fd)
+        replacement_fd = os.open(name, module._directory_open_flags(), dir_fd=root_fd)  # pyright: ignore[reportPrivateUsage]
+        try:
+            sentinel_fd = os.open(
+                "sentinel.txt",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=replacement_fd,
+            )
+            try:
+                os.write(sentinel_fd, b"foreign")
+            finally:
+                os.close(sentinel_fd)
+        finally:
+            os.close(replacement_fd)
+        original_remove(root_fd, name, descriptor)
+
+    monkeypatch.setattr(module, "_remove_validated_directory", replace_before_remove)
+
+    with pytest.raises(IntegrationError) as caught:
+        module._delete_managed_cache_versions(  # pyright: ignore[reportPrivateUsage]
+            root, (("0.1.0", digest),), expected
+        )
+
+    assert caught.value.reason is IntegrationReason.PREVIEW_STALE
+    replacements = [
+        candidate
+        for candidate in root.iterdir()
+        if candidate.name.startswith(".yoetz-cache-remove-")
+        and not candidate.name.endswith("-moved")
+    ]
+    assert len(replacements) == 1
+    assert (replacements[0] / "sentinel.txt").read_bytes() == b"foreign"
+
+
 def test_cache_removal_refuses_replaced_symlink_root(tmp_path: Path) -> None:
     from yoetz.adapters.integrations.codex_marketplace import (
         _delete_managed_cache_versions,  # pyright: ignore[reportPrivateUsage]

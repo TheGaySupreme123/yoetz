@@ -1793,6 +1793,19 @@ def _read_managed_tree_fd(root_fd: int) -> dict[str, bytes]:
 def _managed_cache_digest_at(
     root_fd: int, name: str, expected_members: Mapping[str, bytes]
 ) -> str | None:
+    opened = _open_managed_cache_digest_at(root_fd, name, expected_members)
+    if opened is None:
+        return None
+    descriptor, digest = opened
+    os.close(descriptor)
+    return digest
+
+
+def _open_managed_cache_digest_at(
+    root_fd: int, name: str, expected_members: Mapping[str, bytes]
+) -> tuple[int, str] | None:
+    """Open and validate one managed cache tree, retaining its exact directory inode."""
+
     try:
         descriptor = os.open(name, _directory_open_flags(), dir_fd=root_fd)
     except FileNotFoundError:
@@ -1802,11 +1815,89 @@ def _managed_cache_digest_at(
     try:
         _owned_stat_not_writable(os.fstat(descriptor), directory=True)
         actual = _read_managed_tree_fd(descriptor)
-    finally:
+        if actual != dict(expected_members) and not plugin_tree_matches_marker(actual):
+            raise _error(IntegrationReason.PREVIEW_STALE)
+        return descriptor, _members_digest(actual)
+    except BaseException:
         os.close(descriptor)
-    if actual != dict(expected_members) and not plugin_tree_matches_marker(actual):
+        raise
+
+
+def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _remove_managed_tree_contents_fd(directory_fd: int) -> None:
+    """Delete contents relative to one already-open validated directory inode."""
+
+    try:
+        names = sorted(os.listdir(directory_fd), key=lambda name: os.fsencode(name))
+    except OSError as exc:
+        raise _error(IntegrationReason.WRITE_FAILED) from exc
+    for name in names:
+        if type(name) is not str or name in {"", ".", ".."} or "/" in name:
+            raise _error(IntegrationReason.TARGET_UNSAFE)
+        try:
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise _error(IntegrationReason.PREVIEW_STALE) from exc
+        if stat.S_ISDIR(before.st_mode):
+            _owned_stat_not_writable(before, directory=True)
+            try:
+                child_fd = os.open(name, _directory_open_flags(), dir_fd=directory_fd)
+            except OSError as exc:
+                raise _error(IntegrationReason.PREVIEW_STALE) from exc
+            try:
+                opened = os.fstat(child_fd)
+                _owned_stat_not_writable(opened, directory=True)
+                if not _same_inode(before, opened):
+                    raise _error(IntegrationReason.PREVIEW_STALE)
+                _remove_managed_tree_contents_fd(child_fd)
+                current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if not _same_inode(opened, current):
+                    raise _error(IntegrationReason.PREVIEW_STALE)
+                os.rmdir(name, dir_fd=directory_fd)
+            except OSError as exc:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+            finally:
+                os.close(child_fd)
+            continue
+        _owned_stat_not_writable(before, directory=False)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            member_fd = os.open(name, flags, dir_fd=directory_fd)
+        except OSError as exc:
+            raise _error(IntegrationReason.PREVIEW_STALE) from exc
+        try:
+            opened = os.fstat(member_fd)
+            _owned_stat_not_writable(opened, directory=False)
+            if not _same_inode(before, opened):
+                raise _error(IntegrationReason.PREVIEW_STALE)
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not _same_inode(opened, current):
+                raise _error(IntegrationReason.PREVIEW_STALE)
+            os.unlink(name, dir_fd=directory_fd)
+        except OSError as exc:
+            raise _error(IntegrationReason.WRITE_FAILED) from exc
+        finally:
+            os.close(member_fd)
+
+
+def _remove_validated_directory(root_fd: int, name: str, descriptor: int) -> None:
+    """Remove a tree through its retained descriptor, never by reopening its pathname."""
+
+    validated = os.fstat(descriptor)
+    _remove_managed_tree_contents_fd(descriptor)
+    try:
+        current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise _error(IntegrationReason.PREVIEW_STALE) from exc
+    if not _same_inode(validated, current):
         raise _error(IntegrationReason.PREVIEW_STALE)
-    return _members_digest(actual)
+    try:
+        os.rmdir(name, dir_fd=root_fd)
+    except OSError as exc:
+        raise _error(IntegrationReason.WRITE_FAILED) from exc
 
 
 def _delete_managed_cache_versions(
@@ -1839,8 +1930,15 @@ def _delete_managed_cache_versions(
                 )
             except OSError as exc:
                 raise _error(IntegrationReason.WRITE_FAILED) from exc
-            if _managed_cache_digest_at(root_fd, quarantine, expected_members) != expected_digest:
+            opened = _open_managed_cache_digest_at(root_fd, quarantine, expected_members)
+            if opened is None:
+                raise _error(IntegrationReason.PREVIEW_STALE)
+            quarantine_fd, quarantine_digest = opened
+            if quarantine_digest != expected_digest:
                 try:
+                    current = os.stat(quarantine, dir_fd=root_fd, follow_symlinks=False)
+                    if not _same_inode(os.fstat(quarantine_fd), current):
+                        raise _error(IntegrationReason.PREVIEW_STALE)
                     os.rename(
                         quarantine,
                         version,
@@ -1849,11 +1947,13 @@ def _delete_managed_cache_versions(
                     )
                 except OSError as exc:
                     raise _error(IntegrationReason.WRITE_FAILED) from exc
+                finally:
+                    os.close(quarantine_fd)
                 raise _error(IntegrationReason.PREVIEW_STALE)
             try:
-                shutil.rmtree(quarantine, dir_fd=root_fd)
-            except OSError as exc:
-                raise _error(IntegrationReason.WRITE_FAILED) from exc
+                _remove_validated_directory(root_fd, quarantine, quarantine_fd)
+            finally:
+                os.close(quarantine_fd)
         if os.listdir(root_fd):
             raise _error(IntegrationReason.WRITE_FAILED)
     finally:
