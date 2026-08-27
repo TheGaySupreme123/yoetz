@@ -2618,7 +2618,9 @@ while hook/stream copies of the same phase still share a claim and merge its two
 The claim stores the source-independent materialization version, never the hook/stream cursor
 version (issue #309). A later explicit session-stream outcome enriches an earlier hook `UNKNOWN`
 through an append-only `result_correction` linked to the same canonical action; it never rewrites,
-downgrades, or silently overwrites an explicit result. Duplicates retry incomplete
+downgrades, or silently overwrites an explicit result. Exact correction retries replay; a
+contradictory explicit outcome appends under its outcome/exit-bound identity with a
+`dedup_conflict` gap. Duplicates retry incomplete
 content/store/ledger/verification/advice work idempotently. Stream cursor advancement occurs only
 after outbox insertion. Session end is
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin

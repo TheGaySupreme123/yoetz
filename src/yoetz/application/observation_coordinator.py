@@ -619,7 +619,46 @@ class ObservationCoordinator:
                                     "Observation outcome projection is unavailable.",
                                     retryable=True,
                                 )
-                            if existing_result.payload.outcome is ResultOutcome.UNKNOWN:
+                            correction_payload = correction.drafts[0].draft.payload
+                            if type(correction_payload) is not ResultRecordedPayload:
+                                raise PublicOperationError(
+                                    PublicErrorCode.SERVICE_UNAVAILABLE,
+                                    "Observation outcome correction is unavailable.",
+                                    retryable=True,
+                                )
+                            incoming_fact = (
+                                correction_payload.outcome,
+                                correction_payload.exit_status,
+                            )
+                            existing_fact = (
+                                existing_result.payload.outcome,
+                                existing_result.payload.exit_status,
+                            )
+                            prior_corrections = tuple(
+                                record.payload
+                                for result_id, record in projection.state.results.items()
+                                if result_id != core_result.result_id
+                                and record.payload is not None
+                                and record.payload.action_id == core_result.action_id
+                            )
+                            conflict = (
+                                existing_result.payload.outcome is not ResultOutcome.UNKNOWN
+                                and existing_fact != incoming_fact
+                            ) or any(
+                                (item.outcome, item.exit_status) != incoming_fact
+                                for item in prior_corrections
+                            )
+                            should_correct = (
+                                existing_result.payload.outcome is ResultOutcome.UNKNOWN
+                                or existing_fact != incoming_fact
+                            )
+                            if should_correct:
+                                if conflict:
+                                    correction = materialize_observation_outcome_correction(
+                                        envelope,
+                                        task_id=runtime.task_id,
+                                        conflict=True,
+                                    )
                                 corrected = await self._append_materialized(
                                     runtime,
                                     envelope,

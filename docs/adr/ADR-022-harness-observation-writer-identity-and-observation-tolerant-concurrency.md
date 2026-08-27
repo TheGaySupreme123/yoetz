@@ -169,9 +169,12 @@ unsupported claims and unbounded duplicate findings.
 
 15. A hook `PostToolUse` with no outcome fact may commit `UNKNOWN` before the session stream later
     supplies an authoritative exit outcome for the same call. The original row is never rewritten.
-    A replayed canonical operation consults the current projection and, only for `UNKNOWN`, appends
-    one idempotent `result_correction` linked to the same canonical action. Explicit outcomes are
-    never downgraded or overwritten; correction retries are append-only and operation-idempotent.
+    A replayed canonical operation consults the current projection and appends an idempotent
+    `result_correction` linked to the same canonical action when it enriches `UNKNOWN` or exposes a
+    contradictory explicit fact. Explicit outcomes are
+    never downgraded or overwritten. Correction operation/claim identities bind the exact outcome
+    and exit status: exact retries replay, while contradictory explicit facts append separately with
+    `dedup_conflict` coverage so neither fact is silently discarded.
 
 ## Security and privacy consequences
 

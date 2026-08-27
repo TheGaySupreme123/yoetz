@@ -476,7 +476,8 @@ def materialize_observation_envelope(
             return MaterializedObservationBatch(tuple(drafts), coverage, channel, merged_gaps, None)
 
         # Linked post: action (idempotent stable IDs from correlation) + result.
-        action_source = f"pre:{correlation}:{tool or 'tool'}"
+        family = _action_kind(tool).value
+        action_source = f"pre:{correlation}:{family}"
         action = stable_observation_id(
             kind=IdKind.ACTION,
             task_id=task_id,
@@ -491,7 +492,7 @@ def materialize_observation_envelope(
             mapping_version=MATERIALIZATION_MAPPING_VERSION,
             role="action_event",
         )
-        result_source = f"post:{correlation}:{tool or 'tool'}"
+        result_source = f"post:{correlation}:{family}"
         result = stable_observation_id(
             kind=IdKind.RESULT,
             task_id=task_id,
@@ -731,6 +732,7 @@ def materialize_observation_outcome_correction(
     envelope: ObservationEnvelope,
     *,
     task_id: str,
+    conflict: bool = False,
 ) -> MaterializedObservationBatch:
     """Append an explicit stream outcome that enriches an earlier UNKNOWN hook result.
 
@@ -756,7 +758,8 @@ def materialize_observation_outcome_correction(
     if outcome is ResultOutcome.UNKNOWN:
         return MaterializedObservationBatch((), coverage, channel, gaps, "outcome_unknown")
 
-    action_source = f"pre:{correlation}:{tool or 'tool'}"
+    family = _action_kind(tool).value
+    action_source = f"pre:{correlation}:{family}"
     action = stable_observation_id(
         kind=IdKind.ACTION,
         task_id=task_id,
@@ -773,23 +776,42 @@ def materialize_observation_outcome_correction(
     )
     exit_status = _exit_status(structural)
     correction_source = (
-        f"outcome-correction:{correlation}:{tool or 'tool'}:{outcome.value}:"
+        f"outcome-correction:{correlation}:{family}:{outcome.value}:"
         f"{exit_status if exit_status is not None else 'none'}"
+    )
+    correction_role = (
+        f"result_correction_{outcome.value}_{exit_status if exit_status is not None else 'none'}"
     )
     result = stable_observation_id(
         kind=IdKind.RESULT,
         task_id=task_id,
         source_identity=correction_source,
         mapping_version=MATERIALIZATION_MAPPING_VERSION,
-        role="result_correction",
+        role=correction_role,
     )
     result_event = stable_observation_id(
         kind=IdKind.EVENT,
         task_id=task_id,
         source_identity=correction_source,
         mapping_version=MATERIALIZATION_MAPPING_VERSION,
-        role="result_correction_event",
+        role=f"{correction_role}_event",
     )
+    if conflict:
+        coverage = Coverage(
+            publication_channels=coverage.publication_channels,
+            authorship_assurance=coverage.authorship_assurance,
+            artifact_observation=coverage.artifact_observation,
+            evidence_immutability=coverage.evidence_immutability,
+            ledger_freshness=coverage.ledger_freshness,
+            check_types=coverage.check_types,
+            known_gaps=tuple(
+                sorted(
+                    {*coverage.known_gaps, ObservationGapCode.DEDUP_CONFLICT.value},
+                    key=str.encode,
+                )
+            ),
+        )
+        gaps = tuple(sorted({*gaps, ObservationGapCode.DEDUP_CONFLICT.value}, key=str.encode))
     draft = _draft(
         event=result_event,
         schema_name="result_recorded",
@@ -799,10 +821,14 @@ def materialize_observation_outcome_correction(
             action_id(action),
             outcome,
             exit_status=exit_status,
-            summary=f"Observed corrected result status={outcome.value}",
+            summary=(
+                f"Observed conflicting corrected result status={outcome.value}"
+                if conflict
+                else f"Observed corrected result status={outcome.value}"
+            ),
         ),
         parents=(action_event,),
-        role="result_correction",
+        role=correction_role,
     )
     return MaterializedObservationBatch((draft,), coverage, channel, gaps, None)
 

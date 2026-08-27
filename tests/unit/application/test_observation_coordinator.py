@@ -284,7 +284,7 @@ def test_stream_outcome_correction_links_canonical_action_without_rewriting_unkn
         structural_payload=JsonObject(
             {
                 "action": "function_call_output",
-                "tool_name": "shell",
+                "tool_name": "bash",
                 "tool_call_id": "call-outcome-upgrade",
                 "correlation_id": "call-outcome-upgrade",
                 "exit_status": 7,
@@ -303,12 +303,42 @@ def test_stream_outcome_correction_links_canonical_action_without_rewriting_unkn
 
     correction = materialize_observation_outcome_correction(stream, task_id=task)
     assert correction.skip_reason is None
-    assert tuple(item.role for item in correction.drafts) == ("result_correction",)
+    assert tuple(item.role for item in correction.drafts) == ("result_correction_failure_7",)
     corrected = cast(ResultRecordedPayload, correction.drafts[0].draft.payload)
     assert corrected.action_id == hook_result.action_id
     assert corrected.result_id != hook_result.result_id
     assert corrected.outcome is ResultOutcome.FAILURE
     assert corrected.exit_status == 7
+
+    conflict = materialize_observation_outcome_correction(stream, task_id=task, conflict=True)
+    assert ObservationGapCode.DEDUP_CONFLICT.value in conflict.gaps
+    assert ObservationGapCode.DEDUP_CONFLICT.value in conflict.coverage.known_gaps
+    assert cast(ResultRecordedPayload, conflict.drafts[0].draft.payload).summary == (
+        "Observed conflicting corrected result status=failure"
+    )
+
+    success_stream = replace(
+        stream,
+        structural_payload=JsonObject({**stream.structural_payload, "exit_status": 0}),
+    )
+    success = materialize_observation_outcome_correction(success_stream, task_id=task)
+    assert tuple(item.role for item in success.drafts) == ("result_correction_success_0",)
+
+    from yoetz.application.observation_materialize import observation_operation_digest
+
+    common = {
+        "task_id": task,
+        "session_id": "ses_test",
+        "writer_id": "wri_test",
+        "logical_identity": "sha256:" + "a" * 64,
+    }
+    assert observation_operation_digest(
+        **common,
+        draft_roles=tuple(item.role for item in correction.drafts),
+    ) != observation_operation_digest(
+        **common,
+        draft_roles=tuple(item.role for item in success.drafts),
+    )
 
 
 def test_routine_read_coalescing_respects_result_status_failures() -> None:
@@ -3093,7 +3123,7 @@ async def test_later_stream_failure_appends_correction_after_hook_unknown(
     assert appended_roles == [
         ("action", "result"),
         ("action", "result"),
-        ("result_correction",),
+        ("result_correction_failure_9",),
     ]
     masks = db.execute(
         "SELECT source_mask FROM observation_logical_identity ORDER BY source_mask"
