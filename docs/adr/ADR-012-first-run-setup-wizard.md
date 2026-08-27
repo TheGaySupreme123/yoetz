@@ -97,9 +97,17 @@ exactly those contracts and connects the steps without weakening any existing tr
 
 3. **MCP registration becomes a first-class preview-gated operation** (`yoetz integrate <harness>
    mcp status|preview|preview-remove|install|remove`), automating the exact two-command sequence the
-   Codex runbook already mandates: `codex mcp get yoetz --json` first. It runs the exact
-   `codex mcp add yoetz -- yoetz mcp serve` command only when no entry exists; a foreign same-name
-   entry is preserved and refused with `foreign_entry_present` — there is no force path. Success is
+   Codex runbook already mandates: `codex mcp get yoetz --json` first. A nonzero named lookup is
+   not absence by itself: the adapter runs a bounded `codex mcp list --json` fallback and accepts
+   absence only when that successful structural listing contains no `yoetz` name. A failed or
+   malformed listing fails closed; a single matching entry is classified normally; duplicate
+   matching names are ambiguous and fail closed. It runs the exact `codex mcp add yoetz -- yoetz
+   mcp serve` command only after that positive absence observation; a foreign same-name entry is
+   preserved and refused with `foreign_entry_present` — there is no force path. The structural
+   JSON parser rejects duplicate keys, nonstandard constants, and truncated output. Codex exposes
+   no compare-and-add token, so operators must quiesce non-cooperating MCP configuration writers
+   during the accepted apply; no atomic exclusion is claimed inside the final subprocess window.
+   Success is
    verified by re-reading state, not by trusting the add exit code. Registration remains a fact
    separate from skill installation and from Codex capability support (E-002/E-013 are untouched);
    "registered" never implies "Codex will successfully connect".
@@ -230,7 +238,10 @@ exactly those contracts and connects the steps without weakening any existing tr
    name-based remove. Codex exposes no compare-and-remove token, so the preview warns
    `host_remove_not_compare_and_swap`; the owner must quiesce concurrent MCP config writers and no
    atomic exclusion is claimed inside the final subprocess window. An already-absent entry is
-   `noop`. After activation removal,
+   `noop`. The same positive-absence fallback applies to every pre/post removal read, so a generic
+   failed `get` cannot become a false no-op or successful unregistration. Interactive removal
+   shows the command, route, all warning tokens, and exact preview digest before confirmation.
+   After activation removal,
    observe/inspect reports
    `installed_not_activated` when the managed plugin source remains (issue #387) and
    `not_installed` only when that source is also absent.

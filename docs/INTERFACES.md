@@ -2874,7 +2874,14 @@ harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_prese
 `route_profile` (`policy|strict|null`); `route_profile` is non-null only when the state is
 `yoetz_owned`, because a foreign or absent entry has no Yoetz route to describe.
 `observe_registration` reads exactly what `status_registration` reads, mutates nothing, and shares
-its `status` diagnostic phase — it exists because both owned serve commands classify as
+its `status` diagnostic phase. Each observation starts with `codex mcp get yoetz --json`; because a
+nonzero named lookup is not positive absence, it falls back to bounded `codex mcp list --json`.
+Only a successful list with no matching name classifies as `absent`; a failed/malformed list or
+duplicate matching names raises a typed error, while one matching entry is classified normally.
+The bounded parser also rejects duplicate JSON keys, nonstandard constants, and truncated output.
+Codex exposes no compare-and-add token, so the port cannot claim atomic exclusion of a
+non-cooperating configuration writer inside the final accepted-add subprocess window.
+The observation exists because both owned serve commands classify as
 `yoetz_owned`, so state alone cannot distinguish a strict registration from a policy one.
 `HarnessMcpService` owns confirmation
 (`McpRegistrationConfirmation` with channel exactly `interactive|noninteractive_flag`) and
@@ -2887,8 +2894,11 @@ the same digest-bound lifecycle for an owned external registration: `preview_unr
 serve command, refuse an observed foreign replacement, and treat an already-absent entry as
 `noop`. Because Codex 0.149.x exposes no compare-and-remove token, an owned-entry preview carries
 `host_remove_not_compare_and_swap`; callers must quiesce concurrent host configuration writers,
-and the port does not claim atomic exclusion inside the final host subprocess window. The preview binds
-the exact command and `policy|strict` route profile. The route profile is explicit input:
+and the port does not claim atomic exclusion inside the final host subprocess window. The same
+positive-absence fallback is required after removal, so a generic failed named lookup never proves
+success. The interactive approval surface prints the exact command, route, warnings, and preview
+digest. The preview binds the exact command and `policy|strict` route profile. The route profile is
+explicit input:
 `yoetz setup run` and `yoetz integrate <harness> mcp preview|install` accept
 `--route-profile strict|policy`. Without that input, an existing yoetz-owned registration keeps
 its observed profile — no configuration derivation (or derivation-on-exception fallback) may

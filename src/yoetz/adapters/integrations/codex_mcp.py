@@ -1,14 +1,16 @@
 """Codex adapter for the harness MCP registration port.
 
 Automates exactly the runbook's manual check-then-add sequence:
-``codex mcp get yoetz --json`` first, ``codex mcp add yoetz -- yoetz mcp serve``
-only when no entry exists, and never replacing a foreign same-name entry.
+``codex mcp get yoetz --json`` first, a bounded ``codex mcp list --json``
+fallback when ``get`` fails, and ``codex mcp add yoetz -- yoetz mcp serve`` only
+after absence is positively observed. A foreign same-name entry is never replaced.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -50,6 +52,7 @@ class CommandOutput:
 
     exit_code: int
     stdout: bytes
+    stdout_truncated: bool = False
 
 
 type CommandRunner = Callable[[tuple[str, ...]], CommandOutput]
@@ -57,19 +60,53 @@ type CommandRunner = Callable[[tuple[str, ...]], CommandOutput]
 
 def _default_runner(argv: tuple[str, ...]) -> CommandOutput:
     try:
-        completed = subprocess.run(
-            argv,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=_COMMAND_TIMEOUT_SECONDS,
-            check=False,
-            shell=False,
-        )
+        # Stream host output to a private unnamed file so a noisy or compromised executable
+        # cannot force an unbounded in-memory capture before the structural size check.
+        with tempfile.TemporaryFile() as stdout_file:
+            completed = subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=subprocess.DEVNULL,
+                timeout=_COMMAND_TIMEOUT_SECONDS,
+                check=False,
+                shell=False,
+            )
+            stdout_size = stdout_file.tell()
+            stdout_file.seek(0)
+            stdout = stdout_file.read(_OUTPUT_LIMIT_BYTES)
     except subprocess.TimeoutExpired as exc:
         raise McpRegistrationError(McpRegistrationReason.TIMEOUT, {}) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise McpRegistrationError(McpRegistrationReason.HARNESS_UNAVAILABLE, {}) from exc
-    return CommandOutput(completed.returncode, completed.stdout[:_OUTPUT_LIMIT_BYTES])
+    return CommandOutput(
+        completed.returncode,
+        stdout,
+        stdout_size > _OUTPUT_LIMIT_BYTES,
+    )
+
+
+def _reject_json_constant(_value: str) -> object:
+    raise ValueError("nonstandard_json_constant")
+
+
+def _reject_duplicate_object_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    parsed: dict[str, object] = {}
+    for key, value in pairs:
+        if key in parsed:
+            raise ValueError("duplicate_json_key")
+        parsed[key] = value
+    return parsed
+
+
+def _strict_json_loads(output: CommandOutput) -> object:
+    if output.stdout_truncated:
+        raise ValueError("truncated_json_output")
+    return json.loads(
+        output.stdout.decode("utf-8", errors="strict"),
+        object_pairs_hook=_reject_duplicate_object_keys,
+        parse_constant=_reject_json_constant,
+    )
 
 
 def _entry_command_tokens(entry: Mapping[str, object]) -> tuple[str, ...] | None:
@@ -121,18 +158,10 @@ class CodexMcpAdapter:
     def _run(self, argv: tuple[str, ...]) -> CommandOutput:
         return self._runner(argv)
 
-    def _classify_get(
-        self, output: CommandOutput
+    @staticmethod
+    def _classify_entry(
+        entry: Mapping[str, object],
     ) -> tuple[McpRegistrationState, tuple[str, ...] | None]:
-        if output.exit_code != 0:
-            return McpRegistrationState.ABSENT, None
-        try:
-            parsed = json.loads(output.stdout.decode("utf-8", errors="strict"))
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise McpRegistrationError(McpRegistrationReason.PARSE_FAILED, {}) from exc
-        if not isinstance(parsed, Mapping):
-            raise McpRegistrationError(McpRegistrationReason.PARSE_FAILED, {})
-        entry = cast(Mapping[str, object], parsed)
         tokens = _entry_command_tokens(entry)
         for command in (MCP_STRICT_SERVE_COMMAND, MCP_SERVE_COMMAND):
             if tokens == command:
@@ -142,17 +171,64 @@ class CodexMcpAdapter:
         # An unreadable or different command is preserved, never replaced.
         return McpRegistrationState.FOREIGN_PRESENT, None
 
+    def _classify_get(
+        self, output: CommandOutput
+    ) -> tuple[McpRegistrationState, tuple[str, ...] | None]:
+        if output.exit_code != 0:
+            raise McpRegistrationError(McpRegistrationReason.HARNESS_UNAVAILABLE, {})
+        try:
+            parsed = _strict_json_loads(output)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise McpRegistrationError(McpRegistrationReason.PARSE_FAILED, {}) from exc
+        if not isinstance(parsed, Mapping):
+            raise McpRegistrationError(McpRegistrationReason.PARSE_FAILED, {})
+        return self._classify_entry(cast(Mapping[str, object], parsed))
+
+    def _classify_list(
+        self, output: CommandOutput
+    ) -> tuple[McpRegistrationState, tuple[str, ...] | None]:
+        if output.exit_code != 0:
+            raise McpRegistrationError(McpRegistrationReason.HARNESS_UNAVAILABLE, {})
+        try:
+            parsed = _strict_json_loads(output)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise McpRegistrationError(McpRegistrationReason.PARSE_FAILED, {}) from exc
+        if not isinstance(parsed, list):
+            raise McpRegistrationError(McpRegistrationReason.PARSE_FAILED, {})
+        matches: list[Mapping[str, object]] = []
+        for item in cast(list[object], parsed):
+            if not isinstance(item, Mapping):
+                raise McpRegistrationError(McpRegistrationReason.PARSE_FAILED, {})
+            entry = cast(Mapping[str, object], item)
+            name = entry.get("name")
+            if not isinstance(name, str):
+                raise McpRegistrationError(McpRegistrationReason.PARSE_FAILED, {})
+            if name == MCP_SERVER_NAME:
+                matches.append(entry)
+        if not matches:
+            return McpRegistrationState.ABSENT, None
+        if len(matches) != 1:
+            # A same-name duplicate is not a trustworthy absence or ownership observation.
+            raise McpRegistrationError(McpRegistrationReason.PARSE_FAILED, {})
+        return self._classify_entry(matches[0])
+
+    def _observe_registration_state(
+        self, binary: HarnessBinary
+    ) -> tuple[McpRegistrationState, tuple[str, ...] | None]:
+        output = self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
+        if output.exit_code == 0:
+            return self._classify_get(output)
+        # Codex reports both a missing name and host/config read failures as a nonzero ``get``.
+        # Only a successful structural list may therefore establish positive absence.
+        return self._classify_list(self._run((binary.executable_path, "mcp", "list", "--json")))
+
     async def status_registration(self, binary: HarnessBinary) -> McpRegistrationState:
         self._require_codex(binary)
-        return self._classify_get(
-            self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
-        )[0]
+        return self._observe_registration_state(binary)[0]
 
     async def observe_registration(self, binary: HarnessBinary) -> McpRegistrationObservation:
         self._require_codex(binary)
-        state, command = self._classify_get(
-            self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
-        )
+        state, command = self._observe_registration_state(binary)
         route_profile = None if command is None else _ROUTE_PROFILE_BY_COMMAND.get(command)
         return McpRegistrationObservation(binary.harness_id, state, route_profile)
 
@@ -203,9 +279,7 @@ class CodexMcpAdapter:
 
     async def preview_registration(self, binary: HarnessBinary) -> McpRegistrationPreview:
         self._require_codex(binary)
-        state, current_command = self._classify_get(
-            self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
-        )
+        state, current_command = self._observe_registration_state(binary)
         return self._preview_for(binary, state, current_command)
 
     async def apply_registration(
@@ -240,9 +314,7 @@ class CodexMcpAdapter:
                 {"exit_code_class": "nonzero"},
             )
         # Verify by re-reading state rather than trusting the add exit code alone.
-        state_after, command_after = self._classify_get(
-            self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
-        )
+        state_after, command_after = self._observe_registration_state(binary)
         if (
             state_after is not McpRegistrationState.YOETZ_OWNED
             or command_after != self._serve_command
@@ -313,9 +385,7 @@ class CodexMcpAdapter:
 
     async def preview_unregistration(self, binary: HarnessBinary) -> McpRegistrationPreview:
         self._require_codex(binary)
-        state, current_command = self._classify_get(
-            self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
-        )
+        state, current_command = self._observe_registration_state(binary)
         return self._unregistration_preview_for(binary, state, current_command)
 
     async def apply_unregistration(
@@ -341,9 +411,7 @@ class CodexMcpAdapter:
                 preview.state_before,
                 preview.preview_digest,
             )
-        state_before_remove, command_before_remove = self._classify_get(
-            self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
-        )
+        state_before_remove, command_before_remove = self._observe_registration_state(binary)
         if state_before_remove is McpRegistrationState.FOREIGN_PRESENT:
             raise McpRegistrationError(McpRegistrationReason.FOREIGN_ENTRY_PRESENT, {})
         if (
@@ -357,9 +425,7 @@ class CodexMcpAdapter:
                 McpRegistrationReason.REGISTRATION_FAILED,
                 {"exit_code_class": "nonzero"},
             )
-        state_after, _command_after = self._classify_get(
-            self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
-        )
+        state_after, _command_after = self._observe_registration_state(binary)
         if state_after is not McpRegistrationState.ABSENT:
             raise McpRegistrationError(
                 McpRegistrationReason.REGISTRATION_FAILED,

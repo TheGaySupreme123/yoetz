@@ -106,10 +106,16 @@ codex mcp get yoetz --json
 codex mcp add yoetz -- yoetz mcp serve
 ```
 
-Run `codex mcp get yoetz --json` first. Continue with `mcp add` only when no entry exists — if an
-entry already exists, preserve it and stop unless a separately reviewed operation proves it is the
-exact Yoetz-owned registration being intentionally replaced. Current Codex `mcp add` behavior
-replaces a same-name global entry, so this preflight check matters.
+Run `codex mcp get yoetz --json` first. A nonzero result does not prove absence: Yoetz follows it
+with `codex mcp list --json` and continues only when that command succeeds with no `yoetz` entry.
+A failed/malformed list or duplicate matching names fails closed; a single matching entry is
+classified by its exact command. Strict parsing also rejects duplicate JSON keys, nonstandard
+constants, and truncated output. If an entry already exists, preserve it and stop unless a
+separately reviewed operation proves it is the exact Yoetz-owned registration being intentionally
+replaced. Current Codex `mcp add` behavior replaces a same-name global entry, so this positive
+absence check matters. Codex exposes no compare-and-add token: keep other MCP configuration writers
+quiescent during an accepted apply, because Yoetz cannot atomically exclude a non-cooperating write
+inside the final subprocess window.
 
 The registration check-then-add flow is available as
 `yoetz integrate codex mcp status|preview|install` and is what `yoetz setup run` performs after
@@ -296,14 +302,16 @@ The first command exposes the exact unregistration digest and current owned rout
 mutation. Noninteractive removal requires that digest plus `--accept`; `--accept` alone fails
 closed. Apply re-reads the current entry immediately before it runs `codex mcp remove yoetz` and
 refuses a foreign replacement or changed Yoetz route observed at that boundary. An
-already-absent entry is a no-op.
+already-absent entry is a no-op only after the same successful `mcp list --json` absence check.
+Interactive removal shows the exact command, route profile, warning tokens, and preview digest
+before requesting confirmation.
 
 Codex 0.149.x exposes a name-based remove command, not a compare-and-remove token. The owned-entry
 preview therefore includes `host_remove_not_compare_and_swap`: the owner must keep concurrent
 Codex MCP configuration writers quiescent during the accepted apply. The immediate pre-remove
 recheck narrows the host limitation, but cannot atomically exclude a non-cooperating replacement
 inside the final subprocess scheduling window. Post-apply verification still fails closed if the
-entry is not absent.
+entry is not positively observed absent; a generic failed named lookup is not success.
 Plugin-managed MCP is not this command: it goes away with the plugin artifact, not with `codex mcp
 remove`.
 

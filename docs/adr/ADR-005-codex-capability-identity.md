@@ -12,9 +12,14 @@ skill files under `skills/codex/`, and `tests/capability/`.
    capability run (candidate `0.139.0` as observed local fixture); anything newer than
    maximum-tested is "untested", not "supported". The release manifest records min/max/denied.
 2. **Integration posture:** Codex is the MCP client; Yoetz is a local stdio server registered via
-   `codex mcp add yoetz -- yoetz mcp serve`, default `required = false`, only after
-   `codex mcp get yoetz --json` confirms the global name is absent. A same-name entry is never
-   overwritten unless a separately reviewed flow proves it is the exact Yoetz-owned entry. Skill
+   `codex mcp add yoetz -- yoetz mcp serve`, default `required = false`. Yoetz first runs `codex mcp
+   get yoetz --json`; because a nonzero named lookup is ambiguous, only a successful strict parse
+   of `codex mcp list --json` with no matching name confirms absence. Duplicate keys/names,
+   nonstandard constants, truncation, malformed output, and failed listing all fail closed. A
+   same-name entry is never intentionally overwritten unless a separately reviewed flow proves it
+   is the exact Yoetz-owned entry. Codex exposes no compare-and-add token, so this check cannot
+   atomically exclude a non-cooperating global configuration writer inside the final subprocess
+   window; operators must quiesce such writers during an accepted apply. Skill
    installed explicitly to `.agents/skills/yoetz/` with preview/consent. Codex-readable
    `SKILL.md` frontmatter is limited to `name`, `description`, and optional
    `metadata.short-description`; Yoetz protocol/version compatibility remains in its private

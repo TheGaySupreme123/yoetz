@@ -767,6 +767,23 @@ def _emit_registration_preview(
         typer.echo("  the exact digest above. Any byte change suspends execution.")
 
 
+def _emit_unregistration_preview(mcp_preview: object) -> None:
+    """Show every approval-relevant removal field before interactive consent."""
+
+    typer.echo("Proposed change: remove the Yoetz-owned Codex MCP registration")
+    typer.echo("  MCP server name: yoetz")
+    typer.echo(f"  Action: {getattr(mcp_preview, 'action').value}")
+    typer.echo(f"  State before: {getattr(mcp_preview, 'state_before').value}")
+    serve_command = getattr(mcp_preview, "serve_command", ())
+    typer.echo(f"  Command: {' '.join(serve_command)}")
+    route_profile = getattr(mcp_preview, "route_profile", None)
+    if type(route_profile) is str:
+        typer.echo(f"  MCP route profile: {route_profile}")
+    for warning in getattr(mcp_preview, "warnings", ()):
+        typer.echo(f"  Warning: {warning}")
+    typer.echo(f"  Preview digest: {getattr(mcp_preview, 'preview_digest')}")
+
+
 def _plugin_verified(presence: str | None) -> bool:
     return presence == PluginHookPresence.INSTALLED.value
 
@@ -2750,11 +2767,7 @@ async def integrate_mcp(
                 return _mcp_error_exit("confirmation_required")
             accepted = accept
             if interactive and not accepted:
-                typer.echo("Proposed change: remove the Yoetz-owned Codex MCP registration")
-                typer.echo("  MCP server name: yoetz")
-                typer.echo(f"  Action: {preview.action.value}")
-                typer.echo(f"  State before: {preview.state_before.value}")
-                typer.echo(f"  Preview digest: {preview.preview_digest}")
+                _emit_unregistration_preview(preview)
                 accepted = _confirm_registration()
             if not accepted:
                 return _mcp_error_exit("confirmation_required")
