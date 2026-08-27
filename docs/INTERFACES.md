@@ -2486,7 +2486,11 @@ Shared closed types:
   integers retain their numeric encoding and larger filesystem values use a bounded hexadecimal
   representation before canonical encoding. Call-id/tool
   pairing and outbox dedup are fenced by the resulting source generation, and legacy unfenced
-  pairing state is discarded.
+  pairing state is discarded. For a paired output the same-generation originating call's tool name
+  is authoritative; a conflicting output self-name is overwritten and records `dedup_conflict`
+  rather than selecting a different action family. Rollout privacy filtering parses the valid JSON
+  tree first and then redacts decoded string keys and values, preserving structural punctuation;
+  any redaction-created duplicate key is rejected instead of silently merging fields.
 - `ObservationGapCode` — closed coverage tokens. `unsupported_event` is an admitted profile with
   an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, unknown
   `cli_version`, an absent/unknown `history_mode`, or compressed `rollout-*.jsonl.zst` that the

@@ -708,11 +708,13 @@ def _pair_stream_tool_name(
                 )
             ),
         )
-    if tool_name is not None:
-        return envelope
+    gaps = set(envelope.gap_codes)
+    if tool_name is not None and tool_name != paired:
+        gaps.add(ObservationGapCode.DEDUP_CONFLICT.value)
     return replace(
         envelope,
         structural_payload=JsonObject({**dict(structural), "tool_name": paired}),
+        gap_codes=tuple(sorted(gaps, key=str.encode)),
     )
 
 

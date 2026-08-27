@@ -138,6 +138,30 @@ def test_redaction_canary_is_stripped_from_records() -> None:
     assert _CANARY_SECRET not in repr(parsed.records)
 
 
+def test_secret_assignment_in_valid_output_preserves_json_structure() -> None:
+    profile = profile_for_rollout_version("0.148.0")
+    source = encode_lines(
+        session_meta(),
+        function_call(name="shell", call_id="call_secret_output"),
+        function_call_output(
+            call_id="call_secret_output",
+            output=f"api_key={_CANARY_SECRET}",
+        ),
+    )
+
+    parsed = parse_codex_rollout_jsonl(source, profile, require_admission=True)
+
+    assert parsed.statuses == (
+        ImportLineStatus.MAPPED,
+        ImportLineStatus.MAPPED,
+        ImportLineStatus.MAPPED,
+    )
+    output = next(record for record in parsed.records if record.item_type == "function_call_output")
+    dumped = json.dumps(dict(output.value), default=str)
+    assert _CANARY_SECRET not in dumped
+    assert "[REDACTED]" in dumped
+
+
 def test_wrong_cli_version_is_unsupported_format() -> None:
     profile = profile_for_rollout_version("0.148.0")
     source = encode_lines(

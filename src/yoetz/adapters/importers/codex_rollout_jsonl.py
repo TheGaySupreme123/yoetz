@@ -197,9 +197,8 @@ def parse_codex_rollout_jsonl_from_offset(
                 refused = True
                 stream_gaps.add("unsupported_codex_profile")
             continue
-        redacted, _detected = redact_sensitive_content(line.content)
         try:
-            value = _parse_json_line(redacted)
+            value = _redact_json_tree(_parse_json_line(line.content))
         except TypeError, ValueError, UnicodeError:
             statuses.append(ImportLineStatus.MALFORMED)
             reason = "malformed_line"
@@ -306,6 +305,35 @@ def _parse_json_line(content: bytes) -> dict[str, object]:
     if type(parsed) is not dict:
         raise ValueError("top_level_not_object")
     return cast(dict[str, object], parsed)
+
+
+def _redact_json_tree(value: dict[str, object]) -> dict[str, object]:
+    """Redact only decoded JSON strings so punctuation and tree shape stay intact."""
+
+    def redact(item: object, depth: int = 0) -> object:
+        if depth > _MAX_JSON_DEPTH:
+            raise ValueError("nesting_too_deep")
+        if type(item) is str:
+            redacted, _detected = redact_sensitive_content(item.encode("utf-8", errors="strict"))
+            return redacted.decode("utf-8", errors="strict")
+        if type(item) is list:
+            return [redact(child, depth + 1) for child in cast(list[object], item)]
+        if type(item) is dict:
+            result: dict[str, object] = {}
+            for key, child in cast(dict[str, object], item).items():
+                redacted_key = cast(str, redact(key, depth + 1))
+                if redacted_key in result:
+                    raise ValueError("duplicate_object_key")
+                result[redacted_key] = redact(child, depth + 1)
+            return result
+        return item
+
+    redacted = redact(value)
+    if type(redacted) is not dict:
+        raise ValueError("top_level_not_object")
+    result = cast(dict[str, object], redacted)
+    _validate_json_tree(result)
+    return result
 
 
 def _admit_session_meta(

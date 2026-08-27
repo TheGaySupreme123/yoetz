@@ -392,6 +392,54 @@ def test_function_call_name_pairs_with_output_across_reconcile_passes(tmp_path: 
     assert tuple(item.role for item in batch.drafts) == ("action", "result")
 
 
+def test_originating_call_name_overrides_mismatched_output_name(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    session_id = "stream-pair-name-conflict"
+    target = sessions / f"rollout-{session_id}.jsonl"
+    target.write_bytes(
+        encode_lines(
+            session_meta(),
+            function_call(name="shell", call_id="call-name-conflict"),
+            response_item(
+                {
+                    "call_id": "call-name-conflict",
+                    "exit_code": 0,
+                    "name": "apply_patch",
+                    "output": "ok",
+                    "status": "completed",
+                    "type": "function_call_output",
+                }
+            ),
+        )
+    )
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+
+    assert result["accepted"] == 3
+    output = next(
+        row.envelope
+        for row in store.list_pending_outbox_rows(workspace)
+        if row.envelope.structural_payload.get("action") == "function_call_output"
+    )
+    assert output.structural_payload.get("tool_name") == "shell"
+    assert ObservationGapCode.DEDUP_CONFLICT.value in output.gap_codes
+    batch = materialize_observation_envelope(output, task_id="task_stream_pair_conflict")
+    assert tuple(item.role for item in batch.drafts) == ("action", "result")
+
+
 def test_output_without_same_generation_call_is_evidence_only(tmp_path: Path) -> None:
     home = tmp_path / "codex-home"
     sessions = home / "sessions"
