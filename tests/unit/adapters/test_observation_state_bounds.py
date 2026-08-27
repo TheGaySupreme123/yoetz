@@ -248,7 +248,7 @@ def test_dropped_unterminated_long_line_recovers_when_newline_arrives(tmp_path: 
     store, workspace, session = _consented_store(tmp_path)
     source = tmp_path / "rollout.jsonl"
     chunk = stream_mod._MAX_READ_CHUNK  # pyright: ignore[reportPrivateUsage]
-    long_line = encode_lines(
+    long_line = encode_lines(session_meta()) + encode_lines(
         response_item(
             {
                 "content": [{"text": "z" * (chunk + 40_000), "type": "output_text"}],
@@ -267,23 +267,33 @@ def test_dropped_unterminated_long_line_recovers_when_newline_arrives(tmp_path: 
         cursor=cursor,
         key_material=store.key_material(),
     ).advance(source)
-    assert len(first.partial_line) > _MAX_PARTIAL
+    assert first.partial_line
     store.set_stream_partial(workspace, session, first.partial_line)
-    assert store.get_stream_partial(workspace, session) == b""
 
-    source.write_bytes(long_line + b"\n")
-    second = SessionStreamReader(
+    oversized = SessionStreamReader(
         session_commitment=session,
         profile=default_stream_profile(),
-        cursor=cursor,
+        cursor=first.cursor,
         key_material=store.key_material(),
         partial_line=store.get_stream_partial(workspace, session),
     ).advance(source)
-    store.set_stream_cursor(workspace, session, second.cursor)
-    store.set_stream_partial(workspace, session, second.partial_line)
+    assert len(oversized.partial_line) > _MAX_PARTIAL
+    store.set_stream_partial(workspace, session, oversized.partial_line)
+    assert store.get_stream_partial(workspace, session) == b""
 
-    assert second.cursor.byte_position == source.stat().st_size
-    assert second.partial_line == b""
+    source.write_bytes(long_line + b"\n")
+    recovered = SessionStreamReader(
+        session_commitment=session,
+        profile=default_stream_profile(),
+        cursor=oversized.cursor,
+        key_material=store.key_material(),
+        partial_line=store.get_stream_partial(workspace, session),
+    ).advance(source)
+    store.set_stream_cursor(workspace, session, recovered.cursor)
+    store.set_stream_partial(workspace, session, recovered.partial_line)
+
+    assert recovered.cursor.byte_position == source.stat().st_size
+    assert recovered.partial_line == b""
     assert (
         ObservationGapCode.SOURCE_LAG.value
         not in store.status(ObservationStatusQuery(workspace)).gaps

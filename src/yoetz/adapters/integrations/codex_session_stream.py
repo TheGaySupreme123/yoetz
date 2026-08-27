@@ -53,6 +53,7 @@ __all__ = [
 _MAX_READ_CHUNK: Final = 262_144
 _EMPTY_COMMITMENT: Final = "hmac-sha256:" + ("0" * 64)
 _MAX_SESSION_WALK: Final = 4_096
+_MAX_CANONICAL_INTEGER: Final = (1 << 53) - 1
 PERIODIC_RECONCILE_SECONDS: Final = 30.0
 _MATERIAL_HOOK_EVENTS: Final = frozenset(
     {
@@ -91,11 +92,16 @@ def _now() -> Timestamp:
 def _source_file_identity(facts: os.stat_result, key_material: bytes) -> str:
     """Return a private, path-free identity for one opened stream generation."""
 
+    def bounded(value: int) -> int | str:
+        if -_MAX_CANONICAL_INTEGER <= value <= _MAX_CANONICAL_INTEGER:
+            return value
+        return f"hex:{value:x}"
+
     payload = canonical_encode(
         JsonObject(
             {
-                "device": facts.st_dev,
-                "inode": facts.st_ino,
+                "device": bounded(facts.st_dev),
+                "inode": bounded(facts.st_ino),
             }
         )
     )
@@ -184,7 +190,8 @@ class CodexSessionStreamLocator:
             return None
         if not self._is_beneath(root_resolved, home):
             return None
-        matches: list[Path] = []
+        uncompressed_matches: list[Path] = []
+        compressed_matches: list[Path] = []
         walked = 0
         try:
             for dirpath, dirnames, filenames in os.walk(root_resolved, followlinks=False):
@@ -201,14 +208,19 @@ class CodexSessionStreamLocator:
                         candidate, home=home, session_id=session_id
                     )
                     if validated is not None:
-                        matches.append(validated)
-                    if len(matches) > 1:
-                        return None
+                        target = (
+                            compressed_matches
+                            if validated.name.lower().endswith(".jsonl.zst")
+                            else uncompressed_matches
+                        )
+                        target.append(validated)
         except OSError:
             return None
-        if len(matches) != 1:
+        if len(uncompressed_matches) == 1:
+            return uncompressed_matches[0]
+        if uncompressed_matches or len(compressed_matches) != 1:
             return None
-        return matches[0]
+        return compressed_matches[0]
 
     def _validate_candidate(self, candidate: Path, *, home: Path, session_id: str) -> Path | None:
         try:

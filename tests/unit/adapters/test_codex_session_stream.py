@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -18,6 +20,7 @@ from builders.codex_rollout import (
     session_meta,
 )
 from yoetz.adapters.importers.codex_jsonl import CodexParsedRecord
+from yoetz.adapters.integrations import codex_session_stream as stream_module
 from yoetz.adapters.integrations.codex_session_stream import (
     CodexSessionStreamLocator,
     SessionStreamReader,
@@ -40,6 +43,22 @@ from yoetz.domain.observation import (
     ObservationStatusQuery,
 )
 from yoetz.domain.values import JsonObject
+
+
+def test_source_file_identity_bounds_large_filesystem_integers() -> None:
+    facts = cast(
+        os.stat_result,
+        SimpleNamespace(st_dev=1 << 63, st_ino=(1 << 63) + 1),
+    )
+
+    identity = stream_module._source_file_identity(  # pyright: ignore[reportPrivateUsage]
+        facts,
+        b"k" * 32,
+    )
+
+    assert identity.startswith("hmac-sha256:")
+    assert len(identity) == len("hmac-sha256:") + 64
+
 
 _EMPTY = "hmac-sha256:" + ("0" * 64)
 _KEY = b"k" * 32
@@ -707,6 +726,42 @@ def test_compressed_rollout_is_explicit_unsupported_format(tmp_path: Path) -> No
     assert result["gaps"] == (ObservationGapCode.UNSUPPORTED_FORMAT.value,)
     status = store.status(ObservationStatusQuery(workspace))
     assert ObservationGapCode.UNSUPPORTED_FORMAT.value in status.gaps
+
+
+def test_uncompressed_rollout_precedes_compressed_sibling(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions" / "2026" / "08" / "22"
+    sessions.mkdir(parents=True)
+    home.chmod(0o700)
+    sessions.chmod(0o700)
+    session_id = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+    plain = sessions / f"rollout-{session_id}.jsonl"
+    compressed = sessions / f"rollout-{session_id}.jsonl.zst"
+    plain.write_bytes(completed_shell_rollout())
+    compressed.write_bytes(b"\x28\xb5\x2f\xfd" + b"not-a-real-frame")
+    os.chmod(plain, 0o600)
+    os.chmod(compressed, 0o600)
+    locator = CodexSessionStreamLocator(home)
+    assert locator.resolve(session_id=session_id) == plain.resolve()
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+    assert result["resolved"] is True
+    accepted = result["accepted"]
+    gaps = result["gaps"]
+    assert type(accepted) is int and accepted > 0
+    assert type(gaps) is tuple
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value not in gaps
 
 
 def test_hook_stream_dedup_via_local_store(tmp_path: Path) -> None:
