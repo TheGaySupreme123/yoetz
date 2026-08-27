@@ -203,6 +203,36 @@ def test_unknown_item_type_is_not_mapped_as_clean_coverage() -> None:
     assert all(record.item_type != "future_tool_result" for record in parsed.records)
 
 
+@pytest.mark.parametrize(
+    ("outer_type", "inner_type"),
+    [
+        ("future_outer_result", "function_call_output"),
+        ("item_completed", "future_inner_result"),
+    ],
+)
+def test_unknown_semantic_type_cannot_be_masked_by_nested_item(
+    outer_type: str,
+    inner_type: str,
+) -> None:
+    parsed = parse_codex_rollout_jsonl(
+        encode_lines(
+            session_meta(),
+            response_item(
+                {
+                    "item": {"call_id": "masked", "type": inner_type},
+                    "type": outer_type,
+                }
+            ),
+        ),
+        profile_for_rollout_version("0.148.0"),
+        require_admission=True,
+    )
+
+    assert parsed.statuses[-1] is ImportLineStatus.UNKNOWN
+    assert parsed.reason_codes[-1] == "unknown_item_type"
+    assert len(parsed.records) == 1
+
+
 def test_exec_jsonl_is_unsupported_codex_profile() -> None:
     profile = profile_for_rollout_version("0.148.0")
     source = (

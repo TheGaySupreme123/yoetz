@@ -2496,7 +2496,9 @@ Shared closed types:
   `cli_version`, an absent/unknown `history_mode`, or compressed `rollout-*.jsonl.zst` that the
   hook pass does not decompress). When exact-session `.jsonl` and `.jsonl.zst` siblings both
   exist, the admitted uncompressed file wins; compressed-only remains explicitly unsupported.
-  Unknown semantics never infer success.
+  Every string semantic type present at `payload.type` and nested `payload.item.type` must belong
+  to the admitted profile before a nested item is selected; one known field cannot mask an unknown
+  peer. Unknown semantics never infer success.
 - `ObservationStatus` — lifecycle `active|degraded|stale|stopped`, source coverage, last
   observation, lag, currently true gaps, unsupported events, and the current `AdviceSnapshot`
   frontier identity. Per-code first/last-seen history is retained separately and does not make a

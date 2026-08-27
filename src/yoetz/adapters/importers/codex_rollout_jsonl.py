@@ -356,20 +356,21 @@ def _admit_session_meta(
     return True, "session_meta"
 
 
-def _item_type_of(value: dict[str, object]) -> str | None:
+def _item_types_of(value: dict[str, object]) -> tuple[str | None, tuple[str, ...]]:
     payload = value.get("payload")
     if type(payload) is not dict:
-        return None
+        return None, ()
     body = cast(dict[str, object], payload)
+    payload_type = body.get("type")
     inner = body.get("item")
+    inner_type: object = None
     if type(inner) is dict:
         inner_type = cast(dict[str, object], inner).get("type")
-        if type(inner_type) is str:
-            return inner_type
-    payload_type = body.get("type")
-    if type(payload_type) is str:
-        return payload_type
-    return None
+    candidates = tuple(
+        candidate for candidate in (payload_type, inner_type) if type(candidate) is str
+    )
+    selected = inner_type if type(inner_type) is str else payload_type
+    return (selected if type(selected) is str else None), candidates
 
 
 def _validate_wrapper(value: dict[str, object]) -> tuple[ImportLineStatus, str | None, str | None]:
@@ -385,7 +386,8 @@ def _validate_wrapper(value: dict[str, object]) -> tuple[ImportLineStatus, str |
         return ImportLineStatus.UNSUPPORTED, None, "wrapper_shape_unsupported"
     if "ordinal" in value and type(value.get("ordinal")) is not int:
         return ImportLineStatus.UNSUPPORTED, None, "wrapper_shape_unsupported"
-    item_type = _item_type_of(value)
-    if item_type is not None and item_type not in _ITEM_TYPES:
-        return ImportLineStatus.UNKNOWN, item_type, "unknown_item_type"
+    item_type, semantic_types = _item_types_of(value)
+    for semantic_type in semantic_types:
+        if semantic_type not in _ITEM_TYPES:
+            return ImportLineStatus.UNKNOWN, semantic_type, "unknown_item_type"
     return ImportLineStatus.MAPPED, item_type, None
