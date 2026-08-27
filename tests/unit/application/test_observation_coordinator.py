@@ -23,8 +23,12 @@ from yoetz.application.observation_control import build_observation_support_hand
 from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.application.observation_drain import ObservationOutboxSweeper
 from yoetz.application.observation_materialize import (
+    MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
+    MATERIALIZATION_MAPPING_VERSION,
+    canonical_logical_identity,
     materialize_observation_envelope,
     materialize_observation_outcome_correction,
+    observation_operation_digest,
     observation_writer_id,
 )
 from yoetz.domain.findings import Finding
@@ -415,7 +419,7 @@ def test_completion_signal_is_evidence_unless_claim_kind_is_explicit() -> None:
 
 
 @pytest.mark.anyio
-async def test_live_upgrade_finds_materialization_under_legacy_writer(tmp_path: Path) -> None:
+async def test_live_upgrade_finds_legacy_mapping_under_legacy_writer(tmp_path: Path) -> None:
     from types import SimpleNamespace
 
     task_id = _task_id()
@@ -425,11 +429,25 @@ async def test_live_upgrade_finds_materialization_under_legacy_writer(tmp_path: 
     envelope = _envelope(session=f"hmac-sha256:{'ae' * 32}", identity="hook:upgrade-hazard")
     batch = materialize_observation_envelope(envelope, task_id=task_id)
     lookups: list[tuple[str, str]] = []
+    legacy_mapping_version = MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
+    legacy_digest = observation_operation_digest(
+        task_id=task_id,
+        session_id=session_id,
+        writer_id=legacy_writer_id,
+        logical_identity=canonical_logical_identity(envelope),
+        draft_roles=tuple(item.role for item in batch.drafts),
+        mapping_version=legacy_mapping_version,
+    )
+    expected_operation_id = ""
 
     class _Ledger:
         async def lookup_operation(self, writer_id: str, operation_id: str):
             lookups.append((writer_id, operation_id))
-            return object() if writer_id == legacy_writer_id else None
+            return (
+                object()
+                if writer_id == legacy_writer_id and operation_id == expected_operation_id
+                else None
+            )
 
     class _Clock:
         def now_utc(self) -> Timestamp:
@@ -446,6 +464,9 @@ async def test_live_upgrade_finds_materialization_under_legacy_writer(tmp_path: 
         ids=_Ids(),  # type: ignore[arg-type]
         state_root=tmp_path,
     )
+    expected_operation_id = coordinator._stable_operation_id(  # pyright: ignore[reportPrivateUsage]
+        legacy_digest
+    )
     runtime = SimpleNamespace(
         task_id=task_id,
         session_id=session_id,
@@ -461,7 +482,13 @@ async def test_live_upgrade_finds_materialization_under_legacy_writer(tmp_path: 
     )
 
     assert recovered is not None
+    operation_id, digest, _append_result, mapping_version = recovered
+    assert operation_id == expected_operation_id
+    assert digest == legacy_digest
+    assert mapping_version == legacy_mapping_version
     assert [writer for writer, _operation in lookups] == [
+        harness_writer_id,
+        legacy_writer_id,
         harness_writer_id,
         legacy_writer_id,
     ]
@@ -545,7 +572,8 @@ async def test_existing_operation_reconstructs_frontier_motion_metadata(tmp_path
     )
 
     assert recovered is not None
-    _operation_id, _digest, append_result = recovered
+    _operation_id, _digest, append_result, mapping_version = recovered
+    assert mapping_version == MATERIALIZATION_MAPPING_VERSION
     assert append_result is not None
     assert append_result.outcome == "replayed"
     assert append_result.subject_frontier.sequence == 3
@@ -2554,7 +2582,7 @@ async def test_check_barrier_deferral_is_designed_backpressure(
 
         async def _append_materialized(  # type: ignore[override]
             self, *args: object, **kwargs: object
-        ) -> tuple[str, str, None]:
+        ) -> tuple[str, str, None, str]:
             del args, kwargs
             raise PublicOperationError(code, "Deferred behind the check barrier.", True)
 
@@ -2863,7 +2891,7 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
             batch: object,
             *,
             legacy_writer_id: str | None = None,
-        ) -> tuple[str, str, None]:
+        ) -> tuple[str, str, None, str]:
             del legacy_writer_id
             digest = _digest(
                 task_id=runtime.task_id,  # type: ignore[attr-defined]
@@ -2871,8 +2899,14 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
                 writer_id=runtime.writer_id,  # type: ignore[attr-defined]
                 logical_identity=_identity(envelope),
                 draft_roles=tuple(item.role for item in batch.drafts),  # type: ignore[attr-defined]
+                mapping_version=MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0],
             )
-            return self._stable_operation_id(digest), digest, None
+            return (
+                self._stable_operation_id(digest),
+                digest,
+                None,
+                MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0],
+            )
 
         async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
             del args, kwargs
@@ -2915,16 +2949,31 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
 
     assert not coordinator._storage_corrupt_sessions  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
     rows = db.execute(
-        "SELECT source_mask FROM observation_logical_identity ORDER BY source_mask"
+        "SELECT source_mask,mapping_version FROM observation_logical_identity ORDER BY source_mask"
     ).fetchall()
     # Pre keeps its own hook-only claim; the paired result claim unions hook and
     # stream coverage into source_mask == 3 (previously dead code, issue #309).
     assert [row[0] for row in rows] == [1, 3]
+    assert {row[1] for row in rows} == {MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]}
 
 
 @pytest.mark.anyio
-async def test_later_stream_failure_appends_correction_after_hook_unknown(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "projection_mode",
+    [
+        "ready",
+        "missing",
+        "lagging",
+        "rebuilding",
+        "result_missing",
+        "result_redacted",
+        "legacy_mapping",
+    ],
+)
+async def test_later_stream_failure_correction_projection_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    projection_mode: str,
 ) -> None:
     from types import SimpleNamespace
 
@@ -2953,13 +3002,15 @@ async def test_later_stream_failure_appends_correction_after_hook_unknown(
 
     local, _workspace, session, mapping = _mapped_local(tmp_path, "outcome-correction")
 
-    def _raise_recorded(error: Exception, **_kwargs: object) -> None:
-        raise error
+    recorded_errors: list[Exception] = []
+
+    def _record_error(error: Exception, **_kwargs: object) -> None:
+        recorded_errors.append(error)
 
     monkeypatch.setattr(
         coordinator_module,
         "record_unexpected_exception_without_raising",
-        _raise_recorded,
+        _record_error,
     )
     db = apsw.Connection(":memory:")
     initialize_bundle(db, {"task_id": mapping.yoetz_task_id, "owner_generation": "1"})
@@ -2967,36 +3018,45 @@ async def test_later_stream_failure_appends_correction_after_hook_unknown(
     core_unknown: MaterializedObservationBatch | None = None
     appended_roles: list[tuple[str, ...]] = []
     head = "sha256:" + "a" * 64
+    projection_state = [projection_mode]
 
     class _Ledger:
-        async def load_projection(self, loaded_session: str, view: object) -> StoredProjection:
+        async def load_projection(
+            self, loaded_session: str, view: object
+        ) -> StoredProjection | None:
             assert loaded_session == mapping.yoetz_session_id
             assert view is ProjectionView.CANDIDATE_FINDINGS
             assert core_unknown is not None
+            assert projection_state[0] != "legacy_mapping"
+            if projection_state[0] == "missing":
+                return None
             batch = core_unknown
             result_draft = batch.drafts[1]
             payload = cast(ResultRecordedPayload, result_draft.draft.payload)
+            results = {
+                payload.result_id: ProjectionRecord(
+                    None if projection_state[0] == "result_redacted" else payload,
+                    canonical_digest(encode_payload(payload)),
+                    projection_state[0] == "result_redacted",
+                    result_draft.draft.event_id,
+                    1,
+                )
+            }
+            if projection_state[0] == "result_missing":
+                results = {}
             state = replace(
                 empty_projection_state(),
                 frontier=1,
                 head_digest=head,
-                results={
-                    payload.result_id: ProjectionRecord(
-                        payload,
-                        canonical_digest(encode_payload(payload)),
-                        False,
-                        result_draft.draft.event_id,
-                        1,
-                    )
-                },
+                results=results,
             )
             return StoredProjection(
                 ProjectionView.CANDIDATE_FINDINGS,
                 state,
                 Frontier(1, head),
-                0,
+                1 if projection_state[0] == "lagging" else 0,
                 "projection-test-1",
-                False,
+                projection_state[0] == "rebuilding",
             )
 
     runtime = SimpleNamespace(
@@ -3033,17 +3093,23 @@ async def test_later_stream_failure_appends_correction_after_hook_unknown(
             batch: MaterializedObservationBatch,
             *,
             legacy_writer_id: str | None = None,
-        ) -> tuple[str, str, AppendResult]:
+        ) -> tuple[str, str, AppendResult, str]:
             nonlocal core_unknown
             del legacy_writer_id
             roles = tuple(item.role for item in batch.drafts)
             appended_roles.append(roles)
+            resolved_version = (
+                MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
+                if projection_mode == "legacy_mapping"
+                else MATERIALIZATION_MAPPING_VERSION
+            )
             digest = _digest(
                 task_id=runtime.task_id,  # type: ignore[attr-defined]
                 session_id=runtime.session_id,  # type: ignore[attr-defined]
                 writer_id=runtime.writer_id,  # type: ignore[attr-defined]
                 logical_identity=_identity(envelope),
                 draft_roles=roles,
+                mapping_version=resolved_version,
             )
             if roles == ("action", "result") and core_unknown is None:
                 core_unknown = batch
@@ -3072,6 +3138,7 @@ async def test_later_stream_failure_appends_correction_after_hook_unknown(
                     Frontier(1 + len(accepted), head),
                     (),
                 ),
+                resolved_version,
             )
 
         async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
@@ -3114,21 +3181,45 @@ async def test_later_stream_failure_appends_correction_after_hook_unknown(
         ),
     )
 
-    for envelope in (hook, stream):
-        result = await coordinator.ingest_request(
-            ObservationIngestRequest(codex_session_id="outcome-correction", envelope=envelope)
-        )
-        assert result.disposition is ObservationIngestDisposition.ACCEPTED, result.reason
+    hook_result = await coordinator.ingest_request(
+        ObservationIngestRequest(codex_session_id="outcome-correction", envelope=hook)
+    )
+    assert hook_result.disposition is ObservationIngestDisposition.ACCEPTED, hook_result.reason
+    stream_result = await coordinator.ingest_request(
+        ObservationIngestRequest(codex_session_id="outcome-correction", envelope=stream)
+    )
 
-    assert appended_roles == [
-        ("action", "result"),
-        ("action", "result"),
-        ("result_correction_failure_9",),
-    ]
+    if projection_mode in {"ready", "legacy_mapping"}:
+        assert stream_result.disposition is ObservationIngestDisposition.ACCEPTED
+        assert recorded_errors == []
+    else:
+        # The core operation may already be committed, but the authoritative
+        # correction is part of acceptance. Keep the durable outbox row
+        # retryable until the projection can prove what needs correcting.
+        assert stream_result.disposition is ObservationIngestDisposition.REJECTED
+        assert stream_result.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
+        assert len(recorded_errors) == 1
+        assert appended_roles == [("action", "result"), ("action", "result")]
+
+        projection_state[0] = "ready"
+        recovered = await coordinator.ingest_request(
+            ObservationIngestRequest(codex_session_id="outcome-correction", envelope=stream)
+        )
+        assert recovered.disposition is ObservationIngestDisposition.DUPLICATE
+
     masks = db.execute(
         "SELECT source_mask FROM observation_logical_identity ORDER BY source_mask"
     ).fetchall()
-    assert [row[0] for row in masks] == [2, 3]
+    if projection_mode == "legacy_mapping":
+        # A replayed 1.2 stream operation already contains its explicit result;
+        # its result IDs predate 1.3 correction identities, so it must neither
+        # consult the 1.3 projection nor append a duplicate correction.
+        assert appended_roles == [("action", "result"), ("action", "result")]
+        assert [row[0] for row in masks] == [3]
+    else:
+        assert appended_roles[-1] == ("result_correction_failure_9",)
+        assert appended_roles.count(("result_correction_failure_9",)) == 1
+        assert [row[0] for row in masks] == [2, 3]
 
 
 @pytest.mark.anyio
@@ -3193,9 +3284,14 @@ async def test_identity_claim_conflict_rejects_one_envelope_without_latching(
 
         async def _append_materialized(  # type: ignore[override]
             self, *args: object, **kwargs: object
-        ) -> tuple[str, str, None]:
+        ) -> tuple[str, str, None, str]:
             del args, kwargs
-            return ("op_" + "0" * 32, "sha256:" + "ab" * 32, None)
+            return (
+                "op_" + "0" * 32,
+                "sha256:" + "ab" * 32,
+                None,
+                MATERIALIZATION_MAPPING_VERSION,
+            )
 
         async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
             del args, kwargs

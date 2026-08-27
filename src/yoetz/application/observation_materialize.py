@@ -58,6 +58,7 @@ from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 __all__ = [
     "HOST_OUTCOME_UNAVAILABLE_GAP",
     "approved_check_author",
+    "MATERIALIZATION_LEGACY_MAPPING_VERSIONS",
     "MATERIALIZATION_MAPPING_VERSION",
     "MaterializedObservationBatch",
     "MaterializedObservationDraft",
@@ -72,6 +73,7 @@ __all__ = [
 ]
 
 MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.3.0"
+MATERIALIZATION_LEGACY_MAPPING_VERSIONS: Final = ("obs-ledger/1.2.0",)
 # One bounded coverage condition for "the host emitted a paired tool result with
 # no outcome semantics at all" (#350). It rides the entry coverage of the
 # affected action/result records, so any number of outcome-less observed calls
@@ -855,7 +857,12 @@ def canonical_logical_identity(envelope: ObservationEnvelope) -> str:
     return _logical_identity_digest(("action", envelope.session_commitment, host_call, family))
 
 
-def observation_claim_identity(envelope: ObservationEnvelope, draft_roles: tuple[str, ...]) -> str:
+def observation_claim_identity(
+    envelope: ObservationEnvelope,
+    draft_roles: tuple[str, ...],
+    *,
+    mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
+) -> str:
     """Return the role-scoped key for one durable logical-identity claim.
 
     One host call legitimately materializes several role-sets against the same
@@ -868,10 +875,11 @@ def observation_claim_identity(envelope: ObservationEnvelope, draft_roles: tuple
     cross-source copies of the *same* phase still merge their source masks.
     """
 
+    _validate_materialization_mapping_version(mapping_version)
     return _logical_identity_digest(
         (
             "claim",
-            MATERIALIZATION_MAPPING_VERSION,
+            mapping_version,
             canonical_logical_identity(envelope),
             *draft_roles,
         )
@@ -897,6 +905,7 @@ def observation_operation_digest(
     writer_id: str,
     logical_identity: str,
     draft_roles: tuple[str, ...],
+    mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
 ) -> str:
     """Stable request digest for idempotent observation appends.
 
@@ -904,6 +913,7 @@ def observation_operation_digest(
     identity so matching hook/stream copies produce one ledger operation.
     """
 
+    _validate_materialization_mapping_version(mapping_version)
     return request_digest(
         JsonObject(
             {
@@ -914,10 +924,18 @@ def observation_operation_digest(
                 "writer_id": writer_id,
                 "logical_identity": logical_identity,
                 "roles": draft_roles,
-                "mapping_version": MATERIALIZATION_MAPPING_VERSION,
+                "mapping_version": mapping_version,
             }
         )
     )
+
+
+def _validate_materialization_mapping_version(mapping_version: str) -> None:
+    if type(mapping_version) is not str or mapping_version not in {
+        MATERIALIZATION_MAPPING_VERSION,
+        *MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
+    }:
+        raise ValueError("unsupported observation materialization mapping version")
 
 
 def observation_author() -> Actor:

@@ -62,7 +62,7 @@ def test_multi_agent_claim_unsupported_while_profiles_unfrozen(tmp_path: Path) -
         context,
         (
             Observation("profiles_frozen", boolean_value=False),
-            Observation("harness_profile_empty", boolean_value=False),
+            Observation("harness_profile_empty", boolean_value=True),
             Observation("simulated_propagation", boolean_value=False),
         ),
         EvidenceOutcome.UNSUPPORTED,

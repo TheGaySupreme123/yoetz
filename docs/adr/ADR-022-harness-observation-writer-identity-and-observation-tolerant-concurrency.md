@@ -1,7 +1,8 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-08-18 for the maintainer-directed issue #346 incident repairs #350, #351, and
+**Amended:** 2026-08-27 for issue #418 rollout replay repairs; 2026-08-18 for the
+maintainer-directed issue #346 incident repairs #350, #351, and
 #352 (decisions 12–14); 2026-08-18 for maintainer-authored issues #320 and #326 and issue #322
 (delivered frontier-motion high-water); 2026-08-16 for maintainer-approved issue #224; 2026-08-14
 for moderator-approved issue #244 and the reopened issue #216 recurrence.
@@ -80,7 +81,14 @@ unsupported claims and unbounded duplicate findings.
    materialize as metadata-only `evidence_recorded` events. A narrow claim path exists only when the
    structural payload explicitly carries an admitted `claim_kind`. Mapping version
    `obs-ledger/1.3.0` separates these identities from historical observation-derived claims and
-   gives paired hook/stream results source-independent action/result IDs.
+   gives paired hook/stream results source-independent action/result IDs. Before staging a new
+   `1.3.0` append, upgrade replay checks both the session observation writer and the legacy
+   cooperative writer for committed `1.3.0` and `1.2.0` operations. A `1.2.0` hit carries that
+   mapping version through logical-identity claim repair, preserving the original operation and
+   claim identities for a committed-but-unacknowledged outbox row instead of duplicating them. A
+   replayed `1.2.0` stream operation already contains that version's host-stated result and does not
+   enter the `1.3.0` result-correction path, whose canonical result identities did not exist in
+   `1.2.0`.
 
 7. Deterministic advice finding IDs are condition-scoped over policy, kind, rule code, and detail
    token. Evidence refs prove the condition but never identify it: several rules intentionally cite
@@ -174,7 +182,12 @@ unsupported claims and unbounded duplicate findings.
     contradictory explicit fact. Explicit outcomes are
     never downgraded or overwritten. Correction operation/claim identities bind the exact outcome
     and exit status: exact retries replay, while contradictory explicit facts append separately with
-    `dedup_conflict` coverage so neither fact is silently discarded.
+    `dedup_conflict` coverage so neither fact is silently discarded. Correction is part of ingest
+    acceptance: if the candidate-findings projection is missing, lagging, rebuilding, or lacks a
+    readable core result, the coordinator returns retryable `SERVICE_UNAVAILABLE` and the durable
+    outbox row remains pending. It does not acknowledge the already-committed core append alone,
+    because doing so could permanently lose the authoritative correction; a repaired or rebuilt
+    projection lets the same row replay and finish idempotently.
 
 ## Security and privacy consequences
 

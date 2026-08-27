@@ -35,6 +35,7 @@ from yoetz.application.observation_advice import (
 )
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.application.observation_materialize import (
+    MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
     MATERIALIZATION_MAPPING_VERSION,
     MaterializedObservationBatch,
     approved_check_author,
@@ -546,7 +547,12 @@ class ObservationCoordinator:
                         legacy_writer_id=mapping.yoetz_writer_id,
                     )
                     if claim is not None:
-                        operation_id, materialization_digest, append_result = claim
+                        (
+                            operation_id,
+                            materialization_digest,
+                            append_result,
+                            resolved_mapping_version,
+                        ) = claim
                         # The claim key is role-scoped so the phases of one host
                         # call (pre action, paired result, permission, subagent)
                         # never contend, and the recorded mapping version is the
@@ -556,12 +562,14 @@ class ObservationCoordinator:
                         store.record_logical_identity_claim(
                             workspace=workspace,
                             logical_identity=observation_claim_identity(
-                                envelope, tuple(item.role for item in batch.drafts)
+                                envelope,
+                                tuple(item.role for item in batch.drafts),
+                                mapping_version=resolved_mapping_version,
                             ),
                             materialization_digest=materialization_digest,
                             operation_id=operation_id,
                             source_mask=1 if envelope.source.value == "codex_hook" else 2,
-                            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+                            mapping_version=resolved_mapping_version,
                             materialized_at=timestamp_from_datetime(self.clock.now_utc()),
                         )
                         stage = "ledger_append"
@@ -585,6 +593,7 @@ class ObservationCoordinator:
                         if (
                             append_result is not None
                             and append_result.outcome == "replayed"
+                            and resolved_mapping_version == MATERIALIZATION_MAPPING_VERSION
                             and correction.skip_reason is None
                             and correction.drafts
                         ):
@@ -670,17 +679,19 @@ class ObservationCoordinator:
                                         correction_operation_id,
                                         correction_digest,
                                         correction_result,
+                                        correction_mapping_version,
                                     ) = corrected
                                     store.record_logical_identity_claim(
                                         workspace=workspace,
                                         logical_identity=observation_claim_identity(
                                             envelope,
                                             tuple(item.role for item in correction.drafts),
+                                            mapping_version=correction_mapping_version,
                                         ),
                                         materialization_digest=correction_digest,
                                         operation_id=correction_operation_id,
                                         source_mask=2,
-                                        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+                                        mapping_version=correction_mapping_version,
                                         materialized_at=timestamp_from_datetime(
                                             self.clock.now_utc()
                                         ),
@@ -864,42 +875,55 @@ class ObservationCoordinator:
         batch: MaterializedObservationBatch,
         *,
         legacy_writer_id: str | None = None,
-    ) -> tuple[str, str, AppendResult | None] | None:
+    ) -> tuple[str, str, AppendResult | None, str] | None:
         writer_id = runtime.writer_id
         if writer_id is None:
             return None
+        logical_identity = canonical_logical_identity(envelope)
+        draft_roles = tuple(item.role for item in batch.drafts)
+        writer_ids = [writer_id]
+        if legacy_writer_id is not None and legacy_writer_id != writer_id:
+            writer_ids.append(legacy_writer_id)
+        mapping_versions = (
+            MATERIALIZATION_MAPPING_VERSION,
+            *MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
+        )
+        # Check the stable operation identity before staging payloads. A replay
+        # after "ledger committed, local outbox not acknowledged" must not
+        # create orphan encrypted objects on every retry. Search both admitted
+        # writers for each supported mapping version before staging so an
+        # in-flight pre-upgrade outbox row reuses its committed operation.
+        for mapping_version in mapping_versions:
+            for candidate_writer_id in writer_ids:
+                candidate_digest = observation_operation_digest(
+                    task_id=runtime.task_id,
+                    session_id=runtime.session_id,
+                    writer_id=candidate_writer_id,
+                    logical_identity=logical_identity,
+                    draft_roles=draft_roles,
+                    mapping_version=mapping_version,
+                )
+                candidate_operation_id = self._stable_operation_id(candidate_digest)
+                existing = await runtime.ledger.lookup_operation(
+                    candidate_writer_id, candidate_operation_id
+                )
+                if existing is not None:
+                    return (
+                        candidate_operation_id,
+                        candidate_digest,
+                        _append_result_from_committed(existing),
+                        mapping_version,
+                    )
+
         digest = observation_operation_digest(
             task_id=runtime.task_id,
             session_id=runtime.session_id,
             writer_id=writer_id,
-            logical_identity=canonical_logical_identity(envelope),
-            draft_roles=tuple(item.role for item in batch.drafts),
+            logical_identity=logical_identity,
+            draft_roles=draft_roles,
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
         )
-        # Check the stable operation identity before staging payloads. A replay
-        # after "ledger committed, local outbox not acknowledged" must not
-        # create orphan encrypted objects on every retry.
         operation_id = self._stable_operation_id(digest)
-        existing = await runtime.ledger.lookup_operation(writer_id, operation_id)
-        if existing is not None:
-            return operation_id, digest, _append_result_from_committed(existing)
-        if legacy_writer_id is not None and legacy_writer_id != writer_id:
-            legacy_digest = observation_operation_digest(
-                task_id=runtime.task_id,
-                session_id=runtime.session_id,
-                writer_id=legacy_writer_id,
-                logical_identity=canonical_logical_identity(envelope),
-                draft_roles=tuple(item.role for item in batch.drafts),
-            )
-            legacy_operation_id = self._stable_operation_id(legacy_digest)
-            legacy_existing = await runtime.ledger.lookup_operation(
-                legacy_writer_id, legacy_operation_id
-            )
-            if legacy_existing is not None:
-                return (
-                    legacy_operation_id,
-                    legacy_digest,
-                    _append_result_from_committed(legacy_existing),
-                )
 
         author = observation_author()
         refs: list[ObjectRef] = []
@@ -958,7 +982,7 @@ class ObservationCoordinator:
             command,
         )
         append_result = await run_prepared_append(runtime.ledger, mutation)
-        return operation_id, digest, append_result
+        return operation_id, digest, append_result, MATERIALIZATION_MAPPING_VERSION
 
     async def _materialize_approved_check(
         self,

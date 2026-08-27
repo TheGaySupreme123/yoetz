@@ -2625,11 +2625,16 @@ materialization mapping version and exact draft-role tuple, so phases of one hos
 different materializations (for example pre-action versus paired action/result) cannot collide,
 while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
 The claim stores the source-independent materialization version, never the hook/stream cursor
-version (issue #309). A later explicit session-stream outcome enriches an earlier hook `UNKNOWN`
-through an append-only `result_correction` linked to the same canonical action; it never rewrites,
-downgrades, or silently overwrites an explicit result. Exact correction retries replay; a
-contradictory explicit outcome appends under its outcome/exit-bound identity with a
-`dedup_conflict` gap. Duplicates retry incomplete
+version (issue #309). Before staging under `obs-ledger/1.3.0`, upgrade replay checks the current and
+legacy observation writers for committed `1.3.0` and `1.2.0` operations; a `1.2.0` hit repairs its
+claim with the original mapping version and does not enter the newer correction path. A later
+explicit session-stream outcome enriches an earlier hook `UNKNOWN` through an append-only
+`result_correction` linked to the same canonical action; it never rewrites, downgrades, or silently
+overwrites an explicit result. Exact correction retries replay; a contradictory explicit outcome
+appends under its outcome/exit-bound identity with a `dedup_conflict` gap. The correction is part of
+ingest acceptance: an unavailable, lagging, rebuilding, missing-result, or redacted-result
+candidate-findings projection returns retryable `service_unavailable` and leaves the outbox row
+pending until the projection can prove and complete the correction. Duplicates retry incomplete
 content/store/ledger/verification/advice work idempotently. Stream cursor advancement occurs only
 after outbox insertion. Session end is
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
