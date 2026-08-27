@@ -621,6 +621,8 @@ def _paths(
     project = _validated_project(target)
     _validate_descendant_ancestors(project, Path(".agents/plugins"))
     home = _codex_root(codex_home)
+    _validate_descendant_ancestors(home, Path("plugins/cache/yoetz/yoetz"))
+    _validate_descendant_ancestors(home, Path(".agents/plugins"))
     return (
         project,
         home,
@@ -1833,6 +1835,51 @@ def _directory_open_flags() -> int:
     )
 
 
+def _open_anchored_directory(
+    anchor_root: Path,
+    relative_directory: Path,
+    *,
+    missing_reason: IntegrationReason = IntegrationReason.TARGET_UNSAFE,
+) -> int:
+    """Open one descendant directory without following any path component.
+
+    The returned descriptor is derived from the selected project/home descriptor,
+    so swapping an intermediate pathname cannot redirect a later mutation outside
+    that authority root.
+    """
+
+    if relative_directory.is_absolute() or any(
+        part in {"", ".."} for part in relative_directory.parts
+    ):
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+    try:
+        current_fd = os.open(anchor_root, _directory_open_flags())
+    except FileNotFoundError as exc:
+        raise _error(missing_reason) from exc
+    except OSError as exc:
+        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    try:
+        _owned_stat_not_writable(os.fstat(current_fd), directory=True)
+        for part in relative_directory.parts:
+            try:
+                child_fd = os.open(part, _directory_open_flags(), dir_fd=current_fd)
+            except FileNotFoundError as exc:
+                raise _error(missing_reason) from exc
+            except OSError as exc:
+                raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+            try:
+                _owned_stat_not_writable(os.fstat(child_fd), directory=True)
+            except BaseException:
+                os.close(child_fd)
+                raise
+            os.close(current_fd)
+            current_fd = child_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
 def _require_safe_cache_removal_primitives() -> None:
     required = (os.open, os.rename, os.stat)
     if (
@@ -2047,16 +2094,24 @@ def _remove_exact_managed_file(
     expected: bytes,
     *,
     mismatch_reason: IntegrationReason,
+    anchor_root: Path | None = None,
 ) -> None:
     """Quarantine and unlink only the exact descriptor-bound approved file inode."""
 
     if path.name in {"", ".", ".."} or "/" in path.name:
         raise _error(IntegrationReason.TARGET_UNSAFE)
     _require_safe_file_removal_primitives()
-    try:
-        parent_fd = os.open(path.parent, _directory_open_flags())
-    except OSError as exc:
-        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    if anchor_root is None:
+        try:
+            parent_fd = os.open(path.parent, _directory_open_flags())
+        except OSError as exc:
+            raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    else:
+        try:
+            relative_parent = path.parent.relative_to(anchor_root)
+        except ValueError as exc:
+            raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+        parent_fd = _open_anchored_directory(anchor_root, relative_parent)
     descriptor: int | None = None
     try:
         _owned_stat_not_writable(os.fstat(parent_fd), directory=True)
@@ -2263,7 +2318,7 @@ def _remove_validated_directory(
     except IntegrationError as exc:
         # Recursive deletion may already have unlinked an earlier approved member. Once that
         # phase begins, an observable race is a partial write failure, not a stale preimage.
-        if exc.reason is IntegrationReason.PREVIEW_STALE and mutation_state[0]:
+        if mutation_state[0] and exc.reason is not IntegrationReason.WRITE_FAILED:
             raise _error(IntegrationReason.WRITE_FAILED) from exc
         raise
     try:
@@ -2282,14 +2337,29 @@ def _delete_managed_cache_versions(
     root: Path,
     cache_digests: tuple[tuple[str, str], ...],
     expected_members: Mapping[str, bytes],
+    *,
+    anchor_root: Path | None = None,
 ) -> bool:
-    if not cache_digests or not root.exists():
+    if not cache_digests:
         return False
     _require_safe_cache_removal_primitives()
-    try:
-        root_fd = os.open(root, _directory_open_flags())
-    except OSError as exc:
-        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    if anchor_root is None:
+        try:
+            root_fd = os.open(root, _directory_open_flags())
+        except FileNotFoundError as exc:
+            raise _error(IntegrationReason.PREVIEW_STALE) from exc
+        except OSError as exc:
+            raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    else:
+        try:
+            relative_root = root.relative_to(anchor_root)
+        except ValueError as exc:
+            raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+        root_fd = _open_anchored_directory(
+            anchor_root,
+            relative_root,
+            missing_reason=IntegrationReason.PREVIEW_STALE,
+        )
     try:
         _owned_stat_not_writable(os.fstat(root_fd), directory=True)
         cache_mutation_started = False
@@ -2336,7 +2406,9 @@ def _delete_managed_cache_versions(
                     )
                 except IntegrationError as exc:
                     if exc.reason is not IntegrationReason.PREVIEW_STALE:
-                        raise
+                        if exc.reason is IntegrationReason.WRITE_FAILED:
+                            raise
+                        raise _error(IntegrationReason.WRITE_FAILED) from exc
                     # No member was deleted: restore the exact retained inode when the original
                     # version name is still absent. A failed restore is an outcome-unknown write.
                     try:
@@ -2497,6 +2569,7 @@ def apply_removal(
                                 if mutation_started
                                 else IntegrationReason.PREVIEW_STALE
                             ),
+                            anchor_root=home,
                         )
                     except IntegrationError as exc:
                         if mutation_started and exc.reason is not IntegrationReason.WRITE_FAILED:
@@ -2516,6 +2589,7 @@ def apply_removal(
                         if mutation_started
                         else IntegrationReason.PREVIEW_STALE
                     ),
+                    anchor_root=project,
                 )
             except IntegrationError as exc:
                 if mutation_started or exc.reason is IntegrationReason.WRITE_FAILED:
@@ -2530,9 +2604,10 @@ def apply_removal(
                 _cache_root(home),
                 plan.cache_digests,
                 plan.cache_members,
+                anchor_root=home,
             )
         except IntegrationError as exc:
-            if mutation_started and exc.reason is IntegrationReason.PREVIEW_STALE:
+            if mutation_started and exc.reason is not IntegrationReason.WRITE_FAILED:
                 raise _error(IntegrationReason.WRITE_FAILED, {"conflict": "cache"}) from exc
             raise
         mutation_started = mutation_started or cache_mutated

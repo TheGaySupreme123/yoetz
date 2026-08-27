@@ -653,6 +653,20 @@ def test_symlinked_managed_ancestor_and_leaf_are_refused(tmp_path: Path) -> None
     assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
 
 
+def test_activation_refuses_symlinked_cache_ancestor_before_host_mutation(tmp_path: Path) -> None:
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    outside = tmp_path / "outside-cache"
+    outside.mkdir()
+    (home / "plugins").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(IntegrationError) as caught:
+        preview_activation(target, codex_home=home)
+
+    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+    assert list(outside.iterdir()) == []
+
+
 def test_stale_digest_refuses_without_writing(tmp_path: Path) -> None:
     target, project, home = _target(tmp_path)
     _install(target)
@@ -2044,6 +2058,109 @@ def test_cache_removal_refuses_replaced_symlink_root(tmp_path: Path) -> None:
         _delete_managed_cache_versions(root, (("0.1.0", digest),), expected)
     assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
     assert (outside / "0.1.0/hooks/hooks.json").exists()
+
+
+def test_cache_removal_refuses_symlinked_ancestor_beneath_selected_home(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations.codex_marketplace import (
+        _delete_managed_cache_versions,  # pyright: ignore[reportPrivateUsage]
+        _installed_cache_digest,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    home = tmp_path / "codex-home"
+    home.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    root = outside / "cache/yoetz/yoetz"
+    version = root / "0.1.0"
+    expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
+    for relative, payload in expected.items():
+        destination = version / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    digest = _installed_cache_digest(version, expected)
+    assert digest is not None
+    (home / "plugins").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(IntegrationError) as caught:
+        _delete_managed_cache_versions(
+            home / "plugins/cache/yoetz/yoetz",
+            (("0.1.0", digest),),
+            expected,
+            anchor_root=home,
+        )
+
+    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+    assert (version / "hooks/hooks.json").exists()
+
+
+def test_file_removal_refuses_symlinked_ancestor_beneath_selected_project(
+    tmp_path: Path,
+) -> None:
+    from yoetz.adapters.integrations import codex_marketplace as module
+
+    project = tmp_path / "project"
+    project.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    plugins = outside / "plugins"
+    plugins.mkdir(parents=True)
+    marketplace = plugins / "marketplace.json"
+    expected = b'{"name":"yoetz"}\n'
+    marketplace.write_bytes(expected)
+    (project / ".agents").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(IntegrationError) as caught:
+        module._remove_exact_managed_file(  # pyright: ignore[reportPrivateUsage]
+            project / ".agents/plugins/marketplace.json",
+            expected,
+            mismatch_reason=IntegrationReason.PREVIEW_STALE,
+            anchor_root=project,
+        )
+
+    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+    assert marketplace.read_bytes() == expected
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [IntegrationReason.DESTINATION_CONFLICT, IntegrationReason.TARGET_UNSAFE],
+)
+def test_cache_removal_normalizes_every_post_quarantine_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: IntegrationReason,
+) -> None:
+    from yoetz.adapters.integrations import codex_marketplace as module
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    root = tmp_path / "cache"
+    version = root / "0.1.0"
+    expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
+    for relative, payload in expected.items():
+        destination = version / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    digest = module._installed_cache_digest(version, expected)  # pyright: ignore[reportPrivateUsage]
+    assert digest is not None
+
+    def fail_after_quarantine(
+        _root_fd: int,
+        _name: str,
+        _descriptor: int,
+        _approved_members: Mapping[str, bytes],
+    ) -> None:
+        raise IntegrationError(reason, {})
+
+    monkeypatch.setattr(module, "_remove_validated_directory", fail_after_quarantine)
+
+    with pytest.raises(IntegrationError) as caught:
+        module._delete_managed_cache_versions(  # pyright: ignore[reportPrivateUsage]
+            root,
+            (("0.1.0", digest),),
+            expected,
+        )
+
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
+    assert any(candidate.name.startswith(".yoetz-cache-remove-") for candidate in root.iterdir())
 
 
 def test_purge_cache_deletes_other_managed_versions(tmp_path: Path) -> None:

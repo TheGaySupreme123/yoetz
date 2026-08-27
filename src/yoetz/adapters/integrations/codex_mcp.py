@@ -425,7 +425,13 @@ class CodexMcpAdapter:
                 McpRegistrationReason.REGISTRATION_FAILED,
                 {"exit_code_class": "nonzero"},
             )
-        state_after, _command_after = self._observe_registration_state(binary)
+        try:
+            state_after, _command_after = self._observe_registration_state(binary)
+        except McpRegistrationError as exc:
+            # The name-based remove command already succeeded. Any unreadable or
+            # malformed verification is therefore an outcome-unknown mutation,
+            # not the pre-mutation observation reason.
+            raise McpRegistrationError(McpRegistrationReason.REGISTRATION_FAILED, {}) from exc
         if state_after is not McpRegistrationState.ABSENT:
             raise McpRegistrationError(
                 McpRegistrationReason.REGISTRATION_FAILED,

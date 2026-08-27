@@ -518,7 +518,31 @@ def test_apply_unregistration_does_not_claim_success_after_unreadable_verificati
                 _BINARY, McpRegistrationCommand(preview.preview_digest, True)
             )
         )
-    assert caught.value.reason is McpRegistrationReason.HARNESS_UNAVAILABLE
+    assert caught.value.reason is McpRegistrationReason.REGISTRATION_FAILED
+    assert runner.calls[2][1:3] == ("mcp", "remove")
+
+
+def test_apply_unregistration_normalizes_malformed_post_remove_verification() -> None:
+    plan_adapter = CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())]))
+    preview = anyio.run(lambda: plan_adapter.preview_unregistration(_BINARY))
+    runner = _Runner(
+        [
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, b""),
+            CommandOutput(1, b""),
+            CommandOutput(0, b"not-json"),
+        ]
+    )
+
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(runner).apply_unregistration(
+                _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+            )
+        )
+
+    assert caught.value.reason is McpRegistrationReason.REGISTRATION_FAILED
     assert runner.calls[2][1:3] == ("mcp", "remove")
 
 
