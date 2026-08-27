@@ -71,6 +71,9 @@ _PLUGIN_ADD_TIMEOUT_SECONDS: Final = 30.0
 _MAX_PLUGIN_OUTPUT_BYTES: Final = 262_144
 _MAX_EXECUTABLE_BYTES: Final = 256 * 1024 * 1024
 _MAX_MANAGED_CACHE_FILES: Final = 64
+_MAX_MANAGED_CACHE_ENTRIES: Final = 256
+_MAX_MANAGED_CACHE_DEPTH: Final = 16
+_MAX_MANAGED_CACHE_RELATIVE_PATH_BYTES: Final = 4_096
 _MAX_MANAGED_CACHE_MEMBER_BYTES: Final = 262_144
 _MAX_MANAGED_CACHE_TREE_BYTES: Final = 4 * 1024 * 1024
 _ACTIVATION_LOCK: Final = ".yoetz-marketplace-activation.lock"
@@ -543,23 +546,19 @@ def _plugin_source_installed(target: IntegrationTarget, *, codex_version: str) -
 
 
 def _read_managed_tree(root: Path) -> dict[str, bytes]:
-    """Read one owner-private managed tree, refusing symlinks and unsafe members."""
+    """Read one managed tree through the shared bounded, no-follow descriptor walker."""
 
-    members: dict[str, bytes] = {}
+    if root.is_symlink():
+        raise _error(IntegrationReason.TARGET_UNSAFE)
     try:
-        for candidate in root.rglob("*"):
-            if candidate.is_symlink():
-                raise _error(IntegrationReason.TARGET_UNSAFE)
-            if candidate.is_dir():
-                _owned_not_writable(candidate, directory=True)
-                continue
-            if not candidate.is_file():
-                raise _error(IntegrationReason.TARGET_UNSAFE)
-            _owned_not_writable(candidate, directory=False)
-            members[candidate.relative_to(root).as_posix()] = candidate.read_bytes()
+        descriptor = os.open(root, _directory_open_flags())
     except OSError as exc:
         raise _error(IntegrationReason.TARGET_UNSAFE) from exc
-    return members
+    try:
+        _owned_stat_not_writable(os.fstat(descriptor), directory=True)
+        return _read_managed_tree_fd(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> dict[str, bytes]:
@@ -1484,10 +1483,18 @@ def _managed_cache_versions(
     if root.is_symlink() or not root.is_dir():
         raise _error(IntegrationReason.TARGET_UNSAFE)
     versions: list[tuple[str, str]] = []
+    children: list[Path] = []
     try:
-        children = sorted(root.iterdir(), key=lambda path: path.name.encode("utf-8"))
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if type(entry.name) is not str or entry.name in {"", ".", ".."}:
+                    raise _error(IntegrationReason.TARGET_UNSAFE)
+                children.append(root / entry.name)
+                if len(children) > _MAX_MANAGED_CACHE_ENTRIES:
+                    raise _error(IntegrationReason.PREVIEW_STALE)
     except OSError as exc:
         raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    children.sort(key=lambda path: os.fsencode(path.name))
     if not children:
         return ()
     for child in children:
@@ -1716,21 +1723,39 @@ def _require_safe_cache_removal_primitives() -> None:
         raise _error(IntegrationReason.TARGET_UNSAFE)
 
 
+def _bounded_directory_names(directory_fd: int) -> list[str]:
+    names: list[str] = []
+    try:
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                name = entry.name
+                if type(name) is not str or name in {"", ".", ".."} or "/" in name:
+                    raise _error(IntegrationReason.TARGET_UNSAFE)
+                names.append(name)
+                if len(names) > _MAX_MANAGED_CACHE_ENTRIES:
+                    raise _error(IntegrationReason.PREVIEW_STALE)
+    except OSError as exc:
+        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    return sorted(names, key=lambda name: os.fsencode(name))
+
+
 def _read_managed_tree_fd(root_fd: int) -> dict[str, bytes]:
     members: dict[str, bytes] = {}
     file_count = 0
+    entry_count = 0
     total_bytes = 0
 
-    def walk(directory_fd: int, prefix: str) -> None:
-        nonlocal file_count, total_bytes
-        try:
-            names = sorted(os.listdir(directory_fd), key=lambda name: os.fsencode(name))
-        except OSError as exc:
-            raise _error(IntegrationReason.TARGET_UNSAFE) from exc
-        for name in names:
-            if type(name) is not str or name in {"", ".", ".."} or "/" in name:
-                raise _error(IntegrationReason.TARGET_UNSAFE)
+    def walk(directory_fd: int, prefix: str, depth: int) -> None:
+        nonlocal entry_count, file_count, total_bytes
+        if depth > _MAX_MANAGED_CACHE_DEPTH:
+            raise _error(IntegrationReason.PREVIEW_STALE)
+        for name in _bounded_directory_names(directory_fd):
+            entry_count += 1
+            if entry_count > _MAX_MANAGED_CACHE_ENTRIES:
+                raise _error(IntegrationReason.PREVIEW_STALE)
             relative = name if not prefix else f"{prefix}/{name}"
+            if len(os.fsencode(relative)) > _MAX_MANAGED_CACHE_RELATIVE_PATH_BYTES:
+                raise _error(IntegrationReason.PREVIEW_STALE)
             try:
                 facts = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             except OSError as exc:
@@ -1743,7 +1768,7 @@ def _read_managed_tree_fd(root_fd: int) -> dict[str, bytes]:
                     raise _error(IntegrationReason.TARGET_UNSAFE) from exc
                 try:
                     _owned_stat_not_writable(os.fstat(child_fd), directory=True)
-                    walk(child_fd, relative)
+                    walk(child_fd, relative, depth + 1)
                 finally:
                     os.close(child_fd)
                 continue
@@ -1786,24 +1811,13 @@ def _read_managed_tree_fd(root_fd: int) -> dict[str, bytes]:
             finally:
                 os.close(descriptor)
 
-    walk(root_fd, "")
+    walk(root_fd, "", 1)
     return members
-
-
-def _managed_cache_digest_at(
-    root_fd: int, name: str, expected_members: Mapping[str, bytes]
-) -> str | None:
-    opened = _open_managed_cache_digest_at(root_fd, name, expected_members)
-    if opened is None:
-        return None
-    descriptor, digest = opened
-    os.close(descriptor)
-    return digest
 
 
 def _open_managed_cache_digest_at(
     root_fd: int, name: str, expected_members: Mapping[str, bytes]
-) -> tuple[int, str] | None:
+) -> tuple[int, str, Mapping[str, bytes]] | None:
     """Open and validate one managed cache tree, retaining its exact directory inode."""
 
     try:
@@ -1817,7 +1831,7 @@ def _open_managed_cache_digest_at(
         actual = _read_managed_tree_fd(descriptor)
         if actual != dict(expected_members) and not plugin_tree_matches_marker(actual):
             raise _error(IntegrationReason.PREVIEW_STALE)
-        return descriptor, _members_digest(actual)
+        return descriptor, _members_digest(actual), actual
     except BaseException:
         os.close(descriptor)
         raise
@@ -1827,13 +1841,50 @@ def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
     return left.st_dev == right.st_dev and left.st_ino == right.st_ino
 
 
-def _remove_managed_tree_contents_fd(directory_fd: int) -> None:
-    """Delete contents relative to one already-open validated directory inode."""
+def _expected_child_names(approved_members: Mapping[str, bytes], prefix: str) -> set[str]:
+    stem = "" if not prefix else f"{prefix}/"
+    children: set[str] = set()
+    for relative in approved_members:
+        if not relative.startswith(stem):
+            continue
+        suffix = relative[len(stem) :]
+        if suffix:
+            children.add(suffix.split("/", maxsplit=1)[0])
+    return children
 
+
+def _read_exact_member(
+    descriptor: int,
+    expected: bytes,
+    *,
+    mismatch_reason: IntegrationReason = IntegrationReason.PREVIEW_STALE,
+) -> bytes:
     try:
-        names = sorted(os.listdir(directory_fd), key=lambda name: os.fsencode(name))
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        total = 0
+        while chunk := os.read(descriptor, min(64 * 1024, len(expected) + 1 - total)):
+            total += len(chunk)
+            if total > len(expected):
+                raise _error(mismatch_reason)
+            chunks.append(chunk)
+        return b"".join(chunks)
     except OSError as exc:
         raise _error(IntegrationReason.WRITE_FAILED) from exc
+
+
+def _remove_managed_tree_contents_fd(
+    directory_fd: int,
+    approved_members: Mapping[str, bytes],
+    *,
+    prefix: str = "",
+    mutation_state: list[bool],
+) -> None:
+    """Delete only names and bytes from the exact approved descriptor-bound snapshot."""
+
+    names = _bounded_directory_names(directory_fd)
+    if set(names) != _expected_child_names(approved_members, prefix):
+        raise _error(IntegrationReason.PREVIEW_STALE)
     for name in names:
         if type(name) is not str or name in {"", ".", ".."} or "/" in name:
             raise _error(IntegrationReason.TARGET_UNSAFE)
@@ -1841,7 +1892,12 @@ def _remove_managed_tree_contents_fd(directory_fd: int) -> None:
             before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         except OSError as exc:
             raise _error(IntegrationReason.PREVIEW_STALE) from exc
+        relative = name if not prefix else f"{prefix}/{name}"
+        expected_payload = approved_members.get(relative)
+        has_descendants = any(path.startswith(f"{relative}/") for path in approved_members)
         if stat.S_ISDIR(before.st_mode):
+            if expected_payload is not None or not has_descendants:
+                raise _error(IntegrationReason.PREVIEW_STALE)
             _owned_stat_not_writable(before, directory=True)
             try:
                 child_fd = os.open(name, _directory_open_flags(), dir_fd=directory_fd)
@@ -1852,16 +1908,24 @@ def _remove_managed_tree_contents_fd(directory_fd: int) -> None:
                 _owned_stat_not_writable(opened, directory=True)
                 if not _same_inode(before, opened):
                     raise _error(IntegrationReason.PREVIEW_STALE)
-                _remove_managed_tree_contents_fd(child_fd)
+                _remove_managed_tree_contents_fd(
+                    child_fd,
+                    approved_members,
+                    prefix=relative,
+                    mutation_state=mutation_state,
+                )
                 current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
                 if not _same_inode(opened, current):
                     raise _error(IntegrationReason.PREVIEW_STALE)
                 os.rmdir(name, dir_fd=directory_fd)
+                mutation_state[0] = True
             except OSError as exc:
                 raise _error(IntegrationReason.WRITE_FAILED) from exc
             finally:
                 os.close(child_fd)
             continue
+        if expected_payload is None or has_descendants:
+            raise _error(IntegrationReason.PREVIEW_STALE)
         _owned_stat_not_writable(before, directory=False)
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
@@ -1873,27 +1937,71 @@ def _remove_managed_tree_contents_fd(directory_fd: int) -> None:
             _owned_stat_not_writable(opened, directory=False)
             if not _same_inode(before, opened):
                 raise _error(IntegrationReason.PREVIEW_STALE)
+            if opened.st_size != len(expected_payload):
+                raise _error(IntegrationReason.PREVIEW_STALE)
+            if _read_exact_member(member_fd, expected_payload) != expected_payload:
+                raise _error(IntegrationReason.PREVIEW_STALE)
+            final_before_unlink = os.fstat(member_fd)
+            if final_before_unlink.st_size != len(expected_payload):
+                raise _error(IntegrationReason.PREVIEW_STALE)
             current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            if not _same_inode(opened, current):
+            if not _same_inode(final_before_unlink, current):
                 raise _error(IntegrationReason.PREVIEW_STALE)
             os.unlink(name, dir_fd=directory_fd)
+            mutation_state[0] = True
+            # The unlink has committed. Detect a last-window write through another retained
+            # descriptor and report partial mutation instead of claiming a stale preimage.
+            if (
+                _read_exact_member(
+                    member_fd,
+                    expected_payload,
+                    mismatch_reason=IntegrationReason.WRITE_FAILED,
+                )
+                != expected_payload
+            ):
+                raise _error(IntegrationReason.WRITE_FAILED)
         except OSError as exc:
             raise _error(IntegrationReason.WRITE_FAILED) from exc
         finally:
             os.close(member_fd)
 
 
-def _remove_validated_directory(root_fd: int, name: str, descriptor: int) -> None:
-    """Remove a tree through its retained descriptor, never by reopening its pathname."""
+def _remove_validated_directory(
+    root_fd: int,
+    name: str,
+    descriptor: int,
+    approved_members: Mapping[str, bytes],
+) -> None:
+    """Remove only the approved tree through its retained descriptor and exact member snapshot."""
 
     validated = os.fstat(descriptor)
-    _remove_managed_tree_contents_fd(descriptor)
+    try:
+        current_before = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise _error(IntegrationReason.PREVIEW_STALE) from exc
+    if not _same_inode(validated, current_before):
+        raise _error(IntegrationReason.PREVIEW_STALE)
+    if _read_managed_tree_fd(descriptor) != dict(approved_members):
+        raise _error(IntegrationReason.PREVIEW_STALE)
+    mutation_state = [False]
+    try:
+        _remove_managed_tree_contents_fd(
+            descriptor,
+            approved_members,
+            mutation_state=mutation_state,
+        )
+    except IntegrationError as exc:
+        # Recursive deletion may already have unlinked an earlier approved member. Once that
+        # phase begins, an observable race is a partial write failure, not a stale preimage.
+        if exc.reason is IntegrationReason.PREVIEW_STALE and mutation_state[0]:
+            raise _error(IntegrationReason.WRITE_FAILED) from exc
+        raise
     try:
         current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
     except OSError as exc:
-        raise _error(IntegrationReason.PREVIEW_STALE) from exc
+        raise _error(IntegrationReason.WRITE_FAILED) from exc
     if not _same_inode(validated, current):
-        raise _error(IntegrationReason.PREVIEW_STALE)
+        raise _error(IntegrationReason.WRITE_FAILED)
     try:
         os.rmdir(name, dir_fd=root_fd)
     except OSError as exc:
@@ -1914,11 +2022,21 @@ def _delete_managed_cache_versions(
         raise _error(IntegrationReason.TARGET_UNSAFE) from exc
     try:
         _owned_stat_not_writable(os.fstat(root_fd), directory=True)
+        cache_mutation_started = False
         for version, expected_digest in cache_digests:
-            current_digest = _managed_cache_digest_at(root_fd, version, expected_members)
-            if current_digest is None:
+            try:
+                opened = _open_managed_cache_digest_at(root_fd, version, expected_members)
+            except IntegrationError as exc:
+                if cache_mutation_started:
+                    raise _error(IntegrationReason.WRITE_FAILED) from exc
+                raise
+            if opened is None:
                 continue
+            version_fd, current_digest, approved_members = opened
             if current_digest != expected_digest:
+                os.close(version_fd)
+                if cache_mutation_started:
+                    raise _error(IntegrationReason.WRITE_FAILED)
                 raise _error(IntegrationReason.PREVIEW_STALE)
             quarantine = f".yoetz-cache-remove-{os.urandom(8).hex()}"
             try:
@@ -1929,32 +2047,64 @@ def _delete_managed_cache_versions(
                     dst_dir_fd=root_fd,
                 )
             except OSError as exc:
+                os.close(version_fd)
                 raise _error(IntegrationReason.WRITE_FAILED) from exc
-            opened = _open_managed_cache_digest_at(root_fd, quarantine, expected_members)
-            if opened is None:
-                raise _error(IntegrationReason.PREVIEW_STALE)
-            quarantine_fd, quarantine_digest = opened
-            if quarantine_digest != expected_digest:
+            cache_mutation_started = True
+            try:
                 try:
                     current = os.stat(quarantine, dir_fd=root_fd, follow_symlinks=False)
-                    if not _same_inode(os.fstat(quarantine_fd), current):
-                        raise _error(IntegrationReason.PREVIEW_STALE)
-                    os.rename(
-                        quarantine,
-                        version,
-                        src_dir_fd=root_fd,
-                        dst_dir_fd=root_fd,
-                    )
                 except OSError as exc:
                     raise _error(IntegrationReason.WRITE_FAILED) from exc
-                finally:
-                    os.close(quarantine_fd)
-                raise _error(IntegrationReason.PREVIEW_STALE)
-            try:
-                _remove_validated_directory(root_fd, quarantine, quarantine_fd)
+                if not _same_inode(os.fstat(version_fd), current):
+                    raise _error(IntegrationReason.WRITE_FAILED)
+                try:
+                    _remove_validated_directory(
+                        root_fd,
+                        quarantine,
+                        version_fd,
+                        approved_members,
+                    )
+                except IntegrationError as exc:
+                    if exc.reason is not IntegrationReason.PREVIEW_STALE:
+                        raise
+                    # No member was deleted: restore the exact retained inode when the original
+                    # version name is still absent. A failed restore is an outcome-unknown write.
+                    try:
+                        quarantine_current = os.stat(
+                            quarantine,
+                            dir_fd=root_fd,
+                            follow_symlinks=False,
+                        )
+                    except OSError as stat_exc:
+                        raise _error(IntegrationReason.WRITE_FAILED) from stat_exc
+                    if not _same_inode(os.fstat(version_fd), quarantine_current):
+                        raise _error(IntegrationReason.WRITE_FAILED) from exc
+                    try:
+                        os.stat(version, dir_fd=root_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        try:
+                            os.rename(
+                                quarantine,
+                                version,
+                                src_dir_fd=root_fd,
+                                dst_dir_fd=root_fd,
+                            )
+                        except OSError as restore_exc:
+                            raise _error(IntegrationReason.WRITE_FAILED) from restore_exc
+                    except OSError as restore_exc:
+                        raise _error(IntegrationReason.WRITE_FAILED) from restore_exc
+                    else:
+                        raise _error(IntegrationReason.WRITE_FAILED) from exc
+                    raise _error(IntegrationReason.WRITE_FAILED) from exc
             finally:
-                os.close(quarantine_fd)
-        if os.listdir(root_fd):
+                os.close(version_fd)
+        try:
+            remaining = _bounded_directory_names(root_fd)
+        except IntegrationError as exc:
+            if cache_mutation_started:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+            raise
+        if remaining:
             raise _error(IntegrationReason.WRITE_FAILED)
     finally:
         os.close(root_fd)
@@ -2014,6 +2164,7 @@ def apply_removal(
         _assert_snapshot(marketplace_path, plan.marketplace_before)
         _assert_snapshot(config_path, plan.config_before)
         _assert_binary_probe(plan.binary, _run=_run)
+        mutation_started = False
         if preview.plugin_remove_planned:
             _run_json_command(
                 plan.binary,
@@ -2021,6 +2172,7 @@ def apply_removal(
                 _run=_run,
                 timeout=_PLUGIN_ADD_TIMEOUT_SECONDS,
             )
+            mutation_started = True
         if preview.marketplace_remove_planned:
             _run_json_command(
                 plan.binary,
@@ -2028,12 +2180,15 @@ def apply_removal(
                 _run=_run,
                 timeout=_PLUGIN_ADD_TIMEOUT_SECONDS,
             )
+            mutation_started = True
         current_config = _current_bytes(config_path)
         if current_config is None:
             current_config = b""
         try:
             parsed_config = tomllib.loads(current_config.decode("utf-8") if current_config else "")
         except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+            if mutation_started:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
             raise _error(IntegrationReason.SOURCE_INVALID) from exc
         try:
             _, _, stripped = _config_table_plan(
@@ -2042,9 +2197,9 @@ def apply_removal(
                 project,
             )
         except IntegrationError as exc:
-            if exc.reason is IntegrationReason.REMOVE_REFUSED:
+            if mutation_started:
                 # A conflict discovered after the host removal subprocesses have already
-                # mutated state is a partial-apply failure, not a pre-mutation refusal.
+                # mutated state is a partial-apply failure, not a pre-mutation refusal/staleness.
                 conflict = exc.safe_details.get("conflict")
                 details = {"conflict": conflict} if type(conflict) is str else None
                 raise _error(IntegrationReason.WRITE_FAILED, details) from exc
@@ -2056,17 +2211,34 @@ def apply_removal(
                         config_path.unlink()
                     except OSError as exc:
                         raise _error(IntegrationReason.WRITE_FAILED) from exc
+                    mutation_started = True
             else:
                 _atomic_write(config_path, stripped)
+                mutation_started = True
         if preview.marketplace_json_planned:
             current_marketplace = _current_bytes(marketplace_path)
             if current_marketplace != _canonical_marketplace_bytes():
-                raise _error(IntegrationReason.PREVIEW_STALE)
+                if not mutation_started:
+                    raise _error(IntegrationReason.PREVIEW_STALE)
+                raise _error(
+                    IntegrationReason.WRITE_FAILED,
+                    {"conflict": "repository_marketplace"},
+                )
             try:
                 marketplace_path.unlink()
             except OSError as exc:
                 raise _error(IntegrationReason.WRITE_FAILED) from exc
-        _delete_managed_cache_versions(_cache_root(home), plan.cache_digests, plan.cache_members)
+            mutation_started = True
+        try:
+            _delete_managed_cache_versions(
+                _cache_root(home),
+                plan.cache_digests,
+                plan.cache_members,
+            )
+        except IntegrationError as exc:
+            if mutation_started and exc.reason is IntegrationReason.PREVIEW_STALE:
+                raise _error(IntegrationReason.WRITE_FAILED, {"conflict": "cache"}) from exc
+            raise
         installed, _version = _plugin_inventory(plan.binary, project, _run=_run)
         if installed:
             raise _error(IntegrationReason.WRITE_FAILED)

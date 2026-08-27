@@ -3035,7 +3035,18 @@ conflicting marketplace, config, inventory, or cache surfaces with `remove_refus
 `conflict` token (`personal_marketplace|repository_marketplace|config_marketplace|config_plugin|
 inventory|cache`). Cache purge is default-off. The removal digest binds the exact trusted project
 root as well as the selected executable, Codex home, configuration/cache preimages, planned host
-commands, and cache-purge choice. After a successful removal, `codex plugin list
+commands, and cache-purge choice. Cache preview and apply share descriptor-relative no-follow
+total-entry, recursion-depth, relative-path, file-count, per-member, and aggregate-byte bounds.
+Apply retains the validated version descriptor through quarantine rename, binds deletion to the
+exact approved member names and bytes, refuses
+observable additions/changes before unlink, restores the exact version name when drift occurs
+before the first unlink, preserves the remainder after deletion starts, and never sweeps an
+unapproved name into deletion.
+Pre-mutation drift is `preview_stale`; once any accepted host/config/filesystem mutation has
+started, a later conflict is `write_failed` because partial state is possible. The adapter does not
+claim an atomic compare-and-unlink primitive for a non-cooperating same-UID writer's final POSIX
+content window, so the operator must quiesce such writers. After a successful removal,
+`codex plugin list
 --marketplace yoetz --json` is empty and `config.toml` has no yoetz tables;
 `inspect_activation` / observe status reports `installed_not_activated` when the managed plugin
 source at `.agents/plugins/yoetz` remains (issue #387) and `not_installed` only when that source

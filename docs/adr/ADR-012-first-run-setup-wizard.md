@@ -230,7 +230,18 @@ exactly those contracts and connects the steps without weakening any existing tr
    conflicting entries refuse with `remove_refused` and name the conflicting surface. The removal
    preview binds the exact trusted project root as well as the selected executable, Codex
    home, configuration/cache preimages, planned host commands, and cache-purge choice. A second
-   removal is `already_absent`. The skill tree, consent records, and observation store are
+   removal is `already_absent`. Preview and apply read cache trees through the same no-follow,
+   descriptor-relative total-entry/depth/path/file-count/per-member/aggregate-byte bounds. Apply
+   retains the validated version descriptor across quarantine rename, revalidates the exact
+   approved member set and bytes before and during unlink, and never blanket-deletes newly observed
+   names. It restores the exact version name when an observable content race invalidates the
+   quarantine snapshot before the first unlink but still reports the crossed mutation boundary as
+   `write_failed`, and preserves the remainder after deletion starts.
+   A mismatch after any host/config/filesystem mutation is reported as `write_failed`, not the
+   pre-mutation retry signal `preview_stale`. Ordinary POSIX
+   files still expose a final non-CAS write/unlink window to a non-cooperating same-UID writer, so
+   owners must quiesce concurrent cache writers during accepted removal and no atomic content
+   exclusion is claimed. The skill tree, consent records, and observation store are
    intentionally left in place. `yoetz integrate <harness> mcp preview-remove` exposes the exact
    unregistration digest; noninteractive `remove` requires that digest plus `--accept` before it
    unregisters an owned external `yoetz` MCP entry with `codex mcp remove yoetz`. Apply immediately

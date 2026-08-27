@@ -274,15 +274,30 @@ portable-artifact authority and would fail closed on this host. Cache purge is d
 `--purge-cache` additionally deletes other version directories under
 `<codex-home>/plugins/cache/yoetz/yoetz/<ver>` whose trees byte-match a yoetz render or their own
 valid `yoetz.codex-plugin-install/1` marker. Foreign or modified cache directories are refused
-(`remove_refused`, conflict `cache`) and left untouched.
+(`remove_refused`, conflict `cache`) and left untouched. Preview and apply use the same no-follow,
+descriptor-relative 256-total-entry, 16-level, 4-KiB-relative-path, 64-file,
+256-KiB-per-member, and 4-MiB-aggregate bounds, so directory-only, deep, sparse, and oversized
+trees fail closed before unbounded allocation or recursion. Apply retains the validated version
+descriptor through quarantine rename and rechecks the exact approved names and bytes immediately
+before and during unlink; newly observed names are never swept into deletion. Observable drift
+before the first unlink restores the retained inode to its exact version name; later drift
+preserves the remaining quarantine. Both report `write_failed` because quarantine rename already
+crossed the mutation boundary. Keep same-UID cache writers
+quiescent during removal because ordinary POSIX files provide no atomic compare-and-unlink token
+for the last content-write window.
 
 Apply runs `codex plugin remove yoetz@yoetz --json`, then `codex plugin marketplace remove yoetz
 --json` when `[marketplaces.yoetz]` byte-matches the yoetz render, then deletes
 `<repo>/.agents/plugins/marketplace.json` only when that file byte-matches the yoetz render, then
 deletes the bound current-version cache. Whole-table TOML edits are verified by re-parse. A second
 removal is a no-op (`already_absent`). Foreign, modified, dual, or otherwise conflicting entries
-refuse with `remove_refused` and name the conflicting surface (`repository_marketplace`,
-`personal_marketplace`, `config_marketplace`, `config_plugin`, `inventory`, or `cache`).
+refuse with `remove_refused` and name the conflicting surface (`personal_marketplace`,
+`repository_marketplace`, `config_marketplace`, `config_plugin`, `inventory`, or `cache`). Before
+mutation, changed preview-bound bytes report `preview_stale`.
+After a host command, config write, marketplace unlink, quarantine rename, or member unlink has
+started, any newly observed conflict reports `write_failed` (with the bounded conflict token when
+available) because the outcome may be partial; it is never mislabeled as a safe stale-preview
+retry.
 
 After a successful removal, `codex plugin list --marketplace yoetz --json` is empty and
 `config.toml` has no yoetz tables. `yoetz observe status` reports the existing activation
