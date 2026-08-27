@@ -1906,12 +1906,15 @@ def handle_spool(
             "PermissionRequest",
             "PostToolUse",
         }:
+            workspace_locator = canonical_workspace_locator(workspace)
+            if workspace_locator is None:
+                raise ValueError("workspace_locator_invalid")
             spool_payload = dict(payload)
             # Keep the safe classification, never the host command/input prose.
             if _routine_read_action(payload):
                 spool_payload["action"] = "routine_read"
             HookSpool(_state=_state).append(
-                workspace=str(Path(workspace).expanduser().resolve(strict=False)),
+                workspace=workspace_locator,
                 event_name=event_name,
                 payload=spool_payload,
             )
