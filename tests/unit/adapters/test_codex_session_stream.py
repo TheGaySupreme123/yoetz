@@ -128,6 +128,142 @@ def test_incremental_partial_header_still_requires_exact_profile_admission(
     assert completed.cursor.event_position == 1
 
 
+def test_completed_oversized_line_advances_and_later_records_remain_reachable(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "session.jsonl"
+    profile = default_stream_profile()
+    chunk = stream_module._MAX_READ_CHUNK  # pyright: ignore[reportPrivateUsage]
+    header = encode_lines(session_meta())
+    oversized_body = (
+        b'{"type":"response_item","payload":"'
+        + (b"x" * (profile.max_line_bytes + (2 * chunk)))
+        + b'"}'
+    )
+    later = encode_lines(
+        response_item(
+            {
+                "content": [{"text": "later", "type": "output_text"}],
+                "role": "assistant",
+                "type": "message",
+            }
+        )
+    )
+    path.write_bytes(header + oversized_body + b"\n" + later)
+    session = "hmac-sha256:" + ("9" * 64)
+    reader = _reader(session)
+
+    admitted = reader.advance(path)
+    assert admitted.cursor.event_position == 1
+    assert admitted.partial_line
+
+    entered = reader.advance(path)
+    assert entered.cursor.event_position == 1
+    assert entered.cursor.byte_position == len(header) + profile.max_line_bytes + 1
+    assert entered.partial_line.startswith(
+        stream_module._OVERSIZED_PARTIAL_PREFIX  # pyright: ignore[reportPrivateUsage]
+    )
+
+    cursor = entered.cursor
+    partial = entered.partial_line
+    skipped = entered
+    for _ in range(4):
+        prior_position = cursor.byte_position
+        skipped = SessionStreamReader(
+            session_commitment=session,
+            profile=profile,
+            cursor=cursor,
+            key_material=_KEY,
+            partial_line=partial,
+        ).advance(path)
+        assert skipped.cursor.byte_position - prior_position <= chunk
+        cursor = skipped.cursor
+        partial = skipped.partial_line
+        if skipped.cursor.event_position == 2:
+            break
+
+    assert skipped.cursor.event_position == 2
+    assert skipped.cursor.byte_position == len(header) + len(oversized_body) + 1
+    assert skipped.cursor.last_source_commitment.startswith("hmac-sha256:")
+    assert skipped.partial_line == b""
+    assert len(skipped.envelopes) == 1
+    assert skipped.envelopes[0].event_kind == "unsupported_event"
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value in skipped.gaps
+
+    recovered = SessionStreamReader(
+        session_commitment=session,
+        profile=profile,
+        cursor=skipped.cursor,
+        key_material=_KEY,
+        partial_line=skipped.partial_line,
+    ).advance(path)
+    assert recovered.cursor.event_position == 3
+    assert recovered.cursor.byte_position == path.stat().st_size
+    assert len(recovered.envelopes) == 1
+    assert recovered.envelopes[0].event_kind == "response_item"
+
+
+def test_forged_oversized_line_continuation_restarts_from_admission(tmp_path: Path) -> None:
+    path = tmp_path / "session.jsonl"
+    profile = default_stream_profile()
+    header = encode_lines(session_meta())
+    oversized_body = (
+        b'{"type":"response_item","payload":"' + (b"x" * (profile.max_line_bytes + 10)) + b'"}\n'
+    )
+    path.write_bytes(header + oversized_body)
+    session = "hmac-sha256:" + ("8" * 64)
+    reader = _reader(session)
+
+    admitted = reader.advance(path)
+    entered = reader.advance(path)
+    assert admitted.cursor.event_position == 1
+    assert entered.partial_line.startswith(
+        stream_module._OVERSIZED_PARTIAL_PREFIX  # pyright: ignore[reportPrivateUsage]
+    )
+    forged = entered.partial_line[:-1] + bytes([entered.partial_line[-1] ^ 1])
+
+    restarted = SessionStreamReader(
+        session_commitment=session,
+        profile=profile,
+        cursor=entered.cursor,
+        key_material=_KEY,
+        partial_line=forged,
+    ).advance(path)
+
+    assert restarted.cursor.source_generation == entered.cursor.source_generation + 1
+    assert restarted.cursor.event_position == 1
+    assert ObservationGapCode.CURSOR_STALE.value in restarted.gaps
+    assert ObservationGapCode.TRUNCATED_PAYLOAD.value in restarted.gaps
+    assert not restarted.partial_line.startswith(
+        stream_module._OVERSIZED_PARTIAL_PREFIX  # pyright: ignore[reportPrivateUsage]
+    )
+
+
+def test_oversized_initial_header_never_establishes_profile_admission(tmp_path: Path) -> None:
+    path = tmp_path / "session.jsonl"
+    profile = default_stream_profile()
+    path.write_bytes(b"{" + (b"x" * (profile.max_line_bytes + 10)) + b"}\n")
+    session = "hmac-sha256:" + ("7" * 64)
+    advance = _reader(session).advance(path)
+    assert advance.cursor.event_position == 0
+    assert advance.partial_line.startswith(
+        stream_module._OVERSIZED_PARTIAL_PREFIX  # pyright: ignore[reportPrivateUsage]
+    )
+
+    completed = SessionStreamReader(
+        session_commitment=session,
+        profile=profile,
+        cursor=advance.cursor,
+        key_material=_KEY,
+        partial_line=advance.partial_line,
+    ).advance(path)
+
+    assert completed.envelopes == ()
+    assert completed.cursor.event_position == 1
+    assert completed.cursor.byte_position == path.stat().st_size
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value in completed.gaps
+
+
 def test_truncation_bumps_generation(tmp_path: Path) -> None:
     path = tmp_path / "session.jsonl"
     path.write_bytes(failed_shell_rollout())
@@ -303,6 +439,97 @@ def test_reconcile_does_not_advance_past_a_rejected_envelope(
     assert cursor.byte_position == 0
     assert cursor.event_position == 0
     assert store.pending_outbox_count(workspace) == 0
+
+
+@pytest.mark.parametrize("blocked_by", ["ingest", "outbox"])
+def test_oversized_continuation_survives_final_envelope_backpressure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_by: str,
+) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    session_id = f"stream-oversized-{blocked_by}-retry"
+    target = sessions / f"rollout-{session_id}.jsonl"
+    profile = default_stream_profile()
+    target.write_bytes(
+        encode_lines(session_meta())
+        + b'{"type":"response_item","payload":"'
+        + (b"x" * (profile.max_line_bytes + 10))
+        + b'"}\n'
+    )
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    locator = CodexSessionStreamLocator(home)
+
+    for _ in range(2):
+        reconcile_session_stream(
+            store,
+            workspace_commitment=workspace,
+            session_commitment=session,
+            codex_session_id=session_id,
+            locator=locator,
+        )
+    before = store.get_stream_cursor(workspace, session)
+    before_partial = store.get_stream_partial(workspace, session)
+    assert before is not None and before.event_position == 1
+    assert before_partial.startswith(
+        stream_module._OVERSIZED_PARTIAL_PREFIX  # pyright: ignore[reportPrivateUsage]
+    )
+
+    with monkeypatch.context() as blocked:
+        if blocked_by == "ingest":
+
+            def reject(
+                _store: LocalObservationStore,
+                envelope: object,
+            ) -> ObservationIngestResult:
+                del envelope
+                return ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.CURSOR_STALE.value,
+                    None,
+                )
+
+            blocked.setattr(LocalObservationStore, "ingest", reject)
+        else:
+
+            def overflow(
+                _store: LocalObservationStore,
+                workspace_commitment: str,
+                selected_session_id: str,
+                envelope: object,
+            ) -> str:
+                del workspace_commitment, selected_session_id, envelope
+                return ObservationGapCode.OUTBOX_OVERFLOW.value
+
+            blocked.setattr(LocalObservationStore, "enqueue_outbox", overflow)
+        failed = reconcile_session_stream(
+            store,
+            workspace_commitment=workspace,
+            session_commitment=session,
+            codex_session_id=session_id,
+            locator=locator,
+        )
+
+    assert failed["byte_position"] == before.byte_position
+    assert failed["event_position"] == before.event_position
+    assert store.get_stream_partial(workspace, session) == before_partial
+
+    retried = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+    assert retried["event_position"] == 2
+    assert retried["byte_position"] == target.stat().st_size
+    assert store.get_stream_partial(workspace, session) == b""
 
 
 def test_reconcile_resets_cursor_when_stream_mapping_changes(tmp_path: Path) -> None:

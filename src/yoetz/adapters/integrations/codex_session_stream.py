@@ -72,6 +72,110 @@ _MATERIAL_HOOK_EVENTS: Final = frozenset(
 
 _JSONL_SUFFIXES: Final = (".jsonl", ".jsonl.zst")
 _ROLLOUT_ITEM_TYPES: Final = frozenset(SUPPORTED_ROLLOUT_PROFILES["0.148.0"].item_types)
+_OVERSIZED_PARTIAL_PREFIX: Final = b"\x00yoetz-oversized-line/v1\x00"
+_OVERSIZED_PARTIAL_DOMAIN: Final = b"yoetz/observation-stream-oversized-state/v1\x00"
+_OVERSIZED_LINE_DOMAIN: Final = b"yoetz/observation-stream-oversized-line/v1\x00"
+
+
+@dataclass(frozen=True, slots=True)
+class _OversizedLineState:
+    line_start: int
+    prefix_digest: str
+
+
+def _encode_oversized_partial(
+    *,
+    line_start: int,
+    prefix_commitment: str,
+    session_commitment: str,
+    source_generation: int,
+    source_identity: str,
+    key_material: bytes,
+) -> bytes:
+    digest = prefix_commitment.removeprefix("hmac-sha256:")
+    if (
+        type(line_start) is not int
+        or line_start < 0
+        or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        raise ValueError("session_stream_partial_invalid")
+    body = f"{line_start}:{digest}".encode("ascii")
+    context = (
+        session_commitment.encode("ascii")
+        + b"\x00"
+        + str(source_generation).encode("ascii")
+        + b"\x00"
+        + source_identity.encode("ascii")
+        + b"\x00"
+        + body
+    )
+    tag = hmac.new(key_material, _OVERSIZED_PARTIAL_DOMAIN + context, hashlib.sha256).hexdigest()
+    return _OVERSIZED_PARTIAL_PREFIX + tag.encode("ascii") + b":" + body
+
+
+def _decode_oversized_partial(
+    value: bytes,
+    *,
+    session_commitment: str,
+    source_generation: int,
+    source_identity: str,
+    key_material: bytes,
+) -> _OversizedLineState | None:
+    if not value.startswith(_OVERSIZED_PARTIAL_PREFIX):
+        return None
+    try:
+        tag, line_start_raw, prefix_digest_raw = value[len(_OVERSIZED_PARTIAL_PREFIX) :].split(b":")
+        line_start = int(line_start_raw.decode("ascii"))
+        prefix_digest = prefix_digest_raw.decode("ascii")
+    except UnicodeError, ValueError:
+        raise ValueError("session_stream_partial_invalid") from None
+    body = line_start_raw + b":" + prefix_digest_raw
+    context = (
+        session_commitment.encode("ascii")
+        + b"\x00"
+        + str(source_generation).encode("ascii")
+        + b"\x00"
+        + source_identity.encode("ascii")
+        + b"\x00"
+        + body
+    )
+    expected_tag = (
+        hmac.new(key_material, _OVERSIZED_PARTIAL_DOMAIN + context, hashlib.sha256)
+        .hexdigest()
+        .encode("ascii")
+    )
+    if (
+        line_start < 0
+        or line_start_raw != str(line_start).encode("ascii")
+        or len(prefix_digest) != 64
+        or any(char not in "0123456789abcdef" for char in prefix_digest)
+        or not hmac.compare_digest(tag, expected_tag)
+    ):
+        raise ValueError("session_stream_partial_invalid")
+    return _OversizedLineState(line_start, prefix_digest)
+
+
+def _oversized_line_commitment(
+    *,
+    state: _OversizedLineState,
+    byte_end: int,
+    session_commitment: str,
+    source_generation: int,
+    source_identity: str,
+    key_material: bytes,
+) -> str:
+    body = (
+        session_commitment.encode("ascii")
+        + b"\x00"
+        + str(source_generation).encode("ascii")
+        + b"\x00"
+        + source_identity.encode("ascii")
+        + b"\x00"
+        + f"{state.line_start}:{byte_end}:{state.prefix_digest}".encode("ascii")
+    )
+    digest = hmac.new(key_material, _OVERSIZED_LINE_DOMAIN + body, hashlib.sha256).hexdigest()
+    return f"hmac-sha256:{digest}"
 
 
 def default_stream_profile() -> CodexCapabilityProfile:
@@ -505,11 +609,42 @@ class SessionStreamReader:
         elif byte_position == 0 and event_position == 0 and self.partial_line == b"":
             restarted = generation > 1 or (self._inode is not None)
 
+        oversized_state: _OversizedLineState | None = None
+        if self.partial_line.startswith(_OVERSIZED_PARTIAL_PREFIX):
+            try:
+                oversized_state = _decode_oversized_partial(
+                    self.partial_line,
+                    session_commitment=self.session_commitment,
+                    source_generation=generation,
+                    source_identity=source_identity,
+                    key_material=self.key_material,
+                )
+                if (
+                    oversized_state is None
+                    or oversized_state.line_start > byte_position
+                    or byte_position - oversized_state.line_start <= self.profile.max_line_bytes
+                ):
+                    raise ValueError("session_stream_partial_invalid")
+            except ValueError:
+                # The private continuation marker is authenticated and bound to this session,
+                # generation, and source. An invalid/transplanted marker cannot authorize a skip;
+                # restart the generation and replay from admission instead.
+                restarted = True
+                generation += 1
+                byte_position = 0
+                event_position = 0
+                last_commitment = _EMPTY_COMMITMENT
+                self.partial_line = b""
+                oversized_state = None
+                gaps.add(ObservationGapCode.CURSOR_STALE.value)
+                gaps.add(ObservationGapCode.TRUNCATED_PAYLOAD.value)
+
         self._inode = inode if type(inode) is int else self._inode
         self._source_identity = source_identity
         self._size_at_generation = size
 
-        to_read = min(_MAX_READ_CHUNK, max(0, size - (byte_position + len(self.partial_line))))
+        partial_source_bytes = 0 if oversized_state is not None else len(self.partial_line)
+        to_read = min(_MAX_READ_CHUNK, max(0, size - (byte_position + partial_source_bytes)))
         if to_read == 0 and not self.partial_line:
             cursor = ObservationCursor(
                 source_generation=generation,
@@ -523,12 +658,15 @@ class SessionStreamReader:
                 (), cursor, self.partial_line, tuple(sorted(gaps)), restarted, truncated, rotated
             )
 
+        # A retained partial first line has not established admission. Keep requiring the exact
+        # session header until a complete admitted line advances the durable cursor.
+        require_admission = event_position == 0
         try:
             with path.open("rb") as handle:
-                handle.seek(byte_position + len(self.partial_line))
+                handle.seek(byte_position + partial_source_bytes)
                 chunk = handle.read(to_read)
-                data = self.partial_line + chunk
-                if b"\n" not in data:
+                data = chunk if oversized_state is not None else self.partial_line + chunk
+                if oversized_state is None and b"\n" not in data:
                     # A live JSONL writer can leave a legal line unterminated across hook passes.
                     # Read ahead only when the ordinary chunk contains no delimiter, and never
                     # beyond the profile's admitted line bound plus its terminator. This lets a
@@ -553,6 +691,107 @@ class SessionStreamReader:
                 rotated,
             )
 
+        if oversized_state is not None:
+            newline = data.find(b"\n")
+            if newline < 0:
+                cursor = ObservationCursor(
+                    source_generation=generation,
+                    byte_position=byte_position + len(data),
+                    event_position=event_position,
+                    last_source_commitment=last_commitment,
+                    mapping_version=STREAM_MAPPING_VERSION,
+                )
+                self.cursor = cursor
+                self.partial_line = _encode_oversized_partial(
+                    line_start=oversized_state.line_start,
+                    prefix_commitment=f"hmac-sha256:{oversized_state.prefix_digest}",
+                    session_commitment=self.session_commitment,
+                    source_generation=generation,
+                    source_identity=source_identity,
+                    key_material=self.key_material,
+                )
+                gaps.add(ObservationGapCode.TRUNCATED_PAYLOAD.value)
+                if not data and size > byte_position:
+                    gaps.add(ObservationGapCode.SOURCE_LAG.value)
+                return SessionStreamAdvance(
+                    (),
+                    cursor,
+                    self.partial_line,
+                    tuple(sorted(gaps, key=str.encode)),
+                    restarted,
+                    truncated,
+                    rotated,
+                )
+
+            byte_end = byte_position + newline + 1
+            last_commitment = _oversized_line_commitment(
+                state=oversized_state,
+                byte_end=byte_end,
+                session_commitment=self.session_commitment,
+                source_generation=generation,
+                source_identity=source_identity,
+                key_material=self.key_material,
+            )
+            event_position += 1
+            cursor = ObservationCursor(
+                source_generation=generation,
+                byte_position=byte_end,
+                event_position=event_position,
+                last_source_commitment=last_commitment,
+                mapping_version=STREAM_MAPPING_VERSION,
+            )
+            self.cursor = cursor
+            self.partial_line = b""
+            if require_admission:
+                gaps.add(ObservationGapCode.UNSUPPORTED_FORMAT.value)
+                oversized_envelopes: tuple[ObservationEnvelope, ...] = ()
+            else:
+                gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
+                oversized_envelopes = (
+                    _opaque_stream_envelope(
+                        session_commitment=self.session_commitment,
+                        cursor=cursor,
+                    ),
+                )
+            return SessionStreamAdvance(
+                oversized_envelopes,
+                cursor,
+                b"",
+                tuple(sorted(gaps, key=str.encode)),
+                restarted,
+                truncated,
+                rotated,
+            )
+
+        if b"\n" not in data and len(data) > self.profile.max_line_bytes:
+            prefix_commitment = stream_line_commitment(self.key_material, data)
+            self.partial_line = _encode_oversized_partial(
+                line_start=byte_position,
+                prefix_commitment=prefix_commitment,
+                session_commitment=self.session_commitment,
+                source_generation=generation,
+                source_identity=source_identity,
+                key_material=self.key_material,
+            )
+            cursor = ObservationCursor(
+                source_generation=generation,
+                byte_position=byte_position + len(data),
+                event_position=event_position,
+                last_source_commitment=last_commitment,
+                mapping_version=STREAM_MAPPING_VERSION,
+            )
+            self.cursor = cursor
+            gaps.add(ObservationGapCode.TRUNCATED_PAYLOAD.value)
+            return SessionStreamAdvance(
+                (),
+                cursor,
+                self.partial_line,
+                tuple(sorted(gaps, key=str.encode)),
+                restarted,
+                truncated,
+                rotated,
+            )
+
         if not data:
             cursor = ObservationCursor(
                 source_generation=generation,
@@ -566,9 +805,6 @@ class SessionStreamReader:
                 (), cursor, b"", tuple(sorted(gaps)), restarted, truncated, rotated
             )
 
-        # A retained partial first line has not established admission. Keep requiring the exact
-        # session header until a complete admitted line advances the durable cursor.
-        require_admission = byte_position == 0 and event_position == 0
         try:
             parsed = parse_codex_rollout_jsonl_from_offset(
                 data,
@@ -839,7 +1075,11 @@ def reconcile_session_stream(
         persisted_partial = (
             advance.partial_line
             if not overflow and not delivery_blocked and committed_cursor == advance.cursor
-            else b""
+            else (
+                partial
+                if partial.startswith(_OVERSIZED_PARTIAL_PREFIX) and committed_cursor == existing
+                else b""
+            )
         )
         persisted_call_tools = call_tools
         persisted_identity = (

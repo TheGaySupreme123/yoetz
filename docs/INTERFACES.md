@@ -2499,6 +2499,14 @@ Shared closed types:
   Every string semantic type present at `payload.type` and nested `payload.item.type` must belong
   to the admitted profile before a nested item is selected; one known field cannot mask an unknown
   peer. Unknown semantics never infer success.
+  A rollout line above the admitted 1 MiB line bound enters a private authenticated continuation
+  state bound to the session, source generation, and source identity. Each later reconcile scans at
+  most one 256 KiB chunk; its byte cursor may advance within the oversized line while the event
+  ordinal stays fixed. The terminator advances once as opaque `unsupported_event` evidence, using a
+  domain-separated commitment over the bounded prefix commitment and exact source span, so later
+  records remain reachable without an unbounded hook pass. Until then the tail remains pending as
+  `truncated_payload`. The marker contains no source bytes, and an invalid or transplanted marker
+  starts a new generation from profile admission rather than authorizing a skip.
 - `ObservationStatus` — lifecycle `active|degraded|stale|stopped`, source coverage, last
   observation, lag, currently true gaps, unsupported events, and the current `AdviceSnapshot`
   frontier identity. Per-code first/last-seen history is retained separately and does not make a
