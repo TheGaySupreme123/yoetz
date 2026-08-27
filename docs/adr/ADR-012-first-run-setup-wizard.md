@@ -96,13 +96,21 @@ exactly those contracts and connects the steps without weakening any existing tr
    `yoetz setup run`. An unsafe or unreadable state directory never triggers the wizard.
 
 3. **MCP registration becomes a first-class preview-gated operation** (`yoetz integrate <harness>
-   mcp status|preview|install`), automating the exact two-command sequence the Codex runbook
-   already mandates: `codex mcp get yoetz --json` first; `codex mcp add yoetz -- yoetz mcp serve`
-   only when no entry exists; a foreign same-name entry is preserved and refused with
-   `foreign_entry_present` — there is no force path. Success is verified by re-reading state, not
-   by trusting the add exit code. Registration remains a fact separate from skill installation and
-   from Codex capability support (E-002/E-013 are untouched); "registered" never implies "Codex
-   will successfully connect".
+   mcp status|preview|preview-remove|install|remove`), automating the exact two-command sequence the
+   Codex runbook already mandates: `codex mcp get yoetz --json` first. A nonzero named lookup is
+   not absence by itself: the adapter runs a bounded `codex mcp list --json` fallback and accepts
+   absence only when that successful structural listing contains no `yoetz` name. A failed or
+   malformed listing fails closed; a single matching entry is classified normally; duplicate
+   matching names are ambiguous and fail closed. It runs the exact `codex mcp add yoetz -- yoetz
+   mcp serve` command only after that positive absence observation; a foreign same-name entry is
+   preserved and refused with `foreign_entry_present` — there is no force path. The structural
+   JSON parser rejects duplicate keys, nonstandard constants, and truncated output. Codex exposes
+   no compare-and-add token, so operators must quiesce non-cooperating MCP configuration writers
+   during the accepted apply; no atomic exclusion is claimed inside the final subprocess window.
+   Success is
+   verified by re-reading state, not by trusting the add exit code. Registration remains a fact
+   separate from skill installation and from Codex capability support (E-002/E-013 are untouched);
+   "registered" never implies "Codex will successfully connect".
 
    **Founder-authorized Codex activation repair (2026-08-03).** An accepted setup now also installs
    the packaged project skill at `.agents/skills/yoetz` before it installs the structural plugin
@@ -209,6 +217,48 @@ exactly those contracts and connects the steps without weakening any existing tr
    bound home/config path and the actual activation failure reason instead of resetting to
    `codex_home_required`, and unobserved readiness facts are reported as null rather than asserted
    `false`.
+
+   **Amended 2026-08-25 — consent-gated Codex marketplace and MCP removal (issue #419).** Setup
+   writes remain reversible through the same digest-bound `--accept` lane as activation and MCP
+   install, not through `plugin_artifact_apply`. `yoetz integrate codex plugin
+   preview|status|remove` classifies ownership with `inspect_activation`, then runs
+   `codex plugin remove yoetz@yoetz --json` and, when the `[marketplaces.yoetz]` table
+   byte-matches the yoetz render, `codex plugin marketplace remove yoetz --json`. It deletes
+   repository `.agents/plugins/marketplace.json` only when a retained no-follow descriptor still
+   byte- and inode-matches through a private quarantine rename, and it deletes
+   only digest-matched versioned cache trees. `--purge-cache` is required to delete other
+   yoetz-managed version directories; it is default-off. Foreign, modified, dual, or otherwise
+   conflicting entries refuse with `remove_refused` and name the conflicting surface. The removal
+   preview binds the exact trusted project root as well as the selected executable, Codex
+   home, configuration/cache preimages, planned host commands, and cache-purge choice. A second
+   removal is `already_absent`. Preview and apply read cache trees through the same no-follow,
+   descriptor-relative total-entry/depth/path/file-count/per-member/aggregate-byte bounds. Apply
+   retains the validated version descriptor across quarantine rename, revalidates the exact
+   approved member set and bytes before and during unlink, and never blanket-deletes newly observed
+   names. It restores the exact version name when an observable content race invalidates the
+   quarantine snapshot before the first unlink but still reports the crossed mutation boundary as
+   `write_failed`, and preserves the remainder after deletion starts.
+   Malformed output after a mutating host command is outcome-unknown `write_failed`, never a
+   pre-mutation source error. A mismatch after any host/config/filesystem mutation is reported as `write_failed`, not the
+   pre-mutation retry signal `preview_stale`; successful cache-only deletion carries that mutation
+   fence into every final inventory/config/activation/skill verifier. Ordinary POSIX
+   files still expose a final non-CAS write/unlink window to a non-cooperating same-UID writer, so
+   owners must quiesce concurrent cache/config/marketplace writers during accepted removal and no atomic content
+   exclusion is claimed. The skill tree, consent records, and observation store are
+   intentionally left in place. `yoetz integrate <harness> mcp preview-remove` exposes the exact
+   unregistration digest; noninteractive `remove` requires that digest plus `--accept` before it
+   unregisters an owned external `yoetz` MCP entry with `codex mcp remove yoetz`. Apply immediately
+   re-reads the entry and refuses a foreign replacement or changed owned route observed before the
+   name-based remove. Codex exposes no compare-and-remove token, so the preview warns
+   `host_remove_not_compare_and_swap`; the owner must quiesce concurrent MCP config writers and no
+   atomic exclusion is claimed inside the final subprocess window. An already-absent entry is
+   `noop`. The same positive-absence fallback applies to every pre/post removal read, so a generic
+   failed `get` cannot become a false no-op or successful unregistration. Interactive removal
+   shows the command, route, all warning tokens, and exact preview digest before confirmation.
+   After activation removal,
+   observe/inspect reports
+   `installed_not_activated` when the managed plugin source remains (issue #387) and
+   `not_installed` only when that source is also absent.
 
 The short `yoetz --set --fireworks --model MODEL` and `yoetz --set --grok --model MODEL` paths are
 provider-only entries into the same setup ceremonies. They derive internal provider bindings and

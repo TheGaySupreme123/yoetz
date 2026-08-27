@@ -2859,13 +2859,14 @@ older-guidance render) is likewise a replaceable managed render, not a `modified
 still requires a byte-exact current renderer variant at its source fences before any mutation.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
 `HarnessMcpPort` methods are `status_registration`, `observe_registration`, `preview_registration`,
-and `apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,
+`apply_registration`, `preview_unregistration`, and `apply_unregistration`, each taking a
+`HarnessBinary` (harness ID, redacted-repr executable path,
 optional reported version, `supported|untested` compatibility). Shared names are
 `MCP_SERVER_NAME` (exactly `yoetz`), `MCP_SERVE_COMMAND` (exactly `("yoetz", "mcp", "serve")`),
 `MCP_STRICT_SERVE_COMMAND` (exactly
 `("yoetz", "mcp", "serve", "--semantic", "off")`),
 `McpRegistrationState` (`absent|yoetz_owned|foreign_present`), `McpRegistrationAction`
-(`register|reregister|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
+(`register|reregister|unregister|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
 harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_present`),
 `McpRegistrationPreview`, `McpRegistrationObservation`, `McpRegistrationCommand`,
 `McpRegistrationResult`, and
@@ -2873,14 +2874,31 @@ harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_prese
 `route_profile` (`policy|strict|null`); `route_profile` is non-null only when the state is
 `yoetz_owned`, because a foreign or absent entry has no Yoetz route to describe.
 `observe_registration` reads exactly what `status_registration` reads, mutates nothing, and shares
-its `status` diagnostic phase — it exists because both owned serve commands classify as
+its `status` diagnostic phase. Each observation starts with `codex mcp get yoetz --json`; because a
+nonzero named lookup is not positive absence, it falls back to bounded `codex mcp list --json`.
+Only a successful list with no matching name classifies as `absent`; a failed/malformed list or
+duplicate matching names raises a typed error, while one matching entry is classified normally.
+The bounded parser also rejects duplicate JSON keys, nonstandard constants, and truncated output.
+Codex exposes no compare-and-add token, so the port cannot claim atomic exclusion of a
+non-cooperating configuration writer inside the final accepted-add subprocess window.
+The observation exists because both owned serve commands classify as
 `yoetz_owned`, so state alone cannot distinguish a strict registration from a policy one.
 `HarnessMcpService` owns confirmation
 (`McpRegistrationConfirmation` with channel exactly `interactive|noninteractive_flag`) and
 diagnostics (`McpRegistrationDiagnostic`, `HarnessMcpDiagnosticSink`); every registration
 mutation is digest-bound to a freshly recomputed preview, a foreign same-name entry is
-preserved without any force path, and success is verified by re-reading state. The preview binds
-the exact command and `policy|strict` route profile. The route profile is explicit input:
+preserved without any force path, and success is verified by re-reading state. Unregistration is
+the same digest-bound lifecycle for an owned external registration: `preview_unregistration` /
+`apply_unregistration` re-read the current entry immediately before the name-based
+`codex mcp remove yoetz`, run it only when the observed argv is still the exact previewed Yoetz
+serve command, refuse an observed foreign replacement, and treat an already-absent entry as
+`noop`. Because Codex 0.149.x exposes no compare-and-remove token, an owned-entry preview carries
+`host_remove_not_compare_and_swap`; callers must quiesce concurrent host configuration writers,
+and the port does not claim atomic exclusion inside the final host subprocess window. The same
+positive-absence fallback is required after removal, so a generic failed named lookup never proves
+success. The interactive approval surface prints the exact command, route, warnings, and preview
+digest. The preview binds the exact command and `policy|strict` route profile. The route profile is
+explicit input:
 `yoetz setup run` and `yoetz integrate <harness> mcp preview|install` accept
 `--route-profile strict|policy`. Without that input, an existing yoetz-owned registration keeps
 its observed profile — no configuration derivation (or derivation-on-exception fallback) may
@@ -2891,9 +2909,11 @@ is surfaced before mutation: the wizard preview and report carry `route_profile_
 ordinary digest-bound re-registration.
 The setup-wizard
 schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
-`yoetz.setup-status/1`, and `yoetz.mcp-registration-preview/1`; the marker lives at
-`state_dir()/setup-wizard.json` via `config.paths.setup_marker_path`. The CLI surfaces are
-`yoetz setup run|status` and `yoetz integrate <harness> mcp status|preview|install` (ADR-012).
+`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1`, and
+`yoetz.mcp-unregistration-preview/1`; the marker lives at `state_dir()/setup-wizard.json` via
+`config.paths.setup_marker_path`. The CLI surfaces are
+`yoetz setup run|status` and
+`yoetz integrate <harness> mcp status|preview|preview-remove|install|remove` (ADR-012).
 Standalone `yoetz provider endpoint` retains its explicit credential next command. When endpoint
 binding is embedded in the composed setup wizard, that standalone handoff is suppressed because
 the wizard still owns privacy consent and confidential ingress. Every visible yes/no prompt near
@@ -2994,7 +3014,8 @@ the input for another host's manifest; projections share only the plan (ADR-023)
 `PluginArtifactPort` methods are `preview_artifact`, `install_artifact`, `status_artifact`, and
 `remove_artifact`; interrupted-swap recovery is expressed through `status_artifact` reconciliation,
 never automatic repair. `HostActivationPort` methods are `observe_discovery`,
-`observe_activation`, and — only when authorized — `preview_activation` and `apply_activation`.
+`observe_activation`, and — only when authorized — `preview_activation`, `apply_activation`,
+`preview_removal`, and `apply_removal`.
 Both are siblings of `IntegrationsPort`, `HarnessMcpPort`, and `ObservationPort` under the
 ADR-010/ADR-012 sibling-port rule: a host adapter may compose them but cannot collapse their state
 or authority, and no port's status field implies another's. Mutations preserve the full safe
@@ -3002,9 +3023,40 @@ artifact lifecycle (exact before/after preview and accepted digest, stale-previe
 safe-root containment, no symlink members, complete digest inventory, no unmanaged/modified
 overwrite, failure-atomic replacement, installed-byte verification, no
 filesystem-presence-to-activation inference). The #150 standalone artifact install/remove path
-consumes the ADR-016 `review_only` single-shot trusted review; activation apply remains owned by a
-later child and unavailable. The ADR-012 setup composition remains its own separately authorized
-path (ADR-023 decision 11).
+consumes the ADR-016 `review_only` single-shot trusted review. Codex marketplace activation and
+removal use the ADR-012 digest-bound `--accept` composition already used by MCP
+preview/install/remove; they do not consume `plugin_artifact_apply`, which remains the macOS
+Cursor portable-artifact presence cell and would fail closed on this host (issue #419). Cursor
+standalone activation apply remains owned by a later child and unavailable without the #409
+presence cell. The ADR-012 setup composition remains its own separately authorized path
+(ADR-023 decision 11).
+Codex `preview_removal` / `apply_removal` refuse foreign, modified, dual, or otherwise
+conflicting marketplace, config, inventory, or cache surfaces with `remove_refused` and a closed
+`conflict` token (`personal_marketplace|repository_marketplace|config_marketplace|config_plugin|
+inventory|cache`). Cache purge is default-off. The removal digest binds the exact trusted project
+root as well as the selected executable, Codex home, configuration/cache preimages, planned host
+commands, and cache-purge choice. Cache preview and apply share descriptor-relative no-follow
+total-entry, recursion-depth, relative-path, file-count, per-member, and aggregate-byte bounds.
+Apply retains the validated version descriptor through quarantine rename, binds deletion to the
+exact approved member names and bytes, refuses
+observable additions/changes before unlink, restores the exact version name when drift occurs
+before the first unlink, preserves the remainder after deletion starts, and never sweeps an
+unapproved name into deletion.
+Repository `marketplace.json` and any host-created empty `config.toml` cleanup use the same
+descriptor/inode/byte-bound private-quarantine rule rather than pathname-only unlink.
+Pre-mutation drift is `preview_stale`; once any accepted host/config/filesystem mutation has
+started, including a zero-exit mutating host command whose JSON result is malformed, a later
+conflict is `write_failed` because partial state is possible. A successful
+cache-only deletion sets the same operation-wide fence before final inventory/config/activation/
+skill verification. The adapter does not
+claim an atomic compare-and-unlink primitive for a non-cooperating same-UID writer's final POSIX
+content window, so the operator must quiesce such writers. After a successful removal,
+`codex plugin list
+--marketplace yoetz --json` is empty and `config.toml` has no yoetz tables;
+`inspect_activation` / observe status reports `installed_not_activated` when the managed plugin
+source at `.agents/plugins/yoetz` remains (issue #387) and `not_installed` only when that source
+is also absent. A second removal is `already_absent`. The skill tree, consent records, and
+observation store are intentionally left in place.
 
 The implemented artifact operation is exactly `plugin_artifact_apply`. Its prepare target is the
 portable preview digest, which already binds target identity, current-state digest, action,

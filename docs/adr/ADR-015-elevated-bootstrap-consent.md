@@ -1,11 +1,12 @@
 # ADR-015 — OS-presence-gated elevated bootstrap consent
 
 **Status:** Amended 2026-07-31; amended 2026-08-09 for agent-attested chat authorize
-(issue #164); amended 2026-08-18 for atomic concurrent review claims (issue #344). Superseded in
-scope by ADR-016 for the general non-default consent catalog. Console `yoetz consent review`
-remains fail-closed until a verified OS-presence adapter is installed; allowlisted first-party
-agents may use `yoetz consent authorize` for exact prepared operations that advertise delegated
-chat authority.
+(issue #164); amended 2026-08-18 for atomic concurrent review claims (issue #344); amended
+2026-08-25 to name Codex marketplace/MCP removal as outside this OS-presence lane (issue #419).
+Superseded in scope by ADR-016 for the general non-default consent catalog. Console `yoetz consent
+review` remains fail-closed until a verified OS-presence adapter is installed; allowlisted
+first-party agents may use `yoetz consent authorize` for exact prepared operations that advertise
+delegated chat authority.
 **Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
 `src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`,
 `src/yoetz/protocol/consent.py`, and `src/yoetz/protocol/chat_user_authority.py`.
@@ -26,6 +27,14 @@ still must not accept an agent-selected passphrase.
 1. **Implemented bootstrap operations.** `vault_initialize`, `provider_credential_set`,
    `provider_credential_rotate`, and `repository_privacy_grant` use this lane. It is not a
    vault-unlock API, recovery API, or standing elevation mode.
+
+   **Amendment (2026-08-25, issue #419).** Codex marketplace/plugin removal
+   (`yoetz integrate codex plugin remove`) and external MCP unregistration
+   (`yoetz integrate codex mcp remove`) are not ADR-015 OS-presence operations. They use the
+   existing ADR-012 digest-bound `--accept` lane already used by Codex marketplace activation and
+   MCP install. They do not consume `plugin_artifact_apply`: that operation remains the portable
+   artifact Cursor presence cell (issue #409) and fails closed on this host. Agent-chat authorize
+   is not extended to either removal command.
 
 2. **Agent-safe preparation.** `yoetz consent prepare` creates one owner-only
    `yoetz.elevated-bootstrap.pending/2` record. Its agent projection is

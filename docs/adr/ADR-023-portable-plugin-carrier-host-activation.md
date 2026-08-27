@@ -77,7 +77,8 @@ becomes host-derived.
    (ADR-010/ADR-012): `PluginArtifactPort` — `preview_artifact`, `install_artifact`,
    `status_artifact`, `remove_artifact`, with interrupted-swap recovery expressed through status
    reconciliation, never automatic repair — and `HostActivationPort` — `observe_discovery`,
-   `observe_activation`, and, only when authorized, `preview_activation` / `apply_activation`.
+   `observe_activation`, and, only when authorized, `preview_activation` / `apply_activation`
+   and `preview_removal` / `apply_removal`.
    `HarnessMcpPort` keeps external/global MCP registration; `ObservationPort` keeps consented
    observation. A host adapter may compose these ports; it cannot collapse their state or
    authority, and no port's status field implies another's.
@@ -164,6 +165,16 @@ becomes host-derived.
     boundary they do not exist at all. The ADR-012 setup wizard's
     already-authorized digest-bound composition remains the separately authorized install path and
     is unchanged. Agent preparation is never trusted human review (ADR-015/ADR-016).
+
+    **Amendment (2026-08-25, issue #419).** Codex marketplace removal is authorized the same way
+    Codex marketplace activation already is: the ADR-012 digest-bound `--accept` composition on
+    `yoetz integrate codex plugin remove` and `yoetz integrate codex mcp remove`. That path does
+    not consume `plugin_artifact_apply`. Using the Cursor OS-presence cell here would fail closed
+    on this host and would mis-name the authority Codex activation already uses. Cache purge is
+    default-off. Removal never deletes the skill tree, consent records, or the observation store.
+    After a successful activation removal, `inspect_activation` follows the #347/#387 closed
+    states: `installed_not_activated` when the managed plugin source at `.agents/plugins/yoetz`
+    remains, and `not_installed` only when that source is also absent.
 
 12. **Phased rollout, ADR-009 untouched.** Slice 1 is explicitly skills-only with
     `external_registration`: the portable artifact carries metadata and shared skill bytes, omits

@@ -214,3 +214,64 @@ class HarnessMcpService:
             )
         )
         return result
+
+    async def preview_unregistration(self, binary: HarnessBinary) -> McpRegistrationPreview:
+        if type(binary) is not HarnessBinary:
+            raise _invalid("integration_request_invalid")
+        try:
+            preview = await self._port.preview_unregistration(binary)
+        except McpRegistrationError as exc:
+            self._diagnostics.record_mcp_registration(
+                McpRegistrationDiagnostic(
+                    binary.harness_id, "preview", "failed", None, None, None, exc.reason
+                )
+            )
+            raise
+        self._diagnostics.record_mcp_registration(
+            McpRegistrationDiagnostic(
+                binary.harness_id,
+                "preview",
+                "success",
+                preview.state_before,
+                preview.state_before,
+                preview.preview_digest,
+                None,
+            )
+        )
+        return preview
+
+    async def unregister(
+        self,
+        binary: HarnessBinary,
+        confirmation: McpRegistrationConfirmation,
+    ) -> McpRegistrationResult:
+        if type(binary) is not HarnessBinary:
+            raise _invalid("integration_request_invalid")
+        if type(confirmation) is not McpRegistrationConfirmation:
+            raise _invalid("integration_confirmation_invalid")
+        try:
+            if not confirmation.explicitly_accepted:
+                raise McpRegistrationError(McpRegistrationReason.CONFIRMATION_REQUIRED, {})
+            result = await self._port.apply_unregistration(
+                binary,
+                McpRegistrationCommand(confirmation.preview_digest, True),
+            )
+        except McpRegistrationError as exc:
+            self._diagnostics.record_mcp_registration(
+                McpRegistrationDiagnostic(
+                    binary.harness_id, "execute", "failed", None, None, None, exc.reason
+                )
+            )
+            raise
+        self._diagnostics.record_mcp_registration(
+            McpRegistrationDiagnostic(
+                binary.harness_id,
+                "execute",
+                "success",
+                result.state_before,
+                result.state_after,
+                result.preview_digest,
+                None,
+            )
+        )
+        return result

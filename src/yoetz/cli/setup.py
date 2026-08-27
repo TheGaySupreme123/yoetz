@@ -767,6 +767,23 @@ def _emit_registration_preview(
         typer.echo("  the exact digest above. Any byte change suspends execution.")
 
 
+def _emit_unregistration_preview(mcp_preview: object) -> None:
+    """Show every approval-relevant removal field before interactive consent."""
+
+    typer.echo("Proposed change: remove the Yoetz-owned Codex MCP registration")
+    typer.echo("  MCP server name: yoetz")
+    typer.echo(f"  Action: {getattr(mcp_preview, 'action').value}")
+    typer.echo(f"  State before: {getattr(mcp_preview, 'state_before').value}")
+    serve_command = getattr(mcp_preview, "serve_command", ())
+    typer.echo(f"  Command: {' '.join(serve_command)}")
+    route_profile = getattr(mcp_preview, "route_profile", None)
+    if type(route_profile) is str:
+        typer.echo(f"  MCP route profile: {route_profile}")
+    for warning in getattr(mcp_preview, "warnings", ()):
+        typer.echo(f"  Warning: {warning}")
+    typer.echo(f"  Preview digest: {getattr(mcp_preview, 'preview_digest')}")
+
+
 def _plugin_verified(presence: str | None) -> bool:
     return presence == PluginHookPresence.INSTALLED.value
 
@@ -2689,14 +2706,20 @@ async def integrate_mcp(
     json_output: bool,
     route_profile: Literal["policy", "strict"] | None = None,
 ) -> int:
-    """Client-local ``integrate <harness> mcp status|preview|install`` commands.
+    """Client-local MCP status, registration, and unregistration commands.
 
     ``route_profile`` is the explicit route input. When absent, an existing
     yoetz-owned registration keeps its observed profile (#389); only a fresh
     registration falls back to the structural configuration derivation.
     """
 
-    if harness != "codex" or action not in {"status", "preview", "install"}:
+    if harness != "codex" or action not in {
+        "status",
+        "preview",
+        "preview-remove",
+        "install",
+        "remove",
+    }:
         return _usage_failure("the harness or action is not supported")
     interactive = _is_interactive_terminal()
     binaries = discover_codex_binaries()
@@ -2716,6 +2739,63 @@ async def integrate_mcp(
                     "harness": harness,
                     "route_profile": observation.route_profile,
                     "state": observation.state.value,
+                },
+                json_output=json_output,
+            )
+            return 0
+        if action in {"preview-remove", "remove"}:
+            preview = await service.preview_unregistration(chosen)
+            if action == "preview-remove":
+                _emit(
+                    {
+                        "action": preview.action.value,
+                        "harness": harness,
+                        "preview_digest": preview.preview_digest,
+                        "route_profile": preview.route_profile,
+                        "serve_command": list(preview.serve_command),
+                        "state_before": preview.state_before.value,
+                        "warnings": list(preview.warnings),
+                    },
+                    json_output=json_output,
+                )
+                return 0
+            if preview_digest is not None and preview_digest != preview.preview_digest:
+                return _mcp_error_exit("preview_stale")
+            if preview.state_before is McpRegistrationState.FOREIGN_PRESENT:
+                return _mcp_error_exit("foreign_entry_present")
+            if accept and preview_digest is None:
+                return _mcp_error_exit("confirmation_required")
+            accepted = accept
+            if interactive and not accepted:
+                _emit_unregistration_preview(preview)
+                accepted = _confirm_registration()
+            if not accepted:
+                return _mcp_error_exit("confirmation_required")
+            if preview.action is McpRegistrationAction.NOOP:
+                _emit(
+                    {
+                        "action": "noop",
+                        "harness": harness,
+                        "state_after": preview.state_before.value,
+                        "state_before": preview.state_before.value,
+                    },
+                    json_output=json_output,
+                )
+                return 0
+            result = await service.unregister(
+                chosen,
+                McpRegistrationConfirmation(
+                    preview.preview_digest,
+                    True,
+                    "interactive" if interactive else "noninteractive_flag",
+                ),
+            )
+            _emit(
+                {
+                    "action": result.action.value,
+                    "harness": harness,
+                    "state_after": result.state_after.value,
+                    "state_before": result.state_before.value,
                 },
                 json_output=json_output,
             )

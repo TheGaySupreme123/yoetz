@@ -92,6 +92,32 @@ class _Port:
             command.preview_digest,
         )
 
+    async def preview_unregistration(self, binary: HarnessBinary) -> McpRegistrationPreview:
+        if self.fail_with is not None:
+            raise McpRegistrationError(self.fail_with, {})
+        action = (
+            McpRegistrationAction.NOOP
+            if self.state is McpRegistrationState.ABSENT
+            else McpRegistrationAction.UNREGISTER
+        )
+        return McpRegistrationPreview(binary.harness_id, action, self.state, (), _DIGEST)
+
+    async def apply_unregistration(
+        self,
+        binary: HarnessBinary,
+        command: McpRegistrationCommand,
+    ) -> McpRegistrationResult:
+        self.applied.append(command)
+        if self.fail_with is not None:
+            raise McpRegistrationError(self.fail_with, {})
+        return McpRegistrationResult(
+            binary.harness_id,
+            McpRegistrationAction.UNREGISTER,
+            self.state,
+            McpRegistrationState.ABSENT,
+            command.preview_digest,
+        )
+
 
 def test_status_and_preview_record_success_diagnostics() -> None:
     sink = _Sink()
@@ -200,3 +226,33 @@ def test_invalid_binary_rejected() -> None:
     service = HarnessMcpService(_Port())
     with pytest.raises(ValueError):
         anyio.run(lambda: service.status(object()))  # type: ignore[arg-type]
+
+
+def test_unregister_requires_explicit_acceptance() -> None:
+    sink = _Sink()
+    port = _Port(McpRegistrationState.YOETZ_OWNED)
+    service = HarnessMcpService(port, sink)
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: service.unregister(
+                _BINARY,
+                McpRegistrationConfirmation(_DIGEST, False, "interactive"),
+            )
+        )
+    assert caught.value.reason is McpRegistrationReason.CONFIRMATION_REQUIRED
+    assert port.applied == []
+
+
+def test_unregister_passes_exact_digest_and_records_result() -> None:
+    sink = _Sink()
+    port = _Port(McpRegistrationState.YOETZ_OWNED)
+    service = HarnessMcpService(port, sink)
+    result = anyio.run(
+        lambda: service.unregister(
+            _BINARY,
+            McpRegistrationConfirmation(_DIGEST, True, "noninteractive_flag"),
+        )
+    )
+    assert result.state_after is McpRegistrationState.ABSENT
+    assert port.applied == [McpRegistrationCommand(_DIGEST, True)]
+    assert sink.records[-1].phase == "execute"
