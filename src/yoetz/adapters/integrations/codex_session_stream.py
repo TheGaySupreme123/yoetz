@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import time
 from collections.abc import Callable, Mapping
@@ -33,7 +35,7 @@ from yoetz.domain.observation import (
 )
 from yoetz.domain.values import JsonObject, JsonValue, Timestamp, timestamp_from_datetime
 from yoetz.ports.importer import ImportLineStatus
-from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.canonical import canonical_digest, canonical_encode
 
 __all__ = [
     "CodexSessionStreamLocator",
@@ -84,6 +86,20 @@ def _now() -> Timestamp:
     current = datetime.now(UTC)
     stamp = current.replace(microsecond=(current.microsecond // 1000) * 1000)
     return timestamp_from_datetime(stamp)
+
+
+def _source_file_identity(facts: os.stat_result, key_material: bytes) -> str:
+    """Return a private, path-free identity for one opened stream generation."""
+
+    payload = canonical_encode(
+        JsonObject(
+            {
+                "device": facts.st_dev,
+                "inode": facts.st_ino,
+            }
+        )
+    )
+    return "hmac-sha256:" + hmac.new(key_material, payload, hashlib.sha256).hexdigest()
 
 
 def _token(value: object) -> str | None:
@@ -326,6 +342,7 @@ def envelope_from_stream_record(
             JsonObject(
                 {
                     "byte_end": record.byte_end,
+                    "source_generation": cursor.source_generation,
                     "host_ids": JsonObject(host_ids),
                     "ordinal": record.line_ordinal,
                     "structural": structural,
@@ -363,6 +380,7 @@ def _opaque_stream_envelope(
                     "byte_end": cursor.byte_position,
                     "line_commitment": cursor.last_source_commitment,
                     "ordinal": cursor.event_position,
+                    "source_generation": cursor.source_generation,
                     "wrapper": "unsupported_event",
                 }
             )
@@ -402,6 +420,7 @@ class SessionStreamReader:
     key_material: bytes
     partial_line: bytes = b""
     _inode: int | None = None
+    _source_identity: str | None = None
     _size_at_generation: int = 0
 
     def __post_init__(self) -> None:
@@ -409,6 +428,12 @@ class SessionStreamReader:
             raise ValueError("session_stream_partial_invalid")
         if type(self.key_material) is not bytes or not 16 <= len(self.key_material) <= 64:
             raise ValueError("session_stream_key_invalid")
+
+    @property
+    def source_identity(self) -> str | None:
+        """Return the private identity of the source inspected by the latest advance."""
+
+        return self._source_identity
 
     def advance(self, path: Path) -> SessionStreamAdvance:
         gaps: set[str] = set()
@@ -424,13 +449,16 @@ class SessionStreamReader:
             )
 
         inode = getattr(stat, "st_ino", None)
+        source_identity = _source_file_identity(stat, self.key_material)
         size = stat.st_size
         generation = self.cursor.source_generation
         byte_position = self.cursor.byte_position
         event_position = self.cursor.event_position
         last_commitment = self.cursor.last_source_commitment
 
-        if self._inode is not None and inode is not None and inode != self._inode:
+        if (self._source_identity is not None and source_identity != self._source_identity) or (
+            self._inode is not None and inode is not None and inode != self._inode
+        ):
             # Rotation: new inode → new generation.
             rotated = True
             generation += 1
@@ -452,6 +480,7 @@ class SessionStreamReader:
             restarted = generation > 1 or (self._inode is not None)
 
         self._inode = inode if type(inode) is int else self._inode
+        self._source_identity = source_identity
         self._size_at_generation = size
 
         to_read = min(_MAX_READ_CHUNK, max(0, size - (byte_position + len(self.partial_line))))
@@ -714,7 +743,17 @@ def reconcile_session_stream(
     call_tools = (
         {}
         if mapping_reset
-        else store.stream_call_tools_for_session(workspace_commitment, session_commitment)
+        else store.stream_call_tools_for_session(
+            workspace_commitment,
+            session_commitment,
+            source_generation=existing.source_generation,
+        )
+    )
+    prior_call_tools = dict(call_tools)
+    source_identity = (
+        None
+        if mapping_reset
+        else store.stream_source_identity_for_session(workspace_commitment, session_commitment)
     )
     reader = SessionStreamReader(
         session_commitment=session_commitment,
@@ -722,15 +761,19 @@ def reconcile_session_stream(
         cursor=existing,
         key_material=store.key_material(),
         partial_line=partial,
+        _source_identity=source_identity,
     )
     advance = reader.advance(path)
+    if advance.cursor.source_generation != existing.source_generation:
+        call_tools.clear()
     accepted = 0
     duplicates = 0
     overflow = False
     delivery_blocked = False
     committed_cursor = existing
     for unpaired_envelope in advance.envelopes:
-        envelope = _pair_stream_tool_name(unpaired_envelope, call_tools)
+        candidate_call_tools = dict(call_tools)
+        envelope = _pair_stream_tool_name(unpaired_envelope, candidate_call_tools)
         result = store.ingest(envelope)
         if result.disposition.value not in {"accepted", "duplicate"}:
             delivery_blocked = True
@@ -744,6 +787,7 @@ def reconcile_session_stream(
         ):
             overflow = True
             break
+        call_tools = candidate_call_tools
         committed_cursor = envelope.cursor
         if result.disposition.value == "accepted":
             accepted += 1
@@ -751,14 +795,33 @@ def reconcile_session_stream(
             duplicates += 1
     if not overflow and not delivery_blocked:
         committed_cursor = advance.cursor
-    store.replace_stream_call_tools(workspace_commitment, session_commitment, call_tools)
-    store.set_stream_cursor(workspace_commitment, session_commitment, committed_cursor)
-    # A partial tail belongs to ``advance.cursor``. When overflow leaves the
-    # cursor behind, discard that tail and reread from the last queued line.
-    store.set_stream_partial(
+    source_read_complete = ObservationGapCode.SOURCE_LAG.value not in advance.gaps
+    progress_committed = committed_cursor != existing
+    if progress_committed or (not overflow and not delivery_blocked and source_read_complete):
+        persisted_partial = (
+            advance.partial_line
+            if not overflow and not delivery_blocked and committed_cursor == advance.cursor
+            else b""
+        )
+        persisted_call_tools = call_tools
+        persisted_identity = (
+            reader.source_identity
+            if committed_cursor.source_generation == advance.cursor.source_generation
+            else source_identity
+        )
+    else:
+        # No cursor progress means no new source identity or pairing state may
+        # commit: the next process must rediscover rotation and replay line 1.
+        persisted_partial = partial
+        persisted_call_tools = prior_call_tools
+        persisted_identity = source_identity
+    store.set_stream_reconcile_state(
         workspace_commitment,
         session_commitment,
-        advance.partial_line if not overflow and not delivery_blocked else b"",
+        cursor=committed_cursor,
+        partial=persisted_partial,
+        call_tools=persisted_call_tools,
+        source_identity=persisted_identity,
     )
     store.note_stream_reconcile(workspace_commitment)
     gaps = advance.gaps

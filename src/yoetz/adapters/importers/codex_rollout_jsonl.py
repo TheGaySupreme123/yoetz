@@ -19,6 +19,7 @@ from yoetz.adapters.importers.codex_jsonl import (
     CodexParseResult,
     CodexSourceLine,
 )
+from yoetz.adapters.integrations.codex_capability_cells import CODEX_ROLLOUT_HISTORY_MODES
 from yoetz.domain.values import JsonObject, JsonValue, freeze_json
 from yoetz.observability.privacy import redact_sensitive_content
 from yoetz.ports.importer import ImportLineStatus
@@ -75,6 +76,7 @@ def _profile_digest() -> str:
         {
             "cli_version": "0.148.0",
             "item_types": _ITEM_TYPES,
+            "history_modes": CODEX_ROLLOUT_HISTORY_MODES,
             "max_line_bytes": _MAX_LINE_BYTES,
             "max_lines": _MAX_LINES,
             "max_source_bytes": _MAX_SOURCE_BYTES,
@@ -319,6 +321,9 @@ def _admit_session_meta(
         return False, "unsupported_codex_profile"
     admitted = SUPPORTED_ROLLOUT_PROFILES.get(cli_version)
     if admitted != profile:
+        return False, "unsupported_codex_profile"
+    history_mode = cast(dict[str, object], payload).get("history_mode")
+    if type(history_mode) is not str or history_mode not in CODEX_ROLLOUT_HISTORY_MODES:
         return False, "unsupported_codex_profile"
     return True, "session_meta"
 

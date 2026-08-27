@@ -15,6 +15,9 @@ skill files under `skills/codex/`, and `tests/capability/`.
    importer remains pinned at `0.139.0` (`codex-exec-jsonl/0.139.0/v1`). The session-stream
    reconciler is a different surface and has a parser-only rollout grammar profile for `0.148.0`
    (`codex-rollout-jsonl/0.148.0/v1`) covering constructed `legacy` and `paginated` fixtures.
+   Admission requires the exact session metadata `cli_version` and one of those two
+   `history_mode` values; future or malformed modes fail as unsupported format rather than being
+   interpreted under the pinned grammar.
    Those fixtures are not an isolated installed-artifact capture and therefore do not populate
    `CODEX_HARNESS_PROFILE`, the skill manifest's tested/supported bounds, or `yoetz version`
    capability profiles. Neighbors including `0.149.1` stay untested. The full skill/MCP/hook

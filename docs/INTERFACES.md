@@ -2480,11 +2480,15 @@ Shared closed types:
   flag, and bytes. At most 16 chunks and 700,000 aggregate input bytes keep the request below the
   ordinary 1 MiB control-frame cap; each assembled encrypted object remains below 4 MiB.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
-  mapping version. Codex session-stream cursors use `codex-obs-stream/1.1.0` (rollout JSONL
-  grammar). Cursors are crash-stable and generation-fenced.
+  mapping version. Codex session-stream cursors use `codex-obs-stream/1.2.0` (rollout JSONL
+  grammar). Cursors are crash-stable and generation-fenced. A private HMAC of the source
+  device/inode detects same-or-larger file replacement across reconcile processes; call-id/tool
+  pairing and outbox dedup are fenced by the resulting source generation, and legacy unfenced
+  pairing state is discarded.
 - `ObservationGapCode` — closed coverage tokens. `unsupported_event` is an admitted profile with
   an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, unknown
-  `cli_version`, or compressed `rollout-*.jsonl.zst` that the hook pass does not decompress).
+  `cli_version`, an absent/unknown `history_mode`, or compressed `rollout-*.jsonl.zst` that the
+  hook pass does not decompress).
   Unknown semantics never infer success.
 - `ObservationStatus` — lifecycle `active|degraded|stale|stopped`, source coverage, last
   observation, lag, currently true gaps, unsupported events, and the current `AdviceSnapshot`

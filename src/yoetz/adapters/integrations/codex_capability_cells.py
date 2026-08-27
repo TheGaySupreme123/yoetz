@@ -26,7 +26,7 @@ __all__ = [
 
 CODEX_ROLLOUT_CLI_VERSION: Final = "0.148.0"
 CODEX_ROLLOUT_IMPORTER_PROFILE_ID: Final = "codex-rollout-jsonl/0.148.0/v1"
-CODEX_ROLLOUT_STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.1.0"
+CODEX_ROLLOUT_STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.2.0"
 CODEX_ROLLOUT_SURFACE: Final = "session_stream_rollout"
 CODEX_ROLLOUT_HISTORY_MODES: Final = ("legacy", "paginated")
 CODEX_ROLLOUT_EVIDENCE_CASE_IDS: Final = ("IMP-006", "IMP-007", "IMP-008", "IMP-009")

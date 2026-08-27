@@ -150,6 +150,24 @@ def test_wrong_cli_version_is_unsupported_format() -> None:
     assert all(status is ImportLineStatus.UNSUPPORTED for status in parsed.statuses)
 
 
+@pytest.mark.parametrize("history_mode", ["future", None, 1])
+def test_unknown_or_invalid_history_mode_is_unsupported_format(history_mode: object) -> None:
+    profile = profile_for_rollout_version("0.148.0")
+    meta = session_meta()
+    payload = cast(dict[str, object], meta["payload"])
+    if history_mode is None:
+        payload.pop("history_mode")
+    else:
+        payload["history_mode"] = history_mode
+    source = encode_lines(meta, function_call(name="shell", call_id="x"))
+
+    parsed = parse_codex_rollout_jsonl(source, profile, require_admission=True)
+
+    assert parsed.records == ()
+    assert parsed.stream_gaps == ("unsupported_codex_profile",)
+    assert all(status is ImportLineStatus.UNSUPPORTED for status in parsed.statuses)
+
+
 def test_unknown_item_type_is_not_mapped_as_clean_coverage() -> None:
     parsed = parse_codex_rollout_jsonl(
         encode_lines(session_meta(), response_item({"type": "future_tool_result"})),

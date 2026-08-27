@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -370,6 +371,261 @@ def test_function_call_name_pairs_with_output_across_reconcile_passes(tmp_path: 
     assert outputs[0].structural_payload.get("tool_name") == "shell"
     batch = materialize_observation_envelope(outputs[0], task_id="task_stream_pair")
     assert tuple(item.role for item in batch.drafts) == ("action", "result")
+
+
+def test_truncation_clears_persisted_call_pairing_across_store_restart(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    session_id = "stream-pair-truncated-generation"
+    target = sessions / f"rollout-{session_id}.jsonl"
+    target.write_bytes(
+        encode_lines(
+            session_meta(),
+            function_call(name="shell", call_id="call-reused"),
+            response_item(
+                {
+                    "content": [{"text": "x" * 2048, "type": "output_text"}],
+                    "role": "assistant",
+                    "type": "message",
+                }
+            ),
+        )
+    )
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    locator = CodexSessionStreamLocator(home)
+    first = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+    assert first["generation"] == 1
+
+    target.write_bytes(
+        encode_lines(session_meta(), function_call_output(call_id="call-reused", exit_code=0))
+    )
+    reopened = LocalObservationStore(_state=tmp_path)
+    second = reconcile_session_stream(
+        reopened,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+
+    assert second["truncated"] is True
+    assert second["generation"] == 2
+    outputs = [
+        row.envelope
+        for row in reopened.list_pending_outbox_rows(workspace)
+        if row.envelope.cursor.source_generation == 2
+        and row.envelope.structural_payload.get("action") == "function_call_output"
+    ]
+    assert len(outputs) == 1
+    assert "tool_name" not in outputs[0].structural_payload
+
+
+def test_same_or_larger_rotation_clears_pairing_across_store_restart(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    session_id = "stream-pair-rotated-generation"
+    target = sessions / f"rollout-{session_id}.jsonl"
+    initial = encode_lines(
+        session_meta(),
+        function_call(name="shell", call_id="call-reused"),
+    )
+    target.write_bytes(initial)
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    locator = CodexSessionStreamLocator(home)
+    reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+
+    replacement = target.with_suffix(".replacement")
+    rotated = encode_lines(
+        session_meta(),
+        function_call_output(call_id="call-reused", exit_code=0),
+        response_item(
+            {
+                "content": [{"text": "y" * 2048, "type": "output_text"}],
+                "role": "assistant",
+                "type": "message",
+            }
+        ),
+    )
+    assert len(rotated) >= len(initial)
+    replacement.write_bytes(rotated)
+    os.replace(replacement, target)
+    reopened = LocalObservationStore(_state=tmp_path)
+    second = reconcile_session_stream(
+        reopened,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+
+    assert second["rotated"] is True
+    assert second["generation"] == 2
+    outputs = [
+        row.envelope
+        for row in reopened.list_pending_outbox_rows(workspace)
+        if row.envelope.cursor.source_generation == 2
+        and row.envelope.structural_payload.get("action") == "function_call_output"
+    ]
+    assert len(outputs) == 1
+    assert "tool_name" not in outputs[0].structural_payload
+
+
+@pytest.mark.parametrize("blocked_by", ["ingest", "outbox"])
+def test_rotated_identity_retries_from_header_when_first_envelope_is_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_by: str,
+) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    session_id = f"stream-rotation-{blocked_by}-retry"
+    target = sessions / f"rollout-{session_id}.jsonl"
+    initial = encode_lines(
+        session_meta(),
+        function_call(name="shell", call_id="call-old"),
+    )
+    target.write_bytes(initial)
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    locator = CodexSessionStreamLocator(home)
+    reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+    before = store.get_stream_cursor(workspace, session)
+    assert before is not None and before.source_generation == 1
+
+    replacement = target.with_suffix(".replacement")
+    rotated = encode_lines(
+        session_meta(),
+        function_call_output(call_id="call-old", exit_code=0),
+        response_item(
+            {
+                "content": [{"text": "z" * 2048, "type": "output_text"}],
+                "role": "assistant",
+                "type": "message",
+            }
+        ),
+    )
+    assert len(rotated) >= len(initial)
+    replacement.write_bytes(rotated)
+    os.replace(replacement, target)
+
+    with monkeypatch.context() as blocked:
+        if blocked_by == "ingest":
+
+            def reject(
+                _store: LocalObservationStore,
+                envelope: object,
+            ) -> ObservationIngestResult:
+                del envelope
+                return ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.CURSOR_STALE.value,
+                    None,
+                )
+
+            blocked.setattr(LocalObservationStore, "ingest", reject)
+        else:
+
+            def overflow(
+                _store: LocalObservationStore,
+                workspace_commitment: str,
+                selected_session_id: str,
+                envelope: object,
+            ) -> str:
+                del workspace_commitment, selected_session_id, envelope
+                return ObservationGapCode.OUTBOX_OVERFLOW.value
+
+            blocked.setattr(LocalObservationStore, "enqueue_outbox", overflow)
+        failed = reconcile_session_stream(
+            LocalObservationStore(_state=tmp_path),
+            workspace_commitment=workspace,
+            session_commitment=session,
+            codex_session_id=session_id,
+            locator=locator,
+        )
+
+    assert failed["generation"] == 1
+    assert failed["byte_position"] == before.byte_position
+    retry_store = LocalObservationStore(_state=tmp_path)
+    retried = reconcile_session_stream(
+        retry_store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=locator,
+    )
+
+    assert retried["rotated"] is True
+    assert retried["generation"] == 2
+    assert retried["byte_position"] == len(rotated)
+    outputs = [
+        row.envelope
+        for row in retry_store.list_pending_outbox_rows(workspace)
+        if row.envelope.cursor.source_generation == 2
+        and row.envelope.structural_payload.get("action") == "function_call_output"
+    ]
+    assert len(outputs) == 1
+    assert "tool_name" not in outputs[0].structural_payload
+
+
+def test_legacy_unfenced_call_pairing_is_discarded(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment("stream-legacy-call-tools")
+    store.replace_stream_call_tools(
+        workspace,
+        session,
+        source_generation=1,
+        call_tools={"call-old": "shell"},
+    )
+    state_path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    raw["schema"] = "yoetz.observation-local/8"
+    raw["stream_call_tools"][session] = {"call-old": "shell"}
+    state_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    reopened = LocalObservationStore(_state=tmp_path)
+
+    assert (
+        reopened.stream_call_tools_for_session(
+            workspace,
+            session,
+            source_generation=1,
+        )
+        == {}
+    )
 
 
 def test_locator_matches_reverted_thread_filename(tmp_path: Path) -> None:
