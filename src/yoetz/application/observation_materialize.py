@@ -58,17 +58,22 @@ from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 __all__ = [
     "HOST_OUTCOME_UNAVAILABLE_GAP",
     "approved_check_author",
+    "MATERIALIZATION_LEGACY_MAPPING_VERSIONS",
     "MATERIALIZATION_MAPPING_VERSION",
     "MaterializedObservationBatch",
     "MaterializedObservationDraft",
+    "STREAM_COMPLETED_EVENT_KINDS",
     "canonical_logical_identity",
     "materialize_observation_envelope",
+    "materialize_observation_outcome_correction",
     "observation_claim_identity",
     "observation_writer_id",
     "stable_observation_id",
+    "stream_event_is_completed_tool",
 ]
 
-MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.2.0"
+MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.3.0"
+MATERIALIZATION_LEGACY_MAPPING_VERSIONS: Final = ("obs-ledger/1.2.0",)
 # One bounded coverage condition for "the host emitted a paired tool result with
 # no outcome semantics at all" (#350). It rides the entry coverage of the
 # affected action/result records, so any number of outcome-less observed calls
@@ -110,6 +115,25 @@ _COMPLETION_KINDS: Final = frozenset(
 _PERMISSION_KINDS: Final = frozenset({"PermissionRequest", "PermissionDecision"})
 _SUBAGENT_START: Final = frozenset({"SubagentStart"})
 _SUBAGENT_STOP: Final = frozenset({"SubagentStop"})
+STREAM_COMPLETED_EVENT_KINDS: Final = frozenset(
+    {
+        "custom_tool_call_output",
+        "function_call_output",
+        "item.completed",
+        "item_completed",
+    }
+)
+
+
+def stream_event_is_completed_tool(kind: str, structural: Mapping[str, JsonValue]) -> bool:
+    """True when a session-stream envelope is a completed host tool call."""
+
+    if kind in STREAM_COMPLETED_EVENT_KINDS:
+        return True
+    action = structural.get("action")
+    return (
+        kind == "response_item" and type(action) is str and action in STREAM_COMPLETED_EVENT_KINDS
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,13 +344,15 @@ def materialize_observation_envelope(
     channel = PublicationChannel.HOOK_OBSERVED
     mapping = envelope.cursor.mapping_version or MATERIALIZATION_MAPPING_VERSION
     kind = envelope.event_kind
-    # Codex hook ``PostToolUse`` and session-stream ``item.completed`` are two
-    # observations of the same completed host call. Normalize the stream form
+    # Codex hook ``PostToolUse`` and a completed session-stream tool record
+    # (rollout ``function_call_output``, historically exec ``item.completed``)
+    # are two observations of the same host call. Normalize the stream form
     # before choosing ledger roles so both sources produce the same
     # action/result batch and therefore the same operation digest.
+    completed_stream = stream_event_is_completed_tool(kind, structural)
     if (
         envelope.source is ObservationSource.CODEX_SESSION_STREAM
-        and kind == "item.completed"
+        and completed_stream
         and _correlation(structural) is not None
     ):
         kind = "PostToolUse"
@@ -452,33 +478,35 @@ def materialize_observation_envelope(
             return MaterializedObservationBatch(tuple(drafts), coverage, channel, merged_gaps, None)
 
         # Linked post: action (idempotent stable IDs from correlation) + result.
-        action_source = f"pre:{correlation}:{tool or 'tool'}"
+        family = _action_kind(tool).value
+        action_source = f"pre:{correlation}:{family}"
         action = stable_observation_id(
             kind=IdKind.ACTION,
             task_id=task_id,
             source_identity=action_source,
-            mapping_version=mapping,
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
             role="action",
         )
         action_event = stable_observation_id(
             kind=IdKind.EVENT,
             task_id=task_id,
             source_identity=action_source,
-            mapping_version=mapping,
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
             role="action_event",
         )
+        result_source = f"post:{correlation}:{family}"
         result = stable_observation_id(
             kind=IdKind.RESULT,
             task_id=task_id,
-            source_identity=envelope.source_identity,
-            mapping_version=mapping,
+            source_identity=result_source,
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
             role="result",
         )
         result_event = stable_observation_id(
             kind=IdKind.EVENT,
             task_id=task_id,
-            source_identity=envelope.source_identity,
-            mapping_version=mapping,
+            source_identity=result_source,
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
             role="result_event",
         )
         action_kind = _action_kind(tool)
@@ -702,10 +730,133 @@ def materialize_observation_envelope(
     return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
 
+def materialize_observation_outcome_correction(
+    envelope: ObservationEnvelope,
+    *,
+    task_id: str,
+    conflict: bool = False,
+    target_action_id: str | None = None,
+    target_action_event_id: str | None = None,
+) -> MaterializedObservationBatch:
+    """Append an explicit stream outcome that enriches an earlier UNKNOWN hook result.
+
+    Historical action/result rows stay immutable. The correction is a second,
+    source-independent result linked to the same canonical action, so retries are
+    idempotent and explicit host failure/success facts remain visible. A replayed
+    legacy-mapping operation committed its graph under pre-upgrade record
+    identities; ``target_action_id`` (with an optional committed action event as
+    causal parent) binds the correction to that exact committed action instead of
+    the current canonical one.
+    """
+
+    structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    correlation = _correlation(structural)
+    tool = _tool_name(structural)
+    coverage = _coverage_for(envelope)
+    channel = PublicationChannel.HOOK_OBSERVED
+    gaps = tuple(envelope.gap_codes)
+    if (
+        envelope.source is not ObservationSource.CODEX_SESSION_STREAM
+        or not stream_event_is_completed_tool(envelope.event_kind, structural)
+        or correlation is None
+        or ObservationGapCode.UNPAIRED_EVENT.value in gaps
+    ):
+        return MaterializedObservationBatch((), coverage, channel, gaps, "no_outcome_correction")
+    outcome = _post_outcome(structural)
+    if outcome is ResultOutcome.UNKNOWN:
+        return MaterializedObservationBatch((), coverage, channel, gaps, "outcome_unknown")
+
+    family = _action_kind(tool).value
+    action_source = f"pre:{correlation}:{family}"
+    if target_action_id is not None:
+        action = action_id(target_action_id)
+        action_parents = (
+            (event_id(target_action_event_id),) if target_action_event_id is not None else ()
+        )
+    else:
+        action = action_id(
+            stable_observation_id(
+                kind=IdKind.ACTION,
+                task_id=task_id,
+                source_identity=action_source,
+                mapping_version=MATERIALIZATION_MAPPING_VERSION,
+                role="action",
+            )
+        )
+        action_parents = (
+            event_id(
+                stable_observation_id(
+                    kind=IdKind.EVENT,
+                    task_id=task_id,
+                    source_identity=action_source,
+                    mapping_version=MATERIALIZATION_MAPPING_VERSION,
+                    role="action_event",
+                )
+            ),
+        )
+    exit_status = _exit_status(structural)
+    correction_source = (
+        f"outcome-correction:{correlation}:{family}:{outcome.value}:"
+        f"{exit_status if exit_status is not None else 'none'}"
+    )
+    correction_role = (
+        f"result_correction_{outcome.value}_{exit_status if exit_status is not None else 'none'}"
+    )
+    result = stable_observation_id(
+        kind=IdKind.RESULT,
+        task_id=task_id,
+        source_identity=correction_source,
+        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        role=correction_role,
+    )
+    result_event = stable_observation_id(
+        kind=IdKind.EVENT,
+        task_id=task_id,
+        source_identity=correction_source,
+        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+        role=f"{correction_role}_event",
+    )
+    if conflict:
+        coverage = Coverage(
+            publication_channels=coverage.publication_channels,
+            authorship_assurance=coverage.authorship_assurance,
+            artifact_observation=coverage.artifact_observation,
+            evidence_immutability=coverage.evidence_immutability,
+            ledger_freshness=coverage.ledger_freshness,
+            check_types=coverage.check_types,
+            known_gaps=tuple(
+                sorted(
+                    {*coverage.known_gaps, ObservationGapCode.DEDUP_CONFLICT.value},
+                    key=str.encode,
+                )
+            ),
+        )
+        gaps = tuple(sorted({*gaps, ObservationGapCode.DEDUP_CONFLICT.value}, key=str.encode))
+    draft = _draft(
+        event=result_event,
+        schema_name="result_recorded",
+        occurred_at=envelope.receipt_time,
+        payload=ResultRecordedPayload(
+            result_id(result),
+            action,
+            outcome,
+            exit_status=exit_status,
+            summary=(
+                f"Observed conflicting corrected result status={outcome.value}"
+                if conflict
+                else f"Observed corrected result status={outcome.value}"
+            ),
+        ),
+        parents=action_parents,
+        role=correction_role,
+    )
+    return MaterializedObservationBatch((draft,), coverage, channel, gaps, None)
+
+
 def canonical_logical_identity(envelope: ObservationEnvelope) -> str:
     """Return the canonical logical-observation identity for one envelope.
 
-    Hook ``PostToolUse`` and stream ``item.completed`` copies of the same host
+    Hook ``PostToolUse`` and stream completed-tool copies of the same host
     call collapse to one identity (session + host call/correlation id + tool
     family), so cross-source duplicates materialize a single ledger action or
     result. Consecutive identical commands with *different* host ids stay
@@ -724,7 +875,12 @@ def canonical_logical_identity(envelope: ObservationEnvelope) -> str:
     return _logical_identity_digest(("action", envelope.session_commitment, host_call, family))
 
 
-def observation_claim_identity(envelope: ObservationEnvelope, draft_roles: tuple[str, ...]) -> str:
+def observation_claim_identity(
+    envelope: ObservationEnvelope,
+    draft_roles: tuple[str, ...],
+    *,
+    mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
+) -> str:
     """Return the role-scoped key for one durable logical-identity claim.
 
     One host call legitimately materializes several role-sets against the same
@@ -737,10 +893,11 @@ def observation_claim_identity(envelope: ObservationEnvelope, draft_roles: tuple
     cross-source copies of the *same* phase still merge their source masks.
     """
 
+    _validate_materialization_mapping_version(mapping_version)
     return _logical_identity_digest(
         (
             "claim",
-            MATERIALIZATION_MAPPING_VERSION,
+            mapping_version,
             canonical_logical_identity(envelope),
             *draft_roles,
         )
@@ -766,6 +923,7 @@ def observation_operation_digest(
     writer_id: str,
     logical_identity: str,
     draft_roles: tuple[str, ...],
+    mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
 ) -> str:
     """Stable request digest for idempotent observation appends.
 
@@ -773,6 +931,7 @@ def observation_operation_digest(
     identity so matching hook/stream copies produce one ledger operation.
     """
 
+    _validate_materialization_mapping_version(mapping_version)
     return request_digest(
         JsonObject(
             {
@@ -783,10 +942,18 @@ def observation_operation_digest(
                 "writer_id": writer_id,
                 "logical_identity": logical_identity,
                 "roles": draft_roles,
-                "mapping_version": MATERIALIZATION_MAPPING_VERSION,
+                "mapping_version": mapping_version,
             }
         )
     )
+
+
+def _validate_materialization_mapping_version(mapping_version: str) -> None:
+    if type(mapping_version) is not str or mapping_version not in {
+        MATERIALIZATION_MAPPING_VERSION,
+        *MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
+    }:
+        raise ValueError("unsupported observation materialization mapping version")
 
 
 def observation_author() -> Actor:

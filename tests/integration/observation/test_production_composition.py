@@ -37,6 +37,7 @@ from tests.integration.observation.composition_harness import (
     setup_returns_early_when_mcp_registered,
 )
 
+from builders.codex_rollout import failed_shell_rollout
 from yoetz.adapters.approved_checks import (
     ApprovedCheckApproval,
     ApprovedCheckCommand,
@@ -156,10 +157,7 @@ async def test_dod_zero_coop_durable_observation_advice_composition(tmp_path: Pa
         # Selective session stream also contributes (no cooperative publish_work)
         session = restarted.local.session_commitment("dod-session-1")
         stream_path = tmp_path / "session.jsonl"
-        stream_path.write_bytes(
-            b'{"type":"item.completed","item":{"id":"stream-1","type":"command_execution",'
-            b'"command":"echo","aggregated_output":"","exit_code":1,"status":"completed"}}\n'
-        )
+        stream_path.write_bytes(failed_shell_rollout())
         reader = SessionStreamReader(
             session_commitment=session,
             profile=default_stream_profile(),
@@ -358,22 +356,23 @@ async def test_hook_and_stream_copies_materialize_once(tmp_path: Path) -> None:
         )
         await pipeline.drain_to_task_bundle()
         session = pipeline.local.session_commitment("dedupe-1")
-        # Stream copy of the same logical command
+        # Stream copy of the same logical command, in rollout JSONL grammar.
         record = CodexParsedRecord(
             1,
             0,
             80,
-            "item.completed",
-            "command_execution",
+            "response_item",
+            "function_call_output",
             JsonObject(
                 {
-                    "type": "item.completed",
-                    "item": {
-                        "id": "shared-1",
-                        "type": "command_execution",
+                    "payload": {
+                        "call_id": "shared-1",
                         "exit_code": 1,
+                        "name": "shell",
                         "status": "completed",
+                        "type": "function_call_output",
                     },
+                    "type": "response_item",
                 }
             ),
         )
@@ -409,8 +408,8 @@ async def test_hook_and_stream_copies_materialize_once(tmp_path: Path) -> None:
             for item in pipeline.sqlite.list_envelopes(pipeline.workspace)
             if item.source is ObservationSource.CODEX_HOOK and item.event_kind == "PostToolUse"
         )
-        # The hook Post and the stream item.completed for one host call must
-        # collapse to one canonical identity, materialize the same paired
+        # The hook Post and the stream function_call_output for one host call
+        # must collapse to one canonical identity, materialize the same paired
         # action+result roles, and share one role-scoped claim so the
         # coordinator appends once and unions source coverage (issue #309).
         assert canonical_logical_identity(hook_post) == canonical_logical_identity(stream_env)
@@ -436,10 +435,7 @@ def test_automatic_stream_reconciliation_repairs_missed_hook(tmp_path: Path) -> 
         pipeline.auto_attach("stream-repair")
         session = pipeline.local.session_commitment("stream-repair")
         path = tmp_path / "missed.jsonl"
-        path.write_bytes(
-            b'{"type":"item.completed","item":{"id":"missed-1","type":"command_execution",'
-            b'"command":"echo","aggregated_output":"","exit_code":1,"status":"completed"}}\n'
-        )
+        path.write_bytes(failed_shell_rollout())
         reader = SessionStreamReader(
             session_commitment=session,
             profile=default_stream_profile(),
@@ -453,9 +449,10 @@ def test_automatic_stream_reconciliation_repairs_missed_hook(tmp_path: Path) -> 
             key_material=pipeline.local.key_material(),
         )
         advance = reader.advance(path)
-        assert len(advance.envelopes) == 1
-        result = pipeline.local.ingest(advance.envelopes[0])
-        assert result.disposition.value in {"accepted", "duplicate"}
+        assert len(advance.envelopes) >= 1
+        for envelope in advance.envelopes:
+            result = pipeline.local.ingest(envelope)
+            assert result.disposition.value in {"accepted", "duplicate"}
         status = pipeline.local.status(ObservationStatusQuery(pipeline.workspace))
         assert status.source_coverage[ObservationSource.CODEX_SESSION_STREAM] is True
         surface = resolve_production_surface()

@@ -21,6 +21,7 @@ from tests.capability.evidence import (
     runtime_capability_context,
 )
 
+from builders.codex_rollout import completed_shell_rollout
 from yoetz.adapters.importers.codex_jsonl import (
     SUPPORTED_CODEX_PROFILES,
     CodexCapabilityProfile,
@@ -126,10 +127,7 @@ def test_synthetic_unknown_future_codex_version_generic_ingest(tmp_path: Path) -
     assert store.ingest(envelope).disposition.value == "accepted"
     # Observation continues: a later known stream line still ingests on a fresh generation.
     path = tmp_path / "future.jsonl"
-    path.write_bytes(
-        b'{"type":"item.completed","item":{"id":"fx1","type":"command_execution",'
-        b'"command":"echo","aggregated_output":"ok","exit_code":0,"status":"completed"}}\n'
-    )
+    path.write_bytes(completed_shell_rollout())
     reader = SessionStreamReader(
         session_commitment=session,
         profile=default_stream_profile(),

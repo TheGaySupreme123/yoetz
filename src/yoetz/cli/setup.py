@@ -44,6 +44,7 @@ from yoetz.application.codex_plugin import CodexPluginService
 from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.cli.agent_start import AGENT_START_HANDOFF
+from yoetz.cli.workspace_binding import canonical_workspace_locator
 from yoetz.config.load import load_config
 from yoetz.config.paths import PathSafetyError, setup_marker_path
 from yoetz.domain.values import RequestId, request_id
@@ -119,6 +120,15 @@ _PROVIDER_SETUP_DIRECT_REASONS: Final = frozenset(
         "trusted_console_required",
     }
 )
+
+
+def _canonical_setup_workspace(workspace: Path | None = None) -> Path:
+    canonical = canonical_workspace_locator(Path.cwd() if workspace is None else workspace)
+    if canonical is None:
+        raise ValueError("workspace_locator_invalid")
+    return Path(canonical)
+
+
 _PROVIDER_SETUP_PRIVACY_REASONS: Final = frozenset(
     {
         "local_terminal_required",
@@ -618,7 +628,7 @@ def _grant_observation_consent(workspace: Path | None = None) -> dict[str, JsonV
         from yoetz.adapters.integrations.observation_local import LocalObservationStore
 
         store = LocalObservationStore()
-        root = (workspace if workspace is not None else Path.cwd()).resolve()
+        root = _canonical_setup_workspace(workspace)
         commitment = store.workspace_commitment(str(root))
         store.grant_consent(commitment)
         return {"outcome": "granted", "workspace_commitment": commitment}
@@ -633,7 +643,7 @@ def _grant_observation_consent(workspace: Path | None = None) -> dict[str, JsonV
 def _check_policy_preview(workspace: Path | None = None) -> dict[str, JsonValue]:
     """Return a path-free exact-byte policy preview; repository bytes grant no authority."""
 
-    root = (workspace if workspace is not None else Path.cwd()).resolve()
+    root = _canonical_setup_workspace(workspace)
     try:
         policy, _raw = load_observation_check_policy(root)
     except Exception:
@@ -661,7 +671,7 @@ def _activate_check_policy_trust(
     try:
         from yoetz.adapters.integrations.observation_local import LocalObservationStore
 
-        root = (workspace if workspace is not None else Path.cwd()).resolve()
+        root = _canonical_setup_workspace(workspace)
         policy, _raw = load_observation_check_policy(root)
         if policy.raw_digest != digest:
             return {**preview, "outcome": "untrusted_digest_changed"}
@@ -707,7 +717,7 @@ def _emit_registration_preview(
         typer.echo(f"  Project skill compatibility: {skill_preview.compatibility}")
         typer.echo(f"  Project skill preview digest: {skill_preview.preview_digest}")
     if activation_preview is not None:
-        project = (Path.cwd() if activation_target is None else activation_target).resolve()
+        project = _canonical_setup_workspace(activation_target)
         marketplace_path = project / ".agents" / "plugins" / "marketplace.json"
         config_path = activation_preview.codex_home / "config.toml"
         typer.echo(f"  Codex activation state: {activation_preview.inspection.state.value}")
@@ -765,6 +775,23 @@ def _emit_registration_preview(
             typer.echo(f"  Proposed checks: {', '.join(str(item) for item in check_ids)}")
         typer.echo("  Repository policy bytes propose commands; this confirmation activates only")
         typer.echo("  the exact digest above. Any byte change suspends execution.")
+
+
+def _emit_unregistration_preview(mcp_preview: object) -> None:
+    """Show every approval-relevant removal field before interactive consent."""
+
+    typer.echo("Proposed change: remove the Yoetz-owned Codex MCP registration")
+    typer.echo("  MCP server name: yoetz")
+    typer.echo(f"  Action: {getattr(mcp_preview, 'action').value}")
+    typer.echo(f"  State before: {getattr(mcp_preview, 'state_before').value}")
+    serve_command = getattr(mcp_preview, "serve_command", ())
+    typer.echo(f"  Command: {' '.join(serve_command)}")
+    route_profile = getattr(mcp_preview, "route_profile", None)
+    if type(route_profile) is str:
+        typer.echo(f"  MCP route profile: {route_profile}")
+    for warning in getattr(mcp_preview, "warnings", ()):
+        typer.echo(f"  Warning: {warning}")
+    typer.echo(f"  Preview digest: {getattr(mcp_preview, 'preview_digest')}")
 
 
 def _plugin_verified(presence: str | None) -> bool:
@@ -841,13 +868,13 @@ async def _preview_project_skill(target: IntegrationTarget) -> _ProjectSkillPlan
 async def project_skill_preview(workspace: Path | None = None) -> IntegrationPreview:
     """Return the exact setup skill preview for a non-prompt front end."""
 
-    root = (workspace if workspace is not None else Path.cwd()).resolve()
+    root = _canonical_setup_workspace(workspace)
     target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root))
     return (await _preview_project_skill(target)).preview
 
 
 def _integration_target(workspace: Path | None = None) -> IntegrationTarget:
-    root = (workspace if workspace is not None else Path.cwd()).resolve()
+    root = _canonical_setup_workspace(workspace)
     return IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(root))
 
 
@@ -901,7 +928,7 @@ def _mcp_adapter(
 def _installed_hooks_declare_workspace_binding(workspace: Path | None = None) -> bool:
     """True when the installed plugin hooks render ``--workspace .`` for observe."""
 
-    root = (workspace if workspace is not None else Path.cwd()).resolve()
+    root = _canonical_setup_workspace(workspace)
     hooks_path = root / ".agents" / "plugins" / "yoetz" / "hooks" / "hooks.json"
     try:
         raw = hooks_path.read_bytes()
@@ -922,7 +949,7 @@ def _observation_hook_probe(*, workspace: Path | None = None) -> dict[str, JsonV
     from yoetz.cli.observe_hooks import handle_observe
     from yoetz.protocol.canonical import canonical_encode
 
-    root = (workspace if workspace is not None else Path.cwd()).resolve()
+    root = _canonical_setup_workspace(workspace)
     if not _installed_hooks_declare_workspace_binding(root):
         return {"ok": False, "reason": "hooks_missing_workspace_binding"}
     store = LocalObservationStore()
@@ -2689,14 +2716,20 @@ async def integrate_mcp(
     json_output: bool,
     route_profile: Literal["policy", "strict"] | None = None,
 ) -> int:
-    """Client-local ``integrate <harness> mcp status|preview|install`` commands.
+    """Client-local MCP status, registration, and unregistration commands.
 
     ``route_profile`` is the explicit route input. When absent, an existing
     yoetz-owned registration keeps its observed profile (#389); only a fresh
     registration falls back to the structural configuration derivation.
     """
 
-    if harness != "codex" or action not in {"status", "preview", "install"}:
+    if harness != "codex" or action not in {
+        "status",
+        "preview",
+        "preview-remove",
+        "install",
+        "remove",
+    }:
         return _usage_failure("the harness or action is not supported")
     interactive = _is_interactive_terminal()
     binaries = discover_codex_binaries()
@@ -2716,6 +2749,63 @@ async def integrate_mcp(
                     "harness": harness,
                     "route_profile": observation.route_profile,
                     "state": observation.state.value,
+                },
+                json_output=json_output,
+            )
+            return 0
+        if action in {"preview-remove", "remove"}:
+            preview = await service.preview_unregistration(chosen)
+            if action == "preview-remove":
+                _emit(
+                    {
+                        "action": preview.action.value,
+                        "harness": harness,
+                        "preview_digest": preview.preview_digest,
+                        "route_profile": preview.route_profile,
+                        "serve_command": list(preview.serve_command),
+                        "state_before": preview.state_before.value,
+                        "warnings": list(preview.warnings),
+                    },
+                    json_output=json_output,
+                )
+                return 0
+            if preview_digest is not None and preview_digest != preview.preview_digest:
+                return _mcp_error_exit("preview_stale")
+            if preview.state_before is McpRegistrationState.FOREIGN_PRESENT:
+                return _mcp_error_exit("foreign_entry_present")
+            if accept and preview_digest is None:
+                return _mcp_error_exit("confirmation_required")
+            accepted = accept
+            if interactive and not accepted:
+                _emit_unregistration_preview(preview)
+                accepted = _confirm_registration()
+            if not accepted:
+                return _mcp_error_exit("confirmation_required")
+            if preview.action is McpRegistrationAction.NOOP:
+                _emit(
+                    {
+                        "action": "noop",
+                        "harness": harness,
+                        "state_after": preview.state_before.value,
+                        "state_before": preview.state_before.value,
+                    },
+                    json_output=json_output,
+                )
+                return 0
+            result = await service.unregister(
+                chosen,
+                McpRegistrationConfirmation(
+                    preview.preview_digest,
+                    True,
+                    "interactive" if interactive else "noninteractive_flag",
+                ),
+            )
+            _emit(
+                {
+                    "action": result.action.value,
+                    "harness": harness,
+                    "state_after": result.state_after.value,
+                    "state_before": result.state_before.value,
                 },
                 json_output=json_output,
             )

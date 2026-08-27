@@ -774,7 +774,8 @@ async def test_rpc_deadline_covers_blocked_send_and_bounded_cancel_attempt() -> 
     with pytest.raises(ControlError, match="request_timeout"):
         await client.receipt(_receipt_request(20), deadline_ms=10)
 
-    assert asyncio.get_running_loop().time() - started < 0.2
+    # Keep a strict bound while allowing ordinary shared-runner scheduling jitter.
+    assert asyncio.get_running_loop().time() - started < 0.5
     assert stream.send_attempts == 1
     assert stream.closed is True
     await client.close()

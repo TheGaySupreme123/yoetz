@@ -496,6 +496,7 @@ def _observation_gaps(
         ObservationGapCode.VAULT_LOCKED.value,
         ObservationGapCode.UNPAIRED_EVENT.value,
         ObservationGapCode.UNSUPPORTED_EVENT.value,
+        ObservationGapCode.UNSUPPORTED_FORMAT.value,
     }
     present = [gap for gap in gaps if gap in interesting]
     if lifecycle in {ObservationLifecycle.STALE, ObservationLifecycle.DEGRADED} or present:

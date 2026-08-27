@@ -33,6 +33,12 @@ def _yoetz_entry(*, strict: bool = False) -> bytes:
     return json.dumps({"command": "yoetz", "args": args}).encode("utf-8")
 
 
+def _absent_outputs() -> list[CommandOutput]:
+    """A failed named lookup plus a successful structural proof of absence."""
+
+    return [CommandOutput(1, b""), CommandOutput(0, b"[]")]
+
+
 class _Runner:
     """Scripted subprocess stand-in recording every argv it was asked to run."""
 
@@ -45,12 +51,57 @@ class _Runner:
         return self.outputs.pop(0)
 
 
-def test_status_absent_on_nonzero_get() -> None:
-    runner = _Runner([CommandOutput(1, b"")])
+def test_status_absent_only_after_successful_list_confirmation() -> None:
+    runner = _Runner(_absent_outputs())
     adapter = CodexMcpAdapter(runner)
     state = anyio.run(lambda: adapter.status_registration(_BINARY))
     assert state is McpRegistrationState.ABSENT
-    assert runner.calls == [("/opt/harness/bin/codex", "mcp", "get", "yoetz", "--json")]
+    assert runner.calls == [
+        ("/opt/harness/bin/codex", "mcp", "get", "yoetz", "--json"),
+        ("/opt/harness/bin/codex", "mcp", "list", "--json"),
+    ]
+
+
+def test_status_nonzero_get_fails_closed_when_list_cannot_confirm_absence() -> None:
+    runner = _Runner([CommandOutput(1, b""), CommandOutput(1, b"")])
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(lambda: CodexMcpAdapter(runner).status_registration(_BINARY))
+    assert caught.value.reason is McpRegistrationReason.HARNESS_UNAVAILABLE
+
+
+def test_status_nonzero_get_recovers_owned_entry_from_list() -> None:
+    listed = json.dumps(
+        [{"name": "yoetz", "transport": {"command": "yoetz", "args": ["mcp", "serve"]}}]
+    ).encode("utf-8")
+    runner = _Runner([CommandOutput(1, b""), CommandOutput(0, listed)])
+    state = anyio.run(lambda: CodexMcpAdapter(runner).status_registration(_BINARY))
+    assert state is McpRegistrationState.YOETZ_OWNED
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"not json",
+        b"{}",
+        b"[1]",
+        b'[{"transport": {}}]',
+        b'[{"name":"yoetz"},{"name":"yoetz"}]',
+        b'[{"name":"yoetz","name":"other"}]',
+        b'[{"name":"other","value":NaN}]',
+    ],
+)
+def test_status_nonzero_get_rejects_malformed_or_ambiguous_list(payload: bytes) -> None:
+    runner = _Runner([CommandOutput(1, b""), CommandOutput(0, payload)])
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(lambda: CodexMcpAdapter(runner).status_registration(_BINARY))
+    assert caught.value.reason is McpRegistrationReason.PARSE_FAILED
+
+
+def test_status_nonzero_get_rejects_truncated_list_output() -> None:
+    runner = _Runner([CommandOutput(1, b""), CommandOutput(0, b"[]", stdout_truncated=True)])
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(lambda: CodexMcpAdapter(runner).status_registration(_BINARY))
+    assert caught.value.reason is McpRegistrationReason.PARSE_FAILED
 
 
 def test_status_yoetz_owned_on_exact_command_match() -> None:
@@ -108,7 +159,7 @@ def test_observe_reports_which_route_is_registered() -> None:
 
 def test_observe_reports_no_route_when_the_entry_is_not_ours() -> None:
     absent = anyio.run(
-        lambda: CodexMcpAdapter(_Runner([CommandOutput(1, b"")])).observe_registration(_BINARY)
+        lambda: CodexMcpAdapter(_Runner(_absent_outputs())).observe_registration(_BINARY)
     )
     assert absent.state is McpRegistrationState.ABSENT
     assert absent.route_profile is None
@@ -149,8 +200,15 @@ def test_observe_rejects_a_non_codex_binary() -> None:
 
 
 def test_status_parse_failure_is_a_typed_error() -> None:
-    for stdout in (b"not json", b"[1,2]", b"\xff\xfe"):
-        runner = _Runner([CommandOutput(0, stdout)])
+    for output in (
+        CommandOutput(0, b"not json"),
+        CommandOutput(0, b"[1,2]"),
+        CommandOutput(0, b"\xff\xfe"),
+        CommandOutput(0, b'{"command":"yoetz","command":"other"}'),
+        CommandOutput(0, b'{"command":"other","value":NaN}'),
+        CommandOutput(0, b'{"command":"yoetz"}', stdout_truncated=True),
+    ):
+        runner = _Runner([output])
         with pytest.raises(McpRegistrationError) as caught:
             anyio.run(lambda: CodexMcpAdapter(runner).status_registration(_BINARY))
         assert caught.value.reason is McpRegistrationReason.PARSE_FAILED
@@ -158,7 +216,7 @@ def test_status_parse_failure_is_a_typed_error() -> None:
 
 def test_preview_register_for_absent_and_noop_for_owned() -> None:
     absent = anyio.run(
-        lambda: CodexMcpAdapter(_Runner([CommandOutput(1, b"")])).preview_registration(_BINARY)
+        lambda: CodexMcpAdapter(_Runner(_absent_outputs())).preview_registration(_BINARY)
     )
     assert absent.action is McpRegistrationAction.REGISTER
     assert absent.state_before is McpRegistrationState.ABSENT
@@ -182,11 +240,11 @@ def test_preview_foreign_carries_warning_and_noop() -> None:
 
 def test_strict_preview_binds_exact_command_and_changes_digest() -> None:
     policy = anyio.run(
-        lambda: CodexMcpAdapter(_Runner([CommandOutput(1, b"")])).preview_registration(_BINARY)
+        lambda: CodexMcpAdapter(_Runner(_absent_outputs())).preview_registration(_BINARY)
     )
     strict = anyio.run(
         lambda: CodexMcpAdapter(
-            _Runner([CommandOutput(1, b"")]),
+            _Runner(_absent_outputs()),
             route_profile="strict",
         ).preview_registration(_BINARY)
     )
@@ -228,10 +286,10 @@ def test_explicit_preview_allows_reregistering_an_owned_route_profile() -> None:
 
 
 def test_apply_requires_explicit_acceptance_and_exact_digest() -> None:
-    adapter = CodexMcpAdapter(_Runner([CommandOutput(1, b"")]))
+    adapter = CodexMcpAdapter(_Runner(_absent_outputs()))
     preview = anyio.run(lambda: adapter.preview_registration(_BINARY))
 
-    declined = CodexMcpAdapter(_Runner([CommandOutput(1, b"")]))
+    declined = CodexMcpAdapter(_Runner(_absent_outputs()))
     with pytest.raises(McpRegistrationError) as caught:
         anyio.run(
             lambda: declined.apply_registration(
@@ -240,7 +298,7 @@ def test_apply_requires_explicit_acceptance_and_exact_digest() -> None:
         )
     assert caught.value.reason is McpRegistrationReason.CONFIRMATION_REQUIRED
 
-    stale = CodexMcpAdapter(_Runner([CommandOutput(1, b"")]))
+    stale = CodexMcpAdapter(_Runner(_absent_outputs()))
     with pytest.raises(McpRegistrationError) as caught:
         anyio.run(
             lambda: stale.apply_registration(
@@ -251,12 +309,13 @@ def test_apply_requires_explicit_acceptance_and_exact_digest() -> None:
 
 
 def test_apply_registers_then_verifies_by_rereading_state() -> None:
-    plan_adapter = CodexMcpAdapter(_Runner([CommandOutput(1, b"")]))
+    plan_adapter = CodexMcpAdapter(_Runner(_absent_outputs()))
     preview = anyio.run(lambda: plan_adapter.preview_registration(_BINARY))
 
     runner = _Runner(
         [
             CommandOutput(1, b""),  # get: absent
+            CommandOutput(0, b"[]"),  # list: confirms absence
             CommandOutput(0, b""),  # add
             CommandOutput(0, _yoetz_entry()),  # verify get
         ]
@@ -269,7 +328,7 @@ def test_apply_registers_then_verifies_by_rereading_state() -> None:
     assert result.action is McpRegistrationAction.REGISTER
     assert result.state_before is McpRegistrationState.ABSENT
     assert result.state_after is McpRegistrationState.YOETZ_OWNED
-    assert runner.calls[1] == (
+    assert runner.calls[2] == (
         "/opt/harness/bin/codex",
         "mcp",
         "add",
@@ -282,14 +341,16 @@ def test_apply_registers_then_verifies_by_rereading_state() -> None:
 
 
 def test_apply_reports_failure_when_verify_does_not_show_ownership() -> None:
-    plan_adapter = CodexMcpAdapter(_Runner([CommandOutput(1, b"")]))
+    plan_adapter = CodexMcpAdapter(_Runner(_absent_outputs()))
     preview = anyio.run(lambda: plan_adapter.preview_registration(_BINARY))
 
     runner = _Runner(
         [
             CommandOutput(1, b""),  # get: absent
+            CommandOutput(0, b"[]"),  # list: confirms absence
             CommandOutput(0, b""),  # add claims success
             CommandOutput(1, b""),  # verify still absent
+            CommandOutput(0, b"[]"),  # list: confirms it is still absent
         ]
     )
     with pytest.raises(McpRegistrationError) as caught:
@@ -299,6 +360,20 @@ def test_apply_reports_failure_when_verify_does_not_show_ownership() -> None:
             )
         )
     assert caught.value.reason is McpRegistrationReason.REGISTRATION_FAILED
+
+
+def test_apply_does_not_add_when_failed_get_cannot_confirm_absence() -> None:
+    plan_adapter = CodexMcpAdapter(_Runner(_absent_outputs()))
+    preview = anyio.run(lambda: plan_adapter.preview_registration(_BINARY))
+    runner = _Runner([CommandOutput(1, b""), CommandOutput(1, b"")])
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(runner).apply_registration(
+                _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+            )
+        )
+    assert caught.value.reason is McpRegistrationReason.HARNESS_UNAVAILABLE
+    assert all(call[1:3] != ("mcp", "add") for call in runner.calls)
 
 
 def test_apply_never_replaces_a_foreign_entry() -> None:
@@ -331,3 +406,199 @@ def test_apply_noop_when_already_yoetz_owned() -> None:
     assert result.action is McpRegistrationAction.NOOP
     assert result.state_before is result.state_after is McpRegistrationState.YOETZ_OWNED
     assert all(call[1:3] == ("mcp", "get") for call in runner.calls)
+
+
+def test_preview_unregistration_of_owned_entry() -> None:
+    preview = anyio.run(
+        lambda: CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())])).preview_unregistration(
+            _BINARY
+        )
+    )
+    assert preview.action is McpRegistrationAction.UNREGISTER
+    assert preview.state_before is McpRegistrationState.YOETZ_OWNED
+    assert preview.warnings == ("host_remove_not_compare_and_swap",)
+
+
+def test_preview_unregistration_of_foreign_entry_warns_without_echoing_argv() -> None:
+    preview = anyio.run(
+        lambda: CodexMcpAdapter(
+            _Runner([CommandOutput(0, json.dumps({"command": "other"}).encode("utf-8"))])
+        ).preview_unregistration(_BINARY)
+    )
+    assert preview.action is McpRegistrationAction.UNREGISTER
+    assert preview.state_before is McpRegistrationState.FOREIGN_PRESENT
+    assert preview.warnings == ("foreign_entry_present",)
+    assert preview.serve_command == ("yoetz", "mcp", "serve")
+    preview = anyio.run(
+        lambda: CodexMcpAdapter(_Runner(_absent_outputs())).preview_unregistration(_BINARY)
+    )
+    assert preview.action is McpRegistrationAction.NOOP
+    assert preview.state_before is McpRegistrationState.ABSENT
+
+
+def test_apply_unregistration_removes_owned_entry() -> None:
+    plan_adapter = CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())]))
+    preview = anyio.run(lambda: plan_adapter.preview_unregistration(_BINARY))
+    runner = _Runner(
+        [
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, b""),
+            CommandOutput(1, b""),
+            CommandOutput(0, b"[]"),
+        ]
+    )
+    result = anyio.run(
+        lambda: CodexMcpAdapter(runner).apply_unregistration(
+            _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+        )
+    )
+    assert result.action is McpRegistrationAction.UNREGISTER
+    assert result.state_after is McpRegistrationState.ABSENT
+    assert runner.calls[2] == ("/opt/harness/bin/codex", "mcp", "remove", "yoetz")
+
+
+def test_apply_unregistration_refuses_replacement_before_name_based_remove() -> None:
+    plan_adapter = CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())]))
+    preview = anyio.run(lambda: plan_adapter.preview_unregistration(_BINARY))
+    foreign = CommandOutput(0, json.dumps({"command": "other"}).encode("utf-8"))
+    runner = _Runner(
+        [
+            CommandOutput(0, _yoetz_entry()),
+            foreign,
+        ]
+    )
+
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(runner).apply_unregistration(
+                _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+            )
+        )
+
+    assert caught.value.reason is McpRegistrationReason.FOREIGN_ENTRY_PRESENT
+    assert all(call[1:3] == ("mcp", "get") for call in runner.calls)
+
+
+def test_apply_unregistration_does_not_remove_after_unreadable_ownership_recheck() -> None:
+    plan_adapter = CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())]))
+    preview = anyio.run(lambda: plan_adapter.preview_unregistration(_BINARY))
+    runner = _Runner(
+        [
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(1, b""),
+            CommandOutput(1, b""),
+        ]
+    )
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(runner).apply_unregistration(
+                _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+            )
+        )
+    assert caught.value.reason is McpRegistrationReason.HARNESS_UNAVAILABLE
+    assert all(call[1:3] != ("mcp", "remove") for call in runner.calls)
+
+
+def test_apply_unregistration_does_not_claim_success_after_unreadable_verification() -> None:
+    plan_adapter = CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())]))
+    preview = anyio.run(lambda: plan_adapter.preview_unregistration(_BINARY))
+    runner = _Runner(
+        [
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, b""),
+            CommandOutput(1, b""),
+            CommandOutput(1, b""),
+        ]
+    )
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(runner).apply_unregistration(
+                _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+            )
+        )
+    assert caught.value.reason is McpRegistrationReason.REGISTRATION_FAILED
+    assert runner.calls[2][1:3] == ("mcp", "remove")
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [McpRegistrationReason.TIMEOUT, McpRegistrationReason.HARNESS_UNAVAILABLE],
+)
+def test_apply_unregistration_normalizes_mutating_remove_errors(
+    reason: McpRegistrationReason,
+) -> None:
+    plan_adapter = CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())]))
+    preview = anyio.run(lambda: plan_adapter.preview_unregistration(_BINARY))
+    outputs = [CommandOutput(0, _yoetz_entry()), CommandOutput(0, _yoetz_entry())]
+    calls: list[tuple[str, ...]] = []
+
+    def fail_remove(argv: tuple[str, ...]) -> CommandOutput:
+        calls.append(argv)
+        if argv[1:3] == ("mcp", "remove"):
+            raise McpRegistrationError(reason, {})
+        return outputs.pop(0)
+
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(fail_remove).apply_unregistration(
+                _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+            )
+        )
+
+    assert caught.value.reason is McpRegistrationReason.REGISTRATION_FAILED
+    assert calls[2][1:3] == ("mcp", "remove")
+
+
+def test_apply_unregistration_normalizes_malformed_post_remove_verification() -> None:
+    plan_adapter = CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())]))
+    preview = anyio.run(lambda: plan_adapter.preview_unregistration(_BINARY))
+    runner = _Runner(
+        [
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, b""),
+            CommandOutput(1, b""),
+            CommandOutput(0, b"not-json"),
+        ]
+    )
+
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(runner).apply_unregistration(
+                _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+            )
+        )
+
+    assert caught.value.reason is McpRegistrationReason.REGISTRATION_FAILED
+    assert runner.calls[2][1:3] == ("mcp", "remove")
+
+
+def test_apply_unregistration_refuses_foreign_entry() -> None:
+    foreign = CommandOutput(0, json.dumps({"command": "other"}).encode("utf-8"))
+    plan_adapter = CodexMcpAdapter(_Runner([foreign]))
+    preview = anyio.run(lambda: plan_adapter.preview_unregistration(_BINARY))
+    runner = _Runner([CommandOutput(0, json.dumps({"command": "other"}).encode("utf-8"))])
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(runner).apply_unregistration(
+                _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+            )
+        )
+    assert caught.value.reason is McpRegistrationReason.FOREIGN_ENTRY_PRESENT
+    assert all(call[1:3] == ("mcp", "get") for call in runner.calls)
+
+
+def test_apply_unregistration_is_noop_when_absent() -> None:
+    plan_adapter = CodexMcpAdapter(_Runner(_absent_outputs()))
+    preview = anyio.run(lambda: plan_adapter.preview_unregistration(_BINARY))
+    runner = _Runner(_absent_outputs())
+    result = anyio.run(
+        lambda: CodexMcpAdapter(runner).apply_unregistration(
+            _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+        )
+    )
+    assert result.action is McpRegistrationAction.NOOP
+    assert result.state_after is McpRegistrationState.ABSENT
+    assert [call[1:3] for call in runner.calls] == [("mcp", "get"), ("mcp", "list")]

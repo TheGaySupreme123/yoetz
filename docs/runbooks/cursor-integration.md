@@ -1,8 +1,10 @@
 # Cursor local integration runbook
 
-This runbook covers the local Cursor IDE, Agent CLI, and TypeScript/Python SDK cells implemented by
-issue #153. Cursor Cloud and Cloud Agents are out of scope. Keep regular and testing profiles
-separate; every command below names the exact Cursor configuration root and project.
+This runbook covers the current local Cursor IDE and Agent CLI implementation rows from issue #153. Operational
+TypeScript/Python SDK support is deferred; the SDK package/bridge fixtures remain metadata-only
+experimental scaffolding and do not define current capability cells. Cursor Cloud and Cloud Agents are out
+of scope. Keep regular and testing profiles separate; every command below names the exact Cursor
+configuration root and project.
 
 ## Proof facets are independent
 
@@ -14,11 +16,12 @@ workflow receipt. A later facet never backfills an earlier one.
 
 ## Exact local cells
 
-The initial pins are Cursor IDE `3.17.8` build `3.17.8`, Cursor Agent CLI
-`2026.07.09-a3815c0`, `@cursor/sdk==1.0.23`, `cursor-sdk==1.0.24`, and bridge protocol
-`sdk.v1`. Record the executable/package/bridge digest, OS, architecture, scope, and activation
-source. Cursor's Python package deliberately has no `1.0.23` release; it aligned with the shared
-SDK release line at `1.0.24`. Nearby versions are untested, not implicitly compatible.
+The current implementation pins are Cursor IDE `3.17.8` build `3.17.8` and Cursor Agent CLI
+`2026.07.09-a3815c0`. Record the executable digest, OS, architecture, scope, and activation
+source. The retained `@cursor/sdk==1.0.23`, `cursor-sdk==1.0.24`, and bridge `sdk.v1` values are
+metadata-only fixture pins for future design work; they are not supported compatibility cells.
+Cursor's Python package deliberately has no `1.0.23` release; it aligned with the shared SDK
+release line at `1.0.24`. Nearby versions are untested, not implicitly compatible.
 
 ## Preview and install
 
@@ -74,7 +77,8 @@ Ownership mode is exactly `external_registration` or `plugin_managed`. Observed 
 `absent|external|plugin|dual|foreign|ambiguous`. Configuration source is plugin, project, user,
 inline-create, or inline-send. Preserve duplicate and foreign same-name entries.
 
-The local SDK precedence is:
+The future SDK design records this precedence in metadata fixtures only; it is not an operational
+SDK support claim:
 
 1. per-send inline servers (replace creation-time servers);
 2. creation-time inline servers;
@@ -93,25 +97,65 @@ otherwise hide structured results from the model. It adds no environment or secr
 not widen the service route. Raw initialize and tools/list prove only runtime registration.
 Require a correlated model-controlled `start` or `status` call for use.
 
-## SDK TypeScript and Python
+## SDK TypeScript and Python (deferred)
 
-Pin package and bridge versions. TypeScript uses `local.settingSources`; Python uses
-`local.setting_sources`. Plugin-managed runs must include `plugins`; external runs must include the
-intended `project` or `user` source. Do not rely on ambient sources. Do not replace Yoetz MCP tools
-with SDK custom-tool callbacks. Record sandbox and approval modes as host capability facts; they do
-not widen Yoetz authority.
+Operational local SDK support is deferred for the planned `0.2` readiness slice. The TypeScript and
+Python fixture rows retain package, bridge, setting-source, and precedence metadata only; they are
+marked `metadata_only` and `not_a_support_claim`. No SDK import or execution, bridge start,
+activation, model-controlled Yoetz call, or SDK hook capability is currently advertised or proven.
 
-Test both bindings independently. Each must show its package/bridge identity, explicit sources,
-source-winning negative controls, model-visible Yoetz operations, one correlated model-controlled
-call, and its own final result row.
+Promotion requires a new design-gated issue and independently reviewed proof for each binding:
+package/bridge identity, explicit `local.settingSources` or `local.setting_sources`, source-winning
+negative controls, model-visible Yoetz operations, one correlated model-controlled call, and an
+independent final result row. Until that work lands, use only the IDE/CLI implementation paths above
+and keep each support claim bounded by its actual proof facets.
 
 ## Hooks and observation
 
 The native IDE plugin advertises only `sessionStart`, `sessionEnd`, `afterMCPExecution`,
 `afterFileEdit`, and `stop` for the pinned local profile. It intentionally excludes
-`afterAgentThought`. The portable CLI artifact advertises no hooks, and both SDK hook capability
-cells remain `None`; the SDKs' file-based hook contract is not execution evidence. Hooks call
+`afterAgentThought`. The portable CLI artifact advertises no hooks. SDK fixture metadata advertises
+no hook capability; the SDKs' file-based hook contract is not execution evidence. Hooks call
 `yoetz hooks cursor-observe`, are fail-open, and never enforce Cursor work.
+
+Native hook artifacts resolve the invoking `yoetz` launcher to an exact command at render time. A
+console-script invocation resolves to that absolute executable; the documented `python -m yoetz`
+entrypoint (ADR-007) is preserved as an equivalent module invocation of the same interpreter.
+Explicit absolute and relative invocations retain their path intent and never fall back to
+an ambient `PATH` entry; only a bare `yoetz` name uses `PATH`. The resolved launcher command is
+recorded in native marker schema `/2`; an explicit invocation does not silently bind a
+different ambient-PATH installation, and a malformed `/2` launcher invalidates the marker. Portable
+markers
+remain `/1`. A valid legacy native `/1` marker is recognized as managed-but-modified so users can
+perform one exact previewed replacement (or safe removal) instead of being stranded. The rendered
+timeouts are 10 seconds for `sessionStart`/`stop`, 5 seconds for
+`afterFileEdit`/`afterMCPExecution`, and 3 seconds for `sessionEnd`; `failClosed` remains false.
+`sessionStart` uses Cursor's documented `session_id`/`conversation_id` conversation identity and
+persists the validated pair as a bounded local alias, so later events carrying only
+`conversation_id` resolve to the same Yoetz session; an event whose pair contradicts the validated
+alias is rejected as `cursor_session_ambiguous` rather than splitting one conversation across
+sessions. Local rendering and integration tests cannot prove live host session binding.
+
+Advice uses Cursor's native output contract rather than the Codex/Claude Code envelope.
+`sessionStart` may emit `additional_context`. `stop` does not emit `followup_message` because Cursor
+would auto-submit it as a new user message. `afterFileEdit`, `afterMCPExecution`, and `sessionEnd`
+have no advice output channel and emit `{}`. Only a successfully written, nonempty `sessionStart`
+object commits advice delivery; output-less events do not acquire the delivery lease or consume a
+frontier-motion notice.
+
+Workspace binding does not trust plugin-hook CWD. It selects a single `workspace_roots` entry first,
+then `CURSOR_PROJECT_DIR`, then the explicit `--workspace` value. A multiroot workspace selects the
+deepest root containing `CURSOR_PROJECT_DIR` or refuses. The reusable git-root helper walks safe
+ancestors for the nearest `.git` directory or worktree file, without running Git, and refuses
+symlinked ancestors, root/home locators, unsafe markers, or unbounded/control-bearing values.
+`workspace_unresolvable` and `workspace_unconsented` remain distinct payload-free diagnostics.
+Cursor's current documentation does not specify plugin-hook CWD, and this change does not claim a
+live IDE/CLI CWD measurement; the binding deliberately no longer depends on it.
+
+Use the same selected path for `yoetz observe grant|status|pause|resume|revoke`: operator controls
+and setup probes apply the identical nearest-safe-Git-root normalization as hook ingress. A legacy
+grant made against an exact Git subdirectory is intentionally not searched as an ancestor fallback;
+run `yoetz observe grant --workspace <subdirectory>` once after upgrade to record the canonical root.
 
 Before local storage the adapter discards prompts, reasoning, response text, file paths/content/
 edits, MCP arguments/results, transcripts, command output, email, and workspace roots. Fixtures
@@ -145,8 +189,7 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 |---|---|
 | Skill appears but plugin identity is absent | fallback discovery; not a plugin pass |
 | `tools/list` succeeds but owner is dual/ambiguous | source collision; do not choose silently |
-| SDK sees no plugin MCP | `plugins` missing from explicit setting sources |
-| SDK sees the wrong route | a higher-precedence inline/project/user source won |
+| SDK fixture is present | metadata-only experimental scaffolding; no SDK activation or model-use claim exists |
 | Model sees only a compact sentence and loses structured fields | the native plugin is stale or a portable/external route won; verify the winning source includes `--host cursor`, reload the isolated app, and retry |
 | Installed MCP executable changed but Cursor still shows the old tool inventory | first run `Developer: Reload Window`; if the pinned IDE still reuses its shared MCP process, fully quit that exact Cursor testing app, verify its process exited, relaunch it with the same isolated profile, and re-prove discovery plus `tools/list` before claiming activation |
 | MCP resources load but every workflow call fails after a runtime upgrade | a pre-upgrade Yoetz service may still own the fixed endpoint; restart that exact service through the user-selected supervisor, then retry and require a returned task/session before claiming use |

@@ -50,6 +50,106 @@ def test_grant_pause_resume_revoke_roundtrip(tmp_path: Path, capsys: object) -> 
     assert workspace not in status_out
 
 
+def test_git_subdirectory_consent_and_hook_share_one_canonical_workspace(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repo"
+    nested = repository / "packages/app"
+    nested.mkdir(parents=True)
+    (repository / ".git").mkdir()
+
+    assert observe_cli.grant_observation(workspace=str(nested), _state=state) == 0
+    store = LocalObservationStore(_state=state)
+    root_commitment = store.workspace_commitment(str(repository))
+    subdirectory_commitment = store.workspace_commitment(str(nested))
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    unrelated_commitment = store.workspace_commitment(str(unrelated))
+    store.grant_consent(unrelated_commitment)
+    assert root_commitment != subdirectory_commitment
+    consent = store.consent_for(root_commitment)
+    assert consent is not None and consent.active
+    assert store.consent_for(subdirectory_commitment) is None
+
+    assert observe_cli.pause_observation(workspace=str(nested), _state=state) == 0
+    assert observe_cli.resume_observation(workspace=str(nested), _state=state) == 0
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "git-subdir-session", "hook_event_name": "SessionStart"}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(nested),
+        _state=state,
+        skip_service=True,
+    )
+    assert code == 0
+    assert store.find_workspace_for_codex_session("git-subdir-session") == root_commitment
+    assert store.find_workspace_for_codex_session("git-subdir-session") != unrelated_commitment
+
+    assert observe_cli.revoke_observation(workspace=str(nested), _state=state) == 0
+    revoked = store.consent_for(root_commitment)
+    assert revoked is not None and not revoked.active
+    assert str(repository) not in capsys.readouterr().out  # type: ignore[attr-defined]
+
+
+def test_non_git_hook_workspace_keeps_exact_locator_with_multiple_consents(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    workspace_path = tmp_path / "plain-workspace"
+    unrelated = tmp_path / "unrelated"
+    workspace_path.mkdir()
+    unrelated.mkdir()
+    store = LocalObservationStore(_state=state)
+    workspace_commitment = store.workspace_commitment(str(workspace_path))
+    store.grant_consent(workspace_commitment)
+    store.grant_consent(store.workspace_commitment(str(unrelated)))
+
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "plain-workspace-session", "hook_event_name": "SessionStart"}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(workspace_path),
+        _state=state,
+        skip_service=True,
+    )
+
+    assert code == 0
+    assert store.find_workspace_for_codex_session("plain-workspace-session") == workspace_commitment
+
+
+def test_explicit_git_root_does_not_fall_back_to_legacy_subdirectory_consent(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repo"
+    legacy_subdirectory = repository / "packages/app"
+    legacy_subdirectory.mkdir(parents=True)
+    (repository / ".git").mkdir()
+    store = LocalObservationStore(_state=state)
+    legacy_commitment = store.workspace_commitment(str(legacy_subdirectory))
+    store.grant_consent(legacy_commitment)
+    assert store.consent_for(store.workspace_commitment(str(repository))) is None
+
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "legacy-subdir-session", "hook_event_name": "SessionStart"}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(repository),
+        _state=state,
+        skip_service=True,
+    )
+
+    assert code == 0
+    assert store.codex_sessions_for_workspace(legacy_commitment) == ()
+    assert store.list_pending_outbox_rows(legacy_commitment) == ()
+
+
 def test_workspace_commitment_stable_and_path_free(tmp_path: Path) -> None:
     from yoetz.adapters.integrations.observation_local import LocalObservationStore
 

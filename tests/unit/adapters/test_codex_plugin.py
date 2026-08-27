@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from yoetz.adapters.integrations import codex_plugin as plugin_mod
+from yoetz.adapters.integrations.codex_capability_cells import skill_manifest_capability_fields
 from yoetz.adapters.integrations.codex_plugin import (
     PluginHookPresence,
     codex_supports_async_hooks,
@@ -97,11 +98,9 @@ def _resources() -> _Resources:
         for installed_path, (package_path, data) in guidance_files.items()
     )
     skill_manifest_body: dict[str, JsonValue] = {
-        "capability_profile_ids": [],
-        "codex_version_bounds": {"tested": []},
+        **dict(skill_manifest_capability_fields()),
         "guidance_version": "0.1.0",
         "harness": "codex",
-        "hooks_by_capability_profile": {},
         "managed_members": managed_members,
         "protocol_version": "0.1",
         "schema": "yoetz.codex-skill-manifest/1",

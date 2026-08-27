@@ -33,6 +33,7 @@ from yoetz.application.observation_check_policy import load_observation_check_po
 from yoetz.application.observation_drain import ObservationDrainAction, route_observation_ingest
 from yoetz.application.observation_verification import run_bound_approved_check
 from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
+from yoetz.cli.workspace_binding import canonical_workspace_locator
 from yoetz.domain.observation import (
     ObservationControlCommand,
     ObservationCursor,
@@ -88,8 +89,10 @@ type DrainConnector = Callable[[ControlClientKind], Awaitable[_DrainClient]]
 
 
 def _resolve_workspace(path: str | None) -> Path:
-    root = Path.cwd() if path is None else Path(path)
-    return root.resolve()
+    root = canonical_workspace_locator("." if path is None else path)
+    if root is None:
+        raise ValueError("workspace_locator_invalid")
+    return Path(root)
 
 
 def _emit(payload: Mapping[str, JsonValue], *, json_output: bool) -> None:

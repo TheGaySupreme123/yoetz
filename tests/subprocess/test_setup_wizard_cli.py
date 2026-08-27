@@ -81,13 +81,19 @@ def _yoetz_entry(
     return CommandOutput(0, json.dumps({"command": "yoetz", "args": args}).encode())
 
 
+def _absent_mcp() -> list[CommandOutput]:
+    """A failed named lookup plus a successful structural proof of absence."""
+
+    return [CommandOutput(1, b""), CommandOutput(0, b"[]")]
+
+
 @pytest.fixture
 def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, object]:
     """Fake discovery, adapter subprocesses, service client, and marker path."""
 
     state: dict[str, object] = {
         "binaries": (_binary(),),
-        "outputs": [CommandOutput(1, b"")],
+        "outputs": _absent_mcp(),
         "calls": [],
         "activation_apply_calls": 0,
     }
@@ -520,8 +526,8 @@ def test_non_interactive_accept_registers_and_writes_marker(
     wizard_env: dict[str, object],
 ) -> None:
     wizard_env["outputs"] = [
-        CommandOutput(1, b""),  # preview get: absent
-        CommandOutput(1, b""),  # apply re-preview get: absent
+        *_absent_mcp(),  # preview: confirmed absent
+        *_absent_mcp(),  # apply re-preview: confirmed absent
         CommandOutput(0, b""),  # add
         _yoetz_entry(),  # verify get
     ]
@@ -555,8 +561,8 @@ def test_interactive_generic_accept_does_not_authorize_unshown_activation(
     wizard_env: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wizard_env["outputs"] = [
-        CommandOutput(1, b""),
-        CommandOutput(1, b""),
+        *_absent_mcp(),
+        *_absent_mcp(),
         CommandOutput(0, b""),
         _yoetz_entry(),
     ]
@@ -658,11 +664,11 @@ async def test_a_preview_and_apply_that_disagree_on_the_route_refuse_as_stale(
     skill_preview = await setup_module.project_skill_preview(workspace)
 
     # Exactly what the TUI does today: no route_profile, so the class default (policy) applies.
-    preview_runner = _ScriptedRunner([CommandOutput(1, b"")])
+    preview_runner = _ScriptedRunner(_absent_mcp())
     mcp_preview = await HarnessMcpService(CodexMcpAdapter(preview_runner)).preview(_binary())
 
     # And exactly what apply does today: the configured route, strict with no provider bound.
-    wizard_env["outputs"] = [CommandOutput(1, b"")]
+    wizard_env["outputs"] = _absent_mcp()
     report = await setup_module.apply_codex_integration(
         _binary(),
         workspace=workspace,
@@ -693,14 +699,14 @@ async def test_a_preview_and_apply_on_the_same_route_register(
     workspace = cast(Path, wizard_env["marker"]).parent
     skill_preview = await setup_module.project_skill_preview(workspace)
 
-    preview_runner = _ScriptedRunner([CommandOutput(1, b"")])
+    preview_runner = _ScriptedRunner(_absent_mcp())
     mcp_preview = await HarnessMcpService(
         CodexMcpAdapter(preview_runner, route_profile="strict")
     ).preview(_binary())
 
     wizard_env["outputs"] = [
-        CommandOutput(1, b""),  # step preview get: absent
-        CommandOutput(1, b""),  # adapter install re-preview get: absent
+        *_absent_mcp(),  # step preview: confirmed absent
+        *_absent_mcp(),  # adapter install re-preview: confirmed absent
         CommandOutput(0, b""),  # add
         _yoetz_entry("strict"),  # verify get
     ]
@@ -732,8 +738,8 @@ def test_interactive_wizard_selects_harness_then_installation_and_requires_y_or_
 ) -> None:
     wizard_env["binaries"] = (_binary("/a/codex"), _binary("/b/codex"))
     wizard_env["outputs"] = [
-        CommandOutput(1, b""),  # preview get: absent
-        CommandOutput(1, b""),  # apply re-preview get: absent
+        *_absent_mcp(),  # preview: confirmed absent
+        *_absent_mcp(),  # apply re-preview: confirmed absent
         CommandOutput(0, b""),  # add
         _yoetz_entry(),  # verify get
     ]
@@ -807,7 +813,7 @@ def test_interactive_registration_n_declines_without_mutation(
         result.stdout
     )
     for calls in cast(list[list[tuple[str, ...]]], wizard_env["calls"]):
-        assert all(call[1:3] == ("mcp", "get") for call in calls)
+        assert all(call[1:3] in {("mcp", "get"), ("mcp", "list")} for call in calls)
 
 
 def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
@@ -819,8 +825,8 @@ def test_semantic_first_run_suggests_and_selects_assisted_privacy_draft(
     import yoetz.cli.setup as setup_module
 
     wizard_env["outputs"] = [
-        CommandOutput(1, b""),  # preview get: absent
-        CommandOutput(1, b""),  # apply re-preview get: absent
+        *_absent_mcp(),  # preview: confirmed absent
+        *_absent_mcp(),  # apply re-preview: confirmed absent
         CommandOutput(0, b""),  # add
         _yoetz_entry("policy"),  # verify get
     ]
@@ -965,8 +971,8 @@ def test_composed_wizard_preserves_privacy_when_hidden_credential_input_is_empty
 
     fake_credential = "sk-fake-issue-165-must-never-appear"
     wizard_env["outputs"] = [
-        CommandOutput(1, b""),
-        CommandOutput(1, b""),
+        *_absent_mcp(),
+        *_absent_mcp(),
         CommandOutput(0, b""),
         _yoetz_entry("policy"),
     ]
@@ -1051,8 +1057,8 @@ def test_composed_wizard_reaches_semantic_readiness_after_hidden_credential_stor
     tmp_path: Path,
 ) -> None:
     wizard_env["outputs"] = [
-        CommandOutput(1, b""),
-        CommandOutput(1, b""),
+        *_absent_mcp(),
+        *_absent_mcp(),
         CommandOutput(0, b""),
         _yoetz_entry("policy"),
     ]
@@ -1183,7 +1189,7 @@ def test_installed_hooks_use_nested_plugin_hook_path(tmp_path: Path) -> None:
 
 
 def test_integrate_mcp_status_preview_install(wizard_env: dict[str, object]) -> None:
-    wizard_env["outputs"] = [CommandOutput(1, b"")]
+    wizard_env["outputs"] = _absent_mcp()
     status = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "status", "--json"])
     assert status.exit_code == 0
     absent_status = json.loads(status.stdout)
@@ -1191,7 +1197,7 @@ def test_integrate_mcp_status_preview_install(wizard_env: dict[str, object]) -> 
     # An absent entry has no Yoetz route to describe; the field is present and null, never guessed.
     assert absent_status["route_profile"] is None
 
-    wizard_env["outputs"] = [CommandOutput(1, b"")]
+    wizard_env["outputs"] = _absent_mcp()
     preview = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview", "--json"])
     assert preview.exit_code == 0
     body = json.loads(preview.stdout)
@@ -1199,8 +1205,8 @@ def test_integrate_mcp_status_preview_install(wizard_env: dict[str, object]) -> 
     assert body["preview_digest"].startswith("sha256:")
 
     wizard_env["outputs"] = [
-        CommandOutput(1, b""),
-        CommandOutput(1, b""),
+        *_absent_mcp(),
+        *_absent_mcp(),
         CommandOutput(0, b""),
         _yoetz_entry(),
     ]
@@ -1242,7 +1248,7 @@ def test_integrate_mcp_status_names_the_registered_route(
 def test_integrate_mcp_install_without_accept_fails_closed(
     wizard_env: dict[str, object],
 ) -> None:
-    wizard_env["outputs"] = [CommandOutput(1, b"")]
+    wizard_env["outputs"] = _absent_mcp()
     result = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "install", "--json"])
     assert result.exit_code == 2
     assert "confirmation_required" in result.stderr
@@ -1253,6 +1259,130 @@ def test_integrate_mcp_refuses_foreign_entry(wizard_env: dict[str, object]) -> N
     result = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "install", "--accept", "--json"])
     assert result.exit_code == 2
     assert "foreign_entry_present" in result.stderr
+
+
+def test_integrate_mcp_remove_owned_entry(wizard_env: dict[str, object]) -> None:
+    wizard_env["outputs"] = [_yoetz_entry()]
+    previewed = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview-remove", "--json"])
+    assert previewed.exit_code == 0, (previewed.output, previewed.exception)
+    preview = json.loads(previewed.stdout)
+    assert preview["action"] == "unregister"
+    assert preview["route_profile"] == "strict"
+    assert preview["serve_command"] == ["yoetz", "mcp", "serve", "--semantic", "off"]
+    assert preview["warnings"] == ["host_remove_not_compare_and_swap"]
+    assert preview["preview_digest"].startswith("sha256:")
+
+    wizard_env["outputs"] = [_yoetz_entry()]
+    refused = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "remove", "--json"])
+    assert refused.exit_code == 2
+    assert "confirmation_required" in refused.stderr
+
+    wizard_env["outputs"] = [_yoetz_entry()]
+    unbound = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "remove", "--accept", "--json"])
+    assert unbound.exit_code == 2
+    assert "confirmation_required" in unbound.stderr
+
+    wizard_env["outputs"] = [
+        _yoetz_entry(),
+        _yoetz_entry(),
+        _yoetz_entry(),
+        CommandOutput(0, b""),
+        CommandOutput(1, b""),
+        CommandOutput(0, b"[]"),
+    ]
+    result = _RUNNER.invoke(
+        cli.app,
+        [
+            "integrate",
+            "codex",
+            "mcp",
+            "remove",
+            "--accept",
+            "--preview-digest",
+            preview["preview_digest"],
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    body = json.loads(result.stdout)
+    assert body["action"] == "unregister"
+    assert body["state_after"] == "absent"
+
+
+def test_integrate_mcp_interactive_remove_surfaces_complete_warning_bound_preview(
+    wizard_env: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yoetz.cli.setup as setup_module
+
+    wizard_env["outputs"] = [
+        _yoetz_entry(),
+        _yoetz_entry(),
+        _yoetz_entry(),
+        CommandOutput(0, b""),
+        *_absent_mcp(),
+    ]
+    monkeypatch.setattr(setup_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(setup_module, "_confirm_registration", lambda: True)
+
+    result = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "remove"])
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert "Command: yoetz mcp serve --semantic off" in result.output
+    assert "MCP route profile: strict" in result.output
+    assert "Warning: host_remove_not_compare_and_swap" in result.output
+    assert "Preview digest: sha256:" in result.output
+
+
+def test_integrate_mcp_remove_absent_entry_is_noop(wizard_env: dict[str, object]) -> None:
+    wizard_env["outputs"] = _absent_mcp()
+    previewed = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview-remove", "--json"])
+    assert previewed.exit_code == 0, (previewed.output, previewed.exception)
+    preview_digest = json.loads(previewed.stdout)["preview_digest"]
+
+    wizard_env["outputs"] = _absent_mcp()
+    result = _RUNNER.invoke(
+        cli.app,
+        [
+            "integrate",
+            "codex",
+            "mcp",
+            "remove",
+            "--accept",
+            "--preview-digest",
+            preview_digest,
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert json.loads(result.stdout)["action"] == "noop"
+
+
+def test_integrate_mcp_remove_refuses_foreign_entry(wizard_env: dict[str, object]) -> None:
+    wizard_env["outputs"] = [CommandOutput(0, json.dumps({"command": "other"}).encode())]
+    result = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "remove", "--accept", "--json"])
+    assert result.exit_code == 2
+    assert "foreign_entry_present" in result.stderr
+
+
+def test_integrate_mcp_remove_refuses_stale_preview_digest(
+    wizard_env: dict[str, object],
+) -> None:
+    wizard_env["outputs"] = [_yoetz_entry()]
+    result = _RUNNER.invoke(
+        cli.app,
+        [
+            "integrate",
+            "codex",
+            "mcp",
+            "remove",
+            "--accept",
+            "--preview-digest",
+            "sha256:" + "0" * 64,
+            "--json",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "preview_stale" in result.stderr
 
 
 def test_non_interactive_accept_preserves_existing_policy_route(
@@ -1367,8 +1497,8 @@ def test_failed_activation_preview_reports_bound_home_and_real_reason(
     monkeypatch.setattr(setup_module, "preview_activation", conflicted)
     monkeypatch.setattr(setup_module, "inspect_activation", conflicted)
     wizard_env["outputs"] = [
-        CommandOutput(1, b""),  # preview get: absent
-        CommandOutput(1, b""),  # apply re-preview get: absent
+        *_absent_mcp(),  # preview: confirmed absent
+        *_absent_mcp(),  # apply re-preview: confirmed absent
         CommandOutput(0, b""),  # add
         _yoetz_entry(),  # verify get
     ]

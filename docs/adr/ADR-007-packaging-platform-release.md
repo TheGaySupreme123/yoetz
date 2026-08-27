@@ -61,6 +61,10 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
    keyring entries. Amended by ADR-012: the `codex mcp get`/`codex mcp add` sequence is also
    available as the preview-gated `yoetz integrate <harness> mcp` commands and the `yoetz setup`
    wizard; the manual commands remain valid and the runbook's preservation rules are unchanged.
+   Amended by issue #419: `yoetz integrate <harness> mcp remove` and
+   `yoetz integrate codex plugin remove` are the digest-bound inverses for the MCP entry and the
+   marketplace/`config.toml`/cache surfaces setup writes; uninstall still never deletes
+   bundles/vault/keyring entries, consent records, or the observation store.
 10. **Diagnostics:** `yoetz version --json` emits the full `VersionManifest`; startup safety
     validation is mandatory but the public `doctor` command stays v0.2.
 11. **Public schema hosting without runtime coupling:** the checked-in `schemas/` tree is mounted

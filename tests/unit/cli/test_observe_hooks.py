@@ -15,6 +15,7 @@ from typing import cast
 import pytest
 
 from yoetz.adapters.integrations.codex_lifecycle import acquire_session_lock
+from yoetz.adapters.integrations.hook_spool import HookSpool
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.recommendations import RecommendationState, store_recommendation_state
 from yoetz.cli import observe_hooks as observe_hooks_module
@@ -260,6 +261,34 @@ def test_legacy_spool_is_durable_without_touching_lived_in_observation_state(
     assert b"secret" not in spool_files[0].read_bytes()
 
 
+def test_legacy_spool_canonicalizes_git_subdirectory_to_consented_root(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repo"
+    nested = repository / "packages/app"
+    nested.mkdir(parents=True)
+    (repository / ".git").mkdir()
+    store = LocalObservationStore(_state=state)
+    root_commitment = store.workspace_commitment(str(repository))
+    nested_commitment = store.workspace_commitment(str(nested))
+    store.grant_consent(root_commitment)
+
+    code = handle_spool(
+        event_name="PreToolUse",
+        stdin_bytes=b'{"session_id":"spool-git-root","tool_name":"shell"}',
+        stdout=io.BytesIO(),
+        workspace=str(nested),
+        _state=state,
+    )
+
+    spool = HookSpool(_state=state)
+    assert code == 0
+    assert spool.pending_workspaces() == (root_commitment,)
+    assert nested_commitment not in spool.pending_workspaces()
+    with spool.claim(root_commitment) as records:
+        assert len(records) == 1
+        assert records[0].workspace_commitment == root_commitment
+
+
 def test_post_tool_hook_delivers_pending_frontier_motion_once(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -446,6 +475,35 @@ def test_unsafe_runtime_gate_records_workspace_gap_when_consented(tmp_path: Path
     assert json.loads(stdout.getvalue()) == {}
     status = store.status(ObservationStatusQuery(workspace))
     assert ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value in status.gaps
+
+
+def test_unsafe_runtime_gate_canonicalizes_git_subdirectory_gap(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repo"
+    nested = repository / "packages/app"
+    nested.mkdir(parents=True)
+    (repository / ".git").mkdir()
+    store = LocalObservationStore(_state=state)
+    root_commitment = store.workspace_commitment(str(repository))
+    nested_commitment = store.workspace_commitment(str(nested))
+    store.grant_consent(root_commitment)
+    store.set_runtime_enabled(True)
+    gate = state / "observation/runtime-gate.json"
+    gate.write_text("not-json", encoding="utf-8")
+
+    handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {"session_id": "unsafe-gate-subdirectory", "tool_name": "shell"}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(nested),
+        _state=state,
+    )
+
+    status = store.status(ObservationStatusQuery(root_commitment))
+    assert ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value in status.gaps
+    assert store.consent_for(nested_commitment) is None
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO gate regression is POSIX-only")

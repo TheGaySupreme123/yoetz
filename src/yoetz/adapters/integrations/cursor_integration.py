@@ -13,11 +13,12 @@ import hashlib
 import os
 import platform
 import plistlib
+import shlex
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Final, Literal, cast
@@ -60,6 +61,7 @@ __all__ = [
     "CURSOR_HARNESS_PROFILE",
     "CURSOR_NATIVE_PROFILE_ID",
     "CURSOR_PLUGIN_RELATIVE_ROOT",
+    "CURSOR_SDK_PROOF_LIMITS",
     "CursorArtifactIdentity",
     "CursorCapabilityIdentity",
     "CursorIntegrationError",
@@ -88,6 +90,7 @@ CURSOR_PLUGIN_RELATIVE_ROOT: Final = "plugins/local/yoetz"
 CURSOR_NATIVE_PROFILE_ID: Final = "cursor-native-3.17"
 CURSOR_HOOK_MAPPING_VERSION: Final = "cursor-hooks-3.17-v1"
 CURSOR_SDK_BRIDGE_PROTOCOL: Final = "sdk.v1"
+CURSOR_SDK_PROOF_LIMITS: Final = ("metadata_only", "not_a_support_claim")
 CURSOR_HOOK_EVENTS: Final = (
     "afterFileEdit",
     "afterMCPExecution",
@@ -98,8 +101,6 @@ CURSOR_HOOK_EVENTS: Final = (
 _CURSOR_CAPABILITY_PROFILE_IDS: Final = (
     "cursor-cli-2026.07.09-a3815c0",
     "cursor-ide-3.17.8",
-    "cursor-sdk-python-1.0.24",
-    "cursor-sdk-typescript-1.0.23",
 )
 _CURSOR_HOOK_PROFILE: Final = HarnessHookProfile(
     trigger_event="sessionStart",
@@ -112,18 +113,17 @@ CURSOR_HARNESS_PROFILE: Final = HarnessProfile(
     skill_root="plugins/local/yoetz/skills/",
     frontmatter_profile="agent-skills-1",
     capability_profile_ids=_CURSOR_CAPABILITY_PROFILE_IDS,
-    supported_versions=("1.0.23", "1.0.24", "2026.07.09-a3815c0", "3.17.8"),
+    supported_versions=("2026.07.09-a3815c0", "3.17.8"),
     hooks_by_capability_profile={
         "cursor-cli-2026.07.09-a3815c0": None,
         "cursor-ide-3.17.8": _CURSOR_HOOK_PROFILE,
-        "cursor-sdk-python-1.0.24": None,
-        "cursor-sdk-typescript-1.0.23": None,
     },
 )
 
 _MARKER_NAME: Final = ".yoetz-cursor-plugin-install.json"
-_MARKER_SCHEMA: Final = "yoetz.cursor-plugin-install/1"
-_RENDERER_VERSION: Final = "cursor-plugin/0.1.0"
+_MARKER_SCHEMA_V1: Final = "yoetz.cursor-plugin-install/1"
+_MARKER_SCHEMA_V2: Final = "yoetz.cursor-plugin-install/2"
+_RENDERER_VERSION: Final = "cursor-plugin/0.2.0"
 _ROLLBACK_NAME: Final = ".yoetz-cursor-plugin-rollback"
 _STAGE_PREFIX: Final = ".yoetz-cursor-plugin-stage-"
 _MAX_FILE_BYTES: Final = 262_144
@@ -184,6 +184,8 @@ class CursorCapabilityIdentity:
 
 @dataclass(frozen=True, slots=True, repr=False)
 class CursorArtifactIdentity:
+    """Metadata-only SDK identity; it never establishes a supported SDK cell."""
+
     binding: CursorSdkBinding
     package_version: str
     package_digest: str
@@ -209,9 +211,23 @@ class CursorArtifactIdentity:
             f"bridge_digest={self.bridge_digest!r})"
         )
 
+    @property
+    def proof_limits(self) -> tuple[str, str]:
+        return CURSOR_SDK_PROOF_LIMITS
+
+    @property
+    def metadata_only(self) -> bool:
+        return True
+
+    @property
+    def support_claim(self) -> bool:
+        return False
+
 
 @dataclass(frozen=True, slots=True)
 class CursorSdkProfile:
+    """Metadata-only SDK precedence profile; it never establishes SDK support."""
+
     identity: CursorArtifactIdentity
     setting_sources: tuple[Literal["plugins", "project", "user"], ...]
     mcp_precedence: tuple[CursorMcpSource, ...]
@@ -253,6 +269,18 @@ class CursorSdkProfile:
         }.intersection(self.setting_sources):
             raise ValueError("cursor_sdk_external_source_required")
 
+    @property
+    def proof_limits(self) -> tuple[str, str]:
+        return CURSOR_SDK_PROOF_LIMITS
+
+    @property
+    def metadata_only(self) -> bool:
+        return True
+
+    @property
+    def support_claim(self) -> bool:
+        return False
+
 
 @dataclass(frozen=True, slots=True, repr=False)
 class CursorPluginTarget:
@@ -278,6 +306,7 @@ class CursorPluginArtifact:
     plan: PortablePluginPlan
     members: Mapping[str, bytes]
     artifact_digest: str
+    yoetz_launcher: tuple[str, ...] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.plan) is not PortablePluginPlan:
@@ -286,6 +315,11 @@ class CursorPluginArtifact:
             PluginFormatProfile.AGENT_PLUGINS_1,
             PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
         }:
+            raise ValueError("cursor_artifact_invalid")
+        if self.plan.format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE:
+            if not _valid_launcher(self.yoetz_launcher):
+                raise ValueError("cursor_artifact_invalid")
+        elif self.yoetz_launcher is not None:
             raise ValueError("cursor_artifact_invalid")
         _validate_digest(self.artifact_digest)
         expected = tuple(item.relative_path for item in self.plan.inventory)
@@ -488,11 +522,72 @@ def _mcp_json(route_profile: Literal["strict", "policy"]) -> bytes:
     )
 
 
+def _valid_launcher(launcher: object) -> bool:
+    """Validate one rendered launcher: an absolute executable plus fixed arguments."""
+
+    if type(launcher) is not tuple or not launcher:
+        return False
+    parts = cast(tuple[object, ...], launcher)
+    if any(
+        type(part) is not str
+        or not part
+        or any(ord(char) < 32 or ord(char) == 127 for char in part)
+        for part in parts
+    ):
+        return False
+    return Path(cast(str, parts[0])).is_absolute()
+
+
+def _resolve_yoetz_launcher(candidate: Path | str | Sequence[str] | None = None) -> tuple[str, ...]:
+    """Resolve the exact launcher command used by rendered native Cursor hooks.
+
+    A plain path or name resolves to the console-script executable. A sequence
+    preserves an explicit invocation such as the documented ``python -m yoetz``
+    module entrypoint (ADR-007): its first element is resolved as the
+    executable and the remaining arguments are kept verbatim.
+    """
+
+    arguments: tuple[str, ...] = ()
+    if isinstance(candidate, Sequence) and not isinstance(candidate, str):
+        if not candidate or any(type(part) is not str for part in candidate):
+            raise ValueError("yoetz_executable_unavailable")
+        arguments = tuple(candidate[1:])
+        candidate = candidate[0]
+    if candidate is None:
+        discovered = shutil.which("yoetz")
+    else:
+        candidate_text = os.fspath(candidate)
+        raw = Path(candidate_text).expanduser()
+        separators = (os.sep,) if os.altsep is None else (os.sep, os.altsep)
+        explicit_path = isinstance(candidate, Path) or any(
+            separator in candidate_text for separator in separators
+        )
+        discovered = str(raw) if explicit_path else shutil.which(candidate_text)
+    if discovered is None:
+        raise ValueError("yoetz_executable_unavailable")
+    try:
+        resolved = Path(discovered).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("yoetz_executable_unavailable") from exc
+    if (
+        not resolved.is_file()
+        or not os.access(resolved, os.X_OK)
+        or not resolved.is_absolute()
+        or any(ord(char) < 32 or ord(char) == 127 for char in str(resolved))
+    ):
+        raise ValueError("yoetz_executable_unavailable")
+    launcher = (str(resolved), *arguments)
+    if not _valid_launcher(launcher):
+        raise ValueError("yoetz_executable_unavailable")
+    return launcher
+
+
 def _native_members(
     *,
     source: PackagedPortableResources,
     mcp_ownership: McpOwnership,
     route_profile: Literal["strict", "policy"] | None,
+    yoetz_launcher: tuple[str, ...],
 ) -> dict[str, bytes]:
     manifest: dict[str, JsonValue] = {
         "author": {"name": "Yoetz contributors"},
@@ -508,9 +603,17 @@ def _native_members(
         manifest["mcpServers"] = "mcp.json"
     elif route_profile is not None:
         raise ValueError("cursor_mcp_route_forbidden")
-    hook_command = "yoetz hooks cursor-observe --workspace ."
+    launcher = " ".join(shlex.quote(part) for part in yoetz_launcher)
+    hook_command = f"{launcher} hooks cursor-observe --workspace ."
+    hook_timeouts = {
+        "afterFileEdit": 5,
+        "afterMCPExecution": 5,
+        "sessionEnd": 3,
+        "sessionStart": 10,
+        "stop": 10,
+    }
     hooks = {
-        event: [{"command": f"{hook_command} --event {event}", "timeout": 3}]
+        event: [{"command": f"{hook_command} --event {event}", "timeout": hook_timeouts[event]}]
         for event in CURSOR_HOOK_EVENTS
     }
     members: dict[str, bytes] = {
@@ -532,6 +635,7 @@ def render_cursor_plugin(
     mcp_ownership: McpOwnership = McpOwnership.EXTERNAL_REGISTRATION,
     route_profile: Literal["strict", "policy"] | None = None,
     source: PackagedPortableResources | None = None,
+    yoetz_launcher: Path | str | Sequence[str] | None = None,
 ) -> CursorPluginArtifact:
     """Render one Cursor artifact from canonical packaged guidance bytes."""
 
@@ -550,10 +654,12 @@ def render_cursor_plugin(
             resource_source=resources,
         )
         return CursorPluginArtifact(rendered.plan, dict(rendered.members), rendered.artifact_digest)
+    resolved_yoetz_launcher = _resolve_yoetz_launcher(yoetz_launcher)
     members = _native_members(
         source=resources,
         mcp_ownership=mcp_ownership,
         route_profile=route_profile,
+        yoetz_launcher=resolved_yoetz_launcher,
     )
     plan = PortablePluginPlan(
         name="yoetz",
@@ -590,7 +696,7 @@ def render_cursor_plugin(
             "renderer_version": _RENDERER_VERSION,
         }
     )
-    return CursorPluginArtifact(plan, members, digest)
+    return CursorPluginArtifact(plan, members, digest, resolved_yoetz_launcher)
 
 
 def _safe_existing_ancestor(path: Path) -> Path:
@@ -697,9 +803,16 @@ def _marker(artifact: CursorPluginArtifact) -> bytes:
         "mcp_ownership": artifact.plan.mcp_ownership.value,
         "mcp_route_profile": artifact.plan.mcp_route_profile,
         "renderer_version": artifact.plan.renderer_version,
-        "schema": _MARKER_SCHEMA,
+        "schema": (
+            _MARKER_SCHEMA_V2
+            if artifact.plan.format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE
+            else _MARKER_SCHEMA_V1
+        ),
         "yoetz_version": artifact.plan.version,
     }
+    if artifact.plan.format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE:
+        assert artifact.yoetz_launcher is not None
+        body["yoetz_launcher"] = list(artifact.yoetz_launcher)
     return canonical_encode({**body, "marker_digest": canonical_digest(body)})
 
 
@@ -708,8 +821,12 @@ def _valid_marker(
 ) -> tuple[bool, PluginFormatProfile | None, str | None]:
     raw = files.get(_MARKER_NAME)
     marker = None if raw is None else _load_object(raw)
-    if marker is None or marker.get("schema") != _MARKER_SCHEMA:
+    if marker is None or marker.get("schema") not in {
+        _MARKER_SCHEMA_V1,
+        _MARKER_SCHEMA_V2,
+    }:
         return False, None, None
+    schema = cast(str, marker["schema"])
     digest = marker.get("marker_digest")
     body = {key: value for key, value in marker.items() if key != "marker_digest"}
     if type(digest) is not str or digest != canonical_digest(body):
@@ -723,6 +840,16 @@ def _valid_marker(
         PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
     }:
         return False, None, None
+    launcher = marker.get("yoetz_launcher")
+    if schema == _MARKER_SCHEMA_V2:
+        if (
+            format_profile is not PluginFormatProfile.CURSOR_PLUGIN_NATIVE
+            or type(launcher) is not list
+            or not _valid_launcher(tuple(cast(list[object], launcher)))
+        ):
+            return False, format_profile, cast(str | None, marker.get("artifact_digest"))
+    elif launcher is not None:
+        return False, format_profile, cast(str | None, marker.get("artifact_digest"))
     rows = marker.get("managed_files")
     if type(rows) is not list:
         return False, None, None
@@ -815,8 +942,13 @@ def _inspect(target: CursorPluginTarget, artifact: CursorPluginArtifact) -> _Ins
             False,
         )
     expected = {**artifact.members, _MARKER_NAME: _marker(artifact)}
+    same_format = format_profile is artifact.plan.format_profile
     state = (
-        PluginArtifactState.PORTABLE_EXACT
+        PluginArtifactState.MODIFIED
+        if same_format
+        and format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE
+        and files != expected
+        else PluginArtifactState.PORTABLE_EXACT
         if format_profile is PluginFormatProfile.AGENT_PLUGINS_1 and files == expected
         else PluginArtifactState.PORTABLE_MANAGED
         if format_profile is PluginFormatProfile.AGENT_PLUGINS_1
@@ -840,9 +972,9 @@ _ABSENT_STATE_DIGEST: Final = canonical_digest({"state": "absent"})
 _PREVIEW_WARNINGS: Final = (
     "activation_not_inferred_from_installation",
     "cursor_cloud_not_supported",
+    "cursor_sdk_support_deferred",
     "mcp_handshake_does_not_prove_model_use",
     "observation_requires_separate_consent",
-    "sdk_setting_sources_must_be_explicit",
 )
 
 
@@ -894,11 +1026,12 @@ def _preview_from_inspection(
         and inspection.state is not PluginArtifactState.ABSENT
     ):
         raise _error(PluginArtifactReason.DESTINATION_CONFLICT)
-    if action is PluginArtifactAction.REPLACE and inspection.state not in {
+    replace_allowed = inspection.state in {
         PluginArtifactState.PORTABLE_EXACT,
         PluginArtifactState.PORTABLE_MANAGED,
         PluginArtifactState.NATIVE_MANAGED,
-    }:
+    } or (inspection.state is PluginArtifactState.MODIFIED and inspection.marker_valid)
+    if action is PluginArtifactAction.REPLACE and not replace_allowed:
         raise _error(PluginArtifactReason.DESTINATION_CONFLICT)
     if action is PluginArtifactAction.REMOVE and (
         inspection.state
@@ -906,6 +1039,7 @@ def _preview_from_inspection(
             PluginArtifactState.PORTABLE_EXACT,
             PluginArtifactState.PORTABLE_MANAGED,
             PluginArtifactState.NATIVE_MANAGED,
+            PluginArtifactState.MODIFIED,
         }
         or not inspection.marker_valid
     ):
@@ -919,6 +1053,7 @@ def _preview_from_inspection(
             )
     exact = (
         inspection.marker_valid
+        and inspection.state is not PluginArtifactState.MODIFIED
         and inspection.format_profile is artifact.plan.format_profile
         and inspection.installed_digest == artifact.artifact_digest
     )

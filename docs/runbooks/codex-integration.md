@@ -106,17 +106,24 @@ codex mcp get yoetz --json
 codex mcp add yoetz -- yoetz mcp serve
 ```
 
-Run `codex mcp get yoetz --json` first. Continue with `mcp add` only when no entry exists — if an
-entry already exists, preserve it and stop unless a separately reviewed operation proves it is the
-exact Yoetz-owned registration being intentionally replaced. Current Codex `mcp add` behavior
-replaces a same-name global entry, so this preflight check matters.
+Run `codex mcp get yoetz --json` first. A nonzero result does not prove absence: Yoetz follows it
+with `codex mcp list --json` and continues only when that command succeeds with no `yoetz` entry.
+A failed/malformed list or duplicate matching names fails closed; a single matching entry is
+classified by its exact command. Strict parsing also rejects duplicate JSON keys, nonstandard
+constants, and truncated output. If an entry already exists, preserve it and stop unless a
+separately reviewed operation proves it is the exact Yoetz-owned registration being intentionally
+replaced. Current Codex `mcp add` behavior replaces a same-name global entry, so this positive
+absence check matters. Codex exposes no compare-and-add token: keep other MCP configuration writers
+quiescent during an accepted apply, because Yoetz cannot atomically exclude a non-cooperating write
+inside the final subprocess window.
 
-This check-then-add sequence is also available as
+The registration check-then-add flow is available as
 `yoetz integrate codex mcp status|preview|install` and is what `yoetz setup run` performs after
-Codex discovery (ADR-012). Automating it changes no rule above — it is the same two commands,
-gated by an explicit digest-bound confirmation, run by Yoetz instead of by hand; an existing
-foreign entry is still preserved and refused, success is verified by re-reading the entry, and
-"registered" still never implies Codex will successfully connect at runtime.
+Codex discovery (ADR-012). The separate removal check-then-remove flow is
+`yoetz integrate codex mcp preview-remove|remove`. Both flows are gated by an explicit
+digest-bound confirmation, preserve entries already observed as foreign, and verify the final
+state by re-reading it. A "registered" result still never implies Codex will successfully connect
+at runtime.
 
 The accepted setup path composes four separately reported layers in order: it installs the project
 skill at `.agents/skills/yoetz`, installs managed structural plugin/hook sources at
@@ -132,8 +139,8 @@ selected executable path and SHA-256 and obtains its version by running only `--
 create scratch even for that command, so the temporary home is removed afterward. No selected-home
 inventory command runs before approval.
 
-The preview digest also binds the repository marketplace and selected-home config
-preimages/proposals, managed source-tree digest, cache root
+The preview digest also binds the trusted project root, repository marketplace, and selected-home
+config preimages/proposals, managed source-tree digest, cache root
 `<selected-home>/plugins/cache/yoetz/yoetz`, cache preimage/intended install-tree digest, the
 temporary-private-home probe environment, the forced selected-home environment for mutation, and
 the exact post-consent commands `plugin list --marketplace yoetz --json` and
@@ -237,6 +244,12 @@ evidence boundary explicitly.
 
 ## 8. Remove
 
+Skill removal and activation/MCP removal are separate, consent-gated operations. Skill removal
+never deletes marketplace, `config.toml`, cache, or MCP entries. Activation removal never deletes
+the skill tree.
+
+### Skill tree
+
 ```text
 yoetz integrate codex skill preview --json
 yoetz integrate codex skill remove --json
@@ -245,8 +258,79 @@ yoetz integrate codex skill remove --json
 Confirm the exact preview digest. Removal deletes only a valid managed marker plus its byte-exact
 file inventory. Modified, partial, or unmanaged content is refused and preserved — there is no
 force-remove in v0.1. Removal never uninstalls the Yoetz package, deletes MCP configuration, deletes
-ledger/key data, or touches other skills. Verify `status` shows `absent` afterward, and separately
-manage any MCP configuration yourself if you want it removed too.
+ledger/key data, or touches other skills. Verify `status` shows `absent` afterward.
+
+### Plugin, marketplace, and `config.toml`
+
+```text
+yoetz integrate codex plugin preview --codex-home <home> --json
+yoetz integrate codex plugin remove --codex-home <home> --accept --preview-digest <digest> --json
+```
+
+The Codex plugin command uses the same preview → explicit accept → apply shape as Codex
+activation and MCP install: the mutation is bound to the exact preview digest. It does **not**
+consume the Cursor `plugin_artifact_apply` OS-presence cell; that cell remains the standalone
+portable-artifact authority and would fail closed on this host. Cache purge is default-off.
+`--purge-cache` additionally deletes other version directories under
+`<codex-home>/plugins/cache/yoetz/yoetz/<ver>` whose trees byte-match a yoetz render or their own
+valid `yoetz.codex-plugin-install/1` marker. Foreign or modified cache directories are refused
+(`remove_refused`, conflict `cache`) and left untouched. Preview and apply use the same no-follow,
+descriptor-relative 256-total-entry, 16-level, 4-KiB-relative-path, 64-file,
+256-KiB-per-member, and 4-MiB-aggregate bounds, so directory-only, deep, sparse, and oversized
+trees fail closed before unbounded allocation or recursion. Apply retains the validated version
+descriptor through quarantine rename and rechecks the exact approved names and bytes immediately
+before and during unlink; newly observed names are never swept into deletion. Observable drift
+before the first unlink restores the retained inode to its exact version name; later drift
+preserves the remaining quarantine. Both report `write_failed` because quarantine rename already
+crossed the mutation boundary. Keep same-UID cache writers
+quiescent during removal because ordinary POSIX files provide no atomic compare-and-unlink token
+for the last content-write window.
+
+Apply runs `codex plugin remove yoetz@yoetz --json`, then `codex plugin marketplace remove yoetz
+--json` when `[marketplaces.yoetz]` byte-matches the yoetz render, then deletes
+`<repo>/.agents/plugins/marketplace.json` only when a retained no-follow descriptor still byte- and
+inode-matches through a private quarantine rename, then
+deletes the bound current-version cache. Whole-table TOML edits are verified by re-parse. A second
+removal is a no-op (`already_absent`). Foreign, modified, dual, or otherwise conflicting entries
+refuse with `remove_refused` and name the conflicting surface (`personal_marketplace`,
+`repository_marketplace`, `config_marketplace`, `config_plugin`, `inventory`, or `cache`). Before
+mutation, changed preview-bound bytes report `preview_stale`.
+After a mutating host command starts (including a zero-exit command with malformed JSON), config
+write, marketplace quarantine/unlink, cache quarantine rename, or member unlink has
+started, any newly observed conflict reports `write_failed` (with the bounded conflict token when
+available) because the outcome may be partial; it is never mislabeled as a safe stale-preview
+retry.
+
+After a successful removal, `codex plugin list --marketplace yoetz --json` is empty and
+`config.toml` has no yoetz tables. `yoetz observe status` reports the existing activation
+classification: `installed_not_activated` when the managed plugin source at
+`.agents/plugins/yoetz` remains (issue #387), or `not_installed` when that source is also absent.
+The command reports whether the skill tree remains; it does not remove it. Consent records and the
+observation store are intentionally left in place.
+
+### External MCP registration
+
+```text
+yoetz integrate codex mcp preview-remove --json
+yoetz integrate codex mcp remove --accept --preview-digest <digest> --json
+```
+
+The first command exposes the exact unregistration digest and current owned route without
+mutation. Noninteractive removal requires that digest plus `--accept`; `--accept` alone fails
+closed. Apply re-reads the current entry immediately before it runs `codex mcp remove yoetz` and
+refuses a foreign replacement or changed Yoetz route observed at that boundary. An
+already-absent entry is a no-op only after the same successful `mcp list --json` absence check.
+Interactive removal shows the exact command, route profile, warning tokens, and preview digest
+before requesting confirmation.
+
+Codex 0.149.x exposes a name-based remove command, not a compare-and-remove token. The owned-entry
+preview therefore includes `host_remove_not_compare_and_swap`: the owner must keep concurrent
+Codex MCP configuration writers quiescent during the accepted apply. The immediate pre-remove
+recheck narrows the host limitation, but cannot atomically exclude a non-cooperating replacement
+inside the final subprocess scheduling window. Post-apply verification still fails closed if the
+entry is not positively observed absent; a generic failed named lookup is not success.
+Plugin-managed MCP is not this command: it goes away with the plugin artifact, not with `codex mcp
+remove`.
 
 ## 9. Troubleshooting and recovery
 

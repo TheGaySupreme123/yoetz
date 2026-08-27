@@ -3,18 +3,35 @@
 **Status:** Working decision for spec drafting (2026-07-13). Ratification requires the pinned
 capability matrix run from an installed artifact.
 **Implemented by:** `src/yoetz/adapters/mcp_stdio.py`,
-`src/yoetz/adapters/importers/codex_jsonl.py`, `src/yoetz/mcp/`, the Codex
+`src/yoetz/adapters/importers/codex_jsonl.py`,
+`src/yoetz/adapters/importers/codex_rollout_jsonl.py`,
+`src/yoetz/adapters/integrations/codex_session_stream.py`,
+`src/yoetz/adapters/integrations/codex_capability_cells.py`, `src/yoetz/mcp/`, the Codex
 skill files under `skills/codex/`, and `tests/capability/`.
 
 ## Decisions
 
-1. **Supported Codex range:** target/maximum-tested `0.144.5`; minimum supported set by the
-   capability run (candidate `0.139.0` as observed local fixture); anything newer than
-   maximum-tested is "untested", not "supported". The release manifest records min/max/denied.
+1. **Supported Codex range:** exact cells only, never a continuous range. The `codex exec --json`
+   importer remains pinned at `0.139.0` (`codex-exec-jsonl/0.139.0/v1`). The session-stream
+   reconciler is a different surface and has a parser-only rollout grammar profile for `0.148.0`
+   (`codex-rollout-jsonl/0.148.0/v1`) covering constructed `legacy` and `paginated` fixtures.
+   Admission requires the exact session metadata `cli_version` and one of those two
+   `history_mode` values; future or malformed modes fail as unsupported format rather than being
+   interpreted under the pinned grammar.
+   Those fixtures are not an isolated installed-artifact capture and therefore do not populate
+   `CODEX_HARNESS_PROFILE`, the skill manifest's tested/supported bounds, or `yoetz version`
+   capability profiles. Neighbors including `0.149.1` stay untested. The full skill/MCP/hook
+   matrix in `runtime-support.json` and issue #413 remain unfrozen until those facets have
+   independent installed-artifact evidence.
 2. **Integration posture:** Codex is the MCP client; Yoetz is a local stdio server registered via
-   `codex mcp add yoetz -- yoetz mcp serve`, default `required = false`, only after
-   `codex mcp get yoetz --json` confirms the global name is absent. A same-name entry is never
-   overwritten unless a separately reviewed flow proves it is the exact Yoetz-owned entry. Skill
+   `codex mcp add yoetz -- yoetz mcp serve`, default `required = false`. Yoetz first runs `codex mcp
+   get yoetz --json`; because a nonzero named lookup is ambiguous, only a successful strict parse
+   of `codex mcp list --json` with no matching name confirms absence. Duplicate keys/names,
+   nonstandard constants, truncation, malformed output, and failed listing all fail closed. A
+   same-name entry is never intentionally overwritten unless a separately reviewed flow proves it
+   is the exact Yoetz-owned entry. Codex exposes no compare-and-add token, so this check cannot
+   atomically exclude a non-cooperating global configuration writer inside the final subprocess
+   window; operators must quiesce such writers during an accepted apply. Skill
    installed explicitly to `.agents/skills/yoetz/` with preview/consent. Codex-readable
    `SKILL.md` frontmatter is limited to `name`, `description`, and optional
    `metadata.short-description`; Yoetz protocol/version compatibility remains in its private

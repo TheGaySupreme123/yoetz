@@ -2480,7 +2480,33 @@ Shared closed types:
   flag, and bytes. At most 16 chunks and 700,000 aggregate input bytes keep the request below the
   ordinary 1 MiB control-frame cap; each assembled encrypted object remains below 4 MiB.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
-  mapping version. Cursors are crash-stable and generation-fenced.
+  mapping version. Codex session-stream cursors use `codex-obs-stream/1.2.0` (rollout JSONL
+  grammar). Cursors are crash-stable and generation-fenced. A private HMAC of the source
+  device/inode detects same-or-larger file replacement across reconcile processes; ordinary safe
+  integers retain their numeric encoding and larger filesystem values use a bounded hexadecimal
+  representation before canonical encoding. Call-id/tool
+  pairing and outbox dedup are fenced by the resulting source generation, and legacy unfenced
+  pairing state is discarded. For a paired output the same-generation originating call's tool name
+  is authoritative; a conflicting output self-name is overwritten and records `dedup_conflict`
+  rather than selecting a different action family. Rollout privacy filtering parses the valid JSON
+  tree first and then redacts decoded string keys and values, preserving structural punctuation;
+  any redaction-created duplicate key is rejected instead of silently merging fields.
+- `ObservationGapCode` — closed coverage tokens. `unsupported_event` is an admitted profile with
+  an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, unknown
+  `cli_version`, an absent/unknown `history_mode`, or compressed `rollout-*.jsonl.zst` that the
+  hook pass does not decompress). When exact-session `.jsonl` and `.jsonl.zst` siblings both
+  exist, the admitted uncompressed file wins; compressed-only remains explicitly unsupported.
+  Every string semantic type present at `payload.type` and nested `payload.item.type` must belong
+  to the admitted profile before a nested item is selected; one known field cannot mask an unknown
+  peer. Unknown semantics never infer success.
+  A rollout line above the admitted 1 MiB line bound enters a private authenticated continuation
+  state bound to the session, source generation, and source identity. Each later reconcile scans at
+  most one 256 KiB chunk; its byte cursor may advance within the oversized line while the event
+  ordinal stays fixed. The terminator advances once as opaque `unsupported_event` evidence, using a
+  domain-separated commitment over the bounded prefix commitment and exact source span, so later
+  records remain reachable without an unbounded hook pass. Until then the tail remains pending as
+  `truncated_payload`. The marker contains no source bytes, and an invalid or transplanted marker
+  starts a new generation from profile admission rather than authorizing a skip.
 - `ObservationStatus` — lifecycle `active|degraded|stale|stopped`, source coverage, last
   observation, lag, currently true gaps, unsupported events, and the current `AdviceSnapshot`
   frontier identity. Per-code first/last-seen history is retained separately and does not make a
@@ -2520,12 +2546,17 @@ Shared closed types:
   current target never requires inspecting Yoetz storage. The snapshot's
   `recommended_next_action` remains the kernel token, including `refresh_observation`. Hook
   `additionalContext` maps that machine-condition token to a host-shell next step
-  (`yoetz observe status`) rather than naming a nonexistent MCP tool or CLI verb. Hook stdout is
-  event-specific:
+  (`yoetz observe status`) rather than naming a nonexistent MCP tool or CLI verb. Codex hook stdout
+  is event-specific:
   `SessionStart` / `PostToolUse` / `UserPromptSubmit` emit `hookSpecificOutput.additionalContext`;
   `Stop` emits `decision: block` plus `reason` (Codex has no Stop `hookSpecificOutput`, and
   `stop_hook_active` plus delivery identity are the loop guard); `SessionEnd` always emits `{}`
   because the host discards its stdout and a peek/commit there would consume undelivered advice.
+  Cursor has a separate native contract: raw `sessionStart` emits `additional_context`; raw `stop`
+  advice is disabled because `followup_message` auto-submits a user message; and `afterFileEdit`,
+  `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a
+  nonempty `sessionStart` object after its bytes are written successfully. Output-less events never
+  lease or consume advice or frontier-motion notices.
 
 Independent verification support (local control, not MCP):
 
@@ -2571,6 +2602,10 @@ Independent verification support (local control, not MCP):
   and `SessionEnd` keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
 
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
+Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
+Git subdirectory to the same nearest safe Git project root; a non-Git directory remains its exact
+safe locator. There is no ancestor-commitment fallback. A legacy grant recorded against an exact
+Git subdirectory does not authorize its ancestor and must be explicitly granted again.
 The normalized locator is authenticated encrypted content; plaintext keeps only commitment and
 object ID. Revocation disables/removes the active locator and trust binding while retaining already
 encrypted evidence. Visible task messages, tool input/result, task-linked terminal output,
@@ -2580,12 +2615,17 @@ and untethered logs are excluded before storage. Secret spans are redacted in me
 encryption. SQLite/envelopes retain only encrypted object IDs, commitments, classifications, sizes,
 and relations. Vault/service failure records `content_capture_unavailable` and no plaintext spool.
 Unrecognized visible events accept an opaque stable envelope plus encrypted content and
-`unsupported_event`; unknown semantics never infer success.
+`unsupported_event`; a session-stream file that is the wrong grammar, an untested `cli_version`,
+or a compressed `.jsonl.zst` rollout records `unsupported_format` instead. Unknown semantics never
+infer success.
 
 Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
 
 - Paired `PostToolUse` materialization consumes `exit_status`, `denied`, boolean `success`, and a
-  closed `result_status` spelling table; a payload with no outcome fact records `UNKNOWN` and its
+  closed `result_status` spelling table. Rollout `exit_code` preserves the structural wire range
+  `-1..255` exactly (including `-1` as a nonzero failure); a present value outside that range or of
+  another JSON type is unsupported evidence, never a clean `completed` success. A payload with no
+  outcome fact records `UNKNOWN` and its
   ledger entries carry the `host_outcome_unavailable` known gap. Check coverage and receipts fold
   that gap into one bounded code regardless of how many observed calls lack outcome semantics; the
   deterministic research-evidence policy does not mint one `material_limitation_omitted` candidate
@@ -2605,8 +2645,21 @@ materialization mapping version and exact draft-role tuple, so phases of one hos
 different materializations (for example pre-action versus paired action/result) cannot collide,
 while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
 The claim stores the source-independent materialization version, never the hook/stream cursor
-version (issue #309). Duplicates retry incomplete content/store/ledger/verification/advice work
-idempotently. Stream cursor advancement occurs only after outbox insertion. Session end is
+version (issue #309). Before staging under `obs-ledger/1.3.0`, upgrade replay checks the current and
+legacy observation writers for committed `1.3.0` and `1.2.0` operations; a `1.2.0` hit repairs its
+claim with the original mapping version. Because a replayed `1.2.0` operation may be a pre-upgrade
+hook operation whose result is `UNKNOWN`, it still enters the correction path: the committed result
+is consulted through the replayed operation's accepted event ids (its `1.2.0` record identities
+cannot be re-derived), and a still-needed correction binds to that exact committed action. A later
+explicit session-stream outcome enriches an earlier hook `UNKNOWN` through an append-only
+`result_correction` linked to the same canonical action; it never rewrites, downgrades, or silently
+overwrites an explicit result. Exact correction retries replay; a contradictory explicit outcome
+appends under its outcome/exit-bound identity with a `dedup_conflict` gap. The correction is part of
+ingest acceptance: an unavailable, lagging, rebuilding, missing-result, or redacted-result
+candidate-findings projection returns retryable `service_unavailable` and leaves the outbox row
+pending until the projection can prove and complete the correction. Duplicates retry incomplete
+content/store/ledger/verification/advice work idempotently. Stream cursor advancement occurs only
+after outbox insertion. Session end is
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
 across workspace sessions under a nonblocking per-workspace lease; within one pass a
 `mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),
@@ -2860,13 +2913,14 @@ older-guidance render) is likewise a replaceable managed render, not a `modified
 still requires a byte-exact current renderer variant at its source fences before any mutation.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
 `HarnessMcpPort` methods are `status_registration`, `observe_registration`, `preview_registration`,
-and `apply_registration`, each taking a `HarnessBinary` (harness ID, redacted-repr executable path,
+`apply_registration`, `preview_unregistration`, and `apply_unregistration`, each taking a
+`HarnessBinary` (harness ID, redacted-repr executable path,
 optional reported version, `supported|untested` compatibility). Shared names are
 `MCP_SERVER_NAME` (exactly `yoetz`), `MCP_SERVE_COMMAND` (exactly `("yoetz", "mcp", "serve")`),
 `MCP_STRICT_SERVE_COMMAND` (exactly
 `("yoetz", "mcp", "serve", "--semantic", "off")`),
 `McpRegistrationState` (`absent|yoetz_owned|foreign_present`), `McpRegistrationAction`
-(`register|reregister|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
+(`register|reregister|unregister|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
 harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_present`),
 `McpRegistrationPreview`, `McpRegistrationObservation`, `McpRegistrationCommand`,
 `McpRegistrationResult`, and
@@ -2874,14 +2928,31 @@ harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_prese
 `route_profile` (`policy|strict|null`); `route_profile` is non-null only when the state is
 `yoetz_owned`, because a foreign or absent entry has no Yoetz route to describe.
 `observe_registration` reads exactly what `status_registration` reads, mutates nothing, and shares
-its `status` diagnostic phase — it exists because both owned serve commands classify as
+its `status` diagnostic phase. Each observation starts with `codex mcp get yoetz --json`; because a
+nonzero named lookup is not positive absence, it falls back to bounded `codex mcp list --json`.
+Only a successful list with no matching name classifies as `absent`; a failed/malformed list or
+duplicate matching names raises a typed error, while one matching entry is classified normally.
+The bounded parser also rejects duplicate JSON keys, nonstandard constants, and truncated output.
+Codex exposes no compare-and-add token, so the port cannot claim atomic exclusion of a
+non-cooperating configuration writer inside the final accepted-add subprocess window.
+The observation exists because both owned serve commands classify as
 `yoetz_owned`, so state alone cannot distinguish a strict registration from a policy one.
 `HarnessMcpService` owns confirmation
 (`McpRegistrationConfirmation` with channel exactly `interactive|noninteractive_flag`) and
 diagnostics (`McpRegistrationDiagnostic`, `HarnessMcpDiagnosticSink`); every registration
 mutation is digest-bound to a freshly recomputed preview, a foreign same-name entry is
-preserved without any force path, and success is verified by re-reading state. The preview binds
-the exact command and `policy|strict` route profile. The route profile is explicit input:
+preserved without any force path, and success is verified by re-reading state. Unregistration is
+the same digest-bound lifecycle for an owned external registration: `preview_unregistration` /
+`apply_unregistration` re-read the current entry immediately before the name-based
+`codex mcp remove yoetz`, run it only when the observed argv is still the exact previewed Yoetz
+serve command, refuse an observed foreign replacement, and treat an already-absent entry as
+`noop`. Because Codex 0.149.x exposes no compare-and-remove token, an owned-entry preview carries
+`host_remove_not_compare_and_swap`; callers must quiesce concurrent host configuration writers,
+and the port does not claim atomic exclusion inside the final host subprocess window. The same
+positive-absence fallback is required after removal, so a generic failed named lookup never proves
+success. The interactive approval surface prints the exact command, route, warnings, and preview
+digest. The preview binds the exact command and `policy|strict` route profile. The route profile is
+explicit input:
 `yoetz setup run` and `yoetz integrate <harness> mcp preview|install` accept
 `--route-profile strict|policy`. Without that input, an existing yoetz-owned registration keeps
 its observed profile — no configuration derivation (or derivation-on-exception fallback) may
@@ -2892,9 +2963,11 @@ is surfaced before mutation: the wizard preview and report carry `route_profile_
 ordinary digest-bound re-registration.
 The setup-wizard
 schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
-`yoetz.setup-status/1`, and `yoetz.mcp-registration-preview/1`; the marker lives at
-`state_dir()/setup-wizard.json` via `config.paths.setup_marker_path`. The CLI surfaces are
-`yoetz setup run|status` and `yoetz integrate <harness> mcp status|preview|install` (ADR-012).
+`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1`, and
+`yoetz.mcp-unregistration-preview/1`; the marker lives at `state_dir()/setup-wizard.json` via
+`config.paths.setup_marker_path`. The CLI surfaces are
+`yoetz setup run|status` and
+`yoetz integrate <harness> mcp status|preview|preview-remove|install|remove` (ADR-012).
 Standalone `yoetz provider endpoint` retains its explicit credential next command. When endpoint
 binding is embedded in the composed setup wizard, that standalone handoff is suppressed because
 the wizard still owns privacy consent and confidential ingress. Every visible yes/no prompt near
@@ -2995,7 +3068,8 @@ the input for another host's manifest; projections share only the plan (ADR-023)
 `PluginArtifactPort` methods are `preview_artifact`, `install_artifact`, `status_artifact`, and
 `remove_artifact`; interrupted-swap recovery is expressed through `status_artifact` reconciliation,
 never automatic repair. `HostActivationPort` methods are `observe_discovery`,
-`observe_activation`, and — only when authorized — `preview_activation` and `apply_activation`.
+`observe_activation`, and — only when authorized — `preview_activation`, `apply_activation`,
+`preview_removal`, and `apply_removal`.
 Both are siblings of `IntegrationsPort`, `HarnessMcpPort`, and `ObservationPort` under the
 ADR-010/ADR-012 sibling-port rule: a host adapter may compose them but cannot collapse their state
 or authority, and no port's status field implies another's. Mutations preserve the full safe
@@ -3003,9 +3077,40 @@ artifact lifecycle (exact before/after preview and accepted digest, stale-previe
 safe-root containment, no symlink members, complete digest inventory, no unmanaged/modified
 overwrite, failure-atomic replacement, installed-byte verification, no
 filesystem-presence-to-activation inference). The #150 standalone artifact install/remove path
-consumes the ADR-016 `review_only` single-shot trusted review; activation apply remains owned by a
-later child and unavailable. The ADR-012 setup composition remains its own separately authorized
-path (ADR-023 decision 11).
+consumes the ADR-016 `review_only` single-shot trusted review. Codex marketplace activation and
+removal use the ADR-012 digest-bound `--accept` composition already used by MCP
+preview/install/remove; they do not consume `plugin_artifact_apply`, which remains the macOS
+Cursor portable-artifact presence cell and would fail closed on this host (issue #419). Cursor
+standalone activation apply remains owned by a later child and unavailable without the #409
+presence cell. The ADR-012 setup composition remains its own separately authorized path
+(ADR-023 decision 11).
+Codex `preview_removal` / `apply_removal` refuse foreign, modified, dual, or otherwise
+conflicting marketplace, config, inventory, or cache surfaces with `remove_refused` and a closed
+`conflict` token (`personal_marketplace|repository_marketplace|config_marketplace|config_plugin|
+inventory|cache`). Cache purge is default-off. The removal digest binds the exact trusted project
+root as well as the selected executable, Codex home, configuration/cache preimages, planned host
+commands, and cache-purge choice. Cache preview and apply share descriptor-relative no-follow
+total-entry, recursion-depth, relative-path, file-count, per-member, and aggregate-byte bounds.
+Apply retains the validated version descriptor through quarantine rename, binds deletion to the
+exact approved member names and bytes, refuses
+observable additions/changes before unlink, restores the exact version name when drift occurs
+before the first unlink, preserves the remainder after deletion starts, and never sweeps an
+unapproved name into deletion.
+Repository `marketplace.json` and any host-created empty `config.toml` cleanup use the same
+descriptor/inode/byte-bound private-quarantine rule rather than pathname-only unlink.
+Pre-mutation drift is `preview_stale`; once any accepted host/config/filesystem mutation has
+started, including a zero-exit mutating host command whose JSON result is malformed, a later
+conflict is `write_failed` because partial state is possible. A successful
+cache-only deletion sets the same operation-wide fence before final inventory/config/activation/
+skill verification. The adapter does not
+claim an atomic compare-and-unlink primitive for a non-cooperating same-UID writer's final POSIX
+content window, so the operator must quiesce such writers. After a successful removal,
+`codex plugin list
+--marketplace yoetz --json` is empty and `config.toml` has no yoetz tables;
+`inspect_activation` / observe status reports `installed_not_activated` when the managed plugin
+source at `.agents/plugins/yoetz` remains (issue #387) and `not_installed` only when that source
+is also absent. A second removal is `already_absent`. The skill tree, consent records, and
+observation store are intentionally left in place.
 
 The implemented artifact operation is exactly `plugin_artifact_apply`. Its prepare target is the
 portable preview digest, which already binds target identity, current-state digest, action,
@@ -3072,10 +3177,16 @@ observed `McpOwnershipState`, optional exact route, and sorted warnings. `Cursor
 carries artifact/operation state, detected format, artifact/installed digests, marker validity,
 rollback availability, one `CursorMcpObservation`, and every independent `PluginProofFacet`.
 `CursorPluginResult` carries request/action/operation, before/after states, format,
-preview/artifact/installed digests, and sorted changed members. The marker schema is
-`yoetz.cursor-plugin-install/1`; it contains format, renderer/Yoetz versions, hook mapping version,
-MCP owner/route, artifact digest, exact managed inventory, and marker digest, with no path, content,
-credential, transcript, timestamp, activation, coverage, or receipt claim.
+preview/artifact/installed digests, and sorted changed members. Portable artifacts retain marker
+schema `yoetz.cursor-plugin-install/1`. Newly rendered native artifacts use
+`yoetz.cursor-plugin-install/2`, which adds the resolved absolute invoking `yoetz` executable path
+(never a different ambient-PATH installation when the CLI was invoked by an explicit absolute or
+relative path) to the
+format, renderer/Yoetz versions, hook mapping version, MCP owner/route, artifact digest, exact
+managed inventory, and marker digest. A valid legacy native `/1` marker remains managed but reports
+`modified` against the `/2` desired artifact, so an exact previewed replace or remove remains
+reachable. Neither schema carries a project path, content, credential, transcript, timestamp,
+activation, coverage, or receipt claim.
 
 Cursor lifecycle is exact-preview bound and whole-directory atomic. Install, replace, and remove
 consume the ADR-016 `review_only` single-shot trusted review of `plugin_artifact_apply` prepared
@@ -3134,16 +3245,26 @@ what makes a Cursor observation deliverable rather than a lenient default.
 `ObservationSource` adds `cursor_hook`. The pinned native profile advertises only
 `sessionStart|sessionEnd|afterMCPExecution|afterFileEdit|stop`; `afterAgentThought` is excluded.
 `CURSOR_HARNESS_PROFILE.hooks_by_capability_profile` binds that nonempty profile only to
-`cursor-ide-3.17.8`. The portable CLI cell and both SDK cells are exactly `None`: Agent Plugins do
-not carry hooks, and the SDKs' file-based hook loading has no independent installed-artifact,
-event-delivery, privacy-filtering, failure-behavior, and accepted-observation proof. Native IDE
-rendering or schema validity cannot populate those neighboring cells.
+`cursor-ide-3.17.8`. The portable CLI cell is exactly `None`: Agent Plugins do not carry hooks.
+SDK profile ids and versions are absent from the supported harness profile; their retained
+metadata fixtures are marked `metadata_only` and `not_a_support_claim`. The SDKs' file-based hook
+loading has no independent installed-artifact, event-delivery, privacy-filtering, failure-behavior,
+or accepted-observation proof. Native IDE rendering or schema validity cannot populate those
+neighboring cells.
 Cursor ingress maps only bounded session/generation/tool IDs, exact Cursor/model/effort tokens,
 duration, capability profile, and an installation-keyed HMAC changed-path commitment. It discards
 prompt, reasoning, response text, paths, file contents/edits, MCP/tool inputs/results, transcripts,
-commands/output, email, and workspace roots before storage and never reconciles a Cursor transcript
-stream. Hooks are fail-open and advisory; configuration/trigger-only state earns no observation
-coverage.
+commands/output, and email before storage and never reconciles a Cursor transcript stream. It uses
+`workspace_roots` transiently, then `CURSOR_PROJECT_DIR`, then the explicit hook argument to choose
+one locator. Multi-root input must contain the project directory; the nearest safe `.git` file or
+directory normalizes subdirectories and worktrees without spawning Git. Root/home locators,
+symlinked ancestors, unsafe markers, oversized/control-bearing values, and ambiguous multiroot
+input fail closed. Plain roots never enter structural state, diagnostics, errors, or stdout.
+Unresolvable and resolved-but-unconsented inputs record distinct payload-free diagnostics. Hooks
+are fail-open and advisory; configuration/trigger-only state earns no observation coverage.
+The selected locator retains its exact filesystem-encoded spelling through lookup and commitment;
+Unicode normalization never aliases distinct directories. A grant created under a differently
+normalized spelling does not authorize its sibling and requires an explicit regrant.
 
 ### Claude Code local project harness contract (issue #154)
 
