@@ -6,10 +6,12 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -199,6 +201,16 @@ class _CodexBinaryProbe:
     codex_home: Path
 
 
+@dataclass(frozen=True, slots=True)
+class _BoundedCommandOutput:
+    returncode: int
+    stdout: bytes
+
+
+class _CommandOutputLimit(Exception):
+    pass
+
+
 def _error(
     reason: IntegrationReason,
     details: Mapping[str, str] | None = None,
@@ -219,6 +231,116 @@ def _sha_file(path: Path) -> str:
     except OSError as exc:
         raise _error(IntegrationReason.TARGET_UNSAFE) from exc
     return f"sha256:{digest.hexdigest()}"
+
+
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=1.0)
+
+
+def _run_bounded_command(
+    argv: tuple[str, ...],
+    *,
+    env: Mapping[str, str],
+    timeout: float,
+    stdout_limit: int,
+) -> _BoundedCommandOutput:
+    """Run fixed argv while enforcing the stdout bound during capture.
+
+    Stderr is drained but never retained. This prevents a selected host binary
+    from turning the post-parse size check into unbounded process memory.
+    """
+
+    process: subprocess.Popen[bytes] | None = None
+    selector = selectors.DefaultSelector()
+    stdout = bytearray()
+    try:
+        process = subprocess.Popen(  # noqa: S603 - exact selected executable, no shell
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            env=dict(env),
+            close_fds=True,
+        )
+        if process.stdout is None or process.stderr is None:
+            raise OSError("missing_subprocess_pipe")
+        for stream in (process.stdout, process.stderr):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            events = selector.select(remaining)
+            if not events:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            for key, _mask in events:
+                try:
+                    chunk = os.read(key.fd, 64 * 1024)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if key.fileobj is process.stdout:
+                    if len(stdout) + len(chunk) > stdout_limit:
+                        raise _CommandOutputLimit
+                    stdout.extend(chunk)
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise subprocess.TimeoutExpired(argv, timeout) from None
+        return _BoundedCommandOutput(process.returncode, bytes(stdout))
+    except BaseException:
+        if process is not None:
+            _terminate_process(process)
+        raise
+    finally:
+        selector.close()
+        if process is not None:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
+
+def _command_output(
+    argv: tuple[str, ...],
+    *,
+    env: Mapping[str, str],
+    timeout: float,
+    stdout_limit: int,
+    _run: Callable[..., subprocess.CompletedProcess[bytes]],
+) -> _BoundedCommandOutput:
+    if _run is subprocess.run:
+        return _run_bounded_command(
+            argv,
+            env=env,
+            timeout=timeout,
+            stdout_limit=stdout_limit,
+        )
+    completed = _run(
+        argv,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+        shell=False,
+        env=dict(env),
+    )
+    raw = completed.stdout[: stdout_limit + 1]
+    if len(raw) > stdout_limit:
+        raise _CommandOutputLimit
+    return _BoundedCommandOutput(completed.returncode, raw)
 
 
 def _probe_codex_binary(
@@ -249,19 +371,17 @@ def _probe_codex_binary(
         with tempfile.TemporaryDirectory(prefix="yoetz-codex-version-") as temporary:
             probe_home = Path(temporary)
             probe_home.chmod(0o700)
-            completed = _run(
+            completed = _command_output(
                 (str(executable), "--version"),
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=_VERSION_TIMEOUT_SECONDS,
-                check=False,
-                shell=False,
                 env=_codex_environment(probe_home),
+                timeout=_VERSION_TIMEOUT_SECONDS,
+                stdout_limit=_MAX_VERSION_BYTES,
+                _run=_run,
             )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, _CommandOutputLimit) as exc:
         raise _error(IntegrationReason.SOURCE_INVALID) from exc
-    raw = completed.stdout[: _MAX_VERSION_BYTES + 1]
-    if completed.returncode != 0 or not raw or len(raw) > _MAX_VERSION_BYTES:
+    raw = completed.stdout
+    if completed.returncode != 0 or not raw:
         raise _error(IntegrationReason.SOURCE_INVALID)
     try:
         text = raw.decode("utf-8", errors="strict")
@@ -649,19 +769,17 @@ def _run_json_command(
     timeout: float,
 ) -> Mapping[str, object]:
     try:
-        completed = _run(
+        completed = _command_output(
             (str(binary.executable_path), *command),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            shell=False,
             env=_codex_environment(binary.codex_home),
+            timeout=timeout,
+            stdout_limit=_MAX_PLUGIN_OUTPUT_BYTES,
+            _run=_run,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, _CommandOutputLimit) as exc:
         raise _error(IntegrationReason.WRITE_FAILED) from exc
-    raw = completed.stdout[: _MAX_PLUGIN_OUTPUT_BYTES + 1]
-    if completed.returncode != 0 or not raw or len(raw) > _MAX_PLUGIN_OUTPUT_BYTES:
+    raw = completed.stdout
+    if completed.returncode != 0 or not raw:
         raise _error(IntegrationReason.WRITE_FAILED)
     try:
         parsed = strict_json_parse(raw)
@@ -1387,14 +1505,16 @@ def _strip_exact_table(raw: bytes, table: str) -> bytes:
     span = _exact_table_span(raw, table)
     if span is None:
         return raw
-    start, end = span
+    start, _end = span
+    table_bytes = table.encode("utf-8")
     before = raw[:start]
-    after = raw[end:]
-    if before.endswith(b"\n") and after.startswith(b"\n"):
-        after = after[1:]
+    after = raw[start + len(table_bytes) :]
+    # Activation inserts exactly one separator newline before its first block
+    # and between generated blocks. Remove only that adjacent byte; never
+    # normalize blank lines elsewhere in owner-authored TOML.
+    if before.endswith(b"\n\n"):
+        before = before[:-1]
     merged = before + after
-    while b"\n\n\n" in merged:
-        merged = merged.replace(b"\n\n\n", b"\n\n")
     if merged in {b"", b"\n"}:
         return b""
     if not merged.endswith(b"\n"):
@@ -1755,7 +1875,12 @@ def _read_managed_tree_fd(root_fd: int) -> dict[str, bytes]:
         nonlocal entry_count, file_count, total_bytes
         if depth > _MAX_MANAGED_CACHE_DEPTH:
             raise _error(IntegrationReason.PREVIEW_STALE)
-        for name in _bounded_directory_names(directory_fd):
+        names = _bounded_directory_names(directory_fd)
+        if prefix and not names:
+            # The marker/member digest models files, so an empty directory is
+            # otherwise invisible at preview but appears during exact deletion.
+            raise _error(IntegrationReason.DESTINATION_CONFLICT)
+        for name in names:
             entry_count += 1
             if entry_count > _MAX_MANAGED_CACHE_ENTRIES:
                 raise _error(IntegrationReason.PREVIEW_STALE)

@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -1403,6 +1404,61 @@ def test_exact_empty_config_cleanup_preserves_a_replacement(
     assert config.read_bytes() == foreign
 
 
+def test_removal_preserves_unrelated_owner_blank_lines(tmp_path: Path) -> None:
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    owner = b'owner = "keep"\n\n\n\n[owner_table]\nvalue = true\n'
+    config = home / "config.toml"
+    config.write_bytes(owner)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+
+    removal = preview_removal(target, codex_home=home)
+    apply_removal(target, codex_home=home, approved_digest=removal.preview_digest)
+
+    assert config.read_bytes() == owner
+    assert tomllib.loads(config.read_text(encoding="utf-8")) == {
+        "owner": "keep",
+        "owner_table": {"value": True},
+    }
+
+
+def test_plugin_command_output_is_bounded_during_capture(tmp_path: Path) -> None:
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    executable = home / "flooding-codex"
+    pid_path = home / "flooding-codex.pid"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        f"pid_path = pathlib.Path({str(pid_path)!r})\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('codex-cli 0.148.0-alpha.6')\n"
+        "else:\n"
+        "    pid_path.write_text(str(os.getpid()), encoding='ascii')\n"
+        "    chunk = b'x' * 65536\n"
+        "    while True:\n"
+        "        os.write(2, chunk)\n"
+        "        os.write(1, chunk)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+
+    with pytest.raises(IntegrationError) as caught:
+        _inspect_activation(
+            target,
+            executable_path=str(executable),
+            codex_home=home,
+        )
+
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
+    pid = int(pid_path.read_text(encoding="ascii"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 def test_cache_only_removal_preserves_write_failed_for_final_verification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1500,6 +1556,23 @@ def test_removal_preview_bounds_cache_members(tmp_path: Path, overflow: str) -> 
 
     assert caught.value.reason is IntegrationReason.PREVIEW_STALE
     assert cache.is_dir()
+
+
+def test_removal_preview_rejects_unrepresented_empty_cache_directory(tmp_path: Path) -> None:
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    empty = cache / "owner-empty"
+    empty.mkdir()
+
+    with pytest.raises(IntegrationError) as caught:
+        preview_removal(target, codex_home=home, purge_cache=True)
+
+    assert caught.value.reason is IntegrationReason.REMOVE_REFUSED
+    assert caught.value.safe_details == {"conflict": "cache"}
+    assert empty.is_dir()
 
 
 def test_removal_refuses_foreign_marketplace_and_names_conflict(tmp_path: Path) -> None:
