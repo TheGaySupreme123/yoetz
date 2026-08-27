@@ -209,7 +209,6 @@ _CURSOR_SESSION_PREFIX: Final = "cursor:"
 _CURSOR_UNTESTED_PROFILE_ID: Final = "untested"
 _CURSOR_VERSION_TO_PROFILE: Final = {
     "3.17.8": "cursor-ide-3.17.8",
-    "2026.07.09-a3815c0": "cursor-cli-2026.07.09-a3815c0",
 }
 
 
@@ -292,11 +291,12 @@ def _bool_or_none(value: object) -> bool | None:
 def _cursor_capability_profile_id(cursor_version: object) -> str:
     """Map an exact Cursor version to its reviewed profile, else stay untested.
 
-    Hook payloads may report a version from any Cursor surface.  The native
-    integration owns the reviewed profile IDs, but importing that adapter on
-    every hook would pull in the full plugin/rendering stack.  Keep this
-    bounded table local to the lightweight ingress and never infer support for
-    a neighboring version.
+    Hook payloads may report a version from any Cursor surface. Only the IDE
+    profile owns the reviewed native hook set; the recognized CLI profile has
+    no hook cell and therefore remains ``untested`` at hook ingress. Importing
+    the adapter here would pull in the full plugin/rendering stack, so keep the
+    fail-closed table local and never infer support for a neighboring surface
+    or version.
     """
 
     version = _token_or_none(cursor_version)

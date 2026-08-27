@@ -102,7 +102,13 @@ def _artifact(
             if ownership is McpOwnership.PLUGIN_MANAGED
             else "cursor_mcp_route_forbidden"
         )
-    return render_cursor_plugin(format_profile, mcp_ownership=ownership, route_profile=route)
+    invoking_executable = sys.argv[0] if Path(sys.argv[0]).name == "yoetz" else None
+    return render_cursor_plugin(
+        format_profile,
+        mcp_ownership=ownership,
+        route_profile=route,
+        yoetz_executable=invoking_executable,
+    )
 
 
 def _request(value: str | None) -> RequestId:

@@ -221,7 +221,7 @@ def test_cursor_cached_recommendation_uses_cursor_session_start_renderer(
     ("cursor_version", "profile"),
     [
         ("3.17.8", "cursor-ide-3.17.8"),
-        ("2026.07.09-a3815c0", "cursor-cli-2026.07.09-a3815c0"),
+        ("2026.07.09-a3815c0", "untested"),
         ("1.0.24", "untested"),
         ("999.0", "untested"),
     ],

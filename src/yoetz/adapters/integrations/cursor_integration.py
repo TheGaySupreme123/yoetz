@@ -526,10 +526,18 @@ def _mcp_json(route_profile: Literal["strict", "policy"]) -> bytes:
     )
 
 
-def _resolve_yoetz_executable() -> str:
+def _resolve_yoetz_executable(candidate: Path | str | None = None) -> str:
     """Resolve the exact executable used by rendered native Cursor hooks."""
 
-    discovered = shutil.which("yoetz")
+    if candidate is None:
+        discovered = shutil.which("yoetz")
+    else:
+        raw = Path(candidate).expanduser()
+        discovered = (
+            shutil.which(str(raw))
+            if not raw.is_absolute() and raw.parent == Path(".")
+            else str(raw)
+        )
     if discovered is None:
         raise ValueError("yoetz_executable_unavailable")
     try:
@@ -598,6 +606,7 @@ def render_cursor_plugin(
     mcp_ownership: McpOwnership = McpOwnership.EXTERNAL_REGISTRATION,
     route_profile: Literal["strict", "policy"] | None = None,
     source: PackagedPortableResources | None = None,
+    yoetz_executable: Path | str | None = None,
 ) -> CursorPluginArtifact:
     """Render one Cursor artifact from canonical packaged guidance bytes."""
 
@@ -616,12 +625,12 @@ def render_cursor_plugin(
             resource_source=resources,
         )
         return CursorPluginArtifact(rendered.plan, dict(rendered.members), rendered.artifact_digest)
-    yoetz_executable = _resolve_yoetz_executable()
+    resolved_yoetz_executable = _resolve_yoetz_executable(yoetz_executable)
     members = _native_members(
         source=resources,
         mcp_ownership=mcp_ownership,
         route_profile=route_profile,
-        yoetz_executable=yoetz_executable,
+        yoetz_executable=resolved_yoetz_executable,
     )
     plan = PortablePluginPlan(
         name="yoetz",
@@ -658,7 +667,7 @@ def render_cursor_plugin(
             "renderer_version": _RENDERER_VERSION,
         }
     )
-    return CursorPluginArtifact(plan, members, digest, yoetz_executable)
+    return CursorPluginArtifact(plan, members, digest, resolved_yoetz_executable)
 
 
 def _safe_existing_ancestor(path: Path) -> Path:

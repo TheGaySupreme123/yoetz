@@ -200,6 +200,41 @@ def test_native_render_fails_closed_when_yoetz_console_is_not_discoverable(
         render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
 
 
+def test_native_render_prefers_explicit_invoking_executable_over_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invoking = tmp_path / "invoking" / "yoetz"
+    invoking.parent.mkdir()
+    invoking.write_text("#!/bin/sh\n", encoding="utf-8")
+    invoking.chmod(0o755)
+    ambient = tmp_path / "ambient" / "yoetz"
+    ambient.parent.mkdir()
+    ambient.write_text("#!/bin/sh\n", encoding="utf-8")
+    ambient.chmod(0o755)
+
+    def find_ambient(_name: str) -> str | None:
+        return str(ambient)
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.shutil.which",
+        find_ambient,
+    )
+
+    artifact = render_cursor_plugin(
+        PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
+        yoetz_executable=invoking,
+    )
+
+    resolved = str(invoking.resolve())
+    assert artifact.yoetz_executable == resolved
+    hooks = json.loads(artifact.members["hooks/hooks.json"])
+    assert all(
+        definition[0]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
+        for definition in hooks["hooks"].values()
+    )
+
+
 def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: Path) -> None:
     target = CursorPluginTarget(str(tmp_path / ".cursor"))
     artifact = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
