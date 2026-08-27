@@ -148,6 +148,15 @@ def test_workspace_commitment_from_path_is_hmac_and_path_free() -> None:
     assert commitment != other
 
 
+def test_workspace_commitment_does_not_alias_unicode_normalization_forms() -> None:
+    key = b"k" * 32
+
+    nfc = workspace_commitment_from_path(key, "/tmp/\u00e9")
+    nfd = workspace_commitment_from_path(key, "/tmp/e\u0301")
+
+    assert nfc != nfd
+
+
 def test_advice_snapshot_and_coverage_helper() -> None:
     item = AdviceItem(
         finding_id=_FINDING,

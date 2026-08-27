@@ -2546,12 +2546,17 @@ Shared closed types:
   current target never requires inspecting Yoetz storage. The snapshot's
   `recommended_next_action` remains the kernel token, including `refresh_observation`. Hook
   `additionalContext` maps that machine-condition token to a host-shell next step
-  (`yoetz observe status`) rather than naming a nonexistent MCP tool or CLI verb. Hook stdout is
-  event-specific:
+  (`yoetz observe status`) rather than naming a nonexistent MCP tool or CLI verb. Codex hook stdout
+  is event-specific:
   `SessionStart` / `PostToolUse` / `UserPromptSubmit` emit `hookSpecificOutput.additionalContext`;
   `Stop` emits `decision: block` plus `reason` (Codex has no Stop `hookSpecificOutput`, and
   `stop_hook_active` plus delivery identity are the loop guard); `SessionEnd` always emits `{}`
   because the host discards its stdout and a peek/commit there would consume undelivered advice.
+  Cursor has a separate native contract: raw `sessionStart` emits `additional_context`; raw `stop`
+  advice is disabled because `followup_message` auto-submits a user message; and `afterFileEdit`,
+  `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a
+  nonempty `sessionStart` object after its bytes are written successfully. Output-less events never
+  lease or consume advice or frontier-motion notices.
 
 Independent verification support (local control, not MCP):
 
@@ -2597,6 +2602,10 @@ Independent verification support (local control, not MCP):
   and `SessionEnd` keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
 
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
+Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
+Git subdirectory to the same nearest safe Git project root; a non-Git directory remains its exact
+safe locator. There is no ancestor-commitment fallback. A legacy grant recorded against an exact
+Git subdirectory does not authorize its ancestor and must be explicitly granted again.
 The normalized locator is authenticated encrypted content; plaintext keeps only commitment and
 object ID. Revocation disables/removes the active locator and trust binding while retaining already
 encrypted evidence. Visible task messages, tool input/result, task-linked terminal output,
@@ -3167,10 +3176,16 @@ observed `McpOwnershipState`, optional exact route, and sorted warnings. `Cursor
 carries artifact/operation state, detected format, artifact/installed digests, marker validity,
 rollback availability, one `CursorMcpObservation`, and every independent `PluginProofFacet`.
 `CursorPluginResult` carries request/action/operation, before/after states, format,
-preview/artifact/installed digests, and sorted changed members. The marker schema is
-`yoetz.cursor-plugin-install/1`; it contains format, renderer/Yoetz versions, hook mapping version,
-MCP owner/route, artifact digest, exact managed inventory, and marker digest, with no path, content,
-credential, transcript, timestamp, activation, coverage, or receipt claim.
+preview/artifact/installed digests, and sorted changed members. Portable artifacts retain marker
+schema `yoetz.cursor-plugin-install/1`. Newly rendered native artifacts use
+`yoetz.cursor-plugin-install/2`, which adds the resolved absolute invoking `yoetz` executable path
+(never a different ambient-PATH installation when the CLI was invoked by an explicit absolute or
+relative path) to the
+format, renderer/Yoetz versions, hook mapping version, MCP owner/route, artifact digest, exact
+managed inventory, and marker digest. A valid legacy native `/1` marker remains managed but reports
+`modified` against the `/2` desired artifact, so an exact previewed replace or remove remains
+reachable. Neither schema carries a project path, content, credential, transcript, timestamp,
+activation, coverage, or receipt claim.
 
 Cursor lifecycle is exact-preview bound and whole-directory atomic. Install, replace, and remove
 consume the ADR-016 `review_only` single-shot trusted review of `plugin_artifact_apply` prepared
@@ -3229,16 +3244,26 @@ what makes a Cursor observation deliverable rather than a lenient default.
 `ObservationSource` adds `cursor_hook`. The pinned native profile advertises only
 `sessionStart|sessionEnd|afterMCPExecution|afterFileEdit|stop`; `afterAgentThought` is excluded.
 `CURSOR_HARNESS_PROFILE.hooks_by_capability_profile` binds that nonempty profile only to
-`cursor-ide-3.17.8`. The portable CLI cell and both SDK cells are exactly `None`: Agent Plugins do
-not carry hooks, and the SDKs' file-based hook loading has no independent installed-artifact,
-event-delivery, privacy-filtering, failure-behavior, and accepted-observation proof. Native IDE
-rendering or schema validity cannot populate those neighboring cells.
+`cursor-ide-3.17.8`. The portable CLI cell is exactly `None`: Agent Plugins do not carry hooks.
+SDK profile ids and versions are absent from the supported harness profile; their retained
+metadata fixtures are marked `metadata_only` and `not_a_support_claim`. The SDKs' file-based hook
+loading has no independent installed-artifact, event-delivery, privacy-filtering, failure-behavior,
+or accepted-observation proof. Native IDE rendering or schema validity cannot populate those
+neighboring cells.
 Cursor ingress maps only bounded session/generation/tool IDs, exact Cursor/model/effort tokens,
 duration, capability profile, and an installation-keyed HMAC changed-path commitment. It discards
 prompt, reasoning, response text, paths, file contents/edits, MCP/tool inputs/results, transcripts,
-commands/output, email, and workspace roots before storage and never reconciles a Cursor transcript
-stream. Hooks are fail-open and advisory; configuration/trigger-only state earns no observation
-coverage.
+commands/output, and email before storage and never reconciles a Cursor transcript stream. It uses
+`workspace_roots` transiently, then `CURSOR_PROJECT_DIR`, then the explicit hook argument to choose
+one locator. Multi-root input must contain the project directory; the nearest safe `.git` file or
+directory normalizes subdirectories and worktrees without spawning Git. Root/home locators,
+symlinked ancestors, unsafe markers, oversized/control-bearing values, and ambiguous multiroot
+input fail closed. Plain roots never enter structural state, diagnostics, errors, or stdout.
+Unresolvable and resolved-but-unconsented inputs record distinct payload-free diagnostics. Hooks
+are fail-open and advisory; configuration/trigger-only state earns no observation coverage.
+The selected locator retains its exact filesystem-encoded spelling through lookup and commitment;
+Unicode normalization never aliases distinct directories. A grant created under a differently
+normalized spelling does not authorize its sibling and requires an explicit regrant.
 
 ## 11. Application (`application/`)
 

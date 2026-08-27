@@ -62,6 +62,9 @@ _REASONS: Final = frozenset(
         "runtime_gate_contended",
         "runtime_gate_unsafe",
         "stdout_write_failed",
+        "workspace_unconsented",
+        "workspace_unresolvable",
+        "cursor_session_ambiguous",
         # Observability only: the end-to-end hook budget is a contract, not an
         # enforcement point. Aborting mid-hook would drop ingest.
         "hook_budget_exceeded",

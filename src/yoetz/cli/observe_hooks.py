@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import shlex
 import sys
 import time
@@ -35,11 +36,15 @@ from yoetz.cli.hook_io import (
     context_output as _context_output,
 )
 from yoetz.cli.hook_io import (
+    cursor_context_output as _cursor_context_output,
+)
+from yoetz.cli.hook_io import (
     read_hook_payload,
 )
 from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
 )
+from yoetz.cli.workspace_binding import canonical_workspace_locator, resolve_workspace_locator
 from yoetz.domain.observation import (
     ObservationContentChunk,
     ObservationContentKind,
@@ -201,6 +206,13 @@ _TOKEN_CHARS: Final = frozenset(
 )
 _MAX_TOKEN_CHARS: Final = 128
 _CURSOR_SESSION_PREFIX: Final = "cursor:"
+_CURSOR_ALIAS_FILE: Final = "cursor-session-aliases.json"
+_CURSOR_ALIAS_LOCK: Final = "cursor-session-aliases.lock"
+_MAX_CURSOR_ALIASES: Final = 64
+_CURSOR_UNTESTED_PROFILE_ID: Final = "untested"
+_CURSOR_VERSION_TO_PROFILE: Final = {
+    "3.17.8": "cursor-ide-3.17.8",
+}
 
 
 type AsyncRunner = Callable[[Callable[[], Awaitable[object]]], object]
@@ -277,6 +289,131 @@ def _int_or_none(value: object) -> int | None:
 
 def _bool_or_none(value: object) -> bool | None:
     return value if type(value) is bool else None
+
+
+def _cursor_alias_paths(_state: Path | None) -> tuple[Path, Path]:
+    from yoetz.config.paths import state_dir
+
+    root = state_dir() if _state is None else _state
+    directory = root / "observation"
+    return directory / _CURSOR_ALIAS_FILE, directory / _CURSOR_ALIAS_LOCK
+
+
+def _load_cursor_aliases(path: Path) -> dict[str, str]:
+    import json
+
+    try:
+        if path.is_symlink() or path.stat().st_size > 65_536:
+            return {}
+        loaded = json.loads(path.read_bytes())
+    except OSError, ValueError:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    aliases: dict[str, str] = {}
+    for key, value in cast(dict[object, object], loaded).items():
+        conversation = _token_or_none(key)
+        session = _token_or_none(value)
+        if conversation is not None and session is not None:
+            aliases[conversation] = session
+    return aliases
+
+
+def _aliased_cursor_session(conversation: str, *, _state: Path | None) -> str | None:
+    """Return the session identifier a sessionStart validated for this conversation."""
+
+    path, _lock = _cursor_alias_paths(_state)
+    return _load_cursor_aliases(path).get(conversation)
+
+
+def _bind_cursor_session_alias(conversation: str, session: str, *, _state: Path | None) -> None:
+    """Durably bind one Cursor conversation to one validated session identifier.
+
+    Both identifiers come from the same host payload, so the pair itself is the
+    validation. The bounded local map lets later events that carry only the
+    conversation identifier keep resolving to the same Yoetz session instead of
+    splitting one host conversation across identities (#417).
+    """
+
+    import json
+
+    from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir
+
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - supported hook hosts are POSIX
+        fcntl = None  # type: ignore[assignment]
+
+    path, lock_path = _cursor_alias_paths(_state)
+    try:
+        ensure_owner_only_dir(path.parent)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        lock_descriptor = os.open(lock_path, flags, 0o600)
+        try:
+            os.fchmod(lock_descriptor, 0o600)
+            if fcntl is not None:
+                fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+            aliases = _load_cursor_aliases(path)
+            aliases.pop(conversation, None)
+            aliases[conversation] = session
+            while len(aliases) > _MAX_CURSOR_ALIASES:
+                aliases.pop(next(iter(aliases)))
+            encoded = json.dumps(aliases, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            temporary = path.with_name(path.name + ".tmp")
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            try:
+                os.fchmod(descriptor, 0o600)
+                os.write(descriptor, encoded)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(temporary, path)
+        finally:
+            os.close(lock_descriptor)
+    except OSError, PathSafetyError, ValueError:
+        return
+
+
+def _cursor_capability_profile_id(cursor_version: object) -> str:
+    """Map an exact Cursor version to its reviewed profile, else stay untested.
+
+    Hook payloads may report a version from any Cursor surface. Only the IDE
+    profile owns the reviewed native hook set; the recognized CLI profile has
+    no hook cell and therefore remains ``untested`` at hook ingress. Importing
+    the adapter here would pull in the full plugin/rendering stack, so keep the
+    fail-closed table local and never infer support for a neighboring surface
+    or version.
+    """
+
+    version = _token_or_none(cursor_version)
+    if version is None:
+        return _CURSOR_UNTESTED_PROFILE_ID
+    return _CURSOR_VERSION_TO_PROFILE.get(version, _CURSOR_UNTESTED_PROFILE_ID)
+
+
+def _resolve_cursor_workspace(
+    payload: Mapping[str, JsonValue], explicit_workspace: str | None
+) -> str | None:
+    """Resolve a Cursor workspace without retaining the host's root list.
+
+    ``workspace_binding`` owns the validation and source precedence.  This
+    wrapper returns one resolved path and no payload data.
+    """
+
+    resolved = resolve_workspace_locator(
+        explicit=explicit_workspace,
+        payload=payload,
+        env=os.environ,
+    )
+    # The sibling resolver already performs bounded lexical normalization and
+    # rejects symlinked components.  Do not resolve the returned path again:
+    # that would re-open the exact symlink race this boundary closes.
+    return resolved if type(resolved) is str and resolved else None
 
 
 def _routine_read_action(payload: Mapping[str, JsonValue]) -> bool:
@@ -1097,7 +1234,9 @@ def _note_dropped_event_gap(
     commitment: str | None = None
     if workspace is not None:
         try:
-            locator = str(Path(workspace).expanduser().resolve(strict=False))
+            locator = canonical_workspace_locator(workspace)
+            if locator is None:
+                raise ValueError("workspace_locator_invalid")
             candidate = store.workspace_commitment(locator)
             consent = store.consent_for(candidate)
             if consent is not None and consent.active:
@@ -1129,6 +1268,7 @@ def handle_observe(
     _monotonic: Callable[[], float] = time.monotonic,
     _workspace_commitment: str | None = None,
     source: ObservationSource = ObservationSource.CODEX_HOOK,
+    _output_event_name: str | None = None,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -1174,6 +1314,16 @@ def handle_observe(
                     sys.stdout.close()
             return emitted
 
+        def _render_context(additional_context: str) -> dict[str, JsonValue]:
+            """Render advice for the receiving host, retaining Cursor's raw event name."""
+
+            if source is ObservationSource.CURSOR_HOOK:
+                raw_cursor_event = _output_event_name
+                if raw_cursor_event is None:
+                    return {}
+                return _cursor_context_output(raw_cursor_event, additional_context)
+            return _context_output(resolved_event, additional_context)
+
         payload = read_hook_payload(stdin_bytes)
         harness_id: Literal["codex", "cursor"] = (
             "cursor" if source is ObservationSource.CURSOR_HOOK else "codex"
@@ -1206,9 +1356,7 @@ def handle_observe(
                 additional = ""
                 with contextlib.suppress(Exception):
                     additional = _cached_recommendation_context(_state=_state)
-                _stdout_json(
-                    _context_output(resolved_event, additional) if additional else {}, stdout
-                )
+                _stdout_json(_render_context(additional) if additional else {}, stdout)
             else:
                 _stdout_json({}, stdout)
             return 0
@@ -1227,8 +1375,17 @@ def handle_observe(
             workspace_commitment = _workspace_commitment
         elif workspace is not None:
             try:
-                # Resolve '.' / relative paths locally; never log or persist plaintext.
-                workspace_locator = str(Path(workspace).expanduser().resolve(strict=False))
+                # Cursor already passed through the bounded host resolver. All
+                # other hook sources use the same explicit-path canonicalizer
+                # as consent/control so a Git subdirectory cannot acquire a
+                # second commitment identity.
+                workspace_locator = (
+                    workspace
+                    if source is ObservationSource.CURSOR_HOOK
+                    else canonical_workspace_locator(workspace)
+                )
+                if workspace_locator is None:
+                    raise ValueError("workspace_locator_invalid")
                 workspace_commitment = store.workspace_commitment(workspace_locator)
                 consent_probe = store.consent_for(workspace_commitment)
                 if consent_probe is None or not consent_probe.active:
@@ -1237,14 +1394,18 @@ def handle_observe(
             except Exception:
                 workspace_commitment = None
                 workspace_locator = None
-        if workspace_commitment is None:
-            # Bind only via an existing Codex-session→workspace map for this session.
-            # Never guess a single "active" workspace across consented projects.
+        if workspace_commitment is None and workspace is None:
+            # A hook without an explicit locator may retain the legacy bound-session/single-active
+            # lane. An explicit locator that failed canonical consent never falls back to a
+            # different commitment, including a legacy exact-subdirectory grant.
             workspace_commitment = store.find_workspace_for_codex_session(codex_session_id)
             workspace_locator = None
         consent = None if workspace_commitment is None else store.consent_for(workspace_commitment)
         if consent is None or not consent.active:
             # Consent missing/paused/revoked: no ingest, no spool; still exit 0.
+            if source is ObservationSource.CURSOR_HOOK and workspace is not None:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic("workspace_unconsented", resolved_event, _state=_state)
             _stdout_json({}, stdout)
             return 0
 
@@ -1601,6 +1762,9 @@ def handle_observe(
             and resolved_event in ADVICE_SAFE_EVENTS
             and not skip_advice_loop
             and not stop_already_active
+            and (
+                source is not ObservationSource.CURSOR_HOOK or _output_event_name == "sessionStart"
+            )
         )
         delivery_gate = (
             store.advice_delivery_lease(workspace_commitment)
@@ -1630,15 +1794,25 @@ def handle_observe(
 
             # Release recommendations are read from one bounded local cache only.
             # Existing task/receipt advice always wins this shared context channel.
-            if not additional and resolved_event == "SessionStart" and not skip_advice_loop:
+            if (
+                not additional
+                and resolved_event == "SessionStart"
+                and not skip_advice_loop
+                and (
+                    source is not ObservationSource.CURSOR_HOOK
+                    or _output_event_name == "sessionStart"
+                )
+            ):
                 with contextlib.suppress(Exception):
                     additional = _cached_recommendation_context(_state=_state)
 
+            rendered_output = _render_context(additional) if additional else {}
+            host_consumable = bool(rendered_output)
             if additional:
-                emitted = _stdout_json(_context_output(resolved_event, additional), stdout)
+                emitted = _stdout_json(rendered_output, stdout)
             else:
                 emitted = _stdout_json({}, stdout)
-            if emitted and pending_delivery is not None:
+            if emitted and host_consumable and pending_delivery is not None:
                 # Strictly after the write: delivered-but-unrecorded costs one
                 # redelivery, recorded-but-undelivered would cost the advice.
                 # Nothing past the emission may raise — the outer handler would
@@ -1650,7 +1824,7 @@ def handle_observe(
                         yoetz_session_id=delivery_session_id,
                         session_commitment=session_commitment,
                     )
-            if emitted and pending_frontier_notice is not None:
+            if emitted and host_consumable and pending_frontier_notice is not None:
                 with contextlib.suppress(BaseException):
                     store.commit_frontier_motion_delivery(
                         workspace_commitment,
@@ -1726,11 +1900,44 @@ def handle_cursor_observe(
         raw_event = event_name or payload.get("hook_event_name")
         if type(raw_event) is not str or raw_event not in event_map:
             return 0 if hook_io.stdout_json({}, stdout) else 0
-        session = _token_or_none(payload.get("session_id")) or _token_or_none(
-            payload.get("conversation_id")
-        )
+        session_token = _token_or_none(payload.get("session_id"))
+        conversation_token = _token_or_none(payload.get("conversation_id"))
+        # One host conversation must stay one Yoetz session (#417). sessionStart
+        # validates the pair and persists the alias; later events that carry
+        # only the conversation identifier resolve through it, and an event
+        # whose pair contradicts the validated alias is an ambiguous transition
+        # that is rejected rather than silently splitting the session.
+        if session_token is not None and conversation_token is not None:
+            aliased = _aliased_cursor_session(conversation_token, _state=_state)
+            if raw_event == "sessionStart" or aliased is None:
+                if conversation_token != session_token:
+                    _bind_cursor_session_alias(conversation_token, session_token, _state=_state)
+            elif aliased != session_token:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(
+                        "cursor_session_ambiguous", event_map[raw_event], _state=_state
+                    )
+                return 0 if hook_io.stdout_json({}, stdout) else 0
+            session = session_token
+        elif session_token is None and conversation_token is not None:
+            session = (
+                _aliased_cursor_session(conversation_token, _state=_state) or conversation_token
+            )
+        else:
+            session = session_token
         if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CURSOR_SESSION_PREFIX):
             return 0 if hook_io.stdout_json({}, stdout) else 0
+        resolved_workspace = _resolve_cursor_workspace(payload, workspace)
+        if resolved_workspace is None:
+            # No structural envelope is created until the workspace locator
+            # is resolved.  In particular, Cursor's workspace_roots list is
+            # never forwarded to the observation path or persisted.
+            with contextlib.suppress(Exception):
+                record_hook_diagnostic(
+                    "workspace_unresolvable", event_map[raw_event], _state=_state
+                )
+            return 0 if hook_io.stdout_json({}, stdout) else 0
+        cursor_version = _token_or_none(payload.get("cursor_version"))
         structural: dict[str, JsonValue] = {
             "action": (
                 "cursor_file_edit"
@@ -1739,7 +1946,7 @@ def handle_cursor_observe(
                 if raw_event == "afterMCPExecution"
                 else "cursor_lifecycle"
             ),
-            "capability_profile_id": "cursor-local-3.17",
+            "capability_profile_id": _cursor_capability_profile_id(cursor_version),
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CURSOR_SESSION_PREFIX}{session}",
         }
@@ -1774,12 +1981,13 @@ def handle_cursor_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),
             stdout=stdout,
-            workspace=workspace,
+            workspace=resolved_workspace,
             _state=_state,
             connect=connect,
             run_async=run_async,
             skip_service=skip_service,
             source=ObservationSource.CURSOR_HOOK,
+            _output_event_name=raw_event,
         )
     except BaseException:
         with contextlib.suppress(BaseException):
@@ -1813,12 +2021,15 @@ def handle_spool(
             "PermissionRequest",
             "PostToolUse",
         }:
+            workspace_locator = canonical_workspace_locator(workspace)
+            if workspace_locator is None:
+                raise ValueError("workspace_locator_invalid")
             spool_payload = dict(payload)
             # Keep the safe classification, never the host command/input prose.
             if _routine_read_action(payload):
                 spool_payload["action"] = "routine_read"
             HookSpool(_state=_state).append(
-                workspace=str(Path(workspace).expanduser().resolve(strict=False)),
+                workspace=workspace_locator,
                 event_name=event_name,
                 payload=spool_payload,
             )

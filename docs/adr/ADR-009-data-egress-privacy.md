@@ -329,7 +329,11 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     Observation consent is independent of egress consent. One project-level confirmation records a
     private workspace commitment (never a raw path). The normalized workspace locator is an
     authenticated encrypted task object; plaintext state retains only its commitment and object
-    identity. Revocation stops new ingestion, deactivates the locator and check-policy trust
+    identity. Locator normalization selects a safe Git root and performs lexical path cleanup; it
+    does not apply Unicode normalization. The exact filesystem-encoded spelling feeds the
+    commitment, so canonically equivalent names that identify distinct directories never share
+    consent. A legacy grant under another spelling requires an explicit regrant. Revocation stops
+    new ingestion, deactivates the locator and check-policy trust
     bindings, and retains already encrypted task evidence.
 
     Retain bounded task-relevant visible user/assistant/subagent messages, tool inputs/results,

@@ -137,12 +137,17 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
 
 ### Cursor local amendment (2026-08-22, issue #153)
 
-`HarnessId` adds exactly `cursor`; `cursor_integration.py` is its one adapter. The accepted local
-cells are Cursor IDE `3.17.8`, Cursor Agent CLI `2026.07.09-a3815c0`, local TypeScript SDK
-`1.0.23`, and local Python SDK `1.0.24` over bridge protocol `sdk.v1`. The Python package has no
-`1.0.23` release. Exact artifact digests, OS, architecture, activation
-source, configuration scope, format, MCP owner/source, and SDK setting sources remain evidence per
-cell. No cell inherits another cell's proof, and Cursor Cloud remains outside this amendment.
+`HarnessId` adds exactly `cursor`; `cursor_integration.py` is its one adapter. The current local
+implementation profiles are Cursor IDE `3.17.8` and Cursor Agent CLI
+`2026.07.09-a3815c0`. Local TypeScript SDK `1.0.23` and Python SDK `1.0.24` over bridge protocol
+`sdk.v1` were originally nominated as neighboring cells, but issue #412 defers them for planned
+`0.2`: their package/bridge/precedence fixtures are metadata-only experimental scaffolding and do
+not enter `capability_profile_ids`, `supported_versions`, hook maps, or a public support claim. A
+new design-gated issue plus operational SDK execution, bridge, negative-control, model-call, and
+exact evidence is required before promotion. The Python package has no `1.0.23` release. Exact
+artifact digests, OS, architecture, activation source, configuration scope, format, and MCP
+owner/source remain evidence per IDE/CLI cell. No cell inherits another cell's proof, and Cursor
+Cloud remains outside this amendment.
 
 The portable projection reuses the canonical Agent Plugins skill bytes. The native projection is
 generated independently at `.cursor-plugin/plugin.json`; it may add only proven Cursor components.
@@ -266,6 +271,10 @@ private SQL.
 Observation consent is project-level and separate from egress consent. The plaintext local boundary
 records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
 identities—never raw task content or a raw path in logs/status/SQLite.
+Hook ingress and every consent/control lifecycle entry point derive that commitment from one shared
+workspace canonicalizer: the nearest safe Git root for a Git subdirectory, or the exact safe
+directory for non-Git workspaces. Authority never searches ancestor commitments. Pre-existing
+exact-subdirectory grants remain non-authorizing until an operator explicitly regrants them.
 
 Hook `PostToolUse` and a completed session-stream tool record (rollout `function_call_output`,
 historically exec-JSONL `item.completed`) for one host call normalize before materialization to

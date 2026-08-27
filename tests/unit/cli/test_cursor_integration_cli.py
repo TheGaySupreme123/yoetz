@@ -328,3 +328,26 @@ def test_wedged_install_replay_reconciles_through_the_cli_without_a_second_revie
         )
         == 0
     )
+
+
+def test_invoking_launcher_preserves_module_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz
+    from yoetz.cli import cursor_integration as cli_module
+
+    package_main = str(Path(yoetz.__file__).parent / "__main__.py")
+    monkeypatch.setattr(cli_module.sys, "argv", [package_main])
+    assert cli_module._invoking_launcher() == (  # pyright: ignore[reportPrivateUsage]
+        cli_module.sys.executable,
+        "-m",
+        "yoetz",
+    )
+
+    monkeypatch.setattr(cli_module.sys, "argv", ["/opt/tools/yoetz"])
+    assert cli_module._invoking_launcher() == (  # pyright: ignore[reportPrivateUsage]
+        "/opt/tools/yoetz"
+    )
+
+    monkeypatch.setattr(cli_module.sys, "argv", ["/usr/bin/unrelated"])
+    assert cli_module._invoking_launcher() is None  # pyright: ignore[reportPrivateUsage]

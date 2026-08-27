@@ -5,8 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os
 import re
-import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -448,7 +448,7 @@ def _source_coverage(value: object) -> Mapping[ObservationSource, bool]:
 
 
 def workspace_commitment_from_path(key_material: bytes, path: str) -> str:
-    """Return an HMAC-SHA-256 workspace commitment for normalized path bytes.
+    """Return an HMAC-SHA-256 commitment for exact filesystem-encoded path bytes.
 
     The commitment never embeds the raw path. Callers must supply exact key material
     (for example ``K_lookup`` / commitment MAC bytes). Empty or control-bearing paths
@@ -459,10 +459,9 @@ def workspace_commitment_from_path(key_material: bytes, path: str) -> str:
         raise _invalid("invalid_commitment")
     if type(path) is not str or not path or "\x00" in path:
         raise _invalid()
-    normalized = unicodedata.normalize("NFC", path)
     digest = hmac.new(
         key_material,
-        OBSERVATION_WORKSPACE_DOMAIN + normalized.encode("utf-8"),
+        OBSERVATION_WORKSPACE_DOMAIN + os.fsencode(path),
         hashlib.sha256,
     ).hexdigest()
     return f"hmac-sha256:{digest}"
