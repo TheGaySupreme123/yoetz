@@ -1140,8 +1140,75 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         raise _error(IntegrationReason.WRITE_FAILED) from exc
 
 
-def _replace_cache_tree(path: Path, members: Mapping[str, bytes]) -> None:
+def _open_or_create_private_directory(root_fd: int, relative: Path) -> int:
+    current_fd = os.dup(root_fd)
+    try:
+        for part in relative.parts:
+            if part in {"", ".", ".."}:
+                raise _error(IntegrationReason.TARGET_UNSAFE)
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=current_fd)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+            try:
+                child_fd = os.open(part, _directory_open_flags(), dir_fd=current_fd)
+            except OSError as exc:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+            try:
+                _owned_stat_not_writable(os.fstat(child_fd), directory=True)
+            except BaseException:
+                os.close(child_fd)
+                raise
+            os.close(current_fd)
+            current_fd = child_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _remove_private_tree_contents_fd(directory_fd: int, *, depth: int = 0) -> None:
+    """Remove a freshly created private staging tree without following links."""
+
+    if depth > _MAX_MANAGED_CACHE_DEPTH:
+        raise _error(IntegrationReason.WRITE_FAILED)
+    try:
+        names = _bounded_directory_names(directory_fd)
+    except IntegrationError as exc:
+        raise _error(IntegrationReason.WRITE_FAILED) from exc
+    for name in names:
+        try:
+            facts = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(facts.st_mode):
+                child_fd = os.open(name, _directory_open_flags(), dir_fd=directory_fd)
+                try:
+                    _remove_private_tree_contents_fd(child_fd, depth=depth + 1)
+                finally:
+                    os.close(child_fd)
+                os.rmdir(name, dir_fd=directory_fd)
+            elif stat.S_ISREG(facts.st_mode):
+                os.unlink(name, dir_fd=directory_fd)
+            else:
+                raise _error(IntegrationReason.WRITE_FAILED)
+        except IntegrationError:
+            raise
+        except OSError as exc:
+            raise _error(IntegrationReason.WRITE_FAILED) from exc
+
+
+def _replace_cache_tree(
+    path: Path,
+    members: Mapping[str, bytes],
+    *,
+    anchor_root: Path | None = None,
+) -> None:
     """Atomically replace one managed cache directory with freshly rendered members."""
+
+    if anchor_root is not None:
+        _replace_cache_tree_anchored(path, members, anchor_root=anchor_root)
+        return
 
     parent = path.parent
     _safe_parent(parent)
@@ -1179,6 +1246,124 @@ def _replace_cache_tree(path: Path, members: Mapping[str, bytes]) -> None:
     finally:
         if stage.exists():
             shutil.rmtree(stage, ignore_errors=True)
+
+
+def _replace_cache_tree_anchored(
+    path: Path,
+    members: Mapping[str, bytes],
+    *,
+    anchor_root: Path,
+) -> None:
+    """Replace a managed cache tree through a no-follow selected-home descriptor."""
+
+    if path.name in {"", ".", ".."} or "/" in path.name:
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+    try:
+        relative_parent = path.parent.relative_to(anchor_root)
+    except ValueError as exc:
+        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    parent_fd = _open_anchored_directory(anchor_root, relative_parent)
+    stage = f".yoetz-cache-stage-{os.urandom(6).hex()}"
+    rollback = f".yoetz-cache-rollback-{os.urandom(6).hex()}"
+    stage_fd: int | None = None
+    old_fd: int | None = None
+    old_members: dict[str, bytes] | None = None
+    stage_present = False
+    rollback_present = False
+    destination_installed = False
+    failure: Exception | None = None
+    try:
+        try:
+            os.mkdir(stage, mode=0o700, dir_fd=parent_fd)
+            stage_present = True
+            stage_fd = os.open(stage, _directory_open_flags(), dir_fd=parent_fd)
+            _owned_stat_not_writable(os.fstat(stage_fd), directory=True)
+            for relative_path, payload in sorted(members.items()):
+                relative = Path(relative_path)
+                if relative.is_absolute() or any(
+                    part in {"", ".", ".."} for part in relative.parts
+                ):
+                    raise _error(IntegrationReason.SOURCE_INVALID)
+                directory_fd = _open_or_create_private_directory(stage_fd, relative.parent)
+                try:
+                    descriptor = os.open(
+                        relative.name,
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        0o600,
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        written = 0
+                        while written < len(payload):
+                            written += os.write(descriptor, payload[written:])
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                finally:
+                    os.close(directory_fd)
+
+            try:
+                before = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                before = None
+            except OSError as exc:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+            if before is not None:
+                _owned_stat_not_writable(before, directory=True)
+                old_fd = os.open(path.name, _directory_open_flags(), dir_fd=parent_fd)
+                _owned_stat_not_writable(os.fstat(old_fd), directory=True)
+                old_members = _read_managed_tree_fd(old_fd)
+                os.rename(
+                    path.name,
+                    rollback,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+                rollback_present = True
+            os.rename(stage, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            stage_present = False
+            destination_installed = True
+            if rollback_present:
+                assert old_fd is not None and old_members is not None
+                _remove_validated_directory(parent_fd, rollback, old_fd, old_members)
+                rollback_present = False
+        except IntegrationError:
+            raise
+        except OSError as exc:
+            raise _error(IntegrationReason.WRITE_FAILED) from exc
+    except Exception as exc:
+        failure = exc
+        if rollback_present and not destination_installed:
+            try:
+                os.rename(
+                    rollback,
+                    path.name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+                rollback_present = False
+            except OSError:
+                failure = _error(IntegrationReason.WRITE_FAILED)
+    finally:
+        if stage_present and stage_fd is not None:
+            try:
+                _remove_private_tree_contents_fd(stage_fd)
+                os.rmdir(stage, dir_fd=parent_fd)
+            except IntegrationError as exc:
+                failure = exc
+        if old_fd is not None:
+            os.close(old_fd)
+        if stage_fd is not None:
+            os.close(stage_fd)
+        os.close(parent_fd)
+    if failure is not None:
+        if isinstance(failure, IntegrationError):
+            raise failure
+        raise _error(IntegrationReason.WRITE_FAILED) from failure
 
 
 def _current_bytes(path: Path) -> bytes | None:
@@ -1375,7 +1560,11 @@ def apply_activation(
                         != plan.cache_before
                     ):
                         raise _error(IntegrationReason.PREVIEW_STALE)
-                    _replace_cache_tree(preview.plugin_install_path, plan.cache_members)
+                    _replace_cache_tree(
+                        preview.plugin_install_path,
+                        plan.cache_members,
+                        anchor_root=binary.codex_home,
+                    )
                     if (
                         _installed_cache_digest(preview.plugin_install_path, plan.cache_members)
                         != preview.plugin_install_digest
@@ -1406,7 +1595,11 @@ def apply_activation(
                     # host-specific render belongs to the cache layer (#387).
                     # Seed the exact previewed install bytes over the copied
                     # marker-identified tree.
-                    _replace_cache_tree(cache_created, plan.cache_members)
+                    _replace_cache_tree(
+                        cache_created,
+                        plan.cache_members,
+                        anchor_root=binary.codex_home,
+                    )
                     if (
                         _installed_cache_digest(cache_created, plan.cache_members)
                         != preview.plugin_install_digest
@@ -2339,6 +2532,7 @@ def _delete_managed_cache_versions(
     expected_members: Mapping[str, bytes],
     *,
     anchor_root: Path | None = None,
+    missing_ok_after_prior_mutation: bool = False,
 ) -> bool:
     if not cache_digests:
         return False
@@ -2355,11 +2549,16 @@ def _delete_managed_cache_versions(
             relative_root = root.relative_to(anchor_root)
         except ValueError as exc:
             raise _error(IntegrationReason.TARGET_UNSAFE) from exc
-        root_fd = _open_anchored_directory(
-            anchor_root,
-            relative_root,
-            missing_reason=IntegrationReason.PREVIEW_STALE,
-        )
+        try:
+            root_fd = _open_anchored_directory(
+                anchor_root,
+                relative_root,
+                missing_reason=IntegrationReason.PREVIEW_STALE,
+            )
+        except IntegrationError as exc:
+            if missing_ok_after_prior_mutation and exc.reason is IntegrationReason.PREVIEW_STALE:
+                return True
+            raise
     try:
         _owned_stat_not_writable(os.fstat(root_fd), directory=True)
         cache_mutation_started = False
@@ -2605,6 +2804,7 @@ def apply_removal(
                 plan.cache_digests,
                 plan.cache_members,
                 anchor_root=home,
+                missing_ok_after_prior_mutation=mutation_started,
             )
         except IntegrationError as exc:
             if mutation_started and exc.reason is not IntegrationReason.WRITE_FAILED:

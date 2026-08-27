@@ -667,6 +667,34 @@ def test_activation_refuses_symlinked_cache_ancestor_before_host_mutation(tmp_pa
     assert list(outside.iterdir()) == []
 
 
+def test_cache_replacement_refuses_ancestor_swap_after_validation(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations import codex_marketplace as module
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    home = tmp_path / "codex-home"
+    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    cache.mkdir(parents=True)
+    module._validate_descendant_ancestors(  # pyright: ignore[reportPrivateUsage]
+        home,
+        Path("plugins/cache/yoetz/yoetz"),
+    )
+    outside = tmp_path / "outside-cache"
+    (home / "plugins").rename(outside)
+    (home / "plugins").symlink_to(outside, target_is_directory=True)
+    sentinel = outside / "cache/yoetz/yoetz/0.1.0/sentinel.txt"
+    sentinel.write_bytes(b"outside")
+
+    with pytest.raises(IntegrationError) as caught:
+        module._replace_cache_tree(  # pyright: ignore[reportPrivateUsage]
+            home / "plugins/cache/yoetz/yoetz/0.1.0",
+            render_plugin_install_tree(codex_version="0.148.0-alpha.6"),
+            anchor_root=home,
+        )
+
+    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+    assert sentinel.read_bytes() == b"outside"
+
+
 def test_stale_digest_refuses_without_writing(tmp_path: Path) -> None:
     target, project, home = _target(tmp_path)
     _install(target)
@@ -2091,6 +2119,25 @@ def test_cache_removal_refuses_symlinked_ancestor_beneath_selected_home(tmp_path
 
     assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
     assert (version / "hooks/hooks.json").exists()
+
+
+def test_cache_removal_accepts_host_removed_root_only_after_prior_mutation(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations.codex_marketplace import (
+        _delete_managed_cache_versions,  # pyright: ignore[reportPrivateUsage]
+    )
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    home = tmp_path / "codex-home"
+    home.mkdir(mode=0o700)
+    root = home / "plugins/cache/yoetz/yoetz"
+    expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
+    assert _delete_managed_cache_versions(
+        root,
+        (("0.1.0", "sha256:" + "a" * 64),),
+        expected,
+        anchor_root=home,
+        missing_ok_after_prior_mutation=True,
+    )
 
 
 def test_file_removal_refuses_symlinked_ancestor_beneath_selected_project(
