@@ -50,6 +50,7 @@ def _port_error(reason: str) -> ProtocolValueError:
 
 
 class HarnessId(str, Enum):  # noqa: UP042 - exact wire-valued Enum is required
+    CLAUDE = "claude"
     CODEX = "codex"
     CURSOR = "cursor"
 

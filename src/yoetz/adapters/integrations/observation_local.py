@@ -2140,6 +2140,7 @@ class LocalObservationStore:
             mono_ms = int(self._now_mono() * 1000)
             state.monotonic_epoch = self._boot_epoch()
             if envelope.source in {
+                ObservationSource.CLAUDE_HOOK,
                 ObservationSource.CODEX_HOOK,
                 ObservationSource.CURSOR_HOOK,
             }:
@@ -2607,6 +2608,7 @@ class LocalObservationStore:
         state = self._load(workspace_commitment)
         consent = state.consent
         coverage = {
+            ObservationSource.CLAUDE_HOOK: False,
             ObservationSource.CODEX_HOOK: False,
             ObservationSource.CODEX_SESSION_STREAM: False,
             ObservationSource.CURSOR_HOOK: False,

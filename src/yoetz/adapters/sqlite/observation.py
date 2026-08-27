@@ -1011,6 +1011,7 @@ class SqliteObservationStore:
     ) -> ObservationStatus:
         consent = self._consent_row(workspace_commitment)
         coverage = {
+            ObservationSource.CLAUDE_HOOK: False,
             ObservationSource.CODEX_HOOK: False,
             ObservationSource.CODEX_SESSION_STREAM: False,
             ObservationSource.CURSOR_HOOK: False,

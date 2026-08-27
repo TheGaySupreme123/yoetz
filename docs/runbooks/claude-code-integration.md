@@ -1,0 +1,142 @@
+# Claude Code native integration
+
+This runbook covers exactly one cell: Claude Code CLI `2.1.241` as a local process, project scope,
+native marketplace-installed plugin, and an explicit private directory marketplace. It does not
+claim that Claude Code consumes Agent Plugins. It also does not transfer proof to Claude Desktop,
+remote/web/cloud, synced/managed/user/local scopes, Agent SDK, or headless sessions.
+
+## What Yoetz generates
+
+The managed marketplace source contains:
+
+```text
+.claude-plugin/marketplace.json
+.yoetz-claude-marketplace-install.json
+plugins/yoetz/.claude-plugin/plugin.json
+plugins/yoetz/skills/yoetz/SKILL.md
+plugins/yoetz/skills/yoetz/references/...
+plugins/yoetz/hooks/hooks.json
+plugins/yoetz/.mcp.json                 # plugin-managed mode only
+```
+
+The marketplace entry is `strict:true`, declares only relative source `./plugins/yoetz`, and does
+not redefine plugin components. The plugin manifest is authoritative and sets
+`defaultEnabled:false`. Shared skill/reference bytes come from the same packaged sources as the
+portable and Codex/Cursor projections. Yoetz writes no credentials, endpoints, user config, ledger,
+vault, receipt, or provider state into the plugin, `${CLAUDE_PLUGIN_ROOT}`, or
+`${CLAUDE_PLUGIN_DATA}`.
+
+## Explicit roots
+
+Choose an exact trusted project, exact resolved Claude executable, isolated Claude config/cache,
+and private marketplace source. The cache must be exactly
+`<claude-config-root>/plugins/cache`. The examples use placeholders intentionally; do not infer
+them from ambient `$HOME` or a running session.
+
+```text
+CLAUDE_PATH=/absolute/path/to/resolved/claude
+PROJECT_ROOT=/absolute/path/to/project
+CLAUDE_CONFIG_ROOT=/absolute/path/to/claude-config
+CACHE_ROOT=/absolute/path/to/claude-config/plugins/cache
+MARKETPLACE_ROOT=/absolute/path/to/private/yoetz-marketplace
+```
+
+## Preview and install disabled
+
+For plugin-owned strict MCP, preview the exact operation:
+
+```text
+yoetz integrate claude plugin preview \
+  --claude-path "$CLAUDE_PATH" \
+  --claude-config-root "$CLAUDE_CONFIG_ROOT" \
+  --cache-root "$CACHE_ROOT" \
+  --marketplace-root "$MARKETPLACE_ROOT" \
+  --project-root "$PROJECT_ROOT" \
+  --mcp-ownership plugin-managed \
+  --route-profile strict \
+  --action install --json
+```
+
+Prepare the returned exact digest through the trusted review lane, then replay the returned request
+ID and digest with `plugin install --accept`. `--accept` is not authority by itself; the mutation
+also consumes a matching `plugin_artifact_apply` pending and fresh OS-authenticated user presence.
+Install refuses Claude versions below `2.1.233`, foreign/dual/ambiguous MCP ownership, unsafe roots,
+modified sources, or stale previews.
+
+After install, `status` must show `native_managed`, `marketplace_registered:true`,
+`discovered:true`, exact version/cache digest, and `enabled:false`. These prove no loaded session.
+
+## Static and host validation
+
+Run Claude's validator against the exact generated marketplace root:
+
+```text
+CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_ROOT" "$CLAUDE_PATH" \
+  plugin validate "$MARKETPLACE_ROOT" --strict
+CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_ROOT" "$CLAUDE_PATH" plugin list --json
+CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_ROOT" "$CLAUDE_PATH" \
+  plugin details yoetz@yoetz-local
+```
+
+The validator covers the default manifest/hooks/skill paths. Yoetz separately validates exact
+`.mcp.json` structure and cache bytes; neither static validator proves MCP connection or model use.
+`plugin details` should report one skill, five hooks, and one MCP server in plugin-managed mode.
+
+## Enable, trust, reload, and activation
+
+Preview `--action enable`, consume a new exact review, then run `plugin enable` with the same
+request/digest/roots/options. Project trust, installed state, enabled setting, reload/new session,
+loaded plugin root, skill delivery, and model use are different facts. A directory marketplace may
+report its source plugin root in session init even though list/cache evidence identifies the copied
+install; either root must independently match the rendered bytes. Open or restart an exact
+Claude project session only after the enable read-back. If updating a running session, use
+`/reload-plugins` (and `--force` only when Claude explicitly requires cache invalidation), then prove
+the loaded root/digest in that session. Old concurrent sessions may retain the old plugin.
+
+The skill name is `/yoetz:yoetz`. The MCP server is `plugin:yoetz:yoetz`, and callable names are
+`mcp__plugin_yoetz_yoetz__<operation>`. A live proof needs a fresh session and correlated
+`start`/`status` call through that scoped name; a list/details/MCP handshake alone is insufficient.
+
+## Hooks and observation
+
+The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
+`PostToolUseFailure`, `Stop`, and `SessionEnd`. A bare MCP matcher is a negative control. Hooks call
+`yoetz hooks claude-observe` and are best-effort; timeouts/nonzero exits never authorize or block
+Claude work.
+
+Grant observation separately for the exact project. Exercise every advertised event and inspect
+`yoetz observe status`. Only consented accepted `claude_hook` envelopes earn coverage. Raw
+transcript/prompt/assistant/path/cwd/tool input/tool output/result/error values are discarded before
+storage. Pause, resume, revoke, deduplication, restart, and gap behavior require their own evidence.
+
+## Update
+
+A released plugin byte change requires a new generated manifest version. Preview `--action update`,
+consume a fresh exact review, and run `plugin update` with the same roots/ownership/route. Yoetz
+rewrites only its exact marker-valid source, invokes marketplace update and qualified project plugin
+update, then verifies the new cache/version/digest. New cached bytes are not active until reload or
+a new session proves the loaded root. Preserve and report old/orphaned cache roots; do not delete
+them merely because Claude normally sweeps them later.
+
+## Disable and remove
+
+Disable is its own preview/review/action and proves only the effective setting. Removal is likewise
+preview-bound. It invokes:
+
+```text
+claude plugin uninstall yoetz@yoetz-local --scope project --keep-data
+claude plugin marketplace remove yoetz-local
+```
+
+Then it removes only the exact marker-valid private marketplace source. It preserves plugin data,
+Yoetz ledgers, vault/keyring/provider state, privacy/workflow receipts, credentials, other scopes,
+foreign marketplaces/MCP entries, modified sources, and orphaned caches. A lost/nonzero CLI result
+is `outcome_unknown`; run status and reconcile rather than guessing rollback.
+
+## Proof checklist
+
+Record source/render/marketplace/cache/executable digests, exact Claude version/OS/architecture,
+scope, settings state, component inventory, enabled state, loaded root and session boundary, MCP
+owner/source/runtime, scoped model call, hook consent/evidence, semantic/provider attempt and privacy
+receipt, and final workflow receipt as separate cells. Never summarize those cells as one “plugin
+works” flag.

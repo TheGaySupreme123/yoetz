@@ -171,6 +171,26 @@ These are the initial fixture pins, not a promise that nearby builds are support
 Cursor/SDK/bridge version is `untested` until a new fixture is reviewed. Cursor Cloud and Cloud
 Agents are unsupported by issue #153.
 
+Claude Code compatibility starts with one independent native cell:
+
+| Cell | Exact profile | Required proof boundary |
+|---|---|---|
+| CLI/local/project | Claude Code `2.1.241`, exact executable digest, macOS arm64, private marketplace `yoetz-local`, native format | strict validation, source/render/cache byte identity, project registration, disabled install, discovery, explicit enablement, new-session/reload activation, `/yoetz:yoetz` delivery, exclusive MCP owner/runtime, scoped model call, consented hook evidence |
+
+The committed fixture proves strict validation, project installation into an exact cache, disabled
+default, discovery/component inventory, hook declaration, fresh-session plugin/skill/tool
+registration, and connected plugin-owned strict MCP. A correlated model call was blocked by absent
+authentication in the isolated Claude config; only SessionStart/SessionEnd hook delivery was seen,
+and the separately installed older Yoetz lacked the new hook command. Model use, accepted
+observation, semantic dispatch, privacy receipt, and workflow receipt therefore remain unobserved.
+Claude Desktop local/SSH, Desktop remote, web/cloud, synced plugins, managed/user/local scopes,
+Agent SDK, and noninteractive/headless behavior are separate unpopulated cells. Claude Code is not
+claimed to consume Agent Plugins 1.0.0.
+
+Local-control schema `2.2.0` is the current append-only service-control wire. Relative to immutable
+`2.1.0`, it adds only `claude_hook` to observation envelope sources and source coverage. Peers must
+match the schema-manifest digest; no source is inferred across versions.
+
 ## Change and deprecation process
 
 Every change class (protocol, event, storage, object, projection, provider, platform) names its

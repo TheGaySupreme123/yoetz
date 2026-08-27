@@ -432,6 +432,23 @@ observation cannot proceed. Pause, revoke, or absent consent stops new Cursor ob
 removing an independently valid plugin skill or MCP route. `sessionStart`, hook configuration,
 plugin discovery, and tool listing are not observation evidence and do not strengthen coverage.
 
+### Claude Code local project-hook amendment (2026-08-27, issue #154)
+
+`claude_hook` is a distinct untrusted advisory source on local Claude Code CLI project sessions.
+The native renderer registers only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
+`PostToolUseFailure`, `Stop`, and `SessionEnd`; it never registers permission-changing, prompt,
+agent, HTTP, or content-expansion hooks. The ingress accepts only the exact
+`mcp__plugin_yoetz_yoetz__<workflow-operation>` names, a bounded session/correlation token,
+closed lifecycle action, fixed capability-profile identity, and host-derived success bit.
+
+Transcript/cwd/file paths, prompts, assistant messages, tool input/output, MCP results, raw errors,
+commands, environment, permission mode, credentials, and all unknown fields are discarded before
+the common observation boundary. No Claude content capture or transcript reconciliation exists.
+Hook failure and the host's three-second timeout are fail-soft; declaration, delivery, consent, and
+accepted evidence remain separate. Local-control schema `2.2.0` appends only the `claude_hook`
+envelope/coverage row and retains `2.1.0` byte-for-byte for Cursor peers. Claude trust or plugin
+enablement grants no Yoetz observation/egress/provider authority.
+
 The privacy policy is more than a semantic-provider toggle and cannot be represented by one
 `network=true` capability. Releases must prove the global ceiling; policy-intersection behavior;
 valid `local_only` policies with one bounded but v0.1-unavailable non-LLM channel; channel independence;

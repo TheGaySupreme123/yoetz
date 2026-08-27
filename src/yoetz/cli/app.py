@@ -632,6 +632,33 @@ def hooks_cursor_observe(
             pass
 
 
+@hooks_app.command("claude-observe")
+def hooks_claude_observe(
+    event: Annotated[str, typer.Option("--event", help="Claude hook event name.")],
+    workspace: Annotated[
+        str | None,
+        typer.Option(
+            "--workspace",
+            help=(
+                "Claude project path (normally ${CLAUDE_PROJECT_DIR}). Only its private "
+                "commitment is retained; hook content is structurally minimized."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Privacy-minimized, fail-open observation ingress for Claude Code hooks."""
+
+    try:
+        module = importlib.import_module("yoetz.cli.observe_hooks")
+        handler = cast(Callable[..., int], getattr(module, "handle_claude_observe"))
+        handler(event_name=event, workspace=workspace)
+    except BaseException:
+        try:
+            _stdout_json({})
+        except BaseException:
+            pass
+
+
 @hooks_app.command("spool")
 def hooks_spool(
     event: Annotated[str, typer.Option("--event", help="Codex hook event name.")],
@@ -1181,7 +1208,7 @@ async def _integration(action: str, harness: str, json_output: bool) -> int:
 @integrate_app.callback()
 def integrate_root(
     context: typer.Context,
-    harness: Annotated[str, typer.Argument(help="Exact harness ID (codex or cursor).")],
+    harness: Annotated[str, typer.Argument(help="Exact harness ID (claude, codex, or cursor).")],
 ) -> None:
     context.obj = harness
 
@@ -1268,16 +1295,32 @@ for _mcp_action in ("preview", "install", "status"):
     integrate_mcp_app.command(_mcp_action)(_integration_mcp_command(_mcp_action))
 
 
-def _cursor_plugin_command(command_name: str) -> Callable[..., None]:
+def _host_plugin_command(command_name: str) -> Callable[..., None]:
     def command(
         context: typer.Context,
         cursor_config_root: Annotated[
-            Path,
+            Path | None,
             typer.Option(
                 "--cursor-config-root",
                 help="Exact isolated Cursor ~/.cursor configuration root.",
             ),
-        ],
+        ] = None,
+        claude_path: Annotated[
+            Path | None,
+            typer.Option("--claude-path", help="Exact Claude Code executable."),
+        ] = None,
+        claude_config_root: Annotated[
+            Path | None,
+            typer.Option("--claude-config-root", help="Exact isolated Claude config root."),
+        ] = None,
+        cache_root: Annotated[
+            Path | None,
+            typer.Option("--cache-root", help="Exact Claude plugin cache root."),
+        ] = None,
+        marketplace_root: Annotated[
+            Path | None,
+            typer.Option("--marketplace-root", help="Exact managed private marketplace root."),
+        ] = None,
         project_root: Annotated[
             Path | None,
             typer.Option("--project-root", help="Exact trusted project for MCP source checks."),
@@ -1293,7 +1336,10 @@ def _cursor_plugin_command(command_name: str) -> Callable[..., None]:
         ] = None,
         requested_action: Annotated[
             str | None,
-            typer.Option("--action", help="install or replace; inferred when omitted."),
+            typer.Option(
+                "--action",
+                help="Preview action: install/update/enable/disable/remove (Cursor also: replace).",
+            ),
         ] = None,
         request_value: Annotated[
             str | None,
@@ -1307,30 +1353,73 @@ def _cursor_plugin_command(command_name: str) -> Callable[..., None]:
         json_output: _JSON = False,
     ) -> None:
         harness = cast(str, context.find_root().find_object(str) or context.obj)
-        module = importlib.import_module("yoetz.cli.cursor_integration")
-        operation = cast(Callable[..., int], getattr(module, "run_cursor_plugin_command"))
+        if harness == "cursor":
+            if cursor_config_root is None:
+                raise typer.BadParameter("--cursor-config-root is required for cursor")
+            module = importlib.import_module("yoetz.cli.cursor_integration")
+            operation = cast(Callable[..., int], getattr(module, "run_cursor_plugin_command"))
+            arguments = {
+                "harness": harness,
+                "cursor_config_root": cursor_config_root,
+                "project_root": project_root,
+                "format_name": format_name,
+                "ownership_name": ownership_name,
+                "route_profile": route_profile,
+                "requested_action": requested_action,
+                "request_value": request_value,
+                "preview_digest": preview_digest,
+                "accept": accept,
+                "json_output": json_output,
+            }
+        elif harness == "claude":
+            if any(
+                value is None
+                for value in (
+                    claude_path,
+                    claude_config_root,
+                    cache_root,
+                    marketplace_root,
+                    project_root,
+                )
+            ):
+                raise typer.BadParameter(
+                    "--claude-path, --claude-config-root, --cache-root, "
+                    "--marketplace-root, and --project-root are required for claude"
+                )
+            module = importlib.import_module("yoetz.cli.claude_code_integration")
+            operation = cast(
+                Callable[..., int], getattr(module, "run_claude_code_plugin_command")
+            )
+            arguments = {
+                "harness": harness,
+                "claude_path": claude_path,
+                "claude_config_root": claude_config_root,
+                "cache_root": cache_root,
+                "marketplace_root": marketplace_root,
+                "project_root": project_root,
+                "format_name": format_name,
+                "ownership_name": ownership_name,
+                "route_profile": route_profile,
+                "requested_action": requested_action,
+                "request_value": request_value,
+                "preview_digest": preview_digest,
+                "accept": accept,
+                "json_output": json_output,
+            }
+        else:
+            raise typer.BadParameter("plugin lifecycle is available for claude or cursor")
         _finish(
             operation(
                 command_name,
-                harness=harness,
-                cursor_config_root=cursor_config_root,
-                project_root=project_root,
-                format_name=format_name,
-                ownership_name=ownership_name,
-                route_profile=route_profile,
-                requested_action=requested_action,
-                request_value=request_value,
-                preview_digest=preview_digest,
-                accept=accept,
-                json_output=json_output,
+                **arguments,
             )
         )
 
     return command
 
 
-for _plugin_action in ("preview", "install", "status", "remove"):
-    integrate_plugin_app.command(_plugin_action)(_cursor_plugin_command(_plugin_action))
+for _plugin_action in ("preview", "install", "update", "enable", "disable", "status", "remove"):
+    integrate_plugin_app.command(_plugin_action)(_host_plugin_command(_plugin_action))
 
 
 @setup_app.command("run")
