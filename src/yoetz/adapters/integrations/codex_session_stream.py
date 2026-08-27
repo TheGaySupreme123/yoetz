@@ -331,8 +331,11 @@ def structural_from_stream_record(record: CodexParsedRecord) -> tuple[JsonObject
         if status is not None:
             fields["result_status"] = status
         exit_code = body.get("exit_code")
-        if type(exit_code) is int and not isinstance(exit_code, bool) and 0 <= exit_code <= 2**31:
-            fields["exit_status"] = exit_code
+        if "exit_code" in body:
+            if type(exit_code) is int and -1 <= exit_code <= 255:
+                fields["exit_status"] = exit_code
+            else:
+                gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
         call_id = _token(body.get("id")) or _token(body.get("call_id"))
         if call_id is not None:
             fields["tool_call_id"] = call_id

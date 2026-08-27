@@ -2605,7 +2605,10 @@ infer success.
 Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
 
 - Paired `PostToolUse` materialization consumes `exit_status`, `denied`, boolean `success`, and a
-  closed `result_status` spelling table; a payload with no outcome fact records `UNKNOWN` and its
+  closed `result_status` spelling table. Rollout `exit_code` preserves the structural wire range
+  `-1..255` exactly (including `-1` as a nonzero failure); a present value outside that range or of
+  another JSON type is unsupported evidence, never a clean `completed` success. A payload with no
+  outcome fact records `UNKNOWN` and its
   ledger entries carry the `host_outcome_unavailable` known gap. Check coverage and receipts fold
   that gap into one bounded code regardless of how many observed calls lack outcome semantics; the
   deterministic research-evidence policy does not mint one `material_limitation_omitted` candidate

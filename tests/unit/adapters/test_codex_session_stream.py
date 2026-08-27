@@ -34,6 +34,7 @@ from yoetz.adapters.integrations.observation_local import (
     LocalObservationStore,
 )
 from yoetz.application.observation_materialize import materialize_observation_envelope
+from yoetz.domain.events import ResultOutcome, ResultRecordedPayload
 from yoetz.domain.observation import (
     ObservationCursor,
     ObservationGapCode,
@@ -964,3 +965,81 @@ def test_function_call_output_maps_completed_tool_without_unknown_gap() -> None:
     assert envelope.structural_payload.get("exit_status") == 1
     batch = materialize_observation_envelope(envelope, task_id="task_stream_map")
     assert tuple(item.role for item in batch.drafts) == ("action", "result")
+
+
+def test_function_call_output_preserves_negative_one_exit_status() -> None:
+    record = CodexParsedRecord(
+        1,
+        0,
+        80,
+        "response_item",
+        "function_call_output",
+        JsonObject(
+            {
+                "payload": {
+                    "call_id": "call-shell-negative",
+                    "exit_code": -1,
+                    "name": "shell",
+                    "status": "completed",
+                    "type": "function_call_output",
+                },
+                "type": "response_item",
+            }
+        ),
+    )
+    envelope = envelope_from_stream_record(
+        record,
+        session_commitment="hmac-sha256:" + ("ac" * 32),
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=80,
+            event_position=1,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+    )
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value not in envelope.gap_codes
+    assert envelope.structural_payload.get("exit_status") == -1
+    batch = materialize_observation_envelope(envelope, task_id="task_stream_negative")
+    result = batch.drafts[1].draft.payload
+    assert isinstance(result, ResultRecordedPayload)
+    assert result.outcome is ResultOutcome.FAILURE
+    assert result.exit_status == -1
+
+
+@pytest.mark.parametrize("exit_code", [-2, 256, True, "1"])
+def test_function_call_output_rejects_out_of_profile_exit_status(exit_code: object) -> None:
+    record = CodexParsedRecord(
+        1,
+        0,
+        80,
+        "response_item",
+        "function_call_output",
+        JsonObject(
+            {
+                "payload": {
+                    "call_id": "call-shell-invalid-exit",
+                    "exit_code": exit_code,
+                    "name": "shell",
+                    "status": "completed",
+                    "type": "function_call_output",
+                },
+                "type": "response_item",
+            }
+        ),
+    )
+    envelope = envelope_from_stream_record(
+        record,
+        session_commitment="hmac-sha256:" + ("ad" * 32),
+        cursor=ObservationCursor(
+            source_generation=1,
+            byte_position=80,
+            event_position=1,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+    )
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes
+    assert "exit_status" not in envelope.structural_payload
+    batch = materialize_observation_envelope(envelope, task_id="task_stream_invalid_exit")
+    assert batch.skip_reason == "unsupported_or_gap"
