@@ -1,7 +1,8 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-08-18 for the maintainer-directed issue #346 incident repairs #350, #351, and
+**Amended:** 2026-08-27 for issue #418 rollout replay repairs; 2026-08-18 for the
+maintainer-directed issue #346 incident repairs #350, #351, and
 #352 (decisions 12–14); 2026-08-18 for maintainer-authored issues #320 and #326 and issue #322
 (delivered frontier-motion high-water); 2026-08-16 for maintainer-approved issue #224; 2026-08-14
 for moderator-approved issue #244 and the reopened issue #216 recurrence.
@@ -79,7 +80,19 @@ unsupported claims and unbounded duplicate findings.
 6. Hook envelopes are observation evidence, not agent claims. Completion-like lifecycle signals
    materialize as metadata-only `evidence_recorded` events. A narrow claim path exists only when the
    structural payload explicitly carries an admitted `claim_kind`. Mapping version
-   `obs-ledger/1.2.0` separates these identities from historical observation-derived claims.
+   `obs-ledger/1.3.0` separates these identities from historical observation-derived claims and
+   gives paired hook/stream results source-independent action/result IDs. Before staging a new
+   `1.3.0` append, upgrade replay checks both the session observation writer and the legacy
+   cooperative writer for committed `1.3.0` and `1.2.0` operations. A `1.2.0` hit carries that
+   mapping version through logical-identity claim repair, preserving the original operation and
+   claim identities for a committed-but-unacknowledged outbox row instead of duplicating them. A
+   replayed `1.2.0` operation cannot be assumed to carry a host-stated result: it may be a
+   pre-upgrade hook operation whose committed result is `UNKNOWN`. Its `1.2.0` record identities
+   cannot be re-derived under `1.3.0`, so the correction path consults the committed result through
+   the replayed operation's accepted event ids, skips the correction only when the committed result
+   already states the same explicit fact, and otherwise binds the correction (with `dedup_conflict`
+   coverage on a contradictory explicit fact) to the exact committed legacy action and its committed
+   action event as causal parent.
 
 7. Deterministic advice finding IDs are condition-scoped over policy, kind, rule code, and detail
    token. Evidence refs prove the condition but never identify it: several rules intentionally cite
@@ -165,6 +178,20 @@ unsupported claims and unbounded duplicate findings.
     operator surface and the source of deliberately standing machine conditions (composition
     facts), but is never a silent input to a mapped task snapshot — completing at the construction
     layer the delivery-selection boundary #250 established (issues #346/#352).
+
+15. A hook `PostToolUse` with no outcome fact may commit `UNKNOWN` before the session stream later
+    supplies an authoritative exit outcome for the same call. The original row is never rewritten.
+    A replayed canonical operation consults the current projection and appends an idempotent
+    `result_correction` linked to the same canonical action when it enriches `UNKNOWN` or exposes a
+    contradictory explicit fact. Explicit outcomes are
+    never downgraded or overwritten. Correction operation/claim identities bind the exact outcome
+    and exit status: exact retries replay, while contradictory explicit facts append separately with
+    `dedup_conflict` coverage so neither fact is silently discarded. Correction is part of ingest
+    acceptance: if the candidate-findings projection is missing, lagging, rebuilding, or lacks a
+    readable core result, the coordinator returns retryable `SERVICE_UNAVAILABLE` and the durable
+    outbox row remains pending. It does not acknowledge the already-committed core append alone,
+    because doing so could permanently lose the authoritative correction; a repaired or rebuilt
+    projection lets the same row replay and finish idempotently.
 
 ## Security and privacy consequences
 

@@ -10,6 +10,7 @@ import pytest
 
 import yoetz.adapters.integrations.codex_session_stream as stream_mod
 import yoetz.adapters.integrations.observation_local as local_mod
+from builders.codex_rollout import encode_lines, response_item, session_meta
 from yoetz.adapters.integrations.codex_session_stream import (
     STREAM_MAPPING_VERSION,
     SessionStreamReader,
@@ -214,13 +215,14 @@ def test_stream_drains_a_source_line_longer_than_one_read_chunk(tmp_path: Path) 
     store, workspace, session = _consented_store(tmp_path)
     source = tmp_path / "rollout.jsonl"
     chunk = stream_mod._MAX_READ_CHUNK  # pyright: ignore[reportPrivateUsage]
-    long_line = json.dumps({"type": "message", "payload": "z" * (chunk + 40_000)})
-    source.write_bytes(
-        json.dumps({"type": "message", "payload": "first"}).encode()
-        + b"\n"
-        + long_line.encode()
-        + b"\n"
+    long_row = response_item(
+        {
+            "content": [{"text": "z" * (chunk + 40_000), "type": "output_text"}],
+            "role": "assistant",
+            "type": "message",
+        }
     )
+    source.write_bytes(encode_lines(session_meta(), long_row))
 
     cursor = ObservationCursor(1, 0, 0, f"hmac-sha256:{'00' * 32}", STREAM_MAPPING_VERSION)
     for _ in range(4):
@@ -246,7 +248,16 @@ def test_dropped_unterminated_long_line_recovers_when_newline_arrives(tmp_path: 
     store, workspace, session = _consented_store(tmp_path)
     source = tmp_path / "rollout.jsonl"
     chunk = stream_mod._MAX_READ_CHUNK  # pyright: ignore[reportPrivateUsage]
-    long_line = json.dumps({"type": "message", "payload": "z" * (chunk + 40_000)}).encode()
+    long_line = encode_lines(session_meta()) + encode_lines(
+        response_item(
+            {
+                "content": [{"text": "z" * (chunk + 40_000), "type": "output_text"}],
+                "role": "assistant",
+                "type": "message",
+            }
+        ),
+        terminated=False,
+    )
     source.write_bytes(long_line)
     cursor = ObservationCursor(1, 0, 0, f"hmac-sha256:{'00' * 32}", STREAM_MAPPING_VERSION)
 
@@ -256,23 +267,33 @@ def test_dropped_unterminated_long_line_recovers_when_newline_arrives(tmp_path: 
         cursor=cursor,
         key_material=store.key_material(),
     ).advance(source)
-    assert len(first.partial_line) > _MAX_PARTIAL
+    assert first.partial_line
     store.set_stream_partial(workspace, session, first.partial_line)
-    assert store.get_stream_partial(workspace, session) == b""
 
-    source.write_bytes(long_line + b"\n")
-    second = SessionStreamReader(
+    oversized = SessionStreamReader(
         session_commitment=session,
         profile=default_stream_profile(),
-        cursor=cursor,
+        cursor=first.cursor,
         key_material=store.key_material(),
         partial_line=store.get_stream_partial(workspace, session),
     ).advance(source)
-    store.set_stream_cursor(workspace, session, second.cursor)
-    store.set_stream_partial(workspace, session, second.partial_line)
+    assert len(oversized.partial_line) > _MAX_PARTIAL
+    store.set_stream_partial(workspace, session, oversized.partial_line)
+    assert store.get_stream_partial(workspace, session) == b""
 
-    assert second.cursor.byte_position == source.stat().st_size
-    assert second.partial_line == b""
+    source.write_bytes(long_line + b"\n")
+    recovered = SessionStreamReader(
+        session_commitment=session,
+        profile=default_stream_profile(),
+        cursor=oversized.cursor,
+        key_material=store.key_material(),
+        partial_line=store.get_stream_partial(workspace, session),
+    ).advance(source)
+    store.set_stream_cursor(workspace, session, recovered.cursor)
+    store.set_stream_partial(workspace, session, recovered.partial_line)
+
+    assert recovered.cursor.byte_position == source.stat().st_size
+    assert recovered.partial_line == b""
     assert (
         ObservationGapCode.SOURCE_LAG.value
         not in store.status(ObservationStatusQuery(workspace)).gaps

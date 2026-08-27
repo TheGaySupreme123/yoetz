@@ -22,6 +22,7 @@ from capability.evidence import (
     record_and_write,
     runtime_capability_context,
 )
+from yoetz.adapters.integrations.codex_capability_cells import skill_manifest_capability_fields
 from yoetz.adapters.integrations.codex_skill import (
     CODEX_HARNESS_PROFILE,
     CodexSkillIntegration,
@@ -67,11 +68,9 @@ def _injectable_skill_resources() -> _Resources:
         b"metadata:\n  short-description: Yoetz guidance\n---\n\n# Yoetz\n"
     )
     skill_manifest_body: dict[str, JsonValue] = {
-        "capability_profile_ids": [],
-        "codex_version_bounds": {"tested": []},
+        **dict(skill_manifest_capability_fields()),
         "guidance_version": "0.1.0",
         "harness": "codex",
-        "hooks_by_capability_profile": {},
         "managed_members": [],
         "protocol_version": "0.1",
         "schema": "yoetz.codex-skill-manifest/1",

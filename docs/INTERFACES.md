@@ -2480,7 +2480,33 @@ Shared closed types:
   flag, and bytes. At most 16 chunks and 700,000 aggregate input bytes keep the request below the
   ordinary 1 MiB control-frame cap; each assembled encrypted object remains below 4 MiB.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
-  mapping version. Cursors are crash-stable and generation-fenced.
+  mapping version. Codex session-stream cursors use `codex-obs-stream/1.2.0` (rollout JSONL
+  grammar). Cursors are crash-stable and generation-fenced. A private HMAC of the source
+  device/inode detects same-or-larger file replacement across reconcile processes; ordinary safe
+  integers retain their numeric encoding and larger filesystem values use a bounded hexadecimal
+  representation before canonical encoding. Call-id/tool
+  pairing and outbox dedup are fenced by the resulting source generation, and legacy unfenced
+  pairing state is discarded. For a paired output the same-generation originating call's tool name
+  is authoritative; a conflicting output self-name is overwritten and records `dedup_conflict`
+  rather than selecting a different action family. Rollout privacy filtering parses the valid JSON
+  tree first and then redacts decoded string keys and values, preserving structural punctuation;
+  any redaction-created duplicate key is rejected instead of silently merging fields.
+- `ObservationGapCode` — closed coverage tokens. `unsupported_event` is an admitted profile with
+  an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, unknown
+  `cli_version`, an absent/unknown `history_mode`, or compressed `rollout-*.jsonl.zst` that the
+  hook pass does not decompress). When exact-session `.jsonl` and `.jsonl.zst` siblings both
+  exist, the admitted uncompressed file wins; compressed-only remains explicitly unsupported.
+  Every string semantic type present at `payload.type` and nested `payload.item.type` must belong
+  to the admitted profile before a nested item is selected; one known field cannot mask an unknown
+  peer. Unknown semantics never infer success.
+  A rollout line above the admitted 1 MiB line bound enters a private authenticated continuation
+  state bound to the session, source generation, and source identity. Each later reconcile scans at
+  most one 256 KiB chunk; its byte cursor may advance within the oversized line while the event
+  ordinal stays fixed. The terminator advances once as opaque `unsupported_event` evidence, using a
+  domain-separated commitment over the bounded prefix commitment and exact source span, so later
+  records remain reachable without an unbounded hook pass. Until then the tail remains pending as
+  `truncated_payload`. The marker contains no source bytes, and an invalid or transplanted marker
+  starts a new generation from profile admission rather than authorizing a skip.
 - `ObservationStatus` — lifecycle `active|degraded|stale|stopped`, source coverage, last
   observation, lag, currently true gaps, unsupported events, and the current `AdviceSnapshot`
   frontier identity. Per-code first/last-seen history is retained separately and does not make a
@@ -2580,12 +2606,17 @@ and untethered logs are excluded before storage. Secret spans are redacted in me
 encryption. SQLite/envelopes retain only encrypted object IDs, commitments, classifications, sizes,
 and relations. Vault/service failure records `content_capture_unavailable` and no plaintext spool.
 Unrecognized visible events accept an opaque stable envelope plus encrypted content and
-`unsupported_event`; unknown semantics never infer success.
+`unsupported_event`; a session-stream file that is the wrong grammar, an untested `cli_version`,
+or a compressed `.jsonl.zst` rollout records `unsupported_format` instead. Unknown semantics never
+infer success.
 
 Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
 
 - Paired `PostToolUse` materialization consumes `exit_status`, `denied`, boolean `success`, and a
-  closed `result_status` spelling table; a payload with no outcome fact records `UNKNOWN` and its
+  closed `result_status` spelling table. Rollout `exit_code` preserves the structural wire range
+  `-1..255` exactly (including `-1` as a nonzero failure); a present value outside that range or of
+  another JSON type is unsupported evidence, never a clean `completed` success. A payload with no
+  outcome fact records `UNKNOWN` and its
   ledger entries carry the `host_outcome_unavailable` known gap. Check coverage and receipts fold
   that gap into one bounded code regardless of how many observed calls lack outcome semantics; the
   deterministic research-evidence policy does not mint one `material_limitation_omitted` candidate
@@ -2605,8 +2636,21 @@ materialization mapping version and exact draft-role tuple, so phases of one hos
 different materializations (for example pre-action versus paired action/result) cannot collide,
 while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
 The claim stores the source-independent materialization version, never the hook/stream cursor
-version (issue #309). Duplicates retry incomplete content/store/ledger/verification/advice work
-idempotently. Stream cursor advancement occurs only after outbox insertion. Session end is
+version (issue #309). Before staging under `obs-ledger/1.3.0`, upgrade replay checks the current and
+legacy observation writers for committed `1.3.0` and `1.2.0` operations; a `1.2.0` hit repairs its
+claim with the original mapping version. Because a replayed `1.2.0` operation may be a pre-upgrade
+hook operation whose result is `UNKNOWN`, it still enters the correction path: the committed result
+is consulted through the replayed operation's accepted event ids (its `1.2.0` record identities
+cannot be re-derived), and a still-needed correction binds to that exact committed action. A later
+explicit session-stream outcome enriches an earlier hook `UNKNOWN` through an append-only
+`result_correction` linked to the same canonical action; it never rewrites, downgrades, or silently
+overwrites an explicit result. Exact correction retries replay; a contradictory explicit outcome
+appends under its outcome/exit-bound identity with a `dedup_conflict` gap. The correction is part of
+ingest acceptance: an unavailable, lagging, rebuilding, missing-result, or redacted-result
+candidate-findings projection returns retryable `service_unavailable` and leaves the outbox row
+pending until the projection can prove and complete the correction. Duplicates retry incomplete
+content/store/ledger/verification/advice work idempotently. Stream cursor advancement occurs only
+after outbox insertion. Session end is
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
 across workspace sessions under a nonblocking per-workspace lease; within one pass a
 `mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),

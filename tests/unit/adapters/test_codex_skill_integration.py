@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from yoetz.adapters.integrations.codex_capability_cells import skill_manifest_capability_fields
 from yoetz.adapters.integrations.codex_skill import (
     CODEX_HARNESS_PROFILE,
     CodexSkillIntegration,
@@ -57,11 +58,9 @@ def _resources() -> _Resources:
         b"metadata:\n  short-description: Yoetz guidance\n---\n\n# Yoetz\n"
     )
     skill_manifest_body: dict[str, JsonValue] = {
-        "capability_profile_ids": [],
-        "codex_version_bounds": {"tested": []},
+        **dict(skill_manifest_capability_fields()),
         "guidance_version": "0.1.0",
         "harness": "codex",
-        "hooks_by_capability_profile": {},
         "managed_members": [],
         "protocol_version": "0.1",
         "schema": "yoetz.codex-skill-manifest/1",
@@ -138,7 +137,7 @@ def _resources() -> _Resources:
     return _Resources(files)
 
 
-def test_profile_is_explicitly_unprofiled_until_e002_evidence_exists() -> None:
+def test_profile_does_not_promote_rollout_parser_evidence_to_skill_support() -> None:
     assert CODEX_HARNESS_PROFILE.harness_id is HarnessId.CODEX
     assert CODEX_HARNESS_PROFILE.skill_root == ".agents/skills/yoetz/"
     assert CODEX_HARNESS_PROFILE.capability_profile_ids == ()

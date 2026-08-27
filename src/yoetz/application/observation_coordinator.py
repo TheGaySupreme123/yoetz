@@ -35,17 +35,20 @@ from yoetz.application.observation_advice import (
 )
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.application.observation_materialize import (
+    MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
     MATERIALIZATION_MAPPING_VERSION,
     MaterializedObservationBatch,
     approved_check_author,
     canonical_logical_identity,
     materialize_observation_envelope,
+    materialize_observation_outcome_correction,
     media_type_for_schema,
     observation_author,
     observation_claim_identity,
     observation_operation_digest,
     observation_writer_id,
     stable_observation_id,
+    stream_event_is_completed_tool,
 )
 from yoetz.application.observation_verification import (
     CompletedApprovedCheck,
@@ -544,7 +547,12 @@ class ObservationCoordinator:
                         legacy_writer_id=mapping.yoetz_writer_id,
                     )
                     if claim is not None:
-                        operation_id, materialization_digest, append_result = claim
+                        (
+                            operation_id,
+                            materialization_digest,
+                            append_result,
+                            resolved_mapping_version,
+                        ) = claim
                         # The claim key is role-scoped so the phases of one host
                         # call (pre action, paired result, permission, subagent)
                         # never contend, and the recorded mapping version is the
@@ -554,12 +562,14 @@ class ObservationCoordinator:
                         store.record_logical_identity_claim(
                             workspace=workspace,
                             logical_identity=observation_claim_identity(
-                                envelope, tuple(item.role for item in batch.drafts)
+                                envelope,
+                                tuple(item.role for item in batch.drafts),
+                                mapping_version=resolved_mapping_version,
                             ),
                             materialization_digest=materialization_digest,
                             operation_id=operation_id,
                             source_mask=1 if envelope.source.value == "codex_hook" else 2,
-                            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+                            mapping_version=resolved_mapping_version,
                             materialized_at=timestamp_from_datetime(self.clock.now_utc()),
                         )
                         stage = "ledger_append"
@@ -576,6 +586,188 @@ class ObservationCoordinator:
                                     task_id=runtime.task_id,
                                 )
                             )
+                        correction = materialize_observation_outcome_correction(
+                            envelope,
+                            task_id=runtime.task_id,
+                        )
+                        if (
+                            append_result is not None
+                            and append_result.outcome == "replayed"
+                            and correction.skip_reason is None
+                            and correction.drafts
+                        ):
+                            projection = await runtime.ledger.load_projection(
+                                runtime.session_id,
+                                ProjectionView.CANDIDATE_FINDINGS,
+                            )
+                            if (
+                                projection is None
+                                or type(projection.state) is not ProjectionState
+                                or projection.lag != 0
+                                or projection.rebuild_required
+                            ):
+                                raise PublicOperationError(
+                                    PublicErrorCode.SERVICE_UNAVAILABLE,
+                                    "Observation outcome projection is unavailable.",
+                                    retryable=True,
+                                )
+                            if resolved_mapping_version == MATERIALIZATION_MAPPING_VERSION:
+                                core_result = next(
+                                    (
+                                        item.draft.payload
+                                        for item in batch.drafts
+                                        if type(item.draft.payload) is ResultRecordedPayload
+                                    ),
+                                    None,
+                                )
+                                if type(core_result) is not ResultRecordedPayload:
+                                    raise PublicOperationError(
+                                        PublicErrorCode.SERVICE_UNAVAILABLE,
+                                        "Observation outcome projection is unavailable.",
+                                        retryable=True,
+                                    )
+                                core_result_id = core_result.result_id
+                                existing_result = projection.state.results.get(core_result_id)
+                            else:
+                                # A replayed legacy-mapping operation committed
+                                # its graph under pre-upgrade record identities
+                                # that cannot be re-derived here, and it may be a
+                                # legacy hook operation whose result is UNKNOWN.
+                                # Its accepted event ids are the exact link to
+                                # the committed result, so consult that result
+                                # before deciding whether the explicit stream
+                                # outcome still needs a correction (#418).
+                                accepted_event_ids = {
+                                    item.event_id for item in append_result.accepted
+                                }
+                                committed_results = [
+                                    (candidate_id, record)
+                                    for candidate_id, record in (projection.state.results.items())
+                                    if record.source_event_id in accepted_event_ids
+                                ]
+                                if len(committed_results) != 1:
+                                    raise PublicOperationError(
+                                        PublicErrorCode.SERVICE_UNAVAILABLE,
+                                        "Observation outcome projection is unavailable.",
+                                        retryable=True,
+                                    )
+                                core_result_id, existing_result = committed_results[0]
+                            if existing_result is None or existing_result.payload is None:
+                                raise PublicOperationError(
+                                    PublicErrorCode.SERVICE_UNAVAILABLE,
+                                    "Observation outcome projection is unavailable.",
+                                    retryable=True,
+                                )
+                            existing_payload = existing_result.payload
+                            correction_payload = correction.drafts[0].draft.payload
+                            if type(correction_payload) is not ResultRecordedPayload:
+                                raise PublicOperationError(
+                                    PublicErrorCode.SERVICE_UNAVAILABLE,
+                                    "Observation outcome correction is unavailable.",
+                                    retryable=True,
+                                )
+                            incoming_fact = (
+                                correction_payload.outcome,
+                                correction_payload.exit_status,
+                            )
+                            existing_fact = (
+                                existing_payload.outcome,
+                                existing_payload.exit_status,
+                            )
+                            prior_corrections = tuple(
+                                record.payload
+                                for result_id, record in projection.state.results.items()
+                                if result_id != core_result_id
+                                and record.payload is not None
+                                and record.payload.action_id == existing_payload.action_id
+                            )
+                            conflict = (
+                                existing_payload.outcome is not ResultOutcome.UNKNOWN
+                                and existing_fact != incoming_fact
+                            ) or any(
+                                (item.outcome, item.exit_status) != incoming_fact
+                                for item in prior_corrections
+                            )
+                            should_correct = (
+                                existing_payload.outcome is ResultOutcome.UNKNOWN
+                                or existing_fact != incoming_fact
+                            )
+                            if should_correct:
+                                if resolved_mapping_version != MATERIALIZATION_MAPPING_VERSION:
+                                    # Bind the correction to the exact committed
+                                    # legacy action (and its committed event as
+                                    # causal parent when the projection still
+                                    # exposes it) instead of the current
+                                    # canonical action identities.
+                                    action_record = projection.state.actions.get(
+                                        existing_payload.action_id
+                                    )
+                                    correction = materialize_observation_outcome_correction(
+                                        envelope,
+                                        task_id=runtime.task_id,
+                                        conflict=conflict,
+                                        target_action_id=existing_payload.action_id,
+                                        target_action_event_id=(
+                                            action_record.source_event_id
+                                            if action_record is not None
+                                            else None
+                                        ),
+                                    )
+                                elif conflict:
+                                    correction = materialize_observation_outcome_correction(
+                                        envelope,
+                                        task_id=runtime.task_id,
+                                        conflict=True,
+                                    )
+                                corrected = await self._append_materialized(
+                                    runtime,
+                                    envelope,
+                                    correction,
+                                    legacy_writer_id=mapping.yoetz_writer_id,
+                                )
+                                if corrected is not None:
+                                    (
+                                        correction_operation_id,
+                                        correction_digest,
+                                        correction_result,
+                                        correction_mapping_version,
+                                    ) = corrected
+                                    store.record_logical_identity_claim(
+                                        workspace=workspace,
+                                        logical_identity=observation_claim_identity(
+                                            envelope,
+                                            tuple(item.role for item in correction.drafts),
+                                            mapping_version=correction_mapping_version,
+                                        ),
+                                        materialization_digest=correction_digest,
+                                        operation_id=correction_operation_id,
+                                        source_mask=2,
+                                        mapping_version=correction_mapping_version,
+                                        materialized_at=timestamp_from_datetime(
+                                            self.clock.now_utc()
+                                        ),
+                                    )
+                                    if correction_result is not None:
+                                        await self._local(
+                                            partial(
+                                                self.local.note_frontier_motion,
+                                                workspace,
+                                                codex_session_id,
+                                                from_sequence=(
+                                                    correction_result.subject_frontier.sequence
+                                                ),
+                                                to_sequence=(
+                                                    correction_result.result_frontier.sequence
+                                                ),
+                                                head_digest=(
+                                                    correction_result.result_frontier.head_digest
+                                                ),
+                                                observation_record_count=len(
+                                                    correction_result.accepted
+                                                ),
+                                                task_id=runtime.task_id,
+                                            )
+                                        )
 
                 stage = "verification"
                 await self._enqueue_verification(
@@ -734,42 +926,55 @@ class ObservationCoordinator:
         batch: MaterializedObservationBatch,
         *,
         legacy_writer_id: str | None = None,
-    ) -> tuple[str, str, AppendResult | None] | None:
+    ) -> tuple[str, str, AppendResult | None, str] | None:
         writer_id = runtime.writer_id
         if writer_id is None:
             return None
+        logical_identity = canonical_logical_identity(envelope)
+        draft_roles = tuple(item.role for item in batch.drafts)
+        writer_ids = [writer_id]
+        if legacy_writer_id is not None and legacy_writer_id != writer_id:
+            writer_ids.append(legacy_writer_id)
+        mapping_versions = (
+            MATERIALIZATION_MAPPING_VERSION,
+            *MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
+        )
+        # Check the stable operation identity before staging payloads. A replay
+        # after "ledger committed, local outbox not acknowledged" must not
+        # create orphan encrypted objects on every retry. Search both admitted
+        # writers for each supported mapping version before staging so an
+        # in-flight pre-upgrade outbox row reuses its committed operation.
+        for mapping_version in mapping_versions:
+            for candidate_writer_id in writer_ids:
+                candidate_digest = observation_operation_digest(
+                    task_id=runtime.task_id,
+                    session_id=runtime.session_id,
+                    writer_id=candidate_writer_id,
+                    logical_identity=logical_identity,
+                    draft_roles=draft_roles,
+                    mapping_version=mapping_version,
+                )
+                candidate_operation_id = self._stable_operation_id(candidate_digest)
+                existing = await runtime.ledger.lookup_operation(
+                    candidate_writer_id, candidate_operation_id
+                )
+                if existing is not None:
+                    return (
+                        candidate_operation_id,
+                        candidate_digest,
+                        _append_result_from_committed(existing),
+                        mapping_version,
+                    )
+
         digest = observation_operation_digest(
             task_id=runtime.task_id,
             session_id=runtime.session_id,
             writer_id=writer_id,
-            logical_identity=canonical_logical_identity(envelope),
-            draft_roles=tuple(item.role for item in batch.drafts),
+            logical_identity=logical_identity,
+            draft_roles=draft_roles,
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
         )
-        # Check the stable operation identity before staging payloads. A replay
-        # after "ledger committed, local outbox not acknowledged" must not
-        # create orphan encrypted objects on every retry.
         operation_id = self._stable_operation_id(digest)
-        existing = await runtime.ledger.lookup_operation(writer_id, operation_id)
-        if existing is not None:
-            return operation_id, digest, _append_result_from_committed(existing)
-        if legacy_writer_id is not None and legacy_writer_id != writer_id:
-            legacy_digest = observation_operation_digest(
-                task_id=runtime.task_id,
-                session_id=runtime.session_id,
-                writer_id=legacy_writer_id,
-                logical_identity=canonical_logical_identity(envelope),
-                draft_roles=tuple(item.role for item in batch.drafts),
-            )
-            legacy_operation_id = self._stable_operation_id(legacy_digest)
-            legacy_existing = await runtime.ledger.lookup_operation(
-                legacy_writer_id, legacy_operation_id
-            )
-            if legacy_existing is not None:
-                return (
-                    legacy_operation_id,
-                    legacy_digest,
-                    _append_result_from_committed(legacy_existing),
-                )
 
         author = observation_author()
         refs: list[ObjectRef] = []
@@ -828,7 +1033,7 @@ class ObservationCoordinator:
             command,
         )
         append_result = await run_prepared_append(runtime.ledger, mutation)
-        return operation_id, digest, append_result
+        return operation_id, digest, append_result, MATERIALIZATION_MAPPING_VERSION
 
     async def _materialize_approved_check(
         self,
@@ -1250,7 +1455,9 @@ class ObservationCoordinator:
     ) -> ObservationVerificationWorker | None:
         """Build a worker and enqueue if subject state changed; never run checks here."""
 
-        if envelope.event_kind not in {"PostToolUse", "item.completed"}:
+        if envelope.event_kind != "PostToolUse" and not stream_event_is_completed_tool(
+            envelope.event_kind, envelope.structural_payload
+        ):
             return None
         required = (
             "workspace_locator_descriptor",

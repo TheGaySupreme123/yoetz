@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from builders.codex_rollout import failed_shell_rollout
 from yoetz.adapters.approved_checks import (
     ApprovedCheckApproval,
     ApprovedCheckCommand,
@@ -657,10 +658,7 @@ def test_stream_reconciliation_restores_missed_hook_event(tmp_path: Path) -> Non
     session = store.session_commitment("stream-restore")
     store.bind_session(workspace, session)
     path = tmp_path / "session.jsonl"
-    path.write_bytes(
-        b'{"type":"item.completed","item":{"id":"i-missed","type":"command_execution",'
-        b'"command":"echo","aggregated_output":"ok","exit_code":1,"status":"completed"}}\n'
-    )
+    path.write_bytes(failed_shell_rollout())
     reader = SessionStreamReader(
         session_commitment=session,
         profile=default_stream_profile(),
@@ -674,9 +672,10 @@ def test_stream_reconciliation_restores_missed_hook_event(tmp_path: Path) -> Non
         key_material=store.key_material(),
     )
     advance = reader.advance(path)
-    assert len(advance.envelopes) == 1
-    result = store.ingest(advance.envelopes[0])
-    assert result.disposition.value == "accepted"
+    assert len(advance.envelopes) >= 1
+    for envelope in advance.envelopes:
+        result = store.ingest(envelope)
+        assert result.disposition.value in {"accepted", "duplicate"}
     status = store.status(ObservationStatusQuery(workspace))
     assert status.source_coverage[ObservationSource.CODEX_SESSION_STREAM] is True
     snapshot = store.refresh_advice(workspace)

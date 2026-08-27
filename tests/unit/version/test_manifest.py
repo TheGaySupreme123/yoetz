@@ -87,7 +87,7 @@ def test_guidance_and_skill_source_package_bytes_are_identical() -> None:
         assert read_verified_resource(logical_name) == Path(logical_name).read_bytes()
 
 
-def test_skill_advertises_no_untested_codex_profile_or_hook() -> None:
+def test_skill_does_not_advertise_parser_only_rollout_evidence() -> None:
     document = json.loads(read_verified_resource("skills/codex/yoetz/manifest.json"))
 
     assert document["codex_version_bounds"] == {
