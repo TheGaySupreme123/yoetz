@@ -203,7 +203,11 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
     assert fixture["format_profile"] == "claude_code_plugin_native"
     hook = next(iter(CLAUDE_CODE_HARNESS_PROFILE.hooks_by_capability_profile.values()))
     assert hook is not None
-    assert hook.observation_events == CLAUDE_CODE_HOOK_EVENTS
+    # The artifact renders all five candidate hooks, but the evidence case
+    # recorded observation_evidence: not_observed, so the capability hook cell
+    # stays unpopulated until accepted-observation evidence exists per event.
+    assert hook.observation_events == ()
+    assert fixture["observation_evidence"] == "not_observed"
     assert managed.plan.format_profile is PluginFormatProfile.CLAUDE_CODE_PLUGIN_NATIVE
     assert external.members["skills/yoetz/SKILL.md"] == managed.members["skills/yoetz/SKILL.md"]
     assert ".mcp.json" not in external.members
@@ -239,8 +243,9 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
     assert tuple(sorted(hooks)) == CLAUDE_CODE_HOOK_EVENTS
     assert "PermissionRequest" not in hooks
     assert hooks["PostToolUse"][0]["matcher"] == (
-        "^mcp__plugin_yoetz_yoetz__(start|publish_work|check|respond|status|receipt)$"
+        "^mcp__plugin_yoetz_yoetz__(start|publish_work|check|respond|status|receipt|read_guidance)$"
     )
+    assert hooks["PostToolUseFailure"][0]["matcher"] == hooks["PostToolUse"][0]["matcher"]
     assert all("CLAUDE_PROJECT_DIR" in row[0]["hooks"][0]["command"] for row in hooks.values())
 
 
@@ -322,16 +327,15 @@ def test_project_marketplace_install_enable_disable_and_remove_are_separate_stat
         target=target,
         artifact=artifact,
     )
-    activated = status_claude_code_plugin(
+    # A session observation alone never proves marketplace activation: the
+    # same init event can come from a development --plugin-dir run, so the
+    # independent installed/discovered/registered/enabled facts are required.
+    unactivated = status_claude_code_plugin(
         target, artifact, commands=commands, session_observation=session
     )
-    activated_proof = {item.facet: item.status for item in activated.proof}
-    assert activated.loaded_root_digest == artifact.artifact_digest
-    assert activated_proof[PluginProofFacet.HOST_ACTIVATION] == "proven"
-    assert activated_proof[PluginProofFacet.SKILL_DELIVERY] == "proven"
-    assert activated_proof[PluginProofFacet.MCP_BINDING] == "proven"
-    assert activated_proof[PluginProofFacet.MCP_RUNTIME] == "proven"
-    assert activated_proof[PluginProofFacet.MODEL_USE] == "not_observed"
+    unactivated_proof = {item.facet: item.status for item in unactivated.proof}
+    assert unactivated.loaded_root_digest == artifact.artifact_digest
+    assert unactivated_proof[PluginProofFacet.HOST_ACTIVATION] == "not_observed"
 
     enable_request = request_id("req_10000000-0000-4000-8000-000000000002")
     enable_preview = preview_claude_code_plugin(
@@ -353,6 +357,17 @@ def test_project_marketplace_install_enable_disable_and_remove_are_separate_stat
     )
     assert enabled.enabled is True
     assert enabled.operation_state is PluginOperationState.COMPLETED
+
+    activated = status_claude_code_plugin(
+        target, artifact, commands=commands, session_observation=session
+    )
+    activated_proof = {item.facet: item.status for item in activated.proof}
+    assert activated.loaded_root_digest == artifact.artifact_digest
+    assert activated_proof[PluginProofFacet.HOST_ACTIVATION] == "proven"
+    assert activated_proof[PluginProofFacet.SKILL_DELIVERY] == "proven"
+    assert activated_proof[PluginProofFacet.MCP_BINDING] == "proven"
+    assert activated_proof[PluginProofFacet.MCP_RUNTIME] == "proven"
+    assert activated_proof[PluginProofFacet.MODEL_USE] == "not_observed"
 
     disable_request = request_id("req_10000000-0000-4000-8000-000000000003")
     disable_preview = preview_claude_code_plugin(
@@ -670,3 +685,113 @@ def test_mcp_ownership_detects_an_exact_yoetz_route_under_an_alias(tmp_path: Pat
     assert observed.ownership_state is McpOwnershipState.EXTERNAL
     assert observed.winning_source is ClaudeCodeMcpSource.PROJECT
     assert observed.route_profile == "strict"
+
+
+def test_recovery_material_surfaces_in_status_and_refuses_preview(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations import claude_code_integration as module
+
+    target = _target(tmp_path)
+    artifact = render_claude_code_plugin()
+    commands = _ClaudeFixture(artifact)
+    parent = Path(target.marketplace_root).parent
+    rollback = parent / module._ROLLBACK_NAME  # pyright: ignore[reportPrivateUsage]
+    rollback.mkdir(parents=True)
+
+    status = status_claude_code_plugin(target, artifact, commands=commands)
+    assert status.state is PluginArtifactState.RECOVERY_REQUIRED
+    assert status.operation_state is PluginOperationState.OUTCOME_UNKNOWN
+    with pytest.raises(ClaudeCodeIntegrationError) as refused:
+        preview_claude_code_plugin(
+            _REQUEST, target, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+        )
+    assert refused.value.reason is PluginArtifactReason.RECOVERY_REQUIRED
+
+    rollback.rmdir()
+    stage = parent / f"{module._STAGE_PREFIX}abandoned"  # pyright: ignore[reportPrivateUsage]
+    stage.mkdir()
+    staged = status_claude_code_plugin(target, artifact, commands=commands)
+    assert staged.state is PluginArtifactState.RECOVERY_REQUIRED
+    assert staged.operation_state is PluginOperationState.OUTCOME_UNKNOWN
+
+
+def test_destructive_paths_revalidate_the_displaced_tree_before_deleting(
+    tmp_path: Path,
+) -> None:
+    from yoetz.adapters.integrations import claude_code_integration as module
+
+    target = _target(tmp_path)
+    artifact = render_claude_code_plugin()
+    root = Path(target.marketplace_root)
+    root.mkdir(parents=True)
+    victim = root / "user-notes.txt"
+    victim.write_text("irreplaceable", encoding="utf-8")
+
+    with pytest.raises(ClaudeCodeIntegrationError) as removal:
+        module._remove_source(target)  # pyright: ignore[reportPrivateUsage]
+    assert removal.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+    assert victim.read_text(encoding="utf-8") == "irreplaceable"
+    assert not (root.parent / module._ROLLBACK_NAME).exists()  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(ClaudeCodeIntegrationError) as replacement:
+        module._write_source(target, artifact, _REQUEST)  # pyright: ignore[reportPrivateUsage]
+    assert replacement.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+    assert victim.read_text(encoding="utf-8") == "irreplaceable"
+    assert not (root.parent / module._ROLLBACK_NAME).exists()  # pyright: ignore[reportPrivateUsage]
+    assert not any(
+        item.name.startswith(module._STAGE_PREFIX)  # pyright: ignore[reportPrivateUsage]
+        for item in root.parent.iterdir()
+    )
+
+
+def test_completed_host_command_with_missed_readback_is_outcome_unknown(
+    tmp_path: Path,
+) -> None:
+    target = _target(tmp_path)
+    artifact = render_claude_code_plugin()
+
+    class _EnableClaimsSuccess(_ClaudeFixture):
+        def run(
+            self, target: ClaudeCodePluginTarget, arguments: Sequence[str]
+        ) -> ClaudeCodeCommandResult:
+            args = tuple(arguments)
+            if args[:2] == ("plugin", "enable"):
+                # The host command exits 0 but the mutation never lands.
+                self.calls.append(args)
+                return ClaudeCodeCommandResult(0, b"ok", b"")
+            return super().run(target, arguments)
+
+    commands = _EnableClaimsSuccess(artifact)
+    review = _Review()
+    install_preview = preview_claude_code_plugin(
+        _REQUEST, target, ClaudeCodePluginAction.INSTALL, artifact, commands=commands
+    )
+    installed = apply_claude_code_plugin(
+        _REQUEST,
+        target,
+        ClaudeCodePluginAction.INSTALL,
+        artifact,
+        accepted_preview_digest=install_preview.preview_digest,
+        authority=_authority(install_preview.preview_digest),
+        review=review,
+        commands=commands,
+    )
+    assert installed.operation_state is PluginOperationState.COMPLETED
+
+    enable_request = request_id("req_10000000-0000-4000-8000-000000000005")
+    enable_preview = preview_claude_code_plugin(
+        enable_request, target, ClaudeCodePluginAction.ENABLE, artifact, commands=commands
+    )
+    result = apply_claude_code_plugin(
+        enable_request,
+        target,
+        ClaudeCodePluginAction.ENABLE,
+        artifact,
+        accepted_preview_digest=enable_preview.preview_digest,
+        authority=_authority(enable_preview.preview_digest),
+        review=review,
+        commands=commands,
+    )
+    # The mutation already crossed its boundary; an unreached post-mutation
+    # state is outcome_unknown, never a safe pre-mutation refusal.
+    assert result.operation_state is PluginOperationState.OUTCOME_UNKNOWN
+    assert result.enabled is False

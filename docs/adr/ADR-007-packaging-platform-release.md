@@ -132,8 +132,10 @@ version cannot be used to claim updated active bytes. Update success proves new 
 reload/new-session activation is a separate proof facet.
 
 The initial cell is local Claude Code CLI, project scope, and an explicit private directory
-marketplace only. It rejects versions below `2.1.233` before mutation (covering default-disabled
-install, qualified uninstall, and complete-directory validation behavior), uses Claude's project
+marketplace only. It admits only exactly proven Claude versions (currently `2.1.241`; the
+`2.1.233` floor marks where default-disabled install, qualified uninstall, and complete-directory
+validation behavior first exist, but a version above it is still refused until its native contract
+is proven), uses Claude's project
 install/update/enable/disable/uninstall commands, and verifies each outcome by list/settings/cache
 read-back. Uninstall is qualified as `yoetz@yoetz-local`, uses `--scope project --keep-data`, and
 removes the private marketplace source only after exact managed-marker validation. Claude plugin

@@ -46,7 +46,7 @@ def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
     assert isinstance(sanitized, Mapping)
     assert sanitized == {
         "action": "claude_mcp_success",
-        "capability_profile_id": "claude-code-cli-local-project-2.1.241",
+        "capability_profile_id": "untested",
         "hook_event_name": "PostToolUse",
         "session_id": "claude:session-1",
         "success": True,
@@ -54,6 +54,72 @@ def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
         "tool_use_id": "tool-1",
     }
     assert captured["source"] is ObservationSource.CLAUDE_HOOK
+
+
+def test_claude_capability_profile_requires_exact_evidenced_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Mapping[str, JsonValue]] = []
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        value = strict_json_parse(cast(bytes, kwargs["stdin_bytes"]))
+        assert isinstance(value, Mapping)
+        captured.append(cast(Mapping[str, JsonValue], value))
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    for version, expected in (
+        ("2.1.241", "claude-code-cli-local-project-2.1.241"),
+        # A neighboring version whose contract was never proven, and a payload
+        # naming no version at all, must both stay explicitly untested rather
+        # than emit evidence for the 2.1.241 profile.
+        ("2.1.240", "untested"),
+        (None, "untested"),
+    ):
+        payload: dict[str, JsonValue] = {
+            "hook_event_name": "Stop",
+            "session_id": "session-version",
+        }
+        if version is not None:
+            payload["claude_code_version"] = version
+        assert (
+            observe_hooks.handle_claude_observe(
+                event_name="Stop",
+                stdin_bytes=canonical_encode(payload),
+                stdout=io.BytesIO(),
+            )
+            == 0
+        )
+        assert captured[-1]["capability_profile_id"] == expected
+
+
+def test_claude_read_guidance_calls_survive_the_scoped_ingress_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Mapping[str, JsonValue]] = []
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        value = strict_json_parse(cast(bytes, kwargs["stdin_bytes"]))
+        assert isinstance(value, Mapping)
+        captured.append(cast(Mapping[str, JsonValue], value))
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    payload: dict[str, JsonValue] = {
+        "hook_event_name": "PostToolUse",
+        "session_id": "session-guidance",
+        "tool_name": "mcp__plugin_yoetz_yoetz__read_guidance",
+        "tool_use_id": "tool-guidance",
+    }
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(payload),
+            stdout=io.BytesIO(),
+        )
+        == 0
+    )
+    assert captured[0]["tool_name"] == "mcp__plugin_yoetz_yoetz__read_guidance"
 
 
 def test_claude_failure_discards_raw_error_and_bare_mcp_names_are_negative_control(

@@ -3157,8 +3157,11 @@ synced, managed/user/local scope, Agent SDK, or headless support.
 resolved executable paths; exact `ClaudeCodeCapabilityIdentity(version, executable_digest,
 os_name, architecture)`; scope exactly `project`; and marketplace name exactly `yoetz-local`.
 Representations redact every path. The cache root must equal `<claude_config_root>/plugins/cache`.
-Preview rejects Claude versions below `2.1.233` and re-hashes the executable to detect stale
-identity before any mutation.
+Preview admits only exactly proven Claude versions (`CLAUDE_CODE_HARNESS_PROFILE.supported_versions`,
+currently `2.1.241`); a neighboring version stays explicitly untested rather than running under an
+unearned profile. Preview also re-hashes the executable to detect stale identity, and refuses with
+`recovery_required` while interrupted stage/rollback material remains beside the marketplace source,
+before any mutation.
 
 `ClaudeCodePluginArtifact` contains one `PortablePluginPlan`, sorted native member mapping,
 generated strict marketplace manifest, and separate artifact/marketplace digests. Its format is
@@ -3176,7 +3179,10 @@ enabled/MCP state, a `host_state_digest` over the four host-owned read-back file
 `ClaudeCodePluginResult` carries request/action/operation,
 before/after state, preview/artifact/installed digests, enabled state, and only managed source member
 names. `ClaudeCodePluginStatus` keeps source/cache/marketplace/list/enablement and every
-`PluginProofFacet` separate; `loaded_root_digest` remains null until session-scoped evidence exists.
+`PluginProofFacet` separate; `loaded_root_digest` remains null until session-scoped evidence exists,
+and `host_activation` is proven only when a validated session observation coincides with exact
+installed bytes, discovery, marketplace registration, and enabled state — a session init alone (for
+example a development `--plugin-dir` run) earns no marketplace-installed activation proof.
 
 Every mutation consumes the exact `plugin_artifact_apply` pending plus scoped OS-authenticated
 presence; `--accept` alone is not authority. Install generates/safely swaps only the private source,
@@ -3185,7 +3191,12 @@ show disabled default and matching cache/version. Update requires a marker-valid
 install, replaces only managed source bytes, then invokes marketplace/plugin update. Enable and
 disable alter only Claude's effective project setting. Remove invokes qualified project uninstall
 with `--keep-data`, removes the project marketplace, and deletes only exact marker-valid source.
-Nonzero/lost outcomes reconcile through list/settings/cache and otherwise report `outcome_unknown`;
+Replacement and removal revalidate the displaced tree after it is renamed out of the public path —
+when nothing can swap it any more — and destroy only a marker-valid managed tree; content created or
+modified during the authority or host-command window is restored untouched and the mutation refused.
+Any post-mutation state the independent read-back cannot confirm is `outcome_unknown` regardless of
+the subprocess exit code (`refused` describes only safe pre-mutation rejection); status surfaces
+leftover stage/rollback material as `recovery_required` with `outcome_unknown`, and
 no host-owned settings/cache rollback is guessed.
 
 `ClaudeCodeMcpSource` is exactly
@@ -3198,11 +3209,16 @@ state is unobserved `ambiguous`. Effective route is non-null only for one exact 
 owner. Scoped runtime identities are server `plugin:yoetz:yoetz` and tools
 `mcp__plugin_yoetz_yoetz__<operation>`; bare names are negative controls.
 
-`CLAUDE_CODE_HARNESS_PROFILE` binds `claude-code-hooks-2.1.241-v1` to exactly
-`PostToolUse|PostToolUseFailure|SessionEnd|SessionStart|Stop`. `ObservationSource` adds
+The rendered artifact carries the five candidate hooks
+(`PostToolUse|PostToolUseFailure|SessionEnd|SessionStart|Stop`), but the
+`CLAUDE_CODE_HARNESS_PROFILE` hook capability cell advertises no observation events: the recorded
+evidence case observed no accepted observation, so the cell stays unpopulated until each event has
+installed-host delivery, privacy, and accepted-observation evidence. `ObservationSource` adds
 `claude_hook`; local-control `2.2.0` appends that source and coverage row to immutable `2.1.0`.
-Ingress accepts only closed lifecycle actions, exact scoped workflow tool identity, bounded
-session/correlation token, fixed capability profile, and host-derived success. It discards raw
+Ingress accepts only closed lifecycle actions, exact scoped workflow tool identity (the renderer
+matcher and ingress allowlist derive from the one `YOETZ_WORKFLOW_TOOL_NAMES` set, including
+`read_guidance`), bounded session/correlation token, a fail-closed capability profile mapped from an
+exact payload-evidenced Claude version (`untested` otherwise), and host-derived success. It discards raw
 prompt/response/transcript/path/cwd/command/tool input/tool output/result/error/permission/secret
 content before storage, performs no Claude transcript reconciliation, and is always fail-soft.
 Only consented accepted evidence earns coverage.

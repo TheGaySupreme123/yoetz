@@ -63,6 +63,7 @@ from yoetz.domain.values import (
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
+from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError
 
@@ -1702,10 +1703,31 @@ def handle_observe(
 
 
 _CLAUDE_SESSION_PREFIX: Final = "claude:"
+# Derived from the same exact tool-name set as the rendered hook matcher, so
+# the renderer and this sanitizer allowlist cannot drift apart.
 _CLAUDE_SCOPED_TOOL_RE: Final = re.compile(
-    r"^mcp__plugin_yoetz_yoetz__(?:start|publish_work|check|respond|status|receipt)$",
+    "^mcp__plugin_yoetz_yoetz__(?:" + "|".join(YOETZ_WORKFLOW_TOOL_NAMES) + ")$",
     re.ASCII,
 )
+_CLAUDE_UNTESTED_PROFILE_ID: Final = "untested"
+_CLAUDE_VERSION_TO_PROFILE: Final = {
+    "2.1.241": "claude-code-cli-local-project-2.1.241",
+}
+
+
+def _claude_capability_profile_id(claude_version: object) -> str:
+    """Map an exact evidenced Claude version to its reviewed profile, else stay untested.
+
+    The hook payload is the only version evidence this ingress has. A payload
+    that names no version, or a neighboring version whose native contract was
+    never proven, must not emit observations labeled with the evidenced
+    ``2.1.241`` profile; the fail-closed table never infers a range.
+    """
+
+    token = _token_or_none(claude_version)
+    if token is None:
+        return _CLAUDE_UNTESTED_PROFILE_ID
+    return _CLAUDE_VERSION_TO_PROFILE.get(token, _CLAUDE_UNTESTED_PROFILE_ID)
 
 
 def handle_claude_observe(
@@ -1753,7 +1775,9 @@ def handle_claude_observe(
             return 0
         structural: dict[str, JsonValue] = {
             "action": "claude_lifecycle",
-            "capability_profile_id": "claude-code-cli-local-project-2.1.241",
+            "capability_profile_id": _claude_capability_profile_id(
+                payload.get("claude_code_version")
+            ),
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
         }

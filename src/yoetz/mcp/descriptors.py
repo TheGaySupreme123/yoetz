@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Final, Literal, cast
 
 from yoetz.mcp.resources import read_resource
+from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.schemas import (
     SCHEMA_NAMESPACE,
@@ -1640,15 +1641,7 @@ def _presentation_description_strings(schema: Mapping[str, JsonValue]) -> tuple[
 def _lint_descriptor_sets() -> None:
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         names = tuple(descriptor.name for descriptor in descriptors)
-        if names != (
-            "start",
-            "publish_work",
-            "check",
-            "respond",
-            "status",
-            "receipt",
-            "read_guidance",
-        ):
+        if names != YOETZ_WORKFLOW_TOOL_NAMES:
             raise RuntimeError("descriptor_registry_invalid")
         if len(set(names)) != len(names):
             raise RuntimeError("descriptor_registry_invalid")

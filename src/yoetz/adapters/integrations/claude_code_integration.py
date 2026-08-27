@@ -27,7 +27,12 @@ from yoetz import __version__
 from yoetz.adapters.integrations.portable_plugin import PackagedPortableResources
 from yoetz.domain.values import JsonObject, RequestId
 from yoetz.domain.values import request_id as validate_request_id
-from yoetz.ports.integrations import HarnessHookProfile, HarnessId, HarnessProfile
+from yoetz.ports.integrations import (
+    YOETZ_WORKFLOW_TOOL_NAMES,
+    HarnessHookProfile,
+    HarnessId,
+    HarnessProfile,
+)
 from yoetz.ports.plugin_artifacts import (
     ArtifactAuthority,
     ManagedPluginFile,
@@ -78,6 +83,9 @@ __all__ = [
     "status_claude_code_plugin",
 ]
 
+# Hooks/plugin surfaces this integration relies on exist from 2.1.233, but
+# admission is gated on the exactly proven versions in
+# CLAUDE_CODE_HARNESS_PROFILE.supported_versions, never on this floor alone.
 CLAUDE_CODE_MINIMUM_VERSION: Final = "2.1.233"
 CLAUDE_CODE_NATIVE_PROFILE_ID: Final = "claude-code-cli-local-project-2.1.241"
 CLAUDE_CODE_HOOK_MAPPING_VERSION: Final = "claude-code-hooks-2.1.241-v1"
@@ -92,7 +100,12 @@ _CLAUDE_HOOK_PROFILE: Final = HarnessHookProfile(
     trigger_event="SessionStart",
     trigger_payload_profile_id=CLAUDE_CODE_HOOK_MAPPING_VERSION,
     evidence_case_ids=("claude-code-cli-native-project-2.1.241-macos-arm64",),
-    observation_events=CLAUDE_CODE_HOOK_EVENTS,
+    # The rendered artifact carries all five candidate hooks, but the recorded
+    # evidence case observed no accepted observation for any of them
+    # (observation_evidence: not_observed). The capability hook cell stays
+    # unpopulated until each event has installed-host delivery, privacy, and
+    # accepted-observation evidence.
+    observation_events=(),
 )
 CLAUDE_CODE_HARNESS_PROFILE: Final = HarnessProfile(
     harness_id=HarnessId.CLAUDE,
@@ -126,7 +139,7 @@ _GUIDANCE_NAMES: Final = (
     "workflow.md",
 )
 _YOETZ_SCOPED_TOOL_MATCHER: Final = (
-    "^mcp__plugin_yoetz_yoetz__(start|publish_work|check|respond|status|receipt)$"
+    "^mcp__plugin_yoetz_yoetz__(" + "|".join(YOETZ_WORKFLOW_TOOL_NAMES) + ")$"
 )
 _VERSION_RE: Final = re.compile(r"^(\d+)\.(\d+)\.(\d+)$", re.ASCII)
 
@@ -879,6 +892,25 @@ def _inspect_source(
     target: ClaudeCodePluginTarget, artifact: ClaudeCodePluginArtifact
 ) -> _SourceInspection:
     root = Path(target.marketplace_root)
+    parent = root.parent
+    rollback = parent / _ROLLBACK_NAME
+    if rollback.exists() or rollback.is_symlink():
+        # An interrupted replacement or removal left recovery material behind.
+        # Reporting absent/managed here would let a later operation consume
+        # authority before discovering it; surface the recovery state instead.
+        return _SourceInspection(
+            PluginArtifactState.RECOVERY_REQUIRED,
+            None,
+            False,
+            canonical_digest({"state": "rollback_present"}),
+        )
+    if parent.exists() and any(item.name.startswith(_STAGE_PREFIX) for item in parent.iterdir()):
+        return _SourceInspection(
+            PluginArtifactState.RECOVERY_REQUIRED,
+            None,
+            False,
+            canonical_digest({"state": "stage_present"}),
+        )
     if not root.exists():
         return _SourceInspection(
             PluginArtifactState.ABSENT,
@@ -1181,9 +1213,22 @@ def _proof(
     *,
     installed_exact: bool,
     discovered: bool,
+    registered: bool | None,
+    enabled: bool | None,
     mcp: ClaudeCodeMcpObservation,
     session: ClaudeCodeSessionObservation | None,
 ) -> tuple[PluginProofStatus, ...]:
+    # Activation proof claims the marketplace-installed delivery profile, so a
+    # session observation alone is insufficient: a development --plugin-dir run
+    # can produce the same init event from the source root. Require the
+    # independent installed/discovered/registered/enabled facts alongside it.
+    activated = (
+        session is not None
+        and installed_exact
+        and discovered
+        and registered is True
+        and enabled is True
+    )
     return tuple(
         PluginProofStatus(
             facet,
@@ -1192,7 +1237,7 @@ def _proof(
                 if facet in {PluginProofFacet.SOURCE, PluginProofFacet.RENDERED_ARTIFACT}
                 or (installed_exact and facet is PluginProofFacet.INSTALLED_BYTES)
                 or (discovered and facet is PluginProofFacet.HOST_DISCOVERY)
-                or (session is not None and facet is PluginProofFacet.HOST_ACTIVATION)
+                or (activated and facet is PluginProofFacet.HOST_ACTIVATION)
                 or (
                     session is not None
                     and session.skill_registered
@@ -1255,7 +1300,9 @@ def status_claude_code_plugin(
         claude_config_root=Path(target.claude_config_root),
         connector_entry=connector_entry,
     )
-    if (
+    if source.state is PluginArtifactState.RECOVERY_REQUIRED:
+        state = PluginArtifactState.RECOVERY_REQUIRED
+    elif (
         source.state in {PluginArtifactState.MODIFIED, PluginArtifactState.UNMANAGED}
         or not cache_observed
     ):
@@ -1303,6 +1350,8 @@ def status_claude_code_plugin(
         _proof(
             installed_exact=installed_exact,
             discovered=discovered,
+            registered=registered,
+            enabled=enabled,
             mcp=mcp,
             session=session_observation,
         ),
@@ -1358,18 +1407,7 @@ def observe_claude_code_session_init(
     tools: object = payload.get("tools")
     servers: object = payload.get("mcp_servers")
     skill_registered = isinstance(skills, (list, tuple)) and "yoetz:yoetz" in skills
-    required_tools = {
-        f"mcp__plugin_yoetz_yoetz__{name}"
-        for name in (
-            "check",
-            "publish_work",
-            "read_guidance",
-            "receipt",
-            "respond",
-            "start",
-            "status",
-        )
-    }
+    required_tools = {f"mcp__plugin_yoetz_yoetz__{name}" for name in YOETZ_WORKFLOW_TOOL_NAMES}
     visible_tools: set[str] = set()
     if isinstance(tools, (list, tuple)):
         visible_tools = {item for item in cast(Sequence[object], tools) if type(item) is str}
@@ -1417,12 +1455,22 @@ def preview_claude_code_plugin(
     request = validate_request_id(request)
     if type(action) is not ClaudeCodePluginAction or action is ClaudeCodePluginAction.NOOP:
         raise _error(PluginArtifactReason.SOURCE_INVALID)
-    if _version_tuple(target.identity.version) < _version_tuple(CLAUDE_CODE_MINIMUM_VERSION):
-        raise _error(PluginArtifactReason.FORMAT_UNSUPPORTED)
+    if target.identity.version not in CLAUDE_CODE_HARNESS_PROFILE.supported_versions:
+        # Only versions whose native contract was actually proven are admitted.
+        # A neighboring version must stay explicitly untested rather than run
+        # under (and emit evidence for) the 2.1.241 profile it never earned.
+        raise _error(
+            PluginArtifactReason.FORMAT_UNSUPPORTED,
+            {"version_untested": target.identity.version},
+        )
     target_identity = _validate_target(target)
     status = status_claude_code_plugin(
         target, artifact, commands=commands, connector_entry=connector_entry
     )
+    if status.state is PluginArtifactState.RECOVERY_REQUIRED:
+        # Interrupted stage/rollback material must be resolved before any new
+        # mutation may even be previewed, let alone consume authority.
+        raise _error(PluginArtifactReason.RECOVERY_REQUIRED)
     if action is ClaudeCodePluginAction.INSTALL and status.state is not PluginArtifactState.ABSENT:
         if (
             status.state is PluginArtifactState.NATIVE_MANAGED
@@ -1577,10 +1625,21 @@ def _write_source(
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             _write_file(path, data)
         _fsync_dir(stage)
-        moved = destination.exists()
+        moved = destination.exists() or destination.is_symlink()
         if moved:
             os.replace(destination, rollback)
             _fsync_dir(parent)
+            # Revalidate the displaced tree after the rename, when nothing can
+            # swap it any more: only a marker-valid managed tree may be
+            # destroyed. Content created or modified during the authority or
+            # host-command window is restored untouched and the mutation is
+            # refused (the failure handler below performs the restore).
+            if (
+                rollback.is_symlink()
+                or not rollback.is_dir()
+                or not _valid_source_marker(_safe_tree(rollback))[0]
+            ):
+                raise _error(PluginArtifactReason.DESTINATION_CONFLICT)
         os.replace(stage, destination)
         _fsync_dir(parent)
         if _safe_tree(destination) != members:
@@ -1633,15 +1692,33 @@ def _run_mutation(
 
 def _remove_source(target: ClaudeCodePluginTarget) -> tuple[str, ...]:
     root = Path(target.marketplace_root)
-    files = tuple(sorted(_safe_tree(root), key=str.encode))
     rollback = root.parent / _ROLLBACK_NAME
     if rollback.exists() or rollback.is_symlink():
         raise _error(PluginArtifactReason.RECOVERY_REQUIRED)
     try:
         os.replace(root, rollback)
         _fsync_dir(root.parent)
+    except OSError as exc:
+        raise _error(PluginArtifactReason.WRITE_FAILED) from exc
+    try:
+        # Revalidate the displaced tree after the rename, when nothing can swap
+        # it any more: only a marker-valid managed tree may be deleted. Content
+        # created or modified during the authority or host-command window is
+        # restored untouched and the removal is refused.
+        if rollback.is_symlink() or not rollback.is_dir():
+            raise _error(PluginArtifactReason.DESTINATION_CONFLICT)
+        displaced = _safe_tree(rollback)
+        if not _valid_source_marker(displaced)[0]:
+            raise _error(PluginArtifactReason.DESTINATION_CONFLICT)
+        files = tuple(sorted(displaced, key=str.encode))
         shutil.rmtree(rollback)
         _fsync_dir(root.parent)
+    except ClaudeCodeIntegrationError:
+        with contextlib.suppress(OSError):
+            if (rollback.exists() or rollback.is_symlink()) and not root.exists():
+                os.replace(rollback, root)
+                _fsync_dir(root.parent)
+        raise
     except OSError as exc:
         raise _error(PluginArtifactReason.WRITE_FAILED) from exc
     return files
@@ -1743,13 +1820,11 @@ def apply_claude_code_plugin(
         if action is ClaudeCodePluginAction.DISABLE
         else after.state is PluginArtifactState.ABSENT
     )
-    operation = (
-        PluginOperationState.COMPLETED
-        if reached
-        else PluginOperationState.OUTCOME_UNKNOWN
-        if not command_ok
-        else PluginOperationState.REFUSED
-    )
+    # Every branch above has already crossed a mutation boundary (source write,
+    # host command, or removal). REFUSED describes a safe pre-mutation
+    # rejection only, so any unreached post-mutation state is OUTCOME_UNKNOWN
+    # regardless of the subprocess exit code.
+    operation = PluginOperationState.COMPLETED if reached else PluginOperationState.OUTCOME_UNKNOWN
     return ClaudeCodePluginResult(
         preview.request_id,
         action,

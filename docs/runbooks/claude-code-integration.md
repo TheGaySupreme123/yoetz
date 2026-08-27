@@ -60,8 +60,9 @@ yoetz integrate claude plugin preview \
 Prepare the returned exact digest through the trusted review lane, then replay the returned request
 ID and digest with `plugin install --accept`. `--accept` is not authority by itself; the mutation
 also consumes a matching `plugin_artifact_apply` pending and fresh OS-authenticated user presence.
-Install refuses Claude versions below `2.1.233`, foreign/dual/ambiguous MCP ownership, unsafe roots,
-modified sources, or stale previews.
+Install admits only exactly proven Claude versions (currently `2.1.241`); a neighboring version stays
+explicitly untested. It also refuses foreign/dual/ambiguous MCP ownership, unsafe roots, modified
+sources, leftover stage/rollback recovery material, or stale previews.
 
 After install, `status` must show `native_managed`, `marketplace_registered:true`,
 `discovered:true`, exact version/cache digest, and `enabled:false`. These prove no loaded session.
@@ -88,7 +89,10 @@ Preview `--action enable`, consume a new exact review, then run `plugin enable` 
 request/digest/roots/options. Project trust, installed state, enabled setting, reload/new session,
 loaded plugin root, skill delivery, and model use are different facts. A directory marketplace may
 report its source plugin root in session init even though list/cache evidence identifies the copied
-install; either root must independently match the rendered bytes. Open or restart an exact
+install; either root must independently match the rendered bytes. Activation proof additionally
+requires the exact installed/discovered/registered/enabled facts alongside the session observation —
+a session init alone (for example a development `--plugin-dir` run) proves nothing about the
+marketplace-installed delivery profile. Open or restart an exact
 Claude project session only after the enable read-back. If updating a running session, use
 `/reload-plugins` (and `--force` only when Claude explicitly requires cache invalidation), then prove
 the loaded root/digest in that session. Old concurrent sessions may retain the old plugin.
@@ -131,7 +135,10 @@ claude plugin marketplace remove yoetz-local
 Then it removes only the exact marker-valid private marketplace source. It preserves plugin data,
 Yoetz ledgers, vault/keyring/provider state, privacy/workflow receipts, credentials, other scopes,
 foreign marketplaces/MCP entries, modified sources, and orphaned caches. A lost/nonzero CLI result
-is `outcome_unknown`; run status and reconcile rather than guessing rollback.
+is `outcome_unknown` — as is any post-mutation state the read-back cannot confirm, even on exit 0;
+run status and reconcile rather than guessing rollback. Replacement and removal revalidate the
+displaced tree after renaming it out of the public path and destroy only a marker-valid managed
+tree; interrupted stage/rollback material surfaces in status as `recovery_required`.
 
 ## Proof checklist
 
