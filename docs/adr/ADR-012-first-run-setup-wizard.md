@@ -238,7 +238,8 @@ exactly those contracts and connects the steps without weakening any existing tr
    quarantine snapshot before the first unlink but still reports the crossed mutation boundary as
    `write_failed`, and preserves the remainder after deletion starts.
    A mismatch after any host/config/filesystem mutation is reported as `write_failed`, not the
-   pre-mutation retry signal `preview_stale`. Ordinary POSIX
+   pre-mutation retry signal `preview_stale`; successful cache-only deletion carries that mutation
+   fence into every final inventory/config/activation/skill verifier. Ordinary POSIX
    files still expose a final non-CAS write/unlink window to a non-cooperating same-UID writer, so
    owners must quiesce concurrent cache writers during accepted removal and no atomic content
    exclusion is claimed. The skill tree, consent records, and observation store are

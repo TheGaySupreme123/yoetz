@@ -2012,9 +2012,9 @@ def _delete_managed_cache_versions(
     root: Path,
     cache_digests: tuple[tuple[str, str], ...],
     expected_members: Mapping[str, bytes],
-) -> None:
+) -> bool:
     if not cache_digests or not root.exists():
-        return
+        return False
     _require_safe_cache_removal_primitives()
     try:
         root_fd = os.open(root, _directory_open_flags())
@@ -2106,6 +2106,7 @@ def _delete_managed_cache_versions(
             raise
         if remaining:
             raise _error(IntegrationReason.WRITE_FAILED)
+        return cache_mutation_started
     finally:
         os.close(root_fd)
 
@@ -2230,7 +2231,7 @@ def apply_removal(
                 raise _error(IntegrationReason.WRITE_FAILED) from exc
             mutation_started = True
         try:
-            _delete_managed_cache_versions(
+            cache_mutated = _delete_managed_cache_versions(
                 _cache_root(home),
                 plan.cache_digests,
                 plan.cache_members,
@@ -2239,23 +2240,31 @@ def apply_removal(
             if mutation_started and exc.reason is IntegrationReason.PREVIEW_STALE:
                 raise _error(IntegrationReason.WRITE_FAILED, {"conflict": "cache"}) from exc
             raise
-        installed, _version = _plugin_inventory(plan.binary, project, _run=_run)
-        if installed:
-            raise _error(IntegrationReason.WRITE_FAILED)
-        _assert_yoetz_tables_absent(config_path, project)
-        if preview.marketplace_json_planned and marketplace_path.exists():
-            raise _error(IntegrationReason.WRITE_FAILED)
-        inspection = inspect_activation(
-            target,
-            executable_path=executable_path,
-            codex_home=home,
-            _run=_run,
-        )
-        if inspection.state is ActivationState.ACTIVE:
-            raise _error(IntegrationReason.WRITE_FAILED)
-        if inspection.state is ActivationState.FOREIGN:
-            raise _error(IntegrationReason.WRITE_FAILED)
-        skill_state = skill_tree_state(target)
-        if skill_state != preview.skill_tree_state:
-            raise _error(IntegrationReason.WRITE_FAILED)
+        mutation_started = mutation_started or cache_mutated
+        try:
+            installed, _version = _plugin_inventory(plan.binary, project, _run=_run)
+            if installed:
+                raise _error(IntegrationReason.WRITE_FAILED)
+            _assert_yoetz_tables_absent(config_path, project)
+            if preview.marketplace_json_planned and marketplace_path.exists():
+                raise _error(IntegrationReason.WRITE_FAILED)
+            inspection = inspect_activation(
+                target,
+                executable_path=executable_path,
+                codex_home=home,
+                _run=_run,
+            )
+            if inspection.state is ActivationState.ACTIVE:
+                raise _error(IntegrationReason.WRITE_FAILED)
+            if inspection.state is ActivationState.FOREIGN:
+                raise _error(IntegrationReason.WRITE_FAILED)
+            skill_state = skill_tree_state(target)
+            if skill_state != preview.skill_tree_state:
+                raise _error(IntegrationReason.WRITE_FAILED)
+        except IntegrationError as exc:
+            if mutation_started and exc.reason is not IntegrationReason.WRITE_FAILED:
+                conflict = exc.safe_details.get("conflict")
+                details = {"conflict": conflict} if type(conflict) is str else None
+                raise _error(IntegrationReason.WRITE_FAILED, details) from exc
+            raise
     return RemovalResult(RemovalOutcome.REMOVE, inspection, skill_state, purge_cache)

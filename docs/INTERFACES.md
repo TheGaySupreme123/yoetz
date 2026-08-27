@@ -3043,7 +3043,9 @@ observable additions/changes before unlink, restores the exact version name when
 before the first unlink, preserves the remainder after deletion starts, and never sweeps an
 unapproved name into deletion.
 Pre-mutation drift is `preview_stale`; once any accepted host/config/filesystem mutation has
-started, a later conflict is `write_failed` because partial state is possible. The adapter does not
+started, a later conflict is `write_failed` because partial state is possible. A successful
+cache-only deletion sets the same operation-wide fence before final inventory/config/activation/
+skill verification. The adapter does not
 claim an atomic compare-and-unlink primitive for a non-cooperating same-UID writer's final POSIX
 content window, so the operator must quiesce such writers. After a successful removal,
 `codex plugin list

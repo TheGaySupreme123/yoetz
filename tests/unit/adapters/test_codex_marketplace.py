@@ -1157,6 +1157,59 @@ def test_post_host_mutation_marketplace_conflict_is_write_failed(tmp_path: Path)
     assert not (home / "plugins/cache/yoetz/yoetz/0.1.0").exists()
 
 
+def test_cache_only_removal_preserves_write_failed_for_final_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.adapters.integrations import codex_marketplace as module
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    target, project, home = _target(tmp_path)
+    _install(target)
+    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
+    for relative, payload in expected.items():
+        destination = cache / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    runner = _FakeCodex(target, home)
+    preview = _preview_removal(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        _run=runner,
+    )
+    assert preview.cache_versions == ("0.1.0",)
+    assert preview.plugin_remove_planned is False
+    assert preview.marketplace_remove_planned is False
+    original_inventory = module._plugin_inventory  # pyright: ignore[reportPrivateUsage]
+
+    def fail_inventory_after_cache_delete(
+        binary: object,
+        selected_project: Path,
+        *,
+        _run: object,
+    ) -> tuple[bool, str | None]:
+        if not cache.exists():
+            raise IntegrationError(IntegrationReason.SOURCE_INVALID, {})
+        return original_inventory(binary, selected_project, _run=_run)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(module, "_plugin_inventory", fail_inventory_after_cache_delete)
+
+    with pytest.raises(IntegrationError) as caught:
+        _apply_removal(
+            target,
+            executable_path=str(runner.executable),
+            approved_digest=preview.preview_digest,
+            codex_home=home,
+            _run=runner,
+        )
+
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
+    assert not cache.exists()
+    assert project.is_dir()
+
+
 @pytest.mark.parametrize(
     "overflow",
     ["member_bytes", "file_count", "entry_count", "depth", "version_count"],
