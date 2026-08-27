@@ -288,13 +288,15 @@ for the last content-write window.
 
 Apply runs `codex plugin remove yoetz@yoetz --json`, then `codex plugin marketplace remove yoetz
 --json` when `[marketplaces.yoetz]` byte-matches the yoetz render, then deletes
-`<repo>/.agents/plugins/marketplace.json` only when that file byte-matches the yoetz render, then
+`<repo>/.agents/plugins/marketplace.json` only when a retained no-follow descriptor still byte- and
+inode-matches through a private quarantine rename, then
 deletes the bound current-version cache. Whole-table TOML edits are verified by re-parse. A second
 removal is a no-op (`already_absent`). Foreign, modified, dual, or otherwise conflicting entries
 refuse with `remove_refused` and name the conflicting surface (`personal_marketplace`,
 `repository_marketplace`, `config_marketplace`, `config_plugin`, `inventory`, or `cache`). Before
 mutation, changed preview-bound bytes report `preview_stale`.
-After a host command, config write, marketplace unlink, quarantine rename, or member unlink has
+After a mutating host command starts (including a zero-exit command with malformed JSON), config
+write, marketplace quarantine/unlink, cache quarantine rename, or member unlink has
 started, any newly observed conflict reports `write_failed` (with the bounded conflict token when
 available) because the outcome may be partial; it is never mislabeled as a safe stale-preview
 retry.

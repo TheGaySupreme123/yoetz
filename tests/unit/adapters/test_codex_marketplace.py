@@ -77,6 +77,7 @@ class _FakeCodex:
         self.fail_add_after_copy = False
         self.conflict_after_marketplace_remove = False
         self.repository_marketplace_conflict_after_remove = False
+        self.malformed_after_mutation: set[tuple[str, ...]] = set()
         self.codex_version = codex_version
 
     def __call__(
@@ -163,6 +164,8 @@ class _FakeCodex:
             body = {"name": "yoetz"}
         else:
             raise AssertionError(command)
+        if args in self.malformed_after_mutation:
+            return subprocess.CompletedProcess(command, 0, stdout=b'{"truncated":', stderr=b"")
         return subprocess.CompletedProcess(
             command,
             1
@@ -1155,6 +1158,249 @@ def test_post_host_mutation_marketplace_conflict_is_write_failed(tmp_path: Path)
     assert caught.value.safe_details["conflict"] == "repository_marketplace"
     assert marketplace.read_bytes() == b'{"name":"foreign"}\n'
     assert not (home / "plugins/cache/yoetz/yoetz/0.1.0").exists()
+
+
+@pytest.mark.parametrize("host_surface", ["plugin", "marketplace"])
+def test_mutating_host_malformed_json_is_write_failed(
+    tmp_path: Path,
+    host_surface: str,
+) -> None:
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    if host_surface == "marketplace":
+        shutil.rmtree(cache)
+    runner = _FakeCodex(target, home)
+    preview = _preview_removal(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        _run=runner,
+    )
+    command = (
+        ("plugin", "remove", "yoetz@yoetz", "--json")
+        if host_surface == "plugin"
+        else ("plugin", "marketplace", "remove", "yoetz", "--json")
+    )
+    runner.malformed_after_mutation.add(command)
+
+    with pytest.raises(IntegrationError) as caught:
+        _apply_removal(
+            target,
+            executable_path=str(runner.executable),
+            approved_digest=preview.preview_digest,
+            codex_home=home,
+            _run=runner,
+        )
+
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
+    if host_surface == "plugin":
+        assert not cache.exists()
+    else:
+        config = home / "config.toml"
+        assert "marketplaces.yoetz" not in config.read_text(encoding="utf-8")
+
+
+def test_repository_marketplace_replacement_during_quarantine_is_preserved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.adapters.integrations import codex_marketplace as module
+
+    target, project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    runner = _FakeCodex(target, home)
+    preview = _preview_removal(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        _run=runner,
+    )
+    marketplace = project / ".agents/plugins/marketplace.json"
+    foreign = b'{"name":"foreign-race"}\n'
+    original_rename = os.rename
+    raced = False
+
+    def replace_before_quarantine(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal raced
+        if source == "marketplace.json" and not raced:
+            raced = True
+            replacement = marketplace.with_name("marketplace.foreign")
+            replacement.write_bytes(foreign)
+            os.replace(replacement, marketplace)
+        original_rename(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    # Replacing ``os.rename`` changes function identity and would make the production primitive
+    # capability probe fail before reaching the simulated supported-host race.
+    monkeypatch.setattr(module, "_require_safe_cache_removal_primitives", lambda: None)
+    monkeypatch.setattr(module, "_require_safe_file_removal_primitives", lambda: None)
+    monkeypatch.setattr(os, "rename", replace_before_quarantine)
+
+    with pytest.raises(IntegrationError) as caught:
+        _apply_removal(
+            target,
+            executable_path=str(runner.executable),
+            approved_digest=preview.preview_digest,
+            codex_home=home,
+            _run=runner,
+        )
+
+    assert raced is True
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
+    assert caught.value.safe_details["conflict"] == "repository_marketplace"
+    assert marketplace.read_bytes() == foreign
+
+
+def test_repository_marketplace_restore_never_clobbers_new_foreign_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.adapters.integrations import codex_marketplace as module
+
+    target, project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    runner = _FakeCodex(target, home)
+    preview = _preview_removal(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        _run=runner,
+    )
+    marketplace = project / ".agents/plugins/marketplace.json"
+    moved_foreign = b'{"name":"moved-foreign"}\n'
+    new_foreign = b'{"name":"new-foreign"}\n'
+    original_rename = os.rename
+    original_link = os.link
+    renamed = False
+    linked = False
+
+    def replace_before_quarantine(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal renamed
+        if source == "marketplace.json" and not renamed:
+            renamed = True
+            replacement = marketplace.with_name("marketplace.moved")
+            replacement.write_bytes(moved_foreign)
+            os.replace(replacement, marketplace)
+        original_rename(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    def create_before_restore_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        nonlocal linked
+        if destination == "marketplace.json" and not linked:
+            linked = True
+            marketplace.write_bytes(new_foreign)
+        original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(module, "_require_safe_cache_removal_primitives", lambda: None)
+    monkeypatch.setattr(module, "_require_safe_file_removal_primitives", lambda: None)
+    monkeypatch.setattr(os, "rename", replace_before_quarantine)
+    monkeypatch.setattr(os, "link", create_before_restore_link)
+
+    with pytest.raises(IntegrationError) as caught:
+        _apply_removal(
+            target,
+            executable_path=str(runner.executable),
+            approved_digest=preview.preview_digest,
+            codex_home=home,
+            _run=runner,
+        )
+
+    assert renamed is True
+    assert linked is True
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
+    assert marketplace.read_bytes() == new_foreign
+    quarantines = tuple(marketplace.parent.glob(".yoetz-file-remove-*"))
+    assert len(quarantines) == 1
+    assert quarantines[0].read_bytes() == moved_foreign
+
+
+def test_exact_empty_config_cleanup_preserves_a_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from yoetz.adapters.integrations import codex_marketplace as module
+
+    parent = tmp_path / "codex"
+    parent.mkdir(mode=0o700)
+    config = parent / "config.toml"
+    config.write_bytes(b"")
+    foreign = b'owner = "foreign"\n'
+    original_rename = os.rename
+    raced = False
+
+    def replace_before_quarantine(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal raced
+        if source == "config.toml" and not raced:
+            raced = True
+            replacement = parent / "config.foreign"
+            replacement.write_bytes(foreign)
+            os.replace(replacement, config)
+        original_rename(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    monkeypatch.setattr(module, "_require_safe_file_removal_primitives", lambda: None)
+    monkeypatch.setattr(os, "rename", replace_before_quarantine)
+
+    with pytest.raises(IntegrationError) as caught:
+        module._remove_exact_managed_file(  # pyright: ignore[reportPrivateUsage]
+            config,
+            b"",
+            mismatch_reason=IntegrationReason.PREVIEW_STALE,
+        )
+
+    assert raced is True
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
+    assert config.read_bytes() == foreign
 
 
 def test_cache_only_removal_preserves_write_failed_for_final_verification(

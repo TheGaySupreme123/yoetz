@@ -224,7 +224,8 @@ exactly those contracts and connects the steps without weakening any existing tr
    preview|status|remove` classifies ownership with `inspect_activation`, then runs
    `codex plugin remove yoetz@yoetz --json` and, when the `[marketplaces.yoetz]` table
    byte-matches the yoetz render, `codex plugin marketplace remove yoetz --json`. It deletes
-   repository `.agents/plugins/marketplace.json` only when that file byte-matches, and it deletes
+   repository `.agents/plugins/marketplace.json` only when a retained no-follow descriptor still
+   byte- and inode-matches through a private quarantine rename, and it deletes
    only digest-matched versioned cache trees. `--purge-cache` is required to delete other
    yoetz-managed version directories; it is default-off. Foreign, modified, dual, or otherwise
    conflicting entries refuse with `remove_refused` and name the conflicting surface. The removal
@@ -237,11 +238,12 @@ exactly those contracts and connects the steps without weakening any existing tr
    names. It restores the exact version name when an observable content race invalidates the
    quarantine snapshot before the first unlink but still reports the crossed mutation boundary as
    `write_failed`, and preserves the remainder after deletion starts.
-   A mismatch after any host/config/filesystem mutation is reported as `write_failed`, not the
+   Malformed output after a mutating host command is outcome-unknown `write_failed`, never a
+   pre-mutation source error. A mismatch after any host/config/filesystem mutation is reported as `write_failed`, not the
    pre-mutation retry signal `preview_stale`; successful cache-only deletion carries that mutation
    fence into every final inventory/config/activation/skill verifier. Ordinary POSIX
    files still expose a final non-CAS write/unlink window to a non-cooperating same-UID writer, so
-   owners must quiesce concurrent cache writers during accepted removal and no atomic content
+   owners must quiesce concurrent cache/config/marketplace writers during accepted removal and no atomic content
    exclusion is claimed. The skill tree, consent records, and observation store are
    intentionally left in place. `yoetz integrate <harness> mcp preview-remove` exposes the exact
    unregistration digest; noninteractive `remove` requires that digest plus `--accept` before it

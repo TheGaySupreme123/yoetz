@@ -3042,8 +3042,11 @@ exact approved member names and bytes, refuses
 observable additions/changes before unlink, restores the exact version name when drift occurs
 before the first unlink, preserves the remainder after deletion starts, and never sweeps an
 unapproved name into deletion.
+Repository `marketplace.json` and any host-created empty `config.toml` cleanup use the same
+descriptor/inode/byte-bound private-quarantine rule rather than pathname-only unlink.
 Pre-mutation drift is `preview_stale`; once any accepted host/config/filesystem mutation has
-started, a later conflict is `write_failed` because partial state is possible. A successful
+started, including a zero-exit mutating host command whose JSON result is malformed, a later
+conflict is `write_failed` because partial state is possible. A successful
 cache-only deletion sets the same operation-wide fence before final inventory/config/activation/
 skill verification. The adapter does not
 claim an atomic compare-and-unlink primitive for a non-cooperating same-UID writer's final POSIX

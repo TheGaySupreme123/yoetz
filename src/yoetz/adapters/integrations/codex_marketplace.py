@@ -1723,6 +1723,12 @@ def _require_safe_cache_removal_primitives() -> None:
         raise _error(IntegrationReason.TARGET_UNSAFE)
 
 
+def _require_safe_file_removal_primitives() -> None:
+    _require_safe_cache_removal_primitives()
+    if os.link not in os.supports_dir_fd or os.link not in os.supports_follow_symlinks:
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+
+
 def _bounded_directory_names(directory_fd: int) -> list[str]:
     names: list[str] = []
     try:
@@ -1871,6 +1877,145 @@ def _read_exact_member(
         return b"".join(chunks)
     except OSError as exc:
         raise _error(IntegrationReason.WRITE_FAILED) from exc
+
+
+def _restore_quarantined_file(
+    parent_fd: int,
+    name: str,
+    quarantine: str,
+    quarantined_facts: os.stat_result,
+) -> None:
+    """Restore one preserved quarantine inode when the approved name is still absent."""
+
+    try:
+        current = os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise _error(IntegrationReason.WRITE_FAILED) from exc
+    if not _same_inode(quarantined_facts, current):
+        raise _error(IntegrationReason.WRITE_FAILED)
+    # ``link`` is the portable no-clobber primitive here: it fails with EEXIST instead of
+    # overwriting a foreign file that appears while restoration is in progress.
+    try:
+        os.link(
+            quarantine,
+            name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        restored = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise _error(IntegrationReason.WRITE_FAILED) from exc
+    if not _same_inode(quarantined_facts, restored):
+        raise _error(IntegrationReason.WRITE_FAILED)
+    try:
+        current = os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
+        if not _same_inode(quarantined_facts, current):
+            raise _error(IntegrationReason.WRITE_FAILED)
+        os.unlink(quarantine, dir_fd=parent_fd)
+    except OSError as exc:
+        raise _error(IntegrationReason.WRITE_FAILED) from exc
+
+
+def _remove_exact_managed_file(
+    path: Path,
+    expected: bytes,
+    *,
+    mismatch_reason: IntegrationReason,
+) -> None:
+    """Quarantine and unlink only the exact descriptor-bound approved file inode."""
+
+    if path.name in {"", ".", ".."} or "/" in path.name:
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+    _require_safe_file_removal_primitives()
+    try:
+        parent_fd = os.open(path.parent, _directory_open_flags())
+    except OSError as exc:
+        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    descriptor: int | None = None
+    try:
+        _owned_stat_not_writable(os.fstat(parent_fd), directory=True)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path.name, flags, dir_fd=parent_fd)
+        except FileNotFoundError as exc:
+            raise _error(mismatch_reason) from exc
+        except OSError as exc:
+            raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+        opened = os.fstat(descriptor)
+        _owned_stat_not_writable(opened, directory=False)
+        if (
+            opened.st_size != len(expected)
+            or _read_exact_member(
+                descriptor,
+                expected,
+                mismatch_reason=mismatch_reason,
+            )
+            != expected
+        ):
+            raise _error(mismatch_reason)
+        try:
+            current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise _error(mismatch_reason) from exc
+        if not _same_inode(opened, current):
+            raise _error(mismatch_reason)
+
+        quarantine = f".yoetz-file-remove-{os.urandom(8).hex()}"
+        try:
+            os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise _error(IntegrationReason.WRITE_FAILED) from exc
+        else:
+            raise _error(IntegrationReason.WRITE_FAILED)
+        try:
+            os.rename(
+                path.name,
+                quarantine,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            quarantined = os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise _error(IntegrationReason.WRITE_FAILED) from exc
+        if not _same_inode(opened, quarantined):
+            _restore_quarantined_file(parent_fd, path.name, quarantine, quarantined)
+            raise _error(IntegrationReason.WRITE_FAILED)
+        if (
+            _read_exact_member(
+                descriptor,
+                expected,
+                mismatch_reason=IntegrationReason.WRITE_FAILED,
+            )
+            != expected
+        ):
+            _restore_quarantined_file(parent_fd, path.name, quarantine, quarantined)
+            raise _error(IntegrationReason.WRITE_FAILED)
+        try:
+            final = os.stat(quarantine, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise _error(IntegrationReason.WRITE_FAILED) from exc
+        if not _same_inode(opened, final):
+            raise _error(IntegrationReason.WRITE_FAILED)
+        try:
+            os.unlink(quarantine, dir_fd=parent_fd)
+        except OSError as exc:
+            raise _error(IntegrationReason.WRITE_FAILED) from exc
+        if (
+            _read_exact_member(
+                descriptor,
+                expected,
+                mismatch_reason=IntegrationReason.WRITE_FAILED,
+            )
+            != expected
+        ):
+            raise _error(IntegrationReason.WRITE_FAILED)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_fd)
 
 
 def _remove_managed_tree_contents_fd(
@@ -2167,21 +2312,31 @@ def apply_removal(
         _assert_binary_probe(plan.binary, _run=_run)
         mutation_started = False
         if preview.plugin_remove_planned:
-            _run_json_command(
-                plan.binary,
-                preview.plugin_remove_command,
-                _run=_run,
-                timeout=_PLUGIN_ADD_TIMEOUT_SECONDS,
-            )
             mutation_started = True
+            try:
+                _run_json_command(
+                    plan.binary,
+                    preview.plugin_remove_command,
+                    _run=_run,
+                    timeout=_PLUGIN_ADD_TIMEOUT_SECONDS,
+                )
+            except IntegrationError as exc:
+                if exc.reason is IntegrationReason.WRITE_FAILED:
+                    raise
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
         if preview.marketplace_remove_planned:
-            _run_json_command(
-                plan.binary,
-                preview.marketplace_remove_command,
-                _run=_run,
-                timeout=_PLUGIN_ADD_TIMEOUT_SECONDS,
-            )
             mutation_started = True
+            try:
+                _run_json_command(
+                    plan.binary,
+                    preview.marketplace_remove_command,
+                    _run=_run,
+                    timeout=_PLUGIN_ADD_TIMEOUT_SECONDS,
+                )
+            except IntegrationError as exc:
+                if exc.reason is IntegrationReason.WRITE_FAILED:
+                    raise
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
         current_config = _current_bytes(config_path)
         if current_config is None:
             current_config = b""
@@ -2209,26 +2364,41 @@ def apply_removal(
             if plan.config_before is None and not stripped:
                 if config_path.exists():
                     try:
-                        config_path.unlink()
-                    except OSError as exc:
-                        raise _error(IntegrationReason.WRITE_FAILED) from exc
+                        _remove_exact_managed_file(
+                            config_path,
+                            current_config,
+                            mismatch_reason=(
+                                IntegrationReason.WRITE_FAILED
+                                if mutation_started
+                                else IntegrationReason.PREVIEW_STALE
+                            ),
+                        )
+                    except IntegrationError as exc:
+                        if mutation_started and exc.reason is not IntegrationReason.WRITE_FAILED:
+                            raise _error(IntegrationReason.WRITE_FAILED) from exc
+                        raise
                     mutation_started = True
             else:
                 _atomic_write(config_path, stripped)
                 mutation_started = True
         if preview.marketplace_json_planned:
-            current_marketplace = _current_bytes(marketplace_path)
-            if current_marketplace != _canonical_marketplace_bytes():
-                if not mutation_started:
-                    raise _error(IntegrationReason.PREVIEW_STALE)
-                raise _error(
-                    IntegrationReason.WRITE_FAILED,
-                    {"conflict": "repository_marketplace"},
-                )
             try:
-                marketplace_path.unlink()
-            except OSError as exc:
-                raise _error(IntegrationReason.WRITE_FAILED) from exc
+                _remove_exact_managed_file(
+                    marketplace_path,
+                    _canonical_marketplace_bytes(),
+                    mismatch_reason=(
+                        IntegrationReason.WRITE_FAILED
+                        if mutation_started
+                        else IntegrationReason.PREVIEW_STALE
+                    ),
+                )
+            except IntegrationError as exc:
+                if mutation_started or exc.reason is IntegrationReason.WRITE_FAILED:
+                    raise _error(
+                        IntegrationReason.WRITE_FAILED,
+                        {"conflict": "repository_marketplace"},
+                    ) from exc
+                raise
             mutation_started = True
         try:
             cache_mutated = _delete_managed_cache_versions(
