@@ -24,6 +24,7 @@ from yoetz.application.observation_coordinator import ObservationCoordinator
 from yoetz.application.observation_drain import ObservationOutboxSweeper
 from yoetz.application.observation_materialize import (
     materialize_observation_envelope,
+    materialize_observation_outcome_correction,
     observation_writer_id,
 )
 from yoetz.domain.findings import Finding
@@ -258,6 +259,56 @@ def test_materialize_post_consumes_host_outcome_semantics() -> None:
     # exit_status stays authoritative over softer fields.
     outcome, _batch = _outcome({"exit_status": 2, "success": True}, "hook:outcome-precedence")
     assert outcome is ResultOutcome.FAILURE
+
+
+def test_stream_outcome_correction_links_canonical_action_without_rewriting_unknown() -> None:
+    from yoetz.domain.events import ResultOutcome, ResultRecordedPayload
+
+    task = _task_id()
+    session = f"hmac-sha256:{'ac' * 32}"
+    hook = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="hook:outcome-upgrade",
+        corr="call-outcome-upgrade",
+    )
+    stream = replace(
+        _envelope(
+            session=session,
+            kind="function_call_output",
+            identity="stream:outcome-upgrade",
+            corr="call-outcome-upgrade",
+            exit_status=7,
+        ),
+        source=ObservationSource.CODEX_SESSION_STREAM,
+        structural_payload=JsonObject(
+            {
+                "action": "function_call_output",
+                "tool_name": "shell",
+                "tool_call_id": "call-outcome-upgrade",
+                "correlation_id": "call-outcome-upgrade",
+                "exit_status": 7,
+            }
+        ),
+    )
+
+    hook_batch = materialize_observation_envelope(hook, task_id=task)
+    stream_batch = materialize_observation_envelope(stream, task_id=task)
+    hook_result = cast(ResultRecordedPayload, hook_batch.drafts[1].draft.payload)
+    stream_result = cast(ResultRecordedPayload, stream_batch.drafts[1].draft.payload)
+    assert hook_result.result_id == stream_result.result_id
+    assert hook_result.action_id == stream_result.action_id
+    assert hook_result.outcome is ResultOutcome.UNKNOWN
+    assert stream_result.outcome is ResultOutcome.FAILURE
+
+    correction = materialize_observation_outcome_correction(stream, task_id=task)
+    assert correction.skip_reason is None
+    assert tuple(item.role for item in correction.drafts) == ("result_correction",)
+    corrected = cast(ResultRecordedPayload, correction.drafts[0].draft.payload)
+    assert corrected.action_id == hook_result.action_id
+    assert corrected.result_id != hook_result.result_id
+    assert corrected.outcome is ResultOutcome.FAILURE
+    assert corrected.exit_status == 7
 
 
 def test_routine_read_coalescing_respects_result_status_failures() -> None:
@@ -1807,6 +1858,7 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
         kind="PostToolUse",
         identity="hook:advice-revision",
         ordinal=2,
+        corr="c2",
         exit_status=2,
     )
     _remember_envelope_events(revision_envelope)
@@ -2838,6 +2890,215 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
     # Pre keeps its own hook-only claim; the paired result claim unions hook and
     # stream coverage into source_mask == 3 (previously dead code, issue #309).
     assert [row[0] for row in rows] == [1, 3]
+
+
+@pytest.mark.anyio
+async def test_later_stream_failure_appends_correction_after_hook_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    import apsw
+
+    from yoetz.application import observation_coordinator as coordinator_module
+    from yoetz.application.observation_materialize import (
+        MaterializedObservationBatch,
+    )
+    from yoetz.application.observation_materialize import (
+        canonical_logical_identity as _identity,
+    )
+    from yoetz.application.observation_materialize import (
+        observation_operation_digest as _digest,
+    )
+    from yoetz.domain.events import ResultRecordedPayload, encode_payload
+    from yoetz.domain.values import Frontier
+    from yoetz.kernel.projections import ProjectionRecord, empty_projection_state
+    from yoetz.ports.ledger import (
+        AcceptedEventSummary,
+        AppendResult,
+        ProjectionView,
+        StoredProjection,
+    )
+    from yoetz.protocol.canonical import canonical_digest
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "outcome-correction")
+
+    def _raise_recorded(error: Exception, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(
+        coordinator_module,
+        "record_unexpected_exception_without_raising",
+        _raise_recorded,
+    )
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": mapping.yoetz_task_id, "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    core_unknown: MaterializedObservationBatch | None = None
+    appended_roles: list[tuple[str, ...]] = []
+    head = "sha256:" + "a" * 64
+
+    class _Ledger:
+        async def load_projection(self, loaded_session: str, view: object) -> StoredProjection:
+            assert loaded_session == mapping.yoetz_session_id
+            assert view is ProjectionView.CANDIDATE_FINDINGS
+            assert core_unknown is not None
+            batch = core_unknown
+            result_draft = batch.drafts[1]
+            payload = cast(ResultRecordedPayload, result_draft.draft.payload)
+            state = replace(
+                empty_projection_state(),
+                frontier=1,
+                head_digest=head,
+                results={
+                    payload.result_id: ProjectionRecord(
+                        payload,
+                        canonical_digest(encode_payload(payload)),
+                        False,
+                        result_draft.draft.event_id,
+                        1,
+                    )
+                },
+            )
+            return StoredProjection(
+                ProjectionView.CANDIDATE_FINDINGS,
+                state,
+                Frontier(1, head),
+                0,
+                "projection-test-1",
+                False,
+            )
+
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=store,
+        ledger=_Ledger(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            del released
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Coordinator(ObservationCoordinator):
+        async def _capture_content(  # type: ignore[override]
+            self, runtime: object, store: object, **kwargs: object
+        ) -> tuple[tuple[str, ...], bool]:
+            del runtime, store, kwargs
+            return ((), False)
+
+        async def _append_materialized(  # type: ignore[override]
+            self,
+            runtime: object,
+            envelope: ObservationEnvelope,
+            batch: MaterializedObservationBatch,
+            *,
+            legacy_writer_id: str | None = None,
+        ) -> tuple[str, str, AppendResult]:
+            nonlocal core_unknown
+            del legacy_writer_id
+            roles = tuple(item.role for item in batch.drafts)
+            appended_roles.append(roles)
+            digest = _digest(
+                task_id=runtime.task_id,  # type: ignore[attr-defined]
+                session_id=runtime.session_id,  # type: ignore[attr-defined]
+                writer_id=runtime.writer_id,  # type: ignore[attr-defined]
+                logical_identity=_identity(envelope),
+                draft_roles=roles,
+            )
+            if roles == ("action", "result") and core_unknown is None:
+                core_unknown = batch
+                outcome = "accepted"
+            elif roles == ("action", "result"):
+                outcome = "replayed"
+            else:
+                outcome = "accepted"
+            accepted = tuple(
+                AcceptedEventSummary(
+                    item.draft.event_id,
+                    index,
+                    index,
+                    "sha256:" + f"{index:064x}",
+                    "projected",
+                )
+                for index, item in enumerate(batch.drafts, 1)
+            )
+            return (
+                self._stable_operation_id(digest),
+                digest,
+                AppendResult(
+                    outcome,  # type: ignore[arg-type]
+                    accepted,
+                    Frontier(1, head),
+                    Frontier(1 + len(accepted), head),
+                    (),
+                ),
+            )
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    hook = _envelope(
+        session=session,
+        kind="PostToolUse",
+        identity="hook:outcome-correction",
+        corr="call-outcome-correction",
+    )
+    stream = replace(
+        _envelope(
+            session=session,
+            kind="function_call_output",
+            identity="stream:outcome-correction",
+            corr="call-outcome-correction",
+            exit_status=9,
+        ),
+        source=ObservationSource.CODEX_SESSION_STREAM,
+        structural_payload=JsonObject(
+            {
+                "action": "function_call_output",
+                "tool_name": "shell",
+                "tool_call_id": "call-outcome-correction",
+                "correlation_id": "call-outcome-correction",
+                "exit_status": 9,
+            }
+        ),
+    )
+
+    for envelope in (hook, stream):
+        result = await coordinator.ingest_request(
+            ObservationIngestRequest(codex_session_id="outcome-correction", envelope=envelope)
+        )
+        assert result.disposition is ObservationIngestDisposition.ACCEPTED, result.reason
+
+    assert appended_roles == [
+        ("action", "result"),
+        ("action", "result"),
+        ("result_correction",),
+    ]
+    masks = db.execute(
+        "SELECT source_mask FROM observation_logical_identity ORDER BY source_mask"
+    ).fetchall()
+    assert [row[0] for row in masks] == [2, 3]
 
 
 @pytest.mark.anyio

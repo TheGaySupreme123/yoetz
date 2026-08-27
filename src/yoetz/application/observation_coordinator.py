@@ -40,6 +40,7 @@ from yoetz.application.observation_materialize import (
     approved_check_author,
     canonical_logical_identity,
     materialize_observation_envelope,
+    materialize_observation_outcome_correction,
     media_type_for_schema,
     observation_author,
     observation_claim_identity,
@@ -577,6 +578,95 @@ class ObservationCoordinator:
                                     task_id=runtime.task_id,
                                 )
                             )
+                        correction = materialize_observation_outcome_correction(
+                            envelope,
+                            task_id=runtime.task_id,
+                        )
+                        if (
+                            append_result is not None
+                            and append_result.outcome == "replayed"
+                            and correction.skip_reason is None
+                            and correction.drafts
+                        ):
+                            core_result = next(
+                                (
+                                    item.draft.payload
+                                    for item in batch.drafts
+                                    if type(item.draft.payload) is ResultRecordedPayload
+                                ),
+                                None,
+                            )
+                            projection = await runtime.ledger.load_projection(
+                                runtime.session_id,
+                                ProjectionView.CANDIDATE_FINDINGS,
+                            )
+                            if (
+                                type(core_result) is not ResultRecordedPayload
+                                or projection is None
+                                or type(projection.state) is not ProjectionState
+                                or projection.lag != 0
+                                or projection.rebuild_required
+                            ):
+                                raise PublicOperationError(
+                                    PublicErrorCode.SERVICE_UNAVAILABLE,
+                                    "Observation outcome projection is unavailable.",
+                                    retryable=True,
+                                )
+                            existing_result = projection.state.results.get(core_result.result_id)
+                            if existing_result is None or existing_result.payload is None:
+                                raise PublicOperationError(
+                                    PublicErrorCode.SERVICE_UNAVAILABLE,
+                                    "Observation outcome projection is unavailable.",
+                                    retryable=True,
+                                )
+                            if existing_result.payload.outcome is ResultOutcome.UNKNOWN:
+                                corrected = await self._append_materialized(
+                                    runtime,
+                                    envelope,
+                                    correction,
+                                    legacy_writer_id=mapping.yoetz_writer_id,
+                                )
+                                if corrected is not None:
+                                    (
+                                        correction_operation_id,
+                                        correction_digest,
+                                        correction_result,
+                                    ) = corrected
+                                    store.record_logical_identity_claim(
+                                        workspace=workspace,
+                                        logical_identity=observation_claim_identity(
+                                            envelope,
+                                            tuple(item.role for item in correction.drafts),
+                                        ),
+                                        materialization_digest=correction_digest,
+                                        operation_id=correction_operation_id,
+                                        source_mask=2,
+                                        mapping_version=MATERIALIZATION_MAPPING_VERSION,
+                                        materialized_at=timestamp_from_datetime(
+                                            self.clock.now_utc()
+                                        ),
+                                    )
+                                    if correction_result is not None:
+                                        await self._local(
+                                            partial(
+                                                self.local.note_frontier_motion,
+                                                workspace,
+                                                codex_session_id,
+                                                from_sequence=(
+                                                    correction_result.subject_frontier.sequence
+                                                ),
+                                                to_sequence=(
+                                                    correction_result.result_frontier.sequence
+                                                ),
+                                                head_digest=(
+                                                    correction_result.result_frontier.head_digest
+                                                ),
+                                                observation_record_count=len(
+                                                    correction_result.accepted
+                                                ),
+                                                task_id=runtime.task_id,
+                                            )
+                                        )
 
                 stage = "verification"
                 await self._enqueue_verification(

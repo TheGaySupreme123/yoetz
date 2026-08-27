@@ -79,7 +79,8 @@ unsupported claims and unbounded duplicate findings.
 6. Hook envelopes are observation evidence, not agent claims. Completion-like lifecycle signals
    materialize as metadata-only `evidence_recorded` events. A narrow claim path exists only when the
    structural payload explicitly carries an admitted `claim_kind`. Mapping version
-   `obs-ledger/1.2.0` separates these identities from historical observation-derived claims.
+   `obs-ledger/1.3.0` separates these identities from historical observation-derived claims and
+   gives paired hook/stream results source-independent action/result IDs.
 
 7. Deterministic advice finding IDs are condition-scoped over policy, kind, rule code, and detail
    token. Evidence refs prove the condition but never identify it: several rules intentionally cite
@@ -165,6 +166,12 @@ unsupported claims and unbounded duplicate findings.
     operator surface and the source of deliberately standing machine conditions (composition
     facts), but is never a silent input to a mapped task snapshot — completing at the construction
     layer the delivery-selection boundary #250 established (issues #346/#352).
+
+15. A hook `PostToolUse` with no outcome fact may commit `UNKNOWN` before the session stream later
+    supplies an authoritative exit outcome for the same call. The original row is never rewritten.
+    A replayed canonical operation consults the current projection and, only for `UNKNOWN`, appends
+    one idempotent `result_correction` linked to the same canonical action. Explicit outcomes are
+    never downgraded or overwritten; correction retries are append-only and operation-idempotent.
 
 ## Security and privacy consequences
 

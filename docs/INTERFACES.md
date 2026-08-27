@@ -2616,8 +2616,11 @@ materialization mapping version and exact draft-role tuple, so phases of one hos
 different materializations (for example pre-action versus paired action/result) cannot collide,
 while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
 The claim stores the source-independent materialization version, never the hook/stream cursor
-version (issue #309). Duplicates retry incomplete content/store/ledger/verification/advice work
-idempotently. Stream cursor advancement occurs only after outbox insertion. Session end is
+version (issue #309). A later explicit session-stream outcome enriches an earlier hook `UNKNOWN`
+through an append-only `result_correction` linked to the same canonical action; it never rewrites,
+downgrades, or silently overwrites an explicit result. Duplicates retry incomplete
+content/store/ledger/verification/advice work idempotently. Stream cursor advancement occurs only
+after outbox insertion. Session end is
 generation-scoped; a newer start clears only the old stopped fence. Drain is bounded round-robin
 across workspace sessions under a nonblocking per-workspace lease; within one pass a
 `mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),

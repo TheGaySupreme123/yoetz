@@ -683,10 +683,20 @@ def _pair_stream_tool_name(
             call_tools.pop(next(iter(call_tools)))
         call_tools[call_id] = tool_name
         return envelope
-    if action not in {"function_call_output", "custom_tool_call_output"} or tool_name is not None:
+    if action not in {"function_call_output", "custom_tool_call_output"}:
         return envelope
     paired = call_tools.get(call_id)
     if paired is None:
+        return replace(
+            envelope,
+            gap_codes=tuple(
+                sorted(
+                    {*envelope.gap_codes, ObservationGapCode.UNPAIRED_EVENT.value},
+                    key=str.encode,
+                )
+            ),
+        )
+    if tool_name is not None:
         return envelope
     return replace(
         envelope,
