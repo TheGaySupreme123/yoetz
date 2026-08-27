@@ -636,14 +636,21 @@ def _cache_root(home: Path) -> Path:
 
 
 def _cache_root_has_entries(home: Path) -> bool:
-    root = _cache_root(home)
-    if not root.exists() and not root.is_symlink():
-        return False
-    _validate_descendant_ancestors(home, Path("plugins/cache/yoetz/yoetz"))
+    relative_root = Path("plugins/cache/yoetz/yoetz")
     try:
-        return next(root.iterdir(), None) is not None
-    except OSError as exc:
-        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+        root_fd = _open_anchored_directory(
+            home,
+            relative_root,
+            missing_reason=IntegrationReason.PREVIEW_STALE,
+        )
+    except IntegrationError as exc:
+        if exc.reason is IntegrationReason.PREVIEW_STALE:
+            return False
+        raise
+    try:
+        return bool(_bounded_directory_names(root_fd))
+    finally:
+        os.close(root_fd)
 
 
 def _cache_version_path(root: Path, version: str) -> Path:
@@ -763,6 +770,41 @@ def _installed_cache_digest(path: Path, expected_members: Mapping[str, bytes]) -
     return _members_digest(actual)
 
 
+def _installed_cache_digest_anchored(
+    home: Path,
+    version: str,
+    expected_members: Mapping[str, bytes],
+) -> str | None:
+    """Digest one cache version without following a replaced home ancestor."""
+
+    if _VERSION_RE.fullmatch(version) is None:
+        raise _error(IntegrationReason.SOURCE_INVALID)
+    try:
+        root_fd = _open_anchored_directory(
+            home,
+            Path("plugins/cache/yoetz/yoetz"),
+            missing_reason=IntegrationReason.PREVIEW_STALE,
+        )
+    except IntegrationError as exc:
+        if exc.reason is IntegrationReason.PREVIEW_STALE:
+            return None
+        raise
+    try:
+        opened = _open_managed_cache_digest_at(
+            root_fd,
+            version,
+            expected_members,
+            mismatch_reason=IntegrationReason.DESTINATION_CONFLICT,
+        )
+        if opened is None:
+            return None
+        descriptor, digest, _approved_members = opened
+        os.close(descriptor)
+        return digest
+    finally:
+        os.close(root_fd)
+
+
 def _run_json_command(
     binary: _CodexBinaryProbe,
     command: tuple[str, ...],
@@ -861,16 +903,13 @@ def inspect_activation(
     if installed:
         try:
             cache_members = _source_cache_members(target, codex_version=binary.codex_version)
-            local_digest = _installed_cache_digest(
-                _cache_version_path(_cache_root(home), __version__), cache_members
-            )
+            local_digest = _installed_cache_digest_anchored(home, __version__, cache_members)
             if _canonical_inventory:
                 inventory_installed, version = _plugin_inventory(binary, project, _run=_run)
                 if inventory_installed:
                     assert version is not None
-                    plugin_cached = _installed_cache_digest(
-                        _cache_version_path(_cache_root(home), version),
-                        cache_members,
+                    plugin_cached = _installed_cache_digest_anchored(
+                        home, version, cache_members
                     ) == _members_digest(cache_members)
                 elif _cache_root_has_entries(home):
                     cache_foreign = True
@@ -1014,7 +1053,7 @@ def _activation_plan(
     plugin_install_digest = _members_digest(cache_members)
     plugin_cache_root = _cache_root(home)
     plugin_install_path = _cache_version_path(plugin_cache_root, __version__)
-    cache_before = _installed_cache_digest(plugin_install_path, cache_members)
+    cache_before = _installed_cache_digest_anchored(home, __version__, cache_members)
     digest_body = (
         b"yoetz.codex-marketplace-activation/2\0"
         + str(home).encode("utf-8")
@@ -1556,7 +1595,9 @@ def apply_activation(
                     # marker-identified prior render's digest as ``cache_before``.
                     # Replace only those exact bytes; anything else is stale.
                     if (
-                        _installed_cache_digest(preview.plugin_install_path, plan.cache_members)
+                        _installed_cache_digest_anchored(
+                            binary.codex_home, __version__, plan.cache_members
+                        )
                         != plan.cache_before
                     ):
                         raise _error(IntegrationReason.PREVIEW_STALE)
@@ -1566,7 +1607,9 @@ def apply_activation(
                         anchor_root=binary.codex_home,
                     )
                     if (
-                        _installed_cache_digest(preview.plugin_install_path, plan.cache_members)
+                        _installed_cache_digest_anchored(
+                            binary.codex_home, __version__, plan.cache_members
+                        )
                         != preview.plugin_install_digest
                     ):
                         raise _error(IntegrationReason.WRITE_FAILED)
@@ -1588,7 +1631,9 @@ def apply_activation(
                 )
                 cache_created = _validate_add_result(add_result, preview)
                 if (
-                    _installed_cache_digest(cache_created, plan.cache_members)
+                    _installed_cache_digest_anchored(
+                        binary.codex_home, __version__, plan.cache_members
+                    )
                     != preview.plugin_install_digest
                 ):
                     # ``plugin add`` copies the canonical project source; the
@@ -1601,7 +1646,9 @@ def apply_activation(
                         anchor_root=binary.codex_home,
                     )
                     if (
-                        _installed_cache_digest(cache_created, plan.cache_members)
+                        _installed_cache_digest_anchored(
+                            binary.codex_home, __version__, plan.cache_members
+                        )
                         != preview.plugin_install_digest
                     ):
                         raise _error(IntegrationReason.WRITE_FAILED)
@@ -1785,13 +1832,61 @@ def _marketplace_json_owned(path: Path) -> bool:
 
 
 def _managed_cache_versions(
-    root: Path, expected: Mapping[str, bytes], *, include_all_managed: bool
+    root: Path,
+    expected: Mapping[str, bytes],
+    *,
+    include_all_managed: bool,
+    anchor_root: Path | None = None,
 ) -> tuple[tuple[str, str], ...]:
     """List yoetz-managed version dirs that this removal may delete.
 
     Foreign or unexpected members refuse. Other-version managed trees require
     ``--purge-cache`` so default removal cannot delete extra version dirs.
     """
+
+    if anchor_root is not None:
+        try:
+            relative_root = root.relative_to(anchor_root)
+        except ValueError as exc:
+            raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+        try:
+            root_fd = _open_anchored_directory(
+                anchor_root,
+                relative_root,
+                missing_reason=IntegrationReason.PREVIEW_STALE,
+            )
+        except IntegrationError as exc:
+            if exc.reason is IntegrationReason.PREVIEW_STALE:
+                return ()
+            raise
+        try:
+            names = _bounded_directory_names(root_fd)
+            versions: list[tuple[str, str]] = []
+            for name in names:
+                if _VERSION_RE.fullmatch(name) is None:
+                    _refuse_conflict("cache")
+                try:
+                    opened = _open_managed_cache_digest_at(
+                        root_fd,
+                        name,
+                        expected,
+                        mismatch_reason=IntegrationReason.DESTINATION_CONFLICT,
+                    )
+                except IntegrationError as exc:
+                    if exc.reason is IntegrationReason.DESTINATION_CONFLICT:
+                        _refuse_conflict("cache")
+                    raise
+                if opened is None:
+                    _refuse_conflict("cache")
+                descriptor, digest, _approved_members = opened
+                os.close(descriptor)
+                if name == __version__ or include_all_managed:
+                    versions.append((name, digest))
+                else:
+                    _refuse_conflict("cache")
+            return tuple(versions)
+        finally:
+            os.close(root_fd)
 
     if not root.exists():
         return ()
@@ -1886,7 +1981,10 @@ def _removal_plan(
     cache_root = _cache_root(home)
     _validate_descendant_ancestors(home, Path("plugins/cache/yoetz/yoetz"))
     cache_digests = _managed_cache_versions(
-        cache_root, cache_members, include_all_managed=purge_cache
+        cache_root,
+        cache_members,
+        include_all_managed=purge_cache,
+        anchor_root=home,
     )
     if cache_digests:
         _require_safe_cache_removal_primitives()
@@ -2187,7 +2285,11 @@ def _read_managed_tree_fd(root_fd: int) -> dict[str, bytes]:
 
 
 def _open_managed_cache_digest_at(
-    root_fd: int, name: str, expected_members: Mapping[str, bytes]
+    root_fd: int,
+    name: str,
+    expected_members: Mapping[str, bytes],
+    *,
+    mismatch_reason: IntegrationReason = IntegrationReason.PREVIEW_STALE,
 ) -> tuple[int, str, Mapping[str, bytes]] | None:
     """Open and validate one managed cache tree, retaining its exact directory inode."""
 
@@ -2201,7 +2303,7 @@ def _open_managed_cache_digest_at(
         _owned_stat_not_writable(os.fstat(descriptor), directory=True)
         actual = _read_managed_tree_fd(descriptor)
         if actual != dict(expected_members) and not plugin_tree_matches_marker(actual):
-            raise _error(IntegrationReason.PREVIEW_STALE)
+            raise _error(mismatch_reason)
         return descriptor, _members_digest(actual), actual
     except BaseException:
         os.close(descriptor)
@@ -2716,8 +2818,11 @@ def apply_removal(
                     _run=_run,
                     timeout=_PLUGIN_ADD_TIMEOUT_SECONDS,
                 )
-            except IntegrationError as exc:
-                if exc.reason is IntegrationReason.WRITE_FAILED:
+            except Exception as exc:
+                if (
+                    isinstance(exc, IntegrationError)
+                    and exc.reason is IntegrationReason.WRITE_FAILED
+                ):
                     raise
                 raise _error(IntegrationReason.WRITE_FAILED) from exc
         if preview.marketplace_remove_planned:
@@ -2729,11 +2834,19 @@ def apply_removal(
                     _run=_run,
                     timeout=_PLUGIN_ADD_TIMEOUT_SECONDS,
                 )
-            except IntegrationError as exc:
-                if exc.reason is IntegrationReason.WRITE_FAILED:
+            except Exception as exc:
+                if (
+                    isinstance(exc, IntegrationError)
+                    and exc.reason is IntegrationReason.WRITE_FAILED
+                ):
                     raise
                 raise _error(IntegrationReason.WRITE_FAILED) from exc
-        current_config = _current_bytes(config_path)
+        try:
+            current_config = _current_bytes(config_path)
+        except IntegrationError as exc:
+            if mutation_started and exc.reason is not IntegrationReason.WRITE_FAILED:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+            raise
         if current_config is None:
             current_config = b""
         try:

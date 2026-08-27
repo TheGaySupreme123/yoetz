@@ -79,6 +79,7 @@ class _FakeCodex:
         self.conflict_after_marketplace_remove = False
         self.repository_marketplace_conflict_after_remove = False
         self.malformed_after_mutation: set[tuple[str, ...]] = set()
+        self.error_after_mutation: Exception | None = None
         self.codex_version = codex_version
 
     def __call__(
@@ -165,6 +166,11 @@ class _FakeCodex:
             body = {"name": "yoetz"}
         else:
             raise AssertionError(command)
+        if self.error_after_mutation is not None and args in {
+            ("plugin", "remove", "yoetz@yoetz", "--json"),
+            ("plugin", "marketplace", "remove", "yoetz", "--json"),
+        }:
+            raise self.error_after_mutation
         if args in self.malformed_after_mutation:
             return subprocess.CompletedProcess(command, 0, stdout=b'{"truncated":', stderr=b"")
         return subprocess.CompletedProcess(
@@ -695,6 +701,41 @@ def test_cache_replacement_refuses_ancestor_swap_after_validation(tmp_path: Path
     assert sentinel.read_bytes() == b"outside"
 
 
+def test_removal_preview_refuses_cache_ancestor_swap_after_validation(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations import codex_marketplace as module
+    from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
+
+    home = tmp_path / "codex-home"
+    cache_root = home / "plugins/cache/yoetz/yoetz"
+    cache = cache_root / "0.1.0"
+    cache.mkdir(parents=True)
+    expected = render_plugin_install_tree(codex_version="0.148.0-alpha.6")
+    for relative, payload in expected.items():
+        member = cache / relative
+        member.parent.mkdir(parents=True, exist_ok=True)
+        member.write_bytes(payload)
+    module._validate_descendant_ancestors(  # pyright: ignore[reportPrivateUsage]
+        home,
+        Path("plugins/cache/yoetz/yoetz"),
+    )
+    outside = tmp_path / "outside-cache"
+    (home / "plugins").rename(outside)
+    (home / "plugins").symlink_to(outside, target_is_directory=True)
+    sentinel = outside / "cache/yoetz/yoetz/0.1.0/sentinel.txt"
+    sentinel.write_bytes(b"outside")
+
+    with pytest.raises(IntegrationError) as caught:
+        module._managed_cache_versions(  # pyright: ignore[reportPrivateUsage]
+            cache_root,
+            expected,
+            include_all_managed=False,
+            anchor_root=home,
+        )
+
+    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+    assert sentinel.read_bytes() == b"outside"
+
+
 def test_stale_digest_refuses_without_writing(tmp_path: Path) -> None:
     target, project, home = _target(tmp_path)
     _install(target)
@@ -1201,6 +1242,79 @@ def test_post_host_mutation_marketplace_conflict_is_write_failed(tmp_path: Path)
     assert caught.value.safe_details["conflict"] == "repository_marketplace"
     assert marketplace.read_bytes() == b'{"name":"foreign"}\n'
     assert not (home / "plugins/cache/yoetz/yoetz/0.1.0").exists()
+
+
+def test_post_host_mutation_config_read_error_is_write_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.adapters.integrations import codex_marketplace as module
+
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    runner = _FakeCodex(target, home)
+    preview = _preview_removal(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        _run=runner,
+    )
+    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    config = home / "config.toml"
+    real_current_bytes = module._current_bytes  # pyright: ignore[reportPrivateUsage]
+
+    def fail_after_remove(path: Path) -> bytes | None:
+        if path == config and not cache.exists():
+            raise module._error(  # pyright: ignore[reportPrivateUsage]
+                IntegrationReason.TARGET_UNSAFE
+            )
+        return real_current_bytes(path)
+
+    monkeypatch.setattr(module, "_current_bytes", fail_after_remove)
+    with pytest.raises(IntegrationError) as caught:
+        _apply_removal(
+            target,
+            executable_path=str(runner.executable),
+            approved_digest=preview.preview_digest,
+            codex_home=home,
+            _run=runner,
+        )
+
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
+    assert not cache.exists()
+
+
+def test_mutating_host_runner_error_is_write_failed(tmp_path: Path) -> None:
+    from yoetz.adapters.integrations import codex_marketplace as module
+
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    activation = preview_activation(target, codex_home=home)
+    apply_activation(target, codex_home=home, approved_digest=activation.preview_digest)
+    runner = _FakeCodex(target, home)
+    preview = _preview_removal(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        _run=runner,
+    )
+    cache = home / "plugins/cache/yoetz/yoetz/0.1.0"
+    runner.error_after_mutation = module._error(  # pyright: ignore[reportPrivateUsage]
+        IntegrationReason.TARGET_UNSAFE
+    )
+
+    with pytest.raises(IntegrationError) as caught:
+        _apply_removal(
+            target,
+            executable_path=str(runner.executable),
+            approved_digest=preview.preview_digest,
+            codex_home=home,
+            _run=runner,
+        )
+
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
+    assert not cache.exists()
 
 
 @pytest.mark.parametrize("host_surface", ["plugin", "marketplace"])
