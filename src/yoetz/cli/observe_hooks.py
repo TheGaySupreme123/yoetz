@@ -1143,7 +1143,9 @@ def _note_dropped_event_gap(
     commitment: str | None = None
     if workspace is not None:
         try:
-            locator = str(Path(workspace).expanduser().resolve(strict=False))
+            locator = canonical_workspace_locator(workspace)
+            if locator is None:
+                raise ValueError("workspace_locator_invalid")
             candidate = store.workspace_commitment(locator)
             consent = store.consent_for(candidate)
             if consent is not None and consent.active:

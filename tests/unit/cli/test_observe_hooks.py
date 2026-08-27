@@ -477,6 +477,35 @@ def test_unsafe_runtime_gate_records_workspace_gap_when_consented(tmp_path: Path
     assert ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value in status.gaps
 
 
+def test_unsafe_runtime_gate_canonicalizes_git_subdirectory_gap(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repo"
+    nested = repository / "packages/app"
+    nested.mkdir(parents=True)
+    (repository / ".git").mkdir()
+    store = LocalObservationStore(_state=state)
+    root_commitment = store.workspace_commitment(str(repository))
+    nested_commitment = store.workspace_commitment(str(nested))
+    store.grant_consent(root_commitment)
+    store.set_runtime_enabled(True)
+    gate = state / "observation/runtime-gate.json"
+    gate.write_text("not-json", encoding="utf-8")
+
+    handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {"session_id": "unsafe-gate-subdirectory", "tool_name": "shell"}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(nested),
+        _state=state,
+    )
+
+    status = store.status(ObservationStatusQuery(root_commitment))
+    assert ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value in status.gaps
+    assert store.consent_for(nested_commitment) is None
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO gate regression is POSIX-only")
 def test_runtime_gate_fifo_fails_closed_without_blocking(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
