@@ -593,25 +593,15 @@ class ObservationCoordinator:
                         if (
                             append_result is not None
                             and append_result.outcome == "replayed"
-                            and resolved_mapping_version == MATERIALIZATION_MAPPING_VERSION
                             and correction.skip_reason is None
                             and correction.drafts
                         ):
-                            core_result = next(
-                                (
-                                    item.draft.payload
-                                    for item in batch.drafts
-                                    if type(item.draft.payload) is ResultRecordedPayload
-                                ),
-                                None,
-                            )
                             projection = await runtime.ledger.load_projection(
                                 runtime.session_id,
                                 ProjectionView.CANDIDATE_FINDINGS,
                             )
                             if (
-                                type(core_result) is not ResultRecordedPayload
-                                or projection is None
+                                projection is None
                                 or type(projection.state) is not ProjectionState
                                 or projection.lag != 0
                                 or projection.rebuild_required
@@ -621,13 +611,54 @@ class ObservationCoordinator:
                                     "Observation outcome projection is unavailable.",
                                     retryable=True,
                                 )
-                            existing_result = projection.state.results.get(core_result.result_id)
+                            if resolved_mapping_version == MATERIALIZATION_MAPPING_VERSION:
+                                core_result = next(
+                                    (
+                                        item.draft.payload
+                                        for item in batch.drafts
+                                        if type(item.draft.payload) is ResultRecordedPayload
+                                    ),
+                                    None,
+                                )
+                                if type(core_result) is not ResultRecordedPayload:
+                                    raise PublicOperationError(
+                                        PublicErrorCode.SERVICE_UNAVAILABLE,
+                                        "Observation outcome projection is unavailable.",
+                                        retryable=True,
+                                    )
+                                core_result_id = core_result.result_id
+                                existing_result = projection.state.results.get(core_result_id)
+                            else:
+                                # A replayed legacy-mapping operation committed
+                                # its graph under pre-upgrade record identities
+                                # that cannot be re-derived here, and it may be a
+                                # legacy hook operation whose result is UNKNOWN.
+                                # Its accepted event ids are the exact link to
+                                # the committed result, so consult that result
+                                # before deciding whether the explicit stream
+                                # outcome still needs a correction (#418).
+                                accepted_event_ids = {
+                                    item.event_id for item in append_result.accepted
+                                }
+                                committed_results = [
+                                    (candidate_id, record)
+                                    for candidate_id, record in (projection.state.results.items())
+                                    if record.source_event_id in accepted_event_ids
+                                ]
+                                if len(committed_results) != 1:
+                                    raise PublicOperationError(
+                                        PublicErrorCode.SERVICE_UNAVAILABLE,
+                                        "Observation outcome projection is unavailable.",
+                                        retryable=True,
+                                    )
+                                core_result_id, existing_result = committed_results[0]
                             if existing_result is None or existing_result.payload is None:
                                 raise PublicOperationError(
                                     PublicErrorCode.SERVICE_UNAVAILABLE,
                                     "Observation outcome projection is unavailable.",
                                     retryable=True,
                                 )
+                            existing_payload = existing_result.payload
                             correction_payload = correction.drafts[0].draft.payload
                             if type(correction_payload) is not ResultRecordedPayload:
                                 raise PublicOperationError(
@@ -640,29 +671,49 @@ class ObservationCoordinator:
                                 correction_payload.exit_status,
                             )
                             existing_fact = (
-                                existing_result.payload.outcome,
-                                existing_result.payload.exit_status,
+                                existing_payload.outcome,
+                                existing_payload.exit_status,
                             )
                             prior_corrections = tuple(
                                 record.payload
                                 for result_id, record in projection.state.results.items()
-                                if result_id != core_result.result_id
+                                if result_id != core_result_id
                                 and record.payload is not None
-                                and record.payload.action_id == core_result.action_id
+                                and record.payload.action_id == existing_payload.action_id
                             )
                             conflict = (
-                                existing_result.payload.outcome is not ResultOutcome.UNKNOWN
+                                existing_payload.outcome is not ResultOutcome.UNKNOWN
                                 and existing_fact != incoming_fact
                             ) or any(
                                 (item.outcome, item.exit_status) != incoming_fact
                                 for item in prior_corrections
                             )
                             should_correct = (
-                                existing_result.payload.outcome is ResultOutcome.UNKNOWN
+                                existing_payload.outcome is ResultOutcome.UNKNOWN
                                 or existing_fact != incoming_fact
                             )
                             if should_correct:
-                                if conflict:
+                                if resolved_mapping_version != MATERIALIZATION_MAPPING_VERSION:
+                                    # Bind the correction to the exact committed
+                                    # legacy action (and its committed event as
+                                    # causal parent when the projection still
+                                    # exposes it) instead of the current
+                                    # canonical action identities.
+                                    action_record = projection.state.actions.get(
+                                        existing_payload.action_id
+                                    )
+                                    correction = materialize_observation_outcome_correction(
+                                        envelope,
+                                        task_id=runtime.task_id,
+                                        conflict=conflict,
+                                        target_action_id=existing_payload.action_id,
+                                        target_action_event_id=(
+                                            action_record.source_event_id
+                                            if action_record is not None
+                                            else None
+                                        ),
+                                    )
+                                elif conflict:
                                     correction = materialize_observation_outcome_correction(
                                         envelope,
                                         task_id=runtime.task_id,

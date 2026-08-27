@@ -735,12 +735,18 @@ def materialize_observation_outcome_correction(
     *,
     task_id: str,
     conflict: bool = False,
+    target_action_id: str | None = None,
+    target_action_event_id: str | None = None,
 ) -> MaterializedObservationBatch:
     """Append an explicit stream outcome that enriches an earlier UNKNOWN hook result.
 
     Historical action/result rows stay immutable. The correction is a second,
     source-independent result linked to the same canonical action, so retries are
-    idempotent and explicit host failure/success facts remain visible.
+    idempotent and explicit host failure/success facts remain visible. A replayed
+    legacy-mapping operation committed its graph under pre-upgrade record
+    identities; ``target_action_id`` (with an optional committed action event as
+    causal parent) binds the correction to that exact committed action instead of
+    the current canonical one.
     """
 
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
@@ -762,20 +768,32 @@ def materialize_observation_outcome_correction(
 
     family = _action_kind(tool).value
     action_source = f"pre:{correlation}:{family}"
-    action = stable_observation_id(
-        kind=IdKind.ACTION,
-        task_id=task_id,
-        source_identity=action_source,
-        mapping_version=MATERIALIZATION_MAPPING_VERSION,
-        role="action",
-    )
-    action_event = stable_observation_id(
-        kind=IdKind.EVENT,
-        task_id=task_id,
-        source_identity=action_source,
-        mapping_version=MATERIALIZATION_MAPPING_VERSION,
-        role="action_event",
-    )
+    if target_action_id is not None:
+        action = action_id(target_action_id)
+        action_parents = (
+            (event_id(target_action_event_id),) if target_action_event_id is not None else ()
+        )
+    else:
+        action = action_id(
+            stable_observation_id(
+                kind=IdKind.ACTION,
+                task_id=task_id,
+                source_identity=action_source,
+                mapping_version=MATERIALIZATION_MAPPING_VERSION,
+                role="action",
+            )
+        )
+        action_parents = (
+            event_id(
+                stable_observation_id(
+                    kind=IdKind.EVENT,
+                    task_id=task_id,
+                    source_identity=action_source,
+                    mapping_version=MATERIALIZATION_MAPPING_VERSION,
+                    role="action_event",
+                )
+            ),
+        )
     exit_status = _exit_status(structural)
     correction_source = (
         f"outcome-correction:{correlation}:{family}:{outcome.value}:"
@@ -820,7 +838,7 @@ def materialize_observation_outcome_correction(
         occurred_at=envelope.receipt_time,
         payload=ResultRecordedPayload(
             result_id(result),
-            action_id(action),
+            action,
             outcome,
             exit_status=exit_status,
             summary=(
@@ -829,7 +847,7 @@ def materialize_observation_outcome_correction(
                 else f"Observed corrected result status={outcome.value}"
             ),
         ),
-        parents=(action_event,),
+        parents=action_parents,
         role=correction_role,
     )
     return MaterializedObservationBatch((draft,), coverage, channel, gaps, None)

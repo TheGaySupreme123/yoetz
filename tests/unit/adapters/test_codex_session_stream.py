@@ -125,7 +125,27 @@ def test_incremental_partial_header_still_requires_exact_profile_admission(
     assert completed.envelopes == ()
     assert ObservationGapCode.UNSUPPORTED_FORMAT.value in completed.gaps
     assert completed.cursor.byte_position == len(first) + 1
-    assert completed.cursor.event_position == 1
+    assert completed.cursor.event_position == 0
+
+    # A rejected header keeps admission durably required: later appends are
+    # refused instead of being materialized without an accepted exact profile.
+    path.write_bytes(
+        first
+        + b"\n"
+        + encode_lines(
+            response_item(
+                {
+                    "content": [{"text": "later", "type": "output_text"}],
+                    "role": "assistant",
+                    "type": "message",
+                }
+            )
+        )
+    )
+    appended = reader.advance(path)
+    assert appended.envelopes == ()
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value in appended.gaps
+    assert appended.cursor.event_position == 0
 
 
 def test_completed_oversized_line_advances_and_later_records_remain_reachable(
@@ -259,9 +279,25 @@ def test_oversized_initial_header_never_establishes_profile_admission(tmp_path: 
     ).advance(path)
 
     assert completed.envelopes == ()
-    assert completed.cursor.event_position == 1
+    assert completed.cursor.event_position == 0
     assert completed.cursor.byte_position == path.stat().st_size
     assert ObservationGapCode.UNSUPPORTED_FORMAT.value in completed.gaps
+
+    # The refusal is durable: appending an exact header and a record afterwards
+    # never materializes events for a generation whose first line was rejected.
+    with path.open("ab") as handle:
+        handle.write(encode_lines(session_meta()))
+    refused = SessionStreamReader(
+        session_commitment=session,
+        profile=profile,
+        cursor=completed.cursor,
+        key_material=_KEY,
+        partial_line=completed.partial_line,
+    ).advance(path)
+    assert refused.envelopes == ()
+    assert refused.cursor.event_position == 0
+    assert refused.cursor.byte_position == completed.cursor.byte_position
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value in refused.gaps
 
 
 def test_truncation_bumps_generation(tmp_path: Path) -> None:

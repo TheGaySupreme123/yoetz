@@ -2989,7 +2989,7 @@ async def test_later_stream_failure_correction_projection_policy(
     from yoetz.application.observation_materialize import (
         observation_operation_digest as _digest,
     )
-    from yoetz.domain.events import ResultRecordedPayload, encode_payload
+    from yoetz.domain.events import ActionRecordedPayload, ResultRecordedPayload, encode_payload
     from yoetz.domain.values import Frontier
     from yoetz.kernel.projections import ProjectionRecord, empty_projection_state
     from yoetz.ports.ledger import (
@@ -3017,6 +3017,7 @@ async def test_later_stream_failure_correction_projection_policy(
     store = SqliteObservationStore(db)
     core_unknown: MaterializedObservationBatch | None = None
     appended_roles: list[tuple[str, ...]] = []
+    appended_batches: list[MaterializedObservationBatch] = []
     head = "sha256:" + "a" * 64
     projection_state = [projection_mode]
 
@@ -3027,10 +3028,11 @@ async def test_later_stream_failure_correction_projection_policy(
             assert loaded_session == mapping.yoetz_session_id
             assert view is ProjectionView.CANDIDATE_FINDINGS
             assert core_unknown is not None
-            assert projection_state[0] != "legacy_mapping"
             if projection_state[0] == "missing":
                 return None
             batch = core_unknown
+            action_draft = batch.drafts[0]
+            action_payload = cast(ActionRecordedPayload, action_draft.draft.payload)
             result_draft = batch.drafts[1]
             payload = cast(ResultRecordedPayload, result_draft.draft.payload)
             results = {
@@ -3048,6 +3050,15 @@ async def test_later_stream_failure_correction_projection_policy(
                 empty_projection_state(),
                 frontier=1,
                 head_digest=head,
+                actions={
+                    action_payload.action_id: ProjectionRecord(
+                        action_payload,
+                        canonical_digest(encode_payload(action_payload)),
+                        False,
+                        action_draft.draft.event_id,
+                        1,
+                    )
+                },
                 results=results,
             )
             return StoredProjection(
@@ -3098,6 +3109,7 @@ async def test_later_stream_failure_correction_projection_policy(
             del legacy_writer_id
             roles = tuple(item.role for item in batch.drafts)
             appended_roles.append(roles)
+            appended_batches.append(batch)
             resolved_version = (
                 MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
                 if projection_mode == "legacy_mapping"
@@ -3210,16 +3222,21 @@ async def test_later_stream_failure_correction_projection_policy(
     masks = db.execute(
         "SELECT source_mask FROM observation_logical_identity ORDER BY source_mask"
     ).fetchall()
+    assert appended_roles[-1] == ("result_correction_failure_9",)
+    assert appended_roles.count(("result_correction_failure_9",)) == 1
+    assert [row[0] for row in masks] == [2, 3]
     if projection_mode == "legacy_mapping":
-        # A replayed 1.2 stream operation already contains its explicit result;
-        # its result IDs predate 1.3 correction identities, so it must neither
-        # consult the 1.3 projection nor append a duplicate correction.
-        assert appended_roles == [("action", "result"), ("action", "result")]
-        assert [row[0] for row in masks] == [3]
-    else:
-        assert appended_roles[-1] == ("result_correction_failure_9",)
-        assert appended_roles.count(("result_correction_failure_9",)) == 1
-        assert [row[0] for row in masks] == [2, 3]
+        # A replayed legacy operation may be a pre-upgrade hook UNKNOWN; the
+        # coordinator consults the committed result via its accepted event ids
+        # and binds the explicit correction to that exact committed action.
+        assert core_unknown is not None
+        core_action = cast(ActionRecordedPayload, core_unknown.drafts[0].draft.payload)
+        correction_batch = appended_batches[-1]
+        correction_result = cast(ResultRecordedPayload, correction_batch.drafts[0].draft.payload)
+        assert correction_result.action_id == core_action.action_id
+        assert correction_batch.drafts[0].draft.causal_parents == (
+            core_unknown.drafts[0].draft.event_id,
+        )
 
 
 @pytest.mark.anyio

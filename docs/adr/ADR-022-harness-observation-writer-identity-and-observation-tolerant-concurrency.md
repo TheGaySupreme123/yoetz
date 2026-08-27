@@ -86,9 +86,13 @@ unsupported claims and unbounded duplicate findings.
    cooperative writer for committed `1.3.0` and `1.2.0` operations. A `1.2.0` hit carries that
    mapping version through logical-identity claim repair, preserving the original operation and
    claim identities for a committed-but-unacknowledged outbox row instead of duplicating them. A
-   replayed `1.2.0` stream operation already contains that version's host-stated result and does not
-   enter the `1.3.0` result-correction path, whose canonical result identities did not exist in
-   `1.2.0`.
+   replayed `1.2.0` operation cannot be assumed to carry a host-stated result: it may be a
+   pre-upgrade hook operation whose committed result is `UNKNOWN`. Its `1.2.0` record identities
+   cannot be re-derived under `1.3.0`, so the correction path consults the committed result through
+   the replayed operation's accepted event ids, skips the correction only when the committed result
+   already states the same explicit fact, and otherwise binds the correction (with `dedup_conflict`
+   coverage on a contradictory explicit fact) to the exact committed legacy action and its committed
+   action event as causal parent.
 
 7. Deterministic advice finding IDs are condition-scoped over policy, kind, rule code, and detail
    token. Evidence refs prove the condition but never identify it: several rules intentionally cite

@@ -643,6 +643,24 @@ class SessionStreamReader:
         self._source_identity = source_identity
         self._size_at_generation = size
 
+        if event_position == 0 and byte_position > 0 and not self.partial_line:
+            # Refused admission is durable for this generation: consumed bytes with
+            # no admitted event mean the first complete line was rejected, so no
+            # later append may materialize without an accepted exact header. Only
+            # rotation or truncation (a fresh generation) re-opens admission.
+            cursor = ObservationCursor(
+                source_generation=generation,
+                byte_position=byte_position,
+                event_position=0,
+                last_source_commitment=last_commitment,
+                mapping_version=STREAM_MAPPING_VERSION,
+            )
+            self.cursor = cursor
+            gaps.add(ObservationGapCode.UNSUPPORTED_FORMAT.value)
+            return SessionStreamAdvance(
+                (), cursor, b"", tuple(sorted(gaps, key=str.encode)), restarted, truncated, rotated
+            )
+
         partial_source_bytes = 0 if oversized_state is not None else len(self.partial_line)
         to_read = min(_MAX_READ_CHUNK, max(0, size - (byte_position + partial_source_bytes)))
         if to_read == 0 and not self.partial_line:
@@ -732,7 +750,8 @@ class SessionStreamReader:
                 source_identity=source_identity,
                 key_material=self.key_material,
             )
-            event_position += 1
+            if not require_admission:
+                event_position += 1
             cursor = ObservationCursor(
                 source_generation=generation,
                 byte_position=byte_end,
@@ -743,6 +762,9 @@ class SessionStreamReader:
             self.cursor = cursor
             self.partial_line = b""
             if require_admission:
+                # The oversized first line never established admission. Leaving
+                # the ordinal at zero with consumed bytes keeps this generation
+                # durably refused instead of quietly admitting later appends.
                 gaps.add(ObservationGapCode.UNSUPPORTED_FORMAT.value)
                 oversized_envelopes: tuple[ObservationEnvelope, ...] = ()
             else:
@@ -836,15 +858,7 @@ class SessionStreamReader:
                     gaps.add(ObservationGapCode.TRUNCATED_PAYLOAD.value)
                 break
             consumed = line.byte_end
-            event_position += 1
             last_commitment = stream_line_commitment(self.key_material, line.content)
-            abs_cursor = ObservationCursor(
-                source_generation=generation,
-                byte_position=byte_position + consumed,
-                event_position=event_position,
-                last_source_commitment=last_commitment,
-                mapping_version=STREAM_MAPPING_VERSION,
-            )
             record = next(
                 (item for item in parsed.records if item.line_ordinal == line.ordinal),
                 None,
@@ -857,16 +871,36 @@ class SessionStreamReader:
                     and index == 0
                     and status in {ImportLineStatus.MALFORMED, ImportLineStatus.OVERSIZED}
                 ):
+                    # A refused or never-admitted line consumes its bytes but
+                    # never advances the event ordinal, so admission stays
+                    # required instead of silently lapsing after a rejected
+                    # header once event_position moved past zero.
                     gaps.add(ObservationGapCode.UNSUPPORTED_FORMAT.value)
-                elif index < len(parsed.statuses):
+                    continue
+                event_position += 1
+                if index < len(parsed.statuses):
                     gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
                     envelopes.append(
                         _opaque_stream_envelope(
                             session_commitment=self.session_commitment,
-                            cursor=abs_cursor,
+                            cursor=ObservationCursor(
+                                source_generation=generation,
+                                byte_position=byte_position + consumed,
+                                event_position=event_position,
+                                last_source_commitment=last_commitment,
+                                mapping_version=STREAM_MAPPING_VERSION,
+                            ),
                         )
                     )
                 continue
+            event_position += 1
+            abs_cursor = ObservationCursor(
+                source_generation=generation,
+                byte_position=byte_position + consumed,
+                event_position=event_position,
+                last_source_commitment=last_commitment,
+                mapping_version=STREAM_MAPPING_VERSION,
+            )
             # Rewrite record ordinal to the absolute event position for identity stability.
             positioned = CodexParsedRecord(
                 event_position,
@@ -884,6 +918,11 @@ class SessionStreamReader:
                 )
             )
 
+        if "unsupported_codex_profile" in parsed.stream_gaps and consumed > 0:
+            # A refused chunk holds no tail: the durable refused state is exactly
+            # (event_position == 0, consumed bytes, empty partial), and every
+            # later line of a refused generation is equally unsupported.
+            hold = b""
         new_byte = byte_position + consumed
         self.partial_line = hold
         cursor = ObservationCursor(

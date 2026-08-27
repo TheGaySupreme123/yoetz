@@ -2638,7 +2638,10 @@ while hook/stream copies of the same phase still share a claim and merge its two
 The claim stores the source-independent materialization version, never the hook/stream cursor
 version (issue #309). Before staging under `obs-ledger/1.3.0`, upgrade replay checks the current and
 legacy observation writers for committed `1.3.0` and `1.2.0` operations; a `1.2.0` hit repairs its
-claim with the original mapping version and does not enter the newer correction path. A later
+claim with the original mapping version. Because a replayed `1.2.0` operation may be a pre-upgrade
+hook operation whose result is `UNKNOWN`, it still enters the correction path: the committed result
+is consulted through the replayed operation's accepted event ids (its `1.2.0` record identities
+cannot be re-derived), and a still-needed correction binds to that exact committed action. A later
 explicit session-stream outcome enriches an earlier hook `UNKNOWN` through an append-only
 `result_correction` linked to the same canonical action; it never rewrites, downgrades, or silently
 overwrites an explicit result. Exact correction retries replay; a contradictory explicit outcome
