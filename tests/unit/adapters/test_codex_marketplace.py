@@ -1950,7 +1950,7 @@ def test_cache_removal_does_not_reopen_replaced_quarantine_path(
     assert (replacements[0] / "sentinel.txt").read_bytes() == b"foreign"
 
 
-@pytest.mark.parametrize("mutation", ["modify", "add"])
+@pytest.mark.parametrize("mutation", ["modify", "add", "empty_directory"])
 def test_cache_removal_revalidates_exact_quarantine_contents_before_delete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1986,7 +1986,7 @@ def test_cache_removal_revalidates_exact_quarantine_contents_before_delete(
                 os.write(member_fd, b"changed")
             finally:
                 os.close(member_fd)
-        else:
+        elif mutation == "add":
             member_fd = os.open(
                 "added.txt",
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL,
@@ -1997,6 +1997,8 @@ def test_cache_removal_revalidates_exact_quarantine_contents_before_delete(
                 os.write(member_fd, b"foreign")
             finally:
                 os.close(member_fd)
+        else:
+            os.mkdir("empty", mode=0o700, dir_fd=descriptor)
         original_remove(root_fd, name, descriptor, approved_members)
 
     monkeypatch.setattr(module, "_remove_validated_directory", mutate_before_remove)
@@ -2012,8 +2014,10 @@ def test_cache_removal_revalidates_exact_quarantine_contents_before_delete(
     assert version.is_dir()
     if mutation == "modify":
         assert (version / "hooks/hooks.json").read_bytes() == b"changed"
-    else:
+    elif mutation == "add":
         assert (version / "added.txt").read_bytes() == b"foreign"
+    else:
+        assert (version / "empty").is_dir()
 
 
 def test_cache_removal_restores_quarantine_on_race_before_first_unlink(
@@ -2321,7 +2325,10 @@ def test_cache_removal_normalizes_every_post_quarantine_error(
         )
 
     assert caught.value.reason is IntegrationReason.WRITE_FAILED
-    assert any(candidate.name.startswith(".yoetz-cache-remove-") for candidate in root.iterdir())
+    assert version.is_dir()
+    assert not any(
+        candidate.name.startswith(".yoetz-cache-remove-") for candidate in root.iterdir()
+    )
 
 
 def test_purge_cache_deletes_other_managed_versions(tmp_path: Path) -> None:

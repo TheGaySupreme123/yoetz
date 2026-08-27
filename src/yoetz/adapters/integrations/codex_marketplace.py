@@ -2706,12 +2706,13 @@ def _delete_managed_cache_versions(
                         approved_members,
                     )
                 except IntegrationError as exc:
-                    if exc.reason is not IntegrationReason.PREVIEW_STALE:
-                        if exc.reason is IntegrationReason.WRITE_FAILED:
-                            raise
-                        raise _error(IntegrationReason.WRITE_FAILED) from exc
+                    if exc.reason is IntegrationReason.WRITE_FAILED:
+                        raise
                     # No member was deleted: restore the exact retained inode when the original
-                    # version name is still absent. A failed restore is an outcome-unknown write.
+                    # version name is still absent. `_remove_validated_directory` converts every
+                    # error after its first unlink to WRITE_FAILED, so every other reason is an
+                    # initial-validation failure eligible for this recovery. A failed restore is
+                    # itself an outcome-unknown write.
                     try:
                         quarantine_current = os.stat(
                             quarantine,
