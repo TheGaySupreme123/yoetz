@@ -70,9 +70,7 @@ def _request(value: str | None) -> RequestId:
     return request_id(new_id(IdKind.REQUEST) if value is None else value)
 
 
-def _artifact(
-    ownership_name: str, route_name: str | None
-) -> ClaudeCodePluginArtifact:
+def _artifact(ownership_name: str, route_name: str | None) -> ClaudeCodePluginArtifact:
     ownerships = {
         "external-registration": McpOwnership.EXTERNAL_REGISTRATION,
         "plugin-managed": McpOwnership.PLUGIN_MANAGED,
@@ -144,15 +142,20 @@ def run_claude_code_plugin_command(
 ) -> int:
     """Run one explicit Claude Code CLI/local/project marketplace operation."""
 
-    if harness != "claude" or format_name != "native" or command not in {
-        "preview",
-        "install",
-        "update",
-        "enable",
-        "disable",
-        "status",
-        "remove",
-    }:
+    if (
+        harness != "claude"
+        or format_name != "native"
+        or command
+        not in {
+            "preview",
+            "install",
+            "update",
+            "enable",
+            "disable",
+            "status",
+            "remove",
+        }
+    ):
         sys.stderr.write("claude_code_plugin_command_invalid\n")
         return 2
     try:
@@ -253,8 +256,6 @@ def run_claude_code_plugin_command(
         )
         return 0 if result.operation_state.value == "completed" else 1
     except (ClaudeCodeIntegrationError, ValueError, OSError) as error:
-        reason = (
-            error.reason.value if isinstance(error, ClaudeCodeIntegrationError) else str(error)
-        )
+        reason = error.reason.value if isinstance(error, ClaudeCodeIntegrationError) else str(error)
         sys.stderr.write(f"{reason}\n")
         return 1

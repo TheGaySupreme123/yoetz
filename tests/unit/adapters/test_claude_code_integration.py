@@ -47,15 +47,11 @@ class _Review:
     def __init__(self) -> None:
         self.consumed: list[str] = []
 
-    def consume_setup_authority(
-        self, authority: ArtifactAuthority, preview_digest: str
-    ) -> None:
+    def consume_setup_authority(self, authority: ArtifactAuthority, preview_digest: str) -> None:
         assert authority.target_digest == preview_digest
         self.consumed.append(preview_digest)
 
-    def consume_artifact_review(
-        self, authority: ArtifactAuthority, preview_digest: str
-    ) -> None:
+    def consume_artifact_review(self, authority: ArtifactAuthority, preview_digest: str) -> None:
         assert authority.target_digest == preview_digest
         self.consumed.append(preview_digest)
 
@@ -99,14 +95,10 @@ class _ClaudeFixture:
     def settings(self, target: ClaudeCodePluginTarget, registered: bool) -> None:
         path = Path(target.project_root) / ".claude" / "settings.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        value: dict[str, object] = {
-            "enabledPlugins": {"yoetz@yoetz-local": self.enabled}
-        }
+        value: dict[str, object] = {"enabledPlugins": {"yoetz@yoetz-local": self.enabled}}
         if registered:
             value["extraKnownMarketplaces"] = {
-                "yoetz-local": {
-                    "source": {"source": "directory", "path": target.marketplace_root}
-                }
+                "yoetz-local": {"source": {"source": "directory", "path": target.marketplace_root}}
             }
         path.write_text(json.dumps(value), encoding="utf-8")
         known = Path(target.claude_config_root) / "plugins" / "known_marketplaces.json"
@@ -149,9 +141,7 @@ class _ClaudeFixture:
                         "version": self.artifact.plan.version,
                     }
                 )
-            return ClaudeCodeCommandResult(
-                0, canonical_encode(cast(JsonValue, rows)), b""
-            )
+            return ClaudeCodeCommandResult(0, canonical_encode(cast(JsonValue, rows)), b"")
         if args[:4] == ("plugin", "marketplace", "add", "--scope"):
             self.settings(target, True)
             return ClaudeCodeCommandResult(0, b"ok", b"")
@@ -227,13 +217,16 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
         ".mcp.json",
         "hooks/hooks.json",
         "skills/yoetz/SKILL.md",
-        *{f"skills/yoetz/references/{name}" for name in (
-            "agent-instructions.md",
-            "coverage-and-receipts.md",
-            "publication-policy.md",
-            "request-templates.md",
-            "workflow.md",
-        )},
+        *{
+            f"skills/yoetz/references/{name}"
+            for name in (
+                "agent-instructions.md",
+                "coverage-and-receipts.md",
+                "publication-policy.md",
+                "request-templates.md",
+                "workflow.md",
+            )
+        },
     }
     manifest = json.loads(managed.members[".claude-plugin/plugin.json"])
     marketplace = json.loads(managed.marketplace_manifest)
@@ -496,11 +489,13 @@ def test_update_replaces_only_marker_valid_source_and_rechecks_same_version_cach
     )
     assert result.operation_state is PluginOperationState.COMPLETED
     assert result.installed_digest == policy.artifact_digest
-    assert status_claude_code_plugin(target, policy, commands=commands).mcp_observation.route_profile == (
-        "policy"
-    )
+    assert status_claude_code_plugin(
+        target, policy, commands=commands
+    ).mcp_observation.route_profile == ("policy")
 
-    source_skill = Path(target.marketplace_root) / "plugins" / "yoetz" / "skills" / "yoetz" / "SKILL.md"
+    source_skill = (
+        Path(target.marketplace_root) / "plugins" / "yoetz" / "skills" / "yoetz" / "SKILL.md"
+    )
     source_skill.write_text("modified\n", encoding="utf-8")
     with pytest.raises(ClaudeCodeIntegrationError) as modified:
         preview_claude_code_plugin(
@@ -625,9 +620,7 @@ def test_mcp_sources_preserve_precedence_and_report_dual_foreign_and_ambiguous(
     assert dual.winning_source is ClaudeCodeMcpSource.PROJECT
     assert dual.route_profile is None
 
-    foreign = JsonObject(
-        {"args": ["-c", "foreign"], "command": "sh", "type": "stdio"}
-    )
+    foreign = JsonObject({"args": ["-c", "foreign"], "command": "sh", "type": "stdio"})
     observed = observe_claude_code_mcp(
         plugin_root=plugin,
         project_root=project,

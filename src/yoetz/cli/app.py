@@ -1387,9 +1387,7 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                     "--marketplace-root, and --project-root are required for claude"
                 )
             module = importlib.import_module("yoetz.cli.claude_code_integration")
-            operation = cast(
-                Callable[..., int], getattr(module, "run_claude_code_plugin_command")
-            )
+            operation = cast(Callable[..., int], getattr(module, "run_claude_code_plugin_command"))
             arguments = {
                 "harness": harness,
                 "claude_path": claude_path,

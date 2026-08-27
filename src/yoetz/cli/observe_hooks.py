@@ -1760,7 +1760,9 @@ def handle_claude_observe(
         if raw_event == "SessionStart":
             source = payload.get("source")
             structural["action"] = (
-                start_actions[source] if type(source) is str and source in start_actions else "claude_session"
+                start_actions[source]
+                if type(source) is str and source in start_actions
+                else "claude_session"
             )
         if raw_event in {"PostToolUse", "PostToolUseFailure"}:
             tool_name = payload.get("tool_name")
@@ -1768,9 +1770,7 @@ def handle_claude_observe(
                 hook_io.stdout_json({}, stdout)
                 return 0
             structural["action"] = (
-                "claude_mcp_success"
-                if raw_event == "PostToolUse"
-                else "claude_mcp_failure"
+                "claude_mcp_success" if raw_event == "PostToolUse" else "claude_mcp_failure"
             )
             structural["success"] = raw_event == "PostToolUse"
             structural["tool_name"] = tool_name

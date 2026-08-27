@@ -415,12 +415,8 @@ def test_v22_adds_only_the_claude_hook_source_and_coverage_cell() -> None:
         "cursor_hook",
         "claude_hook",
     ]
-    coverage_v21 = result_v21["$defs"]["observation_status"]["properties"][
-        "source_coverage"
-    ]
-    coverage_v22 = result_v22["$defs"]["observation_status"]["properties"][
-        "source_coverage"
-    ]
+    coverage_v21 = result_v21["$defs"]["observation_status"]["properties"]["source_coverage"]
+    coverage_v22 = result_v22["$defs"]["observation_status"]["properties"]["source_coverage"]
     assert set(coverage_v21["properties"]) == {
         "codex_hook",
         "codex_session_stream",

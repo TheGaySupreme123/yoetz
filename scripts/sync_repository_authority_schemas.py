@@ -369,17 +369,13 @@ def _cursor_result() -> dict[str, Any]:
 
 def _claude_request() -> dict[str, Any]:
     generated = _with_id("control-request", "2.2.0", _cursor_request())
-    generated["$defs"]["observation_envelope"]["properties"]["source"]["enum"].append(
-        "claude_hook"
-    )
+    generated["$defs"]["observation_envelope"]["properties"]["source"]["enum"].append("claude_hook")
     return generated
 
 
 def _claude_result() -> dict[str, Any]:
     generated = _with_id("control-result", "2.2.0", _cursor_result())
-    source_coverage = generated["$defs"]["observation_status"]["properties"][
-        "source_coverage"
-    ]
+    source_coverage = generated["$defs"]["observation_status"]["properties"]["source_coverage"]
     source_coverage["properties"]["claude_hook"] = {"type": "boolean"}
     return generated
 

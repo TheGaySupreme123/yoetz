@@ -235,9 +235,10 @@ class ClaudeCodePluginArtifact:
             data = self.members[item.relative_path]
             if type(data) is not bytes or len(data) != item.size or _sha(data) != item.sha256:
                 raise ValueError("claude_code_artifact_inventory_invalid")
-        if type(self.marketplace_manifest) is not bytes or _sha(
-            self.marketplace_manifest
-        ) != self.marketplace_digest:
+        if (
+            type(self.marketplace_manifest) is not bytes
+            or _sha(self.marketplace_manifest) != self.marketplace_digest
+        ):
             raise ValueError("claude_code_artifact_invalid")
 
 
@@ -252,9 +253,7 @@ class ClaudeCodeMcpObservation:
     def __post_init__(self) -> None:
         if type(self.ownership_state) is not McpOwnershipState:
             raise ValueError("claude_code_mcp_observation_invalid")
-        if self.winning_source is not None and type(
-            self.winning_source
-        ) is not ClaudeCodeMcpSource:
+        if self.winning_source is not None and type(self.winning_source) is not ClaudeCodeMcpSource:
             raise ValueError("claude_code_mcp_observation_invalid")
         if self.route_profile not in {None, "strict", "policy"} or type(self.observed) is not bool:
             raise ValueError("claude_code_mcp_observation_invalid")
@@ -295,9 +294,10 @@ class ClaudeCodePluginStatus:
     notes: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if type(self.state) is not PluginArtifactState or type(
-            self.operation_state
-        ) is not PluginOperationState:
+        if (
+            type(self.state) is not PluginArtifactState
+            or type(self.operation_state) is not PluginOperationState
+        ):
             raise ValueError("claude_code_status_invalid")
         for value in (self.artifact_digest, self.marketplace_digest, self.host_state_digest):
             _validate_digest(value)
@@ -306,17 +306,19 @@ class ClaudeCodePluginStatus:
                 _validate_digest(value)
         if self.installed_version is not None:
             _version_tuple(self.installed_version)
-        if self.marketplace_registered is not None and type(
-            self.marketplace_registered
-        ) is not bool:
+        if (
+            self.marketplace_registered is not None
+            and type(self.marketplace_registered) is not bool
+        ):
             raise ValueError("claude_code_status_invalid")
         if type(self.discovered) is not bool or (
             self.enabled is not None and type(self.enabled) is not bool
         ):
             raise ValueError("claude_code_status_invalid")
-        if type(self.marker_valid) is not bool or type(
-            self.mcp_observation
-        ) is not ClaudeCodeMcpObservation:
+        if (
+            type(self.marker_valid) is not bool
+            or type(self.mcp_observation) is not ClaudeCodeMcpObservation
+        ):
             raise ValueError("claude_code_status_invalid")
         if type(self.proof) is not tuple or tuple(item.facet for item in self.proof) != tuple(
             PluginProofFacet
@@ -343,9 +345,10 @@ class ClaudeCodePluginPreview:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request_id", validate_request_id(self.request_id))
-        if type(self.action) is not ClaudeCodePluginAction or type(
-            self.state_before
-        ) is not PluginArtifactState:
+        if (
+            type(self.action) is not ClaudeCodePluginAction
+            or type(self.state_before) is not PluginArtifactState
+        ):
             raise ValueError("claude_code_preview_invalid")
         for value in (
             self.target_identity,
@@ -355,9 +358,10 @@ class ClaudeCodePluginPreview:
             self.preview_digest,
         ):
             _validate_digest(value)
-        if type(self.mcp_ownership) is not McpOwnership or type(
-            self.mcp_ownership_state
-        ) is not McpOwnershipState:
+        if (
+            type(self.mcp_ownership) is not McpOwnership
+            or type(self.mcp_ownership_state) is not McpOwnershipState
+        ):
             raise ValueError("claude_code_preview_invalid")
         if self.mcp_route_profile not in {None, "strict", "policy"}:
             raise ValueError("claude_code_preview_invalid")
@@ -380,13 +384,15 @@ class ClaudeCodePluginResult:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "request_id", validate_request_id(self.request_id))
-        if type(self.action) is not ClaudeCodePluginAction or type(
-            self.operation_state
-        ) is not PluginOperationState:
+        if (
+            type(self.action) is not ClaudeCodePluginAction
+            or type(self.operation_state) is not PluginOperationState
+        ):
             raise ValueError("claude_code_result_invalid")
-        if type(self.state_before) is not PluginArtifactState or type(
-            self.state_after
-        ) is not PluginArtifactState:
+        if (
+            type(self.state_before) is not PluginArtifactState
+            or type(self.state_after) is not PluginArtifactState
+        ):
             raise ValueError("claude_code_result_invalid")
         for value in (self.preview_digest, self.artifact_digest):
             _validate_digest(value)
@@ -442,9 +448,11 @@ class ClaudeCodeCommandResult:
     stderr: bytes
 
     def __post_init__(self) -> None:
-        if type(self.returncode) is not int or type(self.stdout) is not bytes or type(
-            self.stderr
-        ) is not bytes:
+        if (
+            type(self.returncode) is not int
+            or type(self.stdout) is not bytes
+            or type(self.stderr) is not bytes
+        ):
             raise ValueError("claude_code_command_result_invalid")
         if len(self.stdout) > _MAX_COMMAND_OUTPUT or len(self.stderr) > _MAX_COMMAND_OUTPUT:
             raise ValueError("claude_code_command_result_invalid")
@@ -960,9 +968,10 @@ def _config_entry(raw: object) -> tuple[Mapping[str, JsonValue] | None, bool]:
             if not isinstance(raw_entry, Mapping):
                 return None, False
             relevant.append(cast(Mapping[str, JsonValue], raw_entry))
-        elif isinstance(raw_entry, Mapping) and _route_profile(
-            cast(Mapping[str, JsonValue], raw_entry)
-        ) is not None:
+        elif (
+            isinstance(raw_entry, Mapping)
+            and _route_profile(cast(Mapping[str, JsonValue], raw_entry)) is not None
+        ):
             relevant.append(cast(Mapping[str, JsonValue], raw_entry))
     if not relevant:
         return None, True
@@ -1183,10 +1192,7 @@ def _proof(
                 if facet in {PluginProofFacet.SOURCE, PluginProofFacet.RENDERED_ARTIFACT}
                 or (installed_exact and facet is PluginProofFacet.INSTALLED_BYTES)
                 or (discovered and facet is PluginProofFacet.HOST_DISCOVERY)
-                or (
-                    session is not None
-                    and facet is PluginProofFacet.HOST_ACTIVATION
-                )
+                or (session is not None and facet is PluginProofFacet.HOST_ACTIVATION)
                 or (
                     session is not None
                     and session.skill_registered
@@ -1366,15 +1372,16 @@ def observe_claude_code_session_init(
     }
     visible_tools: set[str] = set()
     if isinstance(tools, (list, tuple)):
-        visible_tools = {
-            item for item in cast(Sequence[object], tools) if type(item) is str
-        }
+        visible_tools = {item for item in cast(Sequence[object], tools) if type(item) is str}
     mcp_connected = False
     if isinstance(servers, (list, tuple)):
         for raw in cast(Sequence[object], servers):
             if isinstance(raw, Mapping):
                 server = cast(Mapping[str, JsonValue], raw)
-                if server.get("name") == "plugin:yoetz:yoetz" and server.get("status") == "connected":
+                if (
+                    server.get("name") == "plugin:yoetz:yoetz"
+                    and server.get("status") == "connected"
+                ):
                     mcp_connected = True
                     break
     return ClaudeCodeSessionObservation(
