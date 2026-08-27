@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import unicodedata
 from pathlib import Path
 
 from yoetz.cli.workspace_binding import canonical_workspace_locator, resolve_workspace_locator
@@ -219,13 +218,12 @@ def test_root_and_home_are_not_workspace_locators(tmp_path: Path) -> None:
     )
 
 
-def test_path_text_is_nfc_normalized_and_bounded(tmp_path: Path) -> None:
+def test_path_text_preserves_exact_filesystem_spelling_and_is_bounded(tmp_path: Path) -> None:
     home = tmp_path / "home"
     raw = os.fspath(tmp_path / ("e\u0301"))
-    expected = os.fspath(tmp_path / unicodedata.normalize("NFC", "e\u0301"))
-    Path(expected).mkdir()
+    Path(raw).mkdir()
 
-    assert resolve_workspace_locator(explicit=raw, payload={}, env=_env(home)) == expected
+    assert resolve_workspace_locator(explicit=raw, payload={}, env=_env(home)) == raw
     assert (
         resolve_workspace_locator(
             explicit="x" * 8_193,

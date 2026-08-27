@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 import stat
-import unicodedata
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, cast
@@ -33,13 +32,12 @@ _WORKSPACE_ROOTS: Final = "workspace_roots"
 
 
 def _bounded_text(value: object) -> str | None:
-    """Return NFC-normalized path text, or reject an untrusted value."""
+    """Return byte-bounded exact filesystem path text, or reject it."""
 
     if type(value) is not str:
         return None
-    normalized = unicodedata.normalize("NFC", value)
     try:
-        encoded = normalized.encode("utf-8")
+        encoded = os.fsencode(value)
     except UnicodeEncodeError:
         return None
     if not encoded or len(encoded) > MAX_WORKSPACE_LOCATOR_BYTES:
@@ -47,9 +45,9 @@ def _bounded_text(value: object) -> str | None:
     # Hook payloads and environment values are user/host-controlled.  Control
     # characters are not valid input to this boundary even though some Unix
     # filesystems permit them in names.
-    if any(ord(char) < 32 or ord(char) == 127 for char in normalized):
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
         return None
-    return normalized
+    return value
 
 
 def _home_path(env: Mapping[str, str], cwd: Path) -> Path:
@@ -251,8 +249,9 @@ def resolve_workspace_locator(
     no Git marker is returned as its safe, lexical non-Git locator.
 
     Invalid, home/root, inaccessible, or symlinked paths return ``None``.
-    User-controlled path text is bounded and NFC-normalized before any path
-    operation.  No shell or Git command is executed.
+    User-controlled path text is byte-bounded without Unicode normalization before any path
+    operation, so distinct filesystem spellings cannot alias consent. No shell or Git command is
+    executed.
     """
 
     actual_env: Mapping[str, str] = os.environ if env is None else env

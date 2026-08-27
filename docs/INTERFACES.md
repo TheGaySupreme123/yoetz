@@ -3261,6 +3261,9 @@ symlinked ancestors, unsafe markers, oversized/control-bearing values, and ambig
 input fail closed. Plain roots never enter structural state, diagnostics, errors, or stdout.
 Unresolvable and resolved-but-unconsented inputs record distinct payload-free diagnostics. Hooks
 are fail-open and advisory; configuration/trigger-only state earns no observation coverage.
+The selected locator retains its exact filesystem-encoded spelling through lookup and commitment;
+Unicode normalization never aliases distinct directories. A grant created under a differently
+normalized spelling does not authorize its sibling and requires an explicit regrant.
 
 ## 11. Application (`application/`)
 
