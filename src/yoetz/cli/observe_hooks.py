@@ -44,7 +44,7 @@ from yoetz.cli.hook_io import (
 from yoetz.cli.hook_io import (
     stderr_line as _stderr_line,
 )
-from yoetz.cli.workspace_binding import resolve_workspace_locator
+from yoetz.cli.workspace_binding import canonical_workspace_locator, resolve_workspace_locator
 from yoetz.domain.observation import (
     ObservationContentChunk,
     ObservationContentKind,
@@ -1282,14 +1282,17 @@ def handle_observe(
             workspace_commitment = _workspace_commitment
         elif workspace is not None:
             try:
-                # Cursor already passed through the bounded, symlink-refusing
-                # workspace resolver. Codex retains its historical local
-                # normalization for '.' and relative paths.
+                # Cursor already passed through the bounded host resolver. All
+                # other hook sources use the same explicit-path canonicalizer
+                # as consent/control so a Git subdirectory cannot acquire a
+                # second commitment identity.
                 workspace_locator = (
                     workspace
                     if source is ObservationSource.CURSOR_HOOK
-                    else str(Path(workspace).expanduser().resolve(strict=False))
+                    else canonical_workspace_locator(workspace)
                 )
+                if workspace_locator is None:
+                    raise ValueError("workspace_locator_invalid")
                 workspace_commitment = store.workspace_commitment(workspace_locator)
                 consent_probe = store.consent_for(workspace_commitment)
                 if consent_probe is None or not consent_probe.active:
@@ -1298,12 +1301,12 @@ def handle_observe(
             except Exception:
                 workspace_commitment = None
                 workspace_locator = None
-        if workspace_commitment is None:
-            # Bind only via an existing Codex-session→workspace map for this session.
-            # Never guess a single "active" workspace across consented projects.
-            if source is not ObservationSource.CURSOR_HOOK or workspace is None:
-                workspace_commitment = store.find_workspace_for_codex_session(codex_session_id)
-                workspace_locator = None
+        if workspace_commitment is None and workspace is None:
+            # A hook without an explicit locator may retain the legacy bound-session/single-active
+            # lane. An explicit locator that failed canonical consent never falls back to a
+            # different commitment, including a legacy exact-subdirectory grant.
+            workspace_commitment = store.find_workspace_for_codex_session(codex_session_id)
+            workspace_locator = None
         consent = None if workspace_commitment is None else store.consent_for(workspace_commitment)
         if consent is None or not consent.active:
             # Consent missing/paused/revoked: no ingest, no spool; still exit 0.
