@@ -27,6 +27,39 @@ def _consented_store(tmp_path: Path) -> tuple[LocalObservationStore, str]:
     return store, commitment
 
 
+def test_cursor_git_subdirectory_uses_canonical_root_consent(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repo"
+    nested = repository / "packages/app"
+    nested.mkdir(parents=True)
+    (repository / ".git").mkdir()
+    store = LocalObservationStore(_state=state)
+    root_commitment = store.workspace_commitment(str(repository))
+    store.grant_consent(root_commitment)
+
+    assert (
+        observe_hooks.handle_cursor_observe(
+            event_name="sessionStart",
+            stdin_bytes=canonical_encode(
+                {
+                    "conversation_id": "cursor-git-subdirectory",
+                    "hook_event_name": "sessionStart",
+                    "workspace_roots": [str(nested)],
+                }
+            ),
+            stdout=io.BytesIO(),
+            workspace=str(nested),
+            _state=state,
+            skip_service=True,
+        )
+        == 0
+    )
+
+    assert (
+        store.find_workspace_for_codex_session("cursor:cursor-git-subdirectory") == root_commitment
+    )
+
+
 def test_cursor_hook_ingress_drops_every_content_and_identity_denylist_field(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
