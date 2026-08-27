@@ -554,3 +554,47 @@ def test_cursor_workspace_diagnostics_distinguish_unconsented_and_unresolvable(
     )
     assert json.loads(unresolved_out.getvalue()) == {}
     assert diagnostics[-1] == "workspace_unresolvable"
+
+
+def test_cursor_lifecycle_identifiers_bind_one_conversation_to_one_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed_sessions: list[object] = []
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        sanitized = strict_json_parse(cast(bytes, kwargs["stdin_bytes"]))
+        assert isinstance(sanitized, Mapping)
+        observed_sessions.append(sanitized["session_id"])
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+
+    def dispatch(event: str, payload: dict[str, JsonValue]) -> int:
+        return observe_hooks.handle_cursor_observe(
+            event_name=event,
+            stdin_bytes=canonical_encode({"hook_event_name": event, **payload}),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+        )
+
+    # sessionStart validates the (conversation, session) pair and persists it.
+    assert dispatch("sessionStart", {"conversation_id": "c-1", "session_id": "s-1"}) == 0
+    # A later event carrying only the conversation identifier resolves through
+    # the alias instead of splitting the conversation into a second session.
+    assert dispatch("stop", {"conversation_id": "c-1"}) == 0
+    assert observed_sessions == ["cursor:s-1", "cursor:s-1"]
+
+    # A non-sessionStart pair contradicting the validated alias is ambiguous
+    # and never produces an envelope under either identity.
+    assert dispatch("afterMCPExecution", {"conversation_id": "c-1", "session_id": "s-2"}) == 0
+    assert observed_sessions == ["cursor:s-1", "cursor:s-1"]
+
+    # A new sessionStart re-validates the pair; the conversation follows it.
+    assert dispatch("sessionStart", {"conversation_id": "c-1", "session_id": "s-2"}) == 0
+    assert dispatch("stop", {"conversation_id": "c-1"}) == 0
+    assert observed_sessions[-2:] == ["cursor:s-2", "cursor:s-2"]
+
+    # An unaliased conversation-only event keeps its deterministic fallback.
+    assert dispatch("stop", {"conversation_id": "c-solo"}) == 0
+    assert observed_sessions[-1] == "cursor:c-solo"

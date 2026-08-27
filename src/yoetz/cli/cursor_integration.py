@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Literal, cast
 
+import yoetz
 from yoetz.adapters.integrations.cursor_integration import (
     CursorIntegrationError,
     CursorPluginArtifact,
@@ -102,13 +103,34 @@ def _artifact(
             if ownership is McpOwnership.PLUGIN_MANAGED
             else "cursor_mcp_route_forbidden"
         )
-    invoking_executable = sys.argv[0] if Path(sys.argv[0]).name == "yoetz" else None
     return render_cursor_plugin(
         format_profile,
         mcp_ownership=ownership,
         route_profile=route,
-        yoetz_executable=invoking_executable,
+        yoetz_launcher=_invoking_launcher(),
     )
+
+
+def _invoking_launcher() -> str | tuple[str, ...] | None:
+    """Preserve the exact invocation that produced this process.
+
+    A console-script invocation binds hooks to that executable, and the
+    documented ``python -m yoetz`` entrypoint (ADR-007) binds an equivalent
+    module invocation of the same interpreter rather than falling back to an
+    ambient PATH lookup that may name an unrelated installation.
+    """
+
+    argv0 = Path(sys.argv[0])
+    if argv0.name == "yoetz":
+        return sys.argv[0]
+    try:
+        package_main = (Path(yoetz.__file__).parent / "__main__.py").resolve()
+        module_invoked = argv0.resolve() == package_main
+    except OSError:
+        module_invoked = False
+    if module_invoked:
+        return (sys.executable, "-m", "yoetz")
+    return None
 
 
 def _request(value: str | None) -> RequestId:

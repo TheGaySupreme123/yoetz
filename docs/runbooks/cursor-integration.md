@@ -118,17 +118,23 @@ The native IDE plugin advertises only `sessionStart`, `sessionEnd`, `afterMCPExe
 no hook capability; the SDKs' file-based hook contract is not execution evidence. Hooks call
 `yoetz hooks cursor-observe`, are fail-open, and never enforce Cursor work.
 
-Native hook artifacts resolve the invoking `yoetz` console executable to an absolute path at render
-time. Explicit absolute and relative invocations retain their path intent and never fall back to
-an ambient `PATH` entry; only a bare `yoetz` name uses `PATH`. The resolved path is
+Native hook artifacts resolve the invoking `yoetz` launcher to an exact command at render time. A
+console-script invocation resolves to that absolute executable; the documented `python -m yoetz`
+entrypoint (ADR-007) is preserved as an equivalent module invocation of the same interpreter.
+Explicit absolute and relative invocations retain their path intent and never fall back to
+an ambient `PATH` entry; only a bare `yoetz` name uses `PATH`. The resolved launcher command is
 recorded in native marker schema `/2`; an explicit invocation does not silently bind a
-different ambient-PATH installation, and a malformed `/2` path invalidates the marker. Portable markers
+different ambient-PATH installation, and a malformed `/2` launcher invalidates the marker. Portable
+markers
 remain `/1`. A valid legacy native `/1` marker is recognized as managed-but-modified so users can
 perform one exact previewed replacement (or safe removal) instead of being stranded. The rendered
 timeouts are 10 seconds for `sessionStart`/`stop`, 5 seconds for
 `afterFileEdit`/`afterMCPExecution`, and 3 seconds for `sessionEnd`; `failClosed` remains false.
-`sessionStart` uses Cursor's documented `session_id`/`conversation_id` conversation identity, but
-local rendering and integration tests cannot prove live host session binding.
+`sessionStart` uses Cursor's documented `session_id`/`conversation_id` conversation identity and
+persists the validated pair as a bounded local alias, so later events carrying only
+`conversation_id` resolve to the same Yoetz session; an event whose pair contradicts the validated
+alias is rejected as `cursor_session_ambiguous` rather than splitting one conversation across
+sessions. Local rendering and integration tests cannot prove live host session binding.
 
 Advice uses Cursor's native output contract rather than the Codex/Claude Code envelope.
 `sessionStart` may emit `additional_context`. `stop` does not emit `followup_message` because Cursor

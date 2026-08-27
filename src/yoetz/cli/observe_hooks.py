@@ -206,6 +206,9 @@ _TOKEN_CHARS: Final = frozenset(
 )
 _MAX_TOKEN_CHARS: Final = 128
 _CURSOR_SESSION_PREFIX: Final = "cursor:"
+_CURSOR_ALIAS_FILE: Final = "cursor-session-aliases.json"
+_CURSOR_ALIAS_LOCK: Final = "cursor-session-aliases.lock"
+_MAX_CURSOR_ALIASES: Final = 64
 _CURSOR_UNTESTED_PROFILE_ID: Final = "untested"
 _CURSOR_VERSION_TO_PROFILE: Final = {
     "3.17.8": "cursor-ide-3.17.8",
@@ -286,6 +289,94 @@ def _int_or_none(value: object) -> int | None:
 
 def _bool_or_none(value: object) -> bool | None:
     return value if type(value) is bool else None
+
+
+def _cursor_alias_paths(_state: Path | None) -> tuple[Path, Path]:
+    from yoetz.config.paths import state_dir
+
+    root = state_dir() if _state is None else _state
+    directory = root / "observation"
+    return directory / _CURSOR_ALIAS_FILE, directory / _CURSOR_ALIAS_LOCK
+
+
+def _load_cursor_aliases(path: Path) -> dict[str, str]:
+    import json
+
+    try:
+        if path.is_symlink() or path.stat().st_size > 65_536:
+            return {}
+        loaded = json.loads(path.read_bytes())
+    except OSError, ValueError:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    aliases: dict[str, str] = {}
+    for key, value in cast(dict[object, object], loaded).items():
+        conversation = _token_or_none(key)
+        session = _token_or_none(value)
+        if conversation is not None and session is not None:
+            aliases[conversation] = session
+    return aliases
+
+
+def _aliased_cursor_session(conversation: str, *, _state: Path | None) -> str | None:
+    """Return the session identifier a sessionStart validated for this conversation."""
+
+    path, _lock = _cursor_alias_paths(_state)
+    return _load_cursor_aliases(path).get(conversation)
+
+
+def _bind_cursor_session_alias(conversation: str, session: str, *, _state: Path | None) -> None:
+    """Durably bind one Cursor conversation to one validated session identifier.
+
+    Both identifiers come from the same host payload, so the pair itself is the
+    validation. The bounded local map lets later events that carry only the
+    conversation identifier keep resolving to the same Yoetz session instead of
+    splitting one host conversation across identities (#417).
+    """
+
+    import json
+
+    from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir
+
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - supported hook hosts are POSIX
+        fcntl = None  # type: ignore[assignment]
+
+    path, lock_path = _cursor_alias_paths(_state)
+    try:
+        ensure_owner_only_dir(path.parent)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        lock_descriptor = os.open(lock_path, flags, 0o600)
+        try:
+            os.fchmod(lock_descriptor, 0o600)
+            if fcntl is not None:
+                fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+            aliases = _load_cursor_aliases(path)
+            aliases.pop(conversation, None)
+            aliases[conversation] = session
+            while len(aliases) > _MAX_CURSOR_ALIASES:
+                aliases.pop(next(iter(aliases)))
+            encoded = json.dumps(aliases, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            temporary = path.with_name(path.name + ".tmp")
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            try:
+                os.fchmod(descriptor, 0o600)
+                os.write(descriptor, encoded)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(temporary, path)
+        finally:
+            os.close(lock_descriptor)
+    except OSError, PathSafetyError, ValueError:
+        return
 
 
 def _cursor_capability_profile_id(cursor_version: object) -> str:
@@ -1809,9 +1900,31 @@ def handle_cursor_observe(
         raw_event = event_name or payload.get("hook_event_name")
         if type(raw_event) is not str or raw_event not in event_map:
             return 0 if hook_io.stdout_json({}, stdout) else 0
-        session = _token_or_none(payload.get("session_id")) or _token_or_none(
-            payload.get("conversation_id")
-        )
+        session_token = _token_or_none(payload.get("session_id"))
+        conversation_token = _token_or_none(payload.get("conversation_id"))
+        # One host conversation must stay one Yoetz session (#417). sessionStart
+        # validates the pair and persists the alias; later events that carry
+        # only the conversation identifier resolve through it, and an event
+        # whose pair contradicts the validated alias is an ambiguous transition
+        # that is rejected rather than silently splitting the session.
+        if session_token is not None and conversation_token is not None:
+            aliased = _aliased_cursor_session(conversation_token, _state=_state)
+            if raw_event == "sessionStart" or aliased is None:
+                if conversation_token != session_token:
+                    _bind_cursor_session_alias(conversation_token, session_token, _state=_state)
+            elif aliased != session_token:
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(
+                        "cursor_session_ambiguous", event_map[raw_event], _state=_state
+                    )
+                return 0 if hook_io.stdout_json({}, stdout) else 0
+            session = session_token
+        elif session_token is None and conversation_token is not None:
+            session = (
+                _aliased_cursor_session(conversation_token, _state=_state) or conversation_token
+            )
+        else:
+            session = session_token
         if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CURSOR_SESSION_PREFIX):
             return 0 if hook_io.stdout_json({}, stdout) else 0
         resolved_workspace = _resolve_cursor_workspace(payload, workspace)

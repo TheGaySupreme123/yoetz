@@ -306,7 +306,7 @@ class CursorPluginArtifact:
     plan: PortablePluginPlan
     members: Mapping[str, bytes]
     artifact_digest: str
-    yoetz_executable: str | None = field(default=None, repr=False)
+    yoetz_launcher: tuple[str, ...] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.plan) is not PortablePluginPlan:
@@ -317,13 +317,9 @@ class CursorPluginArtifact:
         }:
             raise ValueError("cursor_artifact_invalid")
         if self.plan.format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE:
-            if (
-                type(self.yoetz_executable) is not str
-                or not Path(self.yoetz_executable).is_absolute()
-                or any(ord(char) < 32 or ord(char) == 127 for char in self.yoetz_executable)
-            ):
+            if not _valid_launcher(self.yoetz_launcher):
                 raise ValueError("cursor_artifact_invalid")
-        elif self.yoetz_executable is not None:
+        elif self.yoetz_launcher is not None:
             raise ValueError("cursor_artifact_invalid")
         _validate_digest(self.artifact_digest)
         expected = tuple(item.relative_path for item in self.plan.inventory)
@@ -526,9 +522,37 @@ def _mcp_json(route_profile: Literal["strict", "policy"]) -> bytes:
     )
 
 
-def _resolve_yoetz_executable(candidate: Path | str | None = None) -> str:
-    """Resolve the exact executable used by rendered native Cursor hooks."""
+def _valid_launcher(launcher: object) -> bool:
+    """Validate one rendered launcher: an absolute executable plus fixed arguments."""
 
+    if type(launcher) is not tuple or not launcher:
+        return False
+    parts = cast(tuple[object, ...], launcher)
+    if any(
+        type(part) is not str
+        or not part
+        or any(ord(char) < 32 or ord(char) == 127 for char in part)
+        for part in parts
+    ):
+        return False
+    return Path(cast(str, parts[0])).is_absolute()
+
+
+def _resolve_yoetz_launcher(candidate: Path | str | Sequence[str] | None = None) -> tuple[str, ...]:
+    """Resolve the exact launcher command used by rendered native Cursor hooks.
+
+    A plain path or name resolves to the console-script executable. A sequence
+    preserves an explicit invocation such as the documented ``python -m yoetz``
+    module entrypoint (ADR-007): its first element is resolved as the
+    executable and the remaining arguments are kept verbatim.
+    """
+
+    arguments: tuple[str, ...] = ()
+    if isinstance(candidate, Sequence) and not isinstance(candidate, str):
+        if not candidate or any(type(part) is not str for part in candidate):
+            raise ValueError("yoetz_executable_unavailable")
+        arguments = tuple(candidate[1:])
+        candidate = candidate[0]
     if candidate is None:
         discovered = shutil.which("yoetz")
     else:
@@ -552,7 +576,10 @@ def _resolve_yoetz_executable(candidate: Path | str | None = None) -> str:
         or any(ord(char) < 32 or ord(char) == 127 for char in str(resolved))
     ):
         raise ValueError("yoetz_executable_unavailable")
-    return str(resolved)
+    launcher = (str(resolved), *arguments)
+    if not _valid_launcher(launcher):
+        raise ValueError("yoetz_executable_unavailable")
+    return launcher
 
 
 def _native_members(
@@ -560,7 +587,7 @@ def _native_members(
     source: PackagedPortableResources,
     mcp_ownership: McpOwnership,
     route_profile: Literal["strict", "policy"] | None,
-    yoetz_executable: str,
+    yoetz_launcher: tuple[str, ...],
 ) -> dict[str, bytes]:
     manifest: dict[str, JsonValue] = {
         "author": {"name": "Yoetz contributors"},
@@ -576,7 +603,8 @@ def _native_members(
         manifest["mcpServers"] = "mcp.json"
     elif route_profile is not None:
         raise ValueError("cursor_mcp_route_forbidden")
-    hook_command = f"{shlex.quote(yoetz_executable)} hooks cursor-observe --workspace ."
+    launcher = " ".join(shlex.quote(part) for part in yoetz_launcher)
+    hook_command = f"{launcher} hooks cursor-observe --workspace ."
     hook_timeouts = {
         "afterFileEdit": 5,
         "afterMCPExecution": 5,
@@ -607,7 +635,7 @@ def render_cursor_plugin(
     mcp_ownership: McpOwnership = McpOwnership.EXTERNAL_REGISTRATION,
     route_profile: Literal["strict", "policy"] | None = None,
     source: PackagedPortableResources | None = None,
-    yoetz_executable: Path | str | None = None,
+    yoetz_launcher: Path | str | Sequence[str] | None = None,
 ) -> CursorPluginArtifact:
     """Render one Cursor artifact from canonical packaged guidance bytes."""
 
@@ -626,12 +654,12 @@ def render_cursor_plugin(
             resource_source=resources,
         )
         return CursorPluginArtifact(rendered.plan, dict(rendered.members), rendered.artifact_digest)
-    resolved_yoetz_executable = _resolve_yoetz_executable(yoetz_executable)
+    resolved_yoetz_launcher = _resolve_yoetz_launcher(yoetz_launcher)
     members = _native_members(
         source=resources,
         mcp_ownership=mcp_ownership,
         route_profile=route_profile,
-        yoetz_executable=resolved_yoetz_executable,
+        yoetz_launcher=resolved_yoetz_launcher,
     )
     plan = PortablePluginPlan(
         name="yoetz",
@@ -668,7 +696,7 @@ def render_cursor_plugin(
             "renderer_version": _RENDERER_VERSION,
         }
     )
-    return CursorPluginArtifact(plan, members, digest, resolved_yoetz_executable)
+    return CursorPluginArtifact(plan, members, digest, resolved_yoetz_launcher)
 
 
 def _safe_existing_ancestor(path: Path) -> Path:
@@ -783,8 +811,8 @@ def _marker(artifact: CursorPluginArtifact) -> bytes:
         "yoetz_version": artifact.plan.version,
     }
     if artifact.plan.format_profile is PluginFormatProfile.CURSOR_PLUGIN_NATIVE:
-        assert artifact.yoetz_executable is not None
-        body["yoetz_executable"] = artifact.yoetz_executable
+        assert artifact.yoetz_launcher is not None
+        body["yoetz_launcher"] = list(artifact.yoetz_launcher)
     return canonical_encode({**body, "marker_digest": canonical_digest(body)})
 
 
@@ -812,16 +840,15 @@ def _valid_marker(
         PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
     }:
         return False, None, None
-    executable = marker.get("yoetz_executable")
+    launcher = marker.get("yoetz_launcher")
     if schema == _MARKER_SCHEMA_V2:
         if (
             format_profile is not PluginFormatProfile.CURSOR_PLUGIN_NATIVE
-            or type(executable) is not str
-            or not Path(executable).is_absolute()
-            or any(ord(char) < 32 or ord(char) == 127 for char in executable)
+            or type(launcher) is not list
+            or not _valid_launcher(tuple(cast(list[object], launcher)))
         ):
             return False, format_profile, cast(str | None, marker.get("artifact_digest"))
-    elif executable is not None:
+    elif launcher is not None:
         return False, format_profile, cast(str | None, marker.get("artifact_digest"))
     rows = marker.get("managed_files")
     if type(rows) is not list:

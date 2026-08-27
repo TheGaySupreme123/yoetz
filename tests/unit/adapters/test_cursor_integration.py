@@ -127,7 +127,7 @@ def test_portable_and_native_reuse_exact_skill_bytes_but_keep_manifests_disjoint
     assert tuple(sorted(hooks["hooks"])) == CURSOR_HOOK_EVENTS
     assert "afterAgentThought" not in hooks["hooks"]
     resolved = str(executable.resolve())
-    assert native.yoetz_executable == resolved
+    assert native.yoetz_launcher == (resolved,)
     assert all(
         definition[0]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
         for definition in hooks["hooks"].values()
@@ -223,15 +223,46 @@ def test_native_render_prefers_explicit_invoking_executable_over_path(
 
     artifact = render_cursor_plugin(
         PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
-        yoetz_executable=invoking,
+        yoetz_launcher=invoking,
     )
 
     resolved = str(invoking.resolve())
-    assert artifact.yoetz_executable == resolved
+    assert artifact.yoetz_launcher == (resolved,)
     hooks = json.loads(artifact.members["hooks/hooks.json"])
     assert all(
         definition[0]["command"].startswith(f"{shlex.quote(resolved)} hooks cursor-observe ")
         for definition in hooks["hooks"].values()
+    )
+
+
+def test_native_render_preserves_module_entrypoint_launcher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interpreter = tmp_path / "venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+
+    def refuse_path_lookup(_name: str) -> str | None:
+        raise AssertionError("module entrypoint launcher must not consult PATH")
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.shutil.which",
+        refuse_path_lookup,
+    )
+
+    artifact = render_cursor_plugin(
+        PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
+        yoetz_launcher=(str(interpreter), "-m", "yoetz"),
+    )
+
+    resolved = str(interpreter.resolve())
+    assert artifact.yoetz_launcher == (resolved, "-m", "yoetz")
+    hooks = json.loads(artifact.members["hooks/hooks.json"])
+    prefix = f"{shlex.quote(resolved)} -m yoetz hooks cursor-observe "
+    assert all(
+        definition[0]["command"].startswith(prefix) for definition in hooks["hooks"].values()
     )
 
 
@@ -268,10 +299,10 @@ def test_native_render_preserves_explicit_relative_executable_path(
 
     artifact = render_cursor_plugin(
         PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
-        yoetz_executable=candidate,
+        yoetz_launcher=candidate,
     )
 
-    assert artifact.yoetz_executable == str(invoking.resolve())
+    assert artifact.yoetz_launcher == (str(invoking.resolve()),)
 
 
 def test_portable_render_never_resolves_a_host_executable(
@@ -287,10 +318,10 @@ def test_portable_render_never_resolves_a_host_executable(
 
     artifact = render_cursor_plugin(
         PluginFormatProfile.AGENT_PLUGINS_1,
-        yoetz_executable="./yoetz",
+        yoetz_launcher="./yoetz",
     )
 
-    assert artifact.yoetz_executable is None
+    assert artifact.yoetz_launcher is None
 
 
 def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: Path) -> None:
@@ -324,7 +355,8 @@ def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: 
             / ".yoetz-cursor-plugin-install.json"
         ).read_text(encoding="utf-8")
     )
-    assert marker["yoetz_executable"] == artifact.yoetz_executable
+    assert artifact.yoetz_launcher is not None
+    assert marker["yoetz_launcher"] == list(artifact.yoetz_launcher)
     assert marker["schema"] == "yoetz.cursor-plugin-install/2"
     assert marker["renderer_version"] == "cursor-plugin/0.2.0"
 
@@ -358,7 +390,7 @@ def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: 
 def _rewrite_native_marker_as_legacy_v1(destination: Path) -> None:
     marker_path = destination / ".yoetz-cursor-plugin-install.json"
     marker = json.loads(marker_path.read_bytes())
-    marker.pop("yoetz_executable")
+    marker.pop("yoetz_launcher")
     marker["schema"] = "yoetz.cursor-plugin-install/1"
     body = {key: value for key, value in marker.items() if key != "marker_digest"}
     marker["marker_digest"] = canonical_digest(body)
@@ -488,7 +520,7 @@ def test_native_executable_drift_is_modified_and_replaceable(
     marker_path = (
         tmp_path / ".cursor" / "plugins" / "local" / "yoetz" / ".yoetz-cursor-plugin-install.json"
     )
-    assert json.loads(marker_path.read_bytes())["yoetz_executable"] == str(second.resolve())
+    assert json.loads(marker_path.read_bytes())["yoetz_launcher"] == [str(second.resolve())]
 
 
 def test_remove_preserves_separately_registered_mcp_route(tmp_path: Path) -> None:
