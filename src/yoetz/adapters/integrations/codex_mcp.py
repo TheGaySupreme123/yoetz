@@ -419,7 +419,13 @@ class CodexMcpAdapter:
             or command_before_remove != preview.serve_command
         ):
             raise McpRegistrationError(McpRegistrationReason.PREVIEW_STALE, {})
-        remove_output = self._run((binary.executable_path, "mcp", "remove", MCP_SERVER_NAME))
+        try:
+            remove_output = self._run((binary.executable_path, "mcp", "remove", MCP_SERVER_NAME))
+        except Exception as exc:
+            # The name-based command may have mutated registration before a timeout or
+            # harness failure surfaced. Its outcome is therefore unknown, never a
+            # pre-mutation observation error.
+            raise McpRegistrationError(McpRegistrationReason.REGISTRATION_FAILED, {}) from exc
         if remove_output.exit_code != 0:
             raise McpRegistrationError(
                 McpRegistrationReason.REGISTRATION_FAILED,
