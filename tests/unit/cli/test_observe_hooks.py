@@ -1504,6 +1504,45 @@ def test_unmapped_session_reattempts_auto_attach_on_turn_events_only(
     assert calls == ["late-attach"], "tool-call storms must never re-attempt auto-attach"
 
 
+def test_claude_session_start_auto_attach_preserves_the_harness_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    calls: list[tuple[str, str]] = []
+
+    async def fake_auto_start(
+        codex_session_id: str,
+        *,
+        _state: Path | None,
+        harness_id: str = "codex",
+    ) -> object | None:
+        del _state
+        calls.append((codex_session_id, harness_id))
+        return None
+
+    monkeypatch.setattr(observe_hooks_module, "_try_auto_start", fake_auto_start)
+
+    async def connect(_kind: object):
+        return _InstantAckClient()
+
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "claude:auto-attach", "hook_event_name": "SessionStart"}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+        source=ObservationSource.CLAUDE_HOOK,
+    )
+
+    assert code == 0
+    assert calls == [("claude:auto-attach", "claude")]
+
+
 def test_auto_attach_retry_exception_records_diagnostic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

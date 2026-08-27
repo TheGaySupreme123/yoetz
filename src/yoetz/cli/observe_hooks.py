@@ -1145,7 +1145,7 @@ async def _try_auto_start(
     codex_session_id: str,
     *,
     _state: Path | None,
-    harness_id: Literal["codex", "cursor"] = "codex",
+    harness_id: Literal["claude", "codex", "cursor"] = "codex",
 ) -> LifecycleMapping | None:
     """Best-effort service start for consented SessionStart auto-attach.
 
@@ -1590,10 +1590,13 @@ def handle_observe(
                                 async def _attach() -> LifecycleMapping | None:
                                     if harness_id == "codex":
                                         return await _try_auto_start(
-                                            codex_session_id, _state=_state
+                                            codex_session_id,
+                                            _state=_state,
                                         )
                                     return await _try_auto_start(
-                                        codex_session_id, _state=_state, harness_id="cursor"
+                                        codex_session_id,
+                                        _state=_state,
+                                        harness_id=harness_id,
                                     )
 
                                 mapping = cast(LifecycleMapping | None, _resolve_runner()(_attach))
@@ -1689,7 +1692,7 @@ def handle_observe(
                                 else _try_auto_start(
                                     codex_session_id,
                                     _state=_state,
-                                    harness_id="cursor",
+                                    harness_id=harness_id,
                                 )
                             )
                             return await asyncio.wait_for(
@@ -1955,6 +1958,8 @@ def handle_claude_observe(
             "hook_event_name": event_map[raw_event],
             "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
         }
+        if raw_event == "Stop" and payload.get("stop_hook_active") is True:
+            structural["stop_hook_active"] = True
         if raw_event == "SessionStart":
             source = payload.get("source")
             structural["action"] = (

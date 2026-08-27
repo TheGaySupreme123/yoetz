@@ -198,3 +198,33 @@ def test_claude_session_source_is_closed_and_content_never_survives(
         assert "cwd" not in item
         assert "source" not in item
         assert "transcript_path" not in item
+
+
+def test_claude_stop_retains_only_the_boolean_loop_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Mapping[str, JsonValue]] = []
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        value = strict_json_parse(cast(bytes, kwargs["stdin_bytes"]))
+        assert isinstance(value, Mapping)
+        captured.append(cast(Mapping[str, JsonValue], value))
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    for value in (True, False, "true"):
+        observe_hooks.handle_claude_observe(
+            event_name="Stop",
+            stdin_bytes=canonical_encode(
+                {
+                    "hook_event_name": "Stop",
+                    "session_id": "session-stop",
+                    "stop_hook_active": value,
+                }
+            ),
+            stdout=io.BytesIO(),
+        )
+
+    assert captured[0]["stop_hook_active"] is True
+    assert "stop_hook_active" not in captured[1]
+    assert "stop_hook_active" not in captured[2]

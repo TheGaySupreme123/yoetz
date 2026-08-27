@@ -23,7 +23,7 @@ from yoetz.application.observation_advice import (
     ObservationAdviceBuildInput,
     build_observation_advice_snapshot,
 )
-from yoetz.cli.observe_hooks import handle_observe
+from yoetz.cli.observe_hooks import handle_claude_observe, handle_observe
 from yoetz.domain.observation import (
     AdviceSnapshot,
     ObservationCursor,
@@ -523,6 +523,51 @@ def test_stop_hook_active_does_not_block_or_consume_advice(
     guarded = _run(tmp_path, "Stop", "loop-guard", stop_hook_active=True)
     assert guarded == ""
     assert "connect_provider" in _run(tmp_path, "Stop", "loop-guard")
+
+
+def test_claude_stop_loop_guard_does_not_consume_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _consented(tmp_path)
+    _compose(monkeypatch, _STANDING)
+    session = "claude:loop-guard"
+    _run(tmp_path, "SessionStart", session, source="startup")
+    assert "resolve_failed_command" in _run(
+        tmp_path,
+        "PostToolUse",
+        session,
+        tool_name="shell",
+        exit_status=1,
+        correlation_id="c1",
+    )
+    _run(
+        tmp_path,
+        "PostToolUse",
+        session,
+        tool_name="shell",
+        exit_status=0,
+        correlation_id="c1",
+    )
+
+    out = io.BytesIO()
+    code = handle_claude_observe(
+        event_name="Stop",
+        stdin_bytes=json.dumps(
+            {
+                "hook_event_name": "Stop",
+                "session_id": "loop-guard",
+                "stop_hook_active": True,
+            }
+        ).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+
+    assert code == 0
+    assert json.loads(out.getvalue().decode() or "{}") == {}
+    assert "connect_provider" in _run(tmp_path, "Stop", session)
 
 
 def test_session_end_does_not_consume_undeliverable_advice(

@@ -28,6 +28,7 @@ from yoetz.ports.plugin_artifacts import (
     ArtifactAuthority,
     McpOwnership,
     PluginMutationReviewPort,
+    PluginOperationState,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
@@ -68,6 +69,14 @@ def _emit(value: dict[str, object], *, json_output: bool) -> None:
 
 def _request(value: str | None) -> RequestId:
     return request_id(new_id(IdKind.REQUEST) if value is None else value)
+
+
+def _operation_exit_code(state: PluginOperationState) -> int:
+    if state is PluginOperationState.COMPLETED:
+        return 0
+    if state is PluginOperationState.OUTCOME_UNKNOWN:
+        return 4
+    return 1
 
 
 def _artifact(ownership_name: str, route_name: str | None) -> ClaudeCodePluginArtifact:
@@ -254,7 +263,7 @@ def run_claude_code_plugin_command(
             },
             json_output=json_output,
         )
-        return 0 if result.operation_state.value == "completed" else 1
+        return _operation_exit_code(result.operation_state)
     except (ClaudeCodeIntegrationError, ValueError, OSError) as error:
         reason = error.reason.value if isinstance(error, ClaudeCodeIntegrationError) else str(error)
         sys.stderr.write(f"{reason}\n")
