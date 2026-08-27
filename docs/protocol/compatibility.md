@@ -194,7 +194,13 @@ claimed to consume Agent Plugins 1.0.0.
 
 Local-control schema `2.2.0` is the current append-only service-control wire. Relative to immutable
 `2.1.0`, it adds only `claude_hook` to observation envelope sources and source coverage. Peers must
-match the schema-manifest digest; no source is inferred across versions.
+match the schema-manifest digest; no source is inferred across versions. Because every resource
+change moves that digest, an upgraded installation cannot talk to the previous installation's
+still-running service: the handshake is refused as `service_incompatible`, and on-demand startup
+(the MCP bridge) or the explicit `yoetz service restart` replaces the stale holder with a service
+of the current installation through its ordinary bounded shutdown. Stale bridges are then refused
+in turn until their host restarts them. The 2026-08-27 Claude dogfood hit exactly this transition
+and saw an opaque `INTERNAL_ERROR`; it is now a bounded `SERVICE_UNAVAILABLE` naming the repair.
 
 ## Change and deprecation process
 

@@ -6,6 +6,7 @@ import dataclasses
 import importlib
 import os
 import sys
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import Enum
 from functools import cache
@@ -433,6 +434,23 @@ def _with_holder_pid(line: str) -> str:
     return line if holder is None else f"{line} (holder pid {holder})"
 
 
+def _with_holder_identity(line: str) -> str:
+    """Append the stamped holder's pid/version/manifest identity when it is readable."""
+
+    try:
+        from yoetz.config.paths import state_dir
+        from yoetz.service.lifecycle import SINGLETON_LOCK_NAME, probe_singleton_holder_identity
+
+        holder = probe_singleton_holder_identity(state_dir() / SINGLETON_LOCK_NAME)
+    except Exception:
+        holder = None
+    if holder is None:
+        return line
+    version = holder.service_version or "unknown"
+    digest = holder.schema_manifest_digest or "unknown"
+    return f"{line} (holder pid {holder.pid}, service version {version}, schema manifest {digest})"
+
+
 def _lifecycle_exit_code(error: BaseException) -> int | None:
     """Exit code for a bounded lifecycle refusal, or None for anything else.
 
@@ -462,6 +480,19 @@ def _lifecycle_failure(error: LifecycleError) -> int:
 
 def _control_failure(error: ControlError) -> int:
     code = public_error_code_for_control_reason(error.reason)
+    if error.reason in {"service_incompatible", "protocol_mismatch"}:
+        # The endpoint answered, but with a service of another installation or protocol
+        # generation. Neither 'service run' (refused while the holder lives) nor a plain retry
+        # helps; the explicit repair replaces that holder with this installation's service.
+        _stderr(
+            _with_holder_identity(
+                f"{error.reason}: the running local service was started by a different Yoetz "
+                "installation than this command and rejected its handshake. Run "
+                "'yoetz service restart' on a local terminal to replace it with this "
+                "installation's service, then retry"
+            )
+        )
+        return exit_code_for(code)
     if code is PublicErrorCode.SERVICE_UNAVAILABLE and accepted_but_unresponsive(error):
         # A service that answered the connect and then went silent is running. Prescribing
         # 'service run' here sent an operator to a command that must refuse, and the refusal
@@ -1058,6 +1089,70 @@ service_app.command("lock")(_service_command("lock"))
 service_app.command("stop")(_service_command("stop"))
 
 
+async def _service_restart(json_output: bool) -> int:
+    """Replace the running service, compatible or not, with one of this installation.
+
+    A compatible holder is stopped through its ordinary control method; an incompatible holder
+    (another installation's service that rejects this CLI's hello) is asked to stop through the
+    same bounded-shutdown signal on-demand startup uses. The successor is then started on
+    demand and its status reported.
+    """
+
+    from yoetz.service.client import (
+        connect_service_on_demand,
+        supersede_incompatible_service,
+        wait_for_singleton_release,
+    )
+
+    deadline = time.monotonic() + 30.0
+    holder_pid = _singleton_holder_pid()
+    try:
+        try:
+            client = await build_service_client(workspace_locator=None)
+        except ControlError as error:
+            if error.reason in {"service_incompatible", "protocol_mismatch"}:
+                if not await supersede_incompatible_service(deadline=deadline):
+                    return _control_failure(error)
+            elif error.reason != "service_unavailable":
+                return _control_failure(error)
+        else:
+            try:
+                await client.stop()
+            finally:
+                await client.close()
+        if holder_pid is not None and not await wait_for_singleton_release(
+            holder_pid, deadline=deadline
+        ):
+            _stderr(
+                _with_holder_pid(
+                    "service_unavailable: the previous service did not release the singleton "
+                    "within 30 seconds; wait and retry 'yoetz service restart'"
+                )
+            )
+            return exit_code_for(PublicErrorCode.SERVICE_UNAVAILABLE)
+        successor = await connect_service_on_demand(
+            ControlClientKind.CLI,
+            workspace_locator=None,
+            timeout_seconds=max(0.1, min(30.0, deadline - time.monotonic())),
+            supersede_incompatible=False,
+        )
+        try:
+            status = await successor.service_status()
+        finally:
+            await successor.close()
+    except ControlError as error:
+        return _control_failure(error)
+    _human_or_json(status, json_output=json_output)
+    return 0
+
+
+@service_app.command("restart")
+def service_restart(json_output: _JSON = False) -> None:
+    """Stop the running service (even one from another installation) and start this one."""
+
+    _finish(run_async(lambda: _service_restart(json_output)))
+
+
 @service_app.command("run")
 def service_run() -> None:
     """Run the persistent service in the foreground."""
@@ -1321,6 +1416,20 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
             Path | None,
             typer.Option("--marketplace-root", help="Exact managed private marketplace root."),
         ] = None,
+        output_root: Annotated[
+            Path | None,
+            typer.Option(
+                "--output-root",
+                help="export only: not-yet-existing directory for a claude --plugin-dir root.",
+            ),
+        ] = None,
+        development_enabled: Annotated[
+            bool,
+            typer.Option(
+                "--development-enabled",
+                help="export only: render defaultEnabled:true so --plugin-dir loads it.",
+            ),
+        ] = False,
         project_root: Annotated[
             Path | None,
             typer.Option("--project-root", help="Exact trusted project for MCP source checks."),
@@ -1402,6 +1511,21 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
                 "accept": accept,
                 "json_output": json_output,
             }
+        elif harness == "claude" and command_name == "export":
+            if output_root is None:
+                raise typer.BadParameter("--output-root is required for claude plugin export")
+            module = importlib.import_module("yoetz.cli.claude_code_integration")
+            export = cast(Callable[..., int], getattr(module, "run_claude_code_plugin_export"))
+            _finish(
+                export(
+                    output_root=output_root,
+                    ownership_name=ownership_name,
+                    route_profile=route_profile,
+                    development_enabled=development_enabled,
+                    json_output=json_output,
+                )
+            )
+            return
         elif harness == "claude":
             if any(
                 value is None
@@ -1447,7 +1571,16 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
     return command
 
 
-for _plugin_action in ("preview", "install", "update", "enable", "disable", "status", "remove"):
+for _plugin_action in (
+    "preview",
+    "install",
+    "update",
+    "enable",
+    "disable",
+    "status",
+    "remove",
+    "export",
+):
     integrate_plugin_app.command(_plugin_action)(_host_plugin_command(_plugin_action))
 
 

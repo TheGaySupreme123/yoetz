@@ -584,3 +584,48 @@ def test_wire_only_errors_map_to_existing_public_codes() -> None:
     )
     assert public_error_code_for_control_reason("vault_locked") is PublicErrorCode.VAULT_LOCKED
     assert public_error_code_for_control_reason("frame_invalid") is PublicErrorCode.INVALID_REQUEST
+
+
+def test_client_handshake_names_a_peer_that_closes_on_the_hello_as_rejected() -> None:
+    """A service that rejects the hello closes without answering; that is not a bad frame."""
+
+    class _ClosesAfterHello:
+        peer_identity = object()
+
+        def __init__(self, answer: bytes) -> None:
+            self.sent: list[bytes] = []
+            self.answer = bytearray(answer)
+
+        async def receive(self, max_bytes: int) -> bytes:
+            if not self.answer:
+                return b""
+            chunk = bytes(self.answer[:max_bytes])
+            del self.answer[:max_bytes]
+            return chunk
+
+        async def send_all(self, data: Buffer) -> None:
+            self.sent.append(bytes(data))
+
+        async def aclose(self) -> None:
+            return None
+
+    async def exercise() -> None:
+        rejected = _ClosesAfterHello(b"")
+        with pytest.raises(ControlProtocolError) as eof:
+            await client_handshake(rejected, ControlClientKind.MCP_BRIDGE, "0.1.0")
+        _assert_reason(eof, "handshake_rejected")
+        assert len(rejected.sent) == 1
+
+        truncated = _ClosesAfterHello(b"\x00\x00")
+        with pytest.raises(ControlProtocolError) as partial:
+            await client_handshake(truncated, ControlClientKind.MCP_BRIDGE, "0.1.0")
+        _assert_reason(partial, "frame_invalid")
+
+    asyncio.run(exercise())
+
+
+def test_service_incompatible_maps_to_service_unavailable() -> None:
+    assert (
+        public_error_code_for_control_reason("service_incompatible")
+        is PublicErrorCode.SERVICE_UNAVAILABLE
+    )

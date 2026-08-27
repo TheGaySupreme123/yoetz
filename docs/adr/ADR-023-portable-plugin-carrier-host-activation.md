@@ -306,3 +306,22 @@ list/settings/cache read-back. A nonzero/lost CLI outcome that did not reach the
 Marketplace `strict:true`, project scope, manifest version, source/render/cache digests, exact host
 identity, settings preimage, MCP owner, and requested action are preview-bound. Installation starts
 disabled; enabled state still does not prove a loaded session.
+
+#### Launcher binding and development export (2026-08-27 dogfood follow-up)
+
+The first live Claude dogfood failed on two carrier-level facts: the rendered `.mcp.json` and
+hooks launched a bare `yoetz` from the host's PATH, so the plugin bridge, hook process, and
+long-running service came from different installations on one machine; and a
+`defaultEnabled:false` carrier does not load under `claude --plugin-dir`, so no supported
+development activation existed. The Claude carrier therefore binds the exact invoking launcher
+(shared with the Cursor native carrier through `yoetz.adapters.integrations.launcher`), records it
+in a version 2 source marker, and folds it into the artifact digest. A separate `development`
+render (`defaultEnabled:true`) exists only for `yoetz integrate claude plugin export`, which writes
+the plugin root to a caller-chosen new directory without touching host state or consuming review
+authority; preview refuses that carrier, and it never earns marketplace-installed proof. The
+marketplace cell still installs disabled.
+
+The dogfood's third failure was not a carrier fact: an upgraded bridge could not talk to the
+previous installation's still-running service, and could not ask it to stop. That is resolved in
+the local-control client (`service_incompatible`, supersede-on-upgrade, `yoetz service restart`);
+see `docs/INTERFACES.md` under the trusted local service contract.

@@ -16,6 +16,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
+from yoetz import __version__
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ServiceState
@@ -38,7 +39,9 @@ __all__ = [
     "ServiceInstance",
     "ServiceLifecycle",
     "SessionSecurityEvent",
+    "SingletonHolder",
     "probe_singleton_holder",
+    "probe_singleton_holder_identity",
 ]
 
 LOCK_DRAIN_SECONDS: Final = 5
@@ -50,7 +53,8 @@ IDLE_STOP_SECONDS: Final = 7_200
 # One name for the per-user singleton lock file, so the daemon that takes it and the CLI that
 # reports on its holder can never disagree about which file that is.
 SINGLETON_LOCK_NAME: Final = "service.lock"
-_MAX_SINGLETON_HOLDER_BYTES: Final = 256
+# pid + instance id + service version + schema-manifest digest, canonical JSON, one line.
+_MAX_SINGLETON_HOLDER_BYTES: Final = 512
 _DEFAULT_IDLE_SECONDS: Final = 3_600
 _IDLE_POLICY_DOMAIN: Final = "yoetz/idle-relock-policy-change/v1\x00"
 _LIFECYCLE_REASONS: Final = frozenset(
@@ -628,6 +632,14 @@ class ServiceLifecycle:
         """
 
         body: dict[str, JsonValue] = {"instance_id": self._instance_id, "pid": os.getpid()}
+        # Version and schema-manifest identity let a client whose hello this service will
+        # reject (an upgraded installation talking to a stale process) name what it found and
+        # decide whether the holder is a supersede candidate, without a compatible channel.
+        with contextlib.suppress(Exception):
+            from yoetz.protocol.schemas import schema_manifest_digest
+
+            body["schema_manifest_digest"] = schema_manifest_digest()
+            body["service_version"] = __version__
         with contextlib.suppress(OSError):
             os.ftruncate(descriptor, 0)
             os.lseek(descriptor, 0, os.SEEK_SET)
@@ -646,8 +658,29 @@ class ServiceLifecycle:
                 os.close(descriptor)
 
 
+@dataclass(frozen=True, slots=True)
+class SingletonHolder:
+    """Advisory identity of the live process stamped in the singleton lock file.
+
+    ``schema_manifest_digest`` and ``service_version`` are absent for holders stamped by
+    installations that predate the identity fields; they are never inferred.
+    """
+
+    pid: int
+    instance_id: str | None
+    schema_manifest_digest: str | None
+    service_version: str | None
+
+
 def probe_singleton_holder(path: Path) -> int | None:
-    """Return the live pid stamped in a singleton lock file, or ``None`` when unknown.
+    """Return the live pid stamped in a singleton lock file, or ``None`` when unknown."""
+
+    holder = probe_singleton_holder_identity(path)
+    return None if holder is None else holder.pid
+
+
+def probe_singleton_holder_identity(path: Path) -> SingletonHolder | None:
+    """Return the live holder identity stamped in a singleton lock file, or ``None``.
 
     Reading the file never disturbs the lock: taking even a shared flock would conflict with a
     daemon that is still acquiring its exclusive one, so a diagnostic could make a legitimate
@@ -680,14 +713,28 @@ def probe_singleton_holder(path: Path) -> int | None:
         return None
     if type(parsed) is not dict:
         return None
-    pid = cast(dict[str, JsonValue], parsed).get("pid")
+    stamp = cast(dict[str, JsonValue], parsed)
+    pid = stamp.get("pid")
     if type(pid) is not int or not 1 <= pid < 2**31:
         return None
     try:
         os.kill(pid, 0)
     except OSError:
         return None
-    return pid
+    instance_id = stamp.get("instance_id")
+    digest = stamp.get("schema_manifest_digest")
+    version = stamp.get("service_version")
+    if type(digest) is str:
+        try:
+            validate_sha256_digest(digest)
+        except Exception:
+            digest = None
+    return SingletonHolder(
+        pid,
+        instance_id if type(instance_id) is str and len(instance_id) <= 64 else None,
+        digest if type(digest) is str else None,
+        version if type(version) is str and 0 < len(version) <= 128 else None,
+    )
 
 
 class _ServiceGenerationStore:

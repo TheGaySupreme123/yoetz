@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Final, Literal, cast
 
 from yoetz import __version__
+from yoetz.adapters.integrations.launcher import resolve_yoetz_launcher, valid_launcher
 from yoetz.adapters.integrations.portable_plugin import (
     PackagedPortableResources,
     RenderedPortablePlugin,
@@ -523,63 +524,15 @@ def _mcp_json(route_profile: Literal["strict", "policy"]) -> bytes:
 
 
 def _valid_launcher(launcher: object) -> bool:
-    """Validate one rendered launcher: an absolute executable plus fixed arguments."""
+    """Validate one rendered launcher (shared with every native carrier)."""
 
-    if type(launcher) is not tuple or not launcher:
-        return False
-    parts = cast(tuple[object, ...], launcher)
-    if any(
-        type(part) is not str
-        or not part
-        or any(ord(char) < 32 or ord(char) == 127 for char in part)
-        for part in parts
-    ):
-        return False
-    return Path(cast(str, parts[0])).is_absolute()
+    return valid_launcher(launcher)
 
 
 def _resolve_yoetz_launcher(candidate: Path | str | Sequence[str] | None = None) -> tuple[str, ...]:
-    """Resolve the exact launcher command used by rendered native Cursor hooks.
+    """Resolve the exact launcher command used by rendered native Cursor hooks."""
 
-    A plain path or name resolves to the console-script executable. A sequence
-    preserves an explicit invocation such as the documented ``python -m yoetz``
-    module entrypoint (ADR-007): its first element is resolved as the
-    executable and the remaining arguments are kept verbatim.
-    """
-
-    arguments: tuple[str, ...] = ()
-    if isinstance(candidate, Sequence) and not isinstance(candidate, str):
-        if not candidate or any(type(part) is not str for part in candidate):
-            raise ValueError("yoetz_executable_unavailable")
-        arguments = tuple(candidate[1:])
-        candidate = candidate[0]
-    if candidate is None:
-        discovered = shutil.which("yoetz")
-    else:
-        candidate_text = os.fspath(candidate)
-        raw = Path(candidate_text).expanduser()
-        separators = (os.sep,) if os.altsep is None else (os.sep, os.altsep)
-        explicit_path = isinstance(candidate, Path) or any(
-            separator in candidate_text for separator in separators
-        )
-        discovered = str(raw) if explicit_path else shutil.which(candidate_text)
-    if discovered is None:
-        raise ValueError("yoetz_executable_unavailable")
-    try:
-        resolved = Path(discovered).resolve(strict=True)
-    except OSError as exc:
-        raise ValueError("yoetz_executable_unavailable") from exc
-    if (
-        not resolved.is_file()
-        or not os.access(resolved, os.X_OK)
-        or not resolved.is_absolute()
-        or any(ord(char) < 32 or ord(char) == 127 for char in str(resolved))
-    ):
-        raise ValueError("yoetz_executable_unavailable")
-    launcher = (str(resolved), *arguments)
-    if not _valid_launcher(launcher):
-        raise ValueError("yoetz_executable_unavailable")
-    return launcher
+    return resolve_yoetz_launcher(candidate)
 
 
 def _native_members(

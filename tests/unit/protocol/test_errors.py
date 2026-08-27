@@ -165,6 +165,7 @@ schema_path_unsafe
 schema_reference_unresolved
 schema_version_mismatch
 semantic_provenance_json_shape_invalid
+service_incompatible
 set_member_not_ascii
 timestamp_not_utc
 timestamp_out_of_range
@@ -343,7 +344,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 146
+    assert len(source_values) == 147
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

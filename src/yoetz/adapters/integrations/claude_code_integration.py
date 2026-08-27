@@ -14,6 +14,7 @@ import hashlib
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
 from yoetz import __version__
+from yoetz.adapters.integrations.launcher import resolve_yoetz_launcher, valid_launcher
 from yoetz.adapters.integrations.portable_plugin import PackagedPortableResources
 from yoetz.domain.values import JsonObject, RequestId
 from yoetz.domain.values import request_id as validate_request_id
@@ -76,6 +78,7 @@ __all__ = [
     "SubprocessClaudeCodeCommands",
     "apply_claude_code_plugin",
     "discover_claude_code",
+    "export_claude_code_plugin",
     "observe_claude_code_mcp",
     "observe_claude_code_session_init",
     "preview_claude_code_plugin",
@@ -119,8 +122,13 @@ CLAUDE_CODE_HARNESS_PROFILE: Final = HarnessProfile(
 _MARKETPLACE_NAME: Final = "yoetz-local"
 _PLUGIN_ID: Final = f"yoetz@{_MARKETPLACE_NAME}"
 _MARKER_NAME: Final = ".yoetz-claude-marketplace-install.json"
-_MARKER_SCHEMA: Final = "yoetz.claude-code-marketplace-install/1"
-_RENDERER_VERSION: Final = "claude-code-plugin/0.1.0"
+_MARKER_SCHEMA: Final = "yoetz.claude-code-marketplace-install/2"
+# Version 1 markers predate launcher binding; they remain readable (status/remove) but are
+# never written again.
+_LEGACY_MARKER_SCHEMAS: Final = frozenset({"yoetz.claude-code-marketplace-install/1"})
+_EXPORT_MARKER_NAME: Final = ".yoetz-claude-plugin-export.json"
+_EXPORT_MARKER_SCHEMA: Final = "yoetz.claude-code-plugin-export/1"
+_RENDERER_VERSION: Final = "claude-code-plugin/0.2.0"
 _STAGE_PREFIX: Final = ".yoetz-claude-marketplace-stage-"
 _ROLLBACK_NAME: Final = ".yoetz-claude-marketplace-rollback"
 _MAX_FILE_BYTES: Final = 262_144
@@ -232,12 +240,20 @@ class ClaudeCodePluginArtifact:
     marketplace_manifest: bytes
     artifact_digest: str
     marketplace_digest: str
+    # The exact installation the rendered hooks and plugin-owned MCP entry launch
+    # (absolute executable plus fixed arguments); never a bare PATH lookup.
+    yoetz_launcher: tuple[str, ...] = ()
+    # A development carrier ships ``defaultEnabled:true`` for ``claude --plugin-dir`` runs. It
+    # is exported only, never previewed/installed, and earns no marketplace proof.
+    development: bool = False
 
     def __post_init__(self) -> None:
         if (
             type(self.plan) is not PortablePluginPlan
             or self.plan.format_profile is not PluginFormatProfile.CLAUDE_CODE_PLUGIN_NATIVE
         ):
+            raise ValueError("claude_code_artifact_invalid")
+        if not valid_launcher(self.yoetz_launcher) or type(self.development) is not bool:
             raise ValueError("claude_code_artifact_invalid")
         _validate_digest(self.artifact_digest)
         _validate_digest(self.marketplace_digest)
@@ -601,20 +617,25 @@ def _inventory(members: Mapping[str, bytes]) -> tuple[ManagedPluginFile, ...]:
     )
 
 
-def _mcp_json(route_profile: Literal["strict", "policy"]) -> bytes:
-    args = ["mcp", "serve"]
+def _mcp_json(route_profile: Literal["strict", "policy"], yoetz_launcher: tuple[str, ...]) -> bytes:
+    args = [*yoetz_launcher[1:], "mcp", "serve"]
     if route_profile == "strict":
         args.extend(("--semantic", "off"))
     return canonical_encode(
         cast(
             JsonValue,
-            {"mcpServers": {"yoetz": {"args": args, "command": "yoetz", "type": "stdio"}}},
+            {
+                "mcpServers": {
+                    "yoetz": {"args": args, "command": yoetz_launcher[0], "type": "stdio"}
+                }
+            },
         )
     )
 
 
-def _hooks_json() -> bytes:
-    command = 'yoetz hooks claude-observe --workspace "${CLAUDE_PROJECT_DIR}"'
+def _hooks_json(yoetz_launcher: tuple[str, ...]) -> bytes:
+    launcher = " ".join(shlex.quote(part) for part in yoetz_launcher)
+    command = f'{launcher} hooks claude-observe --workspace "${{CLAUDE_PROJECT_DIR}}"'
 
     def hook(event: str) -> dict[str, JsonValue]:
         return {"command": f"{command} --event {event}", "timeout": 3, "type": "command"}
@@ -639,12 +660,23 @@ def render_claude_code_plugin(
     route_profile: Literal["strict", "policy"] | None = None,
     source: PackagedPortableResources | None = None,
     version: str = __version__,
+    yoetz_launcher: Path | str | Sequence[str] | None = None,
+    development_enabled: bool = False,
 ) -> ClaudeCodePluginArtifact:
-    """Render Claude-native bytes from canonical packaged guidance."""
+    """Render Claude-native bytes from canonical packaged guidance.
+
+    ``yoetz_launcher`` binds hooks and the plugin-owned MCP entry to one exact installation
+    (the invoking console script or ``python -m yoetz``); ``None`` resolves ``yoetz`` on PATH
+    to its absolute executable. ``development_enabled`` renders the ``claude --plugin-dir``
+    development carrier (``defaultEnabled:true``), which export writes and preview refuses.
+    """
 
     _version_tuple(version)
     if type(mcp_ownership) is not McpOwnership:
         raise ValueError("claude_code_mcp_ownership_invalid")
+    if type(development_enabled) is not bool:
+        raise ValueError("claude_code_artifact_invalid")
+    resolved_launcher = resolve_yoetz_launcher(yoetz_launcher)
     if (mcp_ownership is McpOwnership.PLUGIN_MANAGED) != (route_profile in {"strict", "policy"}):
         raise ValueError(
             "claude_code_mcp_route_required"
@@ -655,7 +687,7 @@ def render_claude_code_plugin(
     manifest: dict[str, JsonValue] = {
         "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
         "author": {"name": "Yoetz contributors"},
-        "defaultEnabled": False,
+        "defaultEnabled": development_enabled,
         "description": _DESCRIPTION,
         "displayName": "Yoetz",
         "license": "Apache-2.0",
@@ -665,14 +697,14 @@ def render_claude_code_plugin(
     }
     members: dict[str, bytes] = {
         ".claude-plugin/plugin.json": canonical_encode(manifest),
-        "hooks/hooks.json": _hooks_json(),
+        "hooks/hooks.json": _hooks_json(resolved_launcher),
         "skills/yoetz/SKILL.md": resources.read_bytes("skills/portable/yoetz/SKILL.md"),
     }
     for name in _GUIDANCE_NAMES:
         members[f"skills/yoetz/references/{name}"] = resources.read_bytes(f"guidance/{name}")
     if mcp_ownership is McpOwnership.PLUGIN_MANAGED:
         assert route_profile is not None
-        members[".mcp.json"] = _mcp_json(route_profile)
+        members[".mcp.json"] = _mcp_json(route_profile, resolved_launcher)
     plan = PortablePluginPlan(
         name="yoetz",
         version=version,
@@ -725,6 +757,8 @@ def render_claude_code_plugin(
         marketplace_manifest,
         artifact_digest,
         _sha(marketplace_manifest),
+        resolved_launcher,
+        development_enabled,
     )
 
 
@@ -838,6 +872,7 @@ def _marker(artifact: ClaudeCodePluginArtifact) -> bytes:
         "mcp_route_profile": artifact.plan.mcp_route_profile,
         "renderer_version": artifact.plan.renderer_version,
         "schema": _MARKER_SCHEMA,
+        "yoetz_launcher": list(artifact.yoetz_launcher),
         "yoetz_version": artifact.plan.version,
     }
     return canonical_encode({**body, "marker_digest": canonical_digest(body)})
@@ -854,11 +889,19 @@ def _load_object(data: bytes) -> Mapping[str, JsonValue] | None:
 def _valid_source_marker(files: Mapping[str, bytes]) -> tuple[bool, str | None]:
     raw = files.get(_MARKER_NAME)
     marker = None if raw is None else _load_object(raw)
-    if marker is None or marker.get("schema") != _MARKER_SCHEMA:
+    if marker is None or (
+        marker.get("schema") != _MARKER_SCHEMA
+        and marker.get("schema") not in _LEGACY_MARKER_SCHEMAS
+    ):
         return False, None
     digest = marker.get("marker_digest")
     body = {key: value for key, value in marker.items() if key != "marker_digest"}
     if type(digest) is not str or digest != canonical_digest(body):
+        return False, None
+    launcher = marker.get("yoetz_launcher")
+    if marker.get("schema") == _MARKER_SCHEMA and (
+        type(launcher) is not list or not valid_launcher(tuple(cast(list[object], launcher)))
+    ):
         return False, None
     rows = marker.get("managed_files")
     if type(rows) is not list:
@@ -982,7 +1025,9 @@ def _host_state_digest(target: ClaudeCodePluginTarget) -> str:
     return canonical_digest(cast(JsonValue, {"files": rows}))
 
 
-def _config_entry(raw: object) -> tuple[Mapping[str, JsonValue] | None, bool]:
+def _config_entry(
+    raw: object, yoetz_launcher: tuple[str, ...] | None = None
+) -> tuple[Mapping[str, JsonValue] | None, bool]:
     if raw is None:
         return None, True
     if not isinstance(raw, Mapping):
@@ -1002,7 +1047,7 @@ def _config_entry(raw: object) -> tuple[Mapping[str, JsonValue] | None, bool]:
             relevant.append(cast(Mapping[str, JsonValue], raw_entry))
         elif (
             isinstance(raw_entry, Mapping)
-            and _route_profile(cast(Mapping[str, JsonValue], raw_entry)) is not None
+            and _route_profile(cast(Mapping[str, JsonValue], raw_entry), yoetz_launcher) is not None
         ):
             relevant.append(cast(Mapping[str, JsonValue], raw_entry))
     if not relevant:
@@ -1012,18 +1057,37 @@ def _config_entry(raw: object) -> tuple[Mapping[str, JsonValue] | None, bool]:
     return relevant[0], True
 
 
-def _route_profile(entry: Mapping[str, JsonValue] | None) -> Literal["strict", "policy"] | None:
+def _route_profile(
+    entry: Mapping[str, JsonValue] | None, yoetz_launcher: tuple[str, ...] | None = None
+) -> Literal["strict", "policy"] | None:
+    """Classify one MCP entry as an exact Yoetz route, else ``None``.
+
+    An exact route launches either a bare ``yoetz`` console script (external registrations
+    the owner wrote by hand) or this artifact's exact bound launcher (plugin-owned entries and
+    launcher-bound external registrations), followed by the exact ``mcp serve`` arguments.
+    """
+
     if entry is None or set(entry) != {"args", "command", "type"}:
         return None
-    if entry.get("command") != "yoetz" or entry.get("type") != "stdio":
+    if entry.get("type") != "stdio":
         return None
-    args = entry.get("args")
-    if args in (["mcp", "serve"], ("mcp", "serve")):
+    raw_args = entry.get("args")
+    if not isinstance(raw_args, (list, tuple)):
+        return None
+    args = tuple(cast(Sequence[object], raw_args))
+    command = entry.get("command")
+    if command == "yoetz":
+        prefix: tuple[str, ...] = ()
+    elif yoetz_launcher is not None and command == yoetz_launcher[0]:
+        prefix = yoetz_launcher[1:]
+    else:
+        return None
+    if args[: len(prefix)] != prefix:
+        return None
+    rest = args[len(prefix) :]
+    if rest == ("mcp", "serve"):
         return "policy"
-    if args in (
-        ["mcp", "serve", "--semantic", "off"],
-        ("mcp", "serve", "--semantic", "off"),
-    ):
+    if rest == ("mcp", "serve", "--semantic", "off"):
         return "strict"
     return None
 
@@ -1034,8 +1098,13 @@ def observe_claude_code_mcp(
     project_root: Path,
     claude_config_root: Path,
     connector_entry: Mapping[str, JsonValue] | None = None,
+    yoetz_launcher: tuple[str, ...] | None = None,
 ) -> ClaudeCodeMcpObservation:
-    """Observe all reachable sources without treating Claude precedence as ownership."""
+    """Observe all reachable sources without treating Claude precedence as ownership.
+
+    ``yoetz_launcher`` is the artifact's exact bound launcher; entries that launch it with the
+    exact ``mcp serve`` arguments are Yoetz routes just like a bare ``yoetz`` console script.
+    """
 
     candidates: list[tuple[ClaudeCodeMcpSource, Mapping[str, JsonValue]]] = []
     uncertain: list[ClaudeCodeMcpSource] = []
@@ -1045,24 +1114,24 @@ def observe_claude_code_mcp(
     elif config is not None:
         projects = config.get("projects")
         local_raw = projects.get(str(project_root)) if isinstance(projects, Mapping) else None
-        local_entry, local_observed = _config_entry(local_raw)
+        local_entry, local_observed = _config_entry(local_raw, yoetz_launcher)
         if not local_observed:
             uncertain.append(ClaudeCodeMcpSource.LOCAL)
         elif local_entry is not None:
             candidates.append((ClaudeCodeMcpSource.LOCAL, local_entry))
-        user_entry, user_observed = _config_entry(config)
+        user_entry, user_observed = _config_entry(config, yoetz_launcher)
         if not user_observed:
             uncertain.append(ClaudeCodeMcpSource.USER)
         elif user_entry is not None:
             candidates.append((ClaudeCodeMcpSource.USER, user_entry))
     project, project_observed = _json_file(project_root / ".mcp.json")
-    project_entry, project_shape_observed = _config_entry(project)
+    project_entry, project_shape_observed = _config_entry(project, yoetz_launcher)
     if not project_observed or not project_shape_observed:
         uncertain.append(ClaudeCodeMcpSource.PROJECT)
     elif project_entry is not None:
         candidates.append((ClaudeCodeMcpSource.PROJECT, project_entry))
     plugin, plugin_observed = _json_file(plugin_root / ".mcp.json")
-    plugin_entry, plugin_shape_observed = _config_entry(plugin)
+    plugin_entry, plugin_shape_observed = _config_entry(plugin, yoetz_launcher)
     if not plugin_observed or not plugin_shape_observed:
         uncertain.append(ClaudeCodeMcpSource.PLUGIN)
     elif plugin_entry is not None:
@@ -1088,7 +1157,7 @@ def observe_claude_code_mcp(
         )
     if not candidates:
         return ClaudeCodeMcpObservation(McpOwnershipState.ABSENT, None, None, (), True)
-    profiles = [(source, _route_profile(entry)) for source, entry in candidates]
+    profiles = [(source, _route_profile(entry, yoetz_launcher)) for source, entry in candidates]
     present = tuple(source for source, _profile in profiles)
     if any(profile is None for _source, profile in profiles):
         source = next(source for source, profile in profiles if profile is None)
@@ -1298,6 +1367,7 @@ def status_claude_code_plugin(
         plugin_root=plugin_root,
         project_root=Path(target.project_root),
         claude_config_root=Path(target.claude_config_root),
+        yoetz_launcher=artifact.yoetz_launcher,
         connector_entry=connector_entry,
     )
     if source.state is PluginArtifactState.RECOVERY_REQUIRED:
@@ -1455,6 +1525,10 @@ def preview_claude_code_plugin(
     request = validate_request_id(request)
     if type(action) is not ClaudeCodePluginAction or action is ClaudeCodePluginAction.NOOP:
         raise _error(PluginArtifactReason.SOURCE_INVALID)
+    if artifact.development:
+        # The development carrier exists only for ``claude --plugin-dir`` runs; it never
+        # enters the marketplace lane or consumes review authority.
+        raise _error(PluginArtifactReason.SOURCE_INVALID, {"development_carrier": True})
     if target.identity.version not in CLAUDE_CODE_HARNESS_PROFILE.supported_versions:
         # Only versions whose native contract was actually proven are admitted.
         # A neighboring version must stay explicitly untested rather than run
@@ -1654,6 +1728,63 @@ def _write_source(
             if rollback.exists() and not destination.exists():
                 os.replace(rollback, destination)
                 _fsync_dir(parent)
+        if isinstance(exc, ClaudeCodeIntegrationError):
+            raise
+        raise _error(PluginArtifactReason.WRITE_FAILED) from exc
+    return tuple(sorted(members, key=str.encode))
+
+
+def _export_marker(artifact: ClaudeCodePluginArtifact) -> bytes:
+    body: dict[str, JsonValue] = {
+        "artifact_digest": artifact.artifact_digest,
+        "development": artifact.development,
+        "format_profile": artifact.plan.format_profile.value,
+        "hook_mapping_version": CLAUDE_CODE_HOOK_MAPPING_VERSION,
+        "managed_files": [
+            {"relative_path": path, "sha256": _sha(data), "size": len(data)}
+            for path, data in sorted(
+                artifact.members.items(), key=lambda item: item[0].encode("ascii")
+            )
+        ],
+        "mcp_ownership": artifact.plan.mcp_ownership.value,
+        "mcp_route_profile": artifact.plan.mcp_route_profile,
+        "renderer_version": artifact.plan.renderer_version,
+        "schema": _EXPORT_MARKER_SCHEMA,
+        "yoetz_launcher": list(artifact.yoetz_launcher),
+        "yoetz_version": artifact.plan.version,
+    }
+    return canonical_encode({**body, "marker_digest": canonical_digest(body)})
+
+
+def export_claude_code_plugin(
+    artifact: ClaudeCodePluginArtifact, output_root: Path
+) -> tuple[str, ...]:
+    """Write the exact plugin root for a ``claude --plugin-dir`` session; no host state moves.
+
+    This is the supported development/test activation path: it writes only into the caller's
+    chosen, not-yet-existing directory (owner-only, no symlinks, safe ancestors), touches no
+    Claude settings, marketplace, or cache, and consumes no review authority. The written tree
+    carries an export marker naming its digest, launcher, and development flag, so a later
+    status/proof reader can never mistake it for the marketplace-installed delivery cell.
+    """
+
+    destination = Path(os.fspath(output_root)).expanduser().absolute()
+    if destination.exists() or destination.is_symlink():
+        raise _error(PluginArtifactReason.DESTINATION_CONFLICT)
+    _ensure_private_parent(destination.parent)
+    members = {**dict(artifact.members), _EXPORT_MARKER_NAME: _export_marker(artifact)}
+    try:
+        destination.mkdir(mode=0o700)
+        for relative, data in sorted(members.items(), key=lambda item: item[0].encode("ascii")):
+            path = destination / relative
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _write_file(path, data)
+        _fsync_dir(destination)
+        if _safe_tree(destination) != members:
+            raise OSError("claude_export_bytes_mismatch")
+    except BaseException as exc:
+        with contextlib.suppress(OSError):
+            shutil.rmtree(destination)
         if isinstance(exc, ClaudeCodeIntegrationError):
             raise
         raise _error(PluginArtifactReason.WRITE_FAILED) from exc

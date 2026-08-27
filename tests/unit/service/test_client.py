@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import time
 from collections.abc import Buffer
 from inspect import signature
 from pathlib import Path
@@ -962,3 +963,169 @@ async def test_projection_errors_reach_the_caller_without_closing_the_connection
     follow_up.cancel()
     await asyncio.gather(follow_up, return_exceptions=True)
     await client.close()
+
+
+_CORRELATION_FOR_TEST = "err_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+@pytest.mark.anyio
+async def test_on_demand_supersedes_an_incompatible_holder_then_spawns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An upgraded client must replace a stale installation's service, not fail opaquely."""
+
+    import yoetz.service.client as client_module
+
+    expected = object()
+    calls = 0
+    spawned = 0
+    superseded: list[float] = []
+
+    async def scripted_connect(kind: ControlClientKind, **_kwargs: object) -> object:
+        nonlocal calls
+        assert kind is ControlClientKind.MCP_BRIDGE
+        calls += 1
+        if calls == 1:
+            raise ControlError("service_incompatible", retryable=True)
+        if calls == 2:
+            raise ControlError("service_unavailable", retryable=True)
+        return expected
+
+    async def supersede(*, deadline: float) -> bool:
+        superseded.append(deadline)
+        return True
+
+    def spawn() -> None:
+        nonlocal spawned
+        spawned += 1
+
+    monkeypatch.setattr(client_module, "_connect_service_attempt", scripted_connect)
+    monkeypatch.setattr(client_module, "supersede_incompatible_service", supersede)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    monkeypatch.setattr(client_module, "_SERVICE_START_POLL_SECONDS", 0.01)
+    connected = await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.5)
+    assert connected is expected
+    assert len(superseded) == 1
+    assert spawned == 1
+
+
+@pytest.mark.anyio
+async def test_on_demand_reports_incompatibility_when_no_supersede_candidate_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.service.client as client_module
+
+    spawned = 0
+
+    async def scripted_connect(kind: ControlClientKind, **_kwargs: object) -> object:
+        raise ControlError("service_incompatible", retryable=True)
+
+    async def no_candidate(*, deadline: float) -> bool:
+        return False
+
+    def spawn() -> None:
+        nonlocal spawned
+        spawned += 1
+
+    monkeypatch.setattr(client_module, "_connect_service_attempt", scripted_connect)
+    monkeypatch.setattr(client_module, "supersede_incompatible_service", no_candidate)
+    monkeypatch.setattr(client_module, "_spawn_service_process", spawn)
+    with pytest.raises(ControlError) as refused:
+        await connect_service_on_demand(ControlClientKind.MCP_BRIDGE, timeout_seconds=0.2)
+    assert refused.value.reason == "service_incompatible"
+    assert refused.value.retryable is True
+    assert spawned == 0
+
+    # Callers that opt out (the explicit restart path owns supersede itself) never signal.
+    async def must_not_run(*, deadline: float) -> bool:
+        raise AssertionError("supersede must not run when disabled")
+
+    monkeypatch.setattr(client_module, "supersede_incompatible_service", must_not_run)
+    with pytest.raises(ControlError) as untouched:
+        await connect_service_on_demand(
+            ControlClientKind.MCP_BRIDGE, timeout_seconds=0.2, supersede_incompatible=False
+        )
+    assert untouched.value.reason == "service_incompatible"
+
+
+def test_protocol_rejection_reasons_map_to_service_incompatible() -> None:
+    import yoetz.service.client as client_module
+    from yoetz.service.control_protocol import ControlProtocolError
+
+    for reason in ("manifest_mismatch", "handshake_rejected"):
+        mapped = client_module._protocol_error(  # pyright: ignore[reportPrivateUsage]
+            ControlProtocolError(reason)
+        )
+        assert mapped.reason == "service_incompatible"
+        assert mapped.retryable is True
+    mismatch = client_module._protocol_error(  # pyright: ignore[reportPrivateUsage]
+        ControlProtocolError("protocol_mismatch")
+    )
+    assert mismatch.reason == "protocol_mismatch"
+
+
+@pytest.mark.anyio
+async def test_supersede_signals_only_a_live_foreign_identity_holder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+    import sys
+    import threading
+
+    import yoetz.observability.logging as logging_module
+    import yoetz.service.client as client_module
+    from yoetz import __version__
+    from yoetz.protocol.canonical import canonical_encode
+    from yoetz.protocol.schemas import schema_manifest_digest
+
+    lock = tmp_path / "service.lock"
+    monkeypatch.setattr(client_module, "_singleton_lock_path", lambda: lock)
+    recorded: list[str] = []
+
+    def record(
+        *, component: str, operation: str, reason: str, request_id: str | None = None
+    ) -> str:
+        del component, reason, request_id
+        recorded.append(operation)
+        return _CORRELATION_FOR_TEST
+
+    monkeypatch.setattr(logging_module, "record_public_error_without_raising", record)
+
+    def stamp(pid: int, digest: str | None, version: str | None) -> None:
+        body: dict[str, object] = {"instance_id": "svc_test", "pid": pid}
+        if digest is not None:
+            body["schema_manifest_digest"] = digest
+        if version is not None:
+            body["service_version"] = version
+        lock.write_bytes(canonical_encode(body) + b"\n")  # type: ignore[arg-type]
+        lock.chmod(0o600)
+
+    deadline = time.monotonic() + 5.0
+    # No stamp at all: nothing to supersede.
+    assert await client_module.supersede_incompatible_service(deadline=deadline) is False
+    # Same identity that still rejected us is not an upgrade; never signalled.
+    holder = subprocess.Popen(  # noqa: S603 - fixed interpreter
+        (sys.executable, "-c", "import time; time.sleep(30)"),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # A real service is detached and reaped by init; reap this child so its exit is visible
+    # to the liveness probe instead of lingering as a zombie that ``kill(pid, 0)`` still sees.
+    reaper = threading.Thread(target=holder.wait, daemon=True)
+    reaper.start()
+    try:
+        stamp(holder.pid, schema_manifest_digest(), __version__)
+        assert await client_module.supersede_incompatible_service(deadline=deadline) is False
+        assert holder.poll() is None
+        assert recorded == []
+        # A legacy stamp (no identity) from a live process is a supersede candidate.
+        stamp(holder.pid, None, None)
+        assert await client_module.supersede_incompatible_service(deadline=deadline) is True
+        reaper.join(timeout=5)
+        assert holder.returncode is not None and holder.returncode != 0
+        assert recorded == ["service_supersede"]
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=5)

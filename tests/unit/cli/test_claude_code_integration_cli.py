@@ -95,3 +95,50 @@ def test_claude_cli_rejects_portable_format_and_unknown_preview_action(tmp_path:
     unknown = runner.invoke(app, _args(tmp_path, "preview", "--action", "replace"))
     assert unknown.exit_code == 1
     assert unknown.stderr == "claude_code_plugin_action_invalid\n"
+
+
+def test_claude_cli_export_writes_a_plugin_dir_root_without_host_state(tmp_path: Path) -> None:
+    output = tmp_path / "dev-plugin"
+    result = CliRunner().invoke(
+        app,
+        [
+            "integrate",
+            "claude",
+            "plugin",
+            "export",
+            "--output-root",
+            str(output),
+            "--mcp-ownership",
+            "plugin-managed",
+            "--route-profile",
+            "strict",
+            "--development-enabled",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.output)
+    assert body["development"] is True
+    assert body["default_enabled"] is True
+    assert body["proof"] == "development_export_not_marketplace_activation"
+    assert body["next_step"].startswith("claude --plugin-dir ")
+    assert (output / ".claude-plugin" / "plugin.json").is_file()
+    assert (output / ".mcp.json").is_file()
+    assert (output / ".yoetz-claude-plugin-export.json").is_file()
+    manifest = json.loads((output / ".claude-plugin" / "plugin.json").read_text())
+    assert manifest["defaultEnabled"] is True
+    mcp = json.loads((output / ".mcp.json").read_text())["mcpServers"]["yoetz"]
+    assert Path(mcp["command"]).is_absolute()
+    assert body["yoetz_launcher"][0] == mcp["command"]
+    # No Claude config, marketplace, or cache root was ever named, so none can have changed.
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["dev-plugin"]
+
+    again = CliRunner().invoke(
+        app,
+        ["integrate", "claude", "plugin", "export", "--output-root", str(output), "--json"],
+    )
+    assert again.exit_code == 1
+    assert "destination_conflict" in again.output
+
+    missing = CliRunner().invoke(app, ["integrate", "claude", "plugin", "export", "--json"])
+    assert missing.exit_code == 2

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import subprocess
 import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import BinaryIO, Final, Literal, TypedDict, cast
 
 from yoetz import __version__
@@ -104,6 +106,8 @@ __all__ = [
     "accepted_but_unresponsive",
     "connect_service",
     "connect_service_on_demand",
+    "supersede_incompatible_service",
+    "wait_for_singleton_release",
 ]
 
 _MAX_IN_FLIGHT: Final = 32
@@ -126,6 +130,10 @@ _PRIVATE_CONSTRUCTOR_TOKEN: Final = object()
 _CONNECT_HANDSHAKE_TIMEOUT_SECONDS: Final = 5.0
 _SERVICE_START_TIMEOUT_SECONDS: Final = 30.0
 _SERVICE_START_POLL_SECONDS: Final = 0.05
+# A listening service that rejected this client's hello is a different Yoetz installation (or
+# generation) sharing the one per-user endpoint. Both reasons name that condition; only these
+# may make on-demand startup replace the running process.
+_SUPERSEDE_REASONS: Final = frozenset({"service_incompatible", "protocol_mismatch"})
 _SECRET_ENV_MARKERS: Final = (
     "API_KEY",
     "AUTHORIZATION",
@@ -369,7 +377,13 @@ def _transport_error(error: LocalControlTransportError) -> ControlError:
 
 
 def _protocol_error(error: ControlProtocolError) -> ControlError:
-    if error.reason == "protocol_mismatch" or error.reason == "manifest_mismatch":
+    if error.reason in {"manifest_mismatch", "handshake_rejected"}:
+        # The peer is a live Yoetz service from another installation: it either answered with a
+        # different schema-manifest digest or closed on our hello without answering (that is how
+        # a service rejects a manifest it does not share). Retryable: it heals once the endpoint
+        # is owned by a service of this installation.
+        return ControlError("service_incompatible", retryable=True)
+    if error.reason == "protocol_mismatch":
         return ControlError("protocol_mismatch")
     if error.reason == "peer_untrusted":
         return ControlError("peer_untrusted")
@@ -1230,17 +1244,99 @@ async def connect_service(
     )
 
 
+def _singleton_lock_path() -> Path:
+    from yoetz.config.paths import state_dir
+    from yoetz.service.lifecycle import SINGLETON_LOCK_NAME
+
+    return state_dir() / SINGLETON_LOCK_NAME
+
+
+async def wait_for_singleton_release(pid: int, *, deadline: float) -> bool:
+    """Poll until the stamped holder ``pid`` no longer owns the singleton, or the deadline passes."""
+
+    from yoetz.service.lifecycle import probe_singleton_holder_identity
+
+    path = _singleton_lock_path()
+    while True:
+        current = probe_singleton_holder_identity(path)
+        if current is None or current.pid != pid:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(_SERVICE_START_POLL_SECONDS, remaining))
+
+
+async def supersede_incompatible_service(*, deadline: float) -> bool:
+    """Ask the live same-user singleton holder to stop and wait for it to release the endpoint.
+
+    Called only after a listening service rejected this client's hello. The holder is identified
+    through the owner-only singleton stamp (never guessed from process listings), receives the
+    daemon's ordinary bounded-shutdown signal, and is polled until it releases the lock. Returns
+    ``True`` once the endpoint is free, ``False`` when no supersede candidate can be identified
+    (no live stamped holder, an identical-identity holder that rejected us anyway, or a platform
+    without POSIX signals), and raises ``service_incompatible`` when the holder outlives the
+    deadline. A durable diagnostic names every attempt.
+    """
+
+    if os.name == "nt":
+        return False
+    from yoetz.observability.logging import record_public_error_without_raising
+    from yoetz.service.lifecycle import probe_singleton_holder_identity
+
+    holder = probe_singleton_holder_identity(_singleton_lock_path())
+    if holder is None:
+        return False
+    if (
+        holder.schema_manifest_digest == _manifest_digest_for_client()
+        and holder.service_version == __version__
+    ):
+        # Same installation identity yet it rejected the hello: this is not an upgrade, and
+        # stopping it would not change the outcome. Report instead of restarting.
+        return False
+    correlation_id = record_public_error_without_raising(
+        component="service.client",
+        operation="service_supersede",
+        reason="service_incompatible",
+    )
+    try:
+        os.kill(holder.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except OSError as exc:
+        raise ControlError(
+            "service_incompatible", retryable=True, correlation_id=correlation_id
+        ) from exc
+    if await wait_for_singleton_release(holder.pid, deadline=deadline):
+        return True
+    raise ControlError("service_incompatible", retryable=True, correlation_id=correlation_id)
+
+
+def _manifest_digest_for_client() -> str:
+    from yoetz.protocol.schemas import schema_manifest_digest
+
+    return schema_manifest_digest()
+
+
 async def connect_service_on_demand(
     client_kind: ControlClientKind,
     *,
     workspace_locator: WorkspaceLocator | None = None,
     timeout_seconds: float = _SERVICE_START_TIMEOUT_SECONDS,
+    supersede_incompatible: bool = True,
 ) -> ServiceClient:
     """Connect to the fixed service, starting one detached successor only when absent.
 
     Startup is deliberately narrower than workflow authority: it supplies no path, configuration,
     credential, vault input, or policy override.  Concurrent bridges may race to spawn; the
     service singleton admits exactly one winner and every caller reconnects to that winner.
+
+    When ``supersede_incompatible`` is set and the running service rejects this client's hello
+    (a stale process from another installation holding the one per-user endpoint after an
+    upgrade), the holder is asked to stop through its ordinary bounded shutdown and a successor
+    of this installation is spawned inside the same budget. The one endpoint then belongs to
+    the installation that is actually being used; bridges of the stale installation reconnect
+    and are refused in turn, which is the correct outcome of an upgrade.
     """
 
     if type(client_kind) is not ControlClientKind:
@@ -1270,7 +1366,10 @@ async def connect_service_on_demand(
         # repair that process and only creates a singleton race, so fail this bounded attempt.
         raise
     except ControlError as exc:
-        if exc.reason != "service_unavailable":
+        if exc.reason in _SUPERSEDE_REASONS and supersede_incompatible:
+            if not await supersede_incompatible_service(deadline=deadline):
+                raise
+        elif exc.reason != "service_unavailable":
             raise
     if time.monotonic() >= deadline:
         raise ControlError("service_unavailable", retryable=True)

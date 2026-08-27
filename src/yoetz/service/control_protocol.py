@@ -90,6 +90,7 @@ _ERROR_REASONS: Final = frozenset(
         "duplicate_rpc_id",
         "frame_invalid",
         "frame_too_large",
+        "handshake_rejected",
         "manifest_mismatch",
         "method_forbidden",
         "peer_untrusted",
@@ -476,7 +477,9 @@ def decode_control_frame(frame: bytes) -> ControlFrame:
         raise ControlProtocolError("frame_invalid") from None
 
 
-async def _read_exact(stream: ControlStream, byte_count: int) -> bytes:
+async def _read_exact(
+    stream: ControlStream, byte_count: int, *, eof_reason: str = "frame_invalid"
+) -> bytes:
     chunks: list[bytes] = []
     remaining = byte_count
     while remaining:
@@ -485,18 +488,30 @@ async def _read_exact(stream: ControlStream, byte_count: int) -> bytes:
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            raise ControlProtocolError("frame_invalid") from None
-        if type(chunk) is not bytes or not chunk or len(chunk) > remaining:
+            # A transport failure before the first byte of a frame is indistinguishable, for
+            # the caller, from the peer closing on us; both take the caller's EOF reason.
+            raise ControlProtocolError(eof_reason if not chunks else "frame_invalid") from None
+        if type(chunk) is not bytes or not chunk:
+            _fail(eof_reason if not chunks else "frame_invalid")
+        if len(chunk) > remaining:
             _fail("frame_invalid")
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
 
 
-async def read_control_frame(stream: ControlStream) -> ControlFrame:
-    """Read one frame without consuming bytes belonging to its successor."""
+async def read_control_frame(
+    stream: ControlStream, *, eof_reason: str = "frame_invalid"
+) -> ControlFrame:
+    """Read one frame without consuming bytes belonging to its successor.
 
-    prefix = await _read_exact(stream, 4)
+    ``eof_reason`` names the failure when the peer closes before the first byte of this frame
+    arrives. The client handshake uses it to tell "the listening service dropped my hello"
+    (``handshake_rejected``: an incompatible peer that closed without answering) apart from a
+    frame truncated mid-flight, which stays the generic ``frame_invalid``.
+    """
+
+    prefix = await _read_exact(stream, 4, eof_reason=eof_reason)
     declared = struct.unpack(">I", prefix)[0]
     if declared == 0:
         _fail("frame_invalid")
@@ -743,7 +758,10 @@ async def client_handshake(
     }
     try:
         await write_control_frame(stream, hello)
-        result = await read_control_frame(stream)
+        # A service that rejects this hello (schema-manifest or protocol mismatch, or a hello
+        # shape its decoder does not know) closes without answering. Name that outcome so the
+        # client can treat the listening peer as incompatible instead of merely malformed.
+        result = await read_control_frame(stream, eof_reason="handshake_rejected")
         _validated_wire(result, "control-hello-result")
         if result["protocol_version"] != CONTROL_PROTOCOL_VERSION:
             _fail("protocol_mismatch")
@@ -865,6 +883,7 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
         "service_generation_changed",
         "privacy_projection_unavailable",
         "service_unavailable",
+        "service_incompatible",
         "request_timeout",
     }:
         return PublicErrorCode.SERVICE_UNAVAILABLE

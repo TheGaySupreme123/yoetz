@@ -18,6 +18,7 @@ from yoetz.service.lifecycle import (
     ServiceLifecycle,
     SessionSecurityEvent,
     probe_singleton_holder,
+    probe_singleton_holder_identity,
 )
 
 _INSTANCE_ID = "svc_00000000-0000-4000-8000-000000000001"
@@ -367,3 +368,56 @@ def test_holder_probe_refuses_a_stamp_anyone_else_could_have_written(tmp_path: P
     link = tmp_path / "service.lock.link"
     link.symlink_to(path)
     assert probe_singleton_holder(link) is None
+
+
+@pytest.mark.anyio
+async def test_singleton_stamp_names_the_holder_installation_identity(tmp_path: Path) -> None:
+    """A client whose hello the holder rejects can still learn what it is talking to."""
+
+    from yoetz import __version__
+    from yoetz.protocol.schemas import schema_manifest_digest
+
+    path = tmp_path / "service.lock"
+    lifecycle = _lifecycle(_Clock(), singleton_lock_path=path)
+    await lifecycle.acquire_singleton()
+    try:
+        holder = probe_singleton_holder_identity(path)
+        assert holder is not None
+        assert holder.pid == os.getpid()
+        assert holder.schema_manifest_digest == schema_manifest_digest()
+        assert holder.service_version == __version__
+        assert holder.instance_id is not None
+    finally:
+        await lifecycle.transition(ServiceState.LOCKED)
+        await lifecycle.close()
+    assert probe_singleton_holder_identity(path) is None
+
+
+def test_holder_identity_probe_tolerates_legacy_and_malformed_identity_fields(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "service.lock"
+    legacy = canonical_encode({"instance_id": "svc_legacy", "pid": os.getpid()}) + b"\n"
+    path.write_bytes(legacy)
+    path.chmod(0o600)
+    holder = probe_singleton_holder_identity(path)
+    assert holder is not None
+    assert (holder.pid, holder.instance_id) == (os.getpid(), "svc_legacy")
+    assert holder.schema_manifest_digest is None
+    assert holder.service_version is None
+
+    path.write_bytes(
+        canonical_encode(
+            {
+                "instance_id": "svc_bad",
+                "pid": os.getpid(),
+                "schema_manifest_digest": "not-a-digest",
+                "service_version": "",
+            }
+        )
+        + b"\n"
+    )
+    holder = probe_singleton_holder_identity(path)
+    assert holder is not None
+    assert holder.schema_manifest_digest is None
+    assert holder.service_version is None

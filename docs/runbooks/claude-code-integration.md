@@ -21,7 +21,10 @@ plugins/yoetz/.mcp.json                 # plugin-managed mode only
 
 The marketplace entry is `strict:true`, declares only relative source `./plugins/yoetz`, and does
 not redefine plugin components. The plugin manifest is authoritative and sets
-`defaultEnabled:false`. Shared skill/reference bytes come from the same packaged sources as the
+`defaultEnabled:false`. Every hook command and the plugin-owned `.mcp.json` entry launch the exact
+`yoetz` that rendered the plugin (absolute executable, or `<interpreter> -m yoetz`), recorded in the
+source marker; a bare PATH `yoetz` is never written, so the bridge, hooks, and service cannot come
+from different installations. Re-render (`update`) after moving or reinstalling Yoetz. Shared skill/reference bytes come from the same packaged sources as the
 portable and Codex/Cursor projections. Yoetz writes no credentials, endpoints, user config, ledger,
 vault, receipt, or provider state into the plugin, `${CLAUDE_PLUGIN_ROOT}`, or
 `${CLAUDE_PLUGIN_DATA}`.
@@ -66,6 +69,42 @@ sources, leftover stage/rollback recovery material, or stale previews.
 
 After install, `status` must show `native_managed`, `marketplace_registered:true`,
 `discovered:true`, exact version/cache digest, and `enabled:false`. These prove no loaded session.
+
+## Development activation without the marketplace
+
+For dogfooding or CI, export the exact plugin root and load it for one session; nothing under the
+Claude config, marketplace, or cache changes, and no review authority is consumed:
+
+```text
+yoetz integrate claude plugin export \
+  --output-root "$DEV_ROOT" \
+  --mcp-ownership plugin-managed --route-profile strict \
+  --development-enabled --json
+CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_ROOT" "$CLAUDE_PATH" --plugin-dir "$DEV_ROOT" ...
+```
+
+`--development-enabled` renders `defaultEnabled:true` (a disabled carrier does not load under
+`--plugin-dir`); the tree carries a `.yoetz-claude-plugin-export.json` marker naming that flag, so
+status never mistakes it for the marketplace-installed cell, and `preview` refuses it. A development
+session proves skill delivery, MCP binding/runtime, hooks, model use, semantic dispatch, and receipts
+for the exact bytes, but never marketplace installation, discovery, enablement, or host activation.
+
+## Upgrading Yoetz under a running service
+
+The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz
+build the previous build's service still owning the endpoint refuses the new bridge and CLI. The
+first plugin tool call (on-demand startup) replaces that service automatically: it asks the stale
+holder to shut down through its ordinary bounded path and starts this installation's service inside
+the same 30-second budget. If that cannot complete, the tool returns `SERVICE_UNAVAILABLE` with
+`reason_code: service_incompatible` and the repair command; run it on a local terminal:
+
+```text
+yoetz service restart
+```
+
+`yoetz service status` names the incompatible holder's pid, version, and manifest digest. Other
+hosts' sessions still running the previous build's bridge are refused after the switch until they
+restart; that is the intended outcome of an upgrade, not a defect.
 
 ## Static and host validation
 

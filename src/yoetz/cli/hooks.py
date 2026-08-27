@@ -138,6 +138,7 @@ _CONTROL_ERROR_CLASSES: Final[Mapping[str, str]] = MappingProxyType(
         "privacy_projection_unavailable": "retry",
         "privacy_projection_blocked": "privacy",
         "service_unavailable": "unavailable",
+        "service_incompatible": "unavailable",
         "peer_untrusted": "unavailable",
         "protocol_mismatch": "unavailable",
         "frame_invalid": "unavailable",

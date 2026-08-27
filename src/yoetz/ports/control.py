@@ -288,6 +288,7 @@ type ControlRequest = ControlCallRequest | ControlCancelRequest
 _CONTROL_ERROR_REASONS = frozenset(
     {
         "service_unavailable",
+        "service_incompatible",
         "peer_untrusted",
         "protocol_mismatch",
         "frame_invalid",

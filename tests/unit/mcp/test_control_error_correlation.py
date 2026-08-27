@@ -216,3 +216,21 @@ def test_vault_locked_message_and_retryable_follow_the_daemon_flag(
     message = cast(str, error["message"])
     assert "hard lock or missing setup" in message
     assert "Retry this operation" not in message
+
+
+def test_incompatible_service_is_a_bounded_service_unavailable_with_the_repair_command() -> None:
+    """The 2026-08-27 dogfood saw an opaque INTERNAL_ERROR here; agents need the repair."""
+
+    result = bridge._control_error_result(  # pyright: ignore[reportPrivateUsage]
+        ControlError("service_incompatible", retryable=True, correlation_id=_CORRELATION),
+        request_id=_REQUEST,
+        operation="start",
+    )
+    assert result.isError is True
+    structured = cast(dict[str, object], result.structuredContent)
+    error = cast(dict[str, object], structured["error"])
+    assert error["code"] == PublicErrorCode.SERVICE_UNAVAILABLE.value
+    assert error["retryable"] is True
+    assert error["correlation_id"] == _CORRELATION
+    assert cast(dict[str, object], error["safe_details"])["reason_code"] == "service_incompatible"
+    assert "yoetz service restart" in str(error["message"])
