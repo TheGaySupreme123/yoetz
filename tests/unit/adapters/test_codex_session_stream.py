@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from builders.codex_rollout import (
     completed_shell_rollout,
     encode_lines,
     failed_shell_rollout,
     function_call,
     function_call_output,
+    response_item,
     session_meta,
 )
 from yoetz.adapters.importers.codex_jsonl import CodexParsedRecord
@@ -30,6 +33,8 @@ from yoetz.application.observation_materialize import materialize_observation_en
 from yoetz.domain.observation import (
     ObservationCursor,
     ObservationGapCode,
+    ObservationIngestDisposition,
+    ObservationIngestResult,
     ObservationSource,
     ObservationStatusQuery,
 )
@@ -79,6 +84,29 @@ def test_incremental_partial_line_then_complete(tmp_path: Path) -> None:
     assert ObservationGapCode.UNSUPPORTED_EVENT.value not in advance2.gaps
 
 
+def test_incremental_partial_header_still_requires_exact_profile_admission(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "session.jsonl"
+    first = encode_lines(session_meta(cli_version="0.149.1"), terminated=False)
+    path.write_bytes(first)
+    session = "hmac-sha256:" + ("f" * 64)
+    reader = _reader(session)
+
+    advance = reader.advance(path)
+    assert advance.envelopes == ()
+    assert advance.cursor.byte_position == 0
+    assert advance.cursor.event_position == 0
+    assert advance.partial_line == first
+
+    path.write_bytes(first + b"\n")
+    completed = reader.advance(path)
+    assert completed.envelopes == ()
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value in completed.gaps
+    assert completed.cursor.byte_position == len(first) + 1
+    assert completed.cursor.event_position == 1
+
+
 def test_truncation_bumps_generation(tmp_path: Path) -> None:
     path = tmp_path / "session.jsonl"
     path.write_bytes(failed_shell_rollout())
@@ -117,6 +145,18 @@ def test_exec_jsonl_grammar_is_unsupported_format(tmp_path: Path) -> None:
     assert ObservationGapCode.UNSUPPORTED_EVENT.value not in advance.gaps
 
 
+def test_malformed_first_header_never_becomes_an_admitted_opaque_event(tmp_path: Path) -> None:
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(b'{"payload":broken}\n' + encode_lines(session_meta()))
+    session = "hmac-sha256:" + ("1" * 64)
+
+    advance = _reader(session).advance(path)
+
+    assert advance.envelopes == ()
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value in advance.gaps
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value not in advance.gaps
+
+
 def test_reconcile_enqueues_recovered_envelopes_into_outbox(tmp_path: Path) -> None:
     home = tmp_path / "codex-home"
     sessions = home / "sessions" / "2026" / "07" / "23"
@@ -150,6 +190,98 @@ def test_reconcile_enqueues_recovered_envelopes_into_outbox(tmp_path: Path) -> N
     assert isinstance(gaps, tuple)
     assert ObservationGapCode.UNSUPPORTED_EVENT.value not in gaps
     assert store.pending_outbox_count(workspace) == accepted
+
+
+def test_reconcile_persists_unknown_event_before_advancing_cursor(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    session_id = "stream-unknown-event"
+    target = sessions / f"rollout-{session_id}.jsonl"
+    target.write_bytes(
+        encode_lines(
+            session_meta(),
+            response_item({"type": "future_tool_result", "content": "must-not-persist"}),
+        )
+    )
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+
+    assert result["resolved"] is True
+    gaps = result["gaps"]
+    assert isinstance(gaps, tuple)
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value in gaps
+    assert result["byte_position"] == target.stat().st_size
+    envelopes = store.list_envelopes(workspace)
+    unsupported = [
+        envelope
+        for envelope in envelopes
+        if ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes
+    ]
+    assert len(unsupported) == 1
+    assert unsupported[0].event_kind == "unsupported_event"
+    assert dict(unsupported[0].structural_payload) == {}
+    assert b"must-not-persist" not in repr(unsupported[0]).encode()
+    assert store.pending_outbox_count(workspace) == result["accepted"]
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value in status.gaps
+
+
+def test_reconcile_does_not_advance_past_a_rejected_envelope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    session_id = "stream-rejected-event"
+    target = sessions / f"rollout-{session_id}.jsonl"
+    target.write_bytes(failed_shell_rollout())
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+
+    def reject(
+        _store: LocalObservationStore,
+        envelope: object,
+    ) -> ObservationIngestResult:
+        del envelope
+        return ObservationIngestResult(
+            ObservationIngestDisposition.REJECTED,
+            ObservationGapCode.CURSOR_STALE.value,
+            None,
+        )
+
+    monkeypatch.setattr(LocalObservationStore, "ingest", reject)
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+
+    assert result["accepted"] == 0
+    assert result["byte_position"] == 0
+    assert result["event_position"] == 0
+    cursor = store.get_stream_cursor(workspace, session)
+    assert cursor is not None
+    assert cursor.byte_position == 0
+    assert cursor.event_position == 0
+    assert store.pending_outbox_count(workspace) == 0
 
 
 def test_reconcile_resets_cursor_when_stream_mapping_changes(tmp_path: Path) -> None:

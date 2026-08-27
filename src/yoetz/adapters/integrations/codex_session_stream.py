@@ -32,6 +32,7 @@ from yoetz.domain.observation import (
     stream_line_commitment,
 )
 from yoetz.domain.values import JsonObject, JsonValue, Timestamp, timestamp_from_datetime
+from yoetz.ports.importer import ImportLineStatus
 from yoetz.protocol.canonical import canonical_digest
 
 __all__ = [
@@ -347,6 +348,39 @@ def envelope_from_stream_record(
     )
 
 
+def _opaque_stream_envelope(
+    *,
+    session_commitment: str,
+    cursor: ObservationCursor,
+) -> ObservationEnvelope:
+    """Retain one unsupported complete line without interpreting its payload."""
+
+    identity = (
+        "stream:"
+        + canonical_digest(
+            JsonObject(
+                {
+                    "byte_end": cursor.byte_position,
+                    "line_commitment": cursor.last_source_commitment,
+                    "ordinal": cursor.event_position,
+                    "wrapper": "unsupported_event",
+                }
+            )
+        ).removeprefix("sha256:")[:48]
+    )
+    return ObservationEnvelope(
+        session_commitment=session_commitment,
+        event_kind="unsupported_event",
+        source_identity=identity,
+        source=ObservationSource.CODEX_SESSION_STREAM,
+        cursor=cursor,
+        receipt_time=_now(),
+        structural_payload=JsonObject({}),
+        content_object_refs=(),
+        gap_codes=(ObservationGapCode.UNSUPPORTED_EVENT.value,),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SessionStreamAdvance:
     envelopes: tuple[ObservationEnvelope, ...]
@@ -477,7 +511,9 @@ class SessionStreamReader:
                 (), cursor, b"", tuple(sorted(gaps)), restarted, truncated, rotated
             )
 
-        require_admission = byte_position == 0 and event_position == 0 and not self.partial_line
+        # A retained partial first line has not established admission. Keep requiring the exact
+        # session header until a complete admitted line advances the durable cursor.
+        require_admission = byte_position == 0 and event_position == 0
         try:
             parsed = parse_codex_rollout_jsonl_from_offset(
                 data,
@@ -524,10 +560,21 @@ class SessionStreamReader:
             )
             if record is None:
                 reason = parsed.reason_codes[index] if index < len(parsed.reason_codes) else None
-                if reason == "unsupported_codex_profile":
+                status = parsed.statuses[index] if index < len(parsed.statuses) else None
+                if reason == "unsupported_codex_profile" or (
+                    require_admission
+                    and index == 0
+                    and status in {ImportLineStatus.MALFORMED, ImportLineStatus.OVERSIZED}
+                ):
                     gaps.add(ObservationGapCode.UNSUPPORTED_FORMAT.value)
                 elif index < len(parsed.statuses):
                     gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
+                    envelopes.append(
+                        _opaque_stream_envelope(
+                            session_commitment=self.session_commitment,
+                            cursor=abs_cursor,
+                        )
+                    )
                 continue
             # Rewrite record ordinal to the absolute event position for identity stability.
             positioned = CodexParsedRecord(
@@ -680,11 +727,13 @@ def reconcile_session_stream(
     accepted = 0
     duplicates = 0
     overflow = False
+    delivery_blocked = False
     committed_cursor = existing
     for unpaired_envelope in advance.envelopes:
         envelope = _pair_stream_tool_name(unpaired_envelope, call_tools)
         result = store.ingest(envelope)
         if result.disposition.value not in {"accepted", "duplicate"}:
+            delivery_blocked = True
             break
         # Enqueue duplicates too: the local observation row may have committed
         # immediately before an earlier enqueue overflow/crash. This closes the
@@ -700,7 +749,7 @@ def reconcile_session_stream(
             accepted += 1
         else:
             duplicates += 1
-    if not overflow:
+    if not overflow and not delivery_blocked:
         committed_cursor = advance.cursor
     store.replace_stream_call_tools(workspace_commitment, session_commitment, call_tools)
     store.set_stream_cursor(workspace_commitment, session_commitment, committed_cursor)
@@ -709,12 +758,16 @@ def reconcile_session_stream(
     store.set_stream_partial(
         workspace_commitment,
         session_commitment,
-        advance.partial_line if not overflow else b"",
+        advance.partial_line if not overflow and not delivery_blocked else b"",
     )
     store.note_stream_reconcile(workspace_commitment)
     gaps = advance.gaps
-    if ObservationGapCode.UNSUPPORTED_FORMAT.value in gaps:
-        store.note_coverage_gap(workspace_commitment, ObservationGapCode.UNSUPPORTED_FORMAT.value)
+    for durable_gap in (
+        ObservationGapCode.UNSUPPORTED_EVENT.value,
+        ObservationGapCode.UNSUPPORTED_FORMAT.value,
+    ):
+        if durable_gap in gaps:
+            store.note_coverage_gap(workspace_commitment, durable_gap)
     if overflow and ObservationGapCode.OUTBOX_OVERFLOW.value not in gaps:
         gaps = (*gaps, ObservationGapCode.OUTBOX_OVERFLOW.value)
     return {

@@ -191,6 +191,9 @@ def parse_codex_rollout_jsonl_from_offset(
         if len(line.content) > profile.max_line_bytes:
             statuses.append(ImportLineStatus.OVERSIZED)
             reasons.append("line_oversized")
+            if not admitted:
+                refused = True
+                stream_gaps.add("unsupported_codex_profile")
             continue
         redacted, _detected = redact_sensitive_content(line.content)
         try:
@@ -202,6 +205,9 @@ def parse_codex_rollout_jsonl_from_offset(
                 reason = "truncated_final_line"
                 stream_gaps.add(reason)
             reasons.append(reason)
+            if not admitted and line.terminated:
+                refused = True
+                stream_gaps.add("unsupported_codex_profile")
             continue
         if not admitted:
             admitted, admission_reason = _admit_session_meta(value, profile)
