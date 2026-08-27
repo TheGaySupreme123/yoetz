@@ -118,8 +118,10 @@ The native IDE plugin advertises only `sessionStart`, `sessionEnd`, `afterMCPExe
 no hook capability; the SDKs' file-based hook contract is not execution evidence. Hooks call
 `yoetz hooks cursor-observe`, are fail-open, and never enforce Cursor work.
 
-Native hook artifacts resolve the absolute invoking `yoetz` console executable at render time and
-record that path in native marker schema `/2`; an explicit invocation does not silently bind a
+Native hook artifacts resolve the invoking `yoetz` console executable to an absolute path at render
+time. Explicit absolute and relative invocations retain their path intent and never fall back to
+an ambient `PATH` entry; only a bare `yoetz` name uses `PATH`. The resolved path is
+recorded in native marker schema `/2`; an explicit invocation does not silently bind a
 different ambient-PATH installation, and a malformed `/2` path invalidates the marker. Portable markers
 remain `/1`. A valid legacy native `/1` marker is recognized as managed-but-modified so users can
 perform one exact previewed replacement (or safe removal) instead of being stranded. The rendered

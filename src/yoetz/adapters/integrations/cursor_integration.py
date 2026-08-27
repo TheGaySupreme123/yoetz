@@ -532,12 +532,13 @@ def _resolve_yoetz_executable(candidate: Path | str | None = None) -> str:
     if candidate is None:
         discovered = shutil.which("yoetz")
     else:
-        raw = Path(candidate).expanduser()
-        discovered = (
-            shutil.which(str(raw))
-            if not raw.is_absolute() and raw.parent == Path(".")
-            else str(raw)
+        candidate_text = os.fspath(candidate)
+        raw = Path(candidate_text).expanduser()
+        separators = (os.sep,) if os.altsep is None else (os.sep, os.altsep)
+        explicit_path = isinstance(candidate, Path) or any(
+            separator in candidate_text for separator in separators
         )
+        discovered = str(raw) if explicit_path else shutil.which(candidate_text)
     if discovered is None:
         raise ValueError("yoetz_executable_unavailable")
     try:

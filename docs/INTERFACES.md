@@ -3175,7 +3175,8 @@ rollback availability, one `CursorMcpObservation`, and every independent `Plugin
 preview/artifact/installed digests, and sorted changed members. Portable artifacts retain marker
 schema `yoetz.cursor-plugin-install/1`. Newly rendered native artifacts use
 `yoetz.cursor-plugin-install/2`, which adds the resolved absolute invoking `yoetz` executable path
-(never a different ambient-PATH installation when the CLI was invoked by an explicit path) to the
+(never a different ambient-PATH installation when the CLI was invoked by an explicit absolute or
+relative path) to the
 format, renderer/Yoetz versions, hook mapping version, MCP owner/route, artifact digest, exact
 managed inventory, and marker digest. A valid legacy native `/1` marker remains managed but reports
 `modified` against the `/2` desired artifact, so an exact previewed replace or remove remains

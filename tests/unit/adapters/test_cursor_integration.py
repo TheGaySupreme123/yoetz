@@ -235,6 +235,64 @@ def test_native_render_prefers_explicit_invoking_executable_over_path(
     )
 
 
+@pytest.mark.parametrize(
+    ("candidate", "relative_target"),
+    [
+        ("./yoetz", "work/yoetz"),
+        ("bin/yoetz", "work/bin/yoetz"),
+        ("../bin/yoetz", "bin/yoetz"),
+        (Path("yoetz"), "work/yoetz"),
+    ],
+)
+def test_native_render_preserves_explicit_relative_executable_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate: str | Path,
+    relative_target: str,
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    invoking = tmp_path / relative_target
+    invoking.parent.mkdir(parents=True, exist_ok=True)
+    invoking.write_text("#!/bin/sh\n", encoding="utf-8")
+    invoking.chmod(0o755)
+    monkeypatch.chdir(work)
+
+    def refuse_path_lookup(_name: str) -> str | None:
+        raise AssertionError("explicit executable path must not consult PATH")
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.shutil.which",
+        refuse_path_lookup,
+    )
+
+    artifact = render_cursor_plugin(
+        PluginFormatProfile.CURSOR_PLUGIN_NATIVE,
+        yoetz_executable=candidate,
+    )
+
+    assert artifact.yoetz_executable == str(invoking.resolve())
+
+
+def test_portable_render_never_resolves_a_host_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse_path_lookup(_name: str) -> str | None:
+        raise AssertionError("portable rendering must stay host-resolver-free")
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.cursor_integration.shutil.which",
+        refuse_path_lookup,
+    )
+
+    artifact = render_cursor_plugin(
+        PluginFormatProfile.AGENT_PLUGINS_1,
+        yoetz_executable="./yoetz",
+    )
+
+    assert artifact.yoetz_executable is None
+
+
 def test_safe_cursor_lifecycle_is_preview_bound_atomic_and_reversible(tmp_path: Path) -> None:
     target = CursorPluginTarget(str(tmp_path / ".cursor"))
     artifact = render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE)
