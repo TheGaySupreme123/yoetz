@@ -791,6 +791,10 @@ def test_uncompressed_rollout_precedes_compressed_sibling(tmp_path: Path) -> Non
     os.chmod(compressed, 0o600)
     locator = CodexSessionStreamLocator(home)
     assert locator.resolve(session_id=session_id) == plain.resolve()
+    assert (
+        locator.resolve(session_id=session_id, hook_provided_path=str(compressed))
+        == plain.resolve()
+    )
 
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))

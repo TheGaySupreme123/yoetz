@@ -165,7 +165,18 @@ class CodexSessionStreamLocator:
         if home is None:
             return None
         if hook_provided_path is not None:
-            return self._validate_candidate(Path(hook_provided_path), home=home, session_id=token)
+            candidate = self._validate_candidate(
+                Path(hook_provided_path), home=home, session_id=token
+            )
+            if candidate is None:
+                return None
+            if candidate.name.lower().endswith(".jsonl.zst"):
+                uncompressed = self._validate_candidate(
+                    candidate.with_suffix(""), home=home, session_id=token
+                )
+                if uncompressed is not None:
+                    return uncompressed
+            return candidate
         return self._exact_session_match(home=home, session_id=token)
 
     def _validated_home(self) -> Path | None:
