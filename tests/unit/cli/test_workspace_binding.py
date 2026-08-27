@@ -6,7 +6,7 @@ import os
 import unicodedata
 from pathlib import Path
 
-from yoetz.cli.workspace_binding import resolve_workspace_locator
+from yoetz.cli.workspace_binding import canonical_workspace_locator, resolve_workspace_locator
 
 
 def _env(home: Path, **values: str) -> dict[str, str]:
@@ -100,6 +100,31 @@ def test_explicit_locator_is_non_git_fallback(tmp_path: Path) -> None:
     assert resolve_workspace_locator(explicit=explicit, payload={}, env=_env(home)) == os.fspath(
         explicit
     )
+
+
+def test_explicit_canonical_locator_ignores_cursor_environment_and_uses_git_root(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    repository = tmp_path / "repo"
+    nested = repository / "packages/app"
+    unrelated = tmp_path / "cursor-environment"
+    nested.mkdir(parents=True)
+    unrelated.mkdir()
+    _git(repository)
+
+    assert canonical_workspace_locator(
+        nested,
+        env=_env(home, CURSOR_PROJECT_DIR=os.fspath(unrelated)),
+    ) == os.fspath(repository)
+
+
+def test_explicit_canonical_locator_preserves_exact_non_git_workspace(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    workspace = tmp_path / "non-git"
+    workspace.mkdir()
+
+    assert canonical_workspace_locator(workspace, env=_env(home)) == os.fspath(workspace)
 
 
 def test_nearest_nested_git_root_wins(tmp_path: Path) -> None:

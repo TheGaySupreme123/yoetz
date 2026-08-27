@@ -2602,6 +2602,10 @@ Independent verification support (local control, not MCP):
   and `SessionEnd` keeps the host-clamped 3 seconds (ingest/drain only; it is not an advice channel).
 
 Observation consent is one project-level confirmation recorded as a private workspace commitment.
+Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
+Git subdirectory to the same nearest safe Git project root; a non-Git directory remains its exact
+safe locator. There is no ancestor-commitment fallback. A legacy grant recorded against an exact
+Git subdirectory does not authorize its ancestor and must be explicitly granted again.
 The normalized locator is authenticated encrypted content; plaintext keeps only commitment and
 object ID. Revocation disables/removes the active locator and trust binding while retaining already
 encrypted evidence. Visible task messages, tool input/result, task-linked terminal output,

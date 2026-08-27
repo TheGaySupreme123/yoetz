@@ -271,6 +271,10 @@ private SQL.
 Observation consent is project-level and separate from egress consent. The plaintext local boundary
 records a private workspace commitment, structural outbox/quarantine evidence, and encrypted object
 identities—never raw task content or a raw path in logs/status/SQLite.
+Hook ingress and every consent/control lifecycle entry point derive that commitment from one shared
+workspace canonicalizer: the nearest safe Git root for a Git subdirectory, or the exact safe
+directory for non-Git workspaces. Authority never searches ancestor commitments. Pre-existing
+exact-subdirectory grants remain non-authorizing until an operator explicitly regrants them.
 
 Hook `PostToolUse` and a completed session-stream tool record (rollout `function_call_output`,
 historically exec-JSONL `item.completed`) for one host call normalize before materialization to

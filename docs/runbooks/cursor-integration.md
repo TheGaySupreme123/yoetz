@@ -146,6 +146,11 @@ symlinked ancestors, root/home locators, unsafe markers, or unbounded/control-be
 Cursor's current documentation does not specify plugin-hook CWD, and this change does not claim a
 live IDE/CLI CWD measurement; the binding deliberately no longer depends on it.
 
+Use the same selected path for `yoetz observe grant|status|pause|resume|revoke`: operator controls
+and setup probes apply the identical nearest-safe-Git-root normalization as hook ingress. A legacy
+grant made against an exact Git subdirectory is intentionally not searched as an ancestor fallback;
+run `yoetz observe grant --workspace <subdirectory>` once after upgrade to record the canonical root.
+
 Before local storage the adapter discards prompts, reasoning, response text, file paths/content/
 edits, MCP arguments/results, transcripts, command output, email, and workspace roots. Fixtures
 must place canaries in every denied field and prove absence from structural state, objects, logs,

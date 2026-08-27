@@ -50,6 +50,46 @@ def test_grant_pause_resume_revoke_roundtrip(tmp_path: Path, capsys: object) -> 
     assert workspace not in status_out
 
 
+def test_git_subdirectory_consent_and_hook_share_one_canonical_workspace(
+    tmp_path: Path,
+    capsys: object,
+) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repo"
+    nested = repository / "packages/app"
+    nested.mkdir(parents=True)
+    (repository / ".git").mkdir()
+
+    assert observe_cli.grant_observation(workspace=str(nested), _state=state) == 0
+    store = LocalObservationStore(_state=state)
+    root_commitment = store.workspace_commitment(str(repository))
+    subdirectory_commitment = store.workspace_commitment(str(nested))
+    assert root_commitment != subdirectory_commitment
+    consent = store.consent_for(root_commitment)
+    assert consent is not None and consent.active
+    assert store.consent_for(subdirectory_commitment) is None
+
+    assert observe_cli.pause_observation(workspace=str(nested), _state=state) == 0
+    assert observe_cli.resume_observation(workspace=str(nested), _state=state) == 0
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "git-subdir-session", "hook_event_name": "SessionStart"}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(nested),
+        _state=state,
+        skip_service=True,
+    )
+    assert code == 0
+    assert store.find_workspace_for_codex_session("git-subdir-session") == root_commitment
+
+    assert observe_cli.revoke_observation(workspace=str(nested), _state=state) == 0
+    revoked = store.consent_for(root_commitment)
+    assert revoked is not None and not revoked.active
+    assert str(repository) not in capsys.readouterr().out  # type: ignore[attr-defined]
+
+
 def test_workspace_commitment_stable_and_path_free(tmp_path: Path) -> None:
     from yoetz.adapters.integrations.observation_local import LocalObservationStore
 

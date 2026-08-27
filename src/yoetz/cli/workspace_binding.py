@@ -20,7 +20,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, cast
 
-__all__ = ["MAX_WORKSPACE_LOCATOR_BYTES", "resolve_workspace_locator"]
+__all__ = [
+    "MAX_WORKSPACE_LOCATOR_BYTES",
+    "canonical_workspace_locator",
+    "resolve_workspace_locator",
+]
 
 MAX_WORKSPACE_LOCATOR_BYTES: Final = 8_192
 _MAX_WORKSPACE_ROOTS: Final = 32
@@ -189,6 +193,48 @@ def _workspace_roots(payload: Mapping[str, object] | None) -> tuple[object, ...]
     return roots
 
 
+def _canonical_selected_workspace(selected: Path, *, home: Path) -> str | None:
+    root = _git_toplevel(selected, home=home)
+    if root is None:
+        return None
+    try:
+        facts = root.lstat()
+    except OSError:
+        return None
+    if (
+        stat.S_ISLNK(facts.st_mode)
+        or not stat.S_ISDIR(facts.st_mode)
+        or (hasattr(os, "geteuid") and facts.st_uid != os.geteuid())
+        or bool(facts.st_mode & 0o022)
+    ):
+        return None
+    return os.fspath(root)
+
+
+def canonical_workspace_locator(
+    explicit: str | os.PathLike[str] | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> str | None:
+    """Canonicalize one explicit workspace for consent and control identity.
+
+    Unlike hook ingress, this helper never consults Cursor payload or
+    ``CURSOR_PROJECT_DIR`` precedence. The operator-selected path is normalized
+    to the same nearest safe Git root used by hooks; non-Git paths remain exact.
+    """
+
+    actual_env: Mapping[str, str] = os.environ if env is None else env
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        return None
+    home = _home_path(actual_env, cwd)
+    selected = _candidate_path(explicit, cwd=cwd, home=home)
+    if selected is None:
+        return None
+    return _canonical_selected_workspace(selected, home=home)
+
+
 def resolve_workspace_locator(
     explicit: str | os.PathLike[str] | None = None,
     payload: Mapping[str, object] | None = None,
@@ -255,18 +301,4 @@ def resolve_workspace_locator(
             if selected is None:
                 return None
 
-    root = _git_toplevel(selected, home=home)
-    if root is None:
-        return None
-    try:
-        facts = root.lstat()
-    except OSError:
-        return None
-    if (
-        stat.S_ISLNK(facts.st_mode)
-        or not stat.S_ISDIR(facts.st_mode)
-        or (hasattr(os, "geteuid") and facts.st_uid != os.geteuid())
-        or bool(facts.st_mode & 0o022)
-    ):
-        return None
-    return os.fspath(root)
+    return _canonical_selected_workspace(selected, home=home)
