@@ -482,6 +482,44 @@ def test_status_maps_bounded_storage_refusals_to_their_public_exit(
     )
 
 
+@pytest.mark.parametrize(
+    ("verb", "method"),
+    [
+        ("pause", "pause"),
+        ("resume", "resume"),
+        ("revoke", "revoke"),
+    ],
+)
+def test_control_verbs_preserve_bounded_public_error_exits(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+    method: str,
+) -> None:
+    from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+
+    def corrupt(self: LocalObservationStore, command: object) -> object:
+        del self, command
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_CORRUPT, "Observation state is invalid.", False
+        )
+
+    monkeypatch.setattr(LocalObservationStore, method, corrupt)
+    if verb == "pause":
+        code = observe_cli.pause_observation(workspace=str(tmp_path), _state=tmp_path)
+    elif verb == "resume":
+        code = observe_cli.resume_observation(workspace=str(tmp_path), _state=tmp_path)
+    else:
+        code = observe_cli.revoke_observation(workspace=str(tmp_path), _state=tmp_path)
+    assert code == 40
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        f"observation_{verb}_failed:storage_corrupt: Observation state is invalid.\n"
+    )
+
+
 def test_status_maps_an_unsafe_state_path_to_storage_unsafe(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

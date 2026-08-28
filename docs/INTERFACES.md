@@ -2571,10 +2571,14 @@ Shared closed types:
   documents `decision: block` as a continuation prompt; `stop_hook_active` plus delivery identity
   are the loop guard); `SessionEnd` always emits `{}`
   because the host discards its stdout and a peek/commit there would consume undelivered advice.
-  Claude Code hook stdout shares the `hookSpecificOutput.additionalContext` shape on every
-  advice-bearing event including `Stop` / `SubagentStop`, where Claude Code documents it as
-  non-error feedback; the Claude ingress therefore never emits `decision: block`, and its
-  `SessionEnd` emits `{}`.
+  Claude Code hook stdout uses `hookSpecificOutput.additionalContext` for every advice-bearing
+  event in the installed profile: `SessionStart`, `PostToolUse`, `PostToolUseFailure`, and `Stop`.
+  The raw host event is retained in `hookEventName` even though `PostToolUseFailure` shares Yoetz's
+  internal `PostToolUse` advice cadence. At `Stop`, Claude Code documents `additionalContext` as
+  non-error feedback that continues through the same loop guard; the Claude ingress therefore
+  never emits `decision: block`, and its `SessionEnd` emits `{}`. The renderer also knows Claude's
+  `SubagentStart` / `SubagentStop` output shapes, but the current native hook profile does not
+  advertise either event; adding them requires a separately reviewed profile expansion and proof.
   Cursor has a separate native contract: raw `sessionStart` emits `additional_context`; raw `stop`
   advice is disabled because `followup_message` auto-submits a user message; and `afterFileEdit`,
   `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a

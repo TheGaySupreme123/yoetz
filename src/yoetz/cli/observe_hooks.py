@@ -1346,7 +1346,13 @@ def handle_observe(
                     return {}
                 return _cursor_context_output(raw_cursor_event, additional_context)
             if source is ObservationSource.CLAUDE_HOOK:
-                return _claude_context_output(resolved_event, additional_context)
+                # Claude requires hookSpecificOutput.hookEventName to name the
+                # event that actually fired. PostToolUseFailure is normalized to
+                # PostToolUse for Yoetz's internal observation/advice cadence, so
+                # render with the preserved host event instead (#435).
+                return _claude_context_output(
+                    _output_event_name or resolved_event, additional_context
+                )
             return _context_output(resolved_event, additional_context)
 
         payload = read_hook_payload(stdin_bytes)
@@ -2061,6 +2067,7 @@ def handle_claude_observe(
             run_async=run_async,
             skip_service=skip_service,
             source=ObservationSource.CLAUDE_HOOK,
+            _output_event_name=raw_event,
         )
     except BaseException:
         with contextlib.suppress(BaseException):

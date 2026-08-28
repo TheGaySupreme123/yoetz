@@ -56,6 +56,7 @@ STOP_CONTROL_EVENTS: Final = frozenset({"Stop", "SubagentStop"})
 CLAUDE_ADDITIONAL_CONTEXT_EVENTS: Final = frozenset(
     {
         "PostToolUse",
+        "PostToolUseFailure",
         "PreToolUse",
         "SessionStart",
         "Stop",
@@ -114,10 +115,11 @@ def context_output(event_name: str, additional_context: str) -> dict[str, JsonVa
 def claude_context_output(event_name: str, additional_context: str) -> dict[str, JsonValue]:
     """Return the Claude Code-valid stdout object for one event's advice text.
 
-    Every advice-bearing event, including Stop / SubagentStop, injects
-    ``hookSpecificOutput.additionalContext``: that is Claude Code's documented
-    non-error feedback channel, and it never forces a continuation the way
-    ``decision: block`` does. SessionEnd and every undocumented event emit ``{}``.
+    Every supported advice-bearing event, including Stop / SubagentStop, injects
+    ``hookSpecificOutput.additionalContext``. At Stop / SubagentStop that is
+    Claude Code's documented non-error feedback channel: it continues through
+    the same loop protections as ``decision: block`` but is labelled as feedback
+    instead of an error. SessionEnd and every undocumented event emit ``{}``.
     """
 
     text = additional_context.strip()

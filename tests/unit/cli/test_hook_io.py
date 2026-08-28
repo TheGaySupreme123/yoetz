@@ -95,6 +95,15 @@ def test_claude_context_matches_codex_on_shared_additional_context_events() -> N
         )
 
 
+def test_claude_post_tool_failure_preserves_its_host_event_name() -> None:
+    assert claude_context_output("PostToolUseFailure", "bounded advice") == {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUseFailure",
+            "additionalContext": "bounded advice",
+        }
+    }
+
+
 def test_claude_session_end_blank_and_unknown_events_emit_empty_object() -> None:
     assert claude_context_output("SessionEnd", "would be discarded by the host") == {}
     assert claude_context_output("PreCompact", "never an advice channel") == {}

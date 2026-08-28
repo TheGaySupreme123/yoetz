@@ -254,8 +254,11 @@ discards stdout, so it is not advice-safe and never consumes a pending delivery.
 `decision`/`reason`, and `decision: block` is documented as a continuation prompt built from
 `reason`, so the #222 behaviour stands and the loop guard remains `stop_hook_active` plus delivery
 identity. Claude Code documents `hookSpecificOutput.additionalContext` at Stop / SubagentStop as
-non-error feedback, so the Claude ingress renders every advice-bearing event, Stop included, in that
-shape and never emits `decision: block`. Workspace-binding outcomes are diagnosed host-agnostically
+non-error feedback. The Claude ingress renders every advice-bearing event in its installed profile
+in that shape, preserves the raw `PostToolUseFailure` name at the host-output boundary, and never
+emits `decision: block`. Its renderer knows the SubagentStart / SubagentStop shapes, but the current
+native profile does not advertise those events; widening that profile remains separately reviewed.
+Workspace-binding outcomes are diagnosed host-agnostically
 in the shared ingress (`workspace_unresolvable`, `workspace_unconsented`, `paused`), the two storage
 outcomes of a status read carry distinct retryability advisories and the same lowercase diagnostic
 tokens, and `yoetz observe` verbs report pre-store conditions as typed public outcomes instead of

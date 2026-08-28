@@ -9,9 +9,10 @@ from typing import cast
 import pytest
 
 from yoetz.adapters.integrations.codex_lifecycle import load_mapping
-from yoetz.adapters.integrations.observation_local import LocalObservationStore
+from yoetz.adapters.integrations.observation_local import AdviceDelivery, LocalObservationStore
 from yoetz.cli import observe_hooks
 from yoetz.domain.observation import (
+    AdviceSnapshot,
     ObservationControlCommand,
     ObservationRevokeCommand,
     ObservationSource,
@@ -412,6 +413,75 @@ def test_claude_real_ingress_session_start_emits_native_context_and_privacy_cana
         assert canary.encode() not in state_bytes
         assert canary.encode() not in stdout.getvalue()
     assert _recorded_diagnostics(tmp_path) == []
+
+
+def test_claude_failure_advice_preserves_raw_event_and_commits_after_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host sees PostToolUseFailure even though Yoetz uses PostToolUse cadence internally."""
+
+    store, commitment = _consented_store(tmp_path)
+    advice = AdviceDelivery(
+        snapshot=cast(AdviceSnapshot, object()),
+        item=None,
+        delivery_identity="failure-advice-1",
+        text="Review the failed Yoetz operation before continuing.",
+    )
+    commits: list[str] = []
+
+    def fake_peek(
+        self: LocalObservationStore,
+        workspace: str,
+        *,
+        yoetz_session_id: str | None = None,
+        allow_standing: bool = True,
+        session_commitment: str | None = None,
+    ) -> AdviceDelivery:
+        del self, workspace, yoetz_session_id, allow_standing, session_commitment
+        return advice
+
+    def fake_commit(
+        self: LocalObservationStore,
+        workspace: str,
+        identity: str,
+        *,
+        yoetz_session_id: str | None = None,
+        session_commitment: str | None = None,
+    ) -> None:
+        del self, workspace, yoetz_session_id, session_commitment
+        commits.append(identity)
+
+    monkeypatch.setattr(LocalObservationStore, "peek_advice_for_delivery", fake_peek)
+    monkeypatch.setattr(LocalObservationStore, "commit_advice_delivery", fake_commit)
+    stdout = io.BytesIO()
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="PostToolUseFailure",
+            stdin_bytes=canonical_encode(
+                {
+                    "hook_event_name": "PostToolUseFailure",
+                    "session_id": "claude-failure-advice",
+                    "tool_name": "mcp__plugin_yoetz_yoetz__status",
+                    "tool_use_id": "tool-failure-advice",
+                }
+            ),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    emitted = cast(Mapping[str, JsonValue], strict_json_parse(stdout.getvalue()))
+    specific = cast(Mapping[str, JsonValue], emitted["hookSpecificOutput"])
+    assert specific == {
+        "hookEventName": "PostToolUseFailure",
+        "additionalContext": "Review the failed Yoetz operation before continuing.",
+    }
+    assert commits == ["failure-advice-1"]
+    envelope = store.list_envelopes(commitment)[0]
+    assert envelope.structural_payload["hook_name"] == "PostToolUse"
+    assert envelope.structural_payload["success"] is False
 
 
 def test_claude_stop_delivers_advice_as_non_error_feedback_not_a_block(

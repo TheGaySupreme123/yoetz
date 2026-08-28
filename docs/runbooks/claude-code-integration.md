@@ -145,12 +145,16 @@ The skill name is `/yoetz:yoetz`. The MCP server is `plugin:yoetz:yoetz`, and ca
 The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
 `PostToolUseFailure`, `Stop`, and `SessionEnd`. A bare MCP matcher is a negative control. Hooks call
 `yoetz hooks claude-observe` and are best-effort; timeouts/nonzero exits never authorize or block
-Claude work.
+Claude work. The renderer knows Claude's documented `SubagentStart` / `SubagentStop` stdout shapes,
+but this profile does not advertise those events; adding them is a separate profile expansion.
 
-Advice uses Claude Code's documented output contract. `SessionStart`, `PostToolUse`, and `Stop`
-may emit `hookSpecificOutput.additionalContext`; at `Stop` that is Claude Code's non-error feedback
-channel, so Yoetz never emits `decision: block` to Claude Code, and `stop_hook_active` remains the
-loop guard. `SessionEnd` emits `{}`.
+Advice uses Claude Code's documented output contract. `SessionStart`, `PostToolUse`,
+`PostToolUseFailure`, and `Stop` may emit `hookSpecificOutput.additionalContext`. The failure event
+keeps `hookEventName: PostToolUseFailure` even though Yoetz normalizes its internal advice cadence
+to `PostToolUse`. At `Stop`, additional context is Claude Code's non-error feedback channel: it
+continues through the same `stop_hook_active` loop guard as a blocking decision, but is labelled as
+feedback rather than an error. Yoetz never emits `decision: block` to Claude Code. `SessionEnd`
+emits `{}`.
 
 The rendered hook commands bind `--workspace "${CLAUDE_PROJECT_DIR}"`. When a hook ingests
 nothing it still exits 0 with `{}`, but records one payload-free `hook_diagnostics` reason that

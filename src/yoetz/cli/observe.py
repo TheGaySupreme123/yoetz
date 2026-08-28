@@ -533,11 +533,7 @@ def grant_observation(*, workspace: str, _state: Path | None = None) -> int:
 def pause_observation(*, workspace: str, _state: Path | None = None) -> int:
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
-    try:
-        status = store.pause(ObservationControlCommand(commitment))
-    except PublicOperationError as error:
-        typer.echo(f"observation_pause_failed:{error.code.value}", err=True)
-        return 20
+    status = store.pause(ObservationControlCommand(commitment))
     typer.echo(f"observation_paused:{status.lifecycle.value}")
     return 0
 
@@ -546,11 +542,7 @@ def pause_observation(*, workspace: str, _state: Path | None = None) -> int:
 def resume_observation(*, workspace: str, _state: Path | None = None) -> int:
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
-    try:
-        status = store.resume(ObservationControlCommand(commitment))
-    except PublicOperationError as error:
-        typer.echo(f"observation_resume_failed:{error.code.value}", err=True)
-        return 20
+    status = store.resume(ObservationControlCommand(commitment))
     typer.echo(f"observation_resumed:{status.lifecycle.value}")
     return 0
 
@@ -559,11 +551,7 @@ def resume_observation(*, workspace: str, _state: Path | None = None) -> int:
 def revoke_observation(*, workspace: str, _state: Path | None = None) -> int:
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
-    try:
-        status = store.revoke(ObservationRevokeCommand(commitment, retain_evidence=True))
-    except PublicOperationError as error:
-        typer.echo(f"observation_revoke_failed:{error.code.value}", err=True)
-        return 20
+    status = store.revoke(ObservationRevokeCommand(commitment, retain_evidence=True))
     typer.echo(f"observation_revoked:{status.lifecycle.value}:evidence_retained")
     return 0
 
