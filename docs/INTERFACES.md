@@ -2951,7 +2951,10 @@ the exact preview digest and explicit acceptance; a generic `--yes` cannot stand
 partial, unmanaged, unsafe, or changed-after-preview copies are preserved. v0.1 writes only the
 profile's exact `skill_root` — `.agents/skills/yoetz/` for `codex` — inside one explicitly supplied
 trusted project; it never edits harness/MCP configuration, Git state, package resources, or
-arbitrary skills.
+arbitrary skills. Existing `.agents` and `.agents/skills` parents must be real owner-controlled
+directories: a symlink at either component is `target_unsafe`, creation/replacement/removal use
+directory-fd no-follow operations, and a parent identity change between preview and apply is
+`preview_stale` (issue #396).
 
 Filesystem presence and capability compatibility are independent facts: an unprofiled source is
 `unsupported`, while its destination state remains `absent|installed_exact|modified|partial|unsafe`
@@ -2965,7 +2968,10 @@ digest refuses the whole apply before a file is written. Setup separately report
 `project_skill_installation`, structural plugin-source installation, `plugin_activation`, MCP
 registration, hooks/consent, service routing, and semantic readiness; none of those fields implies
 another. `plugin_activation` uses the closed state
-`active|installed_not_activated|not_installed|foreign`. When an explicitly supplied Codex home is
+`active|installed_not_activated|not_installed|foreign`. `not_installed` is actual source
+absence only. A byte-present plugin tree that is not a current renderer variant — including
+`installed_untrusted_unknown` / modified copies that Codex may still be serving — is
+`installed_not_activated`, never `not_installed` and never `active` (issue #347). When an explicitly supplied Codex home is
 bound, the registration and readiness `plugin_activation` blocks echo that home and its config
 path even when the activation preview or inspection fails, and they carry the actual failure
 reason; `codex_home_required` appears only when no home was provided. Readiness facts that were
@@ -3198,8 +3204,8 @@ content window, so the operator must quiesce such writers. After a successful re
 `codex plugin list
 --marketplace yoetz --json` is empty and `config.toml` has no yoetz tables;
 `inspect_activation` / observe status reports `installed_not_activated` when the managed plugin
-source at `.agents/plugins/yoetz` remains (issue #387) and `not_installed` only when that source
-is also absent. A second removal is `already_absent`. The skill tree, consent records, and
+source at `.agents/plugins/yoetz` remains (issues #387 and #347), including a modified or
+untrusted copy, and `not_installed` only when that source is also absent. A second removal is `already_absent`. The skill tree, consent records, and
 observation store are intentionally left in place.
 
 The implemented artifact operation is exactly `plugin_artifact_apply`. Its prepare target is the

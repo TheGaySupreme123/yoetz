@@ -56,6 +56,7 @@ yoetz integrate codex skill status --json
 
 Destination states: `absent`, `installed_exact`, `modified`/`unmanaged`, `partial`, `unsafe`.
 Compatibility is reported separately as `supported`, `unsupported`, or `untested`.
+A symlink at `.agents` or `.agents/skills` is `target_unsafe` and is never followed (issue #396).
 Status is read-only — it never repairs or updates anything. An identical directory without a valid
 managed marker is treated as unmanaged/modified and is protected from removal. `installed_exact`
 does **not** by itself prove Codex has discovered the skill or that MCP is available.
@@ -156,7 +157,9 @@ pathname rollback that could delete or overwrite a concurrent change. `active` m
 agree: managed source installed, repository marketplace and selected-home config exact, canonical
 inventory says `yoetz@yoetz` is installed and enabled from this repository, and the installed
 version cache is byte-identical to the host-specific render of the managed source. Other closed
-states are `installed_not_activated`, `not_installed`, and `foreign`. None of them—and not even
+states are `installed_not_activated`, `not_installed`, and `foreign`. `not_installed` is source
+absence only; a modified or untrusted byte-present tree is `installed_not_activated` and is never
+`active` (issue #347). None of them—and not even
 `active`—proves a later Codex process loaded a hook or delivered an observation.
 
 The managed project source always carries the canonical async-free render; the host-specific form
@@ -304,7 +307,7 @@ retry.
 After a successful removal, `codex plugin list --marketplace yoetz --json` is empty and
 `config.toml` has no yoetz tables. `yoetz observe status` reports the existing activation
 classification: `installed_not_activated` when the managed plugin source at
-`.agents/plugins/yoetz` remains (issue #387), or `not_installed` when that source is also absent.
+`.agents/plugins/yoetz` remains (issues #387 and #347), including a modified copy, or `not_installed` when that source is also absent.
 The command reports whether the skill tree remains; it does not remove it. Consent records and the
 observation store are intentionally left in place.
 

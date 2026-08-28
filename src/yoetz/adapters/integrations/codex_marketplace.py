@@ -659,6 +659,26 @@ def _cache_version_path(root: Path, version: str) -> Path:
     return root / version
 
 
+def _plugin_source_presence(target: IntegrationTarget, *, codex_version: str) -> PluginHookPresence:
+    """Classify source presence independently of host-variant byte parity.
+
+    ``INSTALLED`` when either current renderer variant matches. ``ABSENT`` only
+    when both variants report absence. Any other byte-present tree, including a
+    modified or untrusted copy that Codex may still be serving, is
+    ``INSTALLED_UNTRUSTED_UNKNOWN`` so status never collapses it to
+    ``not_installed`` (#347).
+    """
+
+    seen = tuple(
+        inspect_plugin(target, codex_version=variant).presence for variant in (None, codex_version)
+    )
+    if PluginHookPresence.INSTALLED in seen:
+        return PluginHookPresence.INSTALLED
+    if all(presence is PluginHookPresence.ABSENT for presence in seen):
+        return PluginHookPresence.ABSENT
+    return PluginHookPresence.INSTALLED_UNTRUSTED_UNKNOWN
+
+
 def _plugin_source_installed(target: IntegrationTarget, *, codex_version: str) -> bool:
     """True when the project tree is byte-exactly one current managed renderer variant.
 
@@ -666,11 +686,12 @@ def _plugin_source_installed(target: IntegrationTarget, *, codex_version: str) -
     render (``codex_version=None``); the host-specific form belongs only to the
     activation cache. Either byte-exact form counts as an installed source, so a
     canonical source on an async-capable host never reads as ``not_installed``.
+    Apply fences keep using this exact-variant check; status uses
+    ``_plugin_source_presence`` so a modified tree is not reported absent.
     """
 
-    return any(
-        inspect_plugin(target, codex_version=variant).presence is PluginHookPresence.INSTALLED
-        for variant in (None, codex_version)
+    return (
+        _plugin_source_presence(target, codex_version=codex_version) is PluginHookPresence.INSTALLED
     )
 
 
@@ -896,11 +917,14 @@ def inspect_activation(
     project, home, marketplace_path, config_path = _paths(target, binary.codex_home)
     # The committed project tree carries the canonical render; judging ``installed``
     # against the host-specific render alone would keep an async-capable host at
-    # ``not_installed`` forever (#387).
-    installed = _plugin_source_installed(target, codex_version=binary.codex_version)
+    # ``not_installed`` forever (#387). A byte-present modified tree is still
+    # installed for status (#347): ``not_installed`` is absence only.
+    presence = _plugin_source_presence(target, codex_version=binary.codex_version)
+    installed = presence is not PluginHookPresence.ABSENT
+    exact_source = presence is PluginHookPresence.INSTALLED
     plugin_cached = False
     cache_foreign = False
-    if installed:
+    if exact_source:
         try:
             cache_members = _source_cache_members(target, codex_version=binary.codex_version)
             local_digest = _installed_cache_digest_anchored(home, __version__, cache_members)
