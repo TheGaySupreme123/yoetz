@@ -688,6 +688,96 @@ async def test_status_view_operation_recovers_missing_repository_grant_for_same_
     assert "expires_at" not in continuation_wire
 
 
+async def test_status_view_operation_recovers_disclosure_wait_after_writer_rotation() -> None:
+    """The successor session recovers the old writer's one-use continuation (#438)."""
+
+    base, _objects, seed, ledger = _publish_composition()
+    operation_id = "req_00000000-0000-4000-8000-000000000708"
+    resume = ObjectRef(
+        "obj_00000000-0000-4000-8000-00000000aaad",
+        1,
+        "hmac-sha256:" + "a" * 64,
+        "sha256:" + "b" * 64,
+        "yoetz-object/1",
+        "bmk-1",
+        ObjectMetadata(
+            ObjectKind.DETERMINISTIC_RESULT,
+            "application/vnd.yoetz.deterministic-result+json",
+            seed.task_id,
+            datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+    )
+    pending = OperationRecord(
+        seed.writer_id,
+        operation_id,
+        OperationKind.CHECK,
+        "sha256:" + "c" * 64,
+        OperationState.PENDING,
+        CheckPhase.SEMANTIC_WAIT,
+        "owner-generation-1",
+        "lease-owner-1",
+        1,
+        datetime(2030, 1, 1, tzinfo=UTC),
+        resume,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger._state.operations[(seed.writer_id, operation_id)] = (  # pyright: ignore[reportPrivateUsage]
+        pending,
+        None,
+    )
+    pending_id = protocol_id("ppr_", 711)
+    wait = SemanticDisclosureWait(
+        protocol_id("job_", 709),
+        protocol_id("att_", 710),
+        seed.writer_id,
+        operation_id,
+        pending_id,
+        datetime(2030, 1, 1, tzinfo=UTC),
+        "awaiting",
+        None,
+    )
+    ledger._state.disclosure_waits[wait.job_id] = wait  # pyright: ignore[reportPrivateUsage]
+
+    successor_writer = "wri_00000000-0000-4000-8000-000000000712"
+    successor_session = "ses_00000000-0000-4000-8000-000000000713"
+    successor = replace(
+        base.runtime.task,
+        session_id=successor_session,
+        writer_id=successor_writer,
+    )
+    app = _PublishApp(_PublishRuntime(successor))
+    assert await ledger.load_disclosure_wait(successor_writer, operation_id) is None
+    assert await ledger.load_disclosure_wait(seed.writer_id, operation_id) == wait
+
+    status = await execute_status(
+        cast(StatusApplication, app),
+        _status_operation_request(
+            session_id=successor_session,
+            writer_id=successor_writer,
+            operation_request_id=operation_id,
+            request_tail=714,
+        ),
+    )
+
+    page = cast(StatusOperationPageModel, status.page)
+    assert page.found is True
+    assert page.state == "pending"
+    assert page.continuation is not None
+    assert page.continuation.kind == "privacy_disclosure_decision"
+    assert page.continuation.pending_id == pending_id
+    assert page.continuation.command == (
+        "yoetz",
+        "privacy",
+        "decide-disclosure",
+        pending_id,
+    )
+    assert page.continuation.replay_request_id == operation_id
+
+
 def _complete_check_record(writer_id: str, operation_id: str) -> OperationRecord:
     """A terminal, non-publish operation seeded directly, without paying for a real check."""
 

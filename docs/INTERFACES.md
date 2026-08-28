@@ -214,8 +214,11 @@ same-task attach that rotates the active session and writer; it never crosses a 
 Stored result detail is state-conditional: only
 `complete` + `publish_work` carries outcome, subject/result frontiers, and accepted event
 ids/digests; `pending`/`quarantined` report kind without those fields; `absent` reports none of
-them; non-publish completions report kind without append-shaped event detail. Lookups are scoped
-to the authenticated task. A request from another task is reported as absent.
+them; non-publish completions report kind without append-shaped event detail. A pending check that
+is awaiting repository setup or a one-use disclosure decision reconstructs its typed continuation
+from the routed task ledger using the operation's recorded writer, so a same-task session/writer
+rotation does not strand the decision. Lookups are scoped to the authenticated task. A request
+from another task is reported as absent.
 MCP `publish_work` performs the same envelope-first operation lookup when the supplied body fails
 schema validation (so a malformed retry body can still recover a committed operation) — except
 under a declared `dry_run: true`, which appends nothing, so no prior-operation lookup can change
@@ -1389,8 +1392,10 @@ historical session remains a valid `mode=attach` selector even though ordinary t
 only the active session, and a routed request on the retired session receives the typed current
 binding. If the pair is new but the workspace already owns a non-quarantined task,
 `create_or_attach` returns the typed `workspace_task_exists` conflict instead of silently splitting
-lineage. The conflict discloses no binding; the caller must attach with a previously held session
-selector or choose `mode=create` explicitly for a separate sibling task. Raw refs never land in
+lineage. An `initializing` route counts as occupied: ignoring a still-reclaimable start would let a
+concurrent drifted pair split lineage. The conflict discloses no binding; the caller must attach
+with a previously held session selector or choose `mode=create` explicitly for a separate sibling
+task. Raw refs never land in
 durable state — only the commitments do. This
 model/agent-controlled `workspace_ref_commitment` is an attachment selector, not a
 repository-privacy commitment, and cannot select or inherit disclosure authority.

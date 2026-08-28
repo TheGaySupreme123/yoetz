@@ -26,6 +26,7 @@ from yoetz.ports.ledger import (
     ProjectionQuery,
     ProjectionState,
     ProjectionView,
+    SemanticDisclosureWait,
     StoredProjection,
 )
 from yoetz.ports.objects import ObjectRef, ObjectStorePort
@@ -258,6 +259,13 @@ class _ReadLedger:
         self, writer_id: str, operation_id: str
     ) -> OperationRecord | None:
         return await self._value.lookup_task_operation(writer_id, operation_id)
+
+    async def load_disclosure_wait(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticDisclosureWait | None:
+        """Read the structural continuation for one suspended semantic attempt."""
+
+        return await self._value.load_disclosure_wait(writer_id, operation_id)
 
 
 class _PayloadObjects:

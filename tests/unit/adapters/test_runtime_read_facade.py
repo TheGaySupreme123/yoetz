@@ -1,8 +1,8 @@
 """Read-route runtime facades must cover what read-routed code calls.
 
 ``status(view=operation)`` failed for every caller, every time: it calls ``lookup_task_operation``, but
-a read route hands the application ``_ReadLedger``, a ``__slots__`` facade that exposed four
-methods and not that one, so the call raised ``AttributeError`` before reaching any data — and
+a read route hands the application ``_ReadLedger``, a ``__slots__`` facade that exposed only a
+subset of the port and not that one, so the call raised ``AttributeError`` before reaching data — and
 the recovery view was unavailable exactly when a caller needed it.
 
 Every status test passed throughout, because they drive the raw ledger directly and never cross
@@ -78,3 +78,4 @@ def test_read_ledger_can_look_up_an_operation() -> None:
     facade = runtime_module._ReadLedger  # pyright: ignore[reportPrivateUsage]
     assert callable(getattr(facade, "lookup_operation", None))
     assert callable(getattr(facade, "lookup_task_operation", None))
+    assert callable(getattr(facade, "load_disclosure_wait", None))
