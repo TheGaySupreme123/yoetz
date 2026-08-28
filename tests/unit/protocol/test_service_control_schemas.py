@@ -464,12 +464,8 @@ def test_v23_updates_only_the_status_operation_schema_refs() -> None:
             mapping = cast(dict[str, object], value)
             for key, member in mapping.items():
                 if key == "$ref" and isinstance(member, str):
-                    replaced = member.replace(
-                        "status-request-1.1.0", "status-request-1.0.0"
-                    )
-                    mapping[key] = replaced.replace(
-                        "status-result-1.1.0", "status-result-1.0.0"
-                    )
+                    replaced = member.replace("status-request-1.1.0", "status-request-1.0.0")
+                    mapping[key] = replaced.replace("status-result-1.1.0", "status-result-1.0.0")
                 else:
                     replace_status_version(member)
         elif isinstance(value, list):

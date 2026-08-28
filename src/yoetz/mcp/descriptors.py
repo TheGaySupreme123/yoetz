@@ -48,6 +48,8 @@ _TOOL_SCHEMA_VERSIONS: Final = MappingProxyType({"status": "1.1.0"})
 
 def _tool_schema_version(name: str) -> str:
     return _TOOL_SCHEMA_VERSIONS.get(name, _SCHEMA_VERSION)
+
+
 # Exactly the entry document. Every other guidance document is fetched on demand: the catalog
 # section of agent-instructions.md names the `resources/read` -> `read_guidance` -> installed
 # `references/<name>.md` chain, and `read_guidance` (a plain tool call) survives the empty
@@ -1340,9 +1342,7 @@ class ToolDescriptor:
     def catalog_output_schema(self) -> Mapping[str, JsonValue]:
         """Full catalog-bundled output schema before MCP root-object projection."""
 
-        return _mcp_schema(
-            f"{self.name.replace('_', '-')}-result", _tool_schema_version(self.name)
-        )
+        return _mcp_schema(f"{self.name.replace('_', '-')}-result", _tool_schema_version(self.name))
 
     @property
     def catalog_input_schema(self) -> Mapping[str, JsonValue]:
