@@ -1057,7 +1057,12 @@ class CheckScopeModel(_ClosedModel):
 def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
     from pydantic import ValidationError as PydanticValidationError
 
-    from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instance
+    from yoetz.protocol.schemas import (
+        SchemaInstanceInvalid,
+        load_schema_catalog,
+        request_result_schema_versions,
+        validate_schema_instance,
+    )
 
     raw_dump = model.model_dump(
         mode="json",
@@ -1067,7 +1072,8 @@ def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
     )
     dumped = _strip_optional_non_null_fields(model, cast(Mapping[str, JsonValue], raw_dump))
     try:
-        validate_schema_instance(schema_name, "1.0.0", cast(JsonValue, dumped))
+        schema_version = request_result_schema_versions(load_schema_catalog())[schema_name]
+        validate_schema_instance(schema_name, schema_version, cast(JsonValue, dumped))
     except SchemaInstanceInvalid as exc:
         # Re-raise with JSON Schema path(s) so MCP safe_details can name corrective fields.
         # Root-level object rules (dependentRequired, if/then) arrive as location_reasons with
@@ -1852,7 +1858,6 @@ class PublishWorkDryRunModel(_ClosedModel):
     subject_frontier: FrontierModel
     result_frontier: FrontierModel
     would_accept: tuple[PublishWorkDryRunPreviewEventModel, ...]
-    warning_codes: tuple[Literal["requested_item_attempt_missing"], ...] = ()
     coverage: CoverageModel
     gaps: tuple[CodeWire, ...]
 
@@ -1862,7 +1867,6 @@ class PublishWorkDryRunModel(_ClosedModel):
             raise ValueError("dry_run_preview_count_invalid")
         if self.subject_frontier != self.result_frontier:
             raise ValueError("dry_run_frontier_moved")
-        _require_unique(self.warning_codes, limit=1)
         _require_unique(self.gaps, limit=64)
         _validate_model_against_schema(self, "publish-work-result")
         return self
@@ -3267,9 +3271,14 @@ def public_model_to_wire(model: object) -> dict[str, JsonValue]:
     dumped = _strip_optional_non_null_fields(public_model, raw_dump)
     if type(dumped) is not dict:
         raise TypeError("public_model_wrong_type")
-    from yoetz.protocol.schemas import validate_schema_instance
+    from yoetz.protocol.schemas import (
+        load_schema_catalog,
+        request_result_schema_versions,
+        validate_schema_instance,
+    )
 
-    validate_schema_instance(schema_name, "1.0.0", cast(JsonValue, dumped))
+    schema_version = request_result_schema_versions(load_schema_catalog())[schema_name]
+    validate_schema_instance(schema_name, schema_version, cast(JsonValue, dumped))
     return dict(dumped)
 
 

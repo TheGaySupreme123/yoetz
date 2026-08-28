@@ -51,11 +51,10 @@ obligations apply, record `no_obligations_reason` as exactly `no_material_change
 `single_atomic_change`, or `exploratory_scope_unknown`; the reason is invalid beside effective
 obligation refs. A revision restates the declaration, so omission clears an earlier reason.
 
-Set `dry_run: true` to validate a batch and preview what would be accepted without appending. The
-preview is not evidential and is not citable as a check, publication, or coverage source. A
-`requested_item_attempt_missing` warning means `status view=obligations` has exact
-`unattempted_items` values that still need attempt accounting. Reuse the same `request_id` for the
-real publish after the preview succeeds.
+Read `status view=obligations` first and account for every exact `unattempted_items` value. Then set
+`dry_run: true` to validate a batch and preview what would be accepted without appending. The
+preview is not evidential and is not citable as a check, publication, or coverage source. Reuse the
+same `request_id` for the real publish after the preview succeeds.
 
 Yoetz does not watch your workspace. What is published is what exists.
 

@@ -159,7 +159,7 @@ Bind change-sensitive evidence to the exact subject state or frontier it concern
 
 Batch facts that belong to one material transition. Preserve writer sequence and expected frontier. On timeout, reuse the same request and operation IDs; never manufacture a replacement event merely because the response was lost.
 
-Before a material publish over MCP, set `dry_run: true` to validate the batch and preview accepted event ids and coverage without appending. If readable effective scope still contains an exact requested item with no matching action attempt, the preview includes warning code `requested_item_attempt_missing`; inspect `status view=obligations` for the exact `unattempted_items` values before resolving the obligation. The dry-run result is not evidential and must not be cited as a check, publication, or coverage source. When the preview is acceptable, publish with the same `request_id` and `dry_run` omitted or false.
+Before a material publish over MCP, read `status view=obligations` and inspect the exact `unattempted_items` values before resolving an obligation. Then set `dry_run: true` to validate the batch and preview accepted event ids and coverage without appending. The dry-run result is not evidential and must not be cited as a check, publication, or coverage source. When the preview is acceptable, publish with the same `request_id` and `dry_run` omitted or false.
 
 Worked examples for each ordinary publishable family — and a cross-linked
 action/result/evidence/claim batch — live in the `publish_work` tool input schema `examples` entry

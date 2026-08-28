@@ -43,6 +43,11 @@ __all__ = [
 type McpRouteProfile = Literal["policy", "strict"]
 
 _SCHEMA_VERSION: Final = "1.0.0"
+_TOOL_SCHEMA_VERSIONS: Final = MappingProxyType({"status": "1.1.0"})
+
+
+def _tool_schema_version(name: str) -> str:
+    return _TOOL_SCHEMA_VERSIONS.get(name, _SCHEMA_VERSION)
 # Exactly the entry document. Every other guidance document is fetched on demand: the catalog
 # section of agent-instructions.md names the `resources/read` -> `read_guidance` -> installed
 # `references/<name>.md` chain, and `read_guidance` (a plain tool call) survives the empty
@@ -1321,25 +1326,31 @@ class ToolDescriptor:
 
     @property
     def input_schema(self) -> Mapping[str, JsonValue]:
-        return _mcp_presentation_schema(f"{self.name.replace('_', '-')}-request", _SCHEMA_VERSION)
+        return _mcp_presentation_schema(
+            f"{self.name.replace('_', '-')}-request", _tool_schema_version(self.name)
+        )
 
     @property
     def output_schema(self) -> Mapping[str, JsonValue]:
         return _mcp_output_presentation_schema(
-            f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION
+            f"{self.name.replace('_', '-')}-result", _tool_schema_version(self.name)
         )
 
     @property
     def catalog_output_schema(self) -> Mapping[str, JsonValue]:
         """Full catalog-bundled output schema before MCP root-object projection."""
 
-        return _mcp_schema(f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION)
+        return _mcp_schema(
+            f"{self.name.replace('_', '-')}-result", _tool_schema_version(self.name)
+        )
 
     @property
     def catalog_input_schema(self) -> Mapping[str, JsonValue]:
         """Full catalog-bundled input schema (admission dual-surface; not tools/list)."""
 
-        return _mcp_schema(f"{self.name.replace('_', '-')}-request", _SCHEMA_VERSION)
+        return _mcp_schema(
+            f"{self.name.replace('_', '-')}-request", _tool_schema_version(self.name)
+        )
 
 
 def _descriptor(
@@ -1352,15 +1363,16 @@ def _descriptor(
     open_world: bool = False,
 ) -> ToolDescriptor:
     schema_name = name.replace("_", "-")
+    schema_version = _tool_schema_version(name)
     return ToolDescriptor(
         name=name,
         title=title,
         description=description,
         input_schema_ref=(
-            f"{SCHEMA_NAMESPACE}operations/{schema_name}-request-{_SCHEMA_VERSION}.schema.json"
+            f"{SCHEMA_NAMESPACE}operations/{schema_name}-request-{schema_version}.schema.json"
         ),
         output_schema_ref=(
-            f"{SCHEMA_NAMESPACE}operations/{schema_name}-result-{_SCHEMA_VERSION}.schema.json"
+            f"{SCHEMA_NAMESPACE}operations/{schema_name}-result-{schema_version}.schema.json"
         ),
         annotations=ToolAnnotations(
             read_only=read_only,
@@ -1409,9 +1421,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "follows ingestion sequence; receipt freshness is frontier-bound. Service accepted_at is "
         "independent acceptance metadata, not a freshness or ordering key. Set dry_run true to "
         "validate a batch and preview what would be accepted without appending; the preview is not "
-        "evidential and is not citable as a check, publication, or coverage source. A "
-        "requested_item_attempt_missing warning directs the caller to exact unattempted_items in "
-        "status view=obligations before resolution. After "
+        "evidential and is not citable as a check, publication, or coverage source. Read exact "
+        "unattempted_items in status view=obligations before resolution. After "
         "publishing the material claim and evidence, call check, disposition any findings with "
         "respond, then call receipt before claiming completion. Every reference list, in a draft "
         "envelope and in a payload alike, is admitted only when its members are unique and already "
@@ -1597,10 +1608,10 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
-                "publish_work": "sha256:59ce4d231764d1d8dcf1c35d9616b9bb8f887255957d22749a344b9e64b8cfb9",
+                "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
                 "check": "sha256:3a81f3a6d3e0f714680e221e8dc5fa90d0131629386b03d75bc55d21ab618ee1",
                 "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
-                "status": "sha256:7c0e88d0ab0b690b26f1337af604a0bbdfd1f408867932dd24f7a232f8c20477",
+                "status": "sha256:918ff925873d47c213c546623ec7a28ee1f5798c46fc4c5c3ad879d84d1f18a0",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1608,10 +1619,10 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
-                "publish_work": "sha256:59ce4d231764d1d8dcf1c35d9616b9bb8f887255957d22749a344b9e64b8cfb9",
+                "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
                 "check": "sha256:91b090140843ef3f50bbdf02a42dc78fc418b1968dca8685018698cf276f4557",
                 "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
-                "status": "sha256:7c0e88d0ab0b690b26f1337af604a0bbdfd1f408867932dd24f7a232f8c20477",
+                "status": "sha256:918ff925873d47c213c546623ec7a28ee1f5798c46fc4c5c3ad879d84d1f18a0",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1620,8 +1631,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:244c2d4315582c47903a6fd3ace2337a5a0275f0ccd1c17dcdab99406b6989d4",
-        "strict": "sha256:99aeaaa28c2f230db071d874f15df86aeeb8646733218c268760cb2d8c3f6e3f",
+        "policy": "sha256:328aa4b6f356d8747baa485cefa7b00037d1c5f1838267eccfbc55a1ce04cc6e",
+        "strict": "sha256:94b26da5d31ce50901a6de5c92dea388d767180a40e9cf21df2f7e1fdda6bee9",
     }
 )
 

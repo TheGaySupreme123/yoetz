@@ -247,6 +247,18 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+def _frozen_version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Preserve the released v2.0 version report while newer reports append."""
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    try:
+        return cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "version_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+
+
 def _evidence_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Derive v1.1 from the frozen v1.0 bytes without rewriting historical identity."""
 
@@ -803,31 +815,24 @@ def _read_guidance_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 
 
 def _publish_work_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Extend the reviewed publish result with advisory dry-run warning codes."""
+    """Preserve the reviewed publish result rather than replacing it with model introspection."""
 
     source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
     try:
-        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
-        definitions = cast(dict[str, JsonValue], document["$defs"])
-        dry_run = cast(dict[str, JsonValue], definitions["dry_run"])
-        properties = cast(dict[str, JsonValue], dry_run["properties"])
-    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        return cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
         raise SchemaGenerationError(
             "publish_work_result_schema_template_invalid", entries=(entry.relative_path,)
         ) from exc
-    properties["warning_codes"] = {
-        "items": {"const": "requested_item_attempt_missing", "type": "string"},
-        "maxItems": 1,
-        "type": "array",
-        "uniqueItems": True,
-    }
-    return document
 
 
 def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Extend the reviewed status result with model-owned completion and disposition leaves."""
 
-    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas/operations/status-result-1.0.0.schema.json"
+    )
     try:
         document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
         definitions = cast(dict[str, JsonValue], document["$defs"])
@@ -846,14 +851,6 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         readiness = cast(dict[str, JsonValue], definitions["closure_readiness"])
         readiness_properties = cast(dict[str, JsonValue], readiness["properties"])
         readiness_required = cast(list[JsonValue], readiness["required"])
-        obligation_item = cast(dict[str, JsonValue], definitions["obligation_item"])
-        obligation_properties = cast(dict[str, JsonValue], obligation_item["properties"])
-        success = cast(dict[str, JsonValue], definitions["success"])
-        success_properties = cast(dict[str, JsonValue], success["properties"])
-        success_view = cast(dict[str, JsonValue], success_properties["view"])
-        success_pages = cast(dict[str, JsonValue], success_properties["page"])
-        success_page_refs = cast(list[JsonValue], success_pages["anyOf"])
-        success_view_rules = cast(list[JsonValue], success["allOf"])
         blocking = cast(dict[str, JsonValue], readiness_properties["blocking_conditions"])
         blocking_items = cast(dict[str, JsonValue], blocking["items"])
         blocker_values = cast(list[JsonValue], blocking_items["enum"])
@@ -870,98 +867,6 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         ],
         "type": "string",
     }
-    definitions["action_id"] = {
-        "pattern": ("^act_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
-        "type": "string",
-    }
-    definitions["result_id"] = {
-        "pattern": ("^res_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
-        "type": "string",
-    }
-    definitions["requested_item_text"] = {"maxLength": 1024, "type": "string"}
-    definitions["status_requested_item"] = {
-        "additionalProperties": False,
-        "properties": {
-            "item_kind": {
-                "enum": ["url", "file", "command", "change", "source"],
-                "type": "string",
-            },
-            "value": {
-                "oneOf": [
-                    {"$ref": "#/$defs/requested_item_text"},
-                    {"$ref": "#/$defs/obligation_omission"},
-                ]
-            },
-        },
-        "required": ["item_kind", "value"],
-        "type": "object",
-    }
-    requested_item_list: dict[str, JsonValue] = {
-        "items": {"$ref": "#/$defs/status_requested_item"},
-        "maxItems": 64,
-        "type": "array",
-    }
-    obligation_properties["requested_items"] = requested_item_list
-    obligation_properties["unattempted_items"] = requested_item_list
-    definitions["result_item"] = {
-        "additionalProperties": False,
-        "properties": {
-            "action_id": {"oneOf": [{"$ref": "#/$defs/action_id"}, {"type": "null"}]},
-            "evidence_refs": {
-                "items": {"$ref": "#/$defs/evidence_id"},
-                "maxItems": 64,
-                "type": "array",
-                "uniqueItems": True,
-            },
-            "outcome": {
-                "oneOf": [
-                    {
-                        "enum": ["success", "failure", "partial", "unknown"],
-                        "type": "string",
-                    },
-                    {"type": "null"},
-                ]
-            },
-            "payload_available": {"type": "boolean"},
-            "result_id": {"$ref": "#/$defs/result_id"},
-            "source_event_id": {"$ref": "#/$defs/event_id"},
-        },
-        "required": [
-            "result_id",
-            "source_event_id",
-            "payload_available",
-            "outcome",
-            "action_id",
-            "evidence_refs",
-        ],
-        "type": "object",
-    }
-    definitions["results_page"] = {
-        "additionalProperties": False,
-        "properties": {
-            "items": {
-                "items": {"$ref": "#/$defs/result_item"},
-                "maxItems": 100,
-                "type": "array",
-            },
-            "next_cursor": {"$ref": "#/$defs/nullable_cursor"},
-        },
-        "required": ["items", "next_cursor"],
-        "type": "object",
-    }
-    definitions["view_results"] = {
-        "if": {"properties": {"view": {"const": "results"}}, "required": ["view"]},
-        "then": {"properties": {"page": {"$ref": "#/$defs/results_page"}}},
-    }
-    view_values = cast(list[JsonValue], success_view["enum"])
-    if "results" not in view_values:
-        view_values.insert(view_values.index("versions"), "results")
-    results_page_ref: dict[str, JsonValue] = {"$ref": "#/$defs/results_page"}
-    if results_page_ref not in success_page_refs:
-        success_page_refs.append(results_page_ref)
-    view_results_ref: dict[str, JsonValue] = {"$ref": "#/$defs/view_results"}
-    if view_results_ref not in success_view_rules:
-        success_view_rules.append(view_results_ref)
     finding_properties["disposition"] = {
         "enum": [
             "acknowledged",
@@ -1075,7 +980,113 @@ def _status_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     ):
         if blocker not in blocker_values:
             blocker_values.append(blocker)
+    if entry.schema_version == "1.1.0":
+        _extend_status_result_v11(document)
+        document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+        document["title"] = "Yoetz status result 1.1.0"
     return document
+
+
+def _extend_status_result_v11(document: dict[str, JsonValue]) -> None:
+    """Add actionable result and requested-item projections to the frozen v1.0 shape."""
+
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    obligation = cast(dict[str, JsonValue], definitions["obligation_item"])
+    obligation_properties = cast(dict[str, JsonValue], obligation["properties"])
+    success = cast(dict[str, JsonValue], definitions["success"])
+    success_properties = cast(dict[str, JsonValue], success["properties"])
+    success_view = cast(dict[str, JsonValue], success_properties["view"])
+    success_pages = cast(dict[str, JsonValue], success_properties["page"])
+    success_page_refs = cast(list[JsonValue], success_pages["anyOf"])
+    success_view_rules = cast(list[JsonValue], success["allOf"])
+
+    definitions["action_id"] = {
+        "pattern": "^act_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string",
+    }
+    definitions["result_id"] = {
+        "pattern": "^res_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        "type": "string",
+    }
+    definitions["requested_item_text"] = {"maxLength": 1024, "type": "string"}
+    definitions["status_requested_item"] = {
+        "additionalProperties": False,
+        "properties": {
+            "item_kind": {
+                "enum": ["url", "file", "command", "change", "source"],
+                "type": "string",
+            },
+            "value": {
+                "oneOf": [
+                    {"$ref": "#/$defs/requested_item_text"},
+                    {"$ref": "#/$defs/obligation_omission"},
+                ]
+            },
+        },
+        "required": ["item_kind", "value"],
+        "type": "object",
+    }
+    requested_item_list: dict[str, JsonValue] = {
+        "items": {"$ref": "#/$defs/status_requested_item"},
+        "maxItems": 64,
+        "type": "array",
+    }
+    obligation_properties["requested_items"] = requested_item_list
+    obligation_properties["unattempted_items"] = requested_item_list
+    definitions["result_item"] = {
+        "additionalProperties": False,
+        "properties": {
+            "action_id": {"oneOf": [{"$ref": "#/$defs/action_id"}, {"type": "null"}]},
+            "evidence_refs": {
+                "items": {"$ref": "#/$defs/evidence_id"},
+                "maxItems": 64,
+                "type": "array",
+                "uniqueItems": True,
+            },
+            "outcome": {
+                "oneOf": [
+                    {
+                        "enum": ["success", "failure", "partial", "unknown"],
+                        "type": "string",
+                    },
+                    {"type": "null"},
+                ]
+            },
+            "payload_available": {"type": "boolean"},
+            "result_id": {"$ref": "#/$defs/result_id"},
+            "source_event_id": {"$ref": "#/$defs/event_id"},
+        },
+        "required": [
+            "result_id",
+            "source_event_id",
+            "payload_available",
+            "outcome",
+            "action_id",
+            "evidence_refs",
+        ],
+        "type": "object",
+    }
+    definitions["results_page"] = {
+        "additionalProperties": False,
+        "properties": {
+            "items": {
+                "items": {"$ref": "#/$defs/result_item"},
+                "maxItems": 100,
+                "type": "array",
+            },
+            "next_cursor": {"$ref": "#/$defs/nullable_cursor"},
+        },
+        "required": ["items", "next_cursor"],
+        "type": "object",
+    }
+    definitions["view_results"] = {
+        "if": {"properties": {"view": {"const": "results"}}, "required": ["view"]},
+        "then": {"properties": {"page": {"$ref": "#/$defs/results_page"}}},
+    }
+    view_values = cast(list[JsonValue], success_view["enum"])
+    view_values.insert(view_values.index("versions"), "results")
+    success_page_refs.append({"$ref": "#/$defs/results_page"})
+    success_view_rules.append({"$ref": "#/$defs/view_results"})
 
 
 def _receipt_document_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -1247,16 +1258,16 @@ def _respond_result_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 def _status_request_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Extend the reviewed status filter with the model-owned response disposition."""
 
-    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas/operations/status-request-1.0.0.schema.json"
+    )
     try:
         document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
         definitions = cast(dict[str, JsonValue], document["$defs"])
         findings_filter = cast(dict[str, JsonValue], definitions["findings_filter"])
         properties = cast(dict[str, JsonValue], findings_filter["properties"])
         disposition = cast(dict[str, JsonValue], properties["disposition"])
-        view = cast(dict[str, JsonValue], document["properties"])["view"]
-        view_values = cast(list[JsonValue], cast(dict[str, JsonValue], view)["enum"])
-        rules = cast(list[JsonValue], document["allOf"])
         if not isinstance(disposition, dict):
             raise TypeError("disposition must be an object")
     except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
@@ -1270,25 +1281,30 @@ def _status_request_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         "rejected",
         "waived",
     ]
-    if "results" not in view_values:
+    if entry.schema_version == "1.1.0":
+        properties = cast(dict[str, JsonValue], document["properties"])
+        view = cast(dict[str, JsonValue], properties["view"])
+        view_values = cast(list[JsonValue], view["enum"])
         view_values.insert(view_values.index("versions"), "results")
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        condition = rule.get("if")
-        if not isinstance(condition, dict):
-            continue
-        condition_properties = condition.get("properties")
-        if not isinstance(condition_properties, dict):
-            continue
-        view_condition = condition_properties.get("view")
-        if not isinstance(view_condition, dict):
-            continue
-        no_filter_values = view_condition.get("enum")
-        if isinstance(no_filter_values, list) and "compact" in no_filter_values:
-            if "results" not in no_filter_values:
+        rules = cast(list[JsonValue], document["allOf"])
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            condition = rule.get("if")
+            if not isinstance(condition, dict):
+                continue
+            condition_properties = condition.get("properties")
+            if not isinstance(condition_properties, dict):
+                continue
+            view_condition = condition_properties.get("view")
+            if not isinstance(view_condition, dict):
+                continue
+            no_filter_values = view_condition.get("enum")
+            if isinstance(no_filter_values, list) and "compact" in no_filter_values:
                 no_filter_values.append("results")
-            break
+                break
+        document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+        document["title"] = "Yoetz status request 1.1.0"
     return document
 
 
@@ -1916,6 +1932,26 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "operations/status-request-1.1.0.schema.json",
+        "status-request",
+        "1.1.0",
+        "request_result",
+        "MCP input",
+        lambda: (
+            __import__("yoetz.protocol.models", fromlist=["StatusRequestModel"]).StatusRequestModel
+        ),
+    ),
+    _RegistryEntry(
+        "operations/status-result-1.1.0.schema.json",
+        "status-result",
+        "1.1.0",
+        "request_result",
+        "MCP output",
+        lambda: (
+            __import__("yoetz.protocol.models", fromlist=["StatusResultModel"]).StatusResultModel
+        ),
+    ),
+    _RegistryEntry(
         "privacy/egress-receipt-1.0.0.schema.json",
         "egress-receipt",
         "1.0.0",
@@ -2088,6 +2124,38 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         None,
     ),
     _RegistryEntry(
+        "service/control-hello-2.3.0.schema.json",
+        "control-hello",
+        "2.3.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "service/control-hello-result-2.3.0.schema.json",
+        "control-hello-result",
+        "2.3.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "service/control-request-2.3.0.schema.json",
+        "control-request",
+        "2.3.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "service/control-result-2.3.0.schema.json",
+        "control-result",
+        "2.3.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
         "service/service-status-1.0.0.schema.json",
         "service-status",
         "1.0.0",
@@ -2107,6 +2175,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "version/version-manifest-2.0.0.schema.json",
         "version-manifest",
         "2.0.0",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
+    _RegistryEntry(
+        "version/version-manifest-2.1.0.schema.json",
+        "version-manifest",
+        "2.1.0",
         "version_manifest",
         "version-report",
         lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
@@ -2335,13 +2411,21 @@ def build_schema_documents(
             normalized = _respond_request_schema(entry)
         elif entry.relative_path == "operations/respond-result-1.0.0.schema.json":
             normalized = _respond_result_schema(entry)
-        elif entry.relative_path == "operations/status-request-1.0.0.schema.json":
+        elif entry.relative_path in {
+            "operations/status-request-1.0.0.schema.json",
+            "operations/status-request-1.1.0.schema.json",
+        }:
             normalized = _status_request_schema(entry)
-        elif entry.relative_path == "operations/status-result-1.0.0.schema.json":
+        elif entry.relative_path in {
+            "operations/status-result-1.0.0.schema.json",
+            "operations/status-result-1.1.0.schema.json",
+        }:
             normalized = _status_result_schema(entry)
         elif entry.relative_path == "receipts/receipt-document-1.0.0.schema.json":
             normalized = _receipt_document_schema(entry)
         elif entry.relative_path == "version/version-manifest-2.0.0.schema.json":
+            normalized = _frozen_version_manifest_schema(entry)
+        elif entry.relative_path == "version/version-manifest-2.1.0.schema.json":
             normalized = _version_manifest_schema(entry)
         else:
             try:

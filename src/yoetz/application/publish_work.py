@@ -70,8 +70,6 @@ from yoetz.domain.values import (
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
-from yoetz.kernel.plan_scope import current_plan_scope
-from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.reducers import replay
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.diagnostics import RuntimeCapability
@@ -1192,7 +1190,7 @@ async def _preflight_dry_run_feasibility(
     runtime: TaskRuntime,
     request: PublishWorkRequestModel,
     prepared: PreparedPublication,
-) -> tuple[Frontier, ProjectionState]:
+) -> Frontier:
     """Reject batches the real append path would reject before reporting would_accept.
 
     Matches ``append_batch`` acceptance for frontier sequence, event-id uniqueness, causal
@@ -1275,7 +1273,7 @@ async def _preflight_dry_run_feasibility(
             )
             provisional.append(record)
             previous_ledger = record.entry_digest
-        projected = replay((*existing_records, *provisional))
+        replay((*existing_records, *provisional))
     except ObligationResolutionMismatch as exc:
         draft_index: int | None = None
         if exc.event_id is not None:
@@ -1301,27 +1299,7 @@ async def _preflight_dry_run_feasibility(
         TypeError,
     ):
         raise _event_invalid("invalid_event_value_type") from None
-    return current, projected
-
-
-def _requested_item_attempt_missing(projection: ProjectionState) -> bool:
-    """Return whether readable effective scope contains an exact unattempted request."""
-
-    scope = current_plan_scope(projection.plans, projection.coverage_gaps)
-    if scope.effective_obligation_refs is None:
-        return False
-    attempted = {
-        item
-        for action in projection.actions.values()
-        if action.payload is not None
-        for item in action.payload.attempted_items
-    }
-    return any(
-        record.payload is not None
-        and any(item.value not in attempted for item in record.payload.requested_items)
-        for obligation in scope.effective_obligation_refs
-        if (record := projection.obligations.get(obligation)) is not None
-    )
+    return current
 
 
 async def _execute_dry_run(
@@ -1334,7 +1312,7 @@ async def _execute_dry_run(
 
     # Intentionally skip operation lookup: dry_run must not consume or conflict on request_id.
     prepared = prepare_publication(request, channel=channel, app=app)
-    current, projected = await _preflight_dry_run_feasibility(runtime, request, prepared)
+    current = await _preflight_dry_run_feasibility(runtime, request, prepared)
     frontier = FrontierModel.model_validate(dict(current.as_wire()))
     preview = tuple(
         PublishWorkDryRunPreviewEventModel(
@@ -1360,11 +1338,6 @@ async def _execute_dry_run(
         subject_frontier=frontier,
         result_frontier=frontier,
         would_accept=preview,
-        warning_codes=(
-            ("requested_item_attempt_missing",)
-            if _requested_item_attempt_missing(projected)
-            else ()
-        ),
         coverage=CoverageModel.model_validate(coverage_to_json(prepared.coverage)),
         gaps=prepared.coverage.known_gaps,
     )

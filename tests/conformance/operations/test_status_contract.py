@@ -1306,8 +1306,6 @@ async def test_status_projects_requested_attempt_accounting_and_result_structure
     )
     assert isinstance(dry_run, PublishWorkResultModel)
     assert isinstance(dry_run.root, PublishWorkDryRunModel)
-    assert dry_run.root.warning_codes == ("requested_item_attempt_missing",)
-
     action = protocol_id("act_", seed + 9)
     result = protocol_id("res_", seed + 10)
     result_event = protocol_id("evt_", seed + 12)
