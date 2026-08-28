@@ -52,8 +52,10 @@ obligations apply, record `no_obligations_reason` as exactly `no_material_change
 obligation refs. A revision restates the declaration, so omission clears an earlier reason.
 
 Set `dry_run: true` to validate a batch and preview what would be accepted without appending. The
-preview is not evidential and is not citable as a check, publication, or coverage source. Reuse the
-same `request_id` for the real publish after the preview succeeds.
+preview is not evidential and is not citable as a check, publication, or coverage source. A
+`requested_item_attempt_missing` warning means `status view=obligations` has exact
+`unattempted_items` values that still need attempt accounting. Reuse the same `request_id` for the
+real publish after the preview succeeds.
 
 Yoetz does not watch your workspace. What is published is what exists.
 
@@ -92,6 +94,9 @@ within the authenticated task without requiring a byte-identical replay body. Th
 same-task attach that rotates the active session and writer, but never crosses into another task
 bundle. Stored outcome, frontiers, and accepted event ids are present only when the operation is a
 complete `publish_work`; other states omit them rather than invent detail.
+`view=obligations` includes each requested item and its exact unattempted subset, subject to the
+existing obligation-text projection policy. `view=results` resolves `res_` ids to bounded structural
+facts: source event, payload availability, outcome, linked action, and linked evidence ids.
 
 Before completion, read `declared_obligation_count`, `no_obligations_reason`, and
 `closure_readiness`. An empty readable plan without a typed reason is blocked by

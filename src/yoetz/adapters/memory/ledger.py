@@ -173,6 +173,7 @@ from yoetz.protocol.models import (
     StatusFindingItemModel,
     StatusHistoryItemModel,
     StatusObligationItemModel,
+    StatusResultItemModel,
     StatusStructuralSubjectStateModel,
     StatusVersionSliceModel,
 )
@@ -754,11 +755,19 @@ def _obligation_item(
     obligation: str,
     record: object,
     assigned_actor_ids: tuple[str, ...],
+    attempted_items: frozenset[str],
 ) -> StatusObligationItemModel:
     from yoetz.kernel.projections import ObligationProjectionRecord
 
     typed = cast(ObligationProjectionRecord, record)
     assert typed.payload is not None
+    requested_items = tuple(
+        {"item_kind": item.item_kind.value, "value": item.value}
+        for item in typed.payload.requested_items
+    )
+    unattempted_items = tuple(
+        item for item in requested_items if item["value"] not in attempted_items
+    )
     values = dict(
         obligation_id=obligation,
         status=typed.payload.status.value,
@@ -767,6 +776,8 @@ def _obligation_item(
         source_refs=typed.payload.source_refs,
         assigned_actor_ids=assigned_actor_ids,
         evidence_refs=typed.payload.resolution_evidence_refs,
+        requested_items=requested_items,
+        unattempted_items=unattempted_items,
         revision_event_id=None,
     )
     if typed.payload.acceptance_criteria is not None:
@@ -856,6 +867,12 @@ def _projection_items(
             )
         return tuple(result)
     if view is ProjectionView.OBLIGATIONS:
+        attempted_items = frozenset(
+            item
+            for action in projection.actions.values()
+            if action.payload is not None
+            for item in action.payload.attempted_items
+        )
         actors: dict[str, set[str]] = {}
         for assignment in projection.assignments.values():
             if assignment.payload is None:
@@ -867,11 +884,26 @@ def _projection_items(
                 obligation,
                 record,
                 tuple(sorted(actors.get(obligation, ()), key=str.encode)),
+                attempted_items,
             )
             for obligation, record in sorted(
                 projection.obligations.items(), key=lambda item: item[0].encode()
             )
             if record.payload is not None
+        )
+    if view is ProjectionView.RESULTS:
+        return tuple(
+            StatusResultItemModel(
+                result_id=result,
+                source_event_id=record.source_event_id,
+                payload_available=record.payload is not None,
+                outcome=None if record.payload is None else record.payload.outcome.value,
+                action_id=None if record.payload is None else record.payload.action_id,
+                evidence_refs=() if record.payload is None else record.payload.evidence_refs,
+            )
+            for result, record in sorted(
+                projection.results.items(), key=lambda item: item[0].encode()
+            )
         )
     if view is ProjectionView.EVIDENCE:
         evidence_items: list[ProjectionItem] = []
@@ -1661,6 +1693,8 @@ class MemoryLedgerAdapter:
                     if type(item) is StatusObligationItemModel
                     else item.evidence_id
                     if type(item) is StatusEvidenceItemModel
+                    else item.result_id
+                    if type(item) is StatusResultItemModel
                     else ""
                 )
                 keep = structural_id.encode() > query.position.last_id.encode()
@@ -1692,6 +1726,8 @@ class MemoryLedgerAdapter:
                 next_position = IdProjectionPosition(last.obligation_id)
             elif type(last) is StatusEvidenceItemModel:
                 next_position = IdProjectionPosition(last.evidence_id)
+            elif type(last) is StatusResultItemModel:
+                next_position = IdProjectionPosition(last.result_id)
         status_gaps = _status_gap_codes(effective_projection.coverage_gaps)
         coverage = replace(prefix[-1].coverage, known_gaps=status_gaps)
         return ProjectionPage(

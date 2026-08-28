@@ -57,7 +57,9 @@ from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     CheckRequest,
     FrontierModel,
+    PublishWorkDryRunModel,
     PublishWorkRequest,
+    PublishWorkResultModel,
     RespondRequest,
     StatusCandidateFindingsPageModel,
     StatusCompactPageModel,
@@ -65,6 +67,7 @@ from yoetz.protocol.models import (
     StatusObligationsPageModel,
     StatusRequest,
     StatusResultModel,
+    StatusResultsPageModel,
 )
 
 pytestmark = pytest.mark.anyio
@@ -1200,6 +1203,316 @@ async def test_status_frontier_and_pagination_parity() -> None:
     }
     unpaginated_ids = {item.obligation_id for item in unpaginated_page.items}
     assert paginated_ids == unpaginated_ids
+
+
+async def test_status_projects_requested_attempt_accounting_and_result_structure() -> None:
+    app, _runtime, _projection = _build_app(seed_offset=31)
+    seed = 3_100
+    started = await app.start(start_request(seed, title="Attempt-accounting status"))
+    obligation = protocol_id("obl_", seed + 1)
+    obligation_event = protocol_id("evt_", seed + 2)
+    plan_event = protocol_id("evt_", seed + 3)
+    command = "uv run pytest tests/unit/example.py"
+    change = "src/yoetz/example.py"
+    published = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 4)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": [
+                    {
+                        "event_id": obligation_event,
+                        "schema": {"name": "obligation_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-28T10:00:00.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "obligation_id": obligation,
+                            "description": "Exercise exact attempt accounting.",
+                            "acceptance_criteria": "Both request kinds stay byte-identical.",
+                            "evidence_expectation": "A structural status projection.",
+                            "status": "open",
+                            "requested_items": [
+                                {"item_kind": "command", "value": command},
+                                {"item_kind": "change", "value": change},
+                            ],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                    {
+                        "event_id": plan_event,
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-28T10:00:01.000Z",
+                        "causal_parents": [obligation_event],
+                        "payload": {
+                            "plan_version": 1,
+                            "summary": "Declare the attempt-accounting obligation.",
+                            "obligation_refs": [obligation],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                ],
+            }
+        )
+    )
+
+    obligations = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 5)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "obligations",
+                "limit": "10",
+                "at_frontier": str(published.result_frontier.sequence),
+            }
+        )
+    )
+    item = cast(StatusObligationsPageModel, obligations.page).items[0]
+    assert tuple((entry.item_kind, entry.value) for entry in item.requested_items) == (
+        ("command", command),
+        ("change", change),
+    )
+    assert item.unattempted_items == item.requested_items
+
+    dry_run = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 6)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "dry_run": True,
+                "event_drafts": [
+                    {
+                        "event_id": protocol_id("evt_", seed + 7),
+                        "schema": {"name": "action_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-08-28T10:00:02.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "action_id": protocol_id("act_", seed + 8),
+                            "action_kind": "other",
+                            "description": "Preview an unrelated append.",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+    )
+    assert isinstance(dry_run, PublishWorkResultModel)
+    assert isinstance(dry_run.root, PublishWorkDryRunModel)
+    assert dry_run.root.warning_codes == ("requested_item_attempt_missing",)
+
+    action = protocol_id("act_", seed + 9)
+    result = protocol_id("res_", seed + 10)
+    result_event = protocol_id("evt_", seed + 12)
+    recorded = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 11)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "event_drafts": [
+                    {
+                        "event_id": protocol_id("evt_", seed + 13),
+                        "schema": {"name": "action_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-08-28T10:00:03.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "action_id": action,
+                            "action_kind": "command",
+                            "description": "Attempt the command item.",
+                            "command": command,
+                            "obligation_refs": [obligation],
+                            "attempted_items": [command],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                    {
+                        "event_id": result_event,
+                        "schema": {"name": "result_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-08-28T10:00:04.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "result_id": result,
+                            "action_id": action,
+                            "outcome": "success",
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                ],
+            }
+        )
+    )
+    after = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 14)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "obligations",
+                "limit": "10",
+                "at_frontier": str(recorded.result_frontier.sequence),
+            }
+        )
+    )
+    after_item = cast(StatusObligationsPageModel, after.page).items[0]
+    assert tuple((entry.item_kind, entry.value) for entry in after_item.unattempted_items) == (
+        ("change", change),
+    )
+
+    results = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 15)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "results",
+                "limit": "10",
+                "at_frontier": str(recorded.result_frontier.sequence),
+            }
+        )
+    )
+    result_item = cast(StatusResultsPageModel, results.page).items[0]
+    assert result_item.result_id == result
+    assert result_item.source_event_id == result_event
+    assert result_item.payload_available is True
+    assert result_item.outcome == "success"
+    assert result_item.action_id == action
+    assert result_item.evidence_refs == ()
+
+
+async def test_later_plan_published_restates_scope_after_revision_chain() -> None:
+    app, _runtime, _projection = _build_app(seed_offset=32)
+    seed = 3_200
+    started = await app.start(start_request(seed, title="Plan restatement status"))
+    obligations = tuple(protocol_id("obl_", seed + index) for index in range(1, 4))
+    obligation_events = tuple(protocol_id("evt_", seed + index) for index in range(10, 13))
+    first = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 20)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(started.frontier),
+                "event_drafts": [
+                    *(
+                        {
+                            "event_id": event,
+                            "schema": {"name": "obligation_published", "version": "1.0.0"},
+                            "occurred_at": "2026-08-28T10:10:00.000Z",
+                            "causal_parents": [],
+                            "payload": {
+                                "obligation_id": obligation,
+                                "description": f"Scope obligation {index}.",
+                                "evidence_expectation": "Status counters.",
+                                "status": "open",
+                            },
+                            "artifact_refs": [],
+                            "evidence_refs": [],
+                        }
+                        for index, (obligation, event) in enumerate(
+                            zip(obligations, obligation_events, strict=True), start=1
+                        )
+                    ),
+                    {
+                        "event_id": protocol_id("evt_", seed + 21),
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-28T10:10:01.000Z",
+                        "causal_parents": list(obligation_events),
+                        "payload": {
+                            "plan_version": 1,
+                            "summary": "Initial scope.",
+                            "obligation_refs": [obligations[0]],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    },
+                ],
+            }
+        )
+    )
+    revised = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 22)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(first.result_frontier),
+                "event_drafts": [
+                    {
+                        "event_id": protocol_id("evt_", seed + 23),
+                        "schema": {"name": "plan_revised", "version": "1.0.0"},
+                        "occurred_at": "2026-08-28T10:10:02.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "plan_version": 2,
+                            "supersedes_plan_version": 1,
+                            "reason": "Add a material obligation.",
+                            "summary": "Expanded scope.",
+                            "obligation_changes": [
+                                {"obligation_id": obligations[1], "change": "carried"}
+                            ],
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+    )
+    restated = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 24)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(revised.result_frontier),
+                "event_drafts": [
+                    {
+                        "event_id": protocol_id("evt_", seed + 25),
+                        "schema": {"name": "plan_published", "version": "1.0.0"},
+                        "occurred_at": "2026-08-28T10:10:03.000Z",
+                        "causal_parents": [],
+                        "payload": {
+                            "plan_version": 3,
+                            "summary": "Full append-only scope restatement.",
+                            "obligation_refs": list(obligations),
+                        },
+                        "artifact_refs": [],
+                        "evidence_refs": [],
+                    }
+                ],
+            }
+        )
+    )
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed + 26)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+                "at_frontier": str(restated.result_frontier.sequence),
+            }
+        )
+    )
+    item = cast(StatusCompactPageModel, status.page).items[0]
+    assert item.current_plan_event_id == protocol_id("evt_", seed + 25)
+    assert item.declared_obligation_count == "3"
+    assert item.open_obligation_count == "3"
+    assert status.closure_readiness.declared_obligation_count == "3"
+    assert status.closure_readiness.open_obligation_count == "3"
+    assert status.closure_readiness.blocking_conditions == ("obligations_open",)
 
 
 async def test_future_frontier_is_invalid_request() -> None:

@@ -482,8 +482,11 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   `scope_exclusions`, and optional `no_obligations_reason`
   (`no_material_change|single_atomic_change|exploratory_scope_unknown`). The reason is valid only
   when `obligation_refs` is empty.
+  The first event starts the plan chain. A later `plan_published` is a full append-only scope
+  restatement only when its version is exactly the current version plus one; it replaces the
+  effective refs and empty-scope reason. A duplicate root or version gap makes scope unreadable.
 - `obligation_published`: `obligation_id`, `description`, `evidence_expectation`, optional
-  `acceptance_criteria`, `source_refs`.
+  `acceptance_criteria`, `requested_items`, `source_refs`.
 - `action_recorded`: `action_id`, `action_kind` (`command`|`edit`|`research`|`review`|`other`),
   `description`, optional `command`, `subject_state` (see SubjectStateRef below).
 - `result_recorded`: `result_id`, `action_id`, `outcome` (`success`|`failure`|`partial`|
@@ -1253,12 +1256,12 @@ a check-acquisition reservation or frozen case for their session is active; chec
 with the frontier actually frozen is not relaxed.
 
 `ProjectionView` is `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`,
-`evidence`, `history`, or `versions`. Application status also admits `view=operation` (operation
+`evidence`, `results`, `history`, or `versions`. Application status also admits `view=operation` (operation
 recovery keyed by `filter.operation_request_id`); that view is not a projection row query — the
 operation record is authoritative, and compact projection is only secondary enrichment for
 coverage/closure and must not fail recovery on projection lag or rebuild. The port-owned
 row-query view excludes `candidate_findings` and `operation` and is exactly
-`compact|assignment|obligations|findings|evidence|history|versions`.
+`compact|assignment|obligations|findings|evidence|results|history|versions`.
 `ProjectionQuery(session_id, view, filter, requested_frontier, limit, position,
 expected_projection_version)` uses the exact typed filter and repository-position variants frozen
 in `ports/ledger.md`; `limit` is `1..100`, the expected version is absent on a first page, and
@@ -1272,14 +1275,19 @@ into a typed position and encodes `next_position` back. Adapters filter and page
 storage/projection boundary; application code MUST NOT materialize an unbounded `ProjectionState`
 merely to answer an ordinary row-query status view.
 
-The seven queryable raw-item mappings are closed. Assignment returns exact actor/obligation IDs,
+The eight queryable raw-item mappings are closed. Assignment returns exact actor/obligation IDs,
 uses the same obligation tuple as v0.1 `scope_refs`, and resolves only by a later handoff chain or
 when every referenced obligation is effectively resolved. Obligation effective status is accepted
 `resolved` or plan-change `superseded|waived`; `carried` preserves accepted status. Its assigned
 actors come from non-handoff-superseded assignment branches, and revision is the latest same-ID
 republication/plan-change event. Finding-owned fields are exact; disposition is the latest response
 or `none`, and recorded waiver expiry is never evaluated against wall clock for ordering,
-filtering, or resolution. Evidence strength is exact, availability concerns only declared captured
+filtering, or resolution. The obligations row also returns `requested_items` and the exact
+`unattempted_items` subset; each value remains `obligation_text` and can be projected as an
+omission under a stricter client policy, while item kinds and attempt matching remain structural.
+Results returns only `result_id`, source event id, payload availability, outcome, linked action id,
+and evidence ids; it never returns result prose, command text, exit output, or subject-state content.
+Evidence strength is exact, availability concerns only declared captured
 content (never a path/URL probe), and freshness is the weaker source-envelope/projection freshness
 capped at `redacted_gap` for unavailable captured content. History is accepted-envelope metadata
 including caller-asserted `occurred_at`, digest-bound service `accepted_at`, and the exact

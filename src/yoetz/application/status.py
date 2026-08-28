@@ -92,6 +92,7 @@ from yoetz.protocol.models import (
     StatusOperationPageModel,
     StatusPage,
     StatusRequest,
+    StatusResultsPageModel,
     StatusVersionSliceModel,
     StatusVersionsPageModel,
 )
@@ -607,6 +608,7 @@ def _page_model(page: ProjectionPage, next_cursor: str | None) -> StatusPage:
         "findings": StatusFindingsPageModel,
         "history": StatusHistoryPageModel,
         "obligations": StatusObligationsPageModel,
+        "results": StatusResultsPageModel,
         "versions": StatusVersionsPageModel,
     }
     return constructors[page.view].model_validate(value)
