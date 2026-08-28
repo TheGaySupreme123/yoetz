@@ -24,6 +24,12 @@ from pathlib import Path
 from typing import Final, Literal, cast
 
 from yoetz import __version__
+from yoetz.adapters.integrations.cursor_mcp_runtime import (
+    CursorMcpProcessPort,
+    CursorMcpRuntimeObservation,
+    OsCursorMcpProcesses,
+    observe_cursor_mcp_runtime,
+)
 from yoetz.adapters.integrations.launcher import resolve_yoetz_launcher, valid_launcher
 from yoetz.adapters.integrations.portable_plugin import (
     PackagedPortableResources,
@@ -67,6 +73,8 @@ __all__ = [
     "CursorCapabilityIdentity",
     "CursorIntegrationError",
     "CursorMcpObservation",
+    "CursorMcpProcessPort",
+    "CursorMcpRuntimeObservation",
     "CursorMcpSource",
     "CursorPluginArtifact",
     "CursorPluginPreview",
@@ -393,6 +401,7 @@ class CursorPluginStatus:
     marker_valid: bool
     rollback_available: bool
     mcp_observation: CursorMcpObservation
+    runtime: CursorMcpRuntimeObservation
     proof: tuple[PluginProofStatus, ...]
 
     def __post_init__(self) -> None:
@@ -408,7 +417,11 @@ class CursorPluginStatus:
             _validate_digest(self.installed_digest)
         if type(self.marker_valid) is not bool or type(self.rollback_available) is not bool:
             raise ValueError("cursor_status_invalid")
-        if type(self.mcp_observation) is not CursorMcpObservation or type(self.proof) is not tuple:
+        if (
+            type(self.mcp_observation) is not CursorMcpObservation
+            or type(self.runtime) is not CursorMcpRuntimeObservation
+            or type(self.proof) is not tuple
+        ):
             raise ValueError("cursor_status_invalid")
         if any(type(item) is not PluginProofStatus for item in self.proof):
             raise ValueError("cursor_status_invalid")
@@ -928,6 +941,7 @@ _PREVIEW_WARNINGS: Final = (
     "cursor_sdk_support_deferred",
     "mcp_handshake_does_not_prove_model_use",
     "observation_requires_separate_consent",
+    "reload_window_does_not_replace_mcp_runtime",
 )
 
 
@@ -1441,12 +1455,17 @@ def status_cursor_plugin(
     artifact: CursorPluginArtifact,
     *,
     project_root: Path | None = None,
+    processes: CursorMcpProcessPort | None = None,
 ) -> CursorPluginStatus:
     inspection = _inspect(target, artifact)
     observation = observe_cursor_mcp(
         plugin_root=inspection.destination,
         project_root=project_root,
         user_config_root=inspection.root,
+    )
+    runtime = observe_cursor_mcp_runtime(
+        installed_route=observation.route_profile,
+        processes=OsCursorMcpProcesses() if processes is None else processes,
     )
     return CursorPluginStatus(
         inspection.state,
@@ -1463,6 +1482,7 @@ def status_cursor_plugin(
         inspection.marker_valid,
         inspection.rollback_available,
         observation,
+        runtime,
         _proof(inspection.state),
     )
 
