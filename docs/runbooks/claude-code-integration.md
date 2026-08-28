@@ -157,8 +157,10 @@ nothing it still exits 0 with `{}`, but records one payload-free `hook_diagnosti
 `yoetz observe status --workspace <project>` reports: `workspace_unresolvable` (the variable was
 unset or named a missing, symlinked, or unsafe path), `workspace_unconsented` (the canonical Git
 root of that path carries no active consent — note that a `git worktree` is its own Git root, so
-consent on the main checkout does not cover it), or `paused`. A `recent_count` of zero after a
-session that ran Yoetz tools therefore means the hooks did not fire, not that they were dropped.
+consent on the main checkout does not cover it), or `paused`. A successful ingest records no
+diagnostic, so read `recent_count` together with the envelopes: no new `claude_hook` envelopes and a
+zero `recent_count` after a session that ran Yoetz tools means the hooks never reached the ingress
+or the runtime gate is disabled — not that they were dropped for binding.
 
 Grant observation separately for the exact project. Exercise every advertised event and inspect
 `yoetz observe status`. Only consented accepted `claude_hook` envelopes earn coverage. Raw
