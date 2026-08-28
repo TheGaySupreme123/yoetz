@@ -171,6 +171,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "fixtures/agent-plugins/claude-code-cli-native-project-2.1.241.case.json",
+        "compatibility_manifest",
+        "application/json",
+        True,
+    ),
+    (
         "fixtures/agent-plugins/cursor-sdk-python-1.0.24.case.json",
         "compatibility_manifest",
         "application/json",
@@ -691,6 +697,30 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/service/control-result-2.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-hello-2.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-hello-result-2.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-request-2.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/service/control-result-2.2.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

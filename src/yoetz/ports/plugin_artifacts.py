@@ -45,6 +45,7 @@ _MAX_ROOT = 4_096
 
 class PluginFormatProfile(str, Enum):  # noqa: UP042 - exact public enum
     AGENT_PLUGINS_1 = "agent_plugins_1"
+    CLAUDE_CODE_PLUGIN_NATIVE = "claude_code_plugin_native"
     CODEX_PLUGIN_NATIVE = "codex_plugin_native"
     CURSOR_PLUGIN_NATIVE = "cursor_plugin_native"
 

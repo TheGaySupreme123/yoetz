@@ -357,6 +357,7 @@ class MemoryObservationStore:
 
         consent = self._state.consent.get(workspace_commitment)
         coverage = {
+            ObservationSource.CLAUDE_HOOK: False,
             ObservationSource.CODEX_HOOK: False,
             ObservationSource.CODEX_SESSION_STREAM: False,
             ObservationSource.CURSOR_HOOK: False,

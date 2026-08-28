@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate immutable service-control 2.0.0 schemas for repository authority."""
+"""Generate immutable service-control schemas for repository authority."""
 
 from __future__ import annotations
 
@@ -367,6 +367,19 @@ def _cursor_result() -> dict[str, Any]:
     return generated
 
 
+def _claude_request() -> dict[str, Any]:
+    generated = _with_id("control-request", "2.2.0", _cursor_request())
+    generated["$defs"]["observation_envelope"]["properties"]["source"]["enum"].append("claude_hook")
+    return generated
+
+
+def _claude_result() -> dict[str, Any]:
+    generated = _with_id("control-result", "2.2.0", _cursor_result())
+    source_coverage = generated["$defs"]["observation_status"]["properties"]["source_coverage"]
+    source_coverage["properties"]["claude_hook"] = {"type": "boolean"}
+    return generated
+
+
 def _documents() -> dict[Path, bytes]:
     documents = {
         ("control-hello", "2.0.0"): _hello(),
@@ -383,6 +396,14 @@ def _documents() -> dict[Path, bytes]:
         ),
         ("control-request", "2.1.0"): _cursor_request(),
         ("control-result", "2.1.0"): _cursor_result(),
+        ("control-hello", "2.2.0"): _with_id("control-hello", "2.2.0", _hello()),
+        ("control-hello-result", "2.2.0"): _with_id(
+            "control-hello-result",
+            "2.2.0",
+            _with_id("control-hello-result", "2.0.0", _load("control-hello-result")),
+        ),
+        ("control-request", "2.2.0"): _claude_request(),
+        ("control-result", "2.2.0"): _claude_result(),
     }
     return {
         _SERVICE / f"{name}-{version}.schema.json": canonical_encode(document)

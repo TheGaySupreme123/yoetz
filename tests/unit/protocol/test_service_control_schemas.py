@@ -389,6 +389,49 @@ def test_v21_wire_admits_the_exact_cursor_structural_tokens_hook_ingress_sends()
         validate_schema_instance("control-request", "2.1.0", cast(JsonValue, unknown))
 
 
+def test_v22_adds_only_the_claude_hook_source_and_coverage_cell() -> None:
+    request_v21 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.1.0.schema.json").read_bytes()),
+    )
+    request_v22 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.2.0.schema.json").read_bytes()),
+    )
+    result_v21 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-result-2.1.0.schema.json").read_bytes()),
+    )
+    result_v22 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-result-2.2.0.schema.json").read_bytes()),
+    )
+    source_v21 = request_v21["$defs"]["observation_envelope"]["properties"]["source"]
+    source_v22 = request_v22["$defs"]["observation_envelope"]["properties"]["source"]
+    assert source_v21["enum"] == ["codex_hook", "codex_session_stream", "cursor_hook"]
+    assert source_v22["enum"] == [
+        "codex_hook",
+        "codex_session_stream",
+        "cursor_hook",
+        "claude_hook",
+    ]
+    coverage_v21 = result_v21["$defs"]["observation_status"]["properties"]["source_coverage"]
+    coverage_v22 = result_v22["$defs"]["observation_status"]["properties"]["source_coverage"]
+    assert set(coverage_v21["properties"]) == {
+        "codex_hook",
+        "codex_session_stream",
+        "cursor_hook",
+    }
+    assert set(coverage_v22["properties"]) == {
+        "claude_hook",
+        "codex_hook",
+        "codex_session_stream",
+        "cursor_hook",
+    }
+    for filename in ("control-request-2.2.0.schema.json", "control-result-2.2.0.schema.json"):
+        assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
+
+
 def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:
     request_schema = _schema("control-request")
     result_schema = _schema("control-result")

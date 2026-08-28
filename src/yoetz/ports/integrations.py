@@ -7,13 +7,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Literal, Protocol, cast
+from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.values import JsonObject, JsonValue, RequestId, request_id, validate_sha256_digest
 from yoetz.protocol.canonical import canonical_encode
 from yoetz.protocol.errors import PROTOCOL_REASON_CODES, ProtocolValueError
 
 __all__ = [
+    "YOETZ_WORKFLOW_TOOL_NAMES",
     "HarnessHookProfile",
     "HarnessId",
     "HarnessProfile",
@@ -36,6 +37,20 @@ __all__ = [
 
 type Compatibility = Literal["supported", "unsupported", "untested"]
 
+# The one exact Yoetz workflow tool-name set, in registry order. Renderers that
+# scope host hook matchers to Yoetz tools and hook-ingress sanitizers that admit
+# observed tool names must both derive from this tuple so the two allowlists
+# cannot drift apart (the MCP descriptor registry lint pins the same order).
+YOETZ_WORKFLOW_TOOL_NAMES: Final = (
+    "start",
+    "publish_work",
+    "check",
+    "respond",
+    "status",
+    "receipt",
+    "read_guidance",
+)
+
 _MAX_LOCATION_CHARS = 4_096
 _MAX_FILES = 64
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$", re.ASCII)
@@ -50,6 +65,7 @@ def _port_error(reason: str) -> ProtocolValueError:
 
 
 class HarnessId(str, Enum):  # noqa: UP042 - exact wire-valued Enum is required
+    CLAUDE = "claude"
     CODEX = "codex"
     CURSOR = "cursor"
 

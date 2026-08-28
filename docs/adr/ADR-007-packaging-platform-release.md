@@ -124,3 +124,25 @@ and the neutral skill wrapper is owned at `skills/portable/yoetz/SKILL.md`. All 
 reviewed resource inventory and wheel/sdist through `sync_resource_ripple.py`. Runtime rendering
 uses only those packaged bytes, so clean-install rendering and installed guidance parity are
 covered by the packaging gates without an upstream fetch.
+
+**Claude Code native amendment (2026-08-27, issue #154).** Claude Code is a native dual target,
+not an Agent Plugins consumer. The generated project-marketplace source contains exactly a strict
+`.claude-plugin/marketplace.json`, `plugins/yoetz/.claude-plugin/plugin.json`, the shared skill and
+five byte-identical references, the exact tested hook file, and optional plugin-owned `.mcp.json`.
+Claude Code `2.1.241` copies the plugin into
+`<CLAUDE_CONFIG_DIR>/plugins/cache/yoetz-local/yoetz/<manifest-version>`; Yoetz records the source,
+render, marketplace, installed-cache, and executable digests separately. An unchanged manifest
+version cannot be used to claim updated active bytes. Update success proves new cache bytes only;
+reload/new-session activation is a separate proof facet.
+
+The initial cell is local Claude Code CLI, project scope, and an explicit private directory
+marketplace only. It admits only exactly proven Claude versions (currently `2.1.241`; the
+`2.1.233` floor marks where default-disabled install, qualified uninstall, and complete-directory
+validation behavior first exist, but a version above it is still refused until its native contract
+is proven), uses Claude's project
+install/update/enable/disable/uninstall commands, and verifies each outcome by list/settings/cache
+read-back. Uninstall is qualified as `yoetz@yoetz-local`, uses `--scope project --keep-data`, and
+removes the private marketplace source only after exact managed-marker validation. Claude plugin
+data, Yoetz ledgers, vault/keyring/provider configuration, privacy receipts, credentials, foreign
+marketplaces, other scopes, modified sources, and orphaned caches are never inferred to be safe to
+delete. Public marketplace publication remains a separate release decision.

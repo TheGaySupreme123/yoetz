@@ -561,6 +561,24 @@ def _control_error_result(
             operation=operation,
             host_profile=host_profile,
         )
+    if error.reason in {"service_incompatible", "protocol_mismatch"}:
+        # The one per-user endpoint is owned by a service of another Yoetz installation (or
+        # protocol generation) that rejected this bridge's hello. On-demand startup already
+        # tried to replace it; name the exact repair instead of an opaque internal failure.
+        return structured_error_result(
+            PublicErrorCode.SERVICE_UNAVAILABLE,
+            "The running local Yoetz service belongs to a different Yoetz installation than "
+            "this bridge (control schema-manifest or protocol mismatch), and the bridge could "
+            "not replace it within its startup budget. On a local terminal run "
+            "`yoetz service restart`, then retry this operation with the same request_id. "
+            "Do not retry `start` until that repair has run.",
+            retryable=error.retryable,
+            request_id=request_id,
+            correlation_id=service_correlation_id,
+            operation=operation,
+            safe_details={"reason_code": "service_incompatible"},
+            host_profile=host_profile,
+        )
     if error.reason in {"service_unavailable", "service_draining"}:
         return structured_error_result(
             PublicErrorCode.SERVICE_UNAVAILABLE,

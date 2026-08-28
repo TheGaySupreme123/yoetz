@@ -275,3 +275,53 @@ disabled for every exact pending.
 maintainer decision: the `review_only` lane is designed now so implementation does not later
 improvise authority. Issue #409 makes only the exact pinned macOS Cursor cell usable; neighboring
 cells remain unavailable rather than inheriting that proof.
+
+### Claude Code native/project amendment (2026-08-27, issue #154)
+
+`PluginFormatProfile` adds exactly `claude_code_plugin_native`; `HarnessId` adds exactly `claude`.
+The native plugin root is `plugins/yoetz/` inside a generated strict private marketplace source;
+only its manifest lives at `.claude-plugin/plugin.json`, while skills, hooks, and optional
+`.mcp.json` are siblings at the plugin root. Shared skill/reference bytes remain identical to the
+portable projection, but neither Agent Plugins JSON nor Codex/Cursor native JSON is an input.
+
+The initial `HostSurface.CLAUDE_CODE` cell is narrowed to Claude Code CLI/local process/project
+scope/private-marketplace delivery and profile `claude-code-cli-local-project-2.1.241`. Neighboring
+Claude products and scopes stay explicit unpopulated cells. `defaultEnabled:false` is required.
+Source generation, project marketplace registration, cached installation, discovery, enabled
+setting, loaded-session root, skill use, MCP owner/binding/runtime/model call, hook
+configuration/delivery/consented evidence, semantic dispatch, privacy receipt, and workflow
+receipt remain independent facts.
+
+`ClaudeCodeMcpSource` is exactly
+`local|project|user|plugin|claude_ai_connector`, in Claude's observed precedence order. The winner
+is reported separately from ADR-023 ownership: plugin plus any external exact route is `dual`, two
+same-owner sources are `ambiguous`, any non-exact same-name entry is `foreign`, and unreadable
+reachable state is unobserved `ambiguous`. Install/update/enable refuses those unsafe owner states;
+remove disables no foreign source and deletes only the exact managed project installation/source.
+
+Claude lifecycle actions are `install|update|enable|disable|remove|noop`. Each mutation consumes the
+same exact-preview `plugin_artifact_apply` review lane and reconciles through independent
+list/settings/cache read-back. A nonzero/lost CLI outcome that did not reach the exact target is
+`outcome_unknown`; it is never guessed failed or rolled back across host-owned settings/cache.
+Marketplace `strict:true`, project scope, manifest version, source/render/cache digests, exact host
+identity, settings preimage, MCP owner, and requested action are preview-bound. Installation starts
+disabled; enabled state still does not prove a loaded session.
+
+#### Launcher binding and development export (2026-08-27 dogfood follow-up)
+
+The first live Claude dogfood failed on two carrier-level facts: the rendered `.mcp.json` and
+hooks launched a bare `yoetz` from the host's PATH, so the plugin bridge, hook process, and
+long-running service came from different installations on one machine; and a
+`defaultEnabled:false` carrier does not load under `claude --plugin-dir`, so no supported
+development activation existed. The Claude carrier therefore binds the exact invoking launcher
+(shared with the Cursor native carrier through `yoetz.adapters.integrations.launcher`), records it
+in a version 2 source marker, and folds it into the artifact digest. A separate `development`
+render (`defaultEnabled:true`) exists only for `yoetz integrate claude plugin export`, which writes
+the plugin root to a caller-chosen new directory without touching host state or consuming review
+authority; preview refuses that carrier, and it never earns marketplace-installed proof. The
+marketplace cell still installs disabled.
+
+The dogfood's third failure was not a carrier fact: an upgraded bridge could not talk to the
+previous installation's still-running service, and could not ask it to stop. That is resolved in
+the local-control client (`service_incompatible`, supersede-on-upgrade, `yoetz service restart`);
+see `docs/INTERFACES.md` under the trusted local service contract.

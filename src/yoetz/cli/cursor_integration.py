@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 from typing import Literal, cast
 
-import yoetz
 from yoetz.adapters.integrations.cursor_integration import (
     CursorIntegrationError,
     CursorPluginArtifact,
@@ -18,6 +17,7 @@ from yoetz.adapters.integrations.cursor_integration import (
     render_cursor_plugin,
     status_cursor_plugin,
 )
+from yoetz.adapters.integrations.launcher import invoking_launcher
 from yoetz.adapters.integrations.macos_artifact_presence import MacOSArtifactUserPresence
 from yoetz.adapters.integrations.portable_plugin import (
     ArtifactUserPresencePort,
@@ -112,25 +112,9 @@ def _artifact(
 
 
 def _invoking_launcher() -> str | tuple[str, ...] | None:
-    """Preserve the exact invocation that produced this process.
+    """Preserve the exact invocation that produced this process (shared launcher helper)."""
 
-    A console-script invocation binds hooks to that executable, and the
-    documented ``python -m yoetz`` entrypoint (ADR-007) binds an equivalent
-    module invocation of the same interpreter rather than falling back to an
-    ambient PATH lookup that may name an unrelated installation.
-    """
-
-    argv0 = Path(sys.argv[0])
-    if argv0.name == "yoetz":
-        return sys.argv[0]
-    try:
-        package_main = (Path(yoetz.__file__).parent / "__main__.py").resolve()
-        module_invoked = argv0.resolve() == package_main
-    except OSError:
-        module_invoked = False
-    if module_invoked:
-        return (sys.executable, "-m", "yoetz")
-    return None
+    return invoking_launcher()
 
 
 def _request(value: str | None) -> RequestId:

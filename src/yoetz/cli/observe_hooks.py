@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import shlex
 import sys
 import time
@@ -67,6 +68,7 @@ from yoetz.domain.values import (
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
 )
+from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError
 
@@ -78,6 +80,7 @@ __all__ = [
     "ADVICE_SAFE_EVENTS",
     "STANDING_ADVICE_CADENCE_EVENTS",
     "SUPPORTED_HOOK_EVENTS",
+    "handle_claude_observe",
     "handle_cursor_observe",
     "handle_observe",
     "handle_spool",
@@ -1142,7 +1145,7 @@ async def _try_auto_start(
     codex_session_id: str,
     *,
     _state: Path | None,
-    harness_id: Literal["codex", "cursor"] = "codex",
+    harness_id: Literal["claude", "codex", "cursor"] = "codex",
 ) -> LifecycleMapping | None:
     """Best-effort service start for consented SessionStart auto-attach.
 
@@ -1325,8 +1328,12 @@ def handle_observe(
             return _context_output(resolved_event, additional_context)
 
         payload = read_hook_payload(stdin_bytes)
-        harness_id: Literal["codex", "cursor"] = (
-            "cursor" if source is ObservationSource.CURSOR_HOOK else "codex"
+        harness_id: Literal["claude", "codex", "cursor"] = (
+            "claude"
+            if source is ObservationSource.CLAUDE_HOOK
+            else "cursor"
+            if source is ObservationSource.CURSOR_HOOK
+            else "codex"
         )
         raw_event = event_name or payload.get("hook_event_name")
         if type(raw_event) is not str or not raw_event:
@@ -1470,7 +1477,7 @@ def handle_observe(
             # Cursor publishes structural observation only. Its hook payloads
             # contain prompts, responses, transcript paths, file contents, and
             # MCP arguments/results that must never enter Yoetz content capture.
-            if source is ObservationSource.CURSOR_HOOK:
+            if source in {ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK}:
                 content_chunks, content_truncated = (), False
             else:
                 content_chunks, content_truncated = _visible_content_chunks(
@@ -1583,10 +1590,13 @@ def handle_observe(
                                 async def _attach() -> LifecycleMapping | None:
                                     if harness_id == "codex":
                                         return await _try_auto_start(
-                                            codex_session_id, _state=_state
+                                            codex_session_id,
+                                            _state=_state,
                                         )
                                     return await _try_auto_start(
-                                        codex_session_id, _state=_state, harness_id="cursor"
+                                        codex_session_id,
+                                        _state=_state,
+                                        harness_id=harness_id,
                                     )
 
                                 mapping = cast(LifecycleMapping | None, _resolve_runner()(_attach))
@@ -1682,7 +1692,7 @@ def handle_observe(
                                 else _try_auto_start(
                                     codex_session_id,
                                     _state=_state,
-                                    harness_id="cursor",
+                                    harness_id=harness_id,
                                 )
                             )
                             return await asyncio.wait_for(
@@ -1866,6 +1876,143 @@ def handle_observe(
                 record_hook_diagnostic(
                     "stdout_write_failed", event_name or "observe", _state=_state
                 )
+        return 0
+
+
+_CLAUDE_SESSION_PREFIX: Final = "claude:"
+# Derived from the same exact tool-name set as the rendered hook matcher, so
+# the renderer and this sanitizer allowlist cannot drift apart.
+_CLAUDE_SCOPED_TOOL_RE: Final = re.compile(
+    "^mcp__plugin_yoetz_yoetz__(?:" + "|".join(YOETZ_WORKFLOW_TOOL_NAMES) + ")$",
+    re.ASCII,
+)
+_CLAUDE_UNTESTED_PROFILE_ID: Final = "untested"
+_CLAUDE_VERSION_TO_PROFILE: Final = {
+    "2.1.241": "claude-code-cli-local-project-2.1.241",
+}
+
+
+def _claude_capability_profile_id(claude_version: object) -> str:
+    """Map an exact evidenced Claude version to its reviewed profile, else stay untested.
+
+    The hook payload is the only version evidence this ingress has. A payload
+    that names no version, or a neighboring version whose native contract was
+    never proven, must not emit observations labeled with the evidenced
+    ``2.1.241`` profile; the fail-closed table never infers a range.
+    """
+
+    token = _token_or_none(claude_version)
+    if token is None:
+        return _CLAUDE_UNTESTED_PROFILE_ID
+    return _CLAUDE_VERSION_TO_PROFILE.get(token, _CLAUDE_UNTESTED_PROFILE_ID)
+
+
+def handle_claude_observe(
+    *,
+    event_name: str | None,
+    stdin_bytes: bytes | None = None,
+    stdout: BinaryIO | None = None,
+    workspace: str | None = None,
+    _state: Path | None = None,
+    connect: ServiceConnector | None = None,
+    run_async: AsyncRunner | None = None,
+    skip_service: bool = False,
+) -> int:
+    """Normalize one Claude hook into structural-only Yoetz observation.
+
+    The host payload can contain transcript/cwd paths, prompts, assistant text,
+    complete tool inputs/responses, and raw errors.  None crosses this boundary.
+    Only a closed lifecycle action, exact scoped Yoetz tool identity, bounded
+    correlation token, and host-derived success bit are retained.
+    """
+
+    event_map = {
+        "PostToolUse": "PostToolUse",
+        "PostToolUseFailure": "PostToolUse",
+        "SessionEnd": "SessionEnd",
+        "SessionStart": "SessionStart",
+        "Stop": "Stop",
+    }
+    start_actions = {
+        "startup": "claude_session_startup",
+        "resume": "claude_session_resume",
+        "clear": "claude_session_clear",
+        "compact": "claude_session_compact",
+        "fork": "claude_session_fork",
+    }
+    try:
+        payload = read_hook_payload(stdin_bytes)
+        raw_event = event_name or payload.get("hook_event_name")
+        if type(raw_event) is not str or raw_event not in event_map:
+            hook_io.stdout_json({}, stdout)
+            return 0
+        session = _token_or_none(payload.get("session_id"))
+        if session is None or len(session) > _MAX_TOKEN_CHARS - len(_CLAUDE_SESSION_PREFIX):
+            hook_io.stdout_json({}, stdout)
+            return 0
+        structural: dict[str, JsonValue] = {
+            "action": "claude_lifecycle",
+            "capability_profile_id": _claude_capability_profile_id(
+                payload.get("claude_code_version")
+            ),
+            "hook_event_name": event_map[raw_event],
+            "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
+        }
+        if raw_event == "Stop" and payload.get("stop_hook_active") is True:
+            structural["stop_hook_active"] = True
+        if raw_event == "SessionStart":
+            source = payload.get("source")
+            structural["action"] = (
+                start_actions[source]
+                if type(source) is str and source in start_actions
+                else "claude_session"
+            )
+        if raw_event in {"PostToolUse", "PostToolUseFailure"}:
+            tool_name = payload.get("tool_name")
+            if type(tool_name) is not str or _CLAUDE_SCOPED_TOOL_RE.fullmatch(tool_name) is None:
+                hook_io.stdout_json({}, stdout)
+                return 0
+            structural["action"] = (
+                "claude_mcp_success" if raw_event == "PostToolUse" else "claude_mcp_failure"
+            )
+            structural["success"] = raw_event == "PostToolUse"
+            structural["tool_name"] = tool_name
+            correlation = _token_or_none(payload.get("tool_use_id"))
+            if correlation is not None:
+                structural["tool_use_id"] = correlation
+            if raw_event == "PostToolUse" and tool_name == "mcp__plugin_yoetz_yoetz__start":
+                # Claude's observation envelope stays structural-only, but the
+                # successful start result is the sole authority that can bind
+                # this host session to the cooperative Yoetz task. Inspect the
+                # raw response transiently and persist only validated ids.
+                from yoetz.cli.hooks import bind_start_mapping_from_hook
+
+                with contextlib.suppress(Exception):
+                    bind_start_mapping_from_hook(
+                        cast(
+                            Mapping[str, JsonValue],
+                            {
+                                "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
+                                "tool_name": tool_name,
+                                "tool_response": payload.get("tool_response"),
+                            },
+                        ),
+                        _state=_state,
+                    )
+        return handle_observe(
+            event_name=event_map[raw_event],
+            stdin_bytes=canonical_encode(structural),
+            stdout=stdout,
+            workspace=workspace,
+            _state=_state,
+            connect=connect,
+            run_async=run_async,
+            skip_service=skip_service,
+            source=ObservationSource.CLAUDE_HOOK,
+        )
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            hook_io.stdout_json({}, stdout)
         return 0
 
 

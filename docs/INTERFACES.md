@@ -1528,7 +1528,24 @@ thus the inactive-session exemption) indefinitely via send backpressure.
 The ordinary client independently bounds each connect-plus-handshake attempt to **5 seconds** and
 closes a half-open stream on expiry. On-demand startup has one **30-second** monotonic budget that
 includes its initial attempt, spawn, and polling; an accepted but silent existing endpoint is
-reported unavailable rather than causing a second daemon to be spawned. The MCP bridge supplies a
+reported unavailable rather than causing a second daemon to be spawned.
+
+The handshake pins the exact schema-manifest digest on both sides. A listening service that does
+not share the client's digest (or hello shape) closes the connection without answering; the client
+names that outcome `handshake_rejected` (distinct from a frame truncated mid-flight) and, together
+with an answered `manifest_mismatch`, maps it to the retryable `ControlError` reason
+`service_incompatible` (public code `SERVICE_UNAVAILABLE`). The singleton lock stamp carries the
+holder's `pid`, `instance_id`, `service_version`, and `schema_manifest_digest` (bounded, advisory;
+older stamps omit the last two and are read as unknown). On-demand startup — the MCP bridge's path
+and `yoetz service restart` — treats an incompatible holder as an upgrade to complete: it records a
+`service_supersede` diagnostic, sends the holder its ordinary bounded-shutdown signal, waits for the
+lock to be released inside the same 30-second budget, then spawns and connects to a successor of
+this installation. It never signals a process it cannot identify through the owner-only stamp, a
+holder whose stamped identity equals this installation's, or anything on Windows; those cases and a
+holder that outlives the budget surface as `service_incompatible` whose bridge message names
+`yoetz service restart`. Plain `connect_service` (ordinary CLI commands and hooks) never supersedes.
+Bridges of the stale installation reconnect and are refused in turn, which is the correct outcome
+of an upgrade: the one per-user endpoint belongs to the installation actually in use. The MCP bridge supplies a
 **30-second** call deadline for `start`, `publish_work`, `respond`, `status`, and `receipt`, and a
 **300-second** deadline for `check`; these use the existing private `deadline_ms` envelope field and
 do not change the public workflow-tool schemas. A timed-out write has an unknown outcome: the bridge
@@ -2808,7 +2825,7 @@ Shared types are `HarnessId`, `HarnessProfile`, `HarnessHookProfile`, `Integrati
 `IntegrationFile`, `SkillPreviewCommand`, `SkillApplyCommand`, `SkillStatusCommand`,
 `IntegrationPreview`, `IntegrationStatus`, `IntegrationResult`, and `IntegrationError`.
 
-`HarnessId` is a closed enum whose membership is exactly `codex|cursor`. `HarnessProfile` is the
+`HarnessId` is a closed enum whose membership is exactly `claude|codex|cursor`. `HarnessProfile` is the
 frozen per-harness descriptor: `harness_id`, `skill_root` (the exact relative install directory),
 `frontmatter_profile` (the harness's required skill-header shape), `capability_profile_ids`,
 `supported_versions`, and `hooks_by_capability_profile: Mapping[str, HarnessHookProfile | None]`.
@@ -2821,9 +2838,10 @@ capability once the exact cell is capability-proven; unproven or unprofiled cell
 `observation_events=()` and cannot emit `hook_observed` (ADR-005, ADR-010).
 
 The frozen v0.1 service operations `integration_preview` and `integration_execute` remain
-Codex-only despite `HarnessId` containing `cursor`: their required `harness` discriminator is
-exactly `codex`. Cursor lifecycle operations use the separate `PluginArtifactPort` surface and its
-path-explicit CLI adapter; they are not routed through `IntegrationsPort` or those service methods.
+Codex-only despite `HarnessId` containing `claude|cursor`: their required `harness` discriminator is
+exactly `codex`. Cursor and Claude lifecycle operations use separate host-native artifact surfaces
+and path-explicit CLI adapters; they are not routed through `IntegrationsPort` or those service
+methods.
 
 `HarnessHookProfile` is the closed descriptor
 `(trigger_event, trigger_payload_profile_id, evidence_case_ids,
@@ -3037,7 +3055,7 @@ managed-file inventory with relative paths, sizes, and SHA-256 digests. Agent Pl
 the input for another host's manifest; projections share only the plan (ADR-023).
 
 - `PluginFormatProfile` is a closed enum; membership is exactly
-  `agent_plugins_1|codex_plugin_native|cursor_plugin_native`. A new member requires a reviewed projection design and
+  `agent_plugins_1|claude_code_plugin_native|codex_plugin_native|cursor_plugin_native`. A new member requires a reviewed projection design and
   ADR-023-conformant root registration before any render targets it.
 - `McpOwnership` is exactly `external_registration|plugin_managed`. `McpOwnershipState` is the
   closed observed-owner state `absent|external|plugin|dual|foreign|ambiguous`; `dual`, `foreign`,
@@ -3046,7 +3064,7 @@ the input for another host's manifest; projections share only the plan (ADR-023)
   the observed source, and `foreign_present` projects to `foreign`.
 - `HostSurface` is the closed host-product enum
   `codex_cli|chatgpt_desktop|cursor_ide|cursor_cli|cursor_sdk_local|cursor_cloud|claude_code`, used only to key
-  evidence cells. It is distinct from `HarnessId` (`codex|cursor`); format
+  evidence cells. It is distinct from `HarnessId` (`claude|codex|cursor`); format
   compatibility earns no `HostSurface` support claim, first-party identity, or coverage (ADR-005,
   ADR-023). A Cursor surface consuming the portable artifact is a *portable* cell; one consuming a
   generated native projection is a *native* cell; Claude Code is a *native dual-target* host whose
@@ -3157,7 +3175,7 @@ user value, timestamp, credential, secret reference, transcript, host-activation
 
 ### Cursor local harness contract (issue #153)
 
-`HarnessId` membership is `codex|cursor`. Adding Cursor changes no method on `IntegrationsPort`,
+`HarnessId` membership is now `claude|codex|cursor`. Adding Cursor changed no method on `IntegrationsPort`,
 `PluginArtifactPort`, `HarnessMcpPort`, `ObservationPort`, or the six workflow operations.
 `PluginFormatProfile` membership adds `cursor_plugin_native`; `HostSurface` adds
 `cursor_sdk_local` beside the existing `cursor_ide|cursor_cli|cursor_cloud`. Cursor Cloud remains an
@@ -3264,6 +3282,108 @@ are fail-open and advisory; configuration/trigger-only state earns no observatio
 The selected locator retains its exact filesystem-encoded spelling through lookup and commitment;
 Unicode normalization never aliases distinct directories. A grant created under a differently
 normalized spelling does not authorize its sibling and requires an explicit regrant.
+
+### Claude Code local project harness contract (issue #154)
+
+Claude Code is a native dual target and is not an Agent Plugins consumer. The initial cell is
+exactly Claude Code CLI/local process/project scope/private directory marketplace, capability
+profile `claude-code-cli-local-project-2.1.241`, macOS arm64, and the fixture's exact executable
+digest. `HostSurface.CLAUDE_CODE` does not imply Desktop local/SSH, Desktop remote, web/cloud,
+synced, managed/user/local scope, Agent SDK, or headless support.
+
+`ClaudeCodePluginTarget` binds absolute trusted project, Claude config, cache, marketplace, and
+resolved executable paths; exact `ClaudeCodeCapabilityIdentity(version, executable_digest,
+os_name, architecture)`; scope exactly `project`; and marketplace name exactly `yoetz-local`.
+Representations redact every path. The cache root must equal `<claude_config_root>/plugins/cache`.
+Preview admits only exactly proven Claude versions (`CLAUDE_CODE_HARNESS_PROFILE.supported_versions`,
+currently `2.1.241`); a neighboring version stays explicitly untested rather than running under an
+unearned profile. Preview also re-hashes the executable to detect stale identity, and refuses with
+`recovery_required` while interrupted stage/rollback material remains beside the marketplace source,
+before any mutation.
+
+`ClaudeCodePluginArtifact` contains one `PortablePluginPlan`, sorted native member mapping,
+generated strict marketplace manifest, separate artifact/marketplace digests, the exact bound
+`yoetz_launcher`, and a `development` flag. Its format is
+exactly `claude_code_plugin_native`. The plugin members are `.claude-plugin/plugin.json`,
+`skills/yoetz/SKILL.md`, five byte-identical references, `hooks/hooks.json`, and optional
+plugin-owned `.mcp.json`. Agents, commands, workflows, LSP, monitors, themes, output styles,
+dependencies, channels, `bin`, `settings.json`, and `userConfig` are absent. The source marker is
+`yoetz.claude-code-marketplace-install/2` and contains only structural plan/inventory/digest/launcher
+fields; version 1 markers (no launcher) remain readable for status/remove and are never written.
+
+Every hook command and the plugin-owned `.mcp.json` entry launch the exact installation that
+rendered the artifact — the shared `yoetz.adapters.integrations.launcher` helper resolves the invoking
+console script (or `python -m yoetz` as `(interpreter, "-m", "yoetz")`) to an absolute executable plus
+fixed arguments — never a bare `yoetz` PATH lookup, so the bridge, hook process, and on-demand service
+cannot come from different installations. The launcher is part of the artifact digest. MCP route
+observation recognizes an exact Yoetz route as either a hand-written bare `yoetz` command or the
+artifact's exact launcher, each followed by the exact `mcp serve` arguments; any other command or
+argument shape is `foreign`.
+
+`render_claude_code_plugin(development_enabled=True)` produces the development carrier: identical
+bytes except `defaultEnabled:true`, a distinct digest, and `development=True`. Only
+`export_claude_code_plugin` consumes it — writing the plugin root plus a
+`yoetz.claude-code-plugin-export/1` marker into a not-yet-existing owner-only directory for
+`claude --plugin-dir`, with no Claude settings, marketplace, cache, or review authority involved —
+and preview refuses it (`source_invalid`). A development export earns no marketplace-installed
+proof facet.
+
+`ClaudeCodePluginAction` is `install|update|enable|disable|remove|noop`; callers cannot request
+`noop`. `ClaudeCodePluginPreview` carries request/action, before state, target/current state,
+artifact/marketplace/preview digests, intended and observed MCP ownership/route, and sorted warnings.
+The digest binds scope, marketplace, exact host identity, current source/install/version/settings/
+enabled/MCP state, a `host_state_digest` over the four host-owned read-back files, and future bytes.
+`ClaudeCodePluginResult` carries request/action/operation,
+before/after state, preview/artifact/installed digests, enabled state, and only managed source member
+names. `ClaudeCodePluginStatus` keeps source/cache/marketplace/list/enablement and every
+`PluginProofFacet` separate; `loaded_root_digest` remains null until session-scoped evidence exists,
+and `host_activation` is proven only when a validated session observation coincides with exact
+installed bytes, discovery, marketplace registration, and enabled state — a session init alone (for
+example a development `--plugin-dir` run) earns no marketplace-installed activation proof.
+
+Every mutation consumes the exact `plugin_artifact_apply` pending plus scoped OS-authenticated
+presence; `--accept` alone is not authority. Install generates/safely swaps only the private source,
+adds the project marketplace, and asks Claude to install the qualified plugin; exact read-back must
+show disabled default and matching cache/version. Update requires a marker-valid source/discovered
+install, replaces only managed source bytes, then invokes marketplace/plugin update. Enable and
+disable alter only Claude's effective project setting. Remove invokes qualified project uninstall
+with `--keep-data`, removes the project marketplace, and deletes only exact marker-valid source.
+Replacement and removal revalidate the displaced tree after it is renamed out of the public path —
+when nothing can swap it any more — and destroy only a marker-valid managed tree; content created or
+modified during the authority or host-command window is restored untouched and the mutation refused.
+Any post-mutation state the independent read-back cannot confirm is `outcome_unknown` regardless of
+the subprocess exit code (`refused` describes only safe pre-mutation rejection); status surfaces
+leftover stage/rollback material as `recovery_required` with `outcome_unknown`, and
+no host-owned settings/cache rollback is guessed.
+
+`ClaudeCodeMcpSource` is exactly
+`local|project|user|plugin|claude_ai_connector`, ordered by Claude precedence. Observation reads
+local/user `.claude.json`, project `.mcp.json`, plugin `.mcp.json`, and an explicitly supplied
+connector row. Both the `yoetz` name and any differently named exact Yoetz route are ownership
+candidates. The winner is informational: plugin plus external is `dual`, repeated same-class
+owners are `ambiguous`, non-exact same-name configuration is `foreign`, and unreadable reachable
+state is unobserved `ambiguous`. Effective route is non-null only for one exact external or plugin
+owner. Scoped runtime identities are server `plugin:yoetz:yoetz` and tools
+`mcp__plugin_yoetz_yoetz__<operation>`; bare names are negative controls.
+
+The rendered artifact carries the five candidate hooks
+(`PostToolUse|PostToolUseFailure|SessionEnd|SessionStart|Stop`), but the
+`CLAUDE_CODE_HARNESS_PROFILE` hook capability cell advertises no observation events: the recorded
+evidence case observed no accepted observation, so the cell stays unpopulated until each event has
+installed-host delivery, privacy, and accepted-observation evidence. `ObservationSource` adds
+`claude_hook`; local-control `2.2.0` appends that source and coverage row to immutable `2.1.0`.
+Ingress accepts only closed lifecycle actions, exact scoped workflow tool identity (the renderer
+matcher and ingress allowlist derive from the one `YOETZ_WORKFLOW_TOOL_NAMES` set, including
+`read_guidance`), bounded session/correlation token, a fail-closed capability profile mapped from an
+exact payload-evidenced Claude version (`untested` otherwise), and host-derived success. It discards raw
+prompt/response/transcript/path/cwd/command/tool input/tool output/result/error/permission/secret
+content before storage, performs no Claude transcript reconciliation, and is always fail-soft. One
+closed exception establishes routing rather than content observation: an exact successful scoped
+`start` `PostToolUse` may transiently parse the structured result or one bounded MCP text block and
+persist only validated task/session/writer identifiers plus the frontier token in the existing
+lifecycle mapping. No result bytes or result-derived prose enter the observation envelope, store,
+diagnostics, or errors.
+Only consented accepted evidence earns coverage.
 
 ## 11. Application (`application/`)
 

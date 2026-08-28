@@ -175,6 +175,7 @@ _PROSE_KEYS: Final = frozenset(
 
 
 class ObservationSource(str, Enum):  # noqa: UP042 - exact durable wire enum
+    CLAUDE_HOOK = "claude_hook"
     CODEX_HOOK = "codex_hook"
     CODEX_SESSION_STREAM = "codex_session_stream"
     CURSOR_HOOK = "cursor_hook"

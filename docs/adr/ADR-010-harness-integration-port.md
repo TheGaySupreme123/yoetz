@@ -361,3 +361,24 @@ reference documents were already designed for on-demand retrieval.
 **Leave the MCP surface bare and document the limitation.** Rejected: the omitted rules are not
 polish. An unguided agent publishing transcripts is a privacy failure, and one claiming Yoetz
 verified work is the exact dishonesty the product exists to prevent.
+
+### Claude Code native amendment (2026-08-27, issue #154)
+
+`HarnessId` adds exactly `claude`. Its first and only populated candidate profile is
+`claude-code-cli-local-project-2.1.241`: a local process, project-scope, marketplace-installed
+native plugin on the exact recorded executable/OS/architecture identity. Desktop local/SSH,
+Desktop remote, web/cloud, synced, managed/user/local marketplace scopes, Agent SDK, and headless
+cells do not inherit this result. Claude Code remains absent from the Agent Plugins compatibility
+roster, so the adapter projects from `PortablePluginPlan` and canonical skill bytes rather than
+claiming portable-format consumption.
+
+The exact hook arm is `claude-code-hooks-2.1.241-v1` with `SessionStart`, scoped-Yoetz
+`PostToolUse`, scoped-Yoetz `PostToolUseFailure`, `Stop`, and `SessionEnd`. It is advisory,
+single-flight/coalesced/best-effort under the existing `HarnessHookProfile` contract. Only accepted
+consented `claude_hook` envelopes can earn observation coverage; installing, enabling, listing, or
+starting a session cannot. The host's plugin namespace is `/yoetz:yoetz`; its MCP server/tool names
+are `plugin:yoetz:yoetz` and `mcp__plugin_yoetz_yoetz__<operation>`. Namespacing changes no Yoetz
+operation schema and adds no MCP tool. An exact successful scoped `start` `PostToolUse` binds the
+Claude host session to that cooperative task by transiently extracting and validating only the
+start result's structural task/session/writer identifiers and frontier. Raw result content is not
+retained or admitted into observation evidence.

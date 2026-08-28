@@ -186,6 +186,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "schema_reference_unresolved",
     "schema_version_mismatch",
     "semantic_provenance_json_shape_invalid",
+    "service_incompatible",
     "set_member_not_ascii",
     "timestamp_not_utc",
     "timestamp_out_of_range",
@@ -199,7 +200,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 146
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 147
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
