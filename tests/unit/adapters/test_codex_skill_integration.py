@@ -12,6 +12,7 @@ from yoetz.adapters.integrations.codex_skill import (
     CODEX_HARNESS_PROFILE,
     CodexSkillIntegration,
     build_managed_marker,
+    inspect_destination,
     load_packaged_skill_source,
 )
 from yoetz.domain.values import request_id
@@ -236,6 +237,109 @@ async def test_explicit_allow_untested_installs_discoverable_project_skill(
     assert status.state is IntegrationState.INSTALLED_EXACT
     assert status.compatibility == "unsupported"
     assert (tmp_path / ".agents/skills/yoetz/SKILL.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_symlinked_agents_and_skills_parents_are_target_unsafe(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    (tmp_path / ".agents").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(IntegrationError) as caught:
+        inspect_destination(target, load_packaged_skill_source(_resources()))
+    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+    assert not (outside / "skills").exists()
+
+    (tmp_path / ".agents").unlink()
+    agents = tmp_path / ".agents"
+    agents.mkdir(mode=0o700)
+    (agents / "skills").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(IntegrationError) as caught_skills:
+        await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
+    assert caught_skills.value.reason is IntegrationReason.TARGET_UNSAFE
+    assert not (outside / "yoetz").exists()
+
+
+@pytest.mark.anyio
+async def test_parent_replaced_between_preview_and_apply_fails_closed(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    skills = tmp_path / ".agents" / "skills"
+    skills.mkdir(parents=True, mode=0o700)
+    (tmp_path / ".agents").chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    request = request_id("req_00000000-0000-4000-8000-000000000033")
+    preview = await adapter.preview_skill(
+        HarnessId.CODEX,
+        SkillPreviewCommand(request, target, IntegrationAction.INSTALL, False),
+    )
+
+    replaced = tmp_path / ".agents" / "skills.replaced"
+    skills.rename(replaced)
+    skills.mkdir(mode=0o700)
+
+    with pytest.raises(IntegrationError) as caught:
+        await adapter.install_skill(
+            HarnessId.CODEX,
+            SkillApplyCommand(
+                request,
+                target,
+                IntegrationAction.INSTALL,
+                preview.preview_digest,
+                True,
+                False,
+            ),
+        )
+    assert caught.value.reason is IntegrationReason.PREVIEW_STALE
+    assert not (skills / "yoetz").exists()
+    assert not (replaced / "yoetz").exists()
+
+
+@pytest.mark.anyio
+async def test_install_and_remove_stay_atomic_on_owner_directories(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    install_request = request_id("req_00000000-0000-4000-8000-000000000034")
+    preview = await adapter.preview_skill(
+        HarnessId.CODEX,
+        SkillPreviewCommand(install_request, target, IntegrationAction.INSTALL, False),
+    )
+    await adapter.install_skill(
+        HarnessId.CODEX,
+        SkillApplyCommand(
+            install_request,
+            target,
+            IntegrationAction.INSTALL,
+            preview.preview_digest,
+            True,
+            False,
+        ),
+    )
+    destination = tmp_path / ".agents/skills/yoetz"
+    assert destination.is_dir()
+    assert not destination.is_symlink()
+
+    remove_request = request_id("req_00000000-0000-4000-8000-000000000035")
+    remove_preview = await adapter.preview_skill(
+        HarnessId.CODEX,
+        SkillPreviewCommand(remove_request, target, IntegrationAction.REMOVE, False),
+    )
+    await adapter.remove_skill(
+        HarnessId.CODEX,
+        SkillApplyCommand(
+            remove_request,
+            target,
+            IntegrationAction.REMOVE,
+            remove_preview.preview_digest,
+            True,
+            False,
+        ),
+    )
+    assert not destination.exists()
 
 
 def test_package_import_has_no_filesystem_side_effect(
