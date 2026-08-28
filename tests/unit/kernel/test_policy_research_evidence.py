@@ -113,9 +113,7 @@ def test_evidence_does_not_support_claim_and_success_nontrigger() -> None:
     )
     waived = make_case(
         obligations={
-            obl(1): obligation_record(
-                open_obligation, 1, plan_change=ObligationChangeKind.WAIVED
-            )
+            obl(1): obligation_record(open_obligation, 1, plan_change=ObligationChangeKind.WAIVED)
         },
         claims={clm(1): record(claim, 2)},
     )

@@ -1085,6 +1085,10 @@ def _declared_none_reason_for_render(document: ReceiptDocument) -> str | None:
 
 
 _HUMAN_TEXT_MAX: Final = 32_768
+_HUMAN_TEXT_TRUNCATION_MARKER: Final = (
+    "\n\n[Receipt human_text truncated at 32768 characters; "
+    "remaining canonical section content is omitted.]"
+)
 
 
 def render_receipt_human(document: ReceiptDocument, *, markdown: bool) -> str:
@@ -1100,7 +1104,12 @@ def render_receipt_human(document: ReceiptDocument, *, markdown: bool) -> str:
     parts: list[str] = []
     for section in document.sections:
         heading = f"## {section.title}" if markdown else section.title
-        parts.append(f"{heading}\n{section.body}")
+        section_parts = [heading, section.body]
+        if section.items:
+            section_parts.extend(f"- {item}" for item in section.items)
+        if section.coverage_note is not None:
+            section_parts.append(section.coverage_note)
+        parts.append("\n".join(section_parts))
     advisory_count = sum(
         1 for finding in document.findings if not FINDING_KIND_TRAITS[finding.kind][1]
     )
@@ -1113,7 +1122,8 @@ def render_receipt_human(document: ReceiptDocument, *, markdown: bool) -> str:
         )
     text = "\n\n".join(parts) if parts else render_receipt_compact(document)
     if len(text) > _HUMAN_TEXT_MAX:
-        text = text[:_HUMAN_TEXT_MAX]
+        text = text[: _HUMAN_TEXT_MAX - len(_HUMAN_TEXT_TRUNCATION_MARKER)]
+        text += _HUMAN_TEXT_TRUNCATION_MARKER
     if not text:
         raise ProtocolValueError("invalid_receipt_document")
     return text

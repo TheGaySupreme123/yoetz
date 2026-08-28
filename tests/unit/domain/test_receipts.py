@@ -375,9 +375,9 @@ def test_render_receipt_human_projects_sections_and_advisory_count() -> None:
 
     from yoetz.domain.findings import FindingKind, FindingOrigin
 
-    document = receipt_document_from_json(
-        _variant("unresolved-findings.case.json", "mixed_open_responses")
-    )
+    wire = _variant("unresolved-findings.case.json", "mixed_open_responses")
+    wire["sections"][0]["coverage_note"] = "Coverage note"
+    document = receipt_document_from_json(wire)
     markdown = render_receipt_human(document, markdown=True)
     text = render_receipt_human(document, markdown=False)
     assert "## Limitations" in markdown
@@ -385,8 +385,14 @@ def test_render_receipt_human_projects_sections_and_advisory_count() -> None:
     assert "\n" in markdown
     assert document.sections[0].body in markdown
     assert document.sections[0].body in text
+    assert f"- {document.sections[1].items[0]}" in markdown
+    assert f"- {document.sections[1].items[0]}" in text
+    assert "Coverage note" in markdown
+    assert "Coverage note" in text
     assert "do not by themselves select unresolved_findings_remain" not in markdown
-    assert all(finding.kind is not FindingKind.LEDGER_STALE_OR_INCOMPLETE for finding in document.findings)
+    assert all(
+        finding.kind is not FindingKind.LEDGER_STALE_OR_INCOMPLETE for finding in document.findings
+    )
     assert FindingOrigin.DETERMINISTIC in {finding.origin for finding in document.findings}
 
     advisory = receipt_document_from_json(
@@ -404,3 +410,16 @@ def test_render_receipt_human_projects_sections_and_advisory_count() -> None:
     stale_document = receipt_document_from_json(stale)
     stale_text = render_receipt_human(stale_document, markdown=True)
     assert "do not by themselves select unresolved_findings_remain" in stale_text
+
+
+def test_render_receipt_human_marks_bounded_truncation() -> None:
+    """#437: the wire bound cannot silently erase later receipt sections."""
+
+    wire = _variant("unresolved-findings.case.json", "mixed_open_responses")
+    wire["sections"][0]["body"] = "x" * 32_768
+    document = receipt_document_from_json(wire)
+
+    rendered = render_receipt_human(document, markdown=True)
+
+    assert len(rendered) == 32_768
+    assert rendered.endswith("remaining canonical section content is omitted.]")

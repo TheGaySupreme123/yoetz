@@ -32,7 +32,9 @@ yoetz receipt --request '{"request_id":"req_...","format":"markdown", ...}' --js
 Formats are `json`, `markdown`, and `text`. All three project under the default agent-context
 policy. `json` carries the structured receipt in `document` with `human_text` null. `markdown`
 and `text` keep `document` null by format and project the canonical sections (summary, findings,
-limitations, versions) in `human_text`. Under a deliberately stricter owner policy, digest-bound
+limitations, versions, section items, and coverage notes) in `human_text`. If that projection
+exceeds the wire bound, `human_text` carries an explicit truncation marker. Under a deliberately
+stricter owner policy, digest-bound
 `json` can fail closed with `PRIVACY_AUTHORITY_REQUIRED` (`receipt_json_projection_blocked`) —
 re-request `markdown` or `text`, or widen agent-context policy from a local terminal. If a
 human format cannot project those sections, the result names the omission; it does not return
