@@ -1840,6 +1840,8 @@ def handle_observe(
                         workspace_commitment,
                         codex_session_id,
                         pending_frontier_notice.delivery_identity,
+                        emitted_to_sequence=pending_frontier_notice.to_sequence,
+                        emitted_task_id=pending_frontier_notice.task_id,
                     )
         # Advice selection, the lease, the stdout write itself and both delivery
         # commits sit past the 'drain' window; a blocked host pipe or a

@@ -1359,15 +1359,48 @@ class LocalObservationStore:
             return (state.frontier_motion_notices or {}).get(codex_session_id)
 
     def commit_frontier_motion_delivery(
-        self, workspace: str, codex_session_id: str, delivery_identity: str
+        self,
+        workspace: str,
+        codex_session_id: str,
+        delivery_identity: str,
+        *,
+        emitted_to_sequence: int | None = None,
+        emitted_task_id: str | None = None,
     ) -> None:
-        """Remove exactly the notice whose context bytes reached the hook consumer."""
+        """Advance the delivered mark for the notice bytes that reached the hook consumer.
+
+        Identity match removes that exact notice. A merge that races peek and commit
+        changes identity; the peeked ``emitted_to_sequence`` still advances high-water
+        and clamps any same-task remainder so the emitted range is not re-announced.
+        """
 
         with self._lock:
             state = self._load(workspace)
             notices = state.frontier_motion_notices or {}
             current = notices.get(codex_session_id)
             if current is None or current.delivery_identity != delivery_identity:
+                if (
+                    type(emitted_to_sequence) is not int
+                    or type(emitted_task_id) is not str
+                    or not emitted_task_id
+                    or not 0 < emitted_to_sequence <= _MAX_SAFE_INTEGER
+                ):
+                    return
+                assert state.frontier_motion_delivered is not None
+                delivered = state.frontier_motion_delivered
+                previous = delivered.pop(codex_session_id, None)
+                previous_to = (
+                    previous[1] if previous is not None and previous[0] == emitted_task_id else 0
+                )
+                delivered_to = max(previous_to, emitted_to_sequence)
+                delivered[codex_session_id] = (emitted_task_id, delivered_to)
+                if current is not None and current.task_id == emitted_task_id:
+                    clamped = _clamp_frontier_motion_notice(current, delivered_to)
+                    if clamped is None:
+                        notices.pop(codex_session_id, None)
+                    else:
+                        notices[codex_session_id] = clamped
+                self._save(workspace, state)
                 return
             del notices[codex_session_id]
             assert state.frontier_motion_delivered is not None

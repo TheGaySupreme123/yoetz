@@ -635,6 +635,64 @@ def test_frontier_motion_notice_merges_contiguous_appends_and_is_one_shot(
     assert reloaded.peek_frontier_motion(workspace, "motion-session") is None
 
 
+def test_frontier_motion_commit_mismatch_advances_emitted_range_and_clamps_merge(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.note_frontier_motion(
+        workspace,
+        "race-session",
+        from_sequence=7,
+        to_sequence=9,
+        head_digest="sha256:" + "1" * 64,
+        observation_record_count=2,
+        task_id="tsk-frontier-test",
+    )
+    peeked = store.peek_frontier_motion(workspace, "race-session")
+    assert peeked is not None
+    store.note_frontier_motion(
+        workspace,
+        "race-session",
+        from_sequence=9,
+        to_sequence=12,
+        head_digest="sha256:" + "2" * 64,
+        observation_record_count=3,
+        task_id="tsk-frontier-test",
+    )
+    merged = store.peek_frontier_motion(workspace, "race-session")
+    assert merged is not None
+    assert (merged.from_sequence, merged.to_sequence, merged.observation_record_count) == (7, 12, 5)
+    assert merged.delivery_identity != peeked.delivery_identity
+
+    store.commit_frontier_motion_delivery(
+        workspace,
+        "race-session",
+        peeked.delivery_identity,
+        emitted_to_sequence=peeked.to_sequence,
+        emitted_task_id=peeked.task_id,
+    )
+    remainder = store.peek_frontier_motion(workspace, "race-session")
+    assert remainder is not None
+    assert (remainder.from_sequence, remainder.to_sequence, remainder.observation_record_count) == (
+        9,
+        12,
+        3,
+    )
+
+    store.note_frontier_motion(
+        workspace,
+        "race-session",
+        from_sequence=7,
+        to_sequence=9,
+        head_digest="sha256:" + "1" * 64,
+        observation_record_count=2,
+        task_id="tsk-frontier-test",
+    )
+    assert store.peek_frontier_motion(workspace, "race-session") == remainder
+
+
 def test_frontier_motion_renote_after_delivery_drops_replay_and_clamps_stale_from(
     tmp_path: Path,
 ) -> None:

@@ -139,7 +139,10 @@ unsupported claims and unbounded duplicate findings.
     A later advice-safe `PostToolUse` hook surfaces that the motion was hook-observed, explains
     that held cooperative publish frontiers remain admissible only across observation-authored
     motion, and directs callers to use repair facts when an operation still conflicts. The pending notice is
-    removed only after its bytes reach the hook consumer. It grants no authority, changes no
+    removed only after its bytes reach the hook consumer. When a contiguous merge races that
+    peek/commit window, identity mismatches; commit still advances the delivered high-water to
+    the peeked `to_sequence` and clamps the merged remainder rather than re-announcing the
+    emitted range. It grants no authority, changes no
     optimistic-concurrency predicate, and adds no MCP operation.
 
 12. Paired `PostToolUse` materialization consumes every host-stated outcome fact: `exit_status`

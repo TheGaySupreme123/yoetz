@@ -2741,7 +2741,10 @@ mark and any pending notice for the old task are discarded and announcements res
 new ledger's motion. The notice and delivered-mark maps are capped and drop ended-session
 entries before serialization; a malformed stored value is ignored as empty. Contiguous pending
 notices coalesce, and an advice-safe `PostToolUse` hook consumes the exact notice only after
-emitting its bounded agent context. This context is informational: it neither weakens
+emitting its bounded agent context. If a later append merges into the pending notice between
+peek and commit, delivery identity no longer matches; commit still advances the delivered
+high-water to the peeked `to_sequence` and clamps the merged remainder so the already-emitted
+range is not re-announced. This context is informational: it neither weakens
 exact-frontier checks nor expands the ADR-022 predicate that permits a cooperative publish to
 retain a stale frontier across observation-authored records.
 
