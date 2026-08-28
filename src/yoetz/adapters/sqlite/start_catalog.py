@@ -36,6 +36,7 @@ from yoetz.ports.start_catalog import (
     WORKSPACE_REF_DOMAIN,
     EncryptedResultRef,
     SafeReason,
+    SessionBinding,
     StartAllocation,
     StartCommand,
     StartIdentityCommitments,
@@ -138,7 +139,13 @@ class _Transaction:
         return False
 
 
-def _error(code: PublicErrorCode, *, retryable: bool = False) -> PublicOperationError:
+def _error(
+    code: PublicErrorCode,
+    *,
+    retryable: bool = False,
+    message: str | None = None,
+    safe_details: object | None = None,
+) -> PublicOperationError:
     messages = {
         PublicErrorCode.INVALID_REQUEST: "The start request is invalid.",
         PublicErrorCode.IDEMPOTENCY_CONFLICT: "The request ID was already used.",
@@ -149,7 +156,23 @@ def _error(code: PublicErrorCode, *, retryable: bool = False) -> PublicOperation
         PublicErrorCode.STORAGE_CORRUPT: "The local catalog is inconsistent.",
         PublicErrorCode.INTERNAL_ERROR: "The start state is inconsistent.",
     }
-    return PublicOperationError(code, messages[code], retryable)
+    return PublicOperationError(
+        code,
+        messages[code] if message is None else message,
+        retryable,
+        safe_details=safe_details,
+    )
+
+
+def _workspace_conflict() -> PublicOperationError:
+    return _error(
+        PublicErrorCode.SESSION_CONFLICT,
+        message=(
+            "A task already exists for this workspace. Attach with a previously returned "
+            "session_id, or retry with mode=create for an explicit separate sibling task."
+        ),
+        safe_details={"reason_code": "workspace_task_exists"},
+    )
 
 
 def _optional_text(value: object) -> str | None:
@@ -509,6 +532,16 @@ class SqliteStartCatalog:
             raise _error(PublicErrorCode.STORAGE_CORRUPT)
         return _route_value(_route_from_row(rows[0]))
 
+    async def session_binding(self, session_id: str) -> SessionBinding | None:
+        try:
+            session = validate_id(IdKind.SESSION, session_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        route = self._route_for_session(session)
+        if route is None:
+            return None
+        return self._binding_for_route(route)
+
     async def list_workspace_task_ids(self, workspace_ref_commitment: str) -> tuple[str, ...]:
         """Return non-quarantined task ids under one workspace commitment, ascending.
 
@@ -759,6 +792,15 @@ class SqliteStartCatalog:
 
             created = route is None
             if created:
+                workspace = request.identity_commitments.workspace_ref_commitment
+                if request.mode is StartMode.CREATE_OR_ATTACH and workspace is not None:
+                    rows = self._rows(
+                        "SELECT 1 FROM task_routes "
+                        "WHERE workspace_ref_commitment = ? AND state != 'quarantined' LIMIT 1",
+                        (workspace,),
+                    )
+                    if rows:
+                        raise _workspace_conflict()
                 task_id = proposed[IdKind.TASK]
                 session_id = proposed[IdKind.SESSION]
                 bundle_relpath = f"tasks/{task_id}"
@@ -1113,15 +1155,7 @@ class SqliteStartCatalog:
                 by_commitment = _route_from_row(rows[0])
         by_session: _RouteRow | None = None
         if request.session_id is not None:
-            rows = self._rows(
-                f"SELECT {self._route_columns} FROM task_routes "
-                "WHERE active_session_id = ? LIMIT 2",
-                (request.session_id,),
-            )
-            if len(rows) > 1:
-                raise _error(PublicErrorCode.STORAGE_CORRUPT)
-            if rows:
-                by_session = _route_from_row(rows[0])
+            by_session = self._route_for_session(request.session_id)
         if by_commitment is not None and by_session is not None:
             if by_commitment.task_id != by_session.task_id:
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
@@ -1132,6 +1166,59 @@ class SqliteStartCatalog:
         ):
             raise _error(PublicErrorCode.SESSION_CONFLICT)
         return by_commitment or by_session
+
+    def _route_for_session(self, session_id: str) -> _RouteRow | None:
+        rows = self._rows(
+            f"SELECT {self._route_columns} FROM task_routes WHERE active_session_id = ? LIMIT 2",
+            (session_id,),
+        )
+        if len(rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        if rows:
+            return _route_from_row(rows[0])
+        op_rows = self._rows(
+            "SELECT task_id FROM start_operations WHERE session_id = ? LIMIT 2",
+            (session_id,),
+        )
+        if len(op_rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        if not op_rows:
+            return None
+        task_id = op_rows[0][0]
+        if type(task_id) is not str:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        route_rows = self._rows(
+            f"SELECT {self._route_columns} FROM task_routes WHERE task_id = ? LIMIT 2",
+            (task_id,),
+        )
+        if len(route_rows) != 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        return _route_from_row(route_rows[0])
+
+    def _writer_for_session(self, session_id: str) -> str | None:
+        rows = self._rows(
+            "SELECT writer_id FROM start_operations WHERE session_id = ? LIMIT 2",
+            (session_id,),
+        )
+        if len(rows) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        if not rows:
+            return None
+        writer_id = rows[0][0]
+        if type(writer_id) is not str:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        return writer_id
+
+    def _binding_for_route(self, route: _RouteRow) -> SessionBinding | None:
+        if route.state is TaskRouteState.QUARANTINED:
+            return None
+        writer_id = self._writer_for_session(route.active_session_id)
+        if writer_id is None:
+            return None
+        try:
+            return SessionBinding(route.task_id, route.active_session_id, writer_id)
+        except ValueError as exc:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc
 
     def _resume_existing(
         self,

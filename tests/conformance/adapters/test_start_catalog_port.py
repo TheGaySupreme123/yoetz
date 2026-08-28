@@ -123,9 +123,11 @@ async def _command(
     mode: StartMode = StartMode.CREATE_OR_ATTACH,
     session_id: str | None = None,
     title: str = "Exact task",
+    workspace_ref: str = "workspace-A",
+    external_ref: str = "external-A",
     repository_privacy_commitment: str | None = None,
 ) -> StartCommand:
-    identity = StartIdentityInput(title, "workspace-A", "external-A")
+    identity = StartIdentityInput(title, workspace_ref, external_ref)
     commitments = await catalog.commit_identity(identity)
     digest = canonical_digest(
         {
@@ -236,6 +238,118 @@ async def test_reserve_resume_complete_parity() -> None:
     assert memory_replay == sqlite_replay
     assert memory_replay.outcome == "replayed"
     assert memory_replay.replayed_result is not None
+
+
+@pytest.mark.anyio
+async def test_historical_session_binding_and_reattach_parity() -> None:
+    """Memory and SQLite preserve the same capability-bounded session recovery (#438)."""
+
+    installation_id = _id(IdKind.INSTALLATION, 730)
+    now = datetime(2026, 7, 19, 9, 15, tzinfo=UTC)
+    memory, _ = _memory_catalog(installation_id, _Clock(now))
+    sqlite = _sqlite_catalog(installation_id, _Clock(now))
+
+    memory_created = await memory.reserve_or_resume(
+        await _command(memory, operation_id=_id(IdKind.REQUEST, 731))
+    )
+    sqlite_created = await sqlite.reserve_or_resume(
+        await _command(sqlite, operation_id=_id(IdKind.REQUEST, 731))
+    )
+    assert memory_created == sqlite_created
+    await _finish(memory, memory_created)
+    await _finish(sqlite, sqlite_created)
+
+    memory_attached = await memory.reserve_or_resume(
+        await _command(memory, operation_id=_id(IdKind.REQUEST, 732))
+    )
+    sqlite_attached = await sqlite.reserve_or_resume(
+        await _command(sqlite, operation_id=_id(IdKind.REQUEST, 732))
+    )
+    assert memory_attached == sqlite_attached
+    await _finish(memory, memory_attached)
+    await _finish(sqlite, sqlite_attached)
+
+    assert await memory.resolve_route(memory_created.session_id) is None
+    assert await sqlite.resolve_route(sqlite_created.session_id) is None
+    memory_binding = await memory.session_binding(memory_created.session_id)
+    sqlite_binding = await sqlite.session_binding(sqlite_created.session_id)
+    assert memory_binding == sqlite_binding
+    assert memory_binding is not None
+    assert memory_binding.task_id == memory_created.task_id
+    assert memory_binding.session_id == memory_attached.session_id
+    assert memory_binding.writer_id == memory_attached.writer_id
+    unknown = _id(IdKind.SESSION, 733)
+    assert await memory.session_binding(unknown) is None
+    assert await sqlite.session_binding(unknown) is None
+
+    memory_rebound = await memory.reserve_or_resume(
+        await _command(
+            memory,
+            operation_id=_id(IdKind.REQUEST, 734),
+            mode=StartMode.ATTACH,
+            session_id=memory_created.session_id,
+        )
+    )
+    sqlite_rebound = await sqlite.reserve_or_resume(
+        await _command(
+            sqlite,
+            operation_id=_id(IdKind.REQUEST, 734),
+            mode=StartMode.ATTACH,
+            session_id=sqlite_created.session_id,
+        )
+    )
+    assert memory_rebound == sqlite_rebound
+    assert memory_rebound.route_action == "attached"
+    assert memory_rebound.task_id == memory_created.task_id
+    await _finish(memory, memory_rebound)
+    await _finish(sqlite, sqlite_rebound)
+    assert await memory.session_binding(memory_created.session_id) == await sqlite.session_binding(
+        sqlite_created.session_id
+    )
+    rebound_binding = await sqlite.session_binding(sqlite_created.session_id)
+    assert rebound_binding is not None
+    assert rebound_binding.session_id == sqlite_rebound.session_id
+    assert rebound_binding.writer_id == sqlite_rebound.writer_id
+
+
+@pytest.mark.anyio
+async def test_initializing_route_blocks_implicit_drift_but_not_explicit_sibling() -> None:
+    """A reclaimable initializing start stays occupied until quarantine or explicit intent."""
+
+    installation_id = _id(IdKind.INSTALLATION, 735)
+    now = datetime(2026, 7, 19, 9, 20, tzinfo=UTC)
+    memory, _ = _memory_catalog(installation_id, _Clock(now))
+    sqlite = _sqlite_catalog(installation_id, _Clock(now))
+
+    for catalog in (memory, sqlite):
+        initializing = await catalog.reserve_or_resume(
+            await _command(catalog, operation_id=_id(IdKind.REQUEST, 736))
+        )
+        route = await catalog.resolve_route(initializing.session_id)
+        assert route is not None
+        assert route.state is TaskRouteState.INITIALIZING
+
+        with pytest.raises(PublicOperationError) as conflict:
+            await catalog.reserve_or_resume(
+                await _command(
+                    catalog,
+                    operation_id=_id(IdKind.REQUEST, 737),
+                    external_ref="external-B",
+                )
+            )
+        assert conflict.value.code is PublicErrorCode.SESSION_CONFLICT
+        assert conflict.value.safe_details == {"reason_code": "workspace_task_exists"}
+
+        sibling = await catalog.reserve_or_resume(
+            await _command(
+                catalog,
+                operation_id=_id(IdKind.REQUEST, 738),
+                mode=StartMode.CREATE,
+                external_ref="external-B",
+            )
+        )
+        assert sibling.route_action == "created"
+        assert sibling.task_id != initializing.task_id
 
 
 @pytest.mark.anyio

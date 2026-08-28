@@ -255,17 +255,16 @@ async def test_attachment_conflict_and_quarantine_paths() -> None:
 
 @pytest.mark.anyio
 async def test_workspace_ref_groups_sibling_tasks_and_pair_attaches() -> None:
-    """Same workspace_ref + different external_ref → two tasks; replaying a pair attaches."""
+    """create_or_attach on a drifted pair conflicts; mode=create still makes a sibling."""
 
     harness = _Harness.create(840)
     first_request = await harness.command(841, mode=StartMode.CREATE_OR_ATTACH, refs="A")
-    # Distinct external_ref under the same workspace by rebuilding identity.
     first = await harness.catalog.reserve_or_resume(first_request)
     await _complete(harness.catalog, first, 842)
 
     identity_b = StartIdentityInput("Task title", "workspace-A", "external-B")
     commitments_b = await harness.catalog.commit_identity(identity_b)
-    second_request = StartCommand(
+    drifted_request = StartCommand(
         _id(IdKind.REQUEST, 843),
         canonical_digest(
             {
@@ -281,8 +280,32 @@ async def test_workspace_ref_groups_sibling_tasks_and_pair_attaches() -> None:
         commitments_b,
         None,
     )
-    second = await harness.catalog.reserve_or_resume(second_request)
-    await _complete(harness.catalog, second, 844)
+    with pytest.raises(PublicOperationError) as drifted:
+        await harness.catalog.reserve_or_resume(drifted_request)
+    assert drifted.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert drifted.value.safe_details == {"reason_code": "workspace_task_exists"}
+    assert first.task_id not in drifted.value.message
+    assert first.session_id not in drifted.value.message
+    assert first.writer_id not in drifted.value.message
+
+    create_request = StartCommand(
+        _id(IdKind.REQUEST, 844),
+        canonical_digest(
+            {
+                "external": commitments_b.external_ref_commitment,
+                "mode": StartMode.CREATE.value,
+                "session_id": None,
+                "title": commitments_b.title_commitment,
+                "workspace": commitments_b.workspace_ref_commitment,
+            }
+        ),
+        StartMode.CREATE,
+        identity_b,
+        commitments_b,
+        None,
+    )
+    second = await harness.catalog.reserve_or_resume(create_request)
+    await _complete(harness.catalog, second, 845)
 
     assert second.task_id != first.task_id
     workspace = first_request.identity_commitments.workspace_ref_commitment
@@ -290,8 +313,7 @@ async def test_workspace_ref_groups_sibling_tasks_and_pair_attaches() -> None:
     grouped = await harness.catalog.list_workspace_task_ids(workspace)
     assert grouped == tuple(sorted((first.task_id, second.task_id)))
 
-    # Replaying the first pair attaches rather than creating a third task.
-    attach_request = await harness.command(845, mode=StartMode.CREATE_OR_ATTACH, refs="A")
+    attach_request = await harness.command(846, mode=StartMode.CREATE_OR_ATTACH, refs="A")
     attached = await harness.catalog.reserve_or_resume(attach_request)
     assert attached.route_action == "attached"
     assert attached.task_id == first.task_id

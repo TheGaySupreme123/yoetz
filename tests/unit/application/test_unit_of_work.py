@@ -182,6 +182,11 @@ class _LedgerDouble:
             raise self.lookup_error
         return self.record
 
+    async def lookup_task_operation(
+        self, writer_id: str, operation_id: str
+    ) -> OperationRecord | None:
+        return await self.lookup_operation(writer_id, operation_id)
+
 
 def _ledger(value: _LedgerDouble) -> LedgerPort:
     return cast(LedgerPort, value)

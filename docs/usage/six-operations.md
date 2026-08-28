@@ -88,9 +88,10 @@ is already done. `view=candidate_findings` is an advisory read: it creates no ve
 receipt, and no event. An empty candidate list means only that no rule fired in that read; it is not
 a check and cannot be cited as one. After any ambiguous write, prefer `view=operation` with
 `filter.operation_request_id` set to the write's `request_id`: it looks up that operation's state
-for the authenticated writer without requiring a byte-identical replay body. Stored outcome,
-frontiers, and accepted event ids are present only when the operation is a complete
-`publish_work`; other states omit them rather than invent detail.
+within the authenticated task without requiring a byte-identical replay body. This survives a
+same-task attach that rotates the active session and writer, but never crosses into another task
+bundle. Stored outcome, frontiers, and accepted event ids are present only when the operation is a
+complete `publish_work`; other states omit them rather than invent detail.
 
 Before completion, read `declared_obligation_count`, `no_obligations_reason`, and
 `closure_readiness`. An empty readable plan without a typed reason is blocked by

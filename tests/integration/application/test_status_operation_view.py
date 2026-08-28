@@ -1,7 +1,7 @@
 """Integration coverage for ``status view=operation`` recovery (run-4 residual plan 06 / #61).
 
 The five cases the recovery surface must be total over: completed publish_work, completed check
-(the run-4 failure), unknown request_id, other-writer request_id, and a pending in-flight
+(the run-4 failure), unknown request_id, a prior writer on the same task, and a pending in-flight
 operation. Plus compact-projection lag and cursor rejection so no path raises unbounded.
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -457,8 +458,8 @@ async def test_status_view_operation_absent_for_unknown_request_id() -> None:
     assert page.accepted_events == ()
 
 
-async def test_status_view_operation_absent_for_other_writer_request_id() -> None:
-    """A request_id owned by another writer discloses nothing — same absent page."""
+async def test_status_view_operation_finds_prior_writer_request_id_on_same_task() -> None:
+    """Writer-scoped lookup stays private; task-scoped recovery finds the same-task request (#438)."""
 
     app, _objects, seed, ledger = _publish_composition()
     request = PublishWorkRequestModel.model_validate(
@@ -497,9 +498,11 @@ async def test_status_view_operation_absent_for_other_writer_request_id() -> Non
     assert foreign_writer != seed.writer_id
     assert (await ledger.lookup_operation(foreign_writer, request.request_id)) is None
     assert (await ledger.lookup_operation(seed.writer_id, request.request_id)) is not None
+    found = await ledger.lookup_task_operation(foreign_writer, request.request_id)
+    assert found is not None
+    assert found.writer_id == seed.writer_id
 
-    # Route with the foreign writer_id on the same ledger so status does not SESSION_CONFLICT;
-    # lookup_operation is still keyed by (writer_id, request_id) and must report absent.
+    # Route with the successor writer_id on the same ledger, matching attach-after-start.
     base = app.runtime.task
 
     class _ForeignRuntime:
@@ -534,9 +537,25 @@ async def test_status_view_operation_absent_for_other_writer_request_id() -> Non
         ),
     )
     page = cast(StatusOperationPageModel, status.page)
-    assert page.found is False
-    assert page.state == "absent"
-    assert page.operation_kind is None
+    assert page.found is True
+    assert page.state == "complete"
+    assert page.operation_kind == "publish_work"
+
+    original = await ledger.lookup_operation(seed.writer_id, request.request_id)
+    assert original is not None
+    ledger._state.operations[(foreign_writer, request.request_id)] = (  # pyright: ignore[reportPrivateUsage]
+        replace(original, writer_id=foreign_writer),
+        None,
+    )
+    preferred = await ledger.lookup_task_operation(foreign_writer, request.request_id)
+    assert preferred is not None
+    assert preferred.writer_id == foreign_writer
+    assert (
+        await ledger.lookup_task_operation(
+            "wri_00000000-0000-4000-8000-000000000598", request.request_id
+        )
+        is None
+    )
 
 
 async def test_status_view_operation_reports_pending_for_in_flight_check() -> None:
@@ -667,6 +686,96 @@ async def test_status_view_operation_recovers_missing_repository_grant_for_same_
     continuation_wire = page.continuation.model_dump(mode="json", exclude_none=True)
     assert "pending_id" not in continuation_wire
     assert "expires_at" not in continuation_wire
+
+
+async def test_status_view_operation_recovers_disclosure_wait_after_writer_rotation() -> None:
+    """The successor session recovers the old writer's one-use continuation (#438)."""
+
+    base, _objects, seed, ledger = _publish_composition()
+    operation_id = "req_00000000-0000-4000-8000-000000000708"
+    resume = ObjectRef(
+        "obj_00000000-0000-4000-8000-00000000aaad",
+        1,
+        "hmac-sha256:" + "a" * 64,
+        "sha256:" + "b" * 64,
+        "yoetz-object/1",
+        "bmk-1",
+        ObjectMetadata(
+            ObjectKind.DETERMINISTIC_RESULT,
+            "application/vnd.yoetz.deterministic-result+json",
+            seed.task_id,
+            datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+    )
+    pending = OperationRecord(
+        seed.writer_id,
+        operation_id,
+        OperationKind.CHECK,
+        "sha256:" + "c" * 64,
+        OperationState.PENDING,
+        CheckPhase.SEMANTIC_WAIT,
+        "owner-generation-1",
+        "lease-owner-1",
+        1,
+        datetime(2030, 1, 1, tzinfo=UTC),
+        resume,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    ledger._state.operations[(seed.writer_id, operation_id)] = (  # pyright: ignore[reportPrivateUsage]
+        pending,
+        None,
+    )
+    pending_id = protocol_id("ppr_", 711)
+    wait = SemanticDisclosureWait(
+        protocol_id("job_", 709),
+        protocol_id("att_", 710),
+        seed.writer_id,
+        operation_id,
+        pending_id,
+        datetime(2030, 1, 1, tzinfo=UTC),
+        "awaiting",
+        None,
+    )
+    ledger._state.disclosure_waits[wait.job_id] = wait  # pyright: ignore[reportPrivateUsage]
+
+    successor_writer = "wri_00000000-0000-4000-8000-000000000712"
+    successor_session = "ses_00000000-0000-4000-8000-000000000713"
+    successor = replace(
+        base.runtime.task,
+        session_id=successor_session,
+        writer_id=successor_writer,
+    )
+    app = _PublishApp(_PublishRuntime(successor))
+    assert await ledger.load_disclosure_wait(successor_writer, operation_id) is None
+    assert await ledger.load_disclosure_wait(seed.writer_id, operation_id) == wait
+
+    status = await execute_status(
+        cast(StatusApplication, app),
+        _status_operation_request(
+            session_id=successor_session,
+            writer_id=successor_writer,
+            operation_request_id=operation_id,
+            request_tail=714,
+        ),
+    )
+
+    page = cast(StatusOperationPageModel, status.page)
+    assert page.found is True
+    assert page.state == "pending"
+    assert page.continuation is not None
+    assert page.continuation.kind == "privacy_disclosure_decision"
+    assert page.continuation.pending_id == pending_id
+    assert page.continuation.command == (
+        "yoetz",
+        "privacy",
+        "decide-disclosure",
+        pending_id,
+    )
+    assert page.continuation.replay_request_id == operation_id
 
 
 def _complete_check_record(writer_id: str, operation_id: str) -> OperationRecord:

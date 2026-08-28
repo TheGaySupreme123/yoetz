@@ -1498,6 +1498,20 @@ async def test_failed_check_terminalization_replays_and_allows_a_fresh_check() -
 
 
 @pytest.mark.anyio
+async def test_task_operation_lookup_recovers_a_unique_prior_writer() -> None:
+    command = ledger_command()
+    successor_writer = "wri_00000000-0000-4000-8000-000000000099"
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        owned = await adapter.lookup_task_operation(command.writer_id, command.operation_id)
+        assert owned is not None
+        assert owned.writer_id == command.writer_id
+        inherited = await adapter.lookup_task_operation(successor_writer, command.operation_id)
+        assert inherited is not None
+        assert inherited.writer_id == command.writer_id
+
+
+@pytest.mark.anyio
 async def test_failed_check_terminalization_survives_sqlite_restart() -> None:
     command = ledger_command()
     first = sqlite_ledger(command)

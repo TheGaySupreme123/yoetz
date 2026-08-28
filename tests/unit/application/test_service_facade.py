@@ -29,7 +29,12 @@ from yoetz.ports.publish_response_catalog import (
     PublishResponseKey,
     StoredPublishResponse,
 )
-from yoetz.ports.start_catalog import StartCatalogPort, TaskRoute, TaskRouteState
+from yoetz.ports.start_catalog import (
+    SessionBinding,
+    StartCatalogPort,
+    TaskRoute,
+    TaskRouteState,
+)
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
@@ -48,17 +53,24 @@ from yoetz.protocol.models import (
 _REQUEST = "req_00000000-0000-4000-8000-000000000001"
 _TASK = "tsk_00000000-0000-4000-8000-000000000002"
 _SESSION = "ses_00000000-0000-4000-8000-000000000003"
+_RETIRED_SESSION = "ses_00000000-0000-4000-8000-000000000004"
+_WRITER = "wri_00000000-0000-4000-8000-000000000005"
 
 
 class _Catalog:
-    def __init__(self, route: TaskRoute | None) -> None:
+    def __init__(self, route: TaskRoute | None, binding: SessionBinding | None = None) -> None:
         self.route = route
+        self.binding = binding
         self.calls = 0
 
     async def resolve_route(self, session_id: str) -> TaskRoute | None:
-        assert session_id == _SESSION
+        assert session_id in {_SESSION, _RETIRED_SESSION}
         self.calls += 1
-        return self.route
+        return self.route if session_id == _SESSION else None
+
+    async def session_binding(self, session_id: str) -> SessionBinding | None:
+        assert session_id == _RETIRED_SESSION
+        return self.binding
 
 
 class _Responses:
@@ -153,6 +165,26 @@ async def test_task_workflows_reject_cross_repository_context_before_execution(
 
     assert failure.value.code is PublicErrorCode.SESSION_CONFLICT
     assert catalog.calls == 1
+
+
+@pytest.mark.anyio
+async def test_task_workflow_returns_current_binding_for_superseded_session() -> None:
+    binding = SessionBinding(_TASK, _SESSION, _WRITER)
+    catalog = _Catalog(_route(), binding)
+    app = _application(catalog, enforce_repository_identity=True)
+    request = StatusRequest.model_construct(session_id=_RETIRED_SESSION, writer_id=_WRITER)
+
+    with pytest.raises(PublicOperationError) as caught:
+        await app.status(request)
+
+    assert caught.value.code is PublicErrorCode.SESSION_NOT_FOUND
+    assert caught.value.retryable is False
+    assert caught.value.safe_details == {
+        "reason_code": "session_superseded",
+        "task_id": _TASK,
+        "session_id": _SESSION,
+        "writer_id": _WRITER,
+    }
 
 
 @pytest.mark.anyio

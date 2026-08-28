@@ -24,7 +24,9 @@ available. Before a material publication, send the completed `publish_work` requ
 
 Use `create_or_attach` with a stable workspace/work-item pair when first opening or resuming the
 same work. Alternatively, attach with a returned `session_id`; never use a bare `task_id` as an
-attach selector.
+attach selector. A later identical-pair attach mints a new session: prefer the returned ids, and
+recover a prior `request_id` with `status view=operation` from the successor session. Intentional
+siblings use `mode=create` with a different `external_ref`.
 
 ```json
 {

@@ -415,8 +415,7 @@ def _mapping(value: JsonValue) -> dict[str, JsonValue]:
 
 
 async def _operation_continuation(
-    application: Application,
-    writer_id: str,
+    runtime: TaskRuntime,
     operation: OperationRecord,
 ) -> dict[str, JsonValue] | None:
     """Rebuild the continuation for one suspended check from durable state.
@@ -427,16 +426,14 @@ async def _operation_continuation(
     readable operation page into an error.
     """
 
-    runtime = application.runtime
     operation_request_id = operation.operation_id
-    ledger = getattr(runtime, "ledger", None)
-    load = getattr(ledger, "load_disclosure_wait", None)
+    load = getattr(runtime.ledger, "load_disclosure_wait", None)
     continuation: SemanticContinuation | None = None
     if operation.suspension_kind is CheckSuspensionKind.REPOSITORY_GRANT:
         continuation = repository_grant_continuation(request_id=operation_request_id)
     elif load is not None:
         try:
-            wait = await load(writer_id, operation_request_id)
+            wait = await load(operation.writer_id, operation_request_id)
         except Exception:
             wait = None
         if wait is not None and getattr(wait, "state", None) == "awaiting":
@@ -939,7 +936,7 @@ async def execute_status(
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status filter is invalid.")
             if request.cursor is not None:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
-            operation = await runtime.ledger.lookup_operation(
+            operation = await runtime.ledger.lookup_task_operation(
                 request.writer_id, request.filter.operation_request_id
             )
             continuation = None
@@ -949,8 +946,7 @@ async def execute_status(
                 and getattr(operation, "operation_kind", None) is OperationKind.CHECK
             ):
                 continuation = await _operation_continuation(
-                    app,
-                    request.writer_id,
+                    runtime,
                     operation,
                 )
             try:

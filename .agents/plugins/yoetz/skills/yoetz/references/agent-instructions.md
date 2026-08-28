@@ -18,7 +18,7 @@ Do not call `resources/list` or `list_mcp_resources` to find Yoetz guidance. The
 
 # How often to call each operation
 
-- `start` — once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; do not start a second task and do not send bare `task_id`.
+- `start` — once per task, before substantive work. On resume (same or fresh conversation), `mode=create_or_attach` with the same `workspace_ref` + `external_ref` pair and no `session_id`; do not start a second task and do not send bare `task_id`. Attach returns a new session/writer; keep using those ids. A stale mapping names `mode=attach` plus the mapped `session_id`. A different `external_ref` in an occupied workspace is a typed conflict, not a new task — attach with the previously held session selector or use `mode=create` only for an explicit sibling.
 - `publish_work` — one batch per material transition, usually one to eight events; a batch admits up to 100, so keep one transition in one batch rather than splitting it. A normal session is a handful of batches, never one per file, tool call, or message.
 - `status` — after resume, compaction, or delegate handoff, and before any completion claim. Not between routine tool calls.
 - `check` — after publishing the completion claim and its evidence, and again after any material edit or new evidence. A readable response identifying a finding that check returned is not material change; a redacted or unreadable response requires a recheck. A check with no new events since the last one adds nothing.

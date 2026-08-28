@@ -737,6 +737,22 @@ class Application:
         route = await self.start_catalog.resolve_route(session_id)
         request_task_id = getattr(request, "task_id", None)
         if route is None:
+            binding = await self.start_catalog.session_binding(session_id)
+            if binding is not None and binding.session_id != session_id:
+                raise PublicOperationError(
+                    PublicErrorCode.SESSION_NOT_FOUND,
+                    (
+                        "The requested session was replaced. Continue with session_id "
+                        f"{binding.session_id} and writer_id {binding.writer_id}."
+                    ),
+                    False,
+                    safe_details={
+                        "reason_code": "session_superseded",
+                        "task_id": binding.task_id,
+                        "session_id": binding.session_id,
+                        "writer_id": binding.writer_id,
+                    },
+                )
             raise PublicOperationError(
                 PublicErrorCode.SESSION_NOT_FOUND,
                 "The requested task attachment was not found.",
