@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import io
 
-from yoetz.cli.hook_io import context_output, cursor_context_output, stdout_json
+from yoetz.cli.hook_io import (
+    claude_context_output,
+    context_output,
+    cursor_context_output,
+    stdout_json,
+)
 
 
 def test_session_start_and_post_tool_use_emit_additional_context() -> None:
@@ -67,3 +72,37 @@ def test_codex_context_output_keeps_canonical_stdout_bytes() -> None:
         stream.getvalue() == b'{"hookSpecificOutput":{"additionalContext":"bounded advice",'
         b'"hookEventName":"SessionStart"}}\n'
     )
+
+
+def test_claude_stop_emits_documented_non_error_additional_context() -> None:
+    """Claude Code documents Stop/SubagentStop additionalContext as non-error feedback (#420)."""
+
+    for event in ("Stop", "SubagentStop"):
+        emitted = claude_context_output(event, "  refresh status before an exact-frontier check  ")
+        assert emitted == {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "additionalContext": "refresh status before an exact-frontier check",
+            }
+        }
+        assert "decision" not in emitted
+
+
+def test_claude_context_matches_codex_on_shared_additional_context_events() -> None:
+    for event in ("SessionStart", "PostToolUse", "UserPromptSubmit", "PreToolUse", "SubagentStart"):
+        assert claude_context_output(event, "bounded advice") == context_output(
+            event, "bounded advice"
+        )
+
+
+def test_claude_session_end_blank_and_unknown_events_emit_empty_object() -> None:
+    assert claude_context_output("SessionEnd", "would be discarded by the host") == {}
+    assert claude_context_output("PreCompact", "never an advice channel") == {}
+    assert claude_context_output("Stop", "   ") == {}
+    assert claude_context_output("SessionStart", "") == {}
+
+
+def test_claude_context_is_bounded_by_the_shared_context_limit() -> None:
+    assert claude_context_output("Stop", "x" * 2_001) == {
+        "hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": "x" * 2_000}
+    }

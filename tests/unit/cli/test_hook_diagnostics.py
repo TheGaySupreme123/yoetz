@@ -320,3 +320,26 @@ def test_budget_reason_is_an_admitted_token_and_unknown_reasons_are_closed(
     # async hosts, so its token is no longer admitted and closes to the
     # unknown-reason fallback.
     assert [row["reason"] for row in rows] == ["hook_budget_exceeded", "unknown_reason"]
+
+
+def test_storage_outcome_reasons_are_closed_tokens_shared_with_the_advisory(
+    tmp_path: Path,
+) -> None:
+    """`storage_unsafe` / `storage_corrupt` are the hook-side spelling of the public codes (#338)."""
+
+    for reason in ("storage_unsafe", "storage_corrupt", "STORAGE_CORRUPT"):
+        record_hook_diagnostic(reason, "SessionStart", _state=tmp_path)
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "observation/hook-diagnostics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["reason"] for row in rows] == [
+        "storage_unsafe",
+        "storage_corrupt",
+        "unknown_reason",
+    ]
+    summary = hook_diagnostic_summary(_state=tmp_path)
+    reasons = cast(Mapping[str, object], summary["reasons"])
+    assert set(reasons) == {"storage_unsafe", "storage_corrupt", "unknown_reason"}

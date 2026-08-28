@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
@@ -8,8 +9,14 @@ from typing import cast
 import pytest
 
 from yoetz.adapters.integrations.codex_lifecycle import load_mapping
+from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.cli import observe_hooks
-from yoetz.domain.observation import ObservationSource
+from yoetz.domain.observation import (
+    ObservationControlCommand,
+    ObservationRevokeCommand,
+    ObservationSource,
+)
+from yoetz.kernel.policies.observation_advice import ObservationCompositionFact
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 
 
@@ -328,3 +335,261 @@ def test_claude_stop_retains_only_the_boolean_loop_guard(
     assert captured[0]["stop_hook_active"] is True
     assert "stop_hook_active" not in captured[1]
     assert "stop_hook_active" not in captured[2]
+
+
+def _consented_store(tmp_path: Path) -> tuple[LocalObservationStore, str]:
+    store = LocalObservationStore(_state=tmp_path)
+    commitment = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(commitment)
+    return store, commitment
+
+
+def _recorded_diagnostics(tmp_path: Path) -> list[tuple[str, str]]:
+    path = tmp_path / "observation/hook-diagnostics.jsonl"
+    if not path.exists():
+        return []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    return [(row["reason"], row["event"]) for row in rows if "reason" in row]
+
+
+def test_claude_real_ingress_session_start_emits_native_context_and_privacy_canaries(
+    tmp_path: Path,
+) -> None:
+    """The unstubbed ingress stores one structural envelope and answers in Claude's contract."""
+
+    store, commitment = _consented_store(tmp_path)
+    stdout = io.BytesIO()
+    canaries: dict[str, JsonValue] = {
+        "cwd": "/private/CWD_CANARY",
+        "transcript_path": "/private/TRANSCRIPT_CANARY.jsonl",
+        "prompt": "PROMPT_CANARY",
+        "tool_input": {"command": "INPUT_CANARY"},
+        "tool_response": "RESPONSE_CANARY",
+    }
+    payload: dict[str, JsonValue] = {
+        "session_id": "claude-real-start",
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "claude_code_version": "2.1.241",
+        **canaries,
+    }
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="SessionStart",
+            stdin_bytes=canonical_encode(payload),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    emitted = cast(Mapping[str, JsonValue], strict_json_parse(stdout.getvalue()))
+    assert set(emitted) == {"hookSpecificOutput"}
+    specific = cast(Mapping[str, JsonValue], emitted["hookSpecificOutput"])
+    assert specific["hookEventName"] == "SessionStart"
+    assert "no ledger task is mapped yet" in cast(str, specific["additionalContext"])
+
+    envelopes = store.list_envelopes(commitment)
+    assert len(envelopes) == 1
+    assert envelopes[0].source is ObservationSource.CLAUDE_HOOK
+    structural = envelopes[0].structural_payload
+    assert structural["capability_profile_id"] == "claude-code-cli-local-project-2.1.241"
+    assert structural["hook_name"] == "SessionStart"
+    state_bytes = b"".join(
+        path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+    for canary in (
+        "CWD_CANARY",
+        "TRANSCRIPT_CANARY",
+        "PROMPT_CANARY",
+        "INPUT_CANARY",
+        "RESPONSE_CANARY",
+    ):
+        assert canary.encode() not in canonical_encode(structural)
+        assert canary.encode() not in state_bytes
+        assert canary.encode() not in stdout.getvalue()
+    assert _recorded_diagnostics(tmp_path) == []
+
+
+def test_claude_stop_delivers_advice_as_non_error_feedback_not_a_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pending advice at Claude Stop uses the documented additionalContext channel (#420)."""
+
+    store, commitment = _consented_store(tmp_path)
+    # SessionStart would deliver any advice pending at that moment together
+    # with the attach advisory, so the not-ready provider fact only appears
+    # after the session is bound: the Stop pass is then the first delivery.
+    compositions = [
+        ObservationCompositionFact(
+            semantic_configured=False,
+            semantic_ready=False,
+            provider_factory_ids=(),
+            connected_provider_ids=(),
+        )
+    ]
+    original_refresh = LocalObservationStore.refresh_advice
+
+    def refresh_with_composition(
+        self: LocalObservationStore, workspace: str, **kwargs: object
+    ) -> object:
+        kwargs.setdefault("composition", compositions[-1])
+        return original_refresh(self, workspace, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(LocalObservationStore, "refresh_advice", refresh_with_composition)
+    session = "claude-stop-advice"
+    start_out = io.BytesIO()
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="SessionStart",
+            stdin_bytes=canonical_encode(
+                {"session_id": session, "hook_event_name": "SessionStart", "source": "startup"}
+            ),
+            stdout=start_out,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    session_commitment = store.session_commitment(f"claude:{session}")
+    assert store.peek_advice_for_delivery(commitment, session_commitment=session_commitment) is None
+    compositions.append(
+        ObservationCompositionFact(
+            semantic_configured=True,
+            semantic_ready=False,
+            provider_factory_ids=("fireworks",),
+            connected_provider_ids=(),
+        )
+    )
+    store.refresh_advice(commitment)
+    assert (
+        store.peek_advice_for_delivery(
+            commitment, allow_standing=True, session_commitment=session_commitment
+        )
+        is not None
+    )
+
+    stop_out = io.BytesIO()
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="Stop",
+            stdin_bytes=canonical_encode(
+                {"session_id": session, "hook_event_name": "Stop", "stop_hook_active": False}
+            ),
+            stdout=stop_out,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    emitted = cast(Mapping[str, JsonValue], strict_json_parse(stop_out.getvalue()))
+    assert set(emitted) == {"hookSpecificOutput"}
+    specific = cast(Mapping[str, JsonValue], emitted["hookSpecificOutput"])
+    assert specific["hookEventName"] == "Stop"
+    assert "connect_provider" in cast(str, specific["additionalContext"])
+    assert b"decision" not in stop_out.getvalue()
+    assert store.peek_advice_for_delivery(commitment, session_commitment=session_commitment) is None
+
+    # A second Stop in the same host loop is the documented loop guard: nothing
+    # is re-delivered and the output stays empty.
+    guarded_out = io.BytesIO()
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="Stop",
+            stdin_bytes=canonical_encode(
+                {"session_id": session, "hook_event_name": "Stop", "stop_hook_active": True}
+            ),
+            stdout=guarded_out,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert guarded_out.getvalue() == b"{}\n"
+
+
+@pytest.mark.parametrize(
+    ("workspace", "expected"),
+    [
+        pytest.param("", "workspace_unresolvable", id="empty-locator-from-unset-project-dir"),
+        pytest.param("/private/does-not-exist/CANARY", "workspace_unresolvable", id="missing"),
+        pytest.param(None, "workspace_unconsented", id="unconsented-explicit"),
+    ],
+)
+def test_claude_ingress_records_a_typed_diagnostic_when_nothing_is_ingested(
+    tmp_path: Path, workspace: str | None, expected: str
+) -> None:
+    """A fail-open `{}` still leaves a payload-free trace naming the dropped layer (#435)."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path) if workspace is None else workspace
+    stdout = io.BytesIO()
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(
+                {
+                    "session_id": "claude-dropped",
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "mcp__plugin_yoetz_yoetz__status",
+                    "cwd": "/private/CWD_CANARY",
+                }
+            ),
+            stdout=stdout,
+            workspace=locator,
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert stdout.getvalue() == b"{}\n"
+    assert _recorded_diagnostics(tmp_path) == [(expected, "PostToolUse")]
+    assert store.list_envelopes(store.workspace_commitment(str(tmp_path.resolve()))) == ()
+    diagnostics_bytes = (tmp_path / "observation/hook-diagnostics.jsonl").read_bytes()
+    for canary in (b"CANARY", b"does-not-exist", str(tmp_path).encode()):
+        assert canary not in diagnostics_bytes
+
+
+def test_claude_ingress_names_paused_consent_distinctly(tmp_path: Path) -> None:
+    store, commitment = _consented_store(tmp_path)
+    store.pause(ObservationControlCommand(commitment))
+    stdout = io.BytesIO()
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="SessionStart",
+            stdin_bytes=canonical_encode(
+                {"session_id": "claude-paused", "hook_event_name": "SessionStart"}
+            ),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert stdout.getvalue() == b"{}\n"
+    assert _recorded_diagnostics(tmp_path) == [("paused", "SessionStart")]
+
+    # Revocation keeps the pause flag in the stored record; the diagnostic must
+    # still say unconsented, as the `observe status` consent label does.
+    store.revoke(ObservationRevokeCommand(commitment, retain_evidence=True))
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="SessionStart",
+            stdin_bytes=canonical_encode(
+                {"session_id": "claude-revoked", "hook_event_name": "SessionStart"}
+            ),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert _recorded_diagnostics(tmp_path)[-1] == ("workspace_unconsented", "SessionStart")

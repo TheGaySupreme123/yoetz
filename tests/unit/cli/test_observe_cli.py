@@ -409,3 +409,116 @@ async def test_drain_quarantines_setup_probe_and_routes_other_rows(tmp_path: Pat
     assert summary["reasons"] == {"setup_probe": 1}
     assert store.pending_outbox_count(workspace) == 0
     assert store.quarantined_count(workspace) == 1
+
+
+@pytest.mark.parametrize(
+    "workspace", ["", "/private/does-not-exist/CANARY"], ids=["empty", "missing"]
+)
+def test_status_names_an_unresolvable_locator_instead_of_internal_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], workspace: str
+) -> None:
+    """`--workspace ""` (an unset CLAUDE_PROJECT_DIR) is a typed refusal, exit 2 (#428)."""
+
+    code = observe_cli.observe_status(workspace=workspace, json_output=False, _state=tmp_path)
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert captured.err.startswith("observation_status_failed:workspace_unresolvable: ")
+    assert "CLAUDE_PROJECT_DIR" in captured.err
+    assert "internal_error" not in captured.err
+    assert "CANARY" not in captured.err
+
+    code = observe_cli.observe_status(workspace=workspace, json_output=True, _state=tmp_path)
+    captured = capsys.readouterr()
+    assert code == 2
+    error = json.loads(captured.out)["error"]
+    assert error["reason"] == "workspace_unresolvable"
+    assert error["code"] == "INVALID_REQUEST"
+    assert error["operation"] == "status"
+    assert error["retryable"] is False
+    assert "CANARY" not in captured.out
+
+
+def test_status_command_reports_typed_workspace_failure_through_the_console(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(observe_cli, "state_dir", lambda: tmp_path, raising=False)
+    result = CliRunner().invoke(app, ["observe", "status", "--workspace", "", "--json"])
+    assert result.exit_code == 2
+    assert "internal_error" not in result.output
+    assert json.loads(result.stdout)["error"]["reason"] == "workspace_unresolvable"
+
+
+def test_status_maps_bounded_storage_refusals_to_their_public_exit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+
+    def corrupt(self: LocalObservationStore, workspace: str) -> object:
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_CORRUPT, "Observation state is invalid.", False
+        )
+
+    monkeypatch.setattr(LocalObservationStore, "consent_for", corrupt)
+    code = observe_cli.observe_status(workspace=str(tmp_path), json_output=False, _state=tmp_path)
+    captured = capsys.readouterr()
+    assert code == 40
+    assert captured.err == (
+        "observation_status_failed:storage_corrupt: Observation state is invalid.\n"
+    )
+
+    def unsafe(self: LocalObservationStore, workspace: str) -> object:
+        raise PublicOperationError(PublicErrorCode.STORAGE_UNSAFE, "Runtime gate is unsafe.", True)
+
+    monkeypatch.setattr(LocalObservationStore, "consent_for", unsafe)
+    code = observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=tmp_path)
+    captured = capsys.readouterr()
+    assert code == 20
+    error = json.loads(captured.out)["error"]
+    assert (error["reason"], error["code"], error["retryable"]) == (
+        "storage_unsafe",
+        "STORAGE_UNSAFE",
+        True,
+    )
+
+
+def test_status_maps_an_unsafe_state_path_to_storage_unsafe(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from yoetz.config.paths import PathSafetyError
+
+    def unsafe_store(*args: object, **kwargs: object) -> object:
+        raise PathSafetyError("path_contains_symlink")
+
+    monkeypatch.setattr(observe_cli, "LocalObservationStore", unsafe_store)
+    code = observe_cli.observe_status(workspace=str(tmp_path), json_output=False, _state=tmp_path)
+    captured = capsys.readouterr()
+    assert code == 20
+    assert captured.err.startswith(
+        "observation_status_failed:storage_unsafe: the local Yoetz state path is unsafe "
+        "(path_contains_symlink)"
+    )
+
+
+def test_other_observe_verbs_share_the_typed_workspace_refusal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for verb, call in (
+        ("grant", lambda: observe_cli.grant_observation(workspace="", _state=tmp_path)),
+        ("pause", lambda: observe_cli.pause_observation(workspace="", _state=tmp_path)),
+        ("resume", lambda: observe_cli.resume_observation(workspace="", _state=tmp_path)),
+        ("revoke", lambda: observe_cli.revoke_observation(workspace="", _state=tmp_path)),
+        (
+            "reclaim",
+            lambda: observe_cli.reclaim_observation(
+                workspace="", json_output=False, _state=tmp_path
+            ),
+        ),
+        (
+            "drain",
+            lambda: observe_cli.drain_observation(workspace="", json_output=False, _state=tmp_path),
+        ),
+    ):
+        assert call() == 2
+        captured = capsys.readouterr()
+        assert captured.err.startswith(f"observation_{verb}_failed:workspace_unresolvable: ")

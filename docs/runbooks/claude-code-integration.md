@@ -147,6 +147,19 @@ The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, s
 `yoetz hooks claude-observe` and are best-effort; timeouts/nonzero exits never authorize or block
 Claude work.
 
+Advice uses Claude Code's documented output contract. `SessionStart`, `PostToolUse`, and `Stop`
+may emit `hookSpecificOutput.additionalContext`; at `Stop` that is Claude Code's non-error feedback
+channel, so Yoetz never emits `decision: block` to Claude Code, and `stop_hook_active` remains the
+loop guard. `SessionEnd` emits `{}`.
+
+The rendered hook commands bind `--workspace "${CLAUDE_PROJECT_DIR}"`. When a hook ingests
+nothing it still exits 0 with `{}`, but records one payload-free `hook_diagnostics` reason that
+`yoetz observe status --workspace <project>` reports: `workspace_unresolvable` (the variable was
+unset or named a missing, symlinked, or unsafe path), `workspace_unconsented` (the canonical Git
+root of that path carries no active consent — note that a `git worktree` is its own Git root, so
+consent on the main checkout does not cover it), or `paused`. A `recent_count` of zero after a
+session that ran Yoetz tools therefore means the hooks did not fire, not that they were dropped.
+
 Grant observation separately for the exact project. Exercise every advertised event and inspect
 `yoetz observe status`. Only consented accepted `claude_hook` envelopes earn coverage. Raw
 transcript/prompt/assistant/path/cwd/tool input/tool output/result/error values are discarded before

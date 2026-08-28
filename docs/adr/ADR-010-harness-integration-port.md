@@ -249,6 +249,19 @@ the same six operations; this artifact slice still creates no host activation or
 block again when the host sets `stop_hook_active`. `SessionEnd` has no output schema and the host
 discards stdout, so it is not advice-safe and never consumes a pending delivery.
 
+**Amendment (2026-08-28, issues #420, #435, #338, #428):** Codex's hooks reference was re-read on
+2026-08-28: Stop / SubagentStop still admit only the common output fields plus
+`decision`/`reason`, and `decision: block` is documented as a continuation prompt built from
+`reason`, so the #222 behaviour stands and the loop guard remains `stop_hook_active` plus delivery
+identity. Claude Code documents `hookSpecificOutput.additionalContext` at Stop / SubagentStop as
+non-error feedback, so the Claude ingress renders every advice-bearing event, Stop included, in that
+shape and never emits `decision: block`. Workspace-binding outcomes are diagnosed host-agnostically
+in the shared ingress (`workspace_unresolvable`, `workspace_unconsented`, `paused`), the two storage
+outcomes of a status read carry distinct retryability advisories and the same lowercase diagnostic
+tokens, and `yoetz observe` verbs report pre-store conditions as typed public outcomes instead of
+`internal_error`. Cursor's reference states `session_id` is "the same as `conversation_id`"; the
+alias persisted at `sessionStart` is therefore a defensive bound, not a required join.
+
 **Amendment (2026-08-14):** Hook advice delivery no longer falls back to the workspace-wide
 `advice_snapshot` for task-scoped conditions. Before a Codex session is mapped, task-scoped
 advice is selected only from that Codex session's retained envelopes. After mapping, delivery

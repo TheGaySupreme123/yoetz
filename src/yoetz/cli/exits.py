@@ -225,6 +225,12 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
         "service_draining": (
             "the local service is shutting down; wait for it to exit, then start it again"
         ),
+        "workspace_unresolvable": (
+            "the --workspace locator is empty, missing, symlinked, foreign-owned, or otherwise "
+            "unsafe; pass the resolved path of a directory owned by the current user (host hooks "
+            "render it from CLAUDE_PROJECT_DIR or CURSOR_PROJECT_DIR, so check that variable "
+            "when a hook reports this)"
+        ),
     }
 )
 

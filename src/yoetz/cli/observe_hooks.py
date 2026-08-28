@@ -28,11 +28,15 @@ from yoetz.adapters.integrations.observation_local import (
     YOETZ_TOOL_NAMES,
     AdviceDelivery,
     FrontierMotionNotice,
+    LocalObservationConsent,
     LocalObservationStore,
     ObservationOutboxRow,
 )
 from yoetz.cli import hook_io
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic, record_hook_timing
+from yoetz.cli.hook_io import (
+    claude_context_output as _claude_context_output,
+)
 from yoetz.cli.hook_io import (
     context_output as _context_output,
 )
@@ -1257,6 +1261,18 @@ def _note_dropped_event_gap(
     store.note_coverage_gap(commitment, ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
 
 
+def _consent_binding_diagnostic(consent: LocalObservationConsent | None) -> str:
+    """Name why a resolved workspace admits no ingest: paused, or no active consent.
+
+    Revocation wins over the retained pause flag, matching the `observe status`
+    consent label: a revoked grant is unconsented, not paused.
+    """
+
+    if consent is not None and consent.revoked_at is None and consent.paused:
+        return "paused"
+    return "workspace_unconsented"
+
+
 def handle_observe(
     *,
     event_name: str | None,
@@ -1318,13 +1334,19 @@ def handle_observe(
             return emitted
 
         def _render_context(additional_context: str) -> dict[str, JsonValue]:
-            """Render advice for the receiving host, retaining Cursor's raw event name."""
+            """Render advice in the receiving host's own stdout contract.
+
+            Cursor keeps its raw event name; Claude Code gets its documented
+            non-error Stop feedback instead of Codex's `decision: block`.
+            """
 
             if source is ObservationSource.CURSOR_HOOK:
                 raw_cursor_event = _output_event_name
                 if raw_cursor_event is None:
                     return {}
                 return _cursor_context_output(raw_cursor_event, additional_context)
+            if source is ObservationSource.CLAUDE_HOOK:
+                return _claude_context_output(resolved_event, additional_context)
             return _context_output(resolved_event, additional_context)
 
         payload = read_hook_payload(stdin_bytes)
@@ -1378,6 +1400,14 @@ def handle_observe(
 
         workspace_commitment: str | None = None
         workspace_locator: str | None = None
+        # Why a pass that ingests nothing ingested nothing. Every host ingress
+        # shares this branch, so the reason is host-agnostic (#420/#435): an
+        # explicit locator that cannot be canonicalized (`--workspace ""` from
+        # an unset CLAUDE_PROJECT_DIR, a missing or symlinked path), a canonical
+        # locator without consent, or a deliberately paused one. Without a
+        # payload-free row here, `observe status` cannot tell a hook that fired
+        # and was dropped from one that never fired.
+        binding_diagnostic: str | None = None
         if _workspace_commitment is not None:
             workspace_commitment = _workspace_commitment
         elif workspace is not None:
@@ -1391,16 +1421,21 @@ def handle_observe(
                     if source is ObservationSource.CURSOR_HOOK
                     else canonical_workspace_locator(workspace)
                 )
-                if workspace_locator is None:
-                    raise ValueError("workspace_locator_invalid")
-                workspace_commitment = store.workspace_commitment(workspace_locator)
-                consent_probe = store.consent_for(workspace_commitment)
-                if consent_probe is None or not consent_probe.active:
+            except Exception:
+                workspace_locator = None
+            if workspace_locator is None:
+                binding_diagnostic = "workspace_unresolvable"
+            else:
+                try:
+                    workspace_commitment = store.workspace_commitment(workspace_locator)
+                    consent_probe = store.consent_for(workspace_commitment)
+                    if consent_probe is None or not consent_probe.active:
+                        binding_diagnostic = _consent_binding_diagnostic(consent_probe)
+                        workspace_commitment = None
+                        workspace_locator = None
+                except Exception:
                     workspace_commitment = None
                     workspace_locator = None
-            except Exception:
-                workspace_commitment = None
-                workspace_locator = None
         if workspace_commitment is None and workspace is None:
             # A hook without an explicit locator may retain the legacy bound-session/single-active
             # lane. An explicit locator that failed canonical consent never falls back to a
@@ -1409,10 +1444,12 @@ def handle_observe(
             workspace_locator = None
         consent = None if workspace_commitment is None else store.consent_for(workspace_commitment)
         if consent is None or not consent.active:
-            # Consent missing/paused/revoked: no ingest, no spool; still exit 0.
-            if source is ObservationSource.CURSOR_HOOK and workspace is not None:
-                with contextlib.suppress(Exception):
-                    record_hook_diagnostic("workspace_unconsented", resolved_event, _state=_state)
+            # Consent missing/paused/revoked: no ingest, no spool; still exit 0,
+            # but leave the typed, payload-free trace.
+            if binding_diagnostic is None:
+                binding_diagnostic = _consent_binding_diagnostic(consent)
+            with contextlib.suppress(Exception):
+                record_hook_diagnostic(binding_diagnostic, resolved_event, _state=_state)
             _stdout_json({}, stdout)
             return 0
 
@@ -1576,6 +1613,8 @@ def handle_observe(
                     _PRIVACY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _RETRY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _STALE_MAPPING_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _STORAGE_CORRUPT_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _STORAGE_UNSAFE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _UNAVAILABLE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _active_context,  # pyright: ignore[reportPrivateUsage]
                     _read_status,  # pyright: ignore[reportPrivateUsage]
@@ -1649,6 +1688,17 @@ def handle_observe(
                                 additional = _RETRY_CONTEXT
                             elif kind == "privacy":
                                 additional = _PRIVACY_CONTEXT
+                            elif kind in {"storage_unsafe", "storage_corrupt"}:
+                                # Opposite retry advice, so never the shared
+                                # "unavailable" text (#338); the same token
+                                # lands in hook diagnostics for `observe status`.
+                                additional = (
+                                    _STORAGE_UNSAFE_CONTEXT
+                                    if kind == "storage_unsafe"
+                                    else _STORAGE_CORRUPT_CONTEXT
+                                )
+                                with contextlib.suppress(Exception):
+                                    record_hook_diagnostic(kind, resolved_event, _state=_state)
                             else:
                                 additional = _UNAVAILABLE_CONTEXT
                         if not skip_service:

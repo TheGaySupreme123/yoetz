@@ -134,7 +134,10 @@ timeouts are 10 seconds for `sessionStart`/`stop`, 5 seconds for
 persists the validated pair as a bounded local alias, so later events carrying only
 `conversation_id` resolve to the same Yoetz session; an event whose pair contradicts the validated
 alias is rejected as `cursor_session_ambiguous` rather than splitting one conversation across
-sessions. Local rendering and integration tests cannot prove live host session binding.
+sessions. Cursor's hooks reference (re-read 2026-08-28) describes `sessionStart`'s `session_id` as
+"the same as `conversation_id`", so one conversation maps to one Yoetz session by the host's own
+contract and the alias is a defensive bound. Local rendering and integration tests cannot prove
+live host session binding.
 
 Advice uses Cursor's native output contract rather than the Codex/Claude Code envelope.
 `sessionStart` may emit `additional_context`. `stop` does not emit `followup_message` because Cursor
@@ -148,9 +151,21 @@ then `CURSOR_PROJECT_DIR`, then the explicit `--workspace` value. A multiroot wo
 deepest root containing `CURSOR_PROJECT_DIR` or refuses. The reusable git-root helper walks safe
 ancestors for the nearest `.git` directory or worktree file, without running Git, and refuses
 symlinked ancestors, root/home locators, unsafe markers, or unbounded/control-bearing values.
-`workspace_unresolvable` and `workspace_unconsented` remain distinct payload-free diagnostics.
-Cursor's current documentation does not specify plugin-hook CWD, and this change does not claim a
-live IDE/CLI CWD measurement; the binding deliberately no longer depends on it.
+`workspace_unresolvable` and `workspace_unconsented` remain distinct payload-free diagnostics
+(with `paused` for a paused grant), recorded by the shared ingress for every host.
+
+Measured on 2026-08-28 with Cursor Agent CLI `2026.08.25-3e8eec8` (payload `cursor_version`;
+`cursor-agent --version` printed `2026.08.11-e8db854`) loading the native plugin through
+`--plugin-dir` in an isolated cell: the plugin-sourced `sessionStart` hook ran with `$PWD` equal to
+the **plugin directory** (`<cursor-config-root>/plugins/local/yoetz`), not the project, while
+`CURSOR_PROJECT_DIR` and `CLAUDE_PROJECT_DIR` both named the project root and `workspace_roots`
+was that single root. A bare `--workspace .` would therefore bind the wrong directory; the
+`workspace_roots` → `CURSOR_PROJECT_DIR` → explicit order is what makes the rendered command
+correct. The same payload carried identical `session_id` and `conversation_id` values. In that
+cell, with observation consent granted, the model quoted the `sessionStart` `additional_context`
+verbatim and `yoetz observe status` reported `source_coverage.cursor_hook: true`; with consent
+revoked, the hook emitted `{}` and recorded `workspace_unconsented`. The IDE cell (3.17.x) was
+not measured in that run.
 
 Use the same selected path for `yoetz observe grant|status|pause|resume|revoke`: operator controls
 and setup probes apply the identical nearest-safe-Git-root normalization as hook ingress. A legacy

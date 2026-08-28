@@ -2566,9 +2566,15 @@ Shared closed types:
   (`yoetz observe status`) rather than naming a nonexistent MCP tool or CLI verb. Codex hook stdout
   is event-specific:
   `SessionStart` / `PostToolUse` / `UserPromptSubmit` emit `hookSpecificOutput.additionalContext`;
-  `Stop` emits `decision: block` plus `reason` (Codex has no Stop `hookSpecificOutput`, and
-  `stop_hook_active` plus delivery identity are the loop guard); `SessionEnd` always emits `{}`
+  `Stop` emits `decision: block` plus `reason` (Codex's hooks reference, re-read 2026-08-28,
+  still gives Stop / SubagentStop only the common output fields plus `decision`/`reason`, and
+  documents `decision: block` as a continuation prompt; `stop_hook_active` plus delivery identity
+  are the loop guard); `SessionEnd` always emits `{}`
   because the host discards its stdout and a peek/commit there would consume undelivered advice.
+  Claude Code hook stdout shares the `hookSpecificOutput.additionalContext` shape on every
+  advice-bearing event including `Stop` / `SubagentStop`, where Claude Code documents it as
+  non-error feedback; the Claude ingress therefore never emits `decision: block`, and its
+  `SessionEnd` emits `{}`.
   Cursor has a separate native contract: raw `sessionStart` emits `additional_context`; raw `stop`
   advice is disabled because `followup_message` auto-submits a user message; and `afterFileEdit`,
   `afterMCPExecution`, and `sessionEnd` emit `{}`. Cursor leases and commits advice only for a
@@ -2688,13 +2694,30 @@ classifies `SESSION_CONFLICT` and `SESSION_NOT_FOUND` as `mapping_stale`, not se
 the hook preserves the mapping, tells the agent to call `start` again, and accepts only that
 successful `start` result as authority for replacement ids. `OPERATION_PENDING`, `BUNDLE_BUSY`, and
 `FRONTIER_CONFLICT` are transient status reads; vault and repository-privacy failures retain their
-distinct recovery advisories. The closed public-error table is exhaustive so a new code cannot
+distinct recovery advisories. `STORAGE_UNSAFE` and `STORAGE_CORRUPT` keep their own advisories
+because they prescribe opposite next steps — a fault that may be retried once versus invalid data
+that must not be retried and is escalated to the operator — and the hook records the same
+lowercase token (`storage_unsafe` / `storage_corrupt`) as a payload-free diagnostic so the
+advisory, `hook_diagnostics`, and `observe status` share one vocabulary (issue #338). The closed
+public-error table is exhaustive so a new code cannot
 silently inherit an unrelated advisory (issue #308). `observe status` retains the current and rotated
 hook-diagnostic history, but pairs every all-time reason count with `first_seen`, `last_seen`, and a
 count in the closed one-hour `window_seconds`; timings likewise date the all-time maximum and report
 a separate recent maximum. Unreadable or future timestamps remain retained but are never classified
 as recent, so a fixed historical failure cannot masquerade as live degradation (issue #310).
 Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
+Every host ingress (Codex, Claude Code, Cursor) that ingests nothing because of workspace binding
+records one payload-free diagnostic naming the dropped layer: `workspace_unresolvable` when an
+explicit `--workspace` locator cannot be canonicalized (an empty value from an unset
+`CLAUDE_PROJECT_DIR`, a missing, symlinked, or unsafe path), `workspace_unconsented` when the
+canonical locator carries no active consent, and `paused` when consent is paused. The fail-open
+`{}` stdout is unchanged; the diagnostic is what lets `observe status` distinguish a hook that
+fired and was dropped from one that never fired (issues #420, #435). `yoetz observe` verbs report
+the same pre-store conditions as typed public outcomes rather than `internal_error`:
+`workspace_unresolvable` exits `INVALID_REQUEST` (2) with its remediation, an unsafe local state
+path exits `STORAGE_UNSAFE` (20), and a bounded storage refusal exits with its own public code;
+`--json` callers receive one `error` object carrying `code`, `reason`, `retryable`, `operation`,
+and the bounded message (issue #428).
 A `service_unavailable` rejection retires that session's lane for the pass while other sessions
 remain eligible; no later row may step over a failed lane head. Local observation-store acquisition is capped at two
 seconds for both the process-local reentrant lock and the cross-process flock. Hook timing rows
