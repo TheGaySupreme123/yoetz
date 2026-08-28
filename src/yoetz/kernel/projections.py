@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Final, Protocol, cast
 
 from yoetz.domain.events import (
+    PAYLOAD_TYPES,
     ActionRecordedPayload,
     AssignmentRecordedPayload,
     ClaimRecordedPayload,
@@ -887,18 +888,40 @@ def _snapshot_uint(value: object, *, safe: bool = False) -> int:
     return parsed
 
 
+def _schema_versions(schema_name: str) -> tuple[str, ...]:
+    """Every known wire version of one schema name, newest first."""
+
+    versions = sorted(
+        {schema.version for schema in PAYLOAD_TYPES if schema.name == schema_name},
+        key=lambda version: tuple(int(part) for part in version.split(".")),
+        reverse=True,
+    )
+    if not versions:
+        raise _invalid()
+    return tuple(versions)
+
+
 def _decoded_payload(value: JsonValue, schemas: tuple[str, ...]) -> EventPayload:
+    # A snapshot record carries no schema version: generation-1 snapshots were minted when every
+    # family had exactly one, and adding the version to the record would change the canonical
+    # bytes every stored case_digest and resume pointer is bound to. Decoding with a pinned
+    # "1.0.0" therefore rejected any payload a later version admits — an evidence record with a
+    # ``digest_binding`` (evidence_recorded/1.1.0) failed as ``unknown_payload_field``, which
+    # turned every deferred rehydration of a frozen case (privacy-wait replay, ledger recovery)
+    # into a non-retryable STORAGE_CORRUPT on an intact bundle (issue #427). Each name decodes
+    # under its newest admitting version instead; the name ambiguity check is unchanged.
     decoded: list[EventPayload] = []
     for schema_name in schemas:
-        try:
-            decoded.append(
-                decode_payload(
-                    EventSchema(schema_name, "1.0.0"),
+        for version in _schema_versions(schema_name):
+            try:
+                payload = decode_payload(
+                    EventSchema(schema_name, version),
                     cast(DomainJsonValue, value),
                 )
-            )
-        except ValueError:
-            continue
+            except ValueError:
+                continue
+            decoded.append(payload)
+            break
     if len(decoded) != 1:
         raise _invalid()
     return decoded[0]
