@@ -705,6 +705,20 @@ def _allowed_for(kind: ControlClientKind) -> tuple[ControlMethod, ...]:
     return _WORKFLOW_METHODS if kind is ControlClientKind.MCP_BRIDGE else _ALL_METHODS
 
 
+def _hello_result_wire(
+    service_status: ServiceStatus, allowed: tuple[ControlMethod, ...]
+) -> dict[str, JsonValue]:
+    return {
+        "protocol_version": CONTROL_PROTOCOL_VERSION,
+        "service_version": service_status.service_version,
+        "service_instance_id": service_status.service_instance_id,
+        "service_generation": service_status.service_generation,
+        "status": _status_wire(service_status),
+        "allowed_methods": [method.value for method in allowed],
+        "schema_manifest_digest": _manifest_digest(),
+    }
+
+
 def _manifest_digest() -> str:
     # sha256(manifest.json) only — never build the catalog to hash it (#210).
     return schema_manifest_digest()
@@ -816,9 +830,15 @@ async def server_handshake(
         _validated_wire(hello, "control-hello")
         if hello["protocol_version"] != CONTROL_PROTOCOL_VERSION:
             _fail("protocol_mismatch")
-        if hello["schema_manifest_digest"] != _manifest_digest():
-            _fail("manifest_mismatch")
         kind = ControlClientKind(cast(str, hello["client_kind"]))
+        if hello["schema_manifest_digest"] != _manifest_digest():
+            # Answer with this installation's hello-result so a peer that still
+            # decodes the frozen 2.x shape names `manifest_mismatch` instead of
+            # treating a silent close as `frame_invalid`. The session is not admitted.
+            await write_control_frame(
+                stream, _hello_result_wire(service_status, _allowed_for(kind))
+            )
+            _fail("manifest_mismatch")
         raw_presentation = hello.get("presentation_context")
         render_mode = ProjectionRenderMode.MACHINE_READABLE
         output_is_controlling_tty = False
@@ -846,18 +866,8 @@ async def server_handshake(
                 and type(repository_context) is not RepositoryPrivacyContext
             ):
                 _fail("protocol_mismatch")
-        status = _status_wire(service_status)
         allowed = _allowed_for(kind)
-        response: dict[str, JsonValue] = {
-            "protocol_version": CONTROL_PROTOCOL_VERSION,
-            "service_version": service_status.service_version,
-            "service_instance_id": service_status.service_instance_id,
-            "service_generation": service_status.service_generation,
-            "status": status,
-            "allowed_methods": [method.value for method in allowed],
-            "schema_manifest_digest": _manifest_digest(),
-        }
-        await write_control_frame(stream, response)
+        await write_control_frame(stream, _hello_result_wire(service_status, allowed))
         return ControlSession(
             protocol_version="1.0",
             client_kind=kind,

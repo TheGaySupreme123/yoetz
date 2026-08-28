@@ -43,6 +43,7 @@ from yoetz.service.control_protocol import (
     read_control_frame,
     schema_for_method,
     server_handshake,
+    write_control_frame,
 )
 
 _SERVICE_ID = "svc_00000000-0000-4000-8000-000000000001"
@@ -620,6 +621,49 @@ def test_client_handshake_names_a_peer_that_closes_on_the_hello_as_rejected() ->
         with pytest.raises(ControlProtocolError) as partial:
             await client_handshake(truncated, ControlClientKind.MCP_BRIDGE, "0.1.0")
         _assert_reason(partial, "frame_invalid")
+
+    asyncio.run(exercise())
+
+
+def test_server_answers_hello_result_then_refuses_a_foreign_manifest() -> None:
+    """Issue #436: a decodable older hello must not be a silent close."""
+
+    async def exercise() -> None:
+        client, server, client_peer = _stream_pair()
+        hello = _hello()
+        hello["schema_manifest_digest"] = "sha256:" + "a" * 64
+        await write_control_frame(client, hello)
+        with pytest.raises(ControlProtocolError) as refused:
+            await server_handshake(server, client_peer, _status())
+        _assert_reason(refused, "manifest_mismatch")
+        result = await read_control_frame(client)
+        assert result["schema_manifest_digest"] == load_schema_catalog().manifest_digest
+        assert result["service_instance_id"] == _SERVICE_ID
+
+    asyncio.run(exercise())
+
+
+def test_client_handshake_names_an_answered_foreign_digest_as_manifest_mismatch() -> None:
+    """A 2.1.0-shaped hello-result with another installation's digest is not frame_invalid."""
+
+    async def exercise() -> None:
+        import yoetz.service.control_protocol as proto
+
+        client, server, _peer = _stream_pair()
+
+        async def answer_foreign() -> None:
+            await read_control_frame(server)
+            result = proto._hello_result_wire(  # pyright: ignore[reportPrivateUsage]
+                _status(), proto._allowed_for(ControlClientKind.CLI)  # pyright: ignore[reportPrivateUsage]
+            )
+            result["schema_manifest_digest"] = "sha256:" + "b" * 64
+            await write_control_frame(server, result)
+
+        task = asyncio.create_task(answer_foreign())
+        with pytest.raises(ControlProtocolError) as mismatch:
+            await client_handshake(client, ControlClientKind.CLI, "0.1.0")
+        await task
+        _assert_reason(mismatch, "manifest_mismatch")
 
     asyncio.run(exercise())
 

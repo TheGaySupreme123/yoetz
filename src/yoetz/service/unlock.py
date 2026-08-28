@@ -1084,7 +1084,7 @@ class UnlockCoordinator:
                 "vault_initialize",
                 "vault_unlock",
             }:
-                await self._lifecycle.transition(ServiceState.LOCKED)
+                await self._release_unlocking()
 
     async def close(self) -> None:
         async with self._mutex:
@@ -1098,7 +1098,7 @@ class UnlockCoordinator:
                 "vault_initialize",
                 "vault_unlock",
             }:
-                await self._lifecycle.transition(ServiceState.LOCKED)
+                await self._release_unlocking()
             self._closed = True
 
     def _new_challenge(
@@ -1163,6 +1163,12 @@ class UnlockCoordinator:
 
     def _lifecycle_state(self) -> ServiceState:
         return self._lifecycle.state
+
+    async def _release_unlocking(self) -> None:
+        """Return UNLOCKING to LOCKED; never reverse an in-flight drain or failure."""
+
+        if self._lifecycle_state() is ServiceState.UNLOCKING:
+            await self._lifecycle.transition(ServiceState.LOCKED)
 
     def _require_open_idle(self) -> None:
         if self._closed:

@@ -1269,6 +1269,14 @@ class ServiceDaemon:
                     )
             except TimeoutError:
                 return
+            except ControlProtocolError as exc:
+                if exc.reason in {"manifest_mismatch", "protocol_mismatch"}:
+                    record_public_error_without_raising(
+                        component="service.daemon",
+                        operation="control_handshake",
+                        reason=exc.reason,
+                    )
+                return
             while not self._stop_event.is_set():
                 try:
                     frame = await self._read_control_frame_idle_aware(stream, calls)
@@ -3428,12 +3436,13 @@ class _HumanConnectionServer:
             await _write_human_envelope(stream, response)
             while True:
                 # ServerOpenedEnvelope (step 1) and later ServerPhaseEnvelope both carry
-                # SecretRequiredPhase; the daemon must await YZS1 completion either way.
+                # SecretRequiredPhase; the daemon must await YZS1 completion either way,
+                # and must still observe a foreground peer that disappears at the prompt.
                 phase = getattr(response, "phase", None)
                 if isinstance(phase, SecretRequiredPhase):
                     error_step = cast(int, getattr(response, "step")) + 1
-                    response = await self._service.secret_completed(
-                        cast(str, getattr(response, "ceremony_id"))
+                    response = await self._advance_secret_phase(
+                        stream, cast(str, getattr(response, "ceremony_id"))
                     )
                 else:
                     incoming = await _read_human_envelope(stream)
@@ -3494,6 +3503,29 @@ class _HumanConnectionServer:
                 except Exception:
                     pass
             await stream.aclose()
+
+    async def _advance_secret_phase(self, stream: ControlStream, ceremony_id: str) -> object:
+        """Wait for YZS1 or a human-control peer close/cancel, never only the secret socket."""
+
+        secret_wait = asyncio.create_task(self._service.secret_completed(ceremony_id))
+        peer_wait = asyncio.create_task(_read_human_envelope(stream))
+        done, pending = await asyncio.wait(
+            {secret_wait, peer_wait}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if secret_wait in done and not secret_wait.cancelled():
+            return secret_wait.result()
+        incoming: object | None = None
+        if peer_wait in done and not peer_wait.cancelled():
+            incoming = peer_wait.result()
+        if type(incoming) is ClientCancelEnvelope:
+            return await self._service.cancel(incoming.ceremony_id)
+        await self._service.cancel(ceremony_id)
+        if incoming is None:
+            raise HumanControlError("cancelled")
+        raise HumanControlError("kind_forbidden")
 
 
 async def _production_composition(

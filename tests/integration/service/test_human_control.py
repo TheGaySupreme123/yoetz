@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -842,3 +843,45 @@ async def test_disclosure_consent_needs_no_strong_reauth_and_wrong_phase_is_cons
         await service.submit_action(ClientActionEnvelope(reopened.ceremony_id, 2, RetryAction()))
     with pytest.raises(HumanControlError, match="replay"):
         await service.cancel(reopened.ceremony_id)
+
+
+@pytest.mark.anyio
+async def test_close_during_secret_wait_does_not_deadlock(tmp_path: Path) -> None:
+    """Issue #434: stop()/close() must not wait on the YZS1 acceptor mutex."""
+
+    started = asyncio.Event()
+    hang = asyncio.Event()
+
+    class _HangIngress:
+        cancelled = 0
+
+        async def accept_once(self, expected_binding: object) -> SecretHandle:
+            del expected_binding
+            started.set()
+            await hang.wait()
+            raise AssertionError("secret_wait_should_have_been_cancelled")
+
+        async def cancel_pending(self) -> None:
+            self.cancelled += 1
+            hang.set()
+
+        async def close(self) -> None:
+            return None
+
+    service, _, lifecycle, _, _ = _service(
+        tmp_path, mode="passphrase", ready=False, handles=[]
+    )
+    service._secret_ingress = _HangIngress()  # pyright: ignore[reportPrivateUsage]
+    opened = await service.open_ceremony(
+        ClientOpenEnvelope(
+            "1" * 64,
+            HumanCeremonyKind.VAULT_UNLOCK,
+            EmptyVaultTarget(expected_mode="passphrase"),
+        )
+    )
+    waiter = asyncio.create_task(service.secret_completed(opened.ceremony_id))
+    await asyncio.wait_for(started.wait(), 1.0)
+    await asyncio.wait_for(service.close(), 1.0)
+    with pytest.raises(HumanControlError, match="cancelled"):
+        await asyncio.wait_for(waiter, 1.0)
+    assert lifecycle.state is ServiceState.LOCKED
