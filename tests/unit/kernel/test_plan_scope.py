@@ -166,6 +166,54 @@ def test_revisions_apply_effective_references_and_restate_reason() -> None:
     assert after_clear.current_plan_event_id == event_id(_event(6))
 
 
+def test_next_version_plan_published_restates_scope_after_revisions() -> None:
+    first = obligation_id(_obligation(1))
+    second = obligation_id(_obligation(2))
+    third = obligation_id(_obligation(3))
+    scope = current_plan_scope(
+        {
+            1: _record(PlanPublishedPayload(1, "Initial.", (first,)), frontier=1),
+            2: _record(
+                PlanRevisedPayload(
+                    2,
+                    1,
+                    "Carry second.",
+                    "Expanded.",
+                    (ObligationChange(second, ObligationChangeKind.CARRIED),),
+                ),
+                frontier=2,
+            ),
+            3: _record(
+                PlanRevisedPayload(3, 2, "Restate.", "Still expanded.", ()),
+                frontier=3,
+            ),
+            4: _record(
+                PlanPublishedPayload(4, "Full scope restatement.", (first, second, third)),
+                frontier=4,
+            ),
+        }
+    )
+
+    assert scope.readable is True
+    assert scope.current_plan_event_id == event_id(_event(4))
+    assert scope.effective_obligation_refs == (first, second, third)
+    assert scope.declared_obligation_count == 3
+
+
+def test_plan_published_restatement_requires_exact_next_version() -> None:
+    first = obligation_id(_obligation(1))
+    scope = current_plan_scope(
+        {
+            1: _record(PlanPublishedPayload(1, "Initial.", (first,)), frontier=1),
+            3: _record(PlanPublishedPayload(3, "Skipped version.", (first,)), frontier=3),
+        }
+    )
+
+    assert scope.readable is False
+    assert scope.current_plan_event_id == event_id(_event(3))
+    assert scope.effective_obligation_refs is None
+
+
 @pytest.mark.parametrize(
     "plans,gaps",
     (

@@ -51,7 +51,8 @@ obligations apply, record `no_obligations_reason` as exactly `no_material_change
 `single_atomic_change`, or `exploratory_scope_unknown`; the reason is invalid beside effective
 obligation refs. A revision restates the declaration, so omission clears an earlier reason.
 
-Set `dry_run: true` to validate a batch and preview what would be accepted without appending. The
+Read `status view=obligations` first and account for every exact `unattempted_items` value. Then set
+`dry_run: true` to validate a batch and preview what would be accepted without appending. The
 preview is not evidential and is not citable as a check, publication, or coverage source. Reuse the
 same `request_id` for the real publish after the preview succeeds.
 
@@ -92,6 +93,9 @@ within the authenticated task without requiring a byte-identical replay body. Th
 same-task attach that rotates the active session and writer, but never crosses into another task
 bundle. Stored outcome, frontiers, and accepted event ids are present only when the operation is a
 complete `publish_work`; other states omit them rather than invent detail.
+`view=obligations` includes each requested item and its exact unattempted subset, subject to the
+existing obligation-text projection policy. `view=results` resolves `res_` ids to bounded structural
+facts: source event, payload availability, outcome, linked action, and linked evidence ids.
 
 Before completion, read `declared_obligation_count`, `no_obligations_reason`, and
 `closure_readiness`. An empty readable plan without a typed reason is blocked by

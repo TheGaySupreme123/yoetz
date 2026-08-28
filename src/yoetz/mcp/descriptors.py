@@ -43,6 +43,13 @@ __all__ = [
 type McpRouteProfile = Literal["policy", "strict"]
 
 _SCHEMA_VERSION: Final = "1.0.0"
+_TOOL_SCHEMA_VERSIONS: Final = MappingProxyType({"status": "1.1.0"})
+
+
+def _tool_schema_version(name: str) -> str:
+    return _TOOL_SCHEMA_VERSIONS.get(name, _SCHEMA_VERSION)
+
+
 # Exactly the entry document. Every other guidance document is fetched on demand: the catalog
 # section of agent-instructions.md names the `resources/read` -> `read_guidance` -> installed
 # `references/<name>.md` chain, and `read_guidance` (a plain tool call) survives the empty
@@ -1321,25 +1328,29 @@ class ToolDescriptor:
 
     @property
     def input_schema(self) -> Mapping[str, JsonValue]:
-        return _mcp_presentation_schema(f"{self.name.replace('_', '-')}-request", _SCHEMA_VERSION)
+        return _mcp_presentation_schema(
+            f"{self.name.replace('_', '-')}-request", _tool_schema_version(self.name)
+        )
 
     @property
     def output_schema(self) -> Mapping[str, JsonValue]:
         return _mcp_output_presentation_schema(
-            f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION
+            f"{self.name.replace('_', '-')}-result", _tool_schema_version(self.name)
         )
 
     @property
     def catalog_output_schema(self) -> Mapping[str, JsonValue]:
         """Full catalog-bundled output schema before MCP root-object projection."""
 
-        return _mcp_schema(f"{self.name.replace('_', '-')}-result", _SCHEMA_VERSION)
+        return _mcp_schema(f"{self.name.replace('_', '-')}-result", _tool_schema_version(self.name))
 
     @property
     def catalog_input_schema(self) -> Mapping[str, JsonValue]:
         """Full catalog-bundled input schema (admission dual-surface; not tools/list)."""
 
-        return _mcp_schema(f"{self.name.replace('_', '-')}-request", _SCHEMA_VERSION)
+        return _mcp_schema(
+            f"{self.name.replace('_', '-')}-request", _tool_schema_version(self.name)
+        )
 
 
 def _descriptor(
@@ -1352,15 +1363,16 @@ def _descriptor(
     open_world: bool = False,
 ) -> ToolDescriptor:
     schema_name = name.replace("_", "-")
+    schema_version = _tool_schema_version(name)
     return ToolDescriptor(
         name=name,
         title=title,
         description=description,
         input_schema_ref=(
-            f"{SCHEMA_NAMESPACE}operations/{schema_name}-request-{_SCHEMA_VERSION}.schema.json"
+            f"{SCHEMA_NAMESPACE}operations/{schema_name}-request-{schema_version}.schema.json"
         ),
         output_schema_ref=(
-            f"{SCHEMA_NAMESPACE}operations/{schema_name}-result-{_SCHEMA_VERSION}.schema.json"
+            f"{SCHEMA_NAMESPACE}operations/{schema_name}-result-{schema_version}.schema.json"
         ),
         annotations=ToolAnnotations(
             read_only=read_only,
@@ -1386,7 +1398,9 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "field. workspace_ref is the stable project identity (remote URL or absolute repository "
         "root); external_ref is the stable task identity within that project (branch, issue, or "
         "plan slug). Both refs are redacted one-shot values; only HMAC commitments are persisted, "
-        "so do not self-censor into unstable refs. Author the request from this input schema plus "
+        "so do not self-censor into unstable refs. After resume or compaction, use status "
+        "view=obligations to recover exact requested_items and unattempted_items rather than "
+        "searching transcripts or source. Author the request from this input schema plus "
         "the guidance below, never from memory. Guidance: yoetz://guidance/workflow.md.",
         read_only=False,
         idempotent=True,
@@ -1407,7 +1421,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "follows ingestion sequence; receipt freshness is frontier-bound. Service accepted_at is "
         "independent acceptance metadata, not a freshness or ordering key. Set dry_run true to "
         "validate a batch and preview what would be accepted without appending; the preview is not "
-        "evidential and is not citable as a check, publication, or coverage source. After "
+        "evidential and is not citable as a check, publication, or coverage source. Read exact "
+        "unattempted_items in status view=obligations before resolution. After "
         "publishing the material claim and evidence, call check, disposition any findings with "
         "respond, then call receipt before claiming completion. Every reference list, in a draft "
         "envelope and in a payload alike, is admitted only when its members are unique and already "
@@ -1497,7 +1512,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "status",
         "Read recorded status",
         "Reads one bounded, paginated view: advice, assignment, candidate_findings, compact, "
-        "evidence, findings, history, obligations, operation, or versions. Advice items carry a "
+        "evidence, findings, history, obligations, operation, results, or versions. Advice items carry a "
         "recommended_next_action. Call it when uncertain what you already did or committed to, "
         "rather than reconstructing from memory. view=history returns each event's caller-asserted "
         "occurred_at beside the service-stamped accepted_at plus a closed forward-skew "
@@ -1506,7 +1521,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "view=operation takes filter.operation_request_id and returns that operation's stored "
         "result for recovery without resending the body. view=findings reads recorded findings; "
         "view=candidate_findings returns unrecorded deterministic candidates without verdicts or "
-        "IDs. Read closure_readiness on any result before spending a check or a receipt: "
+        "IDs. view=obligations exposes requested_items and the exact unattempted_items subset "
+        "under obligation-text projection policy. view=results resolves res_ ids to bounded "
+        "source-event, payload-availability, outcome, action, and evidence facts without result "
+        "prose. Read closure_readiness on any result before spending a check or a receipt: "
         "unanswered_finding_count names response work, while receipt_blocking_finding_count names "
         "actionable findings that permanently prevent a clean receipt. findings_unanswered should "
         "be acted on; receipt_findings_unresolved must not trigger another response loop. Call it "
@@ -1589,22 +1607,22 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
-                "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
+                "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
+                "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
                 "check": "sha256:3a81f3a6d3e0f714680e221e8dc5fa90d0131629386b03d75bc55d21ab618ee1",
                 "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
-                "status": "sha256:bcd91efb3b8f96d3198dbf3c0991ec8efb745c19b02c15349ff2bcdc08dfc250",
+                "status": "sha256:918ff925873d47c213c546623ec7a28ee1f5798c46fc4c5c3ad879d84d1f18a0",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:44ba40c96180d4e1f69e3a3044c635ff311a632d6b413f441fc5d36b098c9b6d",
-                "publish_work": "sha256:f6f5d2146d2ee5b7cb588a2e1ca927167c5bee7ff8bd7603d6743882cc451974",
+                "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
+                "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
                 "check": "sha256:91b090140843ef3f50bbdf02a42dc78fc418b1968dca8685018698cf276f4557",
                 "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
-                "status": "sha256:bcd91efb3b8f96d3198dbf3c0991ec8efb745c19b02c15349ff2bcdc08dfc250",
+                "status": "sha256:918ff925873d47c213c546623ec7a28ee1f5798c46fc4c5c3ad879d84d1f18a0",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1613,8 +1631,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:6759a95082b5eac9741fa86508e7f310d3490954c1fcb626078390510a84da15",
-        "strict": "sha256:2cdacc504bdf3f4344cd6d20ef6e0974857dbf02f66da2010605ec3840c1c5b2",
+        "policy": "sha256:328aa4b6f356d8747baa485cefa7b00037d1c5f1838267eccfbc55a1ce04cc6e",
+        "strict": "sha256:94b26da5d31ce50901a6de5c92dea388d767180a40e9cf21df2f7e1fdda6bee9",
     }
 )
 

@@ -380,6 +380,38 @@ def _claude_result() -> dict[str, Any]:
     return generated
 
 
+def _replace_schema_ref(value: Any, old: str, new: str) -> None:
+    if isinstance(value, dict):
+        for key, member in value.items():
+            if key == "$ref" and member == old:
+                value[key] = new
+            else:
+                _replace_schema_ref(member, old, new)
+    elif isinstance(value, list):
+        for member in value:
+            _replace_schema_ref(member, old, new)
+
+
+def _status_v23_request() -> dict[str, Any]:
+    generated = _with_id("control-request", "2.3.0", _claude_request())
+    _replace_schema_ref(
+        generated,
+        "https://schemas.yoetz.dev/0.1/operations/status-request-1.0.0.schema.json",
+        "https://schemas.yoetz.dev/0.1/operations/status-request-1.1.0.schema.json",
+    )
+    return generated
+
+
+def _status_v23_result() -> dict[str, Any]:
+    generated = _with_id("control-result", "2.3.0", _claude_result())
+    _replace_schema_ref(
+        generated,
+        "https://schemas.yoetz.dev/0.1/operations/status-result-1.0.0.schema.json",
+        "https://schemas.yoetz.dev/0.1/operations/status-result-1.1.0.schema.json",
+    )
+    return generated
+
+
 def _documents() -> dict[Path, bytes]:
     documents = {
         ("control-hello", "2.0.0"): _hello(),
@@ -404,6 +436,14 @@ def _documents() -> dict[Path, bytes]:
         ),
         ("control-request", "2.2.0"): _claude_request(),
         ("control-result", "2.2.0"): _claude_result(),
+        ("control-hello", "2.3.0"): _with_id("control-hello", "2.3.0", _hello()),
+        ("control-hello-result", "2.3.0"): _with_id(
+            "control-hello-result",
+            "2.3.0",
+            _with_id("control-hello-result", "2.0.0", _load("control-hello-result")),
+        ),
+        ("control-request", "2.3.0"): _status_v23_request(),
+        ("control-result", "2.3.0"): _status_v23_result(),
     }
     return {
         _SERVICE / f"{name}-{version}.schema.json": canonical_encode(document)

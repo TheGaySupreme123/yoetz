@@ -692,6 +692,10 @@ TaskIdWire = Annotated[str, BeforeValidator(_task_id_wire)]
 FindingIdWire = Annotated[str, BeforeValidator(_finding_id_wire)]
 EvidenceIdWire = Annotated[str, BeforeValidator(_evidence_id_wire)]
 ResultIdWire = Annotated[str, BeforeValidator(_result_id_wire)]
+ActionIdWire = Annotated[
+    str,
+    Field(pattern=r"^act_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
+]
 EventIdWire = Annotated[str, BeforeValidator(_event_id_wire)]
 ObjectIdWire = Annotated[str, BeforeValidator(_object_id_wire)]
 ReceiptIdWire = Annotated[str, BeforeValidator(_receipt_id_wire)]
@@ -711,6 +715,7 @@ JsonPointer = Annotated[str, BeforeValidator(_json_pointer_wire)]
 String1To256 = Annotated[str, Field(min_length=1, max_length=256)]
 String1To4096 = Annotated[str, Field(min_length=1, max_length=4096)]
 String1To8192 = Annotated[str, Field(min_length=1, max_length=8192)]
+String0To1024 = Annotated[str, Field(max_length=1024)]
 String1To32768 = Annotated[str, Field(min_length=1, max_length=32768)]
 CursorWire = Annotated[str, Field(min_length=1, max_length=4096, pattern=r"^[A-Za-z0-9_-]+$")]
 SchemaNameWire = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
@@ -1052,7 +1057,12 @@ class CheckScopeModel(_ClosedModel):
 def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
     from pydantic import ValidationError as PydanticValidationError
 
-    from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instance
+    from yoetz.protocol.schemas import (
+        SchemaInstanceInvalid,
+        load_schema_catalog,
+        request_result_schema_versions,
+        validate_schema_instance,
+    )
 
     raw_dump = model.model_dump(
         mode="json",
@@ -1062,7 +1072,8 @@ def _validate_model_against_schema(model: BaseModel, schema_name: str) -> None:
     )
     dumped = _strip_optional_non_null_fields(model, cast(Mapping[str, JsonValue], raw_dump))
     try:
-        validate_schema_instance(schema_name, "1.0.0", cast(JsonValue, dumped))
+        schema_version = request_result_schema_versions(load_schema_catalog())[schema_name]
+        validate_schema_instance(schema_name, schema_version, cast(JsonValue, dumped))
     except SchemaInstanceInvalid as exc:
         # Re-raise with JSON Schema path(s) so MCP safe_details can name corrective fields.
         # Root-level object rules (dependentRequired, if/then) arrive as location_reasons with
@@ -1294,6 +1305,7 @@ class StatusRequestModel(PublicRequestModel):
         "history",
         "obligations",
         "operation",
+        "results",
         "versions",
     ]
     limit: CanonicalPageLimitWire
@@ -2778,6 +2790,20 @@ class StatusClosureReadinessModel(_ClosedModel):
         return self
 
 
+class StatusRequestedItemModel(_ClosedModel):
+    item_kind: Literal["url", "file", "command", "change", "source"]
+    value: String0To1024 | OmittedContentModel
+
+    @model_validator(mode="after")
+    def _validate_requested_item(self) -> StatusRequestedItemModel:
+        if (
+            isinstance(self.value, OmittedContentModel)
+            and self.value.category is not DataCategory.OBLIGATION_TEXT
+        ):
+            raise ValueError("requested_item_omission_category_invalid")
+        return self
+
+
 class StatusObligationItemModel(_ClosedModel):
     optional_non_null_fields = frozenset({"acceptance_criteria"})
 
@@ -2789,18 +2815,56 @@ class StatusObligationItemModel(_ClosedModel):
     assigned_actor_ids: tuple[ActorAssertionIdWire, ...]
     evidence_refs: tuple[EvidenceOrResultIdWire, ...]
     revision_event_id: EventIdWire | None
+    requested_items: tuple[StatusRequestedItemModel, ...] = ()
+    unattempted_items: tuple[StatusRequestedItemModel, ...] = ()
     acceptance_criteria: String1To8192 | OmittedContentModel | None = None
 
     @model_validator(mode="after")
     def _validate_obligation_item(self) -> StatusObligationItemModel:
         for values in (self.source_refs, self.assigned_actor_ids, self.evidence_refs):
             _require_unique(values, limit=64)
+        if len(self.requested_items) > 64 or len(self.unattempted_items) > 64:
+            raise ValueError("obligation_requested_item_limit")
+        requested = tuple((item.item_kind, item.value) for item in self.requested_items)
+        unattempted = tuple((item.item_kind, item.value) for item in self.unattempted_items)
+        if any(item not in requested for item in unattempted):
+            raise ValueError("obligation_unattempted_item_mismatch")
         for value in (self.description, self.evidence_expectation, self.acceptance_criteria):
             if (
                 isinstance(value, OmittedContentModel)
                 and value.category is not DataCategory.OBLIGATION_TEXT
             ):
                 raise ValueError("obligation_omission_category_invalid")
+        return self
+
+
+class StatusResultItemModel(_ClosedModel):
+    result_id: ResultIdWire
+    source_event_id: EventIdWire
+    payload_available: bool
+    outcome: Literal["success", "failure", "partial", "unknown"] | None
+    action_id: ActionIdWire | None
+    evidence_refs: tuple[EvidenceIdWire, ...]
+
+    @model_validator(mode="after")
+    def _validate_result_item(self) -> StatusResultItemModel:
+        _require_unique(self.evidence_refs, limit=64)
+        structural_payload_available = self.outcome is not None and self.action_id is not None
+        if self.payload_available != structural_payload_available:
+            raise ValueError("result_payload_availability_mismatch")
+        if not self.payload_available and self.evidence_refs:
+            raise ValueError("result_unavailable_evidence_refs")
+        return self
+
+
+class StatusResultsPageModel(_ClosedModel):
+    items: tuple[StatusResultItemModel, ...]
+    next_cursor: CursorWire | None
+
+    @model_validator(mode="after")
+    def _validate_results_page(self) -> StatusResultsPageModel:
+        if len(self.items) > 100:
+            raise ValueError("status_page_limit")
         return self
 
 
@@ -2968,6 +3032,7 @@ type StatusPage = (
     | StatusHistoryPageModel
     | StatusObligationsPageModel
     | StatusOperationPageModel
+    | StatusResultsPageModel
     | StatusVersionsPageModel
 )
 
@@ -2982,6 +3047,7 @@ _STATUS_PAGE_BY_VIEW: Final[Mapping[str, type[_ClosedModel]]] = MappingProxyType
         "history": StatusHistoryPageModel,
         "obligations": StatusObligationsPageModel,
         "operation": StatusOperationPageModel,
+        "results": StatusResultsPageModel,
         "versions": StatusVersionsPageModel,
     }
 )
@@ -3005,6 +3071,7 @@ class StatusSuccessModel(_ClosedModel):
         "history",
         "obligations",
         "operation",
+        "results",
         "versions",
     ]
     requested_frontier: FrontierModel
@@ -3204,9 +3271,14 @@ def public_model_to_wire(model: object) -> dict[str, JsonValue]:
     dumped = _strip_optional_non_null_fields(public_model, raw_dump)
     if type(dumped) is not dict:
         raise TypeError("public_model_wrong_type")
-    from yoetz.protocol.schemas import validate_schema_instance
+    from yoetz.protocol.schemas import (
+        load_schema_catalog,
+        request_result_schema_versions,
+        validate_schema_instance,
+    )
 
-    validate_schema_instance(schema_name, "1.0.0", cast(JsonValue, dumped))
+    schema_version = request_result_schema_versions(load_schema_catalog())[schema_name]
+    validate_schema_instance(schema_name, schema_version, cast(JsonValue, dumped))
     return dict(dumped)
 
 
@@ -3719,13 +3791,29 @@ _STATUS_OBLIGATIONS_STRUCTURAL_POINTERS: Final = (
             "evidence_refs/*",
             "obligation_id",
             "revision_event_id",
+            "requested_items/*/item_kind",
             "source_refs/*",
             "status",
+            "unattempted_items/*/item_kind",
         ),
     )
     + _prefix_leaf_patterns("/page/items/*/acceptance_criteria", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/description", _OMITTED_CONTENT_LEAVES)
     + _prefix_leaf_patterns("/page/items/*/evidence_expectation", _OMITTED_CONTENT_LEAVES)
+    + _prefix_leaf_patterns("/page/items/*/requested_items/*/value", _OMITTED_CONTENT_LEAVES)
+    + _prefix_leaf_patterns("/page/items/*/unattempted_items/*/value", _OMITTED_CONTENT_LEAVES)
+)
+
+_STATUS_RESULTS_STRUCTURAL_POINTERS: Final = ("/page/next_cursor",) + _prefix_leaf_patterns(
+    "/page/items/*",
+    (
+        "action_id",
+        "evidence_refs/*",
+        "outcome",
+        "payload_available",
+        "result_id",
+        "source_event_id",
+    ),
 )
 
 _STATUS_OPERATION_STRUCTURAL_POINTERS: Final = (
@@ -3889,6 +3977,8 @@ _STATUS_CONTENT_RULES: Final[tuple[tuple[str, str, DataCategory], ...]] = (
     ("obligations", "/page/items/*/acceptance_criteria", DataCategory.OBLIGATION_TEXT),
     ("obligations", "/page/items/*/description", DataCategory.OBLIGATION_TEXT),
     ("obligations", "/page/items/*/evidence_expectation", DataCategory.OBLIGATION_TEXT),
+    ("obligations", "/page/items/*/requested_items/*/value", DataCategory.OBLIGATION_TEXT),
+    ("obligations", "/page/items/*/unattempted_items/*/value", DataCategory.OBLIGATION_TEXT),
 )
 _RECEIPT_CONTENT_RULES: Final[tuple[tuple[str, DataCategory], ...]] = (
     ("/document/gaps/*/detail", DataCategory.FINDING_SUMMARY),
@@ -3965,6 +4055,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
         _STATUS_OPERATION_STRUCTURAL_POINTERS,
         status_view="operation",
     )
+    add_structural("status", _STATUS_RESULTS_STRUCTURAL_POINTERS, status_view="results")
     add_structural("status", _STATUS_VERSIONS_STRUCTURAL_POINTERS, status_view="versions")
     add_structural("receipt", _RECEIPT_STRUCTURAL_POINTERS)
 
@@ -4045,7 +4136,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 780:
+    if len(result) != 797:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

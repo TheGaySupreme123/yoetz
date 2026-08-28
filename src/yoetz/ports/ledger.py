@@ -41,6 +41,7 @@ from yoetz.protocol.models import (
     StatusFindingItemModel,
     StatusHistoryItemModel,
     StatusObligationItemModel,
+    StatusResultItemModel,
     StatusVersionSliceModel,
     validate_semantic_outcome,
     validate_semantic_provenance_binding,
@@ -104,6 +105,7 @@ class ProjectionView(str, Enum):  # noqa: UP042 - exact durable enum base
     FINDINGS = "findings"
     CANDIDATE_FINDINGS = "candidate_findings"
     EVIDENCE = "evidence"
+    RESULTS = "results"
     HISTORY = "history"
     VERSIONS = "versions"
 
@@ -158,7 +160,14 @@ class PendingVerdictKind(str, Enum):  # noqa: UP042 - exact durable enum base
 
 
 type QueryableProjectionView = Literal[
-    "compact", "assignment", "obligations", "findings", "evidence", "history", "versions"
+    "compact",
+    "assignment",
+    "obligations",
+    "findings",
+    "evidence",
+    "results",
+    "history",
+    "versions",
 ]
 
 _MAX_SAFE_INTEGER: Final = 2**53 - 1
@@ -1176,7 +1185,7 @@ class IdProjectionPosition:
 
     def __post_init__(self) -> None:
         _validate_any_structural_id(self.last_id)
-        if not self.last_id.startswith(("evt_", "obl_", "evd_")):
+        if not self.last_id.startswith(("evt_", "obl_", "evd_", "res_")):
             raise _invalid()
 
 
@@ -1242,6 +1251,7 @@ class ProjectionQuery:
             "obligations",
             "findings",
             "evidence",
+            "results",
             "history",
             "versions",
         }:
@@ -1258,6 +1268,7 @@ class ProjectionQuery:
             "obligations": ObligationsProjectionFilter,
             "findings": FindingsProjectionFilter,
             "evidence": EvidenceProjectionFilter,
+            "results": None,
             "history": HistoryProjectionFilter,
             "versions": None,
         }
@@ -1267,6 +1278,7 @@ class ProjectionQuery:
             "obligations": IdProjectionPosition,
             "findings": FindingProjectionPosition,
             "evidence": IdProjectionPosition,
+            "results": IdProjectionPosition,
             "history": HistoryProjectionPosition,
             "versions": None,
         }
@@ -1285,7 +1297,12 @@ class ProjectionQuery:
         ):
             raise _invalid()
         if type(self.position) is IdProjectionPosition:
-            prefixes = {"assignment": "evt_", "obligations": "obl_", "evidence": "evd_"}
+            prefixes = {
+                "assignment": "evt_",
+                "obligations": "obl_",
+                "evidence": "evd_",
+                "results": "res_",
+            }
             if not self.position.last_id.startswith(prefixes[self.view]):
                 raise _invalid()
 
@@ -1297,6 +1314,7 @@ type ProjectionItem = (
     | StatusFindingItemModel
     | StatusHistoryItemModel
     | StatusObligationItemModel
+    | StatusResultItemModel
     | StatusVersionSliceModel
 )
 
@@ -1309,6 +1327,7 @@ def _is_projection_item(value: object) -> bool:
         StatusFindingItemModel,
         StatusHistoryItemModel,
         StatusObligationItemModel,
+        StatusResultItemModel,
         StatusVersionSliceModel,
     }
 
@@ -1334,6 +1353,7 @@ class ProjectionPage:
             "obligations",
             "findings",
             "evidence",
+            "results",
             "history",
             "versions",
         }:
@@ -1351,6 +1371,7 @@ class ProjectionPage:
             "findings": StatusFindingItemModel,
             "history": StatusHistoryItemModel,
             "obligations": StatusObligationItemModel,
+            "results": StatusResultItemModel,
             "versions": StatusVersionSliceModel,
         }
         if any(type(item) is not item_type_by_view[self.view] for item in self.items):
@@ -1386,6 +1407,7 @@ class ProjectionPage:
             "findings": FindingProjectionPosition,
             "history": HistoryProjectionPosition,
             "obligations": IdProjectionPosition,
+            "results": IdProjectionPosition,
             "versions": None,
         }[self.view]
         if (expected_position is None and self.next_position is not None) or (
@@ -1399,6 +1421,7 @@ class ProjectionPage:
                 "assignment": "evt_",
                 "evidence": "evd_",
                 "obligations": "obl_",
+                "results": "res_",
             }
             if not self.next_position.last_id.startswith(prefixes[self.view]):
                 raise _invalid()

@@ -237,39 +237,39 @@ _REQUEST_MODEL_SPECS: tuple[tuple[str, str], ...] = (
     ("PublishWorkRequestModel", "operations/publish-work-request-1.0.0.schema.json"),
     ("CheckRequestModel", "operations/check-request-1.0.0.schema.json"),
     ("RespondRequestModel", "operations/respond-request-1.0.0.schema.json"),
-    ("StatusRequestModel", "operations/status-request-1.0.0.schema.json"),
+    ("StatusRequestModel", "operations/status-request-1.1.0.schema.json"),
     ("ReceiptRequestModel", "operations/receipt-request-1.0.0.schema.json"),
 )
 
 _REQUEST_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
     (
         "StatusAssignmentFilterModel",
-        "operations/status-request-1.0.0.schema.json",
+        "operations/status-request-1.1.0.schema.json",
         "assignment_filter",
     ),
     (
         "StatusCandidateFindingsFilterModel",
-        "operations/status-request-1.0.0.schema.json",
+        "operations/status-request-1.1.0.schema.json",
         "candidate_findings_filter",
     ),
     (
         "StatusEvidenceFilterModel",
-        "operations/status-request-1.0.0.schema.json",
+        "operations/status-request-1.1.0.schema.json",
         "evidence_filter",
     ),
     (
         "StatusFindingsFilterModel",
-        "operations/status-request-1.0.0.schema.json",
+        "operations/status-request-1.1.0.schema.json",
         "findings_filter",
     ),
     (
         "StatusHistoryFilterModel",
-        "operations/status-request-1.0.0.schema.json",
+        "operations/status-request-1.1.0.schema.json",
         "history_filter",
     ),
     (
         "StatusObligationsFilterModel",
-        "operations/status-request-1.0.0.schema.json",
+        "operations/status-request-1.1.0.schema.json",
         "obligations_filter",
     ),
 )
@@ -300,6 +300,7 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
     ("history", "history_page"),
     ("obligations", "obligations_page"),
     ("operation", "operation_page"),
+    ("results", "results_page"),
     ("versions", "versions_page"),
 )
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
@@ -316,8 +317,9 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("status", "evidence"): 18,
     ("status", "findings"): 66,
     ("status", "history"): 12,
-    ("status", "obligations"): 19,
+    ("status", "obligations"): 29,
     ("status", "operation"): 24,
+    ("status", "results"): 7,
     ("status", "versions"): 13,
 }
 
@@ -375,71 +377,78 @@ _RESULT_SUPPORT_MODEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ),
     ("RespondResponseModel", "operations/respond-result-1.0.0.schema.json", "response"),
     ("RespondVersionSliceModel", "operations/respond-result-1.0.0.schema.json", "version_slice"),
-    ("StatusSuccessModel", "operations/status-result-1.0.0.schema.json", "success"),
+    ("StatusSuccessModel", "operations/status-result-1.1.0.schema.json", "success"),
     (
         "StatusAdviceItemModel",
-        "operations/status-result-1.0.0.schema.json",
+        "operations/status-result-1.1.0.schema.json",
         "advice_item",
     ),
     (
         "StatusAdvicePageModel",
-        "operations/status-result-1.0.0.schema.json",
+        "operations/status-result-1.1.0.schema.json",
         "advice_page",
     ),
     (
         "StatusAssignmentItemModel",
-        "operations/status-result-1.0.0.schema.json",
+        "operations/status-result-1.1.0.schema.json",
         "assignment_item",
     ),
     (
         "StatusAssignmentPageModel",
-        "operations/status-result-1.0.0.schema.json",
+        "operations/status-result-1.1.0.schema.json",
         "assignment_page",
     ),
     (
         "StatusCandidateFindingItemModel",
-        "operations/status-result-1.0.0.schema.json",
+        "operations/status-result-1.1.0.schema.json",
         "candidate_finding_item",
     ),
     (
         "StatusCandidateFindingsPageModel",
-        "operations/status-result-1.0.0.schema.json",
+        "operations/status-result-1.1.0.schema.json",
         "candidate_findings_page",
     ),
-    ("StatusCompactFindingModel", "operations/status-result-1.0.0.schema.json", "compact_finding"),
-    ("StatusCompactItemModel", "operations/status-result-1.0.0.schema.json", "compact_item"),
+    ("StatusCompactFindingModel", "operations/status-result-1.1.0.schema.json", "compact_finding"),
+    ("StatusCompactItemModel", "operations/status-result-1.1.0.schema.json", "compact_item"),
     (
         "StatusCompactObligationModel",
-        "operations/status-result-1.0.0.schema.json",
+        "operations/status-result-1.1.0.schema.json",
         "compact_obligation",
     ),
-    ("StatusCompactPageModel", "operations/status-result-1.0.0.schema.json", "compact_page"),
-    ("StatusEvidenceItemModel", "operations/status-result-1.0.0.schema.json", "evidence_item"),
-    ("StatusEvidencePageModel", "operations/status-result-1.0.0.schema.json", "evidence_page"),
-    ("StatusFindingBasisModel", "operations/status-result-1.0.0.schema.json", "finding_basis"),
-    ("StatusFindingItemModel", "operations/status-result-1.0.0.schema.json", "finding_item"),
-    ("StatusFindingsPageModel", "operations/status-result-1.0.0.schema.json", "findings_page"),
-    ("StatusHistoryItemModel", "operations/status-result-1.0.0.schema.json", "history_item"),
-    ("StatusHistoryPageModel", "operations/status-result-1.0.0.schema.json", "history_page"),
-    ("StatusImportStatusModel", "operations/status-result-1.0.0.schema.json", "import_status"),
+    ("StatusCompactPageModel", "operations/status-result-1.1.0.schema.json", "compact_page"),
+    ("StatusEvidenceItemModel", "operations/status-result-1.1.0.schema.json", "evidence_item"),
+    ("StatusEvidencePageModel", "operations/status-result-1.1.0.schema.json", "evidence_page"),
+    ("StatusFindingBasisModel", "operations/status-result-1.1.0.schema.json", "finding_basis"),
+    ("StatusFindingItemModel", "operations/status-result-1.1.0.schema.json", "finding_item"),
+    ("StatusFindingsPageModel", "operations/status-result-1.1.0.schema.json", "findings_page"),
+    ("StatusHistoryItemModel", "operations/status-result-1.1.0.schema.json", "history_item"),
+    ("StatusHistoryPageModel", "operations/status-result-1.1.0.schema.json", "history_page"),
+    ("StatusImportStatusModel", "operations/status-result-1.1.0.schema.json", "import_status"),
     (
         "StatusClosureReadinessModel",
-        "operations/status-result-1.0.0.schema.json",
+        "operations/status-result-1.1.0.schema.json",
         "closure_readiness",
     ),
-    ("StatusObligationItemModel", "operations/status-result-1.0.0.schema.json", "obligation_item"),
+    ("StatusObligationItemModel", "operations/status-result-1.1.0.schema.json", "obligation_item"),
+    (
+        "StatusRequestedItemModel",
+        "operations/status-result-1.1.0.schema.json",
+        "status_requested_item",
+    ),
     (
         "StatusObligationsPageModel",
-        "operations/status-result-1.0.0.schema.json",
+        "operations/status-result-1.1.0.schema.json",
         "obligations_page",
     ),
+    ("StatusResultItemModel", "operations/status-result-1.1.0.schema.json", "result_item"),
+    ("StatusResultsPageModel", "operations/status-result-1.1.0.schema.json", "results_page"),
     (
         "StatusStructuralSubjectStateModel",
-        "operations/status-result-1.0.0.schema.json",
+        "operations/status-result-1.1.0.schema.json",
         "structural_subject_state",
     ),
-    ("StatusVersionSliceModel", "operations/status-result-1.0.0.schema.json", "version_slice"),
-    ("StatusVersionsPageModel", "operations/status-result-1.0.0.schema.json", "versions_page"),
+    ("StatusVersionSliceModel", "operations/status-result-1.1.0.schema.json", "version_slice"),
+    ("StatusVersionsPageModel", "operations/status-result-1.1.0.schema.json", "versions_page"),
     ("ReceiptSuccessModel", "operations/receipt-result-1.0.0.schema.json", "success"),
     (
         "ReceiptPolicyVersionEntryModel",
@@ -2156,7 +2165,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 764
+    assert len(derived_patterns) == 781
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -2165,7 +2174,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 780
+    assert len(rules) == 797
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2174,7 +2183,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 764
+    assert len(registry_patterns) == 781
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2490,7 +2499,7 @@ def _derived_result_success_patterns(
             )
             derived.update((method, None, pattern) for pattern in awaiting_patterns)
 
-    status_document = catalog.by_name_version[("status-result", "1.0.0")]
+    status_document = catalog.by_name_version[("status-result", "1.1.0")]
     status_success = _schema_success_definition(status_document)
     status_properties = dict(_schema_mapping(status_success.get("properties")))
     if status_properties.pop("page", None) is None:
@@ -2604,6 +2613,18 @@ def _expected_nonpublish_content_rules(
             "status",
             "obligations",
             "/page/items/*/evidence_expectation",
+            obligation_text,
+        ),
+        (
+            "status",
+            "obligations",
+            "/page/items/*/requested_items/*/value",
+            obligation_text,
+        ),
+        (
+            "status",
+            "obligations",
+            "/page/items/*/unattempted_items/*/value",
             obligation_text,
         ),
         ("receipt", None, "/document/findings/*/detail", finding_summary),
@@ -2732,7 +2753,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 85
+    assert SCHEMA_MEMBER_COUNT == 92
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -2816,7 +2837,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 2_210
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 2_689
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -2829,7 +2850,7 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
     assert len(event_versions) == 16
     assert tuple(request_versions) == tuple(sorted(request_versions, key=str.encode))
     assert tuple(event_versions) == tuple(sorted(event_versions, key=str.encode))
-    assert set(request_versions.values()) == {"1.0.0", "2.2.0", "4.0.0"}
+    assert set(request_versions.values()) == {"1.0.0", "1.1.0", "2.3.0", "4.0.0"}
     assert set(event_versions.values()) == {"1.0.0", "1.1.0"}
     assert event_versions["action_recorded"] == "1.0.0"
     assert event_versions["evidence_recorded"] == "1.1.0"

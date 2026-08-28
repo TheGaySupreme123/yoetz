@@ -74,7 +74,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 123
+REVIEWED_RESOURCE_COUNT: Final = 130
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -93,10 +93,10 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("check-request", "1.0.0"),
     ("check-result", "1.0.0"),
     ("client-info", "1.0.0"),
-    ("control-hello", "2.2.0"),
-    ("control-hello-result", "2.2.0"),
-    ("control-request", "2.2.0"),
-    ("control-result", "2.2.0"),
+    ("control-hello", "2.3.0"),
+    ("control-hello-result", "2.3.0"),
+    ("control-request", "2.3.0"),
+    ("control-result", "2.3.0"),
     ("coverage", "1.0.0"),
     ("egress-receipt", "1.0.0"),
     ("finding", "1.0.0"),
@@ -124,8 +124,8 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("start-request", "1.0.0"),
     ("start-result", "1.0.0"),
     ("status", "4.0.0"),
-    ("status-request", "1.0.0"),
-    ("status-result", "1.0.0"),
+    ("status-request", "1.1.0"),
+    ("status-result", "1.1.0"),
     ("subject-state-ref", "1.0.0"),
 )
 _EVENT_NAMES: Final = (
@@ -600,7 +600,7 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
     if mcp_version is not None and not cast(list[JsonValue], support["mcp_cells"]):
         limitations = tuple(sorted({*limitations, "mcp_capability_unverified"}, key=str.encode))
     return VersionManifest(
-        schema_version="2.0.0",
+        schema_version="2.1.0",
         package_name="yoetz",
         package_version=_distribution_version("yoetz") or "0.1.0",
         protocol_version=PROTOCOL_VERSION,

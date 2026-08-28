@@ -432,6 +432,58 @@ def test_v22_adds_only_the_claude_hook_source_and_coverage_cell() -> None:
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
 
 
+def test_v23_updates_only_the_status_operation_schema_refs() -> None:
+    request_v22 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.2.0.schema.json").read_bytes()),
+    )
+    request_v23 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.3.0.schema.json").read_bytes()),
+    )
+    result_v22 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-result-2.2.0.schema.json").read_bytes()),
+    )
+    result_v23 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-result-2.3.0.schema.json").read_bytes()),
+    )
+
+    old_request_id = request_v22.pop("$id")
+    new_request_id = request_v23.pop("$id")
+    old_result_id = result_v22.pop("$id")
+    new_result_id = result_v23.pop("$id")
+    request_v22_text = str(request_v22)
+    result_v22_text = str(result_v22)
+    assert "status-request-1.0.0.schema.json" in request_v22_text
+    assert "status-result-1.0.0.schema.json" in result_v22_text
+
+    def replace_status_version(value: object) -> None:
+        if isinstance(value, dict):
+            mapping = cast(dict[str, object], value)
+            for key, member in mapping.items():
+                if key == "$ref" and isinstance(member, str):
+                    replaced = member.replace("status-request-1.1.0", "status-request-1.0.0")
+                    mapping[key] = replaced.replace("status-result-1.1.0", "status-result-1.0.0")
+                else:
+                    replace_status_version(member)
+        elif isinstance(value, list):
+            for member in cast(list[object], value):
+                replace_status_version(member)
+
+    replace_status_version(request_v23)
+    replace_status_version(result_v23)
+    assert request_v23 == request_v22
+    assert result_v23 == result_v22
+    assert old_request_id.endswith("control-request-2.2.0.schema.json")
+    assert new_request_id.endswith("control-request-2.3.0.schema.json")
+    assert old_result_id.endswith("control-result-2.2.0.schema.json")
+    assert new_result_id.endswith("control-result-2.3.0.schema.json")
+    for filename in ("control-request-2.3.0.schema.json", "control-result-2.3.0.schema.json"):
+        assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
+
+
 def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:
     request_schema = _schema("control-request")
     result_schema = _schema("control-result")

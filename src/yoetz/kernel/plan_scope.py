@@ -106,7 +106,11 @@ def current_plan_scope(
             readable = False
             continue
         if type(payload) is PlanPublishedPayload:
-            if current_version is not None:
+            # A later plan_published is an append-only full-scope restatement. It is readable
+            # only when it advances the current chain by exactly one version; a duplicate root
+            # or version gap remains conservative unknown. This gives a task one admitted way to
+            # declare a newly material obligation without pretending it superseded an older one.
+            if current_version is not None and payload.plan_version != current_version + 1:
                 readable = False
                 continue
             current_version = payload.plan_version

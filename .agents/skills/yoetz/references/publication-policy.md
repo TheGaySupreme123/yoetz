@@ -100,8 +100,11 @@ closed value:
 
 Do not send a reason beside effective obligation refs. A `plan_revised` event restates the current
 declaration: include the current reason when the revised effective ref set is empty, or omit it to
-clear an earlier reason. Yoetz never infers obligations from prompts, source code, workspace state,
-or plan prose.
+clear an earlier reason. When a mid-task obligation requires a full append-only restatement rather
+than a change disposition, publish `plan_published` at exactly the current plan version plus one;
+its refs and optional empty-scope reason become the complete effective declaration. A duplicate
+root or version gap makes the chain unreadable. Yoetz never infers obligations from prompts, source
+code, workspace state, or plan prose.
 
 An empty-scope reason clears the `no_obligations_declared` readiness blocker, but it does not buy a
 clean completion check. A completion claim over zero declared obligations remains
@@ -156,7 +159,7 @@ Bind change-sensitive evidence to the exact subject state or frontier it concern
 
 Batch facts that belong to one material transition. Preserve writer sequence and expected frontier. On timeout, reuse the same request and operation IDs; never manufacture a replacement event merely because the response was lost.
 
-Before a material publish over MCP, set `dry_run: true` to validate the batch and preview accepted event ids and coverage without appending. The dry-run result is not evidential and must not be cited as a check, publication, or coverage source. When the preview is acceptable, publish with the same `request_id` and `dry_run` omitted or false.
+Before a material publish over MCP, read `status view=obligations` and inspect the exact `unattempted_items` values before resolving an obligation. Then set `dry_run: true` to validate the batch and preview accepted event ids and coverage without appending. The dry-run result is not evidential and must not be cited as a check, publication, or coverage source. When the preview is acceptable, publish with the same `request_id` and `dry_run` omitted or false.
 
 Worked examples for each ordinary publishable family — and a cross-linked
 action/result/evidence/claim batch — live in the `publish_work` tool input schema `examples` entry
