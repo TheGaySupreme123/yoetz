@@ -340,7 +340,11 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     task-linked terminal results, selected changed-file/diff material, approved-check output,
     lifecycle structure, and composition readiness. Reject hidden reasoning, system/developer/
     platform prompts, credentials, detected secret spans, unrelated files, and ambient logs before
-    persistence. Secret-bearing spans are redacted in memory before authenticated encryption.
+    persistence. Secret-bearing spans — including selected changed-file excerpts and
+    approved-check output — are classified by the shared fail-closed scanner and redacted in
+    memory before encoding or authenticated encryption. Matches persist only redaction
+    metadata, never the original bytes. Scanner failure or an explicit canary match records
+    `content_capture_unavailable` and stores no excerpt or output object.
     SQLite, observation envelopes, cursors, local outboxes, status, hook context, and logs contain
     only allowlisted structure, encrypted object identities/commitments, sizes, classifications,
     and relations. A locked vault, absent service, or failed encryption keeps the structural
@@ -357,7 +361,9 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     raw `.yoetz/checks.toml` digest; any byte change suspends all listed commands. Approved checks
     use exact argv, `shell=False`, sanitized environment, bounded output/time, and an enforcing
     sandbox. Network-requiring checks fail closed unless a separately reviewed authorization and
-    sandbox prove the permission. Redacted output is encrypted before durable retention. Optional
+    sandbox prove the permission. Output bytes pass the same fail-closed secret scanner before
+    encryption; compound environment assignments such as `AWS_SECRET_ACCESS_KEY` and bounded
+    `*_TOKEN` forms are redacted, while near-miss non-secret identifiers are left unchanged.
     semantic observation advice remains additive and passes only minimized approved packets through
     the existing privacy gateway. Observation, trust, verification management, and local advice
     diagnostics are local control, not network-egress channels and not additional MCP tools.

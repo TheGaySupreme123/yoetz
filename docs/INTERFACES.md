@@ -2680,9 +2680,12 @@ object ID. Revocation disables/removes the active locator and trust binding whil
 encrypted evidence. Visible task messages, tool input/result, task-linked terminal output,
 changed-file/diff material, approved-check output, lifecycle, and readiness facts may be captured.
 Hidden reasoning, system/platform/developer prompts, credentials, detected secrets, unrelated files,
-and untethered logs are excluded before storage. Secret spans are redacted in memory before
-encryption. SQLite/envelopes retain only encrypted object IDs, commitments, classifications, sizes,
-and relations. Vault/service failure records `content_capture_unavailable` and no plaintext spool.
+and untethered logs are excluded before storage. Every byte that reaches encrypted observation
+persistence passes `prepare_persisted_plaintext`: known secret spans are redacted in memory before
+encoding, matches persist only redaction metadata, and scanner failure or a canary match records
+`content_capture_unavailable` and stores no excerpt or approved-check output object. SQLite/envelopes
+retain only encrypted object IDs, commitments, classifications, sizes, and relations.
+Vault/service failure records `content_capture_unavailable` and no plaintext spool.
 Unrecognized visible events accept an opaque stable envelope plus encrypted content and
 `unsupported_event`; a session-stream file that is the wrong grammar, an untested `cli_version`,
 or a compressed `.jsonl.zst` rollout records `unsupported_format` instead. Unknown semantics never
@@ -3719,6 +3722,8 @@ facade and are never MCP tools.
   is exactly `service|cli|mcp_stdio|confidential_helper` so each process installs only its bounded
   sink/filter profile.
   `observability/privacy.py`: canary-testable redaction helpers,
+  `prepare_persisted_plaintext(data, *, canaries=())` (fail-closed scan before encrypted
+  observation persistence: redact known spans, withhold on canary or scanner failure),
   `session_id_hash(session_id, log_mac: MacKeyHandle)`, and
   `privacy_request_commitment(final_request_body, audit_mac: MacKeyHandle)`; raw MAC keys are never
   accepted.
