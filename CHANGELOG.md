@@ -4,6 +4,21 @@ All notable user-visible changes to Yoetz are documented in this file. Format is
 project-native heading style that marks the pending version as unreleased above
 reverse-chronological released versions.
 
+## Unreleased
+
+### Fixed
+
+- Replaying a check that was suspended on a standing repository grant no longer fails with a
+  non-retryable `STORAGE_CORRUPT` after the trusted `yoetz --privacy` ceremony, and a task whose
+  ledger holds `evidence_recorded/1.1.0` events (any evidence carrying a `digest_binding`) no
+  longer becomes unreadable the moment a pending check has to be rehydrated from its durable resume
+  checkpoint. The checkpoint's projection snapshot records no schema version and its decoder pinned
+  every event family to `1.0.0`, so a digest-bound evidence record encoded fine but could never be
+  decoded again; every deferred rehydration — the same-request replay after the grant, and ledger
+  recovery after a service re-ready while the check was pending — was reported as corruption of an
+  intact bundle. Snapshot records now decode under the newest wire version their family admits
+  (issue #427).
+
 ## 0.1.0 — Public alpha (2026-08-20)
 
 Initial public alpha release. The earlier 0.0.1 registry packages only reserved the project name

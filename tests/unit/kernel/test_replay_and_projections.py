@@ -7,21 +7,32 @@ import subprocess
 import sys
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
+from builders.policy_cases import evd, evidence_record
 from fixture_loader import load_fixture_json
 from yoetz.domain.events import (
+    EVIDENCE_SCHEMA_VERSION,
     ActionKind,
     ActionRecordedPayload,
+    EventSchema,
+    EvidenceContentAvailability,
+    EvidenceDigestBinding,
+    EvidenceDigestProvenance,
+    EvidenceDigestSubject,
+    EvidenceKind,
+    EvidenceRecordedPayload,
     ObligationChangeKind,
     ObligationPublishedPayload,
     ObligationStatus,
+    decode_payload,
     encode_payload,
 )
-from yoetz.domain.values import action_id, event_id, obligation_id
+from yoetz.domain.values import action_id, event_id, obligation_id, timestamp_from_datetime
 from yoetz.kernel.projections import (
     PROJECTION_GENERATION,
     PROJECTION_VERSION,
@@ -34,7 +45,7 @@ from yoetz.kernel.projections import (
     projection_snapshot,
 )
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
-from yoetz.protocol.coverage import LedgerFreshness
+from yoetz.protocol.coverage import EvidenceImmutability, LedgerFreshness
 
 _DIGEST = "sha256:" + "1" * 64
 _EVENT_ID = event_id("evt_00000000-0000-4000-8000-000000000001")
@@ -163,6 +174,57 @@ def test_projection_snapshot_codec_round_trips_canonical_bytes() -> None:
     snapshot = projection_snapshot(state)
     decoded = projection_from_snapshot(snapshot)
     assert decoded == state
+    assert canonical_encode(projection_snapshot(decoded)) == canonical_encode(snapshot)
+
+
+def _digest_bound_evidence_payload() -> EvidenceRecordedPayload:
+    """An evidence payload only ``evidence_recorded/1.1.0`` admits (it carries a digest binding)."""
+
+    return EvidenceRecordedPayload(
+        evidence_id=evd(1),
+        evidence_kind=EvidenceKind.ARTIFACT,
+        strength=EvidenceImmutability.CONTENT_DIGEST,
+        observed_at=timestamp_from_datetime(datetime(2026, 8, 27, 17, 5, tzinfo=UTC)),
+        content_digest="sha256:" + "11" * 32,
+        description="Diff of the reviewed change.",
+        digest_binding=EvidenceDigestBinding(
+            subject=EvidenceDigestSubject.SOURCE_DIFF,
+            content_availability=EvidenceContentAvailability.DIGEST_ONLY,
+            byte_count=128,
+            provenance=EvidenceDigestProvenance.CALLER_ASSERTED,
+        ),
+    )
+
+
+def test_projection_snapshot_codec_round_trips_later_schema_versions() -> None:
+    """A record whose payload only a later wire version admits still rehydrates (issue #427).
+
+    Snapshot records carry no schema version. The decoder used to pin every family to "1.0.0", so
+    an evidence record published as ``evidence_recorded/1.1.0`` with a ``digest_binding`` encoded
+    fine but could never be decoded again: every frozen-case rehydration (privacy-wait replay,
+    ledger recovery) of a task holding such evidence failed as ``invalid_projection_state`` and was
+    reported as non-retryable STORAGE_CORRUPT on an intact bundle.
+    """
+
+    payload = _digest_bound_evidence_payload()
+    encoded = encode_payload(payload)
+    with pytest.raises(ValueError):
+        decode_payload(EventSchema("evidence_recorded", "1.0.0"), encoded)
+    assert decode_payload(EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION), encoded) == (
+        payload
+    )
+
+    state = replace(
+        empty_projection_state(),
+        frontier=1,
+        head_digest=_DIGEST,
+        evidence=cast(Any, {payload.evidence_id: evidence_record(payload, 1)}),
+        freshness=LedgerFreshness.CURRENT,
+    )
+    snapshot = projection_snapshot(state)
+    decoded = projection_from_snapshot(snapshot)
+    assert decoded == state
+    assert decoded.evidence[payload.evidence_id].payload == payload
     assert canonical_encode(projection_snapshot(decoded)) == canonical_encode(snapshot)
 
 
