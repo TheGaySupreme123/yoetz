@@ -34,7 +34,7 @@ from yoetz.cli.hook_io import (
     stdout_json as _stdout_json,
 )
 from yoetz.ports.control import ControlClientKind, ControlError
-from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.canonical import JsonValue, strict_json_parse
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 from yoetz.protocol.ids import IdKind, new_id
 from yoetz.protocol.models import OperationFailureModel, StatusRequest
@@ -43,6 +43,7 @@ from yoetz.service.client import connect_service
 __all__ = [
     "INACTIVE_CONTEXT",
     "YOETZ_START_TOOL_NAMES",
+    "bind_start_mapping_from_hook",
     "handle_observe",
     "handle_post_tool_use",
     "handle_session_start",
@@ -66,7 +67,9 @@ _MAX_STDIN_BYTES: Final = 262_144
 _STATUS_DEADLINE_MS: Final = 5_000
 _INTAKE_CUE_BYTES: Final = 512
 
-YOETZ_START_TOOL_NAMES: Final = frozenset({"start", "mcp__yoetz__start"})
+YOETZ_START_TOOL_NAMES: Final = frozenset(
+    {"start", "mcp__yoetz__start", "mcp__plugin_yoetz_yoetz__start"}
+)
 INACTIVE_CONTEXT: Final = (
     "No Yoetz task is mapped to this session; call start before substantive material work."
 )
@@ -216,15 +219,36 @@ def _as_mapping(value: object) -> Mapping[str, JsonValue] | None:
 
 def _extract_start_success(tool_response: object) -> Mapping[str, JsonValue] | None:
     mapping = _as_mapping(tool_response)
-    if mapping is None:
+    if mapping is not None:
+        structured = mapping.get("structuredContent")
+        if structured is None:
+            structured = mapping.get("structured_content")
+        candidate = _as_mapping(structured) if structured is not None else mapping
+        if candidate is not None and candidate.get("ok") is True:
+            return candidate
+        content = mapping.get("content")
+    else:
+        content = tool_response
+
+    # Claude may expose an MCP result as a content-block list instead of the
+    # structuredContent object Codex supplies. Parse only one bounded text
+    # block, then retain only the validated structural start identifiers below.
+    if type(content) is not list:
         return None
-    structured = mapping.get("structuredContent")
-    if structured is None:
-        structured = mapping.get("structured_content")
-    candidate = _as_mapping(structured) if structured is not None else mapping
-    if candidate is None:
+    content_blocks = cast(list[object], content)
+    if len(content_blocks) != 1:
         return None
-    if candidate.get("ok") is not True:
+    block = _as_mapping(content_blocks[0])
+    if block is None or block.get("type") != "text":
+        return None
+    text = block.get("text")
+    if type(text) is not str or len(text.encode("utf-8")) > _MAX_STDIN_BYTES:
+        return None
+    try:
+        candidate = _as_mapping(strict_json_parse(text.encode("utf-8")))
+    except Exception:
+        return None
+    if candidate is None or candidate.get("ok") is not True:
         return None
     return candidate
 
@@ -244,6 +268,35 @@ def _frontier_from_start(result: Mapping[str, JsonValue]) -> str | None:
         return None
 
 
+def bind_start_mapping_from_hook(
+    payload: Mapping[str, JsonValue],
+    *,
+    _state: Path | None = None,
+) -> bool:
+    """Persist a validated mapping from one exact successful start hook result.
+
+    The host response is inspected transiently. Only task/session/writer ids and
+    the optional frontier token enter lifecycle storage.
+    """
+
+    tool_name = payload.get("tool_name")
+    if type(tool_name) is not str or tool_name not in YOETZ_START_TOOL_NAMES:
+        return False
+    codex_session_id = validate_codex_session_id(payload.get("session_id"))
+    success = _extract_start_success(payload.get("tool_response"))
+    if success is None:
+        return False
+    mapping = mapping_from_start_ids(
+        codex_session_id=codex_session_id,
+        yoetz_task_id=cast(str, success.get("task_id")),
+        yoetz_session_id=cast(str, success.get("session_id")),
+        yoetz_writer_id=cast(str, success.get("writer_id")),
+        last_frontier=_frontier_from_start(success),
+    )
+    store_mapping(mapping, _state=_state)
+    return True
+
+
 def handle_post_tool_use(
     *,
     stdin_bytes: bytes | None = None,
@@ -258,25 +311,8 @@ def handle_post_tool_use(
             stdin_bytes if stdin_bytes is not None else sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
         )
         payload = read_hook_payload(raw)
-        tool_name = payload.get("tool_name")
-        if type(tool_name) is str and tool_name in YOETZ_START_TOOL_NAMES:
-            session_raw = payload.get("session_id")
-            try:
-                codex_session_id = validate_codex_session_id(session_raw)
-            except ProtocolValueError:
-                codex_session_id = None
-            if codex_session_id is not None:
-                success = _extract_start_success(payload.get("tool_response"))
-                if success is not None:
-                    frontier = _frontier_from_start(success)
-                    mapping = mapping_from_start_ids(
-                        codex_session_id=codex_session_id,
-                        yoetz_task_id=cast(str, success.get("task_id")),
-                        yoetz_session_id=cast(str, success.get("session_id")),
-                        yoetz_writer_id=cast(str, success.get("writer_id")),
-                        last_frontier=frontier,
-                    )
-                    store_mapping(mapping, _state=_state)
+        with contextlib.suppress(ProtocolValueError):
+            bind_start_mapping_from_hook(payload, _state=_state)
         from yoetz.cli.observe_hooks import handle_observe
 
         return handle_observe(

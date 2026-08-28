@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import io
 from collections.abc import Mapping
+from pathlib import Path
 from typing import cast
 
 import pytest
 
+from yoetz.adapters.integrations.codex_lifecycle import load_mapping
 from yoetz.cli import observe_hooks
 from yoetz.domain.observation import ObservationSource
 from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
@@ -54,6 +56,104 @@ def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
         "tool_use_id": "tool-1",
     }
     assert captured["source"] is ObservationSource.CLAUDE_HOOK
+
+
+@pytest.mark.parametrize("response_shape", ["structured", "content_blocks"])
+def test_claude_successful_start_binds_only_structural_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    response_shape: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_handle_observe(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    start_result: dict[str, JsonValue] = {
+        "ok": True,
+        "task_id": "tsk_11111111-1111-4111-8111-111111111111",
+        "session_id": "ses_22222222-2222-4222-8222-222222222222",
+        "writer_id": "wri_33333333-3333-4333-8333-333333333333",
+        "frontier": {"sequence": "4", "head_digest": "sha256:" + "a" * 64},
+    }
+    tool_response: JsonValue = (
+        {"structuredContent": start_result}
+        if response_shape == "structured"
+        else [{"type": "text", "text": canonical_encode(start_result).decode("utf-8")}]
+    )
+    payload: dict[str, JsonValue] = {
+        "hook_event_name": "PostToolUse",
+        "session_id": "session-bind",
+        "tool_name": "mcp__plugin_yoetz_yoetz__start",
+        "tool_response": tool_response,
+        "tool_use_id": "tool-bind",
+    }
+
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(payload),
+            stdout=io.BytesIO(),
+            workspace=".",
+            _state=tmp_path,
+        )
+        == 0
+    )
+    mapping = load_mapping("claude:session-bind", _state=tmp_path)
+    assert mapping is not None
+    assert mapping.yoetz_task_id == start_result["task_id"]
+    assert mapping.yoetz_session_id == start_result["session_id"]
+    assert mapping.yoetz_writer_id == start_result["writer_id"]
+    assert mapping.last_frontier == "4:sha256:" + "a" * 64
+
+    sanitized = strict_json_parse(cast(bytes, captured["stdin_bytes"]))
+    assert isinstance(sanitized, Mapping)
+    assert "tool_response" not in sanitized
+    assert "task_id" not in sanitized
+    assert "writer_id" not in sanitized
+
+
+def test_claude_failed_or_non_start_result_creates_no_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_handle_observe(**_kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    for index, (tool_name, response) in enumerate(
+        (
+            ("mcp__plugin_yoetz_yoetz__start", {"structuredContent": {"ok": False}}),
+            (
+                "mcp__plugin_yoetz_yoetz__status",
+                {
+                    "structuredContent": {
+                        "ok": True,
+                        "task_id": "tsk_11111111-1111-4111-8111-111111111111",
+                        "session_id": "ses_22222222-2222-4222-8222-222222222222",
+                        "writer_id": "wri_33333333-3333-4333-8333-333333333333",
+                    }
+                },
+            ),
+        )
+    ):
+        session = f"session-negative-{index}"
+        observe_hooks.handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "session_id": session,
+                    "tool_name": tool_name,
+                    "tool_response": response,
+                }
+            ),
+            stdout=io.BytesIO(),
+            _state=tmp_path,
+        )
+        assert load_mapping(f"claude:{session}", _state=tmp_path) is None
 
 
 def test_claude_capability_profile_requires_exact_evidenced_version(

@@ -3377,7 +3377,12 @@ matcher and ingress allowlist derive from the one `YOETZ_WORKFLOW_TOOL_NAMES` se
 `read_guidance`), bounded session/correlation token, a fail-closed capability profile mapped from an
 exact payload-evidenced Claude version (`untested` otherwise), and host-derived success. It discards raw
 prompt/response/transcript/path/cwd/command/tool input/tool output/result/error/permission/secret
-content before storage, performs no Claude transcript reconciliation, and is always fail-soft.
+content before storage, performs no Claude transcript reconciliation, and is always fail-soft. One
+closed exception establishes routing rather than content observation: an exact successful scoped
+`start` `PostToolUse` may transiently parse the structured result or one bounded MCP text block and
+persist only validated task/session/writer identifiers plus the frontier token in the existing
+lifecycle mapping. No result bytes or result-derived prose enter the observation envelope, store,
+diagnostics, or errors.
 Only consented accepted evidence earns coverage.
 
 ## 11. Application (`application/`)

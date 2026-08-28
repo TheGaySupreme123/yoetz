@@ -1980,6 +1980,25 @@ def handle_claude_observe(
             correlation = _token_or_none(payload.get("tool_use_id"))
             if correlation is not None:
                 structural["tool_use_id"] = correlation
+            if raw_event == "PostToolUse" and tool_name == "mcp__plugin_yoetz_yoetz__start":
+                # Claude's observation envelope stays structural-only, but the
+                # successful start result is the sole authority that can bind
+                # this host session to the cooperative Yoetz task. Inspect the
+                # raw response transiently and persist only validated ids.
+                from yoetz.cli.hooks import bind_start_mapping_from_hook
+
+                with contextlib.suppress(Exception):
+                    bind_start_mapping_from_hook(
+                        cast(
+                            Mapping[str, JsonValue],
+                            {
+                                "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
+                                "tool_name": tool_name,
+                                "tool_response": payload.get("tool_response"),
+                            },
+                        ),
+                        _state=_state,
+                    )
         return handle_observe(
             event_name=event_map[raw_event],
             stdin_bytes=canonical_encode(structural),

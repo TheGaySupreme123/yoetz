@@ -378,4 +378,7 @@ single-flight/coalesced/best-effort under the existing `HarnessHookProfile` cont
 consented `claude_hook` envelopes can earn observation coverage; installing, enabling, listing, or
 starting a session cannot. The host's plugin namespace is `/yoetz:yoetz`; its MCP server/tool names
 are `plugin:yoetz:yoetz` and `mcp__plugin_yoetz_yoetz__<operation>`. Namespacing changes no Yoetz
-operation schema and adds no MCP tool.
+operation schema and adds no MCP tool. An exact successful scoped `start` `PostToolUse` binds the
+Claude host session to that cooperative task by transiently extracting and validating only the
+start result's structural task/session/writer identifiers and frontier. Raw result content is not
+retained or admitted into observation evidence.

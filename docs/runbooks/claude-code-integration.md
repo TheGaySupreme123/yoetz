@@ -150,7 +150,11 @@ Claude work.
 Grant observation separately for the exact project. Exercise every advertised event and inspect
 `yoetz observe status`. Only consented accepted `claude_hook` envelopes earn coverage. Raw
 transcript/prompt/assistant/path/cwd/tool input/tool output/result/error values are discarded before
-storage. Pause, resume, revoke, deduplication, restart, and gap behavior require their own evidence.
+storage. The exact successful scoped `start` post-hook is the sole routing exception: it validates
+the returned task/session/writer identifiers and frontier to bind the Claude session, while storing
+none of the response bytes or prose. Confirm `mapping_present: true`, then drain and require accepted
+rows before claiming hook coverage. Pause, resume, revoke, deduplication, restart, and gap behavior
+require their own evidence.
 
 ## Update
 
