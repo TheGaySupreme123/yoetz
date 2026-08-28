@@ -1002,9 +1002,10 @@ async def test_receipt_build_context_is_complete() -> None:
     text_receipt = await app.receipt(ReceiptRequest.model_validate(text_wire))
     assert text_receipt.document is None
     assert text_receipt.human_text is not None
-    # The derived Markdown/text rendering is no stronger than the same JSON conclusion; compare
-    # the human wording rather than the wire enum spelling (spaces, not underscores).
-    assert "unresolved findings remain" in text_receipt.human_text
+    # Markdown/text project the canonical sections (#437), including the limitations body
+    # that distinguishes check coverage from a compact finding count (#429).
+    assert "Limitations" in text_receipt.human_text
+    assert "unresolved" in text_receipt.human_text.lower()
     assert text_receipt.conclusion == receipt.conclusion
 
 

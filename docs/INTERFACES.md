@@ -498,6 +498,15 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   than inheriting a subject from prose.
 - `claim_recorded`: `claim_id`, `claim_kind` (`completion`|`material`), `statement`,
   `supporting_refs` (evidence/result/obligation IDs), optional `subject_state`.
+  Citing a `failure` or `partial` result on a completion claim's `supporting_refs` is
+  the typed disclosure of that limitation (`material_limitation_omitted` /
+  `failed_work_omitted` do not fire).
+  Research-evidence `evidence_does_not_support_claim` does not treat that citation as a
+  support mismatch. An `unknown` result cited as completion support still mismatches
+  (an outcome-less observation does not become completion evidence). Observed
+  `claim_support_present` with required-missing `claim_support_mismatch` is reserved for
+  a cited ref whose subject state, unknown outcome, or open obligation status cannot
+  support the claim.
 - `plan_revised`: `plan_version`, `supersedes_plan_version`, `reason`, `summary`,
   `obligation_changes`, and optional `no_obligations_reason` using the same closed values. A
   revision restates the effective current declaration: omission clears an earlier reason, and a

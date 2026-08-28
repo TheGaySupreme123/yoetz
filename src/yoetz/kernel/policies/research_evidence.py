@@ -109,14 +109,16 @@ def _typed_support_mismatch(
     relation = subject_state_relation(_support_state(case, ref), claim_state)
     if relation is SubjectStateRelation.DIFFERENT:
         return True, relation
+    # A failure/partial result cited on supporting_refs is limitation disclosure, not a
+    # support mismatch (#429). Outcome-less UNKNOWN remains a mismatch: exempting the
+    # finding storm never upgrades that record into completion support (#350).
     if ref.startswith("res_"):
         record = case.projection.results.get(ResultId(ref))
         if (
             record is not None
             and record.payload is not None
             and claim_kind is ClaimKind.COMPLETION
-            and record.payload.outcome
-            in {ResultOutcome.FAILURE, ResultOutcome.PARTIAL, ResultOutcome.UNKNOWN}
+            and record.payload.outcome is ResultOutcome.UNKNOWN
         ):
             return True, relation
     if ref.startswith("obl_"):
@@ -179,10 +181,8 @@ def _support_mismatch_findings(case: DeterministicCase) -> list[DeterministicAss
                     RESEARCH_EVIDENCE_POLICY_PACK,
                     FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM,
                     _refs((claim_id, policy_public_root(case, ref))),
-                    (
-                        FindingFact("claim_support_present", fact_refs),
-                        FindingFact("claim_support_mismatch", fact_refs),
-                    ),
+                    (FindingFact("claim_support_present", fact_refs),),
+                    (FindingFact("claim_support_mismatch", fact_refs),),
                     subject_state_relation=relation,
                     source_availability=policy_source_availability(case, fact_refs),
                 )

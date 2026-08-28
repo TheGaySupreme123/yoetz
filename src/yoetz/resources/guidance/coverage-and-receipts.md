@@ -100,7 +100,7 @@ repair is to add it or to drop `scope` entirely.
 
 ## Receipt format
 
-Default agent-context policy can project verification output (findings, obligations, receipt sections) so `json`, `markdown`, and `text` receipts work for the requesting agent. Under a deliberately stricter owner policy, digest-bound `json` may fail closed with `PRIVACY_AUTHORITY_REQUIRED` (`receipt_json_projection_blocked`); re-request `markdown` or `text`, or widen agent-context policy from a local terminal. The durable receipt is still recorded when projection is blocked.
+Default agent-context policy can project verification output (findings, obligations, receipt sections) so `json`, `markdown`, and `text` receipts work for the requesting agent. `json` carries the structured receipt in `document`. `markdown` and `text` keep `document` null by format and project those same sections in `human_text` (bodies, items, coverage notes, limitations, finding counts, and coverage-limitation findings that do not by themselves select `unresolved_findings_remain`). If that projection exceeds the wire bound, `human_text` carries an explicit truncation marker. Under a deliberately stricter owner policy, digest-bound `json` may fail closed with `PRIVACY_AUTHORITY_REQUIRED` (`receipt_json_projection_blocked`); re-request `markdown` or `text`, or widen agent-context policy from a local terminal. The durable receipt is still recorded when projection is blocked. If a human format cannot project the sections, the result names the omission rather than returning `document: null` with no pointer and only a compact count.
 
 ## Receipt fields and wording
 
