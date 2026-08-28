@@ -2562,3 +2562,60 @@ def test_end_to_end_hook_budget_is_recorded_and_exceeding_it_is_diagnosed(
     assert budget["recent"] == 1
     timings = dict(cast(Mapping[str, object], summary["timings"]))
     assert timings["count"] == 1
+
+
+def test_codex_explicit_locator_drops_record_typed_workspace_diagnostics(tmp_path: Path) -> None:
+    """The Codex ingress shares the host-agnostic binding diagnostics (#420)."""
+
+    state = tmp_path / "state"
+    repository = tmp_path / "repo"
+    nested = repository / "packages/app"
+    nested.mkdir(parents=True)
+    (repository / ".git").mkdir()
+    diagnostics_path = state / "observation/hook-diagnostics.jsonl"
+
+    def reasons() -> list[str]:
+        if not diagnostics_path.exists():
+            return []
+        return [
+            json.loads(line)["reason"]
+            for line in diagnostics_path.read_text(encoding="utf-8").splitlines()
+        ]
+
+    payload = json.dumps({"session_id": "codex-subdir", "hook_event_name": "PostToolUse"}).encode()
+    for locator in (str(nested), "", str(tmp_path / "absent")):
+        stdout = io.BytesIO()
+        assert (
+            handle_observe(
+                event_name="PostToolUse",
+                stdin_bytes=payload,
+                stdout=stdout,
+                workspace=locator,
+                _state=state,
+                skip_service=True,
+            )
+            == 0
+        )
+        assert stdout.getvalue() == b"{}\n"
+    assert reasons() == [
+        "workspace_unconsented",
+        "workspace_unresolvable",
+        "workspace_unresolvable",
+    ]
+
+    # Consent at the Git root makes the subdirectory hook attach with no new diagnostic.
+    store = LocalObservationStore(_state=state)
+    store.grant_consent(store.workspace_commitment(str(repository)))
+    assert (
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=payload,
+            stdout=io.BytesIO(),
+            workspace=str(nested),
+            _state=state,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert len(reasons()) == 3
+    assert str(repository).encode() not in diagnostics_path.read_bytes()

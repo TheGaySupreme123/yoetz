@@ -17,7 +17,9 @@ from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
     "ADDITIONAL_CONTEXT_EVENTS",
+    "CLAUDE_ADDITIONAL_CONTEXT_EVENTS",
     "STOP_CONTROL_EVENTS",
+    "claude_context_output",
     "context_output",
     "cursor_context_output",
     "read_hook_payload",
@@ -38,9 +40,31 @@ ADDITIONAL_CONTEXT_EVENTS: Final = frozenset(
         "UserPromptSubmit",
     }
 )
-# Codex Stop / SubagentStop admit only universal fields plus decision/reason.
-# hookSpecificOutput is invalid and the host marks the hook Failed (#222).
+# Codex Stop / SubagentStop admit only the common output fields plus
+# decision/reason. The current hooks reference (learn.chatgpt.com/docs/hooks,
+# re-read 2026-08-28 for #420) still lists no hookSpecificOutput for either
+# event, and a build that received one marked the hook Failed with "invalid
+# stop hook JSON output" (#222). Per that reference, `decision: block` does not
+# reject the turn: Codex continues with `reason` as a new continuation prompt,
+# so `stop_hook_active` plus delivery identity remain the loop guard.
 STOP_CONTROL_EVENTS: Final = frozenset({"Stop", "SubagentStop"})
+# Claude Code events whose output schema admits hookSpecificOutput.additionalContext.
+# Unlike Codex, Claude Code documents Stop / SubagentStop `additionalContext` as
+# non-error feedback (code.claude.com/docs/en/hooks, re-read 2026-08-28): the
+# conversation continues so the model can act on it, but it is shown as hook
+# feedback rather than the `decision: block` hook error.
+CLAUDE_ADDITIONAL_CONTEXT_EVENTS: Final = frozenset(
+    {
+        "PostToolUse",
+        "PostToolUseFailure",
+        "PreToolUse",
+        "SessionStart",
+        "Stop",
+        "SubagentStart",
+        "SubagentStop",
+        "UserPromptSubmit",
+    }
+)
 
 
 def stderr_line(message: str) -> None:
@@ -79,6 +103,31 @@ def context_output(event_name: str, additional_context: str) -> dict[str, JsonVa
     if event_name in STOP_CONTROL_EVENTS:
         return {"decision": "block", "reason": text}
     if event_name in ADDITIONAL_CONTEXT_EVENTS:
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": event_name,
+                "additionalContext": text,
+            }
+        }
+    return {}
+
+
+def claude_context_output(event_name: str, additional_context: str) -> dict[str, JsonValue]:
+    """Return the Claude Code-valid stdout object for one event's advice text.
+
+    Every supported advice-bearing event, including Stop / SubagentStop, injects
+    ``hookSpecificOutput.additionalContext``. At Stop / SubagentStop that is
+    Claude Code's documented non-error feedback channel: it continues through
+    the same loop protections as ``decision: block`` but is labelled as feedback
+    instead of an error. SessionEnd and every undocumented event emit ``{}``.
+    """
+
+    text = additional_context.strip()
+    if not text:
+        return {}
+    if len(text) > _MAX_CONTEXT_CHARS:
+        text = text[:_MAX_CONTEXT_CHARS]
+    if event_name in CLAUDE_ADDITIONAL_CONTEXT_EVENTS:
         return {
             "hookSpecificOutput": {
                 "hookEventName": event_name,

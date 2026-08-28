@@ -62,9 +62,18 @@ _REASONS: Final = frozenset(
         "runtime_gate_contended",
         "runtime_gate_unsafe",
         "stdout_write_failed",
+        # Workspace binding outcomes for every host ingress (#420/#435): an
+        # explicit locator that cannot be canonicalized, and a canonical
+        # locator that carries no active consent. Without them a dropped hook
+        # is indistinguishable from a hook that never fired.
         "workspace_unconsented",
         "workspace_unresolvable",
         "cursor_session_ambiguous",
+        # Storage outcomes of a session status read, lowercase of the public
+        # error code so the hook advisory, this file, and `observe status`
+        # share one vocabulary (#338).
+        "storage_corrupt",
+        "storage_unsafe",
         # Observability only: the end-to-end hook budget is a contract, not an
         # enforcement point. Aborting mid-hook would drop ingest.
         "hook_budget_exceeded",

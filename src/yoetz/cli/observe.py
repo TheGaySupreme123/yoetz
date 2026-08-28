@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Final, Protocol, cast
+from typing import Final, ParamSpec, Protocol, cast
 
 import typer
 
@@ -32,8 +33,10 @@ from yoetz.adapters.integrations.observation_local import (
 from yoetz.application.observation_check_policy import load_observation_check_policy
 from yoetz.application.observation_drain import ObservationDrainAction, route_observation_ingest
 from yoetz.application.observation_verification import run_bound_approved_check
+from yoetz.cli.exits import exit_code_for, remediation_message
 from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
 from yoetz.cli.workspace_binding import canonical_workspace_locator
+from yoetz.config.paths import PathSafetyError
 from yoetz.domain.observation import (
     ObservationControlCommand,
     ObservationCursor,
@@ -54,7 +57,7 @@ from yoetz.ports.control import ControlClientKind, ControlError
 from yoetz.ports.integrations import IntegrationScope, IntegrationTarget
 from yoetz.ports.subject_state import SubjectStateCaptureCommand, SubjectStateFormat
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
-from yoetz.protocol.errors import PublicOperationError
+from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.service.client import connect_service_on_demand
 
 __all__ = [
@@ -88,11 +91,101 @@ class _DrainClient(Protocol):
 type DrainConnector = Callable[[ControlClientKind], Awaitable[_DrainClient]]
 
 
+_WORKSPACE_LOCATOR_INVALID: Final = "workspace_locator_invalid"
+_P = ParamSpec("_P")
+
+
 def _resolve_workspace(path: str | None) -> Path:
     root = canonical_workspace_locator("." if path is None else path)
     if root is None:
-        raise ValueError("workspace_locator_invalid")
+        raise ValueError(_WORKSPACE_LOCATOR_INVALID)
     return Path(root)
+
+
+def _typed_failure(
+    operation: str,
+    reason: str,
+    *,
+    code: PublicErrorCode,
+    message: str,
+    retryable: bool,
+    json_output: bool,
+) -> int:
+    """Report one bounded failure that names its layer, never `internal_error` (#428).
+
+    The token comes first so existing machine-readable expectations hold; the
+    remediation follows it. JSON callers get the same facts as one object.
+    """
+
+    if json_output:
+        _emit(
+            {
+                "error": {
+                    "code": code.value,
+                    "message": message,
+                    "operation": operation,
+                    "reason": reason,
+                    "retryable": retryable,
+                }
+            },
+            json_output=True,
+        )
+    else:
+        typer.echo(f"observation_{operation}_failed:{reason}: {message}", err=True)
+    return exit_code_for(code)
+
+
+def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable[_P, int]]:
+    """Map the closed pre-store failures of an observe verb to typed public outcomes.
+
+    An empty, missing, or unsafe `--workspace` locator, an unsafe local state
+    path, and a bounded storage refusal each name a true operating condition;
+    letting them escape to the process catch-all reported all three as
+    `internal_error` exit 70 with no next step (#428).
+    """
+
+    def decorate(function: Callable[_P, int]) -> Callable[_P, int]:
+        @functools.wraps(function)
+        def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> int:
+            json_output = kwargs.get("json_output", False) is True
+            try:
+                return function(*args, **kwargs)
+            except ValueError as error:
+                if str(error) != _WORKSPACE_LOCATOR_INVALID:
+                    raise
+                return _typed_failure(
+                    operation,
+                    "workspace_unresolvable",
+                    code=PublicErrorCode.INVALID_REQUEST,
+                    message=remediation_message("workspace_unresolvable") or "",
+                    retryable=False,
+                    json_output=json_output,
+                )
+            except PathSafetyError as error:
+                return _typed_failure(
+                    operation,
+                    "storage_unsafe",
+                    code=PublicErrorCode.STORAGE_UNSAFE,
+                    message=(
+                        f"the local Yoetz state path is unsafe ({error}); repair the state "
+                        "directory's ownership, permissions, or symlinks and retry"
+                    ),
+                    retryable=False,
+                    json_output=json_output,
+                )
+            except PublicOperationError as error:
+                return _typed_failure(
+                    operation,
+                    error.code.value.lower(),
+                    code=error.code,
+                    message=error.message,
+                    retryable=error.retryable,
+                    json_output=json_output,
+                )
+
+        return wrapped
+
+    return decorate
 
 
 def _emit(payload: Mapping[str, JsonValue], *, json_output: bool) -> None:
@@ -141,6 +234,7 @@ def _delivery_facts(
     return len(rows), dict(sorted(causes.items())), last, mapping_present
 
 
+@_bounded_operation("status")
 def observe_status(
     *,
     workspace: str | None,
@@ -365,6 +459,7 @@ async def _drain_observation_async(
     )
 
 
+@_bounded_operation("drain")
 def drain_observation(
     *, workspace: str | None, json_output: bool, _state: Path | None = None
 ) -> int:
@@ -392,6 +487,7 @@ def drain_observation(
     return code
 
 
+@_bounded_operation("reclaim")
 def reclaim_observation(*, workspace: str, json_output: bool, _state: Path | None = None) -> int:
     """Operator-initiated drop of quarantined observation detail (#211).
 
@@ -422,6 +518,7 @@ def reclaim_observation(*, workspace: str, json_output: bool, _state: Path | Non
     return 0
 
 
+@_bounded_operation("grant")
 def grant_observation(*, workspace: str, _state: Path | None = None) -> int:
     store = LocalObservationStore(_state=_state)
     root = _resolve_workspace(workspace)
@@ -432,38 +529,29 @@ def grant_observation(*, workspace: str, _state: Path | None = None) -> int:
     return 0
 
 
+@_bounded_operation("pause")
 def pause_observation(*, workspace: str, _state: Path | None = None) -> int:
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
-    try:
-        status = store.pause(ObservationControlCommand(commitment))
-    except PublicOperationError as error:
-        typer.echo(f"observation_pause_failed:{error.code.value}", err=True)
-        return 20
+    status = store.pause(ObservationControlCommand(commitment))
     typer.echo(f"observation_paused:{status.lifecycle.value}")
     return 0
 
 
+@_bounded_operation("resume")
 def resume_observation(*, workspace: str, _state: Path | None = None) -> int:
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
-    try:
-        status = store.resume(ObservationControlCommand(commitment))
-    except PublicOperationError as error:
-        typer.echo(f"observation_resume_failed:{error.code.value}", err=True)
-        return 20
+    status = store.resume(ObservationControlCommand(commitment))
     typer.echo(f"observation_resumed:{status.lifecycle.value}")
     return 0
 
 
+@_bounded_operation("revoke")
 def revoke_observation(*, workspace: str, _state: Path | None = None) -> int:
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
-    try:
-        status = store.revoke(ObservationRevokeCommand(commitment, retain_evidence=True))
-    except PublicOperationError as error:
-        typer.echo(f"observation_revoke_failed:{error.code.value}", err=True)
-        return 20
+    status = store.revoke(ObservationRevokeCommand(commitment, retain_evidence=True))
     typer.echo(f"observation_revoked:{status.lifecycle.value}:evidence_retained")
     return 0
 
@@ -631,6 +719,7 @@ def observe_checks_run(
         return 20
 
 
+@_bounded_operation("reconcile")
 def reconcile_session_stream(
     *,
     session_file: str,

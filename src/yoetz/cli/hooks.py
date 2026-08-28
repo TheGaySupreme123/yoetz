@@ -92,12 +92,28 @@ _PRIVACY_CONTEXT: Final = (
     "Yoetz cannot read this mapped session until repository privacy authority is "
     "granted; run 'yoetz --privacy'. No live receipt can be promised until then."
 )
+# The two storage outcomes carry opposite retry advice, so folding both into
+# "unavailable" left an agent unable to tell a fault it may retry from data it
+# must not keep writing to (#338). Both stay bounded and payload-free.
+_STORAGE_UNSAFE_CONTEXT: Final = (
+    "Yoetz storage faulted while reading this mapped session (storage_unsafe): the "
+    "service is reachable and the stored data is not known to be damaged. Retry status "
+    "once before promising a receipt; if it repeats, report it to the operator."
+)
+_STORAGE_CORRUPT_CONTEXT: Final = (
+    "Yoetz stored data for this mapped session is invalid (storage_corrupt). Do not "
+    "retry and do not promise a receipt; stop material work on this task and escalate "
+    "to the operator, who can inspect it with 'yoetz status'."
+)
 
 # Hook-side classification of every public error a status read can surface. The
 # daemon answering with SESSION_* means the stored mapping no longer names a live
 # route/writer — the service is healthy, so reporting it "unavailable" was false
 # and absorbing (issue #308). "retry" codes are transient reads that can succeed
 # on the next attempt; only genuinely degraded states remain "unavailable".
+# The two storage codes keep their own classes because they prescribe opposite
+# next steps (#338): "storage_unsafe" is a fault that may be retried,
+# "storage_corrupt" is invalid data that must not be.
 _STATUS_ERROR_CLASSES: Final[Mapping[PublicErrorCode, str]] = MappingProxyType(
     {
         PublicErrorCode.SESSION_NOT_FOUND: "stale",
@@ -113,8 +129,8 @@ _STATUS_ERROR_CLASSES: Final[Mapping[PublicErrorCode, str]] = MappingProxyType(
         PublicErrorCode.REQUEST_IDENTITY_CONFLICT: "unavailable",
         PublicErrorCode.EVENT_INVALID: "unavailable",
         PublicErrorCode.LIMIT_EXCEEDED: "unavailable",
-        PublicErrorCode.STORAGE_UNSAFE: "unavailable",
-        PublicErrorCode.STORAGE_CORRUPT: "unavailable",
+        PublicErrorCode.STORAGE_UNSAFE: "storage_unsafe",
+        PublicErrorCode.STORAGE_CORRUPT: "storage_corrupt",
         PublicErrorCode.MIGRATION_REQUIRED: "unavailable",
         PublicErrorCode.SERVICE_UNAVAILABLE: "unavailable",
         PublicErrorCode.PROVIDER_UNAVAILABLE: "unavailable",
@@ -374,7 +390,7 @@ async def _read_status(
 ) -> StatusOutcome:
     """Return (context_kind, updated_mapping_or_none).
 
-    kind is active|stale|locked|retry|privacy|unavailable.
+    kind is active|stale|locked|retry|privacy|storage_unsafe|storage_corrupt|unavailable.
     """
 
     client: _StatusClient | None = None
@@ -559,6 +575,21 @@ def handle_session_start(
                 return 0
             if kind == "privacy":
                 _stdout_json(_context_output("SessionStart", _PRIVACY_CONTEXT), stdout)
+                return 0
+            if kind in {"storage_unsafe", "storage_corrupt"}:
+                from yoetz.cli.hook_diagnostics import record_hook_diagnostic
+
+                with contextlib.suppress(Exception):
+                    record_hook_diagnostic(kind, "SessionStart", _state=_state)
+                _stdout_json(
+                    _context_output(
+                        "SessionStart",
+                        _STORAGE_UNSAFE_CONTEXT
+                        if kind == "storage_unsafe"
+                        else _STORAGE_CORRUPT_CONTEXT,
+                    ),
+                    stdout,
+                )
                 return 0
             _stdout_json(_context_output("SessionStart", _UNAVAILABLE_CONTEXT), stdout)
             return 0

@@ -419,7 +419,52 @@ def test_status_error_class_table_is_exhaustive() -> None:
 
     table = hooks_module._STATUS_ERROR_CLASSES  # pyright: ignore[reportPrivateUsage]
     assert set(table) == set(PublicErrorCode)
-    assert set(table.values()) <= {"stale", "locked", "retry", "privacy", "unavailable"}
+    assert set(table.values()) <= {
+        "stale",
+        "locked",
+        "retry",
+        "privacy",
+        "storage_unsafe",
+        "storage_corrupt",
+        "unavailable",
+    }
+    # The two storage codes prescribe opposite next steps and must never share
+    # the generic class again (#338).
+    assert table[PublicErrorCode.STORAGE_UNSAFE] == "storage_unsafe"
+    assert table[PublicErrorCode.STORAGE_CORRUPT] == "storage_corrupt"
+
+
+def test_session_start_storage_codes_carry_distinct_retryability(tmp_path: Path) -> None:
+    """STORAGE_UNSAFE says retry once; STORAGE_CORRUPT says stop and escalate (#338)."""
+
+    unsafe = _session_start_context_for_failure(
+        tmp_path,
+        "codex-storage-unsafe",
+        _failure_result(PublicErrorCode.STORAGE_UNSAFE, retryable=True),
+    )
+    corrupt = _session_start_context_for_failure(
+        tmp_path,
+        "codex-storage-corrupt",
+        _failure_result(PublicErrorCode.STORAGE_CORRUPT),
+    )
+    assert unsafe == hooks_module._STORAGE_UNSAFE_CONTEXT  # pyright: ignore[reportPrivateUsage]
+    assert corrupt == hooks_module._STORAGE_CORRUPT_CONTEXT  # pyright: ignore[reportPrivateUsage]
+    assert unsafe != corrupt
+    assert "storage_unsafe" in unsafe and "Retry" in unsafe
+    assert "storage_corrupt" in corrupt and "Do not retry" in corrupt
+    for text in (unsafe, corrupt):
+        assert text != hooks_module._UNAVAILABLE_CONTEXT  # pyright: ignore[reportPrivateUsage]
+        assert "unavailable" not in text
+        assert len(text) <= 2_000
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "observation/hook-diagnostics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    storage_rows = [row for row in rows if row["reason"].startswith("storage_")]
+    assert [row["reason"] for row in storage_rows] == ["storage_unsafe", "storage_corrupt"]
+    assert {row["event"] for row in storage_rows} == {"SessionStart"}
 
 
 def test_control_error_class_table_is_exhaustive() -> None:
