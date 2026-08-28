@@ -359,7 +359,10 @@ class HumanControlService:
                 await self._consume_failed(session)
                 if isinstance(failure, HumanControlError):
                     raise failure
-                raise HumanControlError(self._map_error(failure)) from failure
+                mapped = (
+                    self._map_error(failure) if isinstance(failure, Exception) else "internal_error"
+                )
+                raise HumanControlError(mapped) from failure
             secret = secret_task.result()
             session.secret_task = None
             try:

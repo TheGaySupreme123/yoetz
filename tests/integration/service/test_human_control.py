@@ -868,9 +868,7 @@ async def test_close_during_secret_wait_does_not_deadlock(tmp_path: Path) -> Non
         async def close(self) -> None:
             return None
 
-    service, _, lifecycle, _, _ = _service(
-        tmp_path, mode="passphrase", ready=False, handles=[]
-    )
+    service, _, lifecycle, _, _ = _service(tmp_path, mode="passphrase", ready=False, handles=[])
     service._secret_ingress = _HangIngress()  # pyright: ignore[reportPrivateUsage]
     opened = await service.open_ceremony(
         ClientOpenEnvelope(

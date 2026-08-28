@@ -3514,7 +3514,11 @@ class _HumanConnectionServer:
         )
         for task in pending:
             task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
+        for task in pending:
+            try:
+                await task
+            except asyncio.CancelledError, Exception:
+                pass
         if secret_wait in done and not secret_wait.cancelled():
             return secret_wait.result()
         incoming: object | None = None

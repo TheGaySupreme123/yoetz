@@ -654,7 +654,8 @@ def test_client_handshake_names_an_answered_foreign_digest_as_manifest_mismatch(
         async def answer_foreign() -> None:
             await read_control_frame(server)
             result = proto._hello_result_wire(  # pyright: ignore[reportPrivateUsage]
-                _status(), proto._allowed_for(ControlClientKind.CLI)  # pyright: ignore[reportPrivateUsage]
+                _status(),
+                proto._allowed_for(ControlClientKind.CLI),  # pyright: ignore[reportPrivateUsage]
             )
             result["schema_manifest_digest"] = "sha256:" + "b" * 64
             await write_control_frame(server, result)
