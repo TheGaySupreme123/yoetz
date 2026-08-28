@@ -1613,6 +1613,12 @@ class SqliteLedger:
         await self._ensure_recovered()
         return await self._oracle().lookup_operation(writer_id, operation_id)
 
+    async def lookup_task_operation(
+        self, writer_id: str, operation_id: str
+    ) -> OperationRecord | None:
+        await self._ensure_recovered()
+        return await self._oracle().lookup_task_operation(writer_id, operation_id)
+
     async def has_active_frozen_case(self, session_id: str) -> bool:
         await self._ensure_recovered()
         return await self._oracle().has_active_frozen_case(session_id)

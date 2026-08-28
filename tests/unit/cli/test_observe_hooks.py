@@ -1116,7 +1116,9 @@ def test_session_start_stale_mapping_advisory_keeps_advice_delivery(
     )
     assert code == 0
     context = json.loads(out.getvalue().decode())["hookSpecificOutput"]["additionalContext"]
-    stale_text = hooks_module._STALE_MAPPING_CONTEXT  # pyright: ignore[reportPrivateUsage]
+    mapping = load_mapping("stale-observe", _state=tmp_path)
+    assert mapping is not None
+    stale_text = hooks_module._stale_mapping_context(mapping)  # pyright: ignore[reportPrivateUsage]
     assert context.startswith(stale_text)
     assert "unavailable" not in context
     # The static stale advisory must not starve pending advice (#241, #280 pattern).

@@ -57,6 +57,7 @@ from yoetz.ports.secret_memory import (
 from yoetz.ports.start_catalog import StartCatalogPort
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.models import StartRequest
 
 if TYPE_CHECKING:
     from yoetz.ports.secret_memory import SecretHandle
@@ -453,6 +454,51 @@ async def test_matching_refs_attach_and_same_title_without_refs_stays_distinct()
         "session_opened",
         "session_resumed",
     ]
+
+
+async def test_historical_session_reattaches_after_same_pair_rotation() -> None:
+    """Same-pair attach retires the held session but keeps it as an attach selector (#438)."""
+
+    app, _, _, catalog = start_composition()
+    created = await execute_start(app, start_request(760, refs=True))
+    attached = await execute_start(app, start_request(761, refs=True))
+    assert attached.outcome == "attached"
+    resumed = await execute_start(
+        app, start_request(762, mode="attach", session_id=created.session_id, refs=True)
+    )
+    assert resumed.outcome == "attached"
+    assert resumed.task_id == created.task_id
+    assert resumed.session_id not in {created.session_id, attached.session_id}
+
+    memory = cast(MemoryStartCatalogAdapter, catalog.delegate)
+    assert await memory.resolve_route(created.session_id) is None
+    binding = await memory.session_binding(created.session_id)
+    assert binding is not None
+    assert binding.session_id == resumed.session_id
+
+
+async def test_create_or_attach_drifted_pair_conflicts_until_explicit_create() -> None:
+    """A changed external_ref in an occupied workspace is not a silent new task (#431)."""
+
+    app, _, _, _ = start_composition()
+    created = await execute_start(app, start_request(770, refs=True))
+    drifted = start_request(771, refs=True).model_dump(mode="json", exclude_none=True)
+    drifted["external_ref"] = "external-B"
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_start(app, StartRequest.model_validate(drifted))
+    assert caught.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert caught.value.safe_details == {"reason_code": "workspace_task_exists"}
+    assert created.task_id not in caught.value.message
+    assert created.session_id not in caught.value.message
+    assert created.writer_id not in caught.value.message
+
+    sibling_wire = start_request(772, mode="create", refs=True).model_dump(
+        mode="json", exclude_none=True
+    )
+    sibling_wire["external_ref"] = "external-B"
+    sibling = await execute_start(app, StartRequest.model_validate(sibling_wire))
+    assert sibling.outcome == "created"
+    assert sibling.task_id != created.task_id
 
 
 async def test_result_published_crash_resumes_pinned_object_and_releases_each_runtime() -> None:

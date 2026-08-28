@@ -1527,3 +1527,7 @@ class LedgerPort(Protocol):
     async def lookup_operation(
         self, writer_id: str, operation_id: str
     ) -> OperationRecord | None: ...
+
+    async def lookup_task_operation(
+        self, writer_id: str, operation_id: str
+    ) -> OperationRecord | None: ...

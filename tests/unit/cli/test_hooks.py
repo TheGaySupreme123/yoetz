@@ -356,7 +356,11 @@ def test_session_start_stale_mapping_is_not_reported_unavailable(
     """SESSION_* means the mapping is stale, not that the service is down (#308)."""
 
     text = _session_start_context_for_failure(tmp_path, "codex-stale", _failure_result(code))
-    assert text == hooks_module._STALE_MAPPING_CONTEXT  # pyright: ignore[reportPrivateUsage]
+    mapping = load_mapping("codex-stale", _state=tmp_path)
+    assert mapping is not None
+    assert text == hooks_module._stale_mapping_context(mapping)  # pyright: ignore[reportPrivateUsage]
+    assert mapping.yoetz_session_id in text
+    assert "mode=attach" in text
     assert "unavailable" not in text
     assert "start" in text
     # The mapping is kept: repair flows through the agent's own re-start via

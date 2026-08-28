@@ -24,7 +24,7 @@ from yoetz.ports.runtime import (
     StartMilestoneExpectation,
     TaskRuntime,
 )
-from yoetz.ports.start_catalog import TaskRoute, TaskRouteState
+from yoetz.ports.start_catalog import SessionBinding, TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
@@ -52,6 +52,10 @@ class _Catalog:
     async def resolve_route(self, session_id: str) -> TaskRoute | None:
         await asyncio.sleep(0)
         return self.route if session_id == self.route.session_id else None
+
+    async def session_binding(self, session_id: str) -> SessionBinding | None:
+        del session_id
+        return None
 
 
 class _Vault:

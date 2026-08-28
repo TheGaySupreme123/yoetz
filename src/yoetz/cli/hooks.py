@@ -79,11 +79,17 @@ _UNAVAILABLE_CONTEXT: Final = (
 _LOCKED_CONTEXT: Final = (
     "Yoetz vault is locked for this mapped session; no live receipt can be promised."
 )
-_STALE_MAPPING_CONTEXT: Final = (
-    "Yoetz task mapping for this session is stale: the task was re-started under new "
-    "session and writer ids. The service itself is healthy. Call start again to re-map "
-    "before further material work."
-)
+
+
+def _stale_mapping_context(mapping: LifecycleMapping) -> str:
+    return (
+        "Yoetz task mapping for this session is stale: the task was re-started under new "
+        "session and writer ids. The service itself is healthy. Call start with mode=attach "
+        f"and session_id {mapping.yoetz_session_id} (task {mapping.yoetz_task_id}) to continue "
+        "the same task. Do not open a new task with a different external_ref."
+    )
+
+
 _RETRY_CONTEXT: Final = (
     "Yoetz is busy and could not read status on this attempt; the service is reachable. "
     "Call status before promising a receipt."
@@ -565,7 +571,9 @@ def handle_session_start(
                 # held here, so this branch owns the resume event's diagnostic.
                 with contextlib.suppress(Exception):
                     record_hook_diagnostic("mapping_stale", "SessionStart", _state=_state)
-                _stdout_json(_context_output("SessionStart", _STALE_MAPPING_CONTEXT), stdout)
+                _stdout_json(
+                    _context_output("SessionStart", _stale_mapping_context(mapping)), stdout
+                )
                 return 0
             if kind == "locked":
                 _stdout_json(_context_output("SessionStart", _LOCKED_CONTEXT), stdout)

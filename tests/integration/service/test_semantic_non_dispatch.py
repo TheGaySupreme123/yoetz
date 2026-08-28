@@ -47,7 +47,12 @@ from yoetz.ports.privacy import (
     RepositoryPrivacyAuthority,
 )
 from yoetz.ports.semantic import ProviderAttemptProvenance, SemanticResultUnavailable
-from yoetz.ports.start_catalog import StartCatalogPort, TaskRoute, TaskRouteState
+from yoetz.ports.start_catalog import (
+    SessionBinding,
+    StartCatalogPort,
+    TaskRoute,
+    TaskRouteState,
+)
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.models import DataCategory, SemanticReason, SemanticStatus
 
@@ -262,6 +267,10 @@ class _Catalog:
     async def resolve_route(self, session: str) -> TaskRoute | None:
         assert session == _SESSION
         return self.route
+
+    async def session_binding(self, session: str) -> SessionBinding | None:
+        del session
+        return None
 
 
 def _route(state: TaskRouteState = TaskRouteState.ACTIVE) -> TaskRoute:

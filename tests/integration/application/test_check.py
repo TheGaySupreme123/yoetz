@@ -190,6 +190,11 @@ class _Ledger:
         assert (writer_id, operation_id) == (_WRITER, _REQUEST)
         return self.operation
 
+    async def lookup_task_operation(
+        self, writer_id: str, operation_id: str
+    ) -> OperationRecord | None:
+        return await self.lookup_operation(writer_id, operation_id)
+
     async def advance_check_phase(
         self,
         lease: OperationLease,

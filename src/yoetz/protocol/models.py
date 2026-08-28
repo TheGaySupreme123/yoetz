@@ -1251,7 +1251,7 @@ class StatusObligationsFilterModel(_ClosedModel):
 
 
 class StatusOperationFilterModel(_ClosedModel):
-    """Keys a status read at one prior operation identity for the authenticated writer."""
+    """Keys a status read at one prior operation identity within the authenticated task."""
 
     operation_request_id: RequestIdWire
 
@@ -2887,7 +2887,7 @@ class StatusOperationAcceptedEventModel(_ClosedModel):
 
 
 class StatusOperationPageModel(_ClosedModel):
-    """One request-id-keyed operation recovery page for the authenticated writer."""
+    """One request-id-keyed operation recovery page within the authenticated task."""
 
     operation_request_id: RequestIdWire
     found: bool

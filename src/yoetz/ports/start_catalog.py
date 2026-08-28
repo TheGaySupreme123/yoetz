@@ -24,6 +24,7 @@ __all__ = [
     "WORKSPACE_REF_DOMAIN",
     "EncryptedResultRef",
     "SafeReason",
+    "SessionBinding",
     "StartAllocation",
     "StartCatalogPort",
     "StartCommand",
@@ -217,6 +218,20 @@ class TaskRoute:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionBinding:
+    """Active session/writer binding for one task, used as an attach repair selector."""
+
+    task_id: str
+    session_id: str
+    writer_id: str
+
+    def __post_init__(self) -> None:
+        _id(IdKind.TASK, self.task_id)
+        _id(IdKind.SESSION, self.session_id)
+        _id(IdKind.WRITER, self.writer_id)
+
+
+@dataclass(frozen=True, slots=True)
 class StartOperationLease:
     """Catalog-start lease; distinct from the check-specific ledger lease."""
 
@@ -371,6 +386,8 @@ class StartCatalogPort(Protocol):
     async def commit_identity(self, value: StartIdentityInput) -> StartIdentityCommitments: ...
 
     async def resolve_route(self, session_id: str) -> TaskRoute | None: ...
+
+    async def session_binding(self, session_id: str) -> SessionBinding | None: ...
 
     async def list_workspace_task_ids(self, workspace_ref_commitment: str) -> tuple[str, ...]: ...
 

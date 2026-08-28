@@ -23,6 +23,7 @@ from yoetz.ports.start_catalog import (
     WORKSPACE_REF_DOMAIN,
     EncryptedResultRef,
     SafeReason,
+    SessionBinding,
     StartAllocation,
     StartCommand,
     StartIdentityCommitments,
@@ -127,6 +128,7 @@ class MemoryStartCatalogState:
     routes: dict[str, _RouteRecord] = field(default_factory=lambda: {})
     operations: dict[tuple[str, str], _OperationRecord] = field(default_factory=lambda: {})
     session_index: dict[str, str] = field(default_factory=lambda: {})
+    historical_session_index: dict[str, str] = field(default_factory=lambda: {})
     attachment_index: dict[tuple[str, str], str] = field(default_factory=lambda: {})
     publish_responses: dict[tuple[str, str, LocalDisclosureSink], StoredPublishResponse] = field(
         default_factory=lambda: {}
@@ -151,7 +153,13 @@ class MemoryStartCatalogPolicy:
             raise ValueError("start_lease_policy_invalid")
 
 
-def _error(code: PublicErrorCode, *, retryable: bool = False) -> PublicOperationError:
+def _error(
+    code: PublicErrorCode,
+    *,
+    retryable: bool = False,
+    message: str | None = None,
+    safe_details: object | None = None,
+) -> PublicOperationError:
     messages = {
         PublicErrorCode.INVALID_REQUEST: "The start request is invalid.",
         PublicErrorCode.IDEMPOTENCY_CONFLICT: "The request ID was already used.",
@@ -162,7 +170,23 @@ def _error(code: PublicErrorCode, *, retryable: bool = False) -> PublicOperation
         PublicErrorCode.STORAGE_CORRUPT: "The local catalog is inconsistent.",
         PublicErrorCode.INTERNAL_ERROR: "The start state is inconsistent.",
     }
-    return PublicOperationError(code, messages[code], retryable)
+    return PublicOperationError(
+        code,
+        messages[code] if message is None else message,
+        retryable,
+        safe_details=safe_details,
+    )
+
+
+def _workspace_conflict() -> PublicOperationError:
+    return _error(
+        PublicErrorCode.SESSION_CONFLICT,
+        message=(
+            "A task already exists for this workspace. Attach with a previously returned "
+            "session_id, or retry with mode=create for an explicit separate sibling task."
+        ),
+        safe_details={"reason_code": "workspace_task_exists"},
+    )
 
 
 def _commitment(lookup: MacKeyHandle, domain: bytes, value: str) -> str:
@@ -359,6 +383,21 @@ class MemoryStartCatalogAdapter:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT)
         return _route_value(record)
 
+    async def session_binding(self, session_id: str) -> SessionBinding | None:
+        try:
+            session = validate_id(IdKind.SESSION, session_id)
+        except (TypeError, ValueError) as exc:
+            raise _error(PublicErrorCode.INVALID_REQUEST) from exc
+        async with self._lock:
+            task_id = self._state.session_index.get(session)
+            if task_id is None:
+                task_id = self._state.historical_session_index.get(session)
+            if task_id is None:
+                task_id = self._task_id_for_operation_session(session)
+            if task_id is None:
+                return None
+            return self._binding_for_task(task_id)
+
     async def list_workspace_task_ids(self, workspace_ref_commitment: str) -> tuple[str, ...]:
         try:
             validate_commitment(workspace_ref_commitment)
@@ -478,6 +517,14 @@ class MemoryStartCatalogAdapter:
 
             created = route is None
             if created:
+                workspace = request.identity_commitments.workspace_ref_commitment
+                if request.mode is StartMode.CREATE_OR_ATTACH and workspace is not None:
+                    if any(
+                        record.workspace_ref_commitment == workspace
+                        and record.state is not TaskRouteState.QUARANTINED
+                        for record in self._state.routes.values()
+                    ):
+                        raise _workspace_conflict()
                 task_id = proposed[IdKind.TASK]
                 session_id = proposed[IdKind.SESSION]
                 bundle_relpath = f"tasks/{task_id}"
@@ -691,6 +738,10 @@ class MemoryStartCatalogAdapter:
         by_session: _RouteRecord | None = None
         if request.session_id is not None:
             task_id = self._state.session_index.get(request.session_id)
+            if task_id is None:
+                task_id = self._state.historical_session_index.get(request.session_id)
+            if task_id is None:
+                task_id = self._task_id_for_operation_session(request.session_id)
             if task_id is not None:
                 by_session = self._state.routes.get(task_id)
                 if by_session is None:
@@ -804,7 +855,9 @@ class MemoryStartCatalogAdapter:
             raise _error(PublicErrorCode.STORAGE_CORRUPT)
         if self._state.session_index.get(old_session) != route.task_id:
             raise _error(PublicErrorCode.STORAGE_CORRUPT)
-        del self._state.session_index[old_session]
+        if old_session != session_id:
+            del self._state.session_index[old_session]
+            self._state.historical_session_index[old_session] = route.task_id
         self._state.session_index[session_id] = route.task_id
         self._state.routes[route.task_id] = replace(
             route,
@@ -813,3 +866,35 @@ class MemoryStartCatalogAdapter:
             quarantine_code=None,
             updated_at=now,
         )
+
+    def _task_id_for_operation_session(self, session_id: str) -> str | None:
+        matches = [
+            record.task_id
+            for record in self._state.operations.values()
+            if record.session_id == session_id
+        ]
+        if len(matches) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        return None if not matches else matches[0]
+
+    def _writer_for_session(self, session_id: str) -> str | None:
+        matches = [
+            record.writer_id
+            for record in self._state.operations.values()
+            if record.session_id == session_id
+        ]
+        if len(matches) > 1:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT)
+        return None if not matches else matches[0]
+
+    def _binding_for_task(self, task_id: str) -> SessionBinding | None:
+        route = self._state.routes.get(task_id)
+        if route is None or route.state is TaskRouteState.QUARANTINED:
+            return None
+        writer_id = self._writer_for_session(route.active_session_id)
+        if writer_id is None:
+            return None
+        try:
+            return SessionBinding(route.task_id, route.active_session_id, writer_id)
+        except ValueError as exc:
+            raise _error(PublicErrorCode.STORAGE_CORRUPT) from exc

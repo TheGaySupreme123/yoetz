@@ -939,7 +939,7 @@ async def execute_status(
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status filter is invalid.")
             if request.cursor is not None:
                 raise _error(PublicErrorCode.INVALID_REQUEST, "The status cursor is invalid.")
-            operation = await runtime.ledger.lookup_operation(
+            operation = await runtime.ledger.lookup_task_operation(
                 request.writer_id, request.filter.operation_request_id
             )
             continuation = None

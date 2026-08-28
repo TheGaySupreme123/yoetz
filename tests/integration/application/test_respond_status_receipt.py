@@ -110,6 +110,7 @@ from yoetz.protocol.models import (
     StatusCompactPageModel,
     StatusEvidencePageModel,
     StatusFindingsPageModel,
+    StatusOperationPageModel,
     StatusRequest,
 )
 
@@ -1846,7 +1847,8 @@ async def test_reattach_detaches_the_prior_session_from_the_task_route() -> None
     assert attached.outcome == "attached"
 
     # Bounded, not an internal error: the superseded session no longer resolves to a route, which
-    # is the fact the real bundle runtime turns into SESSION_NOT_FOUND before any ledger read.
+    # both application routing and the real bundle runtime turn into SESSION_NOT_FOUND before any
+    # ledger read.
     assert await app.start_catalog.resolve_route(started.session_id) is None
     resumed_route = await app.start_catalog.resolve_route(attached.session_id)
     assert resumed_route is not None
@@ -1856,6 +1858,41 @@ async def test_reattach_detaches_the_prior_session_from_the_task_route() -> None
     ledger, _objects = _runtime.resources[attached.task_id]
     stranger = protocol_id("ses_", 2099)
     assert [record async for record in ledger.load_events(stranger)] == []
+
+
+async def test_status_operation_after_reattach_recovers_prior_session_request() -> None:
+    """Issue #438: view=operation from the successor session finds the prior request_id."""
+
+    app, _runtime, _ = _build_app(seed_offset=14)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=2100, refs=True)
+
+    attached = await app.start(
+        start_request(2120, title="Respond/status/receipt exercise", refs=True)
+    )
+    assert attached.session_id != started.session_id
+    recovered = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2130)),
+                "session_id": attached.session_id,
+                "writer_id": attached.writer_id,
+                "view": "operation",
+                "filter": {"operation_request_id": checked.request_id},
+                "limit": "100",
+            }
+        )
+    )
+    page = recovered.page
+    assert type(page) is StatusOperationPageModel
+    assert page.found is True
+    assert page.state == "complete"
+    assert page.operation_kind == "check"
+
+    assert await app.start_catalog.resolve_route(started.session_id) is None
+    binding = await app.start_catalog.session_binding(started.session_id)
+    assert binding is not None
+    assert binding.session_id == attached.session_id
+    assert binding.writer_id == attached.writer_id
 
 
 async def _drain_observation_record(

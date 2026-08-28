@@ -33,7 +33,7 @@ from yoetz.ports.runtime import (
     StartMilestoneExpectation,
     TaskRuntime,
 )
-from yoetz.ports.start_catalog import TaskRoute, TaskRouteState
+from yoetz.ports.start_catalog import SessionBinding, TaskRoute, TaskRouteState
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
@@ -55,14 +55,20 @@ class _Inspection:
 
 
 class _Catalog:
-    def __init__(self, route: TaskRoute) -> None:
+    def __init__(self, route: TaskRoute, binding: SessionBinding | None = None) -> None:
         self.generation = 3
         self.route_value = route
+        self.binding = binding
         self.lookups = 0
 
     async def resolve_route(self, session_id: str) -> TaskRoute | None:
         self.lookups += 1
         return self.route_value if session_id == self.route_value.session_id else None
+
+    async def session_binding(self, session_id: str) -> SessionBinding | None:
+        if self.binding is None or session_id == self.route_value.session_id:
+            return None
+        return self.binding
 
 
 class _Vault:
@@ -241,6 +247,42 @@ async def test_stale_service_rejects_before_catalog_route_io() -> None:
         )
     assert caught.value.code is PublicErrorCode.SERVICE_UNAVAILABLE
     assert catalog.lookups == 0
+
+
+@pytest.mark.anyio
+async def test_superseded_session_returns_current_bounded_binding() -> None:
+    route, writer = _route()
+    retired_session = _id(IdKind.SESSION, 4)
+    binding = SessionBinding(route.task_id, route.session_id, writer)
+    catalog = _Catalog(route, binding)
+    runtime = await open_local_bundle_runtime(
+        _context(frozenset({RuntimeCapability.STRUCTURAL_READ})),
+        catalog,
+        _Vault(),
+        _Harness(1, route, writer).factories(),
+        _Diagnostics(),
+        object(),
+    )
+
+    with pytest.raises(PublicOperationError) as caught:
+        await runtime.route(
+            RouteCommand(
+                retired_session,
+                None,
+                RouteAccess.STRUCTURAL_READ,
+                frozenset({RuntimeCapability.STRUCTURAL_READ}),
+            )
+        )
+
+    assert caught.value.code is PublicErrorCode.SESSION_NOT_FOUND
+    assert caught.value.retryable is False
+    assert caught.value.safe_details == {
+        "reason_code": "session_superseded",
+        "task_id": route.task_id,
+        "session_id": route.session_id,
+        "writer_id": writer,
+    }
+    await runtime.close()
 
 
 @pytest.mark.anyio

@@ -166,6 +166,7 @@ schema_reference_unresolved
 schema_version_mismatch
 semantic_provenance_json_shape_invalid
 service_incompatible
+session_superseded
 set_member_not_ascii
 timestamp_not_utc
 timestamp_out_of_range
@@ -175,7 +176,8 @@ unknown_event_schema
 unknown_payload_field
 unsorted_set_field
 unsupported_json_type
-unsupported_payload_type""".splitlines()
+unsupported_payload_type
+workspace_task_exists""".splitlines()
 )
 
 
@@ -344,7 +346,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 147
+    assert len(source_values) == 149
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)
@@ -511,9 +513,12 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
         "retry_after_ms",
         "schema_name",
         "sequence",
+        "session_id",
         "state",
         "status",
+        "task_id",
         "view",
+        "writer_id",
     )
     assert SAFE_DETAIL_KEYS == expected_keys
     accepted = normalize_safe_details(
@@ -533,9 +538,12 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
             "retry_after_ms": 1,
             "schema_name": "accepted-event",
             "sequence": 5,
+            "session_id": "ses_00000000-0000-4000-8000-000000000001",
             "state": _SafeEnum.READY,
             "status": _SafeEnum.READY,
+            "task_id": "tsk_00000000-0000-4000-8000-000000000001",
             "view": _SafeEnum.READY,
+            "writer_id": "wri_00000000-0000-4000-8000-000000000001",
         }
     )
     assert tuple(accepted) == expected_keys

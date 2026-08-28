@@ -1618,12 +1618,12 @@ def handle_observe(
                     _LOCKED_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _PRIVACY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _RETRY_CONTEXT,  # pyright: ignore[reportPrivateUsage]
-                    _STALE_MAPPING_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _STORAGE_CORRUPT_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _STORAGE_UNSAFE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _UNAVAILABLE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _active_context,  # pyright: ignore[reportPrivateUsage]
                     _read_status,  # pyright: ignore[reportPrivateUsage]
+                    _stale_mapping_context,  # pyright: ignore[reportPrivateUsage]
                 )
 
                 with acquire_session_lock(codex_session_id, _state=_state) as owned:
@@ -1682,7 +1682,7 @@ def handle_observe(
                                 # (re-started elsewhere). Repair flows through the agent's
                                 # own start via handle_post_tool_use; meanwhile the static
                                 # advisory must not starve pending advice (issue #308).
-                                additional = _STALE_MAPPING_CONTEXT
+                                additional = _stale_mapping_context(mapping)
                                 attach_advisory_only = True
                                 with contextlib.suppress(Exception):
                                     record_hook_diagnostic(

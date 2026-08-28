@@ -1713,6 +1713,20 @@ class MemoryLedgerAdapter:
             row = self._state.operations.get((writer_id, operation_id))
         return None if row is None else row[0]
 
+    async def lookup_task_operation(
+        self, writer_id: str, operation_id: str
+    ) -> OperationRecord | None:
+        async with self._lock:
+            preferred = self._state.operations.get((writer_id, operation_id))
+            if preferred is not None:
+                return preferred[0]
+            matches = [
+                row[0]
+                for key, row in self._state.operations.items()
+                if key[0] != writer_id and key[1] == operation_id
+            ]
+        return matches[0] if len(matches) == 1 else None
+
     async def reclaim_operation(
         self, writer_id: str, operation_id: str, request_digest: str
     ) -> OperationLease | PendingVerdict:

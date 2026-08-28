@@ -84,7 +84,11 @@ ordinary dictionary with exactly `code`, `message`, `retryable`, and bound `corr
 adds `safe_details` only when nonempty, as a new ordinary dictionary in ASCII key order. The frozen
 public-error JSON Schema remains a structural superset of this exact mapping-only runtime emitter.
 Allowlisted `safe_details` keys include structural recovery fields such as `reason_code`,
-`sequence`, and `head_digest` (for `FRONTIER_CONFLICT` current-head recovery). For MCP
+`sequence`, `head_digest` (for `FRONTIER_CONFLICT` current-head recovery), and validated
+`task_id`/`session_id`/`writer_id` selectors. `SESSION_NOT_FOUND` with
+`reason_code: session_superseded` carries the current binding for a retired session. The separate
+`workspace_task_exists` conflict deliberately carries no task selector or count: possession of a
+workspace reference alone is not authority to discover or attach another task. For MCP
 `INVALID_REQUEST` validation failures, `safe_details` may also carry parallel `fields` and
 `reasons` arrays: each entry is an allowlisted JSON pointer and a closed reason token for that
 location (same index order; at most eight locations). `reason_code` may co-occur with
@@ -204,12 +208,14 @@ identity, refs) plus coverage/gaps. It appends nothing, records no operation, do
 `dry_run: null` is rejected; omit the field or pass a boolean.
 The preferred recovery read after any ambiguous write is `status view=operation` with
 `filter.operation_request_id` set to the write's `request_id`: it is a state lookup for that
-operation identity (`absent`/`pending`/`complete`/`quarantined`) for the authenticated writer,
-without requiring a reconstructed publish body. Stored result detail is state-conditional: only
+operation identity (`absent`/`pending`/`complete`/`quarantined`) within the authenticated task,
+without requiring a reconstructed publish body. The task-scoped read intentionally survives a
+same-task attach that rotates the active session and writer; it never crosses a task bundle.
+Stored result detail is state-conditional: only
 `complete` + `publish_work` carries outcome, subject/result frontiers, and accepted event
 ids/digests; `pending`/`quarantined` report kind without those fields; `absent` reports none of
 them; non-publish completions report kind without append-shaped event detail. Lookups are scoped
-to the caller writer; another writer's `request_id` is reported as absent.
+to the authenticated task. A request from another task is reported as absent.
 MCP `publish_work` performs the same envelope-first operation lookup when the supplied body fails
 schema validation (so a malformed retry body can still recover a committed operation) — except
 under a declared `dry_run: true`, which appends nothing, so no prior-operation lookup can change
@@ -1079,6 +1085,10 @@ single predicate deciding between the two, shared by the receipt and by compact 
   non-retryable post-admission failure; records no check event and advances no frontier; retryable
   failures are rejected and remain pending);
 - `lookup_operation(writer_id, operation_id) -> OperationRecord | None`.
+- `lookup_task_operation(writer_id, operation_id) -> OperationRecord | None` (the caller already
+  holds one task runtime; this recovery read prefers the authenticated writer, otherwise returns a
+  unique prior-writer match inside that task, and fails closed as absent on ambiguous cross-writer
+  reuse).
 
 The check orchestration methods are authority-bearing port methods, not SQLite extensions.
 Once `freeze_case` returns a `FrozenCase` whose `lease` field carries the `OperationLease`, an
@@ -1332,6 +1342,8 @@ in a receipt (`application/status.md`, `application/check.md`).
 `StartCatalogPort` methods are `reserve_or_resume(StartCommand) -> StartAllocation`,
 `commit_identity(StartIdentityInput) -> StartIdentityCommitments`,
 `resolve_route(session_id) -> TaskRoute | None`,
+`session_binding(session_id) -> SessionBinding | None` (active binding for either an active or
+historical session of the same task),
 `list_workspace_task_ids(workspace_ref_commitment) -> tuple[str, ...]` (task ids only, ascending,
 non-quarantined; no public MCP surface yet),
 `advance_phase(allocation, phase, result: EncryptedResultRef | None = None) -> StartAllocation`,
@@ -1344,7 +1356,8 @@ encrypted-envelope digest, canonical unprojected structural bytes, and result di
 crash resume before terminal catalog completion.
 
 Shared route values are `TaskRoute` and `TaskRouteState` (`initializing`, `active`,
-`quarantined`). `TaskRoute` carries task ID, active session ID, generated bundle route, positive
+`quarantined`), plus `SessionBinding(task_id, session_id, writer_id)` for typed repair selectors.
+`TaskRoute` carries task ID, active session ID, generated bundle route, positive
 route generation, state, the optional installation-keyed `repository_privacy_commitment`, and the
 stored active route-identity digest. The repository commitment is supplied only by the trusted
 control-session binding and is never derived from the start request. That digest is SHA-256 over
@@ -1371,7 +1384,14 @@ fields. `reserve_or_resume` recomputes/verifies them before idempotency or route
 low-entropy plaintext from leaking through an unkeyed structural request digest. `workspace_ref`
 is the caller-declared project identity and `external_ref` the stable task identity within that project;
 together they are the attach selector when `session_id` is absent (`mode=create_or_attach` or
-`attach` with the pair). Raw refs never land in durable state — only the commitments do. This
+`attach` with the pair). An identical pair attaches and rotates to a fresh session/writer; the
+historical session remains a valid `mode=attach` selector even though ordinary task routing accepts
+only the active session, and a routed request on the retired session receives the typed current
+binding. If the pair is new but the workspace already owns a non-quarantined task,
+`create_or_attach` returns the typed `workspace_task_exists` conflict instead of silently splitting
+lineage. The conflict discloses no binding; the caller must attach with a previously held session
+selector or choose `mode=create` explicitly for a separate sibling task. Raw refs never land in
+durable state — only the commitments do. This
 model/agent-controlled `workspace_ref_commitment` is an attachment selector, not a
 repository-privacy commitment, and cannot select or inherit disclosure authority.
 
@@ -2695,8 +2715,9 @@ but only after atomically acquiring its lifecycle lock so an attach already in f
 Turn-boundary hooks retry auto-attach under a bounded budget and record a payload-free diagnostic
 when no mapping results. A status read against a mapping whose Yoetz session or writer was replaced
 classifies `SESSION_CONFLICT` and `SESSION_NOT_FOUND` as `mapping_stale`, not service unavailability:
-the hook preserves the mapping, tells the agent to call `start` again, and accepts only that
-successful `start` result as authority for replacement ids. `OPERATION_PENDING`, `BUNDLE_BUSY`, and
+the hook preserves the mapping, tells the agent to call `start mode=attach` with the mapped
+session id, and accepts only that successful `start` result as authority for replacement ids.
+`OPERATION_PENDING`, `BUNDLE_BUSY`, and
 `FRONTIER_CONFLICT` are transient status reads; vault and repository-privacy failures retain their
 distinct recovery advisories. `STORAGE_UNSAFE` and `STORAGE_CORRUPT` keep their own advisories
 because they prescribe opposite next steps — a fault that may be retried once versus invalid data

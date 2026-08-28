@@ -90,14 +90,14 @@ On resume, attach to the existing task and read status before reconstructing wor
 `start` resumes by one of two selectors (never by bare `task_id`):
 
 1. `session_id` — continue the exact session you already hold.
-2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that project work item without a `session_id`. Under `mode=create_or_attach`, the same pair creates on first use and attaches on every later conversation.
+2. `workspace_ref` + `external_ref` as a pair — resolve the durable task for that project work item without a `session_id`. Under `mode=create_or_attach`, the same pair creates on first use and attaches on every later conversation. Attach mints a fresh session and writer; use the returned ids. The previously held session is retired for routing, but `status view=operation` from the successor session recovers that task's request ids, and `start mode=attach` with the retired `session_id` re-binds the same task. A different `external_ref` in a workspace that already has a task is `SESSION_CONFLICT` (`workspace_task_exists`) without task selectors — attach with the previously held session id, or retry with `mode=create` for an explicit sibling.
 
 Convention:
 
 - `workspace_ref` = stable project identity (repository remote URL, or absolute repository root when there is no remote).
 - `external_ref` = stable task identity within that project (branch name, issue reference, or plan slug).
 
-Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work in the same project → same `workspace_ref`, different `external_ref`. Both refs are one-shot redacted values: only installation-keyed HMAC commitments are persisted, so a repository path or remote URL never lands in durable state — do not self-censor into unstable refs.
+Same conversation resuming, or a fresh conversation continuing the same work → `mode=create_or_attach` with the same pair and no `session_id`. Sibling work in the same project → `mode=create` with the same `workspace_ref` and a different `external_ref` (do not use `create_or_attach` for a new sibling). Both refs are one-shot redacted values: only installation-keyed HMAC commitments are persisted, so a repository path or remote URL never lands in durable state — do not self-censor into unstable refs.
 
 ## Findings and recheck
 

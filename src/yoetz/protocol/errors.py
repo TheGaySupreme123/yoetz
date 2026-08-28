@@ -187,6 +187,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "schema_version_mismatch",
     "semantic_provenance_json_shape_invalid",
     "service_incompatible",
+    "session_superseded",
     "set_member_not_ascii",
     "timestamp_not_utc",
     "timestamp_out_of_range",
@@ -197,10 +198,11 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "unsorted_set_field",
     "unsupported_json_type",
     "unsupported_payload_type",
+    "workspace_task_exists",
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 147
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 149
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
@@ -223,9 +225,12 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "retry_after_ms",
     "schema_name",
     "sequence",
+    "session_id",
     "state",
     "status",
+    "task_id",
     "view",
+    "writer_id",
 )
 
 _INTEGER_DETAIL_KEYS = frozenset({"count", "limit", "retry_after_ms", "sequence"})
@@ -249,6 +254,22 @@ _SCHEMA_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", re.ASCII)
 _CORRELATION_ID_PATTERN = re.compile(
     r"^err_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.ASCII,
+)
+_PROTOCOL_ID_DETAIL_PATTERNS: Mapping[str, re.Pattern[str]] = MappingProxyType(
+    {
+        "session_id": re.compile(
+            r"^ses_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            re.ASCII,
+        ),
+        "task_id": re.compile(
+            r"^tsk_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            re.ASCII,
+        ),
+        "writer_id": re.compile(
+            r"^wri_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            re.ASCII,
+        ),
+    }
 )
 _EMPTY_SAFE_DETAILS: Mapping[str, SafeDetailValue] = MappingProxyType({})
 
@@ -338,6 +359,11 @@ def _normalize_detail(key: str, value: object) -> SafeDetailValue | None:
         return None
     if key == "field" and _valid_json_pointer(value):
         return cast(str, value)
+    pattern = _PROTOCOL_ID_DETAIL_PATTERNS.get(key)
+    if pattern is not None:
+        if type(value) is str and pattern.fullmatch(value) is not None:
+            return value
+        return None
     return None
 
 

@@ -42,7 +42,7 @@ from yoetz.ports.runtime import (
     StartMilestoneExpectation,
     TaskRuntime,
 )
-from yoetz.ports.start_catalog import TaskRoute, TaskRouteState
+from yoetz.ports.start_catalog import SessionBinding, TaskRoute, TaskRouteState
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
 __all__ = [
@@ -70,6 +70,8 @@ class _GenerationCatalog(Protocol):
     def generation(self) -> int: ...
 
     async def resolve_route(self, session_id: str) -> TaskRoute | None: ...
+
+    async def session_binding(self, session_id: str) -> SessionBinding | None: ...
 
 
 class _RouteInspection(Protocol):
@@ -252,6 +254,11 @@ class _ReadLedger:
 
         return await self._value.lookup_operation(writer_id, operation_id)
 
+    async def lookup_task_operation(
+        self, writer_id: str, operation_id: str
+    ) -> OperationRecord | None:
+        return await self._value.lookup_task_operation(writer_id, operation_id)
+
 
 class _PayloadObjects:
     __slots__ = ("_value",)
@@ -277,8 +284,14 @@ class _StatusImporter:
         return await self._value.status(session_id)
 
 
-def _error(code: PublicErrorCode, message: str, *, retryable: bool) -> PublicOperationError:
-    return PublicOperationError(code, message, retryable)
+def _error(
+    code: PublicErrorCode,
+    message: str,
+    *,
+    retryable: bool,
+    safe_details: object | None = None,
+) -> PublicOperationError:
+    return PublicOperationError(code, message, retryable, safe_details=safe_details)
 
 
 _STALE = "The ready service generation changed."
@@ -348,6 +361,22 @@ class LocalBundleRuntime(BundleRuntimePort):
         )
         route = await self._catalog.resolve_route(command.session_id)
         if route is None:
+            binding = await self._catalog.session_binding(command.session_id)
+            if binding is not None and binding.session_id != command.session_id:
+                raise _error(
+                    PublicErrorCode.SESSION_NOT_FOUND,
+                    (
+                        "The requested session was replaced. Continue with session_id "
+                        f"{binding.session_id} and writer_id {binding.writer_id}."
+                    ),
+                    retryable=False,
+                    safe_details={
+                        "reason_code": "session_superseded",
+                        "task_id": binding.task_id,
+                        "session_id": binding.session_id,
+                        "writer_id": binding.writer_id,
+                    },
+                )
             raise _error(
                 PublicErrorCode.SESSION_NOT_FOUND,
                 "The requested task attachment was not found.",
