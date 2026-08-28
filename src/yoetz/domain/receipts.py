@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Final, Literal, cast
 
 from yoetz.domain.findings import (
+    FINDING_KIND_TRAITS,
     Finding,
     FindingOrigin,
     ResponseDisposition,
@@ -87,6 +88,7 @@ __all__ = [
     "receipt_document_to_json",
     "receipt_weakest_coverage",
     "render_receipt_compact",
+    "render_receipt_human",
     "semantic_coverage_gap_code",
 ]
 
@@ -1080,6 +1082,41 @@ def _declared_none_reason_for_render(document: ReceiptDocument) -> str | None:
         ):
             return gap.detail
     return None
+
+
+_HUMAN_TEXT_MAX: Final = 32_768
+
+
+def render_receipt_human(document: ReceiptDocument, *, markdown: bool) -> str:
+    """Project the canonical receipt sections into markdown or plain-text ``human_text``.
+
+    JSON receipts carry the structured document; markdown/text receipts keep ``document``
+    null by format and must still expose limitations and finding-count distinctions here
+    (#437, #429). Compact one-line wording remains ``render_receipt_compact``.
+    """
+
+    if type(document) is not ReceiptDocument or type(markdown) is not bool:
+        raise ProtocolValueError("invalid_receipt_document")
+    parts: list[str] = []
+    for section in document.sections:
+        heading = f"## {section.title}" if markdown else section.title
+        parts.append(f"{heading}\n{section.body}")
+    advisory_count = sum(
+        1 for finding in document.findings if not FINDING_KIND_TRAITS[finding.kind][1]
+    )
+    if advisory_count:
+        heading = "## Coverage limitations" if markdown else "Coverage limitations"
+        noun = "finding" if advisory_count == 1 else "findings"
+        parts.append(
+            f"{heading}\n{advisory_count} recorded coverage-limitation {noun} remain visible "
+            "and do not by themselves select unresolved_findings_remain."
+        )
+    text = "\n\n".join(parts) if parts else render_receipt_compact(document)
+    if len(text) > _HUMAN_TEXT_MAX:
+        text = text[:_HUMAN_TEXT_MAX]
+    if not text:
+        raise ProtocolValueError("invalid_receipt_document")
+    return text
 
 
 def render_receipt_compact(document: ReceiptDocument) -> str:

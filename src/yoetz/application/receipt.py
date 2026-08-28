@@ -22,7 +22,7 @@ from yoetz.domain.receipts import (
     ReceiptVersionSlice,
     receipt_document_from_json,
     receipt_document_to_json,
-    render_receipt_compact,
+    render_receipt_human,
     semantic_coverage_gap_code,
 )
 from yoetz.domain.values import (
@@ -554,7 +554,11 @@ def _internal_result(
     result_frontier: Frontier,
 ) -> ReceiptInternalResult:
     document_json = cast(JsonValue, receipt_document_to_json(document))
-    human = None if request.format is ReceiptFormat.JSON else render_receipt_compact(document)
+    human = (
+        None
+        if request.format is ReceiptFormat.JSON
+        else render_receipt_human(document, markdown=request.format is ReceiptFormat.MARKDOWN)
+    )
     return ReceiptInternalResult(
         "0.1",
         "1.0.0",

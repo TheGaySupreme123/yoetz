@@ -12,6 +12,8 @@ from builders.policy_cases import (
     evt,
     fnd,
     make_case,
+    obl,
+    obligation_record,
     record,
     res,
 )
@@ -22,6 +24,9 @@ from yoetz.domain.events import (
     ClaimRecordedPayload,
     EvidenceKind,
     EvidenceRecordedPayload,
+    ObligationChangeKind,
+    ObligationPublishedPayload,
+    ObligationStatus,
     ResponseDisposition,
     ResponseRecordedPayload,
     ResultOutcome,
@@ -77,17 +82,22 @@ def _evidence(state: SubjectStateRef | None = None) -> EvidenceRecordedPayload:
 
 
 def test_evidence_does_not_support_claim_and_success_nontrigger() -> None:
-    failure = _result(ResultOutcome.FAILURE)
+    open_obligation = ObligationPublishedPayload(
+        obligation_id=obl(1),
+        description="Synthetic obligation",
+        evidence_expectation="Typed evidence",
+        status=ObligationStatus.OPEN,
+        requested_items=(),
+    )
     claim = ClaimRecordedPayload(
         claim_id=clm(1),
         claim_kind=ClaimKind.COMPLETION,
         statement="Complete",
-        supporting_refs=(res(1),),
+        supporting_refs=(obl(1),),
     )
     trigger = make_case(
-        actions={act(1): record(_action(), 1)},
-        results={res(1): record(failure, 2)},
-        claims={clm(1): record(claim, 3)},
+        obligations={obl(1): obligation_record(open_obligation, 1)},
+        claims={clm(1): record(claim, 2)},
     )
     result = run_deterministic_policies(trigger, RESEARCH_EVIDENCE_POLICY_PACK)
     finding = next(
@@ -96,15 +106,40 @@ def test_evidence_does_not_support_claim_and_success_nontrigger() -> None:
         if item.candidate.kind is FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM
     )
     assert tuple(fact.fact_code for fact in finding.basis.observed_facts) == (
-        "claim_support_mismatch",
         "claim_support_present",
     )
-    success = make_case(
+    assert tuple(fact.fact_code for fact in finding.basis.required_but_missing_facts) == (
+        "claim_support_mismatch",
+    )
+    waived = make_case(
+        obligations={
+            obl(1): obligation_record(
+                open_obligation, 1, plan_change=ObligationChangeKind.WAIVED
+            )
+        },
+        claims={clm(1): record(claim, 2)},
+    )
+    assert FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM not in _kinds(waived)
+
+
+def test_cited_non_success_result_is_limitation_disclosure_not_support_mismatch() -> None:
+    """#429: citing a partial/failed result is disclosure, not contradictory support facts."""
+
+    failure = _result(ResultOutcome.FAILURE)
+    claim = ClaimRecordedPayload(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Complete",
+        supporting_refs=(res(1),),
+    )
+    disclosed = make_case(
         actions={act(1): record(_action(), 1)},
-        results={res(1): record(_result(ResultOutcome.SUCCESS), 2)},
+        results={res(1): record(failure, 2)},
         claims={clm(1): record(claim, 3)},
     )
-    assert FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM not in _kinds(success)
+    kinds = _kinds(disclosed)
+    assert FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM not in kinds
+    assert FindingKind.MATERIAL_LIMITATION_OMITTED not in kinds
 
 
 def test_diff_does_not_match_account_and_equal_digest_nontrigger() -> None:
@@ -177,6 +212,7 @@ def test_material_limitation_omitted_and_exact_link_nontrigger() -> None:
         claims={clm(1): record(disclosed, 3)},
     )
     assert FindingKind.MATERIAL_LIMITATION_OMITTED not in _kinds(near)
+    assert FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM not in _kinds(near)
 
 
 def _hook_observed_coverage() -> object:

@@ -19,6 +19,7 @@ from yoetz.domain.receipts import (
     receipt_document_to_json,
     receipt_weakest_coverage,
     render_receipt_compact,
+    render_receipt_human,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.errors import ProtocolValueError
@@ -367,3 +368,39 @@ def test_semantic_review_not_run_never_hides_unresolved_findings() -> None:
     assert "semantic relevance review was not run" in rendered
     assert "no unresolved deterministic issue" not in rendered
     assert "blocked before dispatch" not in rendered
+
+
+def test_render_receipt_human_projects_sections_and_advisory_count() -> None:
+    """#437/#429: markdown/text human_text carries sections, not a compact one-liner."""
+
+    from yoetz.domain.findings import FindingKind, FindingOrigin
+
+    document = receipt_document_from_json(
+        _variant("unresolved-findings.case.json", "mixed_open_responses")
+    )
+    markdown = render_receipt_human(document, markdown=True)
+    text = render_receipt_human(document, markdown=False)
+    assert "## Limitations" in markdown
+    assert "Limitations" in text
+    assert "\n" in markdown
+    assert document.sections[0].body in markdown
+    assert document.sections[0].body in text
+    assert "do not by themselves select unresolved_findings_remain" not in markdown
+    assert all(finding.kind is not FindingKind.LEDGER_STALE_OR_INCOMPLETE for finding in document.findings)
+    assert FindingOrigin.DETERMINISTIC in {finding.origin for finding in document.findings}
+
+    advisory = receipt_document_from_json(
+        _variant("semantic-advisory.case.json", "success_after_durable_receipt")
+    )
+    advisory_text = render_receipt_human(advisory, markdown=True)
+    assert "## Limitations" in advisory_text
+    assert "Semantic review completed" in advisory_text
+    # material_limitation_omitted is actionable, so no extra coverage-limitation appendix.
+    assert "do not by themselves select unresolved_findings_remain" not in advisory_text
+
+    stale = _variant("unresolved-findings.case.json", "mixed_open_responses")
+    stale["findings"][0]["kind"] = "ledger_stale_or_incomplete"
+    stale["findings"][0]["priority"] = 3
+    stale_document = receipt_document_from_json(stale)
+    stale_text = render_receipt_human(stale_document, markdown=True)
+    assert "do not by themselves select unresolved_findings_remain" in stale_text
