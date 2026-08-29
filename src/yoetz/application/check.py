@@ -96,6 +96,7 @@ from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
 from yoetz.protocol.models import (
     CheckRequest,
+    CheckScopeModel,
     SemanticReason,
     SemanticStatus,
     validate_semantic_outcome,
@@ -848,11 +849,16 @@ FindingIdentity = tuple[FindingKind, str, tuple[EventId | ObligationId | ClaimId
 
 
 def prior_finding_ids(projection: ProjectionState) -> dict[FindingIdentity, FindingId]:
-    """Index the live recorded findings by the identity a policy re-derives them under."""
+    """Index the live recorded findings by the identity a policy re-derives them under.
+
+    A finding a later qualifying check already resolved is history, not a live row: an issue that
+    fires again after that proof is a successor and takes a fresh ID, so the resolved row keeps
+    its proof and the new row starts unresolved (issue #458).
+    """
 
     prior: dict[FindingIdentity, FindingId] = {}
     for key, record in projection.findings.items():
-        if record.payload is None:
+        if record.payload is None or record.resolved_by_check_event_id is not None:
             continue
         prior[(record.payload.kind, record.payload.policy_id, record.payload.subject_refs)] = key
     return prior
@@ -1567,6 +1573,7 @@ async def execute_check_commit(
             semantic_result.reason,
             semantic_result.provenance,
             request.request_id,
+            scope=CheckScopeModel(claim_ids=scope.claim_ids, obligation_ids=scope.obligation_ids),
         )
     except PublicOperationError as exc:
         if frozen is not None and not exc.retryable:

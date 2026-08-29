@@ -18,6 +18,7 @@ from builders.policy_cases import (
     clm,
     evd,
     evidence_record,
+    finding_record,
     make_case,
     obl,
     obligation_record,
@@ -44,7 +45,7 @@ from yoetz.domain.findings import Finding
 from yoetz.domain.privacy import ReviewContextProfile, ReviewSelectionPolicy
 from yoetz.domain.values import EvidenceId, FindingId, finding_id, timestamp_from_string
 from yoetz.kernel.deterministic_checks import DeterministicCase
-from yoetz.kernel.projections import EvidenceProjectionRecord, ProjectionRecord
+from yoetz.kernel.projections import EvidenceProjectionRecord, FindingProjectionRecord
 from yoetz.ports.semantic import SemanticCase
 from yoetz.protocol.coverage import EvidenceImmutability
 from yoetz.protocol.ids import IdKind, new_id
@@ -64,7 +65,7 @@ class _Ids:
 
 
 def _case(
-    findings: Mapping[FindingId, ProjectionRecord[Finding]] | None = None,
+    findings: Mapping[FindingId, FindingProjectionRecord] | None = None,
 ) -> DeterministicCase:
     plan = plan_record(PlanPublishedPayload(1, "Ship the review packet", (obl(1),)), 1)
     obligation = obligation_record(
@@ -142,9 +143,9 @@ def _recheck() -> tuple[DeterministicCase, tuple[Finding, ...], Finding]:
         finding_id=finding_id(new_id(IdKind.FINDING)),
         subject_refs=(clm(1),),
     )
-    recorded: dict[FindingId, ProjectionRecord[Finding]] = {}
+    recorded: dict[FindingId, FindingProjectionRecord] = {}
     for index, item in enumerate((*first_findings, retired)):
-        recorded[item.finding_id] = record(item, 5 + index)
+        recorded[item.finding_id] = finding_record(item, 5 + index)
     second_case = _case(findings=recorded)
     second_findings = _derived_findings(second_case)
     assert {item.finding_id for item in first_findings} <= {

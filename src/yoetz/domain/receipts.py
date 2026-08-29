@@ -89,6 +89,8 @@ __all__ = [
     "receipt_weakest_coverage",
     "render_receipt_compact",
     "render_receipt_human",
+    "resolved_finding_ids_for_render",
+    "unresolved_findings_for_render",
     "semantic_coverage_gap_code",
 ]
 
@@ -1065,6 +1067,29 @@ def receipt_weakest_coverage(document: ReceiptDocument) -> Coverage:
     return result
 
 
+def resolved_finding_ids_for_render(document: ReceiptDocument) -> frozenset[str]:
+    """The finding ids the summary section names as resolved by a later qualifying check.
+
+    The frozen receipt document carries no per-finding resolution flag; the builder records the
+    resolved historical ids as the summary section's items, which every include level carries.
+    """
+
+    summary = next(
+        (section for section in document.sections if section.key is ReceiptSectionKey.SUMMARY),
+        None,
+    )
+    if summary is None:
+        return frozenset()
+    return frozenset(item for item in summary.items if item.startswith("fnd_"))
+
+
+def unresolved_findings_for_render(document: ReceiptDocument) -> tuple[Finding, ...]:
+    """Current (not resolved) finding rows, in document order."""
+
+    resolved = resolved_finding_ids_for_render(document)
+    return tuple(finding for finding in document.findings if finding.finding_id not in resolved)
+
+
 def _waiver_for_render(document: ReceiptDocument) -> ReceiptResponse | None:
     for response in document.responses:
         if response.disposition is ResponseDisposition.WAIVED:
@@ -1137,6 +1162,7 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
     frontier = document.subject_frontier.sequence
     prefix = f"Yoetz receipt at frontier {frontier}: "
     gap_codes = frozenset(gap.code for gap in document.gaps)
+    unresolved = unresolved_findings_for_render(document)
 
     if "encryption_key_unavailable" in gap_codes:
         return (
@@ -1170,7 +1196,7 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
         )
     if gap_codes & _SEMANTIC_REVIEW_NOT_RUN_GAPS:
         if document.conclusion is ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN:
-            count = len(document.findings)
+            count = len(unresolved)
             noun = "finding" if count == 1 else "findings"
             verb = "remains" if count == 1 else "remain"
             return (
@@ -1219,20 +1245,20 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
                     f"at {waiver.waiver_expiry.wire} and is not active."
                 )
 
-    if any(finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED for finding in document.findings):
+    if any(finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED for finding in unresolved):
         return (
             prefix
             + "one advisory semantic finding remains unresolved. Semantic review completed, but "
             "it does not upgrade deterministic assurance or prove correctness."
         )
     if document.conclusion is ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN:
-        if len(document.findings) == 3:
+        if len(unresolved) == 3 and len(document.findings) == 3:
             return (
                 prefix
                 + "unresolved findings remain. Three current findings are shown: one acknowledged, "
                 "one disputed by a rejection, and one without a response."
             )
-        count = len(document.findings)
+        count = len(unresolved)
         noun = "finding" if count == 1 else "findings"
         verb = "remains" if count == 1 else "remain"
         return prefix + f"{count} unresolved {noun} {verb}."

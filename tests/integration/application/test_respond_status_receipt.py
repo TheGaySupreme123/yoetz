@@ -25,6 +25,7 @@ from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.application.check import FinalSemanticEvaluation
 from yoetz.application.egress import PrivacyCoordinator
 from yoetz.application.observation_materialize import observation_author
+from yoetz.application.publish_work import PublishWorkInternalResult
 from yoetz.application.service import Application, VerificationPolicy
 from yoetz.application.start import StartInternalResult
 from yoetz.domain.events import (
@@ -2523,3 +2524,400 @@ async def test_receipt_append_stage_rejects_observation_finding_suffix() -> None
         expected_frontier=checked.result_frontier.sequence,
     )
     assert accepted.result_frontier.sequence == drained.result_frontier.sequence + 1
+
+
+async def _repair_open_obligation(
+    app: Application,
+    started: StartInternalResult,
+    obligation_id: str,
+    frontier: Frontier,
+    *,
+    seed: int,
+) -> PublishWorkInternalResult:
+    """Resolve the seeded obligation the exact way the publication policy admits.
+
+    The meaning fields repeat the open row byte-for-byte; only ``status`` and
+    ``resolution_evidence_refs`` change, and the resolving evidence lands in the same batch.
+    """
+
+    evidence = protocol_id("evd_", seed)
+    wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", seed)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(frontier),
+        "event_drafts": (
+            {
+                "event_id": protocol_id("evt_", seed + 1),
+                "schema": {"name": "evidence_recorded", "version": EVIDENCE_SCHEMA_VERSION},
+                "occurred_at": "2026-07-19T12:01:00.000Z",
+                "causal_parents": (),
+                "payload": {
+                    "evidence_id": evidence,
+                    "evidence_kind": "test_result",
+                    "strength": "content_digest",
+                    "content_digest": "sha256:" + "3" * 64,
+                    "observed_at": "2026-07-19T12:01:00.000Z",
+                    "description": "The exercise's result was recorded.",
+                    # Digest-bound so the recheck carries no legacy-evidence gap: a repair must
+                    # leave a state a check can actually prove clean.
+                    "digest_binding": {
+                        "subject": "test_report",
+                        "content_availability": "digest_only",
+                        "byte_count": 128,
+                        "provenance": "caller_asserted",
+                    },
+                },
+                "artifact_refs": (),
+                "evidence_refs": (),
+            },
+            {
+                "event_id": protocol_id("evt_", seed + 2),
+                "schema": {"name": "obligation_published", "version": "1.0.0"},
+                "occurred_at": "2026-07-19T12:01:01.000Z",
+                "causal_parents": (protocol_id("evt_", seed + 1),),
+                "payload": {
+                    "obligation_id": obligation_id,
+                    "description": "Publish a result for the respond/status/receipt exercise.",
+                    "acceptance_criteria": "A result is recorded in the task ledger.",
+                    "evidence_expectation": "A linked immutable result record.",
+                    "status": "resolved",
+                    "resolution_evidence_refs": (evidence,),
+                },
+                "artifact_refs": (),
+                "evidence_refs": (evidence,),
+            },
+        ),
+    }
+    result = await app.publish_work(PublishWorkRequest.model_validate(wire))
+    assert type(result) is PublishWorkInternalResult, f"unexpected publish outcome: {type(result)}"
+    return result
+
+
+async def _findings_view(
+    app: Application, started: StartInternalResult, seed: int, *, include_resolved: bool
+) -> StatusFindingsPageModel:
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", seed)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "findings",
+                "limit": "10",
+                "filter": {"include_resolved": include_resolved},
+            }
+        )
+    )
+    return cast(StatusFindingsPageModel, status.page)
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_repair_plus_later_qualifying_check_resolves_the_finding(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #458: the record is repaired, a later whole-case deterministic check finds the
+    same issue absent, and the finding stops blocking the receipt while staying visible.
+
+    The response alone changes nothing (locked separately); the proof is the check.
+    """
+
+    app, _runtime, _ = _build_app(seed_offset=20, ledger_backend=ledger_backend)
+    started, checked, obligation_id = await _bootstrap_finding(app, seed=2000)
+    finding = checked.findings[0]
+    assert finding.kind is FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS
+
+    acked = await app.respond(
+        RespondRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2010)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(checked.result_frontier),
+                "finding_id": finding.finding_id,
+                "finding_frontier": _frontier(checked.result_frontier),
+                "disposition": "acknowledged",
+            }
+        )
+    )
+    seeded_ids = {item.finding_id for item in checked.findings}
+    before = await _findings_view(app, started, 2011, include_resolved=True)
+    assert {item.finding_id: item.resolved for item in before.items} == dict.fromkeys(
+        seeded_ids, False
+    )
+
+    repaired = await _repair_open_obligation(
+        app, started, obligation_id, acked.result_frontier, seed=2020
+    )
+    rechecked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2030)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(repaired.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(rechecked) is CheckCommitResult, f"unexpected nonterminal check: {type(rechecked)}"
+    assert not seeded_ids & {item.finding_id for item in rechecked.findings}, (
+        "the repaired state must not re-fire the seeded issues"
+    )
+    assert all(not FINDING_KIND_TRAITS[item.kind][1] for item in rechecked.findings), (
+        "only advisory rows (digest-only evidence) may remain"
+    )
+    assert rechecked.suppressed_count == 0
+    advisory_ids = {item.finding_id for item in rechecked.findings}
+
+    # Status: the seeded rows are history now — visible only on request, no longer
+    # receipt-blocking — while the recheck's own advisory row is current and unanswered.
+    default_view = await _findings_view(app, started, 2040, include_resolved=False)
+    assert {item.finding_id for item in default_view.items} == advisory_ids
+    history = await _findings_view(app, started, 2041, include_resolved=True)
+    by_id = {item.finding_id: item for item in history.items}
+    assert set(by_id) == seeded_ids | advisory_ids
+    assert all(by_id[item].resolved for item in seeded_ids)
+    assert by_id[finding.finding_id].disposition == "acknowledged"
+    assert all(not by_id[item].resolved for item in advisory_ids)
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2042)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    compact = cast(StatusCompactPageModel, status.page).items[0]
+    # Answered and resolved are independent: the two seeded rows never responded to are still
+    # unanswered history, and the advisory row is unanswered and current; none of them blocks.
+    assert compact.unanswered_finding_count == str(len(seeded_ids) - 1 + len(advisory_ids))
+    assert compact.receipt_blocking_finding_count == "0"
+    assert "receipt_findings_unresolved" not in status.closure_readiness.blocking_conditions
+
+    # Receipt: no longer ``unresolved_findings_remain``; the resolved row stays in the document
+    # as history and the wording separates it from current findings and coverage gaps.
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2050)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(rechecked.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert receipt.conclusion != "unresolved_findings_remain"
+    document = cast(dict[str, JsonValue], receipt.document)
+    assert {
+        cast(str, cast(dict[str, JsonValue], row)["finding_id"])
+        for row in cast(list[JsonValue], document["findings"])
+    } == seeded_ids | advisory_ids
+    sections = {
+        cast(dict[str, JsonValue], section)["key"]: cast(dict[str, JsonValue], section)
+        for section in cast(list[JsonValue], document["sections"])
+    }
+    assert sections["summary"]["items"] == sorted(seeded_ids)
+    assert "resolved by a later qualifying check" in cast(str, sections["summary"]["body"])
+    assert "remain visible as history" in cast(str, sections["summary"]["body"])
+    assert sections["findings_and_dispositions"]["items"] == []
+    assert "remains unresolved" not in cast(str, sections["findings_and_dispositions"]["body"])
+    text = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2051)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(receipt.result_frontier),
+                "format": "text",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert text.human_text is not None
+    assert "resolved by a later qualifying check" in text.human_text
+    assert "remain unresolved" not in text.human_text
+
+
+async def test_refired_issue_after_resolution_is_a_blocking_successor() -> None:
+    """Resolution is not a waiver: reopening the obligation re-fires the issue as a fresh row
+    that blocks again, while the resolved row keeps its proof as history."""
+
+    app, _runtime, _ = _build_app(seed_offset=21)
+    started, checked, obligation_id = await _bootstrap_finding(app, seed=2100)
+    finding = checked.findings[0]
+    repaired = await _repair_open_obligation(
+        app, started, obligation_id, checked.result_frontier, seed=2120
+    )
+    clean = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2130)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(repaired.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(clean) is CheckCommitResult
+    assert not any(FINDING_KIND_TRAITS[item.kind][1] for item in clean.findings)
+
+    # A brand-new completion claim over a brand-new open obligation is the same issue kind but a
+    # different subject, so it is a different issue; the resolved row must stay resolved and the
+    # new one must block.
+    reopened = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2140)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(clean.result_frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", 2141),
+                        "schema": {"name": "obligation_published", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:02:00.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "obligation_id": protocol_id("obl_", 2142),
+                            "description": "Publish a second result.",
+                            "acceptance_criteria": "A second result is recorded.",
+                            "evidence_expectation": "A linked immutable result record.",
+                            "status": "open",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                    {
+                        "event_id": protocol_id("evt_", 2143),
+                        "schema": {"name": "claim_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:02:01.000Z",
+                        "causal_parents": (protocol_id("evt_", 2141),),
+                        "payload": {
+                            "claim_id": protocol_id("clm_", 2144),
+                            "claim_kind": "completion",
+                            "statement": "The second exercise is complete.",
+                            "supporting_refs": (protocol_id("obl_", 2142),),
+                            "obligation_refs": (protocol_id("obl_", 2142),),
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    refired = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2150)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(reopened.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(refired) is CheckCommitResult
+    assert refired.findings, "the new open obligation under a completion claim must fire"
+    assert all(item.finding_id != finding.finding_id for item in refired.findings)
+
+    history = await _findings_view(app, started, 2160, include_resolved=True)
+    by_id = {item.finding_id: item.resolved for item in history.items}
+    assert by_id[finding.finding_id] is True
+    assert all(by_id[item.finding_id] is False for item in refired.findings)
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2170)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(refired.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert receipt.conclusion == "unresolved_findings_remain"
+
+
+async def test_scoped_check_that_excludes_the_subject_resolves_nothing() -> None:
+    """A recheck scoped to a different subject never saw the repaired obligation's issue, so the
+    finding stays current even though the repair itself is on the ledger."""
+
+    app, _runtime, _ = _build_app(seed_offset=22)
+    started, checked, obligation_id = await _bootstrap_finding(app, seed=2200)
+    finding = checked.findings[0]
+    repaired = await _repair_open_obligation(
+        app, started, obligation_id, checked.result_frontier, seed=2220
+    )
+    other = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2230)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(repaired.result_frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", 2231),
+                        "schema": {"name": "obligation_published", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:03:00.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "obligation_id": protocol_id("obl_", 2232),
+                            "description": "An unrelated open obligation.",
+                            "acceptance_criteria": "Unrelated work is recorded.",
+                            "evidence_expectation": "A linked immutable result record.",
+                            "status": "open",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    scoped = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2240)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(other.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+                "scope": {"claim_ids": (), "obligation_ids": (protocol_id("obl_", 2232),)},
+            }
+        )
+    )
+    assert type(scoped) is CheckCommitResult
+    history = await _findings_view(app, started, 2250, include_resolved=True)
+    assert {item.finding_id: item.resolved for item in history.items}[finding.finding_id] is False
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 2251)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    assert "receipt_findings_unresolved" in status.closure_readiness.blocking_conditions

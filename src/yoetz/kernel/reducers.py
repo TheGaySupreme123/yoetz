@@ -51,12 +51,17 @@ from yoetz.domain.values import (
     result_id,
     validate_sha256_digest,
 )
+from yoetz.kernel.finding_resolution import (
+    apply_check_resolution,
+    reopen_findings_resolved_by,
+)
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     ContradictionKey,
     ContradictionRecord,
     DecisionProjectionRecord,
     EvidenceProjectionRecord,
+    FindingProjectionRecord,
     LatestTestedState,
     ObligationProjectionRecord,
     PlanProjectionRecord,
@@ -384,6 +389,16 @@ def _tombstone[T](event: AcceptedEvent, payload_type: type[T]) -> ProjectionReco
     )
 
 
+def _finding_record(event: AcceptedEvent, payload: Finding | None) -> FindingProjectionRecord:
+    return FindingProjectionRecord(
+        payload=payload,
+        payload_digest=event.projection_locator.canonical_payload_digest,
+        redacted=payload is None,
+        source_event_id=event.event_id,
+        source_frontier=event.ledger.ingestion_sequence,
+    )
+
+
 def _verify_exact_event(state: ProjectionState, event: LedgerRecord, index: ReplayIndex) -> None:
     if type(state) is not ProjectionState or type(index) is not ReplayIndex:
         raise _corrupt()
@@ -510,7 +525,7 @@ def _redact_current_records(
     results: dict[ResultId, ProjectionRecord[ResultRecordedPayload]],
     evidence: dict[EvidenceId, EvidenceProjectionRecord],
     claims: dict[ClaimId, ProjectionRecord[ClaimRecordedPayload]],
-    findings: dict[FindingId, ProjectionRecord[Finding]],
+    findings: dict[FindingId, FindingProjectionRecord],
     responses: dict[FindingId, ProjectionRecord[ResponseRecordedPayload]],
 ) -> None:
     targets = frozenset(target_event_ids)
@@ -655,7 +670,7 @@ def _recompute_missing_gaps(
     results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]],
     evidence: Mapping[EvidenceId, EvidenceProjectionRecord],
     claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload]],
-    findings: Mapping[FindingId, ProjectionRecord[Finding]],
+    findings: Mapping[FindingId, FindingProjectionRecord],
     responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]],
 ) -> tuple[str, ...]:
     gaps = {marker for marker in retained_gaps if not marker.startswith("missing_ref:")}
@@ -876,10 +891,8 @@ def reduce_event(
             )
         elif family == "finding_recorded":
             key = _locator_id(accepted, finding_id)
-            findings[key] = (
-                _tombstone(accepted, Finding)
-                if payload is None
-                else _projection_record(accepted, cast(FindingRecordedPayload, payload))
+            findings[key] = _finding_record(
+                accepted, None if payload is None else cast(FindingRecordedPayload, payload)
             )
         elif family == "response_recorded":
             key = _locator_id(accepted, finding_id)
@@ -905,6 +918,10 @@ def reduce_event(
                 stale = (
                     check.coverage.ledger_freshness is LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE
                 )
+                # Resolution is a fold over every recorded check, not a property of the latest
+                # one: a finding proven absent stays resolved when a later weaker check adds
+                # nothing, and is re-fired only when a check returns the same issue again.
+                apply_check_resolution(findings, check, accepted.event_id)
         elif family == "redaction_recorded":
             event_targets = set(accepted.projection_locator.redaction_target_event_ids)
             object_targets = accepted.projection_locator.redaction_target_object_ids
@@ -929,6 +946,7 @@ def reduce_event(
             if latest is not None and latest.source_check_event_id in event_targets:
                 latest = None
                 stale = False
+            reopen_findings_resolved_by(findings, frozenset(ordered_event_targets))
             for target_event in ordered_event_targets:
                 gaps.add(f"redacted_event:{target_event}")
             for target_object in object_targets:

@@ -995,9 +995,16 @@ single predicate deciding between the two, shared by the receipt and by compact 
   weakest-material coverage baseline are retained with the ordered selection).
 - `ReceiptFindingState`, owned by `kernel/receipt_builder.py`, is exactly
   `(finding_id, resolved)`. The ordered tuple contains one latest current row per issue key; its
-  boolean is derived by the application from the shared check-scope/policy-execution applicability
-  rules: a same-issue successor replaces the old row and starts unresolved, while only a later
-  qualifying check resolves the current row. A response disposition never resolves it.
+  boolean is the one shared proof-based answer, `kernel/finding_resolution.finding_is_resolved`,
+  read from the projection: a same-issue successor replaces the old row and starts unresolved,
+  while only a later qualifying check resolves the current row (registered under the finding
+  view below). A response disposition never resolves it. Resolved rows stay in the document's
+  `findings` as history; the summary section's `items` are exactly their ascending ids (the one
+  section every include level carries), and the fixed summary/findings templates append “One
+  earlier finding was resolved by a later qualifying check and remains visible as history.” (or
+  the plural form) so a reader can tell resolved history from current findings and from coverage
+  gaps. Renderers derive the current set as `findings` minus those ids; nothing else in the frozen
+  `receipt-document/1.0.0` shape changes.
   `ReceiptBuildContext` is exactly `(projection,
   subject_frontier, availability, coverage, gaps, finding_states, applicable_check)`, where
   `availability` is the current `CaseAvailabilityFacts`, `coverage` is the weakest material fold,
@@ -1097,7 +1104,9 @@ single predicate deciding between the two, shared by the receipt and by compact 
 - `renew_leases(lease) -> OperationLease`;
 - `reclaim_operation(writer_id, operation_id, request_digest) -> OperationLease | PendingVerdict`;
 - `commit_check_if_current(frozen, findings, policy_executions, semantic_status, semantic_reason,
-  semantic_provenance, request_id) -> CheckCommitResult`;
+  semantic_provenance, request_id, *, scope=None) -> CheckCommitResult` (`scope` is the request's
+  normalized `CheckScopeModel`, recorded verbatim on `check_recorded`; `None` records the whole
+  case);
 - `fail_check_if_current(lease, failure) -> None` (last-resort terminalization for a bounded,
   non-retryable post-admission failure; records no check event and advances no frontier; retryable
   failures are rejected and remain pending);
@@ -1327,15 +1336,39 @@ is cleaner than the coverage vector beside it. `StatusCompactItemModel` rejects 
 
 Finding response does not resolve. The issue key is `(origin, policy_id, policy_version, kind,
 complete canonical subject_refs)`. A later same-key row supersedes the old and starts unresolved.
-A later check resolves an old row only if its recorded subject frontier includes that finding, its
-matching policy execution is `run/completed`, suppression is zero, freshness is current with no
-gaps, and normalized scope is whole-case or directly intersects a selected claim/obligation
-subject ref. Semantic findings additionally require `succeeded/semantic_completed`. Weak,
-skipped, failed, capped, stale, and non-overlapping checks do nothing and never reopen resolution
-while its proof remains visible; redaction may remove that proof and conservatively reopen the row
-with an explicit gap.
-Therefore `CheckRecordedPayload` adds required normalized `scope` (both tuples empty means whole
-case) and required exact `policy_executions`; policies/frontier/returned IDs alone cannot prove
+Resolution is proof-based and replay-derived, owned by `kernel/finding_resolution.py`: the reducer
+folds every readable `check_recorded` event into each finding's projection record as
+`resolved_by_check_event_id` (`FindingProjectionRecord`; the snapshot key is emitted only when set,
+so pre-existing snapshots stay byte-identical). A check resolves a current row only when all of
+these hold: its recorded `subject_frontier` is at or after the finding's ingestion sequence; every
+finding it returned is readable and none shares the row's issue key; `suppressed_count` is zero;
+the execution for the row's `(policy_id, policy_version)` is `run/completed`; its normalized
+`scope` is whole-case or names one of the row's `subject_refs`; its coverage `ledger_freshness` is
+not `stale_after_material_change|redacted_gap|unknown`; and its `known_gaps` lie within the
+proof class's closed tolerated set — for deterministic rows the semantic-review absence/weakness
+codes (`semantic_review_not_requested|semantic_review_not_configured|
+semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
+semantic_review_context_withheld|semantic_challenges_rejected|
+semantic_case_content_over_item_limit`) plus the evidence-strength codes
+(`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`);
+for `semantic_model_derived` rows only the evidence-strength codes, and the check must also record
+`succeeded/semantic_completed`. Any other gap — redacted or unavailable payloads and objects,
+missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
+both proof classes. A deterministic-only check therefore never resolves a semantic finding, and a
+weakened semantic review never resolves one either. A check that returns a finding again clears
+that row's proof; a resolved row is excluded from finding-ID reuse (`prior_finding_ids`), so a
+re-fired issue is a successor under a fresh id that starts unresolved while the resolved row keeps
+its proof; redacting the proving check clears the proof and the `redacted_event` marker names why.
+Weak, skipped, failed, capped, stale, and non-overlapping checks do nothing and never reopen
+resolution while its proof remains visible. `finding_is_resolved(state, finding_id)` is the one
+read every surface uses (receipt finding states, `receipt_blocking_finding_count`, the status
+finding row's `resolved`): proof present, and the latest response, if any, readable and not
+`provenance_disputed`. The released `status-result` 1.1.0 finding item pins `provenance_disputed`
+rows to `resolved=false`; the rule honours that pin, so such a row stays receipt-blocking until a
+versioned status result lifts it.
+Therefore `CheckRecordedPayload` carries required normalized `scope` (both tuples empty means
+whole case; the ledger records the request's normalized scope, never a synthetic whole-case value)
+and required exact `policy_executions`; policies/frontier/returned IDs alone cannot prove
 applicability.
 
 `include_resolved` absent/false adds `resolved=false`, while true removes only that predicate;
@@ -3549,8 +3582,11 @@ no_obligations_reason, blocking_conditions)` beside `import_status`, on every vi
 `unanswered_finding_count` counts recorded findings with no recorded response, whatever a later
 response's disposition; a rejection, waiver, or provenance dispute answers the finding on the
 record and its own quality surfaces as a later finding. `receipt_blocking_finding_count` selects the
-newest readable finding per receipt issue key and counts the actionable ones. It never decreases
-merely because a response was recorded: every receipt finding state remains `resolved=false`.
+newest readable finding per receipt issue key and counts the actionable ones that
+`finding_is_resolved` does not report resolved. It never decreases merely because a response was
+recorded; only a later qualifying check of the repaired record (the finding-view rule above)
+resolves a row, and the same read sets the receipt's `resolved` state and the status finding
+row's `resolved`, so the three surfaces cannot disagree.
 The compact singleton carries the same two completion-scope fields beside its current plan locator,
 both counters, and an `unanswered_findings` preview. Its `blocking_conditions` are exactly
 `obligations_open|findings_unanswered|receipt_findings_unresolved|no_plan_published|

@@ -129,13 +129,25 @@ No disposition resolves a finding. Agents can record `acknowledged`, `provenance
 `rejected`; `waived` is reserved for an authorized local-CLI human. Each records what was decided
 and what evidence was attached; none clears the finding for receipt purposes. A readable response
 does clear the status surface's `unanswered_finding_count`, while the actionable finding remains in
-`receipt_blocking_finding_count`. Every actionable finding recorded in a task therefore keeps the
-receipt conclusion at `unresolved_findings_remain`, even after later checks return no findings at
-all.
+`receipt_blocking_finding_count`.
 
-Repairing the record is still worth doing — it stops the next check from firing the same rule, and
-it shows a reader what was done — but a task that fired an actionable finding does not go on to
-produce a clean completion receipt, and the final answer should not describe one.
+What does resolve a finding is proof: a later check that tested the repaired record and found the
+same issue absent. That check must cover the finding — the whole case, or a scope that names the
+finding's subject — with the owning policy pack run to completion, nothing suppressed, and no
+redacted or unreadable material in its coverage; a semantic finding additionally needs a completed
+semantic review, and a deterministic-only check never resolves one. Weak, scoped-away, stale, or
+failed checks change nothing, and a check that reports the same issue again keeps it current.
+
+A resolved finding is not erased. Status still lists it (`resolved: true`, shown when
+`include_resolved` is requested), the receipt still carries it as history, and the receipt wording
+says how many earlier findings were resolved by a later qualifying check, apart from any findings
+that are still current and from any coverage limitations. One exception is fixed by the released
+status wire: a finding whose latest response is `provenance_disputed` stays current even after such
+a check.
+
+Repairing the record is therefore the way back to a clean receipt: repair, recheck, and read the
+result. A task whose recheck still fires the issue does not go on to produce a clean completion
+receipt, and the final answer should not describe one.
 
 Responding does not throw the check away. A recorded check still counts toward a later receipt when
 the only events between the two are responses to findings that check itself returned and/or a

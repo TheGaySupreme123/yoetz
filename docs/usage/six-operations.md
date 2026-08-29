@@ -79,7 +79,8 @@ verdict `incomplete_check`, an explicit reason, and no semantic findings.
 Answers a finding: accept and act, supply evidence, revise the claim, dispute with evidence, or
 state an unresolved limitation. **A response does not erase a finding**, and no disposition
 resolves one: an actionable finding keeps the receipt conclusion at `unresolved_findings_remain`
-for the rest of the task, whichever disposition is recorded. Recheck after any material edit,
+until a later qualifying check finds the same issue absent from the repaired record, whichever
+disposition is recorded. A resolved finding stays visible as history. Recheck after any material edit,
 evidence change, or plan change. A readable response to a finding returned by the current check
 does not require a recheck; a redacted or unreadable response does.
 
@@ -103,9 +104,9 @@ Before completion, read `declared_obligation_count`, `no_obligations_reason`, an
 plan scope is unreadable, readiness is unknown rather than zero. Read the finding counters
 separately: `unanswered_finding_count` is response work still to do, while
 `receipt_blocking_finding_count` is the current actionable finding set that prevents a clean
-receipt even after every response. Accordingly, `findings_unanswered` is remediable;
-`receipt_findings_unresolved` is a persistent conclusion bound and should not trigger another
-response loop.
+receipt even after every response; only a later qualifying check of the repaired record shrinks
+it. Accordingly, `findings_unanswered` is answered; `receipt_findings_unresolved` is repaired and
+rechecked, and should not trigger another response loop.
 
 ### `receipt`
 Projects the honest summary of what was checked, at what coverage, and what remains open. Formats:

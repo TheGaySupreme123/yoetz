@@ -60,7 +60,7 @@ or any snapshot of it ([ADR-017](adr/ADR-017-full-screen-terminal-interface.md) 
 |---|---|
 | `protocol/` | Canonical wire form: IDs, request/result models, canonical JSON, digests. Pure. |
 | `domain/` | Values and events — the vocabulary of what happened. Pure. |
-| `kernel/` | Deterministic truth: reducers, projections, the check engine, ranking, receipt building, and the versioned policy packs under `kernel/policies/`. Pure — no IO, no clock, no network. |
+| `kernel/` | Deterministic truth: reducers, projections, the check engine, ranking, proof-based finding resolution, receipt building, and the versioned policy packs under `kernel/policies/`. Pure — no IO, no clock, no network. |
 | `ports/` | The interfaces the application depends on: ledger, objects, keys, runtime, semantic, privacy, importer, integrations, subject state. |
 | `adapters/` | Concrete implementations of those ports: `sqlite/`, `objects/`, `keys/`, `memory/` (the in-memory reference used for conformance parity), `providers/`, `privacy/`, `importers/`, `integrations/`, `control/`, plus `mcp_stdio.py` and `git_subject_state.py`. |
 | `application/` | Use cases. One module per public operation (`start`, `publish_work`, `check`, `respond`, `status`, `receipt`), plus egress, privacy policy, maintenance, import review, harness integration, and the observation coordinator. |

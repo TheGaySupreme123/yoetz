@@ -40,6 +40,8 @@ from yoetz.domain.receipts import (
     SchemaVersionEntry,
     receipt_document_to_json,
     render_receipt_compact,
+    resolved_finding_ids_for_render,
+    unresolved_findings_for_render,
 )
 from yoetz.domain.values import (
     FindingId,
@@ -56,6 +58,7 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
 from yoetz.kernel.projections import (
+    FindingProjectionRecord,
     LatestTestedState,
     ObligationProjectionRecord,
     PlanProjectionRecord,
@@ -168,7 +171,7 @@ def _projection(
 ) -> object:
     findings: dict[object, object] = {}
     if finding is not None:
-        findings[finding.finding_id] = ProjectionRecord(
+        findings[finding.finding_id] = FindingProjectionRecord(
             payload=finding,
             payload_digest=canonical_digest(encode_payload(finding)),
             redacted=False,
@@ -812,3 +815,83 @@ def test_compact_renderer_never_echoes_unrecognized_scope_reason_detail() -> Non
     rendered = render_receipt_compact(tampered)
     assert "CALLER SECRET" not in rendered
     assert "closed reason is unavailable" in rendered
+
+
+def test_resolved_history_is_named_apart_from_current_findings_and_gaps() -> None:
+    """A resolved finding stays in the document as history, is listed by id in the summary
+    section (the one every include level carries), and the fixed templates say so beside the
+    current count so a reader can tell "was fixed" from "still open" and from coverage limits."""
+
+    finding = _finding()
+    receipt = _build(
+        _context(
+            finding=finding,
+            resolved=True,
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, _coverage()),
+        ),
+        include=ReceiptInclude.STANDARD,
+    )
+    assert receipt.conclusion is ReceiptConclusion.NO_UNRESOLVED_DETERMINISTIC_FINDINGS
+    assert receipt.findings == (finding,)
+    sections = {section.key: section for section in receipt.sections}
+    summary = sections[ReceiptSectionKey.SUMMARY]
+    assert summary.items == (finding.finding_id,)
+    assert summary.body == (
+        "No unresolved deterministic findings were recorded at frontier 2. One earlier finding "
+        "was resolved by a later qualifying check and remains visible as history."
+    )
+    dispositions = sections[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS]
+    assert dispositions.items == ()
+    assert dispositions.body == (
+        "No findings remain open. One earlier finding was resolved by a later qualifying check "
+        "and remains visible as history."
+    )
+    assert resolved_finding_ids_for_render(receipt) == frozenset({finding.finding_id})
+    assert unresolved_findings_for_render(receipt) == ()
+    compact = render_receipt_compact(receipt)
+    assert "no unresolved deterministic findings were recorded" in compact
+    assert "1 unresolved finding" not in compact
+
+
+def test_resolved_history_beside_a_current_finding_counts_only_the_current_one() -> None:
+    current = _finding()
+    resolved = replace(
+        current,
+        finding_id=finding_id("fnd_00000000-0000-4000-8000-000000000002"),
+        subject_refs=(obligation_id("obl_00000000-0000-4000-8000-000000000002"),),
+    )
+    base = _context(
+        finding=current,
+        check=_check(CheckVerdict.ACTION_REQUIRED, _coverage(), returned=(current.finding_id,)),
+    )
+    projection = replace(
+        base.projection,
+        findings={
+            **base.projection.findings,
+            resolved.finding_id: FindingProjectionRecord(
+                payload=resolved,
+                payload_digest=canonical_digest(encode_payload(resolved)),
+                redacted=False,
+                source_event_id=event_id("evt_00000000-0000-4000-8000-000000000013"),
+                source_frontier=1,
+                resolved_by_check_event_id=_CHECK_EVENT_ID,
+            ),
+        },
+    )
+    context = replace(
+        base,
+        projection=projection,
+        finding_states=(
+            ReceiptFindingState(current.finding_id, resolved=False),
+            ReceiptFindingState(resolved.finding_id, resolved=True),
+        ),
+    )
+    receipt = _build(context, include=ReceiptInclude.SUMMARY)
+    assert receipt.conclusion is ReceiptConclusion.UNRESOLVED_FINDINGS_REMAIN
+    assert len(receipt.findings) == 2
+    summary = next(s for s in receipt.sections if s.key is ReceiptSectionKey.SUMMARY)
+    assert summary.items == (resolved.finding_id,)
+    assert summary.body.startswith("One actionable finding remain unresolved at frontier 2.")
+    assert "One earlier finding was resolved by a later qualifying check" in summary.body
+    assert unresolved_findings_for_render(receipt) == (current,)
+    assert render_receipt_compact(receipt).endswith("1 unresolved finding remains.")

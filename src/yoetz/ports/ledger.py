@@ -33,6 +33,7 @@ from yoetz.protocol.errors import PublicOperationError
 from yoetz.protocol.ids import IdKind, validate_actor_id, validate_id
 from yoetz.protocol.models import (
     MAX_EVENTS_PER_BATCH,
+    CheckScopeModel,
     SemanticReason,
     SemanticStatus,
     StatusAssignmentItemModel,
@@ -1541,6 +1542,8 @@ class LedgerPort(Protocol):
         semantic_reason: SemanticReason,
         semantic_provenance: SemanticProvenance | None,
         request_id: str,
+        *,
+        scope: CheckScopeModel | None = None,
     ) -> CheckCommitResult: ...
 
     async def fail_check_if_current(

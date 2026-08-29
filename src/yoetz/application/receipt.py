@@ -38,6 +38,7 @@ from yoetz.domain.values import (
     timestamp_from_datetime,
 )
 from yoetz.kernel.deterministic_checks import CaseGap, build_deterministic_case, case_coverage
+from yoetz.kernel.finding_resolution import finding_is_resolved
 from yoetz.kernel.receipt_builder import (
     ReceiptBuildContext,
     ReceiptFindingState,
@@ -382,10 +383,12 @@ def _finding_states(projection: object) -> tuple[ReceiptFindingState, ...]:
     from yoetz.kernel.projections import ProjectionState
 
     assert type(projection) is ProjectionState
-    # Resolution is proof-based. Conservatively unresolved is always safe; the shared projection
-    # proof can only weaken a receipt if unavailable, never strengthen it from a disposition.
+    # Resolution is proof-based: the projection carries which later qualifying check, if any,
+    # proved each current issue absent, and a response disposition never sets it. Reading the
+    # shared rule here is what keeps the receipt and ``receipt_blocking_finding_count`` equal.
     return tuple(
-        ReceiptFindingState(item.finding_id, False) for item in current_receipt_findings(projection)
+        ReceiptFindingState(item.finding_id, finding_is_resolved(projection, item.finding_id))
+        for item in current_receipt_findings(projection)
     )
 
 
