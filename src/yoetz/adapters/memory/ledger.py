@@ -2445,9 +2445,8 @@ class MemoryLedgerAdapter:
                 and self._observation_only_since_unlocked(frozen_frontier.sequence)
             )
             if (
-                (current != frozen_frontier and not observation_only_suffix)
-                or self._state.frozen_cases.get(key) != frozen.case
-            ):
+                current != frozen_frontier and not observation_only_suffix
+            ) or self._state.frozen_cases.get(key) != frozen.case:
                 failure = _frontier_conflict(current)
                 canonical = canonical_encode(
                     {
