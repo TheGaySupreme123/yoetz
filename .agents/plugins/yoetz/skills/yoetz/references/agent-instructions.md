@@ -205,11 +205,9 @@ current state and applies the recommendation's reviewed preview/confirmation cer
 package-update recommendation, `accept` only prints the human-run upgrade command; do not run that
 upgrade unless the user separately instructs you to do so.
 
-Codex activation acceptance and decline are exact-target decisions, not global recommendation-id
-decisions. They bind the selected executable/home and current activation/cache digest. Another
-target, or an `installed_not_activated` target without an unchanged exact-target decline, gets fresh
-advice and requires a fresh preview and decision. Historical acceptance is not proof of current
-activation; a prior decline only quiets its unchanged target and never authorizes activation.
+Codex activation accept/decline decisions bind the exact executable, home, preview, and cache
+digests. An inactive target gets fresh advice unless its exact digest was declined. Acceptance does
+not prove activation; a decline never authorizes it.
 
 # Read more
 
