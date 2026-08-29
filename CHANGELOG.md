@@ -14,6 +14,19 @@ reverse-chronological released versions.
   events, projection, writers, and every other operation readable and writable. A corrupt event
   chain or object inventory row still fails the bundle once; an environmental `OSError` during
   rehydration still retries without latching (issue #443).
+
+- A check parked on a standing repository-grant handoff no longer refuses every observation
+  append for the rest of the session. `suspension_kind=repository_grant` expires the lease
+  and is not an active frozen-case barrier, so the drain can ledger hook-observed work
+  while the trusted ceremony is outstanding. Same-request replay re-installs the barrier
+  and still commits if only observation moved past the frozen subject frontier; cooperative
+  motion still conflicts (issue #445).
+
+- A tracked root `CLAUDE.md` whose complete bytes are the reviewed `@AGENTS.md` alias no longer
+  makes every later pull request fail the source publication-boundary gate. The exception is
+  source-only and exact; nested aliases, changed content, and packaged copies remain blocked
+  (issue #455).
+
 - Codex skill install, replace, and remove now refuse a symlink at `.agents` or `.agents/skills`
   as `target_unsafe`, bind the managed parent's identity into the preview digest, and perform the
   stage/replace/remove swap through a directory-fd no-follow walk so a parent swapped between
