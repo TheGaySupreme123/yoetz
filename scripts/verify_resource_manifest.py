@@ -189,6 +189,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "fixtures/agent-plugins/cursor-stale-shared-mcp-runtime.case.json",
+        "compatibility_manifest",
+        "application/json",
+        True,
+    ),
+    (
         "fixtures/canonical/accepted-entry-identity.case.json",
         "canonical_vector",
         "application/json",

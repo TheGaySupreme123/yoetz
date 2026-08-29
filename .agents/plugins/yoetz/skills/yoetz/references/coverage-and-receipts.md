@@ -78,7 +78,7 @@ A clean deterministic-only check is not an implementation review. When `mode=det
 
 A non-succeeding `semantic_status` is a coverage gap, not a failure to retry away.
 
-- `not_configured`, `blocked_by_policy`, and `human_denied` will not change without owner action: take the first answer.
+- `not_configured`, `blocked_by_policy`, and `human_denied` will not change without owner action: take the first answer, except when installed plugin status names a `policy` route while this process reports `route_semantic_ceiling` (stale runtime / `full_restart_required`). That is an activation mismatch, not an owner privacy decision.
 - `unavailable` and `timeout` are the only statuses retried inside a job, and only for a transport-unavailable, provider-timeout, or rate-limited reason. By the time you see one, that job already spent its own attempt budget.
 - `refused`, `invalid`, and `failed` are not retried inside the job at all, so a fresh request is a fresh gamble rather than a continuation. Their first answer is already terminal: fall back to `deterministic_only` immediately rather than spending a second job to confirm.
 

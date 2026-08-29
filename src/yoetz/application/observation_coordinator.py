@@ -115,7 +115,7 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.projections import ProjectionRecord, ProjectionState
 from yoetz.observability.logging import record_unexpected_exception_without_raising
-from yoetz.observability.privacy import redact_sensitive_content
+from yoetz.observability.privacy import prepare_persisted_plaintext
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
@@ -139,6 +139,7 @@ from yoetz.ports.runtime import (
     TaskRuntime,
 )
 from yoetz.ports.subject_state import SubjectStateCaptureCommand, SubjectStateFormat
+from yoetz.ports.workspace_inspect import InspectedArtifact
 from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_json_parse
 from yoetz.protocol.coverage import EvidenceImmutability, PublicationChannel, coverage_for_channel
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
@@ -218,7 +219,72 @@ __all__ = [
     "ObservationAdviceHook",
     "ObservationCoordinator",
     "ObservationMappingLoader",
+    "build_inspection_excerpt_manifest",
 ]
+
+_INSPECT_EXCERPT_FORMAT: Final = "yoetz.observation-inspect-excerpt/1"
+_MAX_INSPECT_EXCERPT_ARTIFACTS: Final = 16
+_MAX_INSPECT_EXCERPT_PREFIX_BYTES: Final = 512
+
+
+def build_inspection_excerpt_manifest(
+    artifacts: Sequence[InspectedArtifact],
+    *,
+    canaries: tuple[bytes, ...] = (),
+) -> tuple[bytes | None, bool]:
+    """Scan changed-file excerpts before base64 encoding.
+
+    Returns ``(canonical_bytes, capture_unavailable)``. Secret matches persist
+    only path/digest/finding-kind metadata. A scanner failure or canary match
+    stores no excerpt object.
+    """
+
+    parts: list[JsonObject] = []
+    capture_unavailable = False
+    seen = 0
+    for item in artifacts:
+        if type(item) is not InspectedArtifact:
+            continue
+        if seen >= _MAX_INSPECT_EXCERPT_ARTIFACTS:
+            break
+        seen += 1
+        if not item.excerpt:
+            continue
+        prefix = item.excerpt[:_MAX_INSPECT_EXCERPT_PREFIX_BYTES]
+        scan = prepare_persisted_plaintext(prefix, canaries=canaries)
+        if not scan.persist:
+            capture_unavailable = True
+            break
+        if scan.redacted:
+            parts.append(
+                JsonObject(
+                    {
+                        "path": item.relative_path,
+                        "digest": item.content_digest,
+                        "redacted": True,
+                        "finding_kinds": list(scan.finding_kinds),
+                    }
+                )
+            )
+            continue
+        parts.append(
+            JsonObject(
+                {
+                    "path": item.relative_path,
+                    "digest": item.content_digest,
+                    "redacted": False,
+                    "excerpt_b64": base64.b64encode(scan.content).decode("ascii"),
+                }
+            )
+        )
+    if capture_unavailable:
+        return None, True
+    if not parts:
+        return None, False
+    return (
+        canonical_encode(JsonObject({"format": _INSPECT_EXCERPT_FORMAT, "artifacts": parts})),
+        False,
+    )
 
 
 class ObservationMappingLoader(Protocol):
@@ -1320,7 +1386,19 @@ class ObservationCoordinator:
                 object_ids.add(existing)
                 any_redacted = any_redacted or chunk.redacted
                 continue
-            safe_content, detected = redact_sensitive_content(chunk.content)
+            scan = prepare_persisted_plaintext(chunk.content)
+            if not scan.persist:
+                any_redacted = True
+                await self._local(
+                    partial(
+                        self.local.note_coverage_gap,
+                        workspace,
+                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                    )
+                )
+                continue
+            safe_content = scan.content
+            detected = scan.redacted
             any_redacted = any_redacted or chunk.redacted or detected
             stored_chunk = replace(
                 chunk,
@@ -1554,40 +1632,9 @@ class ObservationCoordinator:
         repository = cast(ObservationVerificationRepository, store.verification_repository())
 
         async def persist_output(job: ObservationVerificationJob, content: bytes) -> str | None:
-            chunk = ObservationContentChunk(
-                content_kind=ObservationContentKind.APPROVED_CHECK_OUTPUT,
-                correlation_identity=f"check:{job.job_id}",
-                source_commitment=f"hmac-sha256:{'0' * 64}",
-                media_type="text/plain",
-                part_index=0,
-                part_count=1,
-                content=content,
-                redacted=True,
+            return await self._persist_approved_check_output(
+                runtime, store, workspace, job, content
             )
-            manifest = canonical_encode(
-                JsonObject(
-                    {
-                        "format": "yoetz.observation-content/1",
-                        "content_kind": chunk.content_kind.value,
-                        "correlation_identity": chunk.correlation_identity,
-                        "source_commitment": chunk.source_commitment,
-                        "media_type": chunk.media_type,
-                        "part_index": 0,
-                        "part_count": 1,
-                        "redacted": True,
-                        "content_b64": base64.b64encode(content).decode("ascii"),
-                    }
-                )
-            )
-            ref = await self._encrypt_captured_content(runtime, manifest)
-            store.record_content_manifest(
-                workspace=workspace,
-                logical_identity=f"verification:{job.job_id}",
-                chunk=chunk,
-                ref=ref,
-                recorded_at=timestamp_from_datetime(self.clock.now_utc()),
-            )
-            return ref.object_id
 
         def now_wire() -> str:
             return timestamp_from_datetime(self.clock.now_utc()).wire
@@ -1659,24 +1706,18 @@ class ObservationCoordinator:
                     facts_ref = await self._encrypt_captured_content(runtime, fact_bytes)
                     facts_object_id = facts_ref.object_id
                 if orchestration.inspect is not None and orchestration.inspect.artifacts:
-                    excerpt_parts = tuple(
-                        {
-                            "path": item.relative_path,
-                            "digest": item.content_digest,
-                            "excerpt_b64": base64.b64encode(item.excerpt[:512]).decode("ascii"),
-                        }
-                        for item in orchestration.inspect.artifacts[:16]
-                        if item.excerpt
+                    excerpt_bytes, excerpt_unavailable = build_inspection_excerpt_manifest(
+                        orchestration.inspect.artifacts
                     )
-                    if excerpt_parts:
-                        excerpt_bytes = canonical_encode(
-                            JsonObject(
-                                {
-                                    "format": "yoetz.observation-inspect-excerpt/1",
-                                    "artifacts": list(excerpt_parts),
-                                }
+                    if excerpt_unavailable:
+                        await self._local(
+                            partial(
+                                self.local.note_coverage_gap,
+                                workspace,
+                                ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
                             )
                         )
+                    elif excerpt_bytes is not None:
                         excerpt_ref = await self._encrypt_captured_content(runtime, excerpt_bytes)
                         excerpt_object_id = excerpt_ref.object_id
             except Exception:
@@ -1760,40 +1801,9 @@ class ObservationCoordinator:
         repository = cast(ObservationVerificationRepository, store.verification_repository())
 
         async def persist_output(job: ObservationVerificationJob, content: bytes) -> str | None:
-            chunk = ObservationContentChunk(
-                content_kind=ObservationContentKind.APPROVED_CHECK_OUTPUT,
-                correlation_identity=f"check:{job.job_id}",
-                source_commitment=f"hmac-sha256:{'0' * 64}",
-                media_type="text/plain",
-                part_index=0,
-                part_count=1,
-                content=content,
-                redacted=True,
+            return await self._persist_approved_check_output(
+                runtime, store, workspace, job, content
             )
-            manifest = canonical_encode(
-                JsonObject(
-                    {
-                        "format": "yoetz.observation-content/1",
-                        "content_kind": chunk.content_kind.value,
-                        "correlation_identity": chunk.correlation_identity,
-                        "source_commitment": chunk.source_commitment,
-                        "media_type": chunk.media_type,
-                        "part_index": 0,
-                        "part_count": 1,
-                        "redacted": True,
-                        "content_b64": base64.b64encode(content).decode("ascii"),
-                    }
-                )
-            )
-            ref = await self._encrypt_captured_content(runtime, manifest)
-            store.record_content_manifest(
-                workspace=workspace,
-                logical_identity=f"verification:{job.job_id}",
-                chunk=chunk,
-                ref=ref,
-                recorded_at=timestamp_from_datetime(self.clock.now_utc()),
-            )
-            return ref.object_id
 
         def now_wire() -> str:
             return timestamp_from_datetime(self.clock.now_utc()).wire
@@ -1827,6 +1837,61 @@ class ObservationCoordinator:
         """Deprecated alias: enqueue (+ inline drain without supervisor)."""
 
         await self._enqueue_verification(runtime, workspace, store, envelope)
+
+    async def _persist_approved_check_output(
+        self,
+        runtime: TaskRuntime,
+        store: TaskObservationPort,
+        workspace: str,
+        job: ObservationVerificationJob,
+        content: bytes,
+    ) -> str | None:
+        """Encrypt approved-check output only after the shared fail-closed scan."""
+
+        scan = prepare_persisted_plaintext(content)
+        if not scan.persist:
+            await self._local(
+                partial(
+                    self.local.note_coverage_gap,
+                    workspace,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
+            )
+            return None
+        chunk = ObservationContentChunk(
+            content_kind=ObservationContentKind.APPROVED_CHECK_OUTPUT,
+            correlation_identity=f"check:{job.job_id}",
+            source_commitment=f"hmac-sha256:{'0' * 64}",
+            media_type="text/plain",
+            part_index=0,
+            part_count=1,
+            content=scan.content,
+            redacted=scan.redacted,
+        )
+        manifest = canonical_encode(
+            JsonObject(
+                {
+                    "format": "yoetz.observation-content/1",
+                    "content_kind": chunk.content_kind.value,
+                    "correlation_identity": chunk.correlation_identity,
+                    "source_commitment": chunk.source_commitment,
+                    "media_type": chunk.media_type,
+                    "part_index": 0,
+                    "part_count": 1,
+                    "redacted": scan.redacted,
+                    "content_b64": base64.b64encode(scan.content).decode("ascii"),
+                }
+            )
+        )
+        ref = await self._encrypt_captured_content(runtime, manifest)
+        store.record_content_manifest(
+            workspace=workspace,
+            logical_identity=f"verification:{job.job_id}",
+            chunk=chunk,
+            ref=ref,
+            recorded_at=timestamp_from_datetime(self.clock.now_utc()),
+        )
+        return ref.object_id
 
     async def _encrypt_captured_content(self, runtime: TaskRuntime, content: bytes) -> ObjectRef:
         metadata = ObjectMetadata(

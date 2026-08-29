@@ -67,8 +67,11 @@ Portable uses root `plugin.json`; native uses `.cursor-plugin/plugin.json`. One 
 contain only one of those manifests.
 
 For local IDE development the explicit user root resolves to `plugins/local/yoetz` below the named
-Cursor configuration root. Restart Cursor or run `Developer: Reload Window`; that is activation
-work, not installation proof. For CLI use the exact installed tree with `--plugin-dir`. Do not copy
+Cursor configuration root. File install is not live MCP runtime. `Developer: Reload Window` can
+leave a shared `mcp-process` helper on the previous route; fully quit that exact Cursor app, verify
+its processes exited, and relaunch with the same isolated profile. `yoetz integrate cursor plugin
+status` reports `mcp.runtime.activation` as `matched` or `full_restart_required` when a live scan
+is available. That is activation work, not installation proof. For CLI use the exact installed tree with `--plugin-dir`. Do not copy
 the skill to `.cursor/skills`, add a rule, or rely on `.agents/skills` as fallback evidence.
 
 ## MCP ownership and source precedence
@@ -206,7 +209,8 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 | `tools/list` succeeds but owner is dual/ambiguous | source collision; do not choose silently |
 | SDK fixture is present | metadata-only experimental scaffolding; no SDK activation or model-use claim exists |
 | Model sees only a compact sentence and loses structured fields | the native plugin is stale or a portable/external route won; verify the winning source includes `--host cursor`, reload the isolated app, and retry |
-| Installed MCP executable changed but Cursor still shows the old tool inventory | first run `Developer: Reload Window`; if the pinned IDE still reuses its shared MCP process, fully quit that exact Cursor testing app, verify its process exited, relaunch it with the same isolated profile, and re-prove discovery plus `tools/list` before claiming activation |
+| Installed MCP executable changed but Cursor still shows the old tool inventory | fully quit that exact Cursor testing app; Reload Window is not enough if a shared MCP helper survived. Verify its process exited, relaunch it with the same isolated profile, and re-prove discovery plus `tools/list` before claiming activation. `mcp.runtime.activation=full_restart_required` is this state. |
+| `semantic_required` returns `route_semantic_ceiling` while plugin status says route `policy` | activation mismatch, not an owner privacy decision; inspect `mcp.runtime`, fully quit the host, and do not mint a fresh semantic check against the stale process |
 | MCP resources load but every workflow call fails after a runtime upgrade | a pre-upgrade Yoetz service may still own the fixed endpoint; restart that exact service through the user-selected supervisor, then retry and require a returned task/session before claiming use |
 | Hook fires but status stays published-only | configuration/trigger is not accepted observation evidence |
 | Strict route has no semantic review | expected route ceiling; authorize a separate policy route when intended |

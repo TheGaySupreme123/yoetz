@@ -38,7 +38,11 @@ from yoetz.adapters.integrations.codex_marketplace import (
 from yoetz.adapters.integrations.codex_marketplace import (
     preview_removal as _preview_removal,
 )
-from yoetz.adapters.integrations.codex_plugin import install_plugin
+from yoetz.adapters.integrations.codex_plugin import (
+    PluginHookPresence,
+    inspect_plugin,
+    install_plugin,
+)
 from yoetz.ports.integrations import (
     IntegrationError,
     IntegrationReason,
@@ -400,6 +404,70 @@ def test_canonical_source_activates_on_async_host_and_seeds_host_rendered_cache(
     )
     handler = cache_hooks["hooks"]["PreToolUse"][0]["hooks"][0]
     assert handler.get("async") is True
+
+
+def test_plugin_source_installed_accepts_either_current_renderer_variant(tmp_path: Path) -> None:
+    target, _project, home = _target(tmp_path)
+    host = "0.148.0-alpha.6"
+    _install(target, codex_version=None)
+    assert inspect_plugin(target, codex_version=None).presence is PluginHookPresence.INSTALLED
+    assert (
+        inspect_plugin(target, codex_version=host).presence
+        is PluginHookPresence.INSTALLED_UNTRUSTED_UNKNOWN
+    )
+    assert (
+        inspect_activation(target, codex_home=home).state is ActivationState.INSTALLED_NOT_ACTIVATED
+    )
+
+    _install(target, codex_version=host)
+    assert inspect_plugin(target, codex_version=host).presence is PluginHookPresence.INSTALLED
+    assert (
+        inspect_plugin(target, codex_version=None).presence
+        is PluginHookPresence.INSTALLED_UNTRUSTED_UNKNOWN
+    )
+    runner = _FakeCodex(target, home, codex_version=host)
+    assert (
+        _inspect_activation(
+            target, executable_path=str(runner.executable), codex_home=home, _run=runner
+        ).state
+        is ActivationState.INSTALLED_NOT_ACTIVATED
+    )
+
+
+def test_modified_plugin_source_is_installed_not_activated(tmp_path: Path) -> None:
+    """#347: a byte-present modified tree is not classified as not_installed."""
+
+    target, project, home = _target(tmp_path)
+    _install(target, codex_version=None)
+    hooks = project / ".agents/plugins/yoetz/hooks/hooks.json"
+    hooks.write_bytes(hooks.read_bytes() + b"\n")
+
+    inspection = inspect_activation(target, codex_home=home)
+
+    assert (
+        inspect_plugin(target, codex_version=None).presence
+        is PluginHookPresence.INSTALLED_UNTRUSTED_UNKNOWN
+    )
+    assert inspection.state is ActivationState.INSTALLED_NOT_ACTIVATED
+    assert inspection.plugin_cached is False
+
+
+def test_inventory_enabled_modified_source_never_reads_active(tmp_path: Path) -> None:
+    target, project, home = _target(tmp_path)
+    _install(target, codex_version=None)
+    (project / ".agents/plugins/yoetz/hooks/hooks.json").write_bytes(b"{}\n")
+    (home / "config.toml").write_text(
+        '[marketplaces.yoetz]\nsource_type = "local"\n'
+        f'source = "{project}"\n\n[plugins."yoetz@yoetz"]\nenabled = true\n',
+        encoding="utf-8",
+    )
+    (home / "plugins/cache/yoetz/yoetz/0.1.0").mkdir(parents=True, mode=0o700)
+
+    inspection = inspect_activation(target, codex_home=home)
+
+    assert inspection.state is ActivationState.INSTALLED_NOT_ACTIVATED
+    assert inspection.state is not ActivationState.ACTIVE
+    assert inspection.state is not ActivationState.NOT_INSTALLED
 
 
 def test_same_version_cache_refresh_replaces_prior_managed_render(tmp_path: Path) -> None:
