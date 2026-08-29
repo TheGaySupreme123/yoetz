@@ -794,7 +794,7 @@ async def test_undecodable_pending_resume_is_quarantined_not_latched(
     assert failure.value.code is PublicErrorCode.STORAGE_CORRUPT
     assert failure.value.retryable is False
     assert dict(failure.value.safe_details) == {
-        "reason_code": OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value
+        "quarantine_code": OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value
     }
 
     replacement = await reopened.freeze_case(
@@ -834,6 +834,6 @@ async def test_undecodable_pending_resume_is_quarantined_not_latched(
         )
     assert persisted_failure.value.code is PublicErrorCode.STORAGE_CORRUPT
     assert dict(persisted_failure.value.safe_details) == {
-        "reason_code": OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value
+        "quarantine_code": OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value
     }
     persisted_db.close()

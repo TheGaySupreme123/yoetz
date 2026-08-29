@@ -212,6 +212,7 @@ def _error(
     *,
     retryable: bool = False,
     reason_code: str | None = None,
+    quarantine_code: str | None = None,
     sequence: int | None = None,
     head_digest: str | None = None,
     component: _ErrorComponent | None = None,
@@ -221,6 +222,8 @@ def _error(
     details: dict[str, str | int] = {}
     if reason_code is not None:
         details["reason_code"] = reason_code
+    if quarantine_code is not None:
+        details["quarantine_code"] = quarantine_code
     if sequence is not None:
         details["sequence"] = sequence
     if head_digest is not None:
@@ -466,7 +469,7 @@ def quarantine_resume_object_invalid(
 
     error = _error(
         PublicErrorCode.STORAGE_CORRUPT,
-        reason_code=OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value,
+        quarantine_code=OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value,
     )
     canonical = canonical_encode(
         {
@@ -1882,7 +1885,7 @@ class MemoryLedgerAdapter:
                         raise stored_error
                     raise _error(
                         PublicErrorCode.STORAGE_CORRUPT,
-                        reason_code=(
+                        quarantine_code=(
                             record.quarantine_code.value
                             if record.quarantine_code is not None
                             else None
