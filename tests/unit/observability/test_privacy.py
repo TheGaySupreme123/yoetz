@@ -10,10 +10,12 @@ from yoetz.observability.privacy import (
     PRIVACY_REQUEST_BODY_DOMAIN,
     SESSION_HASH_DOMAIN,
     DiagnosticRedactionProfile,
+    PersistenceScanResult,
     PrivacyFenceError,
     Sensitivity,
     assert_plaintext_safe,
     build_diagnostic_manifest,
+    prepare_persisted_plaintext,
     privacy_request_commitment,
     redact_diagnostic_record,
     redact_diagnostic_value,
@@ -128,6 +130,10 @@ def test_canary_spanning_scan_chunk_boundary_is_detected() -> None:
         (b"OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123456", "credential_pattern"),
         (b"https://" + b"user:password@" + b"example.invalid/resource", "credential_pattern"),
         (b"github_pat_abcdefghijklmnopqrstuvwxyz123456", "credential_pattern"),
+        (b"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "credential_pattern"),
+        (b"AZURE_CLIENT_SECRET=abc123secretvalue0001", "credential_pattern"),
+        (b"GITHUB_TOKEN=notakeybutlongenoughvalue", "credential_pattern"),
+        (b"NPM_TOKEN=npm_notarealtokenvalue12", "credential_pattern"),
     ],
 )
 def test_sensitive_scanner_positive_patterns(data: bytes, kind: str) -> None:
@@ -142,10 +148,44 @@ def test_sensitive_scanner_positive_patterns(data: bytes, kind: str) -> None:
         b"random structural identifier sk-short",
         b"sha256:" + b"a" * 64,
         b"\xff\xfe\x80 ordinary invalid utf8 bytes",
+        b"AWS_ACCESS_KEY_ID=not-an-akia-identifier",
+        b"TOKEN_COUNT=12",
+        b"MAX_TOKEN=4096",
+        b"SECRETARY=Alice",
+        b"tokenize=falsehood",
     ],
 )
 def test_sensitive_scanner_negative_patterns(data: bytes) -> None:
     assert scan_for_sensitive_content(data) == ()
+
+
+def test_prepare_persisted_plaintext_redacts_without_retaining_match() -> None:
+    secret = b"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    data = b"export " + secret + b"\n"
+    result = prepare_persisted_plaintext(data)
+    assert result.persist is True
+    assert result.redacted is True
+    assert result.finding_kinds == ("credential_pattern",)
+    assert b"[REDACTED]" in result.content
+    assert b"wJalrXUtnFEMI" not in result.content
+    assert secret not in result.content
+
+
+def test_prepare_persisted_plaintext_withholds_canary_and_scanner_failure() -> None:
+    canary = b"unique-binary-canary-\x00-credential"
+    withheld = prepare_persisted_plaintext(b"prefix" + canary + b"suffix", canaries=(canary,))
+    assert withheld == PersistenceScanResult(False, b"", True, ("canary",))
+    failed = prepare_persisted_plaintext(canary, canaries=(b"",))
+    assert failed.persist is False
+    assert failed.content == b""
+    assert failed.redacted is True
+
+
+def test_prepare_persisted_plaintext_withholds_at_finding_capacity() -> None:
+    secret = b"AWS_SECRET_ACCESS_KEY=not-a-real-but-sensitive-value"
+    saturated = prepare_persisted_plaintext(b"\n".join([secret] * 128))
+
+    assert saturated == PersistenceScanResult(False, b"", True, ("credential_pattern",))
 
 
 def test_privacy_helpers_are_deterministic() -> None:
