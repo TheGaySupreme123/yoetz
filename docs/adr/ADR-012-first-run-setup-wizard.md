@@ -159,7 +159,9 @@ exactly those contracts and connects the steps without weakening any existing tr
    repository, and the inventory's versioned cache is byte-identical to the managed plugin tree.
    Otherwise the closed state is
    `installed_not_activated`, `not_installed`, or `foreign`; installed bytes, configuration, cache,
-   and inventory remain separately reported facts. Declining changes none of them. This ceremony
+   and inventory remain separately reported facts. `not_installed` is source absence only; a
+   modified or untrusted byte-present tree is `installed_not_activated` and never `active`
+   (issue #347). Declining changes none of them. This ceremony
    authorizes a standing Codex trust change for future sessions in that exact Codex home; it does
    not prove that a later session loaded a hook or delivered an observation.
 
@@ -257,7 +259,8 @@ exactly those contracts and connects the steps without weakening any existing tr
    shows the command, route, all warning tokens, and exact preview digest before confirmation.
    After activation removal,
    observe/inspect reports
-   `installed_not_activated` when the managed plugin source remains (issue #387) and
+   `installed_not_activated` when the managed plugin source remains (issues #387 and #347),
+   including a modified copy, and
    `not_installed` only when that source is also absent.
 
 The short `yoetz --set --fireworks --model MODEL` and `yoetz --set --grok --model MODEL` paths are
