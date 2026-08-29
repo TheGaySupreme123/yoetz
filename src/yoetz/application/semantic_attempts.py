@@ -4,6 +4,12 @@ ADR-006: one durable semantic operation, at most two retries (``max_retries``), 
 deadline (``timeout_seconds``), and one physical attempt identity per dispatch. The ledger's
 ``semantic_jobs`` / ``semantic_attempts`` tables are the recovery authority — never a
 memory-only coordinator object.
+
+Two retry classes share that budget. Transient classes (timeout, transport, rate limit) may use
+every remaining slot. The repair class — a response that reached the provider and came back
+``invalid / response_content_invalid`` (incomplete or overlong output) — may use exactly one slot
+per job (issue #348), resubmitting the same frozen case as a fresh physical attempt. Every other
+invalid, refusal, policy, human, stale, quota, and secret class is terminal on first sight.
 """
 
 from __future__ import annotations
@@ -35,15 +41,17 @@ __all__ = [
     "attempt_accounting_to_json",
     "backoff_seconds",
     "final_status_after_exhaustion",
+    "is_repairable_semantic_outcome",
     "is_retriable_semantic_outcome",
     "max_physical_attempts",
     "physical_attempt_budget",
+    "repair_retries_from_rows",
     "run_durable_semantic_attempts",
     "should_retry_after",
     "status_for_semantic_reason",
 ]
 
-# ADR-006 approved transient classes only. Contract-invalid is not automatically retried.
+# ADR-006 approved transient classes only. Contract-invalid is not a transient class.
 _RETRIABLE_REASONS: Final[frozenset[SemanticReason]] = frozenset(
     {
         SemanticReason.PROVIDER_TIMEOUT,
@@ -51,6 +59,18 @@ _RETRIABLE_REASONS: Final[frozenset[SemanticReason]] = frozenset(
         SemanticReason.PROVIDER_RATE_LIMITED,
     }
 )
+
+# Issue #348 repair class: the provider was reached and answered, but the answer was incomplete
+# or overlong (``failure_class=response_content``). One bounded resubmission of the same frozen
+# case may recover a usable judgment. ``response_schema_invalid`` (non-JSON / wrong shape) and
+# ``semantic_judgment_rejected`` (post-validation) are deliberately absent: they are not fixed by
+# asking again.
+_REPAIRABLE_REASONS: Final[frozenset[SemanticReason]] = frozenset(
+    {SemanticReason.RESPONSE_CONTENT_INVALID}
+)
+
+# At most one repair retry per durable semantic job, whatever ``max_retries`` allows.
+_REPAIR_RETRY_LIMIT: Final = 1
 
 _RETRIABLE_STATUSES: Final[frozenset[SemanticStatus]] = frozenset(
     {
@@ -123,6 +143,24 @@ def is_retriable_semantic_outcome(status: SemanticStatus, reason: SemanticReason
     return True
 
 
+def is_repairable_semantic_outcome(status: SemanticStatus, reason: SemanticReason) -> bool:
+    """Whether a terminal attempt outcome is the issue #348 repair class (one retry, ever)."""
+
+    return status is SemanticStatus.INVALID and reason in _REPAIRABLE_REASONS
+
+
+def repair_retries_from_rows(attempts: tuple[SemanticAttemptRecord, ...]) -> int:
+    """Count repair retries already spent on a job from its durable attempt rows.
+
+    A repaired attempt is closed as ``expired`` with the repair-class terminal code, so the count
+    is simply the rows carrying such a code. Reading it from rows rather than coordinator memory
+    is what keeps the one-repair cap true across a crash or an ``awaiting_human`` replay, where
+    the loop restarts with fresh locals but the ledger still remembers the first attempt.
+    """
+
+    return sum(1 for attempt in attempts if attempt.terminal_code in _REPAIRABLE_REASONS)
+
+
 def should_retry_after(
     *,
     status: SemanticStatus,
@@ -130,12 +168,25 @@ def should_retry_after(
     attempts_completed: int,
     max_retries: int,
     deadline_expired: bool,
+    repair_retries_used: int = 0,
 ) -> bool:
-    """Decide whether another physical attempt is admitted inside the total deadline."""
+    """Decide whether another physical attempt is admitted inside the total deadline.
+
+    ``repair_retries_used`` is the number of repair retries the job has already spent (from
+    durable rows). A repair-class outcome is admitted only while that count is below the
+    one-retry cap; transient classes ignore it. Both classes share the physical-attempt budget.
+    """
 
     if deadline_expired:
         return False
-    if not is_retriable_semantic_outcome(status, reason):
+    if type(repair_retries_used) is not int or repair_retries_used < 0:
+        raise ValueError("repair_retries_used_invalid")
+    if is_retriable_semantic_outcome(status, reason):
+        pass
+    elif is_repairable_semantic_outcome(status, reason):
+        if repair_retries_used >= _REPAIR_RETRY_LIMIT:
+            return False
+    else:
         return False
     budget = physical_attempt_budget(max_retries)
     return attempts_completed < budget
@@ -196,9 +247,13 @@ def final_status_after_exhaustion(
 
     A single physical attempt that fails with a retriable class keeps its exact reason
     (``max_retries=0``). Exhaustion after using the full budget surfaces
-    ``unavailable/retry_budget_exhausted``.
+    ``unavailable/retry_budget_exhausted``. A repair-class last outcome is a real provider
+    answer, not transport exhaustion: it keeps ``invalid/response_content_invalid`` however many
+    attempts preceded it, so a second invalid answer reads as what it was.
     """
 
+    if is_repairable_semantic_outcome(last_status, last_reason):
+        return last_status, last_reason
     budget = physical_attempt_budget(max_retries)
     if attempts_completed >= budget and attempts_completed > 1:
         return SemanticStatus.UNAVAILABLE, SemanticReason.RETRY_BUDGET_EXHAUSTED
@@ -484,8 +539,9 @@ async def run_durable_semantic_attempts(
     """Run the physical attempt loop for one durable semantic job.
 
     Each iteration claims (or resumes) one attempt, dispatches once, and records a durable
-    outcome. Retries only the ADR-006 transient classes within the total deadline and
-    ``max_retries`` budget. Exactly one selected attempt or one terminal failed job results.
+    outcome. Retries the ADR-006 transient classes, plus at most one issue #348 repair retry
+    after ``invalid/response_content_invalid``, within the total deadline and ``max_retries``
+    budget. Exactly one selected attempt or one terminal failed job results.
 
     Crash/replay after a terminal job row already exists recovers from durable state without
     re-claiming. The check operation lease is renewed around each claim/select so a configured
@@ -656,20 +712,31 @@ async def run_durable_semantic_attempts(
             # durable record that the check is open, not finished.
             return build_final(evaluation.status, evaluation.reason, evaluation, accounting)
 
+        # The repair cap is read from durable rows, not a local counter: after an
+        # ``awaiting_human`` replay this loop starts over with ``attempts_completed`` rebuilt
+        # from the claimed ordinal, and the one-repair rule has to survive that the same way.
+        repair_retries_used = repair_retries_from_rows(
+            await ledger.list_semantic_attempts(job.job_id)
+        )
         can_retry = should_retry_after(
             status=evaluation.status,
             reason=evaluation.reason,
             attempts_completed=attempts_completed,
             max_retries=max_retries,
             deadline_expired=deadline.expired(now_monotonic()),
+            repair_retries_used=repair_retries_used,
         )
         if can_retry:
+            # ``expired`` keeps the job claimable and leaves this attempt's terminal code in the
+            # row, so the repaired attempt stays visible in accounting next to its successor.
             await ledger.record_attempt_outcome(
                 handle,
                 AttemptOutcome.EXPIRED,
                 terminal_code=evaluation.reason,
             )
-            delay = backoff_seconds(handle.attempt_ordinal)
+            # A repair is not waiting out a transport fault; resubmit without backoff.
+            repair = is_repairable_semantic_outcome(evaluation.status, evaluation.reason)
+            delay = backoff_seconds(handle.attempt_ordinal, kind="none" if repair else "transient")
             if delay > 0.0 and not deadline.expired(now_monotonic() + delay):
                 await sleep(delay)
             continue

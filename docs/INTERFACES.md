@@ -1168,10 +1168,19 @@ The exact shared frozen records, also owned by `ports/ledger.py`, are:
 Semantic attempt budget (ADR-006): `ProviderProfileConfig.timeout_seconds` is the total
 semantic-operation deadline; `max_retries` (0..2) is the maximum additional physical attempts
 (so physical budget is `1 + max_retries`, at most three). Yoetz owns the retry loop with SDK
-`max_retries=0`. Retries are admitted only for timeout / transport / rate-limited classes; policy
-blocks, human denial, secret detection, invalid case, stale frontier, refusal, and exhausted
-authority never retry. `confirm_every_request` requires a fresh foreground decision per physical
-attempt. Attempt accounting (`attempted_count`, `selected_attempt_id`, terminal reason counts,
+`max_retries=0`. Transient retries are admitted only for timeout / transport / rate-limited
+classes. One further class shares the same physical budget: `invalid / response_content_invalid`
+(the provider was reached and answered, but the answer was incomplete or overlong) admits at most
+one repair retry per job (issue #348) — the same frozen case resubmitted as a fresh physical
+attempt, with no sampling, provider, model, category, or retention widening; a repaired attempt is
+closed as `expired` with that terminal code so it stays in accounting, and a second
+`response_content_invalid` answer terminates honestly as `invalid / response_content_invalid`
+(never `retry_budget_exhausted`) with `attempted_count=2`. The repair count is rebuilt from durable
+attempt rows (`repair_retries_from_rows`), not coordinator memory, so it survives an
+`awaiting_human` replay. `response_schema_invalid`, `semantic_judgment_rejected`, policy blocks,
+human denial, secret detection, invalid case, stale frontier, refusal, quota exhaustion, and
+exhausted authority never retry. `confirm_every_request` requires a fresh foreground decision per
+physical attempt, the repair attempt included. Attempt accounting (`attempted_count`, `selected_attempt_id`, terminal reason counts,
 `exhausted`) is reconstructed from durable job/attempt rows via `load_semantic_job` +
 `list_semantic_attempts` — not from memory-only coordinator state. When
 `enqueue_semantic_job` recovers an already-terminal job (`succeeded` / `failed` /
