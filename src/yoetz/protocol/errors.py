@@ -50,6 +50,7 @@ type SafeDetailValue = str | int
 
 
 _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
+    "accepted_but_unresponsive",
     "accepted_record_shape_invalid",
     "actor_id_malformed",
     "actor_id_not_generated",
@@ -61,6 +62,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "empty_check_types",
     "empty_publication_channels",
     "empty_subject_state",
+    "endpoint_unsafe",
     "engine_family_wrong_author",
     "entry_digest_mismatch",
     "event_family_not_admitted",
@@ -76,6 +78,8 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "finding_json_shape_invalid",
     "finding_priority_mismatch",
     "float_forbidden",
+    "frame_invalid",
+    "frame_too_large",
     "frontier_changed",
     "frontier_digest_mismatch",
     "id_malformed_uuid",
@@ -89,6 +93,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "input_not_bytes",
     "integer_out_of_safe_range",
     "integer_out_of_sqlite_range",
+    "internal_error",
     "invalid_actor_type",
     "invalid_approved_check",
     "invalid_approved_check_policy",
@@ -136,6 +141,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "ledger_assigned_field_in_request_identity",
     "lone_surrogate",
     "malformed_json",
+    "method_forbidden",
     "missing_payload_field",
     "nesting_too_deep",
     "no_obligations_reason_conflict",
@@ -149,9 +155,11 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "operation_recovery_unavailable",
     "ownership_contended",
     "payload_redaction_mismatch",
+    "peer_untrusted",
     "plan_version_conflict",
     "privacy_projection_unavailable",
     "privacy_receipt_not_durable",
+    "protocol_mismatch",
     "provider_attempt_provenance_is_not_final",
     "public_error_invalid_correlation_id",
     "public_error_invalid_message",
@@ -164,6 +172,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "redaction_target_required",
     "ref_mirror_mismatch",
     "request_identity_conflict",
+    "request_timeout",
     "response_fields_invalid",
     "response_projection_failed",
     "schema_artifact_role_invalid",
@@ -186,7 +195,10 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "schema_reference_unresolved",
     "schema_version_mismatch",
     "semantic_provenance_json_shape_invalid",
+    "service_draining",
+    "service_generation_changed",
     "service_incompatible",
+    "service_unavailable",
     "session_superseded",
     "set_member_not_ascii",
     "timestamp_not_utc",
@@ -202,7 +214,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 149
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 161
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

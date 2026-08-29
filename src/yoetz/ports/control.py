@@ -304,6 +304,7 @@ _CONTROL_ERROR_REASONS = frozenset(
         "response_projection_failed",
         "read_projection_failed",
         "service_generation_changed",
+        "endpoint_unsafe",
     }
 )
 _EMPTY_ACCEPTED_STATE: Final[Mapping[str, SafeDetailValue]] = MappingProxyType({})

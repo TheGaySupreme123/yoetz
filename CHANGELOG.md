@@ -8,6 +8,13 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Cooperative MCP calls no longer collapse typed local-control failures into opaque,
+  non-retryable `INTERNAL_ERROR`. Service absence, an accepted-but-unresponsive listener,
+  incompatible or mismatched installations, unsafe or untrusted endpoints, timeouts, and bounded
+  protocol refusals now retain an actionable public code, truthful retryability, a structural
+  `reason_code`, resolvable correlation diagnostics, and same-`request_id` recovery guidance;
+  genuinely unexpected bridge defects remain `INTERNAL_ERROR` (issue #460).
+
 - `yoetz observe status` no longer collapses bounded observation-store filesystem failures into
   generic `internal_error`. Unsafe state/lock shapes, unavailable open/permission/read-only/
   missing-parent/lock failures, and corrupt stored data retain distinct typed outcomes; fixed

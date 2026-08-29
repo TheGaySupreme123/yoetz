@@ -373,6 +373,8 @@ class _ReceiptCommon(TypedDict):
 def _transport_error(error: LocalControlTransportError) -> ControlError:
     if error.reason == "peer_untrusted":
         return ControlError("peer_untrusted")
+    if error.reason == "endpoint_unsafe":
+        return ControlError("endpoint_unsafe")
     return ControlError("service_unavailable", retryable=True)
 
 

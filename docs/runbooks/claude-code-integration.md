@@ -96,7 +96,8 @@ build the previous build's service still owning the endpoint refuses the new bri
 first plugin tool call (on-demand startup) replaces that service automatically: it asks the stale
 holder to shut down through its ordinary bounded path and starts this installation's service inside
 the same 30-second budget. If that cannot complete, the tool returns `SERVICE_UNAVAILABLE` with
-`reason_code: service_incompatible` and the repair command; run it on a local terminal:
+`reason_code: service_incompatible` (or `protocol_mismatch` when the refusal is a protocol
+generation mismatch) and the repair command; run it on a local terminal:
 
 ```text
 yoetz service restart
