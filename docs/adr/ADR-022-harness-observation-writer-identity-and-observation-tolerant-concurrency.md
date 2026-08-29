@@ -1,7 +1,8 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-08-27 for issue #418 rollout replay repairs; 2026-08-18 for the
+**Amended:** 2026-08-29 for issue #445 (standing-grant parks are not an observation
+barrier); 2026-08-27 for issue #418 rollout replay repairs; 2026-08-18 for the
 maintainer-directed issue #346 incident repairs #350, #351, and
 #352 (decisions 12–14); 2026-08-18 for maintainer-authored issues #320 and #326 and issue #322
 (delivered frontier-motion high-water); 2026-08-16 for maintainer-approved issue #224; 2026-08-14
@@ -12,7 +13,7 @@ for moderator-approved issue #244 and the reopened issue #216 recurrence.
 `src/yoetz/kernel/policies/observation_advice.py`, `src/yoetz/service/ready_composition.py`, and
 `src/yoetz/adapters/integrations/observation_local.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
-issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #320, #322, and #326.
+issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #320, #322, #326, and #445.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -65,9 +66,14 @@ unsupported claims and unbounded duplicate findings.
    reservation that defers observation appends until the durable frozen-case barrier is installed.
    The reservation is never persisted and expires after 60 seconds if acquisition stalls.
    Observation-authored append attempts while either barrier is active receive retryable
-   `OPERATION_PENDING`; the durable outbox retries after the check commits. Commit retains exact
-   equality with the frontier actually frozen, so the verdict is never retargeted to a frontier it
-   did not inspect.
+   `OPERATION_PENDING`; the durable outbox retries after the check commits. A check parked on a
+   standing-repository-grant suspension (`suspension_kind=repository_grant`) is not an active
+   barrier: no provider job exists, the lease is expired, and the ceremony may never complete.
+   Observation appends proceed; same-request replay re-installs the barrier when it reclaims the
+   lease. Commit keeps the frozen subject frontier — the verdict is never retargeted to a frontier
+   it did not inspect — and tolerates an observation-authored suffix after that frontier the same
+   way acquisition and `append_batch` do, appending check events at the live head. Cooperative or
+   importer motion still conflicts.
 
 5. Receipt acquisition may keep its caller-supplied subject frontier across an
    observation-authored suffix only when the supplied projection is the exact genesis-prefix replay

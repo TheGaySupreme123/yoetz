@@ -472,6 +472,13 @@ carried them; they are listed because each one describes the behavior that now s
 
 ### Fixed
 
+- A check parked on a standing repository-grant handoff no longer refuses every observation
+  append for the rest of the session. `suspension_kind=repository_grant` expires the lease
+  and is not an active frozen-case barrier, so the drain can ledger hook-observed work
+  while the trusted ceremony is outstanding. Same-request replay re-installs the barrier
+  and still commits if only observation moved past the frozen subject frontier; cooperative
+  motion still conflicts (issue #445).
+
 - Hook observation advice no longer tells an agent `Next: refresh_observation`. That token
   remains the snapshot next-action value, but the hook clause now names the real host-shell
   step (`yoetz observe status`) and asks the agent to disclose the gap if it persists at
