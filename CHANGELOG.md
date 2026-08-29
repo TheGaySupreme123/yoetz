@@ -8,6 +8,11 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- A tracked root `CLAUDE.md` whose complete bytes are the reviewed `@AGENTS.md` alias no longer
+  makes every later pull request fail the source publication-boundary gate. The exception is
+  source-only and exact; nested aliases, changed content, and packaged copies remain blocked
+  (issue #455).
+
 - Codex skill install, replace, and remove now refuse a symlink at `.agents` or `.agents/skills`
   as `target_unsafe`, bind the managed parent's identity into the preview digest, and perform the
   stage/replace/remove swap through a directory-fd no-follow walk so a parent swapped between

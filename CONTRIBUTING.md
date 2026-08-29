@@ -85,6 +85,8 @@ entries.
 - Keep release-related and security-sensitive changes clearly labeled in your commit/PR description.
 - Preserve the public/private boundary: nothing under `docs/architecture/` or any other gitignored
   local drafting input belongs in a public file. `scripts/scan_public_boundary.py` enforces this.
+  The tracked root `CLAUDE.md` is a reviewed public alias only while its complete bytes remain
+  exactly `@AGENTS.md\n`; changing its content, nesting another copy, or packaging it fails closed.
 
 ## Honesty rules that bind every change
 

@@ -8,7 +8,10 @@ absolute paths, and exceptions (where they exist) are exact.
 
 Scope notes (verbatim conflicts, reported rather than guessed around):
 
-1. The scanner (``scripts/scan_public_boundary.py``) is documented as supporting a reviewed
+1. The scanner has one built-in, exact source-root exception for the public ``CLAUDE.md`` alias
+   whose complete bytes are ``@AGENTS.md\n``. It is not a general exception mechanism: the same
+   path in an artifact, a nested alias, or any different source bytes remain blocked. The scanner
+   is otherwise documented as supporting a reviewed
    per-file exception mechanism ("Allow exceptions match exact rule ID + normalized file + bounded
    digest/line context ... every exception states ... keys cannot be allowlisted"). The actual
    ``scripts/scan_public_boundary.py`` has no such mechanism: ``BoundaryRule``/``ScanReport`` carry
@@ -146,6 +149,39 @@ def test_scanner_cli_passes_on_the_clean_synthetic_tree(
     root = _clean_git_source_tree(tmp_path / "clean-repo-cli")
     rc = scanner.main(["--source-tree", str(root)])
     assert rc == 0
+
+
+def test_scanner_cli_admits_only_the_exact_public_root_claude_alias(
+    scanner: ModuleType, tmp_path: Path
+) -> None:
+    root = _clean_git_source_tree(tmp_path / "clean-repo-claude-alias")
+    (root / "CLAUDE.md").write_bytes(b"@AGENTS.md\n")
+    subprocess.run(["git", "add", "CLAUDE.md"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "public agent alias"], cwd=root, check=True)
+
+    assert scanner.main(["--source-tree", str(root)]) == 0
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "data", "target_kind"),
+    [
+        ("CLAUDE.md", b"private instructions\n", "source"),
+        ("nested/CLAUDE.md", b"@AGENTS.md\n", "source"),
+        ("CLAUDE.md", b"@AGENTS.md\n", "artifact"),
+    ],
+)
+def test_public_root_claude_alias_exception_fails_closed(
+    scanner: ModuleType, relative_path: str, data: bytes, target_kind: str
+) -> None:
+    entry = scanner.FileEntry(relative_path=relative_path, size=len(data), data=data)
+    findings = scanner.scan_filename(
+        entry,
+        scanner.load_rules(),
+        target_label="candidate",
+        target_kind=target_kind,
+    )
+
+    assert {finding.rule_id for finding in findings} == {"PRIV-SESSION-002"}
 
 
 # ---------------------------------------------------------------------------
