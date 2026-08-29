@@ -205,6 +205,11 @@ current state and applies the recommendation's reviewed preview/confirmation cer
 package-update recommendation, `accept` only prints the human-run upgrade command; do not run that
 upgrade unless the user separately instructs you to do so.
 
+Codex activation acceptance and decline are exact-target decisions, not global recommendation-id
+decisions. They bind the selected executable/home and current activation/cache digest. Another
+target or a target that drifts back to `installed_not_activated` gets fresh advice and requires a
+fresh preview and decision; a prior decline never authorizes activation.
+
 # Read more
 
 - `yoetz://guidance/agent-instructions.md` - this document; re-read it if the initialize copy is not in context.

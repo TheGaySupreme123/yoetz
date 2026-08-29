@@ -63,6 +63,10 @@ re-planned, it does not widen and continue.
 
 ## 2. Preflight sequence
 
+For Codex runs launched from a disposable worktree, first complete the stricter
+[Codex dogfood parity preflight](codex-dogfood.md). Its exact-worktree activation, consent, host
+delivery, observation, and rollback cells are not implied by the five semantic checks below.
+
 Run all five before the first task action and record the output verbatim. Every command here is
 read-only and already exists — this runbook adds no command.
 
@@ -150,6 +154,7 @@ authorized to make and stop there.
 
 ## See also
 
+- [Codex dogfood parity](codex-dogfood.md) — exact-worktree preflight, postflight, and rollback.
 - [Codex integration runbook](codex-integration.md) — installing the skill and registering MCP.
 - [Privacy and semantic review](../usage/privacy-and-semantic-review.md) — the durable policy that
   authorizes disclosure.

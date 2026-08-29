@@ -364,7 +364,7 @@ remove`.
 | Compatibility is `unsupported` | Automatic activation is unprofiled; use a supported Yoetz/Codex version pair when capability evidence is required. |
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$yoetz` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |
-| Setup reports `installed_not_activated` | Re-run setup/recommendation preview for the exact selected executable. Review canonical inventory and the versioned cache; marketplace/config presence alone is insufficient. A marker-consistent stale cache is refreshed by an ordinary approved re-run. |
+| Setup reports `installed_not_activated` | Run `yoetz recommend list --codex-path <exact-executable> --codex-home <exact-home>`, then accept only the freshly shown target/preview digest. Historical acceptance or decline for another target cannot suppress this recovery. Review canonical inventory and the versioned cache; marketplace/config presence alone is insufficient. A marker-consistent stale cache is refreshed by an ordinary approved re-run. |
 | Activation reports `destination_conflict` | The versioned cache (or a config/marketplace surface) holds foreign, marker-inconsistent, or modified content. Review it by hand; setup only replaces trees that match their own Yoetz install marker. |
 | Activation failed with an explicit `--codex-home` | Read the actual `reason` in `registration.plugin_activation`/`readiness.plugin_activation`; the bound home and config path are echoed there. `codex_home_required` appears only when no home was passed. |
 | Setup reports plugin source files but no Yoetz skill appears | Check `.agents/skills/yoetz`; source installation and plugin activation do not prove project-skill discovery. |
@@ -385,3 +385,8 @@ state, source/installed/preview digests, the bounded reason token, and file-stat
 - Never force an overwrite or a removal.
 - Never claim skill installation changed MCP configuration.
 - Never claim support for a Codex version outside the current tested set.
+
+For a disposable-worktree integration run, use the [Codex dogfood parity
+runbook](codex-dogfood.md). The ordinary setup/semantic checks above are necessary but do not prove
+exact-worktree activation, consent, host delivery, observation, rollback, or normal-target
+isolation.

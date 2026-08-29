@@ -18,6 +18,8 @@ from yoetz.application.recommendations import (
     RecommendationContext,
     RecommendationState,
     RecommendationStoreError,
+    RecommendationTarget,
+    codex_activation_recommendation_target,
     decline_cached_recommendation,
     evaluate_recommendation_context,
     recommendation_by_id,
@@ -69,14 +71,43 @@ def _selected_codex_home(explicit: Path | str | None) -> Path:
     return resolve_codex_home(explicit).resolve(strict=False)
 
 
-def _activation_state(
+def _target_from_preview(preview: object) -> RecommendationTarget:
+    executable_path = getattr(preview, "executable_path", None)
+    executable_digest = getattr(preview, "executable_digest", None)
+    codex_version = getattr(preview, "codex_version", None)
+    codex_home = getattr(preview, "codex_home", None)
+    preview_digest = getattr(preview, "preview_digest", None)
+    plugin_install_digest = getattr(preview, "plugin_install_digest", None)
+    if (
+        not isinstance(executable_path, Path)
+        or type(executable_digest) is not str
+        or type(codex_version) is not str
+        or not isinstance(codex_home, Path)
+        or type(preview_digest) is not str
+        or type(plugin_install_digest) is not str
+    ):
+        raise _RecommendationCliError("activation_preview_invalid")
+    try:
+        return codex_activation_recommendation_target(
+            executable_path=executable_path,
+            executable_digest=executable_digest,
+            codex_version=codex_version,
+            codex_home=codex_home,
+            activation_preview_digest=preview_digest,
+            plugin_install_digest=plugin_install_digest,
+        )
+    except (OSError, ValueError) as exc:
+        raise _RecommendationCliError("activation_preview_invalid") from exc
+
+
+def _activation_context(
     target: Path,
     *,
     executable_path: Path | str | None = None,
     codex_home: Path | str | None = None,
-) -> str | None:
+) -> tuple[str | None, RecommendationTarget | None]:
     if executable_path is None:
-        return None
+        return None, None
     try:
         module = importlib.import_module(_ACTIVATION_MODULE)
         selected_home = _selected_codex_home(codex_home)
@@ -85,6 +116,12 @@ def _activation_state(
             executable_path=os.fspath(executable_path),
             codex_home=selected_home,
         )
+        preview = module.preview_activation(
+            _integration_target(target),
+            executable_path=os.fspath(executable_path),
+            codex_home=selected_home,
+        )
+        recommendation_target = _target_from_preview(preview)
     except (
         _RecommendationCliError,
         AttributeError,
@@ -94,10 +131,10 @@ def _activation_state(
         TypeError,
         ValueError,
     ):
-        return None
+        return None, None
     state = getattr(inspection, "state", None)
     value = getattr(state, "value", state)
-    return value if type(value) is str else None
+    return (value, recommendation_target) if type(value) is str else (None, None)
 
 
 async def _current_context(
@@ -109,13 +146,15 @@ async def _current_context(
 ) -> RecommendationContext:
     config = _load_current_config(config_path)
     target = Path.cwd() if activation_target is None else activation_target
+    activation_state, activation_decision_target = _activation_context(
+        target, executable_path=codex_path, codex_home=codex_home
+    )
     # Phase 2 supplies the durable privacy-policy posture. Until then this remains deliberately
     # no-egress and cannot manufacture package-update advice from an unauthorized network call.
     return await evaluate_recommendation_context(
         observation_enabled=config.observation.enabled,
-        codex_activation_state=_activation_state(
-            target, executable_path=codex_path, codex_home=codex_home
-        ),
+        codex_activation_state=activation_state,
+        codex_activation_target=activation_decision_target,
         allow_network=False,
     )
 
@@ -139,8 +178,13 @@ def _state_payload(state: RecommendationState) -> dict[str, object]:
                 "decision": row.decision,
                 "decided_at": row.decided_at.isoformat(),
                 "version": row.version,
+                "recommendation_id": row.recommendation_id or key,
+                "target_digest": None if row.target is None else row.target.target_digest,
             }
             for key, row in sorted(state.decisions.items())
+        },
+        "pending_targets": {
+            key: target.target_digest for key, target in sorted(state.pending_targets.items())
         },
     }
 
@@ -160,6 +204,8 @@ def _render_state(state: RecommendationState, *, json_output: bool) -> None:
             continue
         typer.echo(f"  {item.id}: {item.title}")
         typer.echo(f"    {item.summary}")
+        if (target := state.pending_targets.get(item.id)) is not None:
+            typer.echo(f"    Target digest: {target.target_digest}")
         typer.echo(
             f"    Accept: yoetz recommend accept {item.id}  |  "
             f"Decline: yoetz recommend decline {item.id}"
@@ -172,7 +218,9 @@ async def _refresh_for_cli(
     async def context() -> RecommendationContext:
         return await _current_context(codex_path=codex_path, codex_home=codex_home)
 
-    return await refresh_pending(context_factory=context)
+    # Exact-target list is also the recovery touchpoint: it must re-evaluate even when a
+    # historical same-version decision left the global pending cache empty (#463).
+    return await refresh_pending(context_factory=context, force=True)
 
 
 @recommend_app.command("list")
@@ -291,7 +339,9 @@ def _environment_lines(environment: object) -> tuple[str, ...]:
     return tuple(lines)
 
 
-def _apply_codex_activation(*, target: Path, executable_path: Path, codex_home: Path) -> str:
+def _apply_codex_activation(
+    *, target: Path, executable_path: Path, codex_home: Path
+) -> tuple[str, RecommendationTarget]:
     try:
         module = importlib.import_module(_ACTIVATION_MODULE)
         integration_target = _integration_target(target)
@@ -301,6 +351,7 @@ def _apply_codex_activation(*, target: Path, executable_path: Path, codex_home: 
             executable_path=os.fspath(executable_path),
             codex_home=selected_home,
         )
+        recommendation_target = _target_from_preview(preview)
         digest, exact_change = _preview_text(preview)
         preview_home = getattr(preview, "codex_home", None)
         if not isinstance(preview_home, Path) or preview_home != selected_home:
@@ -388,8 +439,11 @@ def _apply_codex_activation(*, target: Path, executable_path: Path, codex_home: 
     ) as exc:
         raise _RecommendationCliError("activation_unavailable") from exc
     return (
-        f"applied exact activation preview {digest}; "
-        "start a fresh Codex process/session to load the plugin and hooks"
+        (
+            f"applied exact activation preview {digest}; "
+            "start a fresh Codex process/session to load the plugin and hooks"
+        ),
+        recommendation_target,
     )
 
 
@@ -398,9 +452,9 @@ def _apply_recommendation(
     *,
     codex_path: Path | None = None,
     codex_home: Path | None = None,
-) -> str:
+) -> tuple[str, RecommendationTarget | None]:
     if recommendation_id == "observation-enabled":
-        return _apply_observation_enabled(path=None)
+        return _apply_observation_enabled(path=None), None
     if recommendation_id == "codex-plugin-activation":
         if codex_path is None:
             raise _RecommendationCliError("activation_codex_path_required")
@@ -410,7 +464,7 @@ def _apply_recommendation(
             target=Path.cwd(), executable_path=codex_path, codex_home=codex_home
         )
     if recommendation_id == "package-update":
-        return f"run: {PACKAGE_UPDATE_UPGRADE_COMMAND}"
+        return f"run: {PACKAGE_UPDATE_UPGRADE_COMMAND}", None
     raise _RecommendationCliError("recommendation_unknown")
 
 
@@ -456,13 +510,13 @@ def recommend_accept(
             raise _RecommendationCliError("recommendation_not_pending")
         # The command itself is the approval. Re-preview at this point binds activation to fresh
         # bytes; activation additionally confirms that displayed digest before it mutates trust.
-        outcome = _apply_recommendation(
+        outcome, decision_target = _apply_recommendation(
             recommendation_id, codex_path=codex_path, codex_home=codex_home
         )
         # The change is applied at this point; a decision-store failure below must not be
         # reported as if nothing happened.
         try:
-            record_recommendation_decision(recommendation_id, "accepted")
+            record_recommendation_decision(recommendation_id, "accepted", target=decision_target)
         except RecommendationStoreError as exc:
             typer.echo(f"applied {recommendation_id}: {outcome}")
             typer.echo(
@@ -490,21 +544,21 @@ def recommend_decline(
         Path | None,
         typer.Option(
             "--codex-path",
-            help="Accepted for compatibility; decline never inspects a Codex executable.",
+            help="Accepted for compatibility; decline binds the cached exact target.",
         ),
     ] = None,
     codex_home: Annotated[
         Path | None,
         typer.Option(
             "--codex-home",
-            help="Accepted for compatibility; decline never touches a Codex home.",
+            help="Accepted for compatibility; decline binds the cached exact target.",
         ),
     ] = None,
 ) -> None:
-    """Remember an explicit decline; this recommendation will not be shown again."""
+    """Remember an explicit decline for the cached recommendation target."""
 
-    # Decline consumes no Codex authority, so these selectors are deliberately inert; the
-    # wrapper command in cli/app.py still forwards them for invocation compatibility.
+    # Decline consumes no Codex authority, so these selectors are deliberately inert. The cached
+    # pending target already contains the digest-only identity that was shown by list/the hook.
     del codex_path, codex_home
     if recommendation_by_id(recommendation_id) is None:
         typer.echo("invalid_request: recommendation_unknown", err=True)
@@ -521,4 +575,7 @@ def recommend_decline(
     except ValueError as exc:
         typer.echo(f"recommendation_error: {exc}", err=True)
         raise typer.Exit(2) from exc
-    typer.echo(f"declined {recommendation_id}; this recommendation will not be shown again")
+    if recommendation_id == "codex-plugin-activation":
+        typer.echo(f"declined {recommendation_id} for this exact target and activation digest")
+    else:
+        typer.echo(f"declined {recommendation_id}; this recommendation will not be shown again")

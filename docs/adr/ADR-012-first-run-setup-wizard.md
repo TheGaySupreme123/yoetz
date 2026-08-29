@@ -263,6 +263,16 @@ exactly those contracts and connects the steps without weakening any existing tr
    including a modified copy, and
    `not_installed` only when that source is also absent.
 
+   **Amended 2026-08-29 — target-bound activation recommendation recovery (issue #463).** An
+   accepted or declined `codex-plugin-activation` recommendation is no longer a package-version-wide
+   decision. Its digest-only identity binds the resolved executable, executable bytes and version,
+   canonical Codex home, activation preview, and intended host-rendered cache. Before suppressing
+   advice, `recommend list` re-inspects that exact target. A currently active target stays quiet;
+   another home, another executable, or a target whose preview/cache digest drifted to
+   `installed_not_activated` receives fresh advice. Decline is equally target-bound and grants
+   nothing. Apply still re-previews, prints the exact digest and bounded preimages, requires the
+   post-preview confirmation, and refuses stale, foreign, modified, or ambiguous state.
+
 The short `yoetz --set --fireworks --model MODEL` and `yoetz --set --grok --model MODEL` paths are
 provider-only entries into the same setup ceremonies. They derive internal provider bindings and
 always collect the API key through hidden TTY

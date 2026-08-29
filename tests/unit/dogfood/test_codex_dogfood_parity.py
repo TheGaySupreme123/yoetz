@@ -1,0 +1,203 @@
+"""Executable classification locks for exact-worktree Codex dogfood parity (#464)."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+_FIXTURE = (
+    Path(__file__).parents[2] / "fixtures" / "codex-dogfood" / "worktree-without-exact-consent.json"
+)
+_SCRIPT = Path(__file__).parents[3] / "scripts" / "check_codex_dogfood_parity.py"
+_SPEC = importlib.util.spec_from_file_location("check_codex_dogfood_parity", _SCRIPT)
+assert _SPEC is not None and _SPEC.loader is not None
+_MODULE = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_MODULE)
+POSTFLIGHT_FACETS = _MODULE.POSTFLIGHT_FACETS
+PREFLIGHT_FACETS = _MODULE.PREFLIGHT_FACETS
+DogfoodGateError = _MODULE.DogfoodGateError
+classify_codex_dogfood_report = _MODULE.classify_codex_dogfood_report
+_DIGEST = "sha256:" + ("a" * 64)
+
+
+def _gate(status: str = "pass") -> dict[str, object]:
+    if status == "pass":
+        return {
+            "status": "pass",
+            "reason": None,
+            "evidence_digest": _DIGEST,
+            "next_action": "none",
+        }
+    return {
+        "status": status,
+        "reason": "not_exercised",
+        "evidence_digest": None,
+        "next_action": "complete_postflight",
+    }
+
+
+def _report() -> dict[str, object]:
+    return {
+        "schema": "yoetz.codex-dogfood-parity/1",
+        "identity": {
+            "source_ref": "a" * 40,
+            "package_digest": _DIGEST,
+            "codex_executable_digest": _DIGEST,
+            "codex_version": "0.148.0",
+            "codex_home_digest": _DIGEST,
+            "launcher_digest": _DIGEST,
+            "route_profile": "policy",
+            "worktree_digest": _DIGEST,
+        },
+        "scope": {
+            "hooks_advertised": True,
+            "session_stream_advertised": True,
+            "semantic_required": True,
+            "influence_required": True,
+        },
+        "observed": {
+            "activation_state": "active",
+            "exact_worktree_consent": "active",
+            "primary_checkout_consent": "active",
+            "controls_workspace_match": True,
+            "mapping_present": True,
+            "accepted_envelope_count": 4,
+            "undelivered_count": 0,
+            "drain_succeeded": True,
+            "hook_coverage": True,
+            "stream_coverage": True,
+        },
+        "facets": {name: _gate() for name in (*PREFLIGHT_FACETS, *POSTFLIGHT_FACETS)},
+    }
+
+
+def _facets(report: dict[str, object]) -> dict[str, dict[str, object]]:
+    return cast(dict[str, dict[str, object]], report["facets"])
+
+
+def _observed(report: dict[str, object]) -> dict[str, object]:
+    return cast(dict[str, object], report["observed"])
+
+
+def test_every_required_layer_passes_before_full_gate_can_pass() -> None:
+    result = classify_codex_dogfood_report(_report())
+
+    assert result["preflight_outcome"] == "pass"
+    assert result["launch_allowed"] is True
+    assert result["full_outcome"] == "pass"
+    assert result["failed_facets"] == []
+
+
+def test_installed_not_activated_is_disqualifying_and_actionable() -> None:
+    report = _report()
+    _observed(report)["activation_state"] = "installed_not_activated"
+    _facets(report)["plugin_activation"] = {
+        "status": "fail",
+        "reason": "installed_not_activated",
+        "evidence_digest": _DIGEST,
+        "next_action": "yoetz_recommend_list_exact_target",
+    }
+
+    result = classify_codex_dogfood_report(report)
+
+    assert result["preflight_outcome"] == "fail"
+    assert result["launch_allowed"] is False
+    assert result["failed_facets"] == ["plugin_activation"]
+
+
+def test_primary_checkout_consent_cannot_cover_the_exact_worktree_fixture() -> None:
+    fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
+    report = _report()
+    observed = _observed(report)
+    observed["primary_checkout_consent"] = fixture["primary_checkout_consent"]
+    observed["exact_worktree_consent"] = fixture["exact_worktree_consent"]
+    _facets(report)["observation_consent"] = fixture["observation_consent"]
+
+    result = classify_codex_dogfood_report(report)
+
+    assert result["preflight_outcome"] == fixture["expected_preflight_outcome"]
+    assert result["launch_allowed"] is fixture["expected_launch_allowed"]
+    assert result["blocked_facets"] == ["observation_consent"]
+
+
+def test_registration_or_tools_without_model_call_cannot_pass_full_gate() -> None:
+    report = _report()
+    _facets(report)["model_mcp_call"] = {
+        "status": "not_run",
+        "reason": "model_call_not_observed",
+        "evidence_digest": _DIGEST,
+        "next_action": "complete_postflight",
+    }
+
+    result = classify_codex_dogfood_report(report)
+
+    assert result["preflight_outcome"] == "pass"
+    assert result["full_outcome"] == "not_run"
+    assert result["not_run_facets"] == ["model_mcp_call"]
+
+
+def test_advertised_hooks_require_mapping_envelopes_and_a_clean_drain() -> None:
+    report = _report()
+    _observed(report)["mapping_present"] = False
+    with pytest.raises(DogfoodGateError, match="mapping_observation_missing"):
+        classify_codex_dogfood_report(report)
+
+    report = _report()
+    _observed(report)["undelivered_count"] = 1
+    with pytest.raises(DogfoodGateError, match="drain_observation_mismatch"):
+        classify_codex_dogfood_report(report)
+
+
+def test_unadvertised_session_stream_is_explicitly_unsupported_not_green() -> None:
+    report = _report()
+    scope = cast(dict[str, object], report["scope"])
+    scope["session_stream_advertised"] = False
+    _observed(report)["stream_coverage"] = False
+    _facets(report)["session_stream"] = {
+        "status": "unsupported",
+        "reason": "capability_not_advertised",
+        "evidence_digest": _DIGEST,
+        "next_action": "none",
+    }
+
+    result = classify_codex_dogfood_report(report)
+
+    assert result["full_outcome"] == "pass"
+    assert result["unsupported_facets"] == ["session_stream"]
+
+
+def test_report_inventory_rejects_transcript_or_path_extensions() -> None:
+    report = _report()
+    report["transcript"] = "must never be admitted"
+    with pytest.raises(DogfoodGateError, match="report_fields_invalid"):
+        classify_codex_dogfood_report(report)
+
+    report = _report()
+    identity = cast(dict[str, object], report["identity"])
+    identity["worktree_path"] = "/private/path"
+    with pytest.raises(DogfoodGateError, match="identity_fields_invalid"):
+        classify_codex_dogfood_report(report)
+
+
+def test_cli_preflight_refuses_launch_on_a_failed_required_facet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = _report()
+    _observed(report)["activation_state"] = "installed_not_activated"
+    _facets(report)["plugin_activation"] = {
+        "status": "fail",
+        "reason": "installed_not_activated",
+        "evidence_digest": _DIGEST,
+        "next_action": "yoetz_recommend_list_exact_target",
+    }
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+    assert _MODULE.main([str(path), "--phase", "preflight"]) == 20
+    result = json.loads(capsys.readouterr().out)
+    assert result["launch_allowed"] is False
+    assert result["preflight_outcome"] == "fail"

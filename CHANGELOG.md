@@ -8,6 +8,17 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Codex activation recommendation decisions now bind the exact executable path/bytes/version,
+  canonical home, activation preview, and rendered-cache digest. Another Codex home or a target
+  that drifts back to `installed_not_activated` receives fresh actionable advice; active targets
+  stay quiet, declines remain exact-target-only, legacy unscoped decisions suppress nothing, and
+  activation still requires a freshly shown digest and confirmation (issue #463).
+
+- Disposable-worktree Codex dogfood now has an executable parity gate that fails before launch on
+  missing exact-worktree consent or activation and retains packaging, discovery, host delivery,
+  model use, hooks, mapping, drain, session stream, semantic provenance, receipt, influence,
+  rollback, and normal-target isolation as separate closed-state cells (issue #464).
+
 - Cooperative MCP calls no longer collapse typed local-control failures into opaque,
   non-retryable `INTERNAL_ERROR`. Service absence, an accepted-but-unresponsive listener,
   incompatible or mismatched installations, unsafe or untrusted endpoints, timeouts, and bounded

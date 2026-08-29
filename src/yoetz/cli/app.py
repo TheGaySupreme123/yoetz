@@ -261,7 +261,7 @@ def recommend_decline_cmd(
         ),
     ] = None,
 ) -> None:
-    """Remember an explicit decline; this recommendation will not be shown again."""
+    """Remember an explicit decline for the cached recommendation target."""
 
     _recommend_operation("recommend_decline")(
         recommendation_id,
