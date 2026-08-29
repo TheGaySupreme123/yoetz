@@ -225,6 +225,15 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
         "service_draining": (
             "the local service is shutting down; wait for it to exit, then start it again"
         ),
+        "storage_unsafe": (
+            "the local Yoetz observation store has an unsafe file or path shape; repair its "
+            "owner-only files, permissions, or symlinks and retry"
+        ),
+        "storage_unavailable": (
+            "the local Yoetz observation store could not be opened or locked from this process; "
+            "make the owner-only state directory accessible and writable from the supported host "
+            "surface, then retry"
+        ),
         "workspace_unresolvable": (
             "the --workspace locator is empty, missing, symlinked, foreign-owned, or otherwise "
             "unsafe; pass the resolved path of a directory owned by the current user (host hooks "

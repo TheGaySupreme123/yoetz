@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import functools
 import os
 import time
@@ -92,6 +93,13 @@ type DrainConnector = Callable[[ControlClientKind], Awaitable[_DrainClient]]
 
 
 _WORKSPACE_LOCATOR_INVALID: Final = "workspace_locator_invalid"
+_UNSAFE_OBSERVATION_STORAGE_ERRNOS: Final = frozenset(
+    {
+        errno.EISDIR,
+        errno.ELOOP,
+        errno.ENOTDIR,
+    }
+)
 _P = ParamSpec("_P")
 
 
@@ -161,15 +169,12 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     retryable=False,
                     json_output=json_output,
                 )
-            except PathSafetyError as error:
+            except PathSafetyError:
                 return _typed_failure(
                     operation,
                     "storage_unsafe",
                     code=PublicErrorCode.STORAGE_UNSAFE,
-                    message=(
-                        f"the local Yoetz state path is unsafe ({error}); repair the state "
-                        "directory's ownership, permissions, or symlinks and retry"
-                    ),
+                    message=remediation_message("storage_unsafe") or "",
                     retryable=False,
                     json_output=json_output,
                 )
@@ -180,6 +185,27 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     code=error.code,
                     message=error.message,
                     retryable=error.retryable,
+                    json_output=json_output,
+                )
+            except BrokenPipeError:
+                # A closed output consumer is not an observation-store failure.
+                raise
+            except OSError as error:
+                if error.errno in _UNSAFE_OBSERVATION_STORAGE_ERRNOS:
+                    return _typed_failure(
+                        operation,
+                        "storage_unsafe",
+                        code=PublicErrorCode.STORAGE_UNSAFE,
+                        message=remediation_message("storage_unsafe") or "",
+                        retryable=False,
+                        json_output=json_output,
+                    )
+                return _typed_failure(
+                    operation,
+                    "storage_unavailable",
+                    code=PublicErrorCode.SERVICE_UNAVAILABLE,
+                    message=remediation_message("storage_unavailable") or "",
+                    retryable=True,
                     json_output=json_output,
                 )
 
