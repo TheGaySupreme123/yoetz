@@ -17,7 +17,16 @@ from mcp import types
 from mcp.shared.message import SessionMessage
 from pydantic import ValidationError
 
+from yoetz.protocol.canonical import MAX_JSON_DEPTH
+
 MAX_JSON_FRAME_BYTES: Final = 1_048_576
+# Nesting bound for one inbound frame, shared with the canonical codec so a
+# frame the bridge admits can never exceed what the protocol layer accepts.
+# Enforced without recursion: a size-valid frame can nest far deeper than the
+# interpreter's recursion limit, and a RecursionError escaping the parser is
+# not a TransportFailure, so it used to terminate the bridge task group
+# instead of producing the fixed `invalid_json` response (issue #394).
+MAX_JSON_NESTING_DEPTH: Final = MAX_JSON_DEPTH
 _MAX_READ_CHUNK: Final = 65_536
 _EOF_DRAIN_SECONDS: Final = 5.0
 _PARSE_REASONS: Final = frozenset(
@@ -44,7 +53,12 @@ _FAILURE_REASONS: Final = frozenset(
     }
 )
 
-__all__ = ["MAX_JSON_FRAME_BYTES", "TransportFailure", "bounded_stdio_server"]
+__all__ = [
+    "MAX_JSON_FRAME_BYTES",
+    "MAX_JSON_NESTING_DEPTH",
+    "TransportFailure",
+    "bounded_stdio_server",
+]
 
 
 class TransportFailure(Exception):
@@ -126,31 +140,48 @@ def _parse_frame(frame: bytes) -> SessionMessage:
         )
     except TransportFailure:
         raise
-    except (ValueError, json.JSONDecodeError) as exc:
+    except (ValueError, json.JSONDecodeError, RecursionError) as exc:
+        # The decoder recurses per nesting level; past the interpreter limit it
+        # raises RecursionError rather than a decode error.
         raise TransportFailure("invalid_json") from exc
     if type(parsed) is not dict:
         raise TransportFailure("not_jsonrpc")
-    try:
-        _validate_unicode(cast(dict[object, object], parsed))
-    except UnicodeEncodeError as exc:
-        raise TransportFailure("invalid_json") from exc
+    _validate_tree(cast(dict[object, object], parsed))
     try:
         message = types.JSONRPCMessage.model_validate(parsed)
-    except ValidationError as exc:
+    except (ValidationError, RecursionError) as exc:
         raise TransportFailure("not_jsonrpc") from exc
     return SessionMessage(message)
 
 
-def _validate_unicode(value: object) -> None:
-    if type(value) is str:
-        value.encode("utf-8", errors="strict")
-    elif type(value) is list:
-        for item in cast(list[object], value):
-            _validate_unicode(item)
-    elif type(value) is dict:
-        for key, item in cast(dict[object, object], value).items():
-            _validate_unicode(key)
-            _validate_unicode(item)
+def _validate_tree(root: dict[object, object]) -> None:
+    """Bound nesting and require strictly encodable text, without recursion.
+
+    Depth counts containers along a path including the root object, so a frame
+    is admitted only while every container sits at depth <= MAX_JSON_NESTING_DEPTH
+    — the same envelope the canonical codec enforces. The walk is an explicit
+    stack so its cost is linear in the frame and never in interpreter frames.
+    """
+
+    stack: list[tuple[object, int]] = [(root, 1)]
+    while stack:
+        value, depth = stack.pop()
+        if type(value) is str:
+            try:
+                value.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as exc:
+                raise TransportFailure("invalid_json") from exc
+        elif type(value) is list:
+            if depth > MAX_JSON_NESTING_DEPTH:
+                raise TransportFailure("invalid_json")
+            for item in cast(list[object], value):
+                stack.append((item, depth + 1))
+        elif type(value) is dict:
+            if depth > MAX_JSON_NESTING_DEPTH:
+                raise TransportFailure("invalid_json")
+            for key, item in cast(dict[object, object], value).items():
+                stack.append((key, depth + 1))
+                stack.append((item, depth + 1))
 
 
 def _serialize_session_message(message: SessionMessage) -> bytes:
@@ -292,6 +323,11 @@ async def _reader(
                         message = _parse_frame(frame)
                     except TransportFailure as exc:
                         await _emit_transport_error(items, exc.reason)
+                        continue
+                    except RecursionError:
+                        # Belt and braces: no parse-stage recursion may end the
+                        # bridge; the frame is malformed for this transport.
+                        await _emit_transport_error(items, "invalid_json")
                         continue
                     if isinstance(message.message.root, types.JSONRPCRequest):
                         tracker.request_started()

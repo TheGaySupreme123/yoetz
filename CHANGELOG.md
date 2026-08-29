@@ -8,6 +8,11 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- The MCP stdio bridge no longer exits on a size-valid but excessively nested JSON frame.
+  Inbound nesting is bounded at the canonical codec's 64 levels with a non-recursive walk, any
+  decoder `RecursionError` is converted to the fixed `invalid_json` parse error, and a valid
+  request succeeds immediately after a rejected deeply nested one (issue #394).
+
 - Cooperative MCP calls no longer collapse typed local-control failures into opaque,
   non-retryable `INTERNAL_ERROR`. Service absence, an accepted-but-unresponsive listener,
   incompatible or mismatched installations, unsafe or untrusted endpoints, timeouts, and bounded
