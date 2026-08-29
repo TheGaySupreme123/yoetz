@@ -147,7 +147,9 @@ uv run python scripts/check_codex_dogfood_parity.py <report-outside-worktree.jso
 The full outcome cannot pass if preflight did not pass. Required postflight rows vary only by the
 four explicit scope booleans: advertised hooks, advertised session stream, required semantic
 review, and required influence measurement. Optional unsupported/not-run rows remain listed in the
-result instead of disappearing into an aggregate green status.
+result instead of disappearing into an aggregate green status. A row excluded by scope must be
+`unsupported` for an unadvertised host capability or `not_run` for optional semantic/influence work;
+an out-of-scope pass, failure, or block is inconsistent evidence and invalidates the report.
 
 ## 7. Report shape and statuses
 

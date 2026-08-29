@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import stat
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -141,8 +141,21 @@ async def test_activation_acceptance_is_exact_target_and_drift_bound(tmp_path: P
     )
     assert accepted.pending == ()
 
-    same = await refresh_pending(context=context, root=tmp_path, version="0.1.0", force=True)
-    assert same.pending == ()
+    same_inactive = await refresh_pending(
+        context=context, root=tmp_path, version="0.1.0", force=True
+    )
+    assert same_inactive.pending == ("codex-plugin-activation",)
+
+    active = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="active",
+            codex_activation_target=None,
+        ),
+        root=tmp_path,
+        version="0.1.0",
+        force=True,
+    )
+    assert active.pending == ()
 
     other = await refresh_pending(
         context=RecommendationContext(
@@ -167,6 +180,89 @@ async def test_activation_acceptance_is_exact_target_and_drift_bound(tmp_path: P
     )
     assert drifted.pending == ("codex-plugin-activation",)
     assert drifted.pending_targets["codex-plugin-activation"] == drifted_first_target
+
+
+@pytest.mark.anyio
+async def test_foreign_or_nonpreviewable_activation_clears_stale_advice(tmp_path: Path) -> None:
+    target = _activation_target("abcde")
+    await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="installed_not_activated",
+            codex_activation_target=target,
+        ),
+        root=tmp_path,
+        force=True,
+    )
+
+    foreign = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="foreign",
+            codex_activation_target=None,
+        ),
+        root=tmp_path,
+        force=True,
+    )
+    assert foreign.pending == ()
+
+    nonpreviewable = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="installed_not_activated",
+            codex_activation_target=None,
+        ),
+        root=tmp_path,
+        force=True,
+    )
+    assert nonpreviewable.pending == ()
+
+
+def test_activation_decision_history_is_bounded_without_losing_current_decision(
+    tmp_path: Path,
+) -> None:
+    base = _activation_target("abcde")
+    accepted_targets: list[RecommendationTarget] = []
+    for index in range(12):
+        target = _rebound_target(base, preview=f"sha256:{index:064x}")
+        accepted_targets.append(target)
+        record_recommendation_decision(
+            "codex-plugin-activation",
+            "accepted",
+            root=tmp_path,
+            now=_NOW + timedelta(seconds=index),
+            target=target,
+        )
+    accepted = load_recommendation_state(root=tmp_path)
+    accepted_rows = [row for row in accepted.decisions.values() if row.decision == "accepted"]
+    assert len(accepted_rows) == 8
+    assert {row.target for row in accepted_rows} == set(accepted_targets[-8:])
+
+    declined_targets: list[RecommendationTarget] = []
+    for index in range(24):
+        target = _rebound_target(base, home=f"sha256:{index + 100:064x}")
+        declined_targets.append(target)
+        record_recommendation_decision(
+            "codex-plugin-activation",
+            "declined",
+            root=tmp_path,
+            now=_NOW + timedelta(minutes=index),
+            target=target,
+        )
+    full = load_recommendation_state(root=tmp_path)
+    declined_rows = [row for row in full.decisions.values() if row.decision == "declined"]
+    assert len(full.decisions) == 24
+    assert len(declined_rows) == 16
+    assert {row.target for row in declined_rows} == set(declined_targets[-16:])
+
+    current = _rebound_target(base, home="sha256:" + ("f" * 64))
+    record_recommendation_decision(
+        "codex-plugin-activation",
+        "declined",
+        root=tmp_path,
+        now=_NOW - timedelta(days=1),
+        target=current,
+    )
+    bounded = load_recommendation_state(root=tmp_path)
+    assert len(bounded.decisions) == 24
+    assert any(row.target == current for row in bounded.decisions.values())
 
 
 @pytest.mark.anyio

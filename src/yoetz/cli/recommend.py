@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import shlex
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Final, cast
 
@@ -116,6 +117,23 @@ def _activation_context(
             executable_path=os.fspath(executable_path),
             codex_home=selected_home,
         )
+    except (
+        _RecommendationCliError,
+        AttributeError,
+        ImportError,
+        IntegrationError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return None, None
+    state = getattr(inspection, "state", None)
+    value = getattr(state, "value", state)
+    if type(value) is not str:
+        return None, None
+    if value != "installed_not_activated":
+        return value, None
+    try:
         preview = module.preview_activation(
             _integration_target(target),
             executable_path=os.fspath(executable_path),
@@ -131,10 +149,10 @@ def _activation_context(
         TypeError,
         ValueError,
     ):
-        return None, None
-    state = getattr(inspection, "state", None)
-    value = getattr(state, "value", state)
-    return (value, recommendation_target) if type(value) is str else (None, None)
+        # The inspected state remains authoritative. A non-previewable modified/ambiguous target
+        # is not actionable recommendation advice and must clear any stale cached prompt.
+        return value, None
+    return value, recommendation_target
 
 
 async def _current_context(
@@ -340,7 +358,11 @@ def _environment_lines(environment: object) -> tuple[str, ...]:
 
 
 def _apply_codex_activation(
-    *, target: Path, executable_path: Path, codex_home: Path
+    *,
+    target: Path,
+    executable_path: Path,
+    codex_home: Path,
+    record_approval: Callable[[RecommendationTarget], None] | None = None,
 ) -> tuple[str, RecommendationTarget]:
     try:
         module = importlib.import_module(_ACTIVATION_MODULE)
@@ -421,6 +443,10 @@ def _apply_codex_activation(
         typer.echo(f"preview digest: {digest}")
         if not typer.confirm("Apply exactly this digest-bound activation change?", default=False):
             raise _RecommendationCliError("activation_not_approved")
+        if record_approval is not None:
+            # The accepted decision is authority, not a success claim. Persist it before mutation
+            # so a full bounded store cannot leave an applied change with no decision record.
+            record_approval(recommendation_target)
         module.apply_activation(
             integration_target,
             approved_digest=digest,
@@ -452,6 +478,7 @@ def _apply_recommendation(
     *,
     codex_path: Path | None = None,
     codex_home: Path | None = None,
+    record_activation_approval: Callable[[RecommendationTarget], None] | None = None,
 ) -> tuple[str, RecommendationTarget | None]:
     if recommendation_id == "observation-enabled":
         return _apply_observation_enabled(path=None), None
@@ -461,7 +488,10 @@ def _apply_recommendation(
         if codex_home is None:
             raise _RecommendationCliError("activation_codex_home_required")
         return _apply_codex_activation(
-            target=Path.cwd(), executable_path=codex_path, codex_home=codex_home
+            target=Path.cwd(),
+            executable_path=codex_path,
+            codex_home=codex_home,
+            record_approval=record_activation_approval,
         )
     if recommendation_id == "package-update":
         return f"run: {PACKAGE_UPDATE_UPGRADE_COMMAND}", None
@@ -497,6 +527,7 @@ def recommend_accept(
     if recommendation_id == "codex-plugin-activation" and codex_home is None:
         typer.echo("recommendation_error: activation_codex_home_required", err=True)
         raise typer.Exit(2)
+    activation_decision_recorded = False
     try:
 
         async def refresh_exact() -> RecommendationState:
@@ -508,23 +539,37 @@ def recommend_accept(
         current = anyio.run(refresh_exact)
         if recommendation_id not in current.pending:
             raise _RecommendationCliError("recommendation_not_pending")
+
         # The command itself is the approval. Re-preview at this point binds activation to fresh
         # bytes; activation additionally confirms that displayed digest before it mutates trust.
+        def record_activation(target: RecommendationTarget) -> None:
+            nonlocal activation_decision_recorded
+            record_recommendation_decision("codex-plugin-activation", "accepted", target=target)
+            activation_decision_recorded = True
+
         outcome, decision_target = _apply_recommendation(
-            recommendation_id, codex_path=codex_path, codex_home=codex_home
+            recommendation_id,
+            codex_path=codex_path,
+            codex_home=codex_home,
+            record_activation_approval=(
+                record_activation if recommendation_id == "codex-plugin-activation" else None
+            ),
         )
-        # The change is applied at this point; a decision-store failure below must not be
-        # reported as if nothing happened.
-        try:
-            record_recommendation_decision(recommendation_id, "accepted", target=decision_target)
-        except RecommendationStoreError as exc:
-            typer.echo(f"applied {recommendation_id}: {outcome}")
-            typer.echo(
-                f"recommendation_error: {exc.reason_code} "
-                "(the change above was applied, but the decision could not be recorded)",
-                err=True,
-            )
-            raise typer.Exit(2) from exc
+        if not activation_decision_recorded:
+            # Non-activation recommendations still record after applying. Their fixed global keys
+            # cannot exhaust the bounded target history; preserve the existing partial-apply report.
+            try:
+                record_recommendation_decision(
+                    recommendation_id, "accepted", target=decision_target
+                )
+            except RecommendationStoreError as exc:
+                typer.echo(f"applied {recommendation_id}: {outcome}")
+                typer.echo(
+                    f"recommendation_error: {exc.reason_code} "
+                    "(the change above was applied, but the decision could not be recorded)",
+                    err=True,
+                )
+                raise typer.Exit(2) from exc
     except RecommendationStoreError as exc:
         typer.echo(f"recommendation_error: {exc.reason_code}", err=True)
         raise typer.Exit(2) from exc
@@ -532,6 +577,11 @@ def recommend_accept(
         typer.echo(f"invalid_request: {exc.reason_code}", err=True)
         raise typer.Exit(2) from exc
     except _RecommendationCliError as exc:
+        if activation_decision_recorded:
+            typer.echo(
+                "activation decision recorded; the activation apply did not complete",
+                err=True,
+            )
         typer.echo(f"recommendation_error: {exc.reason_code}", err=True)
         raise typer.Exit(2) from exc
     typer.echo(f"accepted {recommendation_id}: {outcome}")

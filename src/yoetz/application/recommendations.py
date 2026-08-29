@@ -58,7 +58,9 @@ _LEGACY_SCHEMA: Final = "yoetz.recommendations/1"
 _STORE_NAME: Final = "recommendations.json"
 _LOCK_NAME: Final = "recommendations.lock"
 _MAX_STORE_BYTES: Final = 32 * 1024
-_MAX_DECISIONS: Final = 128
+_MAX_DECISIONS: Final = 32
+_MAX_ACCEPTED_ACTIVATION_HISTORY: Final = 8
+_MAX_DECLINED_ACTIVATION_HISTORY: Final = 16
 _MAX_TEXT_LENGTH: Final = 256
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$", re.ASCII)
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
@@ -208,7 +210,14 @@ def _observation_satisfied(context: RecommendationContext) -> bool:
 
 
 def _activation_satisfied(context: RecommendationContext) -> bool:
-    return context.codex_activation_state is None or context.codex_activation_state == "active"
+    # Acceptance is a recorded decision, not proof that activation still holds. Only an exact,
+    # currently previewable installed-not-activated target is actionable advice. Active targets
+    # need nothing; foreign/modified/ambiguous targets require manual review, not a stale prompt.
+    return (
+        context.codex_activation_state is None
+        or context.codex_activation_state != "installed_not_activated"
+        or context.codex_activation_target is None
+    )
 
 
 def _package_update_satisfied(context: RecommendationContext) -> bool:
@@ -593,25 +602,52 @@ async def evaluate_recommendation_context(
 
 
 def _decision_suppresses(
-    decision: RecommendationDecision | None, *, installed_version: str
+    recommendation_id: str,
+    decision: RecommendationDecision | None,
+    *,
+    installed_version: str,
 ) -> bool:
     if decision is None:
         return False
     if decision.decision == "declined":
         return True
+    if recommendation_id == "codex-plugin-activation":
+        # Re-inspection, not historical acceptance, decides whether activation advice is needed.
+        # A currently inactive target must always receive recovery, even if it returns to the exact
+        # pre-apply digest that an older acceptance recorded.
+        return False
     # Acceptance authorizes one exact action. Suppress it for this running version so a package
     # upgrade command does not immediately re-nag; a new release frontier is evaluated afresh.
     return decision.version == installed_version
+
+
+def _compact_activation_decisions(
+    decisions: dict[str, RecommendationDecision], *, current_key: str
+) -> None:
+    """Bound advisory history without ever discarding the decision just recorded."""
+
+    for value, limit in (
+        ("accepted", _MAX_ACCEPTED_ACTIVATION_HISTORY),
+        ("declined", _MAX_DECLINED_ACTIVATION_HISTORY),
+    ):
+        history = sorted(
+            (
+                (candidate_key, row)
+                for candidate_key, row in decisions.items()
+                if row.recommendation_id == "codex-plugin-activation" and row.decision == value
+            ),
+            key=lambda item: (item[0] == current_key, item[1].decided_at, item[0]),
+            reverse=True,
+        )
+        for stale_key, _row in history[limit:]:
+            del decisions[stale_key]
 
 
 def _fact_is_known(item: RecommendedDefault, context: RecommendationContext) -> bool:
     if item.id == "observation-enabled":
         return context.observation_enabled is not None
     if item.id == "codex-plugin-activation":
-        return (
-            context.codex_activation_state is not None
-            and context.codex_activation_target is not None
-        )
+        return context.codex_activation_state is not None
     if item.id == "package-update":
         # A "skipped_*" advisory records that no version comparison was actually performed
         # (no policy/network authority, no cached or network answer, unparsable versions).
@@ -654,6 +690,7 @@ async def refresh_pending(
                 resolved.codex_activation_target if item.id == "codex-plugin-activation" else None
             )
             if _decision_suppresses(
+                item.id,
                 current.decisions.get(_decision_key(item.id, target)),
                 installed_version=current_version,
             ):
@@ -713,6 +750,10 @@ def record_recommendation_decision(
             recommendation_id=recommendation_id,
             target=target,
         )
+        if recommendation_id == "codex-plugin-activation":
+            _compact_activation_decisions(decisions, current_key=key)
+        if len(decisions) > _MAX_DECISIONS:
+            raise RecommendationStoreError("recommendation_store_write_failed")
         updated = RecommendationState(
             last_evaluated_version=current.last_evaluated_version or current_version,
             decisions=MappingProxyType(decisions),
@@ -764,6 +805,8 @@ def decline_cached_recommendation(
             recommendation_id=recommendation_id,
             target=target,
         )
+        if recommendation_id == "codex-plugin-activation":
+            _compact_activation_decisions(decisions, current_key=key)
         updated = RecommendationState(
             last_evaluated_version=current.last_evaluated_version or current_version,
             decisions=MappingProxyType(decisions),

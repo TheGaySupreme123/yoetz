@@ -170,6 +170,21 @@ def test_unadvertised_session_stream_is_explicitly_unsupported_not_green() -> No
     assert result["unsupported_facets"] == ["session_stream"]
 
 
+def test_out_of_scope_failure_cannot_be_ignored_by_full_aggregation() -> None:
+    report = _report()
+    scope = cast(dict[str, object], report["scope"])
+    scope["influence_required"] = False
+    _facets(report)["corrective_influence"] = {
+        "status": "fail",
+        "reason": "influence_failed",
+        "evidence_digest": _DIGEST,
+        "next_action": "do_not_launch",
+    }
+
+    with pytest.raises(DogfoodGateError, match="out_of_scope_facet_not_not_run"):
+        classify_codex_dogfood_report(report)
+
+
 def test_report_inventory_rejects_transcript_or_path_extensions() -> None:
     report = _report()
     report["transcript"] = "must never be admitted"

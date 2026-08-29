@@ -268,10 +268,12 @@ exactly those contracts and connects the steps without weakening any existing tr
    decision. Its digest-only identity binds the resolved executable, executable bytes and version,
    canonical Codex home, activation preview, and intended host-rendered cache. Before suppressing
    advice, `recommend list` re-inspects that exact target. A currently active target stays quiet;
-   another home, another executable, or a target whose preview/cache digest drifted to
-   `installed_not_activated` receives fresh advice. Decline is equally target-bound and grants
-   nothing. Apply still re-previews, prints the exact digest and bounded preimages, requires the
-   post-preview confirmation, and refuses stale, foreign, modified, or ambiguous state.
+   any actionable target observed as `installed_not_activated` receives fresh advice even if an
+   accepted history row has the same digest, unless an unchanged exact-target decline applies.
+   Decline is equally target-bound and grants nothing. Non-previewable foreign, modified, or
+   ambiguous state clears stale advice for the automatic path and requires manual review. Apply
+   still re-previews, prints the exact digest and bounded preimages, requires the post-preview
+   confirmation, durably records that authority before host mutation, and refuses stale state.
 
 The short `yoetz --set --fireworks --model MODEL` and `yoetz --set --grok --model MODEL` paths are
 provider-only entries into the same setup ceremonies. They derive internal provider bindings and

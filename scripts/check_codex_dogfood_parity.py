@@ -326,6 +326,24 @@ def _required_postflight(scope: DogfoodScope) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _validate_out_of_scope_facets(
+    scope: DogfoodScope, facets: Mapping[str, GateRow], required: tuple[str, ...]
+) -> None:
+    required_set = frozenset(required)
+    for name in POSTFLIGHT_FACETS:
+        if name in required_set:
+            continue
+        status = facets[name]["status"]
+        if name in _HOOK_FACETS or name == "session_stream":
+            if status != "unsupported":
+                raise _error("unadvertised_capability_facet_not_unsupported")
+        elif status != "not_run":
+            # Optional semantic/influence work cannot carry an ignored pass, fail, or block. The
+            # scope must be revised first so every performed or failed cell participates in the
+            # aggregate conclusion.
+            raise _error("out_of_scope_facet_not_not_run")
+
+
 def classify_codex_dogfood_report(document: object) -> DogfoodGateResult:
     """Validate one report and derive the preflight/full outcomes without score collapsing."""
 
@@ -401,6 +419,7 @@ def classify_codex_dogfood_report(document: object) -> DogfoodGateResult:
 
     preflight = _aggregate(PREFLIGHT_FACETS, facets)
     required_postflight = _required_postflight(scope)
+    _validate_out_of_scope_facets(scope, facets, required_postflight)
     postflight = _aggregate(required_postflight, facets)
     full: GateStatus = preflight if preflight != "pass" else postflight
     encoded = json.dumps(report, separators=(",", ":"), sort_keys=True).encode("utf-8")

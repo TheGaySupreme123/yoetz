@@ -138,7 +138,9 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    After launch, skill delivery, a correlated model-issued MCP call, advertised hook events,
    mapping, accepted envelopes, drain, advertised session-stream reconciliation, semantic
    provenance, receipt, influence scope, rollback, and unchanged normal state remain separate
-   cells. Unsupported and not-run states stay explicit and cannot be aggregated into green.
+   cells. Unsupported and not-run states stay explicit and cannot be aggregated into green. Any
+   performed or failed cell must be placed in scope; an out-of-scope pass, failure, or block makes
+   the report invalid instead of silently disappearing from aggregation.
 
    The current Codex `0.144.5` capability candidate exposes `PreToolUse`, `PermissionRequest`,
    `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
