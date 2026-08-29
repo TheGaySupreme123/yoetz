@@ -181,6 +181,13 @@ def test_prepare_persisted_plaintext_withholds_canary_and_scanner_failure() -> N
     assert failed.redacted is True
 
 
+def test_prepare_persisted_plaintext_withholds_at_finding_capacity() -> None:
+    secret = b"AWS_SECRET_ACCESS_KEY=not-a-real-but-sensitive-value"
+    saturated = prepare_persisted_plaintext(b"\n".join([secret] * 128))
+
+    assert saturated == PersistenceScanResult(False, b"", True, ("credential_pattern",))
+
+
 def test_privacy_helpers_are_deterministic() -> None:
     record = {
         "engine_version": "0.1.0",

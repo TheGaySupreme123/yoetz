@@ -456,6 +456,11 @@ def prepare_persisted_plaintext(
     kinds = tuple(dict.fromkeys(finding.kind for finding in findings))
     if any(finding.kind == "canary" for finding in findings):
         return PersistenceScanResult(False, b"", True, kinds)
+    # The public scanner deliberately caps structural findings. Reaching that
+    # cap does not prove there is no later match, so encrypted persistence must
+    # withhold instead of redacting only the visible prefix of the finding set.
+    if len(findings) >= _MAX_SCAN_FINDINGS:
+        return PersistenceScanResult(False, b"", True, kinds)
     if not findings:
         return PersistenceScanResult(True, data, False, ())
     return PersistenceScanResult(True, _replace_sensitive_spans(data, findings), True, kinds)

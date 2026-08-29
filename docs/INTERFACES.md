@@ -2682,8 +2682,9 @@ changed-file/diff material, approved-check output, lifecycle, and readiness fact
 Hidden reasoning, system/platform/developer prompts, credentials, detected secrets, unrelated files,
 and untethered logs are excluded before storage. Every byte that reaches encrypted observation
 persistence passes `prepare_persisted_plaintext`: known secret spans are redacted in memory before
-encoding, matches persist only redaction metadata, and scanner failure or a canary match records
-`content_capture_unavailable` and stores no excerpt or approved-check output object. SQLite/envelopes
+encoding, matches persist only redaction metadata, and scanner failure, finding-capacity exhaustion,
+or a canary match records `content_capture_unavailable` and stores no excerpt or approved-check
+output object. SQLite/envelopes
 retain only encrypted object IDs, commitments, classifications, sizes, and relations.
 Vault/service failure records `content_capture_unavailable` and no plaintext spool.
 Unrecognized visible events accept an opaque stable envelope plus encrypted content and

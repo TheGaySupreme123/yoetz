@@ -343,8 +343,9 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     persistence. Secret-bearing spans — including selected changed-file excerpts and
     approved-check output — are classified by the shared fail-closed scanner and redacted in
     memory before encoding or authenticated encryption. Matches persist only redaction
-    metadata, never the original bytes. Scanner failure or an explicit canary match records
-    `content_capture_unavailable` and stores no excerpt or output object.
+    metadata, never the original bytes. Scanner failure, finding-capacity exhaustion, or an
+    explicit canary match records `content_capture_unavailable` and stores no excerpt or output
+    object.
     SQLite, observation envelopes, cursors, local outboxes, status, hook context, and logs contain
     only allowlisted structure, encrypted object identities/commitments, sizes, classifications,
     and relations. A locked vault, absent service, or failed encryption keeps the structural
