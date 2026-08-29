@@ -18,6 +18,7 @@ from yoetz.adapters.integrations.codex_skill import (
     SkillResourceSource,
     load_packaged_skill_members,
     load_packaged_skill_source,
+    validated_managed_parent,
 )
 from yoetz.domain.values import JsonValue as DomainJsonValue
 from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND, MCP_SERVER_NAME
@@ -370,28 +371,7 @@ def _validated_project(target: IntegrationTarget) -> Path:
 def _validated_plugin_parent(root: Path, *, create: bool) -> Path:
     """Resolve the managed parent without following project-local symlink ancestors."""
 
-    current = root
-    for component in (".agents", "plugins"):
-        candidate = current / component
-        if not candidate.exists() and not candidate.is_symlink():
-            if not create:
-                return root / ".agents" / "plugins"
-            try:
-                candidate.mkdir(mode=0o700)
-            except OSError as exc:
-                raise _error(IntegrationReason.WRITE_FAILED) from exc
-        if candidate.is_symlink() or not candidate.is_dir():
-            raise _error(IntegrationReason.TARGET_UNSAFE)
-        try:
-            stat = candidate.stat()
-        except OSError as exc:
-            raise _error(IntegrationReason.TARGET_UNSAFE) from exc
-        if hasattr(os, "geteuid") and stat.st_uid != os.geteuid():
-            raise _error(IntegrationReason.TARGET_UNSAFE)
-        if stat.st_mode & 0o022:
-            raise _error(IntegrationReason.TARGET_UNSAFE)
-        current = candidate
-    return current
+    return validated_managed_parent(root, (".agents", "plugins"), create=create)
 
 
 def plugin_tree_matches_marker(members: Mapping[str, bytes]) -> bool:

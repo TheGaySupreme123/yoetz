@@ -88,6 +88,7 @@ def test_cursor_profile_exposes_only_supported_ide_and_cli_cells() -> None:
         "cursor-ide-native-3.17.8.case.json",
         "cursor-sdk-python-1.0.24.case.json",
         "cursor-sdk-typescript-1.0.23.case.json",
+        "cursor-stale-shared-mcp-runtime.case.json",
     ):
         fixture = json.loads(read_verified_resource(f"fixtures/agent-plugins/{name}"))
         assert fixture["schema"].startswith("yoetz.cursor-")

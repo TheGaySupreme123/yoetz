@@ -179,3 +179,15 @@ def test_check_never_understates_its_reach(profile: str) -> None:
 
     assert annotations.open_world is (profile == "policy")
     assert annotations.read_only is False
+
+
+@pytest.mark.parametrize("source", (_skill, _instructions))
+def test_text_distinguishes_stale_runtime_from_a_genuine_route_ceiling(
+    source: Callable[[], str],
+) -> None:
+    text = source()
+
+    assert "activation mismatch" in text
+    assert "full_restart_required" in text
+    assert "do not mint a fresh semantic check" in text
+    assert "never authorizes egress" in text

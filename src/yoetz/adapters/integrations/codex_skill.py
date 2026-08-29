@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import resources
@@ -50,6 +50,7 @@ __all__ = [
     "load_packaged_skill_members",
     "load_packaged_skill_source",
     "recover_interrupted_swap",
+    "validated_managed_parent",
 ]
 
 _ADAPTER_VERSION = "codex-skill/0.1.0"
@@ -108,6 +109,7 @@ class DestinationInspection:
     file_states: tuple[JsonObject, ...]
     managed_marker_valid: bool
     target_identity: str
+    parent_identity: str
 
     def __repr__(self) -> str:
         return (
@@ -386,17 +388,76 @@ def _validated_project(target: IntegrationTarget) -> tuple[Path, str]:
         if current.is_symlink():
             raise _error(IntegrationReason.TARGET_UNSAFE)
     try:
-        stat = root.stat()
+        facts = root.stat()
     except OSError as exc:
         raise _error(IntegrationReason.TARGET_UNSAFE) from exc
-    if hasattr(os, "geteuid") and stat.st_uid != os.geteuid():
+    if hasattr(os, "geteuid") and facts.st_uid != os.geteuid():
         raise _error(IntegrationReason.TARGET_UNSAFE)
-    if stat.st_mode & 0o022:
+    if facts.st_mode & 0o022:
         raise _error(IntegrationReason.TARGET_UNSAFE)
-    identity = canonical_digest(
-        {"device": stat.st_dev, "inode": stat.st_ino, "mode": stat.st_mode & 0o777}
-    )
+    identity = _inode_identity(facts)
     return root, identity
+
+
+def _inode_identity(facts: os.stat_result) -> str:
+    return canonical_digest(
+        {"device": facts.st_dev, "inode": facts.st_ino, "mode": facts.st_mode & 0o777}
+    )
+
+
+def _owned_stat_not_writable(facts: os.stat_result, *, directory: bool) -> None:
+    expected = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected(facts.st_mode):
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+    if hasattr(os, "geteuid") and facts.st_uid != os.geteuid():
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+    if facts.st_mode & 0o022:
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+
+
+def validated_managed_parent(root: Path, components: tuple[str, ...], *, create: bool) -> Path:
+    """Resolve a managed parent without following project-local symlink ancestors."""
+
+    if not components or any(part in {"", ".", ".."} or "/" in part for part in components):
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+    current = root
+    for component in components:
+        candidate = current / component
+        if not candidate.exists() and not candidate.is_symlink():
+            if not create:
+                return root.joinpath(*components)
+            try:
+                candidate.mkdir(mode=0o700)
+            except OSError as exc:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise _error(IntegrationReason.TARGET_UNSAFE)
+        try:
+            facts = candidate.stat()
+        except OSError as exc:
+            raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+        _owned_stat_not_writable(facts, directory=True)
+        current = candidate
+    return current
+
+
+def _skill_parent_identity(root: Path) -> str:
+    current = root
+    identity_path = root
+    for component in (".agents", "skills"):
+        candidate = current / component
+        if not candidate.exists() and not candidate.is_symlink():
+            break
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise _error(IntegrationReason.TARGET_UNSAFE)
+        identity_path = candidate
+        current = candidate
+    try:
+        facts = identity_path.lstat()
+    except OSError as exc:
+        raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+    _owned_stat_not_writable(facts, directory=True)
+    return _inode_identity(facts)
 
 
 def _file_state(path: Path, expected: IntegrationFile) -> JsonObject:
@@ -423,7 +484,9 @@ def inspect_destination(target: IntegrationTarget, source: SkillSource) -> Desti
     """Classify only the profile-fixed destination without mutating it."""
 
     root, target_identity = _validated_project(target)
-    destination = root / CODEX_HARNESS_PROFILE.skill_root.rstrip("/")
+    parent = validated_managed_parent(root, (".agents", "skills"), create=False)
+    parent_identity = _skill_parent_identity(root)
+    destination = parent / "yoetz"
     if destination.is_symlink():
         raise _error(IntegrationReason.TARGET_UNSAFE)
     siblings = destination.parent
@@ -481,6 +544,7 @@ def inspect_destination(target: IntegrationTarget, source: SkillSource) -> Desti
         rows,
         marker_valid,
         target_identity,
+        parent_identity,
     )
 
 
@@ -544,6 +608,7 @@ def _preview(
             "scope": command.target.scope.value,
             "source_digest": source.resource_set_digest,
             "target_identity": inspection.target_identity,
+            "parent_identity": inspection.parent_identity,
             "warnings": list(warnings),
         }
     )
@@ -559,32 +624,164 @@ def _preview(
     )
 
 
-def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _require_dir_fd_primitives() -> None:
+    required = (os.open, os.mkdir, os.rename, os.rmdir, os.unlink, os.listdir)
+    if (
+        not getattr(os, "O_NOFOLLOW", 0)
+        or not getattr(os, "O_DIRECTORY", 0)
+        or any(function not in os.supports_dir_fd for function in required[:-1])
+        or os.listdir not in os.supports_fd
+    ):
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+
+
+def _fsync_fd(directory_fd: int) -> None:
+    os.fsync(directory_fd)
+
+
+def _open_or_create_nested(root_fd: int, relative: Path) -> int:
+    current_fd = os.dup(root_fd)
     try:
-        os.fsync(fd)
+        for part in relative.parts:
+            if part in {"", ".", ".."}:
+                raise _error(IntegrationReason.TARGET_UNSAFE)
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=current_fd)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+            try:
+                child_fd = os.open(part, _directory_open_flags(), dir_fd=current_fd)
+            except OSError as exc:
+                raise _error(IntegrationReason.WRITE_FAILED) from exc
+            try:
+                _owned_stat_not_writable(os.fstat(child_fd), directory=True)
+            except BaseException:
+                os.close(child_fd)
+                raise
+            os.close(current_fd)
+            current_fd = child_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _write_file_fd(directory_fd: int, name: str, payload: bytes) -> None:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
+    try:
+        written = 0
+        while written < len(payload):
+            written += os.write(descriptor, payload[written:])
+        os.fsync(descriptor)
     finally:
-        os.close(fd)
+        os.close(descriptor)
 
 
-def _write_bundle(stage: Path, bundle: _SourceBundle) -> None:
-    stage.mkdir(mode=0o700)
+def _write_bundle_fd(stage_fd: int, bundle: _SourceBundle) -> None:
     for relative_path, data in bundle.members.items():
-        destination = stage / relative_path
-        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        relative = Path(relative_path)
+        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+            raise _error(IntegrationReason.SOURCE_INVALID)
+        directory_fd = _open_or_create_nested(stage_fd, relative.parent)
         try:
-            written = 0
-            while written < len(data):
-                written += os.write(fd, data[written:])
-            os.fsync(fd)
+            _write_file_fd(directory_fd, relative.name, data)
         finally:
-            os.close(fd)
-    marker = stage / _MARKER_NAME
-    marker.write_bytes(build_managed_marker(bundle.source, IntegrationScope.TRUSTED_PROJECT))
-    with marker.open("rb") as handle:
-        os.fsync(handle.fileno())
-    _fsync_dir(stage)
+            os.close(directory_fd)
+    marker = build_managed_marker(bundle.source, IntegrationScope.TRUSTED_PROJECT)
+    _write_file_fd(stage_fd, _MARKER_NAME, marker)
+    _fsync_fd(stage_fd)
+
+
+def _remove_tree_fd(parent_fd: int, name: str, *, depth: int = 0) -> None:
+    if depth > 16 or name in {"", ".", ".."} or "/" in name:
+        raise _error(IntegrationReason.TARGET_UNSAFE)
+    directory_fd = os.open(name, _directory_open_flags(), dir_fd=parent_fd)
+    try:
+        _owned_stat_not_writable(os.fstat(directory_fd), directory=True)
+        for child in os.listdir(directory_fd):
+            if child in {"", ".", ".."} or "/" in child:
+                raise _error(IntegrationReason.TARGET_UNSAFE)
+            facts = os.stat(child, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(facts.st_mode):
+                os.unlink(child, dir_fd=directory_fd)
+            elif stat.S_ISDIR(facts.st_mode):
+                _remove_tree_fd(directory_fd, child, depth=depth + 1)
+            else:
+                os.unlink(child, dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def _open_skill_parent_fd(
+    root: Path,
+    *,
+    create: bool,
+    target_identity: str,
+    parent_identity: str,
+) -> int:
+    """Open the managed parent and prove the previewed inode is on the retained walk."""
+
+    _require_dir_fd_primitives()
+    current_fd = os.open(root, _directory_open_flags())
+    try:
+        root_facts = os.fstat(current_fd)
+        _owned_stat_not_writable(root_facts, directory=True)
+        root_identity = _inode_identity(root_facts)
+        if root_identity != target_identity:
+            raise _error(IntegrationReason.PREVIEW_STALE)
+        preview_parent_seen = root_identity == parent_identity
+        for component in (".agents", "skills"):
+            try:
+                child_fd = os.open(component, _directory_open_flags(), dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise _error(IntegrationReason.TARGET_UNSAFE) from None
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=current_fd)
+                except OSError as exc:
+                    raise _error(IntegrationReason.WRITE_FAILED) from exc
+                try:
+                    child_fd = os.open(component, _directory_open_flags(), dir_fd=current_fd)
+                except OSError as exc:
+                    raise _error(IntegrationReason.WRITE_FAILED) from exc
+            except OSError as exc:
+                raise _error(IntegrationReason.TARGET_UNSAFE) from exc
+            try:
+                child_facts = os.fstat(child_fd)
+                _owned_stat_not_writable(child_facts, directory=True)
+                preview_parent_seen = (
+                    preview_parent_seen or _inode_identity(child_facts) == parent_identity
+                )
+            except BaseException:
+                os.close(child_fd)
+                raise
+            os.close(current_fd)
+            current_fd = child_fd
+        if not preview_parent_seen:
+            raise _error(IntegrationReason.PREVIEW_STALE)
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
 
 
 def recover_interrupted_swap(
@@ -699,29 +896,50 @@ class CodexSkillIntegration(IntegrationsPort):
                 else IntegrationReason.PARTIAL_INSTALL
             )
             raise _error(reason)
-        parent = inspection.destination.parent
-        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        stage = parent / f".yoetz.stage-{command.request_id}"
-        rollback = parent / f".yoetz.rollback-{command.request_id}"
-        if stage.exists() or rollback.exists():
-            raise _error(IntegrationReason.PREVIEW_STALE)
+        root, _target_identity = _validated_project(command.target)
+        parent_fd = _open_skill_parent_fd(
+            root,
+            create=True,
+            target_identity=inspection.target_identity,
+            parent_identity=inspection.parent_identity,
+        )
+        stage_name = f".yoetz.stage-{command.request_id}"
+        rollback_name = f".yoetz.rollback-{command.request_id}"
+        destination_name = "yoetz"
         try:
-            _write_bundle(stage, bundle)
+            existing_names = set(os.listdir(parent_fd))
+            if stage_name in existing_names or rollback_name in existing_names:
+                raise _error(IntegrationReason.PREVIEW_STALE)
+            os.mkdir(stage_name, mode=0o700, dir_fd=parent_fd)
+            stage_fd = os.open(stage_name, _directory_open_flags(), dir_fd=parent_fd)
+            try:
+                _owned_stat_not_writable(os.fstat(stage_fd), directory=True)
+                _write_bundle_fd(stage_fd, bundle)
+            finally:
+                os.close(stage_fd)
+            _fsync_fd(parent_fd)
             if replacing:
-                os.replace(inspection.destination, rollback)
-                _fsync_dir(parent)
-            os.replace(stage, inspection.destination)
-            _fsync_dir(parent)
+                os.rename(
+                    destination_name,
+                    rollback_name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                )
+                _fsync_fd(parent_fd)
+            os.rename(stage_name, destination_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            _fsync_fd(parent_fd)
             final = inspect_destination(command.target, bundle.source)
             if final.state is not IntegrationState.INSTALLED_EXACT:
                 raise _error(IntegrationReason.WRITE_FAILED)
-            if rollback.exists():
-                shutil.rmtree(rollback)
-                _fsync_dir(parent)
+            if rollback_name in os.listdir(parent_fd):
+                _remove_tree_fd(parent_fd, rollback_name)
+                _fsync_fd(parent_fd)
         except IntegrationError:
             raise
         except OSError as exc:
             raise _error(IntegrationReason.WRITE_FAILED) from exc
+        finally:
+            os.close(parent_fd)
         return IntegrationResult(
             command.requested_action,
             inspection.state,
@@ -756,17 +974,27 @@ class CodexSkillIntegration(IntegrationsPort):
             or inspection.state is not IntegrationState.INSTALLED_EXACT
         ):
             raise _error(IntegrationReason.REMOVE_REFUSED)
-        parent = inspection.destination.parent
-        staging = parent / f".yoetz.remove-{command.request_id}"
-        if staging.exists():
-            raise _error(IntegrationReason.PREVIEW_STALE)
+        root, _target_identity = _validated_project(command.target)
+        parent_fd = _open_skill_parent_fd(
+            root,
+            create=False,
+            target_identity=inspection.target_identity,
+            parent_identity=inspection.parent_identity,
+        )
+        staging_name = f".yoetz.remove-{command.request_id}"
         try:
-            os.replace(inspection.destination, staging)
-            _fsync_dir(parent)
-            shutil.rmtree(staging)
-            _fsync_dir(parent)
+            if staging_name in os.listdir(parent_fd):
+                raise _error(IntegrationReason.PREVIEW_STALE)
+            os.rename("yoetz", staging_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            _fsync_fd(parent_fd)
+            _remove_tree_fd(parent_fd, staging_name)
+            _fsync_fd(parent_fd)
+        except IntegrationError:
+            raise
         except OSError as exc:
             raise _error(IntegrationReason.WRITE_FAILED) from exc
+        finally:
+            os.close(parent_fd)
         return IntegrationResult(
             IntegrationAction.REMOVE,
             inspection.state,

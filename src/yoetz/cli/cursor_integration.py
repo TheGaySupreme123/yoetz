@@ -132,6 +132,14 @@ def _status_body(status: CursorPluginStatus) -> dict[str, object]:
             "ownership_state": status.mcp_observation.ownership_state.value,
             "present_sources": [item.value for item in status.mcp_observation.present_sources],
             "route_profile": status.mcp_observation.route_profile,
+            "runtime": {
+                "activation": status.runtime.activation,
+                "foreign_process_count": status.runtime.foreign_process_count,
+                "live_route_profile": status.runtime.live_route_profile,
+                "observed": status.runtime.observed,
+                "policy_process_count": status.runtime.policy_process_count,
+                "strict_process_count": status.runtime.strict_process_count,
+            },
             "winning_source": (
                 None
                 if status.mcp_observation.winning_source is None

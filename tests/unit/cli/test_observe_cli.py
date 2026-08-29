@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -304,6 +305,38 @@ def test_status_inspects_only_the_explicit_codex_target(
     assert payload["plugin_activation"] == "active"
     assert observed["executable_path"] == str(codex_path)
     assert observed["codex_home"] == codex_home
+
+
+def test_status_reports_modified_present_plugin_as_installed_not_activated(
+    tmp_path: Path, capsys: object
+) -> None:
+    """#347: exercise the production activation classifier through observe status."""
+
+    from yoetz.adapters.integrations.codex_plugin import install_plugin
+    from yoetz.ports.integrations import IntegrationScope, IntegrationTarget
+
+    state = tmp_path / "state"
+    project = tmp_path / "project"
+    project.mkdir(mode=0o700)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(project))
+    install_plugin(target, allow_untested=True, codex_version=None)
+    hooks = project / ".agents/plugins/yoetz/hooks/hooks.json"
+    hooks.write_bytes(hooks.read_bytes() + b"\n")
+
+    assert (
+        observe_cli.observe_status(
+            workspace=str(project),
+            codex_path=Path(sys.executable),
+            codex_home=codex_home,
+            json_output=True,
+            _state=state,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
+    assert payload["plugin_activation"] == "installed_not_activated"
 
 
 def test_status_help_exposes_exact_activation_target_options() -> None:

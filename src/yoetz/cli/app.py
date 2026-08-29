@@ -451,6 +451,52 @@ def _with_holder_identity(line: str) -> str:
     return f"{line} (holder pid {holder.pid}, service version {version}, schema manifest {digest})"
 
 
+def _with_correlation(line: str, error: ControlError) -> str:
+    if error.correlation_id is None:
+        return line
+    return f"{line}; correlation_id {error.correlation_id}"
+
+
+def _holder_identity_json() -> dict[str, JsonValue] | None:
+    """Bounded singleton-stamp fields for machine-readable control failures."""
+
+    try:
+        from yoetz.config.paths import state_dir
+        from yoetz.service.lifecycle import SINGLETON_LOCK_NAME, probe_singleton_holder_identity
+
+        holder = probe_singleton_holder_identity(state_dir() / SINGLETON_LOCK_NAME)
+    except Exception:
+        return None
+    if holder is None:
+        return None
+    body: dict[str, JsonValue] = {"pid": holder.pid}
+    if holder.service_version is not None:
+        body["service_version"] = holder.service_version
+    if holder.schema_manifest_digest is not None:
+        body["schema_manifest_digest"] = holder.schema_manifest_digest
+    return body
+
+
+def _bind_handshake_correlation(error: ControlError) -> ControlError:
+    if error.reason not in {"service_incompatible", "protocol_mismatch"}:
+        return error
+    if error.correlation_id is not None:
+        return error
+    from yoetz.observability.logging import record_public_error_without_raising
+
+    correlation_id = record_public_error_without_raising(
+        component="cli.service",
+        operation="control_handshake",
+        reason=error.reason,
+    )
+    return ControlError(
+        error.reason,
+        retryable=error.retryable,
+        accepted_state=error.accepted_state or None,
+        correlation_id=correlation_id,
+    )
+
+
 def _lifecycle_exit_code(error: BaseException) -> int | None:
     """Exit code for a bounded lifecycle refusal, or None for anything else.
 
@@ -478,20 +524,36 @@ def _lifecycle_failure(error: LifecycleError) -> int:
     return exit_code_for(code)
 
 
-def _control_failure(error: ControlError) -> int:
+def _control_failure(error: ControlError, *, json_output: bool = False) -> int:
+    error = _bind_handshake_correlation(error)
     code = public_error_code_for_control_reason(error.reason)
     if error.reason in {"service_incompatible", "protocol_mismatch"}:
         # The endpoint answered, but with a service of another installation or protocol
         # generation. Neither 'service run' (refused while the holder lives) nor a plain retry
         # helps; the explicit repair replaces that holder with this installation's service.
-        _stderr(
+        guidance = _with_correlation(
             _with_holder_identity(
                 f"{error.reason}: the running local service was started by a different Yoetz "
                 "installation than this command and rejected its handshake. Run "
                 "'yoetz service restart' on a local terminal to replace it with this "
                 "installation's service, then retry"
-            )
+            ),
+            error,
         )
+        _stderr(guidance)
+        if json_output:
+            payload: dict[str, JsonValue] = {
+                "ok": False,
+                "public_code": code.value,
+                "reason": error.reason,
+                "retryable": error.retryable,
+            }
+            if error.correlation_id is not None:
+                payload["correlation_id"] = error.correlation_id
+            holder = _holder_identity_json()
+            if holder is not None:
+                payload["holder"] = holder
+            _stdout_json(payload)
         return exit_code_for(code)
     if code is PublicErrorCode.SERVICE_UNAVAILABLE and accepted_but_unresponsive(error):
         # A service that answered the connect and then went silent is running. Prescribing
@@ -1074,7 +1136,7 @@ async def _service_call(method: str, json_output: bool) -> int:
         _human_or_json(result, json_output=json_output)
         return 0
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
 
 
 def _service_command(method: str) -> Callable[..., None]:
@@ -1112,9 +1174,9 @@ async def _service_restart(json_output: bool) -> int:
         except ControlError as error:
             if error.reason in {"service_incompatible", "protocol_mismatch"}:
                 if not await supersede_incompatible_service(deadline=deadline):
-                    return _control_failure(error)
+                    return _control_failure(error, json_output=json_output)
             elif error.reason != "service_unavailable":
-                return _control_failure(error)
+                return _control_failure(error, json_output=json_output)
         else:
             try:
                 await client.stop()
@@ -1141,7 +1203,7 @@ async def _service_restart(json_output: bool) -> int:
         finally:
             await successor.close()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
     _human_or_json(status, json_output=json_output)
     return 0
 

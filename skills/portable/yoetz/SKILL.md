@@ -33,3 +33,12 @@ coverage, or completion proof. MCP ownership is mode-specific and exclusive:
 - `external_registration` omits `mcp.json`; the existing host registration remains the sole owner.
 - `plugin_managed` includes the selected `mcp.json` route; this plugin is the sole owner, so do not
   keep a duplicate native, project, user, or global registration.
+
+Installed plugin bytes are not live MCP runtime. After replace, query
+`yoetz integrate cursor plugin status` and read `mcp.route_profile` plus `mcp.runtime`. If a
+`semantic_required` check returns `blocked_by_policy` / `route_semantic_ceiling` while installed
+status is `policy`, or `mcp.runtime.activation` is `full_restart_required`, that is an activation
+mismatch: fully quit Cursor (Reload Window is not enough), then continue only after live runtime
+matches the installed policy route. Do not mint a fresh semantic check against the stale process,
+and do not change privacy settings. A live installed strict route remains the ordinary terminal
+ceiling.

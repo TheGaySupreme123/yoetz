@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import secrets
-from asyncio import Lock, Task, create_task
+from asyncio import CancelledError, Lock, Task, create_task, wait
 from dataclasses import dataclass
 from typing import Final, Literal, Protocol, cast
 
@@ -338,9 +338,34 @@ class HumanControlService:
             binding = session.secret_binding
             if binding is None or binding != session.phase.binding:
                 raise HumanControlError("stale_generation")
+            secret_task = session.secret_task
+        # Do not hold the ceremony mutex while YZS1 waits: stop()/cancel()/peer EOF must
+        # be able to release the singleton without waiting out CEREMONY_EXPIRY_SECONDS.
+        try:
+            await wait({secret_task})
+        except CancelledError:
+            async with self._mutex:
+                if self._active is session:
+                    await self._consume_failed(session)
+            raise
+        async with self._mutex:
+            if self._active is not session:
+                raise HumanControlError("cancelled")
+            if secret_task.cancelled():
+                await self._consume_failed(session)
+                raise HumanControlError("cancelled")
+            failure = secret_task.exception()
+            if failure is not None:
+                await self._consume_failed(session)
+                if isinstance(failure, HumanControlError):
+                    raise failure
+                mapped = (
+                    self._map_error(failure) if isinstance(failure, Exception) else "internal_error"
+                )
+                raise HumanControlError(mapped) from failure
+            secret = secret_task.result()
+            session.secret_task = None
             try:
-                secret = await session.secret_task
-                session.secret_task = None
                 purpose = binding.purpose
                 if purpose is ConfidentialSecretPurpose.VAULT_INITIALIZE:
                     challenge = self._require_unlock_challenge(session)
@@ -512,6 +537,13 @@ class HumanControlService:
     async def close(self) -> None:
         async with self._mutex:
             if self._active is not None:
+                from yoetz.observability.logging import record_public_error_without_raising
+
+                record_public_error_without_raising(
+                    component="service.human_control",
+                    operation="ceremony_shutdown",
+                    reason="cancelled",
+                )
                 await self._consume_failed(self._active)
             await self._secret_ingress.close()
             if self._user_presence is not None:
@@ -783,9 +815,10 @@ class HumanControlService:
         return ServerCloseEnvelope(session.binding.ceremony_id, session.next_step + 1, "cancelled")
 
     async def _consume_failed(self, session: _Ceremony) -> None:
-        if session.secret_task is not None:
-            session.secret_task.cancel()
-            session.secret_task = None
+        secret_task = session.secret_task
+        session.secret_task = None
+        if secret_task is not None and not secret_task.done():
+            secret_task.cancel()
         await self._secret_ingress.cancel_pending()
         await self._unlock.cancel()
         if type(session.request.target) is InstallationRecoveryTarget:
@@ -902,6 +935,7 @@ class HumanControlService:
         reason = getattr(exc, "reason", None)
         mapping = {
             "binding_expired": "binding_expired",
+            "cancelled": "cancelled",
             "challenge_mismatch": "stale_generation",
             "closed": "closed",
             "human_authority_unavailable": "presence_unavailable",

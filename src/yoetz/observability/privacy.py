@@ -17,11 +17,13 @@ __all__ = [
     "PRIVACY_REQUEST_BODY_DOMAIN",
     "SESSION_HASH_DOMAIN",
     "DiagnosticRedactionProfile",
+    "PersistenceScanResult",
     "PrivacyFenceError",
     "ScanFinding",
     "Sensitivity",
     "assert_plaintext_safe",
     "build_diagnostic_manifest",
+    "prepare_persisted_plaintext",
     "privacy_request_commitment",
     "redact_diagnostic_record",
     "redact_diagnostic_value",
@@ -73,10 +75,22 @@ _CREDENTIAL_PATTERNS: Final = (
     re.compile(rb"(?<![A-Z0-9])AKIA[A-Z0-9]{16}(?![A-Z0-9])"),
 )
 _URI_PASSWORD = re.compile(rb"[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s/:@]{1,128}:[^\s/@]{1,256}@")
+# Compound names such as AWS_SECRET_ACCESS_KEY and AZURE_CLIENT_SECRET keep the
+# secret token as one underscore/hyphen component, not the entire identifier.
 _SECRET_ASSIGNMENT = re.compile(
     rb"(?i)(?:^|[^A-Za-z0-9_])['\"]?"
+    rb"(?:[A-Za-z][A-Za-z0-9]{0,63}[_-])*"
     rb"(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|private[_-]?key|secret)"
+    rb"(?:[_-][A-Za-z][A-Za-z0-9]{0,63})*"
     rb"['\"]?\s*[:=]\s*['\"]?[^\s,'\";}{]{1,512}"
+)
+# `*_TOKEN` only as the final identifier component. The value must contain a
+# non-digit and be at least eight bytes so MAX_TOKEN=4096 and TOKEN_COUNT=12
+# are not treated as secrets.
+_TOKEN_ASSIGNMENT = re.compile(
+    rb"(?i)(?:^|[^A-Za-z0-9_])['\"]?"
+    rb"(?:[A-Za-z][A-Za-z0-9]{0,63}[_-])*token"
+    rb"['\"]?\s*[:=]\s*['\"]?(?=[^\s,'\";}{]{0,511}[A-Za-z_/=+-])[^\s,'\";}{]{8,512}"
 )
 
 _LOG_FIELDS: Final = frozenset(
@@ -340,7 +354,7 @@ def scan_for_sensitive_content(
                 )
                 offset = found + len(marker)
 
-    for pattern in (*_CREDENTIAL_PATTERNS, _URI_PASSWORD, _SECRET_ASSIGNMENT):
+    for pattern in (*_CREDENTIAL_PATTERNS, _URI_PASSWORD, _SECRET_ASSIGNMENT, _TOKEN_ASSIGNMENT):
         for chunk_start, chunk in _scan_chunks(data):
             for match in pattern.finditer(chunk):
                 _append_finding(
@@ -378,12 +392,7 @@ def assert_plaintext_safe(
     raise PrivacyFenceError(reason, surface)
 
 
-def redact_sensitive_content(data: bytes) -> tuple[bytes, bool]:
-    """Replace every detected credential/key span without retaining the match."""
-
-    findings = scan_for_sensitive_content(data)
-    if not findings:
-        return data, False
+def _replace_sensitive_spans(data: bytes, findings: tuple[ScanFinding, ...]) -> bytes:
     pieces: list[bytes] = []
     cursor = 0
     for finding in findings:
@@ -393,7 +402,77 @@ def redact_sensitive_content(data: bytes) -> tuple[bytes, bool]:
         pieces.append(b"[REDACTED]")
         cursor = finding.end_offset
     pieces.append(data[cursor:])
-    return b"".join(pieces), True
+    return b"".join(pieces)
+
+
+@dataclass(frozen=True, slots=True)
+class PersistenceScanResult:
+    """Fail-closed scan outcome for bytes about to be encrypted at rest.
+
+    ``persist`` is false when the payload must be withheld entirely. Matched
+    secret bytes are never retained: redacted content substitutes ``[REDACTED]``,
+    and withheld results carry empty content plus finding kinds only.
+    """
+
+    persist: bool
+    content: bytes
+    redacted: bool
+    finding_kinds: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.persist) is not bool or type(self.redacted) is not bool:
+            raise TypeError("persistence_scan_flag_invalid")
+        if type(self.content) is not bytes:
+            raise TypeError("persistence_scan_content_invalid")
+        if type(self.finding_kinds) is not tuple:
+            raise TypeError("persistence_scan_kinds_invalid")
+        if any(
+            type(kind) is not str
+            or kind not in {"canary", "credential_pattern", "private_key_marker"}
+            for kind in self.finding_kinds
+        ):
+            raise ValueError("persistence_scan_kind_invalid")
+        if not self.persist and self.content:
+            raise ValueError("persistence_scan_withheld_must_be_empty")
+
+
+def prepare_persisted_plaintext(
+    data: bytes,
+    *,
+    canaries: tuple[bytes, ...] = (),
+) -> PersistenceScanResult:
+    """Classify bytes before encoding or encrypted persistence.
+
+    Known secret spans are redacted in memory. A canary match or scanner
+    failure withholds the payload so original bytes never reach an object.
+    """
+
+    if type(data) is not bytes:
+        return PersistenceScanResult(False, b"", True, ())
+    try:
+        findings = scan_for_sensitive_content(data, canaries=canaries)
+    except PrivacyFenceError, TypeError, ValueError:
+        return PersistenceScanResult(False, b"", True, ())
+    kinds = tuple(dict.fromkeys(finding.kind for finding in findings))
+    if any(finding.kind == "canary" for finding in findings):
+        return PersistenceScanResult(False, b"", True, kinds)
+    # The public scanner deliberately caps structural findings. Reaching that
+    # cap does not prove there is no later match, so encrypted persistence must
+    # withhold instead of redacting only the visible prefix of the finding set.
+    if len(findings) >= _MAX_SCAN_FINDINGS:
+        return PersistenceScanResult(False, b"", True, kinds)
+    if not findings:
+        return PersistenceScanResult(True, data, False, ())
+    return PersistenceScanResult(True, _replace_sensitive_spans(data, findings), True, kinds)
+
+
+def redact_sensitive_content(data: bytes) -> tuple[bytes, bool]:
+    """Replace every detected credential/key span without retaining the match."""
+
+    findings = scan_for_sensitive_content(data)
+    if not findings:
+        return data, False
+    return _replace_sensitive_spans(data, findings), True
 
 
 def _safe_mac(handle: MacKeyHandle, domain: bytes, message: bytes) -> str:

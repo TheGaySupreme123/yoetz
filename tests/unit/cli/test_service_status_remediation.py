@@ -10,6 +10,7 @@ need opposite next steps. Sending an operator from an unresponsive-but-live daem
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 from typer.testing import CliRunner
@@ -85,3 +86,50 @@ def test_other_control_failures_keep_their_existing_guidance(
     assert code == 20
     assert guidance.startswith(PublicErrorCode.VAULT_LOCKED.value.lower())
     assert "yoetz service unlock" in guidance
+
+
+def test_incompatible_service_status_json_names_reason_holder_and_correlation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+
+    lock = tmp_path / "service.lock"
+    lock.write_bytes(
+        canonical_encode(
+            {
+                "instance_id": "svc_00000000-0000-4000-8000-000000000001",
+                "pid": os.getpid(),
+                "service_version": "0.1.0",
+                "schema_manifest_digest": "sha256:" + "a" * 64,
+            }
+        )
+        + b"\n"
+    )
+    lock.chmod(0o600)
+
+    async def refuse(*_args: object, **_kwargs: object) -> ServiceClient:
+        raise ControlError("service_incompatible", retryable=True)
+
+    monkeypatch.setattr(cli, "build_service_client", refuse)
+
+    def record_correlation(**_kwargs: object) -> str:
+        return "err_00000000-0000-4000-8000-000000000099"
+
+    monkeypatch.setattr(
+        "yoetz.observability.logging.record_public_error_without_raising",
+        record_correlation,
+    )
+    result = CliRunner().invoke(cli.app, ["service", "status", "--json"])
+    assert result.exit_code == 20
+    assert "service_incompatible" in result.stderr
+    assert "correlation_id err_" in result.stderr
+    payload = cast(dict[str, JsonValue], strict_json_parse(result.stdout.encode("utf-8")))
+    assert payload["ok"] is False
+    assert payload["reason"] == "service_incompatible"
+    assert payload["public_code"] == PublicErrorCode.SERVICE_UNAVAILABLE.value
+    assert payload["correlation_id"] == "err_00000000-0000-4000-8000-000000000099"
+    holder = cast(dict[str, JsonValue], payload["holder"])
+    assert holder["pid"] == os.getpid()
+    assert holder["schema_manifest_digest"] == "sha256:" + "a" * 64

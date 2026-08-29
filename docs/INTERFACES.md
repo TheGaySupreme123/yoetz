@@ -1578,13 +1578,20 @@ closes a half-open stream on expiry. On-demand startup has one **30-second** mon
 includes its initial attempt, spawn, and polling; an accepted but silent existing endpoint is
 reported unavailable rather than causing a second daemon to be spawned.
 
-The handshake pins the exact schema-manifest digest on both sides. A listening service that does
-not share the client's digest (or hello shape) closes the connection without answering; the client
-names that outcome `handshake_rejected` (distinct from a frame truncated mid-flight) and, together
-with an answered `manifest_mismatch`, maps it to the retryable `ControlError` reason
-`service_incompatible` (public code `SERVICE_UNAVAILABLE`). The singleton lock stamp carries the
-holder's `pid`, `instance_id`, `service_version`, and `schema_manifest_digest` (bounded, advisory;
-older stamps omit the last two and are read as unknown). On-demand startup — the MCP bridge's path
+The handshake pins the exact schema-manifest digest on both sides. When a listening
+service can decode the peer's hello as a known control-hello shape but the digest does
+not match, it answers with a hello-result carrying **this** installation's digest and
+then closes without admitting a session. The client names an answered digest mismatch
+`manifest_mismatch` and a silent close (unknown hello shape, or a peer that still
+closes without answering) `handshake_rejected`; both map to the retryable
+`ControlError` reason `service_incompatible` (public code `SERVICE_UNAVAILABLE`).
+`yoetz service status --json` emits that reason plus the stamped holder identity and a
+`correlation_id` joinable with `yoetz service diagnostics --correlation-id`. Older
+pre-2.2.0 CLIs that lack `handshake_rejected` still decode the answered hello-result
+and fail on the digest themselves (`protocol_mismatch` in those binaries). The
+singleton lock stamp carries the holder's `pid`, `instance_id`, `service_version`, and
+`schema_manifest_digest` (bounded, advisory; older stamps omit the last two and are
+read as unknown). On-demand startup — the MCP bridge's path
 and `yoetz service restart` — treats an incompatible holder as an upgrade to complete: it records a
 `service_supersede` diagnostic, sends the holder its ordinary bounded-shutdown signal, waits for the
 lock to be released inside the same 30-second budget, then spawns and connects to a successor of
@@ -1875,7 +1882,13 @@ monotonic sample with the same floor rule.
 `privacy_policy_decision`, `privacy_disclosure_decision`, and `idle_relock_policy_change`.
 `CEREMONY_EXPIRY_SECONDS = 300` is the one YZH1/YZS1 challenge/binding expiry. It bounds a whole
 human ceremony, including the trip to a provider console to mint an API key, so it is a five-minute
-span rather than a keystroke timeout. The nine fixed
+span rather than a keystroke timeout. While a `SecretRequiredPhase` is live, the human-control
+handler waits for YZS1 **or** a close/cancel on the YZH1 peer. Killing the foreground ceremony
+client (EOF at the passphrase prompt) cancels the one global ceremony immediately. `service stop`
+must not wait on that mutex: `secret_completed` releases it while waiting, `close()` cancels any
+still-active ceremony, and `UnlockCoordinator.cancel` returns UNLOCKING to LOCKED without reversing
+an in-flight DRAINING/FAILED transition. Shutdown that cancels a live ceremony records
+`ceremony_shutdown` / `cancelled` in the owner-only diagnostic ring. The nine fixed
 `ConfidentialSecretPurpose` wire codes are `1=vault_initialize`, `2=vault_unlock`,
 `3=portable_recovery`, `4=provider_reauthentication`, `5=provider_credential`,
 `6=privacy_reauthentication`, `7=security_reauthentication`,
@@ -2686,9 +2699,13 @@ object ID. Revocation disables/removes the active locator and trust binding whil
 encrypted evidence. Visible task messages, tool input/result, task-linked terminal output,
 changed-file/diff material, approved-check output, lifecycle, and readiness facts may be captured.
 Hidden reasoning, system/platform/developer prompts, credentials, detected secrets, unrelated files,
-and untethered logs are excluded before storage. Secret spans are redacted in memory before
-encryption. SQLite/envelopes retain only encrypted object IDs, commitments, classifications, sizes,
-and relations. Vault/service failure records `content_capture_unavailable` and no plaintext spool.
+and untethered logs are excluded before storage. Every byte that reaches encrypted observation
+persistence passes `prepare_persisted_plaintext`: known secret spans are redacted in memory before
+encoding, matches persist only redaction metadata, and scanner failure, finding-capacity exhaustion,
+or a canary match records `content_capture_unavailable` and stores no excerpt or approved-check
+output object. SQLite/envelopes
+retain only encrypted object IDs, commitments, classifications, sizes, and relations.
+Vault/service failure records `content_capture_unavailable` and no plaintext spool.
 Unrecognized visible events accept an opaque stable envelope plus encrypted content and
 `unsupported_event`; a session-stream file that is the wrong grammar, an untested `cli_version`,
 or a compressed `.jsonl.zst` rollout records `unsupported_format` instead. Unknown semantics never
@@ -2957,7 +2974,10 @@ the exact preview digest and explicit acceptance; a generic `--yes` cannot stand
 partial, unmanaged, unsafe, or changed-after-preview copies are preserved. v0.1 writes only the
 profile's exact `skill_root` — `.agents/skills/yoetz/` for `codex` — inside one explicitly supplied
 trusted project; it never edits harness/MCP configuration, Git state, package resources, or
-arbitrary skills.
+arbitrary skills. Existing `.agents` and `.agents/skills` parents must be real owner-controlled
+directories: a symlink at either component is `target_unsafe`, creation/replacement/removal use
+directory-fd no-follow operations, and a parent identity change between preview and apply is
+`preview_stale` (issue #396).
 
 Filesystem presence and capability compatibility are independent facts: an unprofiled source is
 `unsupported`, while its destination state remains `absent|installed_exact|modified|partial|unsafe`
@@ -2971,7 +2991,10 @@ digest refuses the whole apply before a file is written. Setup separately report
 `project_skill_installation`, structural plugin-source installation, `plugin_activation`, MCP
 registration, hooks/consent, service routing, and semantic readiness; none of those fields implies
 another. `plugin_activation` uses the closed state
-`active|installed_not_activated|not_installed|foreign`. When an explicitly supplied Codex home is
+`active|installed_not_activated|not_installed|foreign`. `not_installed` is actual source
+absence only. A byte-present plugin tree that is not a current renderer variant — including
+`installed_untrusted_unknown` / modified copies that Codex may still be serving — is
+`installed_not_activated`, never `not_installed` and never `active` (issue #347). When an explicitly supplied Codex home is
 bound, the registration and readiness `plugin_activation` blocks echo that home and its config
 path even when the activation preview or inspection fails, and they carry the actual failure
 reason; `codex_home_required` appears only when no home was provided. Readiness facts that were
@@ -3204,8 +3227,8 @@ content window, so the operator must quiesce such writers. After a successful re
 `codex plugin list
 --marketplace yoetz --json` is empty and `config.toml` has no yoetz tables;
 `inspect_activation` / observe status reports `installed_not_activated` when the managed plugin
-source at `.agents/plugins/yoetz` remains (issue #387) and `not_installed` only when that source
-is also absent. A second removal is `already_absent`. The skill tree, consent records, and
+source at `.agents/plugins/yoetz` remains (issues #387 and #347), including a modified or
+untrusted copy, and `not_installed` only when that source is also absent. A second removal is `already_absent`. The skill tree, consent records, and
 observation store are intentionally left in place.
 
 The implemented artifact operation is exactly `plugin_artifact_apply`. Its prepare target is the
@@ -3320,7 +3343,14 @@ vault/keyring/provider/privacy state, unrelated settings, and Cursor caches.
 `CursorMcpSource` is exactly
 `inline_send|inline_create|plugin|project|user`. `CursorMcpObservation` carries observed
 `McpOwnershipState`, winning source or null, exact route or null, ordered present sources, and an
-observation boolean. SDK precedence is exactly that enum order. A higher-precedence or duplicate
+observation boolean. `CursorPluginStatus` also carries one `CursorMcpRuntimeObservation`: whether a
+live process scan ran, exact bounded counts of classified policy/strict/foreign `yoetz mcp serve` processes,
+the live helper route or null, and `activation` exactly
+`unobserved|matched|full_restart_required`. Classification requires an exact `yoetz` launcher token
+and known serve suffix; an unavailable or truncated scan is `unobserved`. Counts and closed tokens only — never raw argv, paths,
+or parent command lines. File registration is not live runtime: a plugin-managed `policy` tree with
+a surviving Cursor-helper child on the strict argv is `full_restart_required`, and `HOST_ACTIVATION`
+stays `not_observed`. Reload Window is not a sufficient activation proof. SDK precedence is exactly that enum order. A higher-precedence or duplicate
 same-name source cannot create a plugin-managed pass: plugin plus external is `dual`, multiple
 same-class sources are `ambiguous`, and any non-exact same-name entry is `foreign`. Route
 recognition is key-set exact — exactly `command`, `type`, `args` — so an entry carrying any
@@ -3725,6 +3755,8 @@ facade and are never MCP tools.
   is exactly `service|cli|mcp_stdio|confidential_helper` so each process installs only its bounded
   sink/filter profile.
   `observability/privacy.py`: canary-testable redaction helpers,
+  `prepare_persisted_plaintext(data, *, canaries=())` (fail-closed scan before encrypted
+  observation persistence: redact known spans, withhold on canary or scanner failure),
   `session_id_hash(session_id, log_mac: MacKeyHandle)`, and
   `privacy_request_commitment(final_request_body, audit_mac: MacKeyHandle)`; raw MAC keys are never
   accepted.

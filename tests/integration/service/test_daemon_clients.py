@@ -68,10 +68,13 @@ from yoetz.protocol.models import (
 from yoetz.service.client import _connected_client  # pyright: ignore[reportPrivateUsage]
 from yoetz.service.confidential_protocol import (
     ClientOpenEnvelope,
+    ConfidentialSecretPurpose,
     EmptyVaultTarget,
     HumanCeremonyBinding,
     HumanCeremonyKind,
     KeyringRetryPhase,
+    SecretIngressBinding,
+    SecretRequiredPhase,
     ServerCloseEnvelope,
     ServerErrorEnvelope,
     ServerOpenedEnvelope,
@@ -2616,3 +2619,98 @@ async def test_human_connection_cancels_an_open_ceremony_when_terminal_disconnec
         ServerOpenedEnvelope,
         ServerErrorEnvelope,
     ]
+
+
+@pytest.mark.anyio
+async def test_human_connection_cancels_secret_phase_when_terminal_disconnects() -> None:
+    """Issue #434: EOF at a passphrase prompt must not wait on YZS1."""
+
+    ceremony_id = "a" * 64
+    binding = SecretIngressBinding(
+        binding_version=1,
+        ceremony_id=ceremony_id,
+        secret_challenge="c" * 64,
+        purpose=ConfidentialSecretPurpose.VAULT_UNLOCK,
+        service_instance_id=_INSTANCE_ID,
+        service_generation=7,
+        vault_generation=3,
+        policy_generation=None,
+        target_digest="sha256:" + "2" * 64,
+        expires_at_monotonic_ms=1_000_000,
+    )
+
+    class _Stream:
+        def __init__(self) -> None:
+            self._incoming = bytearray(
+                encode_human_frame(
+                    ClientOpenEnvelope(
+                        "b" * 64,
+                        HumanCeremonyKind.VAULT_UNLOCK,
+                        EmptyVaultTarget(expected_mode="passphrase"),
+                    )
+                )
+            )
+            self.sent: list[bytes] = []
+            self.closed = False
+
+        @property
+        def peer_identity(self) -> object:
+            return object()
+
+        async def receive(self, max_bytes: int) -> bytes:
+            if not self._incoming:
+                return b""
+            size = min(max_bytes, len(self._incoming))
+            chunk = bytes(self._incoming[:size])
+            del self._incoming[:size]
+            return chunk
+
+        async def send_all(self, data: Buffer) -> None:
+            self.sent.append(bytes(data))
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class _HumanService:
+        def __init__(self) -> None:
+            self.cancelled: list[str] = []
+            self.secret_started = asyncio.Event()
+
+        async def open_ceremony(self, request: ClientOpenEnvelope) -> ServerOpenedEnvelope:
+            return ServerOpenedEnvelope(
+                ceremony_id,
+                1,
+                HumanCeremonyBinding(
+                    binding_version=1,
+                    ceremony_id=ceremony_id,
+                    connection_nonce=request.connection_nonce,
+                    ceremony_kind=HumanCeremonyKind.VAULT_UNLOCK,
+                    service_instance_id=_INSTANCE_ID,
+                    service_generation=7,
+                    vault_generation=3,
+                    policy_generation=None,
+                    target_digest="sha256:" + "2" * 64,
+                    expires_at_monotonic_ms=1_000_000,
+                ),
+                VaultUnlockPreview(),
+                SecretRequiredPhase(binding),
+            )
+
+        async def secret_completed(self, received_ceremony_id: str) -> ServerOpenedEnvelope:
+            del received_ceremony_id
+            self.secret_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("secret_wait_should_have_been_cancelled")
+
+        async def cancel(self, received_ceremony_id: str) -> ServerCloseEnvelope:
+            self.cancelled.append(received_ceremony_id)
+            return ServerCloseEnvelope(received_ceremony_id, 3, "cancelled")
+
+    stream = _Stream()
+    service = _HumanService()
+    handler = daemon_module._HumanConnectionServer(service)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+
+    await asyncio.wait_for(handler(stream), 1.0)
+
+    assert service.cancelled == [ceremony_id]
+    assert stream.closed
