@@ -25,7 +25,7 @@ from yoetz.ports.control import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.errors import PublicErrorCode
-from yoetz.protocol.schemas import load_schema_catalog
+from yoetz.protocol.schemas import load_schema_catalog, validate_schema_instance
 from yoetz.service.control_protocol import (
     CONTROL_PROTOCOL_VERSION,
     MAX_ACTIVE_REQUESTS_PER_SESSION,
@@ -637,6 +637,7 @@ def test_server_answers_hello_result_then_refuses_a_foreign_manifest() -> None:
             await server_handshake(server, client_peer, _status())
         _assert_reason(refused, "manifest_mismatch")
         result = await read_control_frame(client)
+        validate_schema_instance("control-hello-result", "2.1.0", result)
         assert result["schema_manifest_digest"] == load_schema_catalog().manifest_digest
         assert result["service_instance_id"] == _SERVICE_ID
 
