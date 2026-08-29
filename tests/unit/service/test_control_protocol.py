@@ -585,6 +585,18 @@ def test_wire_only_errors_map_to_existing_public_codes() -> None:
     )
     assert public_error_code_for_control_reason("vault_locked") is PublicErrorCode.VAULT_LOCKED
     assert public_error_code_for_control_reason("frame_invalid") is PublicErrorCode.INVALID_REQUEST
+    assert (
+        public_error_code_for_control_reason("endpoint_unsafe")
+        is PublicErrorCode.SERVICE_UNAVAILABLE
+    )
+    assert (
+        public_error_code_for_control_reason("peer_untrusted")
+        is PublicErrorCode.SERVICE_UNAVAILABLE
+    )
+    assert (
+        public_error_code_for_control_reason("service_draining")
+        is PublicErrorCode.SERVICE_UNAVAILABLE
+    )
 
 
 def test_client_handshake_names_a_peer_that_closes_on_the_hello_as_rejected() -> None:

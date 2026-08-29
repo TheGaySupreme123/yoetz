@@ -895,6 +895,9 @@ def public_error_code_for_control_reason(reason: str) -> PublicErrorCode:
         "service_unavailable",
         "service_incompatible",
         "request_timeout",
+        "endpoint_unsafe",
+        "peer_untrusted",
+        "service_draining",
     }:
         return PublicErrorCode.SERVICE_UNAVAILABLE
     if reason == "privacy_projection_blocked":

@@ -100,6 +100,24 @@ otherwise hide structured results from the model. It adds no environment or secr
 not widen the service route. Raw initialize and tools/list prove only runtime registration.
 Require a correlated model-controlled `start` or `status` call for use.
 
+## Upgrading Yoetz under a running service
+
+The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz
+build the previous build's service still owning the endpoint refuses the new bridge and CLI. The
+first plugin tool call (on-demand startup) replaces that service automatically: it asks the stale
+holder to shut down through its ordinary bounded path and starts this installation's service inside
+the same 30-second budget. If that cannot complete, the tool returns `SERVICE_UNAVAILABLE` with
+`reason_code: service_incompatible` (or `protocol_mismatch` when the refusal is a protocol
+generation mismatch) and the repair command; run it on a local terminal:
+
+```text
+yoetz service restart
+```
+
+`yoetz service status` names the incompatible holder's pid, version, and manifest digest. Other
+hosts' sessions still running the previous build's bridge are refused after the switch until they
+restart; that is the intended outcome of an upgrade, not a defect.
+
 ## SDK TypeScript and Python (deferred)
 
 Operational local SDK support is deferred for the planned `0.2` readiness slice. The TypeScript and

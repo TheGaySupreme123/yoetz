@@ -29,7 +29,8 @@ _VALID_CORRELATION_ID = "err_00000000-0000-4000-8000-000000000000"
 _OTHER_CORRELATION_ID = "err_00000000-0000-4000-8000-000000000001"
 
 _EXPECTED_REASON_CODES = tuple(
-    """accepted_record_shape_invalid
+    """accepted_but_unresponsive
+accepted_record_shape_invalid
 actor_id_malformed
 actor_id_not_generated
 byte_order_mark_forbidden
@@ -40,6 +41,7 @@ duplicate_set_member
 empty_check_types
 empty_publication_channels
 empty_subject_state
+endpoint_unsafe
 engine_family_wrong_author
 entry_digest_mismatch
 event_family_not_admitted
@@ -55,6 +57,8 @@ expected_frontier_required
 finding_json_shape_invalid
 finding_priority_mismatch
 float_forbidden
+frame_invalid
+frame_too_large
 frontier_changed
 frontier_digest_mismatch
 id_malformed_uuid
@@ -68,6 +72,7 @@ import_report_invalid
 input_not_bytes
 integer_out_of_safe_range
 integer_out_of_sqlite_range
+internal_error
 invalid_actor_type
 invalid_approved_check
 invalid_approved_check_policy
@@ -115,6 +120,7 @@ invalid_utf8
 ledger_assigned_field_in_request_identity
 lone_surrogate
 malformed_json
+method_forbidden
 missing_payload_field
 nesting_too_deep
 no_obligations_reason_conflict
@@ -128,9 +134,11 @@ obligation_resolution_mismatch
 operation_recovery_unavailable
 ownership_contended
 payload_redaction_mismatch
+peer_untrusted
 plan_version_conflict
 privacy_projection_unavailable
 privacy_receipt_not_durable
+protocol_mismatch
 provider_attempt_provenance_is_not_final
 public_error_invalid_correlation_id
 public_error_invalid_message
@@ -143,6 +151,7 @@ receipt_json_shape_invalid
 redaction_target_required
 ref_mirror_mismatch
 request_identity_conflict
+request_timeout
 response_fields_invalid
 response_projection_failed
 schema_artifact_role_invalid
@@ -165,7 +174,10 @@ schema_path_unsafe
 schema_reference_unresolved
 schema_version_mismatch
 semantic_provenance_json_shape_invalid
+service_draining
+service_generation_changed
 service_incompatible
+service_unavailable
 session_superseded
 set_member_not_ascii
 timestamp_not_utc
@@ -346,7 +358,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 149
+    assert len(source_values) == 161
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

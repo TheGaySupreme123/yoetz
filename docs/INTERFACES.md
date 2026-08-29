@@ -1665,7 +1665,27 @@ operation request models, and is rejected on every other control method. `strict
 weaken or select this field.
 
 `ControlError` carries one bounded reason, a `retryable` flag, and an optional service-minted
-`correlation_id`. `response_projection_failed` is reserved for the window after a handler returns
+`correlation_id`. The closed reason set includes `endpoint_unsafe` (local AF_UNIX path/mode/peer
+safety refusal). The ordinary client preserves that token instead of folding it into
+`service_unavailable`. The MCP bridge maps it to public `SERVICE_UNAVAILABLE`, `retryable=false`,
+and `safe_details.reason_code=endpoint_unsafe`, with copy that names the endpoint-safety class and
+never a socket path. Unsafe and untrusted endpoint copy forbids retry before local repair and then
+preserves same-`request_id` replay. The CLI control-failure helper is unchanged: it still projects
+the public code and does not add a separate unsafe-endpoint guidance line.
+
+The MCP bridge maps every typed `ControlError` reason onto a public error through the public-error
+recorder (`{tool}_public_error`) with sink `reason` equal to the control-reason token (or
+`accepted_but_unresponsive` for an accepted-but-silent listener). `exception_control_error` and
+`{tool}_internal_error` remain only for genuinely unexpected defects. Absent service uses
+`SERVICE_UNAVAILABLE` with the sanctioned `yoetz service run` supervisor copy and same-`request_id`
+replay; an accepted-but-unresponsive listener uses distinct copy that forbids `yoetz service run`
+and names `yoetz service status` / `yoetz service stop`. `service_incompatible` and
+`protocol_mismatch` share the `yoetz service restart` copy and public `SERVICE_UNAVAILABLE`, and
+are told apart by `safe_details.reason_code`. That MCP `SERVICE_UNAVAILABLE` mapping for
+`protocol_mismatch` is deliberate: the CLI helper still uses `public_error_code_for_control_reason`,
+which keeps `protocol_mismatch` as `INVALID_REQUEST`.
+
+`response_projection_failed` is reserved for the window after a handler returns
 for non-`publish_work` writes (and the impossible minimal-envelope path), where a write may already
 be durable and only the response could not be shaped; it is always `retryable=True`, and the bridge
 answers it with the same-`request_id` replay remedy it uses for its own projection failures. For

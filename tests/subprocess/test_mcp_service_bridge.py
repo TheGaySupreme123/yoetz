@@ -7,6 +7,7 @@ import json
 import logging
 import sys
 from collections.abc import Awaitable, Callable, Iterator
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 import yoetz.mcp.server as bridge
 from yoetz.config.models import LoggingConfig
 from yoetz.mcp.resources import read_resource
+from yoetz.observability.diagnostics import append_diagnostic_record, lookup_diagnostic_records
 from yoetz.observability.logging import LogMode, configure_logging
 from yoetz.ports.control import ControlError
 from yoetz.protocol.canonical import JsonValue, canonical_encode
@@ -35,6 +37,7 @@ from yoetz.protocol.models import (
     StatusRequest,
     StatusResult,
 )
+from yoetz.service.client import _AcceptedServiceUnresponsive  # pyright: ignore[reportPrivateUsage]
 
 _PREFIXES = {
     "request": "req_",
@@ -231,6 +234,50 @@ def _install_clients(
         cast(Callable[[object], Awaitable[object]], connect),
     )
     return remaining
+
+
+def _install_connect_failure(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> None:
+    """Raise at connect time so `_RECONNECT_REASONS` cannot swallow service_unavailable."""
+
+    async def connect(_kind: object, *, workspace_locator: object = None) -> object:
+        del _kind, workspace_locator
+        raise failure
+
+    monkeypatch.setattr(
+        bridge,
+        "connect_service_on_demand",
+        cast(Callable[[object], Awaitable[object]], connect),
+    )
+
+
+_LEAK_TOKENS = (
+    "Traceback",
+    "/tmp/",
+    ".sock",
+    "Application Support",
+    "must-not-reach-public-output",
+    "YZH1-",
+    "Bearer ",
+)
+_ABSENT_SERVICE_MESSAGE = (
+    "The local Yoetz service is not running. On a local terminal run "
+    "'yoetz service run' under your selected user supervisor, then retry this "
+    "operation with the same request_id."
+)
+_SERVICE_CORRELATION = "err_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+def _assert_no_leakage(*blobs: object) -> None:
+    rendered = json.dumps(blobs, default=str)
+    for token in _LEAK_TOKENS:
+        assert token not in rendered
+
+
+def _start_error(result: object, request_id: str) -> dict[str, object]:
+    structured = cast(dict[str, object], getattr(result, "structuredContent"))
+    assert getattr(result, "isError") is True
+    assert structured["request_id"] == request_id
+    return cast(dict[str, object], structured["error"])
 
 
 @pytest.mark.anyio
@@ -436,6 +483,7 @@ async def test_write_timeout_preserves_unknown_outcome_and_same_request_remedy(
     error = cast(dict[str, JsonValue], result.structuredContent["error"])
     assert error["code"] == "SERVICE_UNAVAILABLE"
     assert error["retryable"] is True
+    assert cast(dict[str, object], error["safe_details"])["reason_code"] == "request_timeout"
     assert error["message"] == (
         "The local operation timed out and may still have committed. Retry with the same "
         "request_id to recover the stored outcome; for an existing Yoetz session, status "
@@ -459,6 +507,7 @@ async def test_status_timeout_names_read_only_fresh_request_remedy(
     assert result.structuredContent is not None
     error = cast(dict[str, JsonValue], result.structuredContent["error"])
     assert error["code"] == "SERVICE_UNAVAILABLE"
+    assert cast(dict[str, object], error["safe_details"])["reason_code"] == "request_timeout"
     assert "requested no write" in cast(str, error["message"])
     assert "new request_id" in cast(str, error["message"])
     await bridge.close_bridge_runtime(runtime)
@@ -933,4 +982,175 @@ async def test_transient_projection_failure_stays_retryable_service_unavailable(
     assert error["retryable"] is True
     details = cast(dict[str, JsonValue], error["safe_details"])
     assert details["reason_code"] == "privacy_projection_unavailable"
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.fixture
+def diagnostic_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    import yoetz.observability.diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    return tmp_path
+
+
+@pytest.mark.anyio
+async def test_connect_absent_service_names_the_supervisor_repair(
+    monkeypatch: pytest.MonkeyPatch, diagnostic_root: Path
+) -> None:
+    _install_connect_failure(monkeypatch, ControlError("service_unavailable", retryable=True))
+    runtime = bridge.build_bridge_runtime()
+    request = _requests()["start"]
+
+    result = await bridge.dispatch_start(request, runtime)
+
+    error = _start_error(result, cast(str, request["request_id"]))
+    assert error["code"] == PublicErrorCode.SERVICE_UNAVAILABLE.value
+    assert error["retryable"] is True
+    assert error["message"] == _ABSENT_SERVICE_MESSAGE
+    assert cast(dict[str, object], error["safe_details"])["reason_code"] == "service_unavailable"
+    found = lookup_diagnostic_records(cast(str, error["correlation_id"]), root=diagnostic_root)
+    assert len(found) == 1
+    assert found[0]["reason"] == "service_unavailable"
+    assert found[0]["reason"] != "exception_control_error"
+    _assert_no_leakage(result.structuredContent, found)
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_connect_accepted_but_unresponsive_does_not_prescribe_service_run(
+    monkeypatch: pytest.MonkeyPatch, diagnostic_root: Path
+) -> None:
+    _install_connect_failure(
+        monkeypatch,
+        _AcceptedServiceUnresponsive(),  # pyright: ignore[reportPrivateUsage]
+    )
+    runtime = bridge.build_bridge_runtime()
+    request = _requests()["start"]
+
+    result = await bridge.dispatch_start(request, runtime)
+
+    error = _start_error(result, cast(str, request["request_id"]))
+    assert error["code"] == PublicErrorCode.SERVICE_UNAVAILABLE.value
+    assert error["retryable"] is True
+    message = cast(str, error["message"])
+    assert message != _ABSENT_SERVICE_MESSAGE
+    assert "under your selected user supervisor" not in message
+    assert "Do not run `yoetz service run`" in message
+    assert (
+        cast(dict[str, object], error["safe_details"])["reason_code"] == "accepted_but_unresponsive"
+    )
+    found = lookup_diagnostic_records(cast(str, error["correlation_id"]), root=diagnostic_root)
+    assert len(found) == 1
+    assert found[0]["reason"] == "accepted_but_unresponsive"
+    _assert_no_leakage(result.structuredContent, found)
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_connect_incompatible_holder_reuses_service_correlation_id(
+    monkeypatch: pytest.MonkeyPatch, diagnostic_root: Path
+) -> None:
+    append_diagnostic_record(
+        correlation_id=_SERVICE_CORRELATION,
+        component="service.daemon",
+        operation="start_service_incompatible",
+        reason="service_incompatible",
+        request_id=cast(str, _requests()["start"]["request_id"]),
+        root=diagnostic_root,
+    )
+    _install_connect_failure(
+        monkeypatch,
+        ControlError("service_incompatible", retryable=True, correlation_id=_SERVICE_CORRELATION),
+    )
+    runtime = bridge.build_bridge_runtime()
+    request = _requests()["start"]
+
+    result = await bridge.dispatch_start(request, runtime)
+
+    error = _start_error(result, cast(str, request["request_id"]))
+    assert error["code"] == PublicErrorCode.SERVICE_UNAVAILABLE.value
+    assert error["retryable"] is True
+    assert error["correlation_id"] == _SERVICE_CORRELATION
+    assert "yoetz service restart" in str(error["message"])
+    assert cast(dict[str, object], error["safe_details"])["reason_code"] == "service_incompatible"
+    found = lookup_diagnostic_records(_SERVICE_CORRELATION, root=diagnostic_root)
+    assert len(found) == 1
+    _assert_no_leakage(result.structuredContent, found)
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_connect_protocol_mismatch_is_distinct_and_ships_non_retryable(
+    monkeypatch: pytest.MonkeyPatch, diagnostic_root: Path
+) -> None:
+    append_diagnostic_record(
+        correlation_id=_SERVICE_CORRELATION,
+        component="service.daemon",
+        operation="start_protocol_mismatch",
+        reason="protocol_mismatch",
+        request_id=cast(str, _requests()["start"]["request_id"]),
+        root=diagnostic_root,
+    )
+    _install_connect_failure(
+        monkeypatch,
+        ControlError("protocol_mismatch", correlation_id=_SERVICE_CORRELATION),
+    )
+    runtime = bridge.build_bridge_runtime()
+    request = _requests()["start"]
+
+    result = await bridge.dispatch_start(request, runtime)
+
+    error = _start_error(result, cast(str, request["request_id"]))
+    assert error["code"] == PublicErrorCode.SERVICE_UNAVAILABLE.value
+    assert error["retryable"] is False
+    assert error["correlation_id"] == _SERVICE_CORRELATION
+    assert "yoetz service restart" in str(error["message"])
+    assert cast(dict[str, object], error["safe_details"])["reason_code"] == "protocol_mismatch"
+    found = lookup_diagnostic_records(_SERVICE_CORRELATION, root=diagnostic_root)
+    assert len(found) == 1
+    _assert_no_leakage(result.structuredContent, found)
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_connect_endpoint_unsafe_is_non_retryable_without_a_socket_path(
+    monkeypatch: pytest.MonkeyPatch, diagnostic_root: Path
+) -> None:
+    _install_connect_failure(monkeypatch, ControlError("endpoint_unsafe"))
+    runtime = bridge.build_bridge_runtime()
+    request = _requests()["start"]
+
+    result = await bridge.dispatch_start(request, runtime)
+
+    error = _start_error(result, cast(str, request["request_id"]))
+    assert error["code"] == PublicErrorCode.SERVICE_UNAVAILABLE.value
+    assert error["retryable"] is False
+    assert "unsafe to use" in str(error["message"])
+    assert "same request_id" in str(error["message"])
+    assert cast(dict[str, object], error["safe_details"])["reason_code"] == "endpoint_unsafe"
+    found = lookup_diagnostic_records(cast(str, error["correlation_id"]), root=diagnostic_root)
+    assert len(found) == 1
+    assert found[0]["reason"] == "endpoint_unsafe"
+    _assert_no_leakage(result.structuredContent, found)
+    await bridge.close_bridge_runtime(runtime)
+
+
+@pytest.mark.anyio
+async def test_unexpected_start_error_stays_internal_without_exception_text(
+    monkeypatch: pytest.MonkeyPatch, diagnostic_root: Path
+) -> None:
+    _install_clients(monkeypatch, [_FakeClient(RuntimeError("must-not-reach-public-output"))])
+    runtime = bridge.build_bridge_runtime()
+    request = _requests()["start"]
+
+    result = await bridge.dispatch_start(request, runtime)
+
+    error = _start_error(result, cast(str, request["request_id"]))
+    assert error["code"] == PublicErrorCode.INTERNAL_ERROR.value
+    assert error["retryable"] is False
+    found = lookup_diagnostic_records(cast(str, error["correlation_id"]), root=diagnostic_root)
+    assert len(found) == 1
+    assert found[0]["operation"] == "start_internal_error"
+    assert str(found[0]["reason"]).startswith("exception_")
+    _assert_no_leakage(result.structuredContent, found)
     await bridge.close_bridge_runtime(runtime)

@@ -126,6 +126,24 @@ digest-bound confirmation, preserve entries already observed as foreign, and ver
 state by re-reading it. A "registered" result still never implies Codex will successfully connect
 at runtime.
 
+## Upgrading Yoetz under a running service
+
+The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz
+build the previous build's service still owning the endpoint refuses the new bridge and CLI. The
+first MCP tool call (on-demand startup) replaces that service automatically: it asks the stale
+holder to shut down through its ordinary bounded path and starts this installation's service inside
+the same 30-second budget. If that cannot complete, the tool returns `SERVICE_UNAVAILABLE` with
+`reason_code: service_incompatible` (or `protocol_mismatch` when the refusal is a protocol
+generation mismatch) and the repair command; run it on a local terminal:
+
+```text
+yoetz service restart
+```
+
+`yoetz service status` names the incompatible holder's pid, version, and manifest digest. Other
+hosts' sessions still running the previous build's bridge are refused after the switch until they
+restart; that is the intended outcome of an upgrade, not a defect.
+
 The accepted setup path composes four separately reported layers in order: it installs the project
 skill at `.agents/skills/yoetz`, installs managed structural plugin/hook sources at
 `.agents/plugins/yoetz`, applies an explicitly approved Codex activation, then verifies the MCP

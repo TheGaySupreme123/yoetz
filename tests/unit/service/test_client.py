@@ -1064,6 +1064,17 @@ def test_protocol_rejection_reasons_map_to_service_incompatible() -> None:
     assert mismatch.reason == "protocol_mismatch"
 
 
+def test_transport_error_preserves_endpoint_unsafe() -> None:
+    import yoetz.service.client as client_module
+    from yoetz.adapters.control.unix_socket import LocalControlTransportError
+
+    mapped = client_module._transport_error(  # pyright: ignore[reportPrivateUsage]
+        LocalControlTransportError("endpoint_unsafe")
+    )
+    assert mapped.reason == "endpoint_unsafe"
+    assert mapped.retryable is False
+
+
 @pytest.mark.anyio
 async def test_supersede_signals_only_a_live_foreign_identity_holder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

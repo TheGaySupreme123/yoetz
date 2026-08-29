@@ -77,7 +77,11 @@ from yoetz.protocol.models import (
     StatusResult,
     public_model_to_wire,
 )
-from yoetz.service.client import ServiceClient, connect_service_on_demand
+from yoetz.service.client import (
+    ServiceClient,
+    accepted_but_unresponsive,
+    connect_service_on_demand,
+)
 
 __all__ = [
     "BRIDGE_RUNTIME",
@@ -374,6 +378,7 @@ def structured_error_result(
     details_reason_code: str | None = None,
     correlation_id: str | None = None,
     operation: str | None = None,
+    diagnostic_reason: str | None = None,
     host_profile: Literal["generic", "cursor"] = "generic",
 ) -> types.CallToolResult:
     """Build a bounded structured tool error with a prevalidated nested fallback.
@@ -383,16 +388,24 @@ def structured_error_result(
     the durable diagnostic line under it, because an id minted straight into the envelope resolves
     to nothing (issue #191). ``operation`` only names the failing tool in that record; it never
     reaches the wire. ``details_reason_code`` rides beside field locations, which no other
-    ``safe_details`` shape can carry.
+    ``safe_details`` shape can carry. ``diagnostic_reason`` names the sink ``reason`` when this
+    boundary mints the id; it must be a bounded token. Unrecognized values fall back to the
+    lowercased public code.
     """
 
+    sink_reason = (
+        diagnostic_reason
+        if type(diagnostic_reason) is str
+        and _SINK_OPERATION.fullmatch(diagnostic_reason) is not None
+        else code.value.lower()
+    )
     resolved_correlation_id = (
         correlation_id
         if correlation_id is not None
         else record_public_error_without_raising(
             component="mcp.bridge",
             operation=_public_error_operation(operation),
-            reason=code.value.lower(),
+            reason=sink_reason,
             request_id=request_id,
         )
     )
@@ -424,6 +437,33 @@ def structured_error_result(
             )
 
 
+def _control_public_error_result(
+    error: ControlError,
+    request_id: str | None,
+    operation: str,
+    *,
+    code: PublicErrorCode,
+    message: str,
+    retryable: bool,
+    host_profile: Literal["generic", "cursor"],
+    safe_details: Mapping[str, object] | None = None,
+    diagnostic_reason: str | None = None,
+) -> types.CallToolResult:
+    """Map a typed ControlError through the public-error recorder, never the unexpected path."""
+
+    return structured_error_result(
+        code,
+        message,
+        retryable=retryable,
+        request_id=request_id,
+        correlation_id=error.correlation_id,
+        operation=operation,
+        safe_details=dict(safe_details) if safe_details is not None else None,
+        diagnostic_reason=diagnostic_reason if diagnostic_reason is not None else error.reason,
+        host_profile=host_profile,
+    )
+
+
 def _control_error_result(
     error: ControlError,
     request_id: str | None,
@@ -434,7 +474,6 @@ def _control_error_result(
     # Prefer the service-minted diagnostic id when present so the agent-facing public error
     # resolves the same durable sink record the daemon already wrote. Never mint a second id for
     # a failure the service already correlated.
-    service_correlation_id = error.correlation_id
     if error.reason == "vault_locked":
         # The daemon's retryable flag distinguishes a soft lock or transient re-unlock
         # failure (heals on a later attempt) from a hard lock or missing setup (needs a
@@ -462,42 +501,43 @@ def _control_error_result(
                 "uninitialized, run `yoetz setup` or prepare `vault_initialize` via "
                 "`yoetz consent catalog` / `prepare` (ADR-015). Never send secrets over MCP."
             )
-        return structured_error_result(
-            PublicErrorCode.VAULT_LOCKED,
-            message,
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.VAULT_LOCKED,
+            message=message,
             retryable=error.retryable,
-            request_id=request_id,
-            correlation_id=service_correlation_id,
-            operation=operation,
             host_profile=host_profile,
         )
     if error.reason == "request_cancelled":
-        return structured_error_result(
-            PublicErrorCode.CANCELLED,
-            "The operation was cancelled.",
-            request_id=request_id,
-            correlation_id=service_correlation_id,
-            operation=operation,
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.CANCELLED,
+            message="The operation was cancelled.",
+            retryable=False,
             host_profile=host_profile,
         )
     if error.reason == "privacy_projection_blocked":
-        return structured_error_result(
-            PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED,
-            (
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED,
+            message=(
                 "The receipt is durably recorded, but JSON projection to agent context is blocked "
                 "by the active privacy policy. Re-request with format markdown or text, or widen "
                 "the agent-context policy from a local terminal."
             ),
             retryable=False,
-            request_id=request_id,
-            correlation_id=service_correlation_id,
-            operation=operation,
+            host_profile=host_profile,
             safe_details={
                 "reason_code": "receipt_json_projection_blocked",
                 "operation": "receipt",
                 "field": "format",
             },
-            host_profile=host_profile,
         )
     if error.reason == "response_projection_failed":
         # Accepted durable publish_work usually returns the reduced total-acceptance envelope
@@ -508,37 +548,39 @@ def _control_error_result(
         details: dict[str, object] = dict(_RESPONSE_PROJECTION_FAILED_DETAILS)
         if error.accepted_state:
             details.update(error.accepted_state)
-        return structured_error_result(
-            PublicErrorCode.INTERNAL_ERROR,
-            _RESPONSE_PROJECTION_FAILED_MESSAGE,
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.INTERNAL_ERROR,
+            message=_RESPONSE_PROJECTION_FAILED_MESSAGE,
             retryable=True,
-            request_id=request_id,
-            correlation_id=service_correlation_id,
-            operation=operation,
-            safe_details=details,
             host_profile=host_profile,
+            safe_details=details,
         )
     if error.reason == "read_projection_failed":
-        return structured_error_result(
-            PublicErrorCode.INTERNAL_ERROR,
-            _READ_PROJECTION_FAILED_MESSAGE,
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.INTERNAL_ERROR,
+            message=_READ_PROJECTION_FAILED_MESSAGE,
             retryable=True,
-            request_id=request_id,
-            correlation_id=service_correlation_id,
-            operation=operation,
-            safe_details=dict(_READ_PROJECTION_FAILED_DETAILS),
             host_profile=host_profile,
+            safe_details=dict(_READ_PROJECTION_FAILED_DETAILS),
         )
     if error.reason == "privacy_projection_unavailable":
-        return structured_error_result(
-            PublicErrorCode.SERVICE_UNAVAILABLE,
-            "Receipt projection is temporarily unavailable; retry after the local service is ready.",
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                "Receipt projection is temporarily unavailable; retry after the local service is ready."
+            ),
             retryable=True,
-            request_id=request_id,
-            correlation_id=service_correlation_id,
-            operation=operation,
-            safe_details={"reason_code": "privacy_projection_unavailable"},
             host_profile=host_profile,
+            safe_details={"reason_code": "privacy_projection_unavailable"},
         )
     if error.reason == "request_timeout":
         if operation in _WRITE_OPERATIONS:
@@ -552,49 +594,179 @@ def _control_error_result(
                 "The local status read timed out and requested no write. Repeat the read with a "
                 "new request_id."
             )
-        return structured_error_result(
-            PublicErrorCode.SERVICE_UNAVAILABLE,
-            message,
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.SERVICE_UNAVAILABLE,
+            message=message,
             retryable=True,
-            request_id=request_id,
-            correlation_id=service_correlation_id,
-            operation=operation,
             host_profile=host_profile,
+            safe_details={"reason_code": "request_timeout"},
         )
     if error.reason in {"service_incompatible", "protocol_mismatch"}:
         # The one per-user endpoint is owned by a service of another Yoetz installation (or
         # protocol generation) that rejected this bridge's hello. On-demand startup already
         # tried to replace it; name the exact repair instead of an opaque internal failure.
-        return structured_error_result(
-            PublicErrorCode.SERVICE_UNAVAILABLE,
-            "The running local Yoetz service belongs to a different Yoetz installation than "
-            "this bridge (control schema-manifest or protocol mismatch), and the bridge could "
-            "not replace it within its startup budget. On a local terminal run "
-            "`yoetz service restart`, then retry this operation with the same request_id. "
-            "Do not retry `start` until that repair has run.",
+        # MCP keeps SERVICE_UNAVAILABLE for both; CLI maps protocol_mismatch to INVALID_REQUEST.
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                "The running local Yoetz service belongs to a different Yoetz installation than "
+                "this bridge (control schema-manifest or protocol mismatch), and the bridge could "
+                "not replace it within its startup budget. On a local terminal run "
+                "`yoetz service restart`, then retry this operation with the same request_id. "
+                "Do not retry `start` until that repair has run."
+            ),
             retryable=error.retryable,
-            request_id=request_id,
-            correlation_id=service_correlation_id,
-            operation=operation,
-            safe_details={"reason_code": "service_incompatible"},
             host_profile=host_profile,
+            safe_details={"reason_code": error.reason},
         )
-    if error.reason in {"service_unavailable", "service_draining"}:
-        return structured_error_result(
-            PublicErrorCode.SERVICE_UNAVAILABLE,
-            "The local service is unavailable; retry after it is ready.",
+    if error.reason == "service_draining":
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.SERVICE_UNAVAILABLE,
+            message="The local service is draining; retry after it is ready.",
             retryable=True,
-            request_id=request_id,
-            correlation_id=service_correlation_id,
-            operation=operation,
             host_profile=host_profile,
+            safe_details={"reason_code": "service_draining"},
         )
-    if service_correlation_id is not None:
+    if error.reason == "service_unavailable":
+        if accepted_but_unresponsive(error):
+            # A listener that accepted and then went silent is running. Prescribing
+            # `yoetz service run` here sent an operator to a command that must refuse (#237).
+            return _control_public_error_result(
+                error,
+                request_id,
+                operation,
+                code=PublicErrorCode.SERVICE_UNAVAILABLE,
+                message=(
+                    "The local Yoetz service is listening but did not answer. Wait and retry; on a "
+                    "local terminal run `yoetz service status`. Do not run `yoetz service run` — "
+                    "it will refuse while that process holds the singleton. If it is wedged, stop "
+                    "it with `yoetz service stop`, then retry this operation with the same "
+                    "request_id."
+                ),
+                retryable=True,
+                host_profile=host_profile,
+                safe_details={"reason_code": "accepted_but_unresponsive"},
+                diagnostic_reason="accepted_but_unresponsive",
+            )
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                "The local Yoetz service is not running. On a local terminal run "
+                "'yoetz service run' under your selected user supervisor, then retry this "
+                "operation with the same request_id."
+            ),
+            retryable=True,
+            host_profile=host_profile,
+            safe_details={"reason_code": "service_unavailable"},
+        )
+    if error.reason == "service_generation_changed":
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                "The local service instance changed after reconnect. Retry this operation with "
+                "the same request_id."
+            ),
+            retryable=True,
+            host_profile=host_profile,
+            safe_details={"reason_code": "service_generation_changed"},
+        )
+    if error.reason == "peer_untrusted":
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                "The local control endpoint identity could not be trusted. Repair the endpoint "
+                "on a local terminal; do not retry until that repair has run. Then retry this "
+                "operation with the same request_id."
+            ),
+            retryable=False,
+            host_profile=host_profile,
+            safe_details={"reason_code": "peer_untrusted"},
+        )
+    if error.reason == "endpoint_unsafe":
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                "The local control endpoint is unsafe to use. Repair the endpoint on a local "
+                "terminal; do not retry until that repair has run. Then retry this operation "
+                "with the same request_id."
+            ),
+            retryable=False,
+            host_profile=host_profile,
+            safe_details={"reason_code": "endpoint_unsafe"},
+        )
+    if error.reason == "frame_invalid":
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.INVALID_REQUEST,
+            message="The local control request was invalid.",
+            retryable=False,
+            host_profile=host_profile,
+            safe_details={"reason_code": "frame_invalid"},
+        )
+    if error.reason == "frame_too_large":
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.INVALID_REQUEST,
+            message="The local control frame exceeded the allowed size.",
+            retryable=False,
+            host_profile=host_profile,
+            safe_details={"reason_code": "frame_too_large"},
+        )
+    if error.reason == "method_forbidden":
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.INVALID_REQUEST,
+            message="The local control method is not allowed.",
+            retryable=False,
+            host_profile=host_profile,
+            safe_details={"reason_code": "method_forbidden"},
+        )
+    if error.reason == "internal_error":
+        return _control_public_error_result(
+            error,
+            request_id,
+            operation,
+            code=PublicErrorCode.INTERNAL_ERROR,
+            message="The bridge could not complete the operation.",
+            retryable=False,
+            host_profile=host_profile,
+            safe_details={"reason_code": "internal_error"},
+        )
+    # Last resort: a ControlError reason this mapper does not yet name. Keep the unexpected
+    # recorder so a future vocabulary addition cannot silently ship as a public-error class.
+    if error.correlation_id is not None:
         return structured_error_result(
             PublicErrorCode.INTERNAL_ERROR,
             "The bridge could not complete the operation.",
             request_id=request_id,
-            correlation_id=service_correlation_id,
+            correlation_id=error.correlation_id,
             host_profile=host_profile,
         )
     correlation_id = record_unexpected_exception_without_raising(
