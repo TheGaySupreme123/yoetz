@@ -1081,7 +1081,7 @@ async def test_repository_grant_suspension_releases_observation_barrier() -> Non
 
     command = ledger_command(request_suffix="9")
     operation_id = "req_00000000-0000-4000-8000-000000000036"
-    observation = _observation_command(request_suffix="a", expected_frontier=1, seed="g")
+    observation = _observation_command(request_suffix="a", expected_frontier=1, seed="c")
     for adapter in (memory_ledger(command), sqlite_ledger(command)):
         await adapter.append_batch(command)
         lease = await _semantic_wait_lease(adapter, command, operation_id)
@@ -1101,7 +1101,7 @@ async def test_repository_grant_resume_commits_across_observation_only_suffix() 
 
     command = ledger_command(request_suffix="c")
     operation_id = "req_00000000-0000-4000-8000-000000000037"
-    observation = _observation_command(request_suffix="d", expected_frontier=1, seed="h")
+    observation = _observation_command(request_suffix="d", expected_frontier=1, seed="d")
     for adapter in (memory_ledger(command), sqlite_ledger(command)):
         await adapter.append_batch(command)
         await adapter.suspend_check_for_repository_grant(
