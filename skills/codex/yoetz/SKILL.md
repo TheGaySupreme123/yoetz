@@ -239,6 +239,7 @@ Publish exactly the first time: an exact `attempted_items` entry for every reque
 - When a second job in one session again returns no judgment, stop: run `deterministic_only`, disclose the gap naming the recorded `semantic_status` and `semantic_reason`, and do not spend a third job.
 - On `OPERATION_PENDING`, read `status` with `view=operation` once and replay the same `request_id` once. If it is still pending, continue with a new deterministic-only request and say the earlier operation never reached a terminal result.
 - A rejected request is a schema problem, not a retry problem. Correct the named field and resend once.
+- `safe_details.availability: terminal_unavailable` belongs to the host binding, not the call: later calls under a new `request_id` inherit the same `correlation_id` without a new diagnostic. Carry it into every delegated assignment as a bounded `yoetz_availability` block (state, host binding, parent `correlation_id` and `request_id`, proof limit); delegates that inherit it make no Yoetz call and publish nothing. Only the coordinator runs the one named repair and replays the original `request_id`. Never run `yoetz service stop`, `service run`, or `service restart` from `INTERNAL_ERROR` or from a message that did not name that exact command.
 
 ## Never publish
 

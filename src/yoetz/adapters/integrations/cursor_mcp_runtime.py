@@ -3,7 +3,10 @@
 Installed plugin files name a desired route. Cursor can keep a shared ``mcp-process`` helper
 alive across Reload Window, so file status alone cannot prove that model calls use that route.
 This module classifies exact known ``yoetz mcp serve`` argv suffixes and Cursor-helper parents
-into counts and an activation token. Unmatched tokens are dropped and never logged.
+into counts and an activation token. When the installed marker binds an exact launcher, the
+tokens before ``mcp serve`` are compared with that launcher so a helper child running a different
+Yoetz executable (an ambient PATH install, another channel) is reported as an executable mismatch
+(issue #468). Unmatched tokens are dropped and never logged.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ __all__ = [
     "FixedCursorMcpProcesses",
     "OsCursorMcpProcesses",
     "classify_cursor_semantic_ceiling",
+    "classify_serve_argv",
     "observe_cursor_mcp_runtime",
 ]
 
@@ -45,6 +49,10 @@ _CURSOR_COMM_EXACT: Final = frozenset({"Cursor", "mcp-process"})
 
 
 type CursorRuntimeActivation = Literal["unobserved", "matched", "full_restart_required"]
+type CursorLauncherMatch = Literal["matched", "different", "unresolved"]
+type CursorExecutableActivation = Literal[
+    "unobserved", "matched", "unproven", "executable_mismatch"
+]
 type CursorCeilingClass = Literal[
     "not_applicable",
     "genuine_route_ceiling",
@@ -55,15 +63,24 @@ type CursorCeilingClass = Literal[
 
 @dataclass(frozen=True, slots=True)
 class CursorMcpProcessSnapshot:
-    """One classified live process. ``argv_suffix`` is an exact known serve suffix or empty."""
+    """One classified live process.
+
+    ``route_profile`` is the exact known serve suffix class (``None`` for a foreign suffix).
+    ``launcher`` compares the tokens before ``mcp serve`` with the expected bound launcher:
+    ``matched`` (exact), ``different`` (another absolute executable), ``unresolved`` (a bare
+    name that cannot be attributed), or ``None`` when no launcher was expected.
+    """
 
     parent_kind: Literal["cursor_helper", "other"]
     route_profile: Literal["strict", "policy"] | None
+    launcher: CursorLauncherMatch | None = None
 
     def __post_init__(self) -> None:
         if self.parent_kind not in {"cursor_helper", "other"}:
             raise ValueError("cursor_mcp_process_invalid")
         if self.route_profile not in {None, "strict", "policy"}:
+            raise ValueError("cursor_mcp_process_invalid")
+        if self.launcher not in {None, "matched", "different", "unresolved"}:
             raise ValueError("cursor_mcp_process_invalid")
 
 
@@ -75,11 +92,23 @@ class CursorMcpRuntimeObservation:
     policy_process_count: int
     strict_process_count: int
     foreign_process_count: int
+    executable_activation: CursorExecutableActivation = "unobserved"
 
     def __post_init__(self) -> None:
         if type(self.observed) is not bool:
             raise ValueError("cursor_mcp_runtime_invalid")
         if self.activation not in {"unobserved", "matched", "full_restart_required"}:
+            raise ValueError("cursor_mcp_runtime_invalid")
+        if self.executable_activation not in {
+            "unobserved",
+            "matched",
+            "unproven",
+            "executable_mismatch",
+        }:
+            raise ValueError("cursor_mcp_runtime_invalid")
+        if self.executable_activation == "executable_mismatch" and (
+            self.activation != "full_restart_required"
+        ):
             raise ValueError("cursor_mcp_runtime_invalid")
         if self.live_route_profile not in {None, "strict", "policy"}:
             raise ValueError("cursor_mcp_runtime_invalid")
@@ -135,10 +164,52 @@ def classify_serve_suffix(
 ) -> Literal["strict", "policy", "foreign"] | None:
     """Classify a serve suffix. Returns ``None`` when ``mcp serve`` is absent."""
 
+    kind, _launcher = classify_serve_argv(tokens, None)
+    return kind
+
+
+def _launcher_match(
+    tokens: Sequence[str], serve_index: int, expected_launcher: tuple[str, ...]
+) -> CursorLauncherMatch:
+    width = len(expected_launcher)
+    if (
+        serve_index >= width
+        and tuple(tokens[serve_index - width : serve_index]) == expected_launcher
+    ):
+        return "matched"
+    if width > 1 and serve_index >= width:
+        # Module entrypoint shape (``<interpreter> -m yoetz``): the fixed tail matched but the
+        # interpreter is another explicit executable.
+        head = tokens[serve_index - width]
+        tail = tuple(tokens[serve_index - width + 1 : serve_index])
+        if tail == expected_launcher[1:] and ("/" in head or "\\" in head):
+            return "different"
+    preceding = tokens[serve_index - 1]
+    if "/" in preceding or "\\" in preceding:
+        # An absolute (or explicit) executable that is not the bound launcher: another
+        # installation answered the host's spawn.
+        return "different"
+    return "unresolved"
+
+
+def classify_serve_argv(
+    tokens: Sequence[str],
+    expected_launcher: tuple[str, ...] | None,
+) -> tuple[Literal["strict", "policy", "foreign"] | None, CursorLauncherMatch | None]:
+    """Classify one argv as ``(serve suffix class, launcher match)``.
+
+    The suffix class is ``None`` when ``mcp serve`` is absent. The launcher match is ``None``
+    when no launcher was expected or the suffix is absent; otherwise it compares the tokens that
+    precede ``mcp`` with ``expected_launcher`` exactly. A shebang console script shows up as
+    ``<interpreter> <script> mcp serve …`` and a module entrypoint as
+    ``<interpreter> -m yoetz mcp serve …``; both compare on the exact bound tuple.
+    """
+
     suffix: tuple[str, ...] | None = None
+    serve_index: int | None = None
     for index, token in enumerate(tokens):
         if type(token) is not str:
-            return None
+            return None, None
         if (
             token == "mcp"
             and index > 0
@@ -148,15 +219,19 @@ def classify_serve_suffix(
         ):
             rest = tuple(tokens[index:])
             if len(rest) > _MAX_TOKENS:
-                return "foreign"
+                return "foreign", None
             suffix = rest
-    if suffix is None:
-        return None
+            serve_index = index
+    if suffix is None or serve_index is None:
+        return None, None
+    launcher: CursorLauncherMatch | None = None
+    if expected_launcher is not None and expected_launcher:
+        launcher = _launcher_match(tokens, serve_index, expected_launcher)
     if suffix in _POLICY_SUFFIXES:
-        return "policy"
+        return "policy", launcher
     if suffix in _STRICT_SUFFIXES:
-        return "strict"
-    return "foreign"
+        return "strict", launcher
+    return "foreign", launcher
 
 
 def observe_cursor_mcp_runtime(
@@ -164,7 +239,13 @@ def observe_cursor_mcp_runtime(
     installed_route: Literal["strict", "policy"] | None,
     processes: CursorMcpProcessPort,
 ) -> CursorMcpRuntimeObservation:
-    """Compare classified Cursor-helper children with the installed winning route."""
+    """Compare classified Cursor-helper children with the installed winning route.
+
+    When snapshots carry a launcher comparison, a helper child whose executable differs from
+    the bound launcher is an ``executable_mismatch``: the host is running another Yoetz
+    installation behind marker-valid plugin bytes, and only a full application quit replaces
+    that process. An unattributable bare launcher leaves the executable ``unproven``.
+    """
 
     snapshot = processes.snapshot()
     if snapshot is None:
@@ -174,6 +255,7 @@ def observe_cursor_mcp_runtime(
     foreign = 0
     helper_routes: set[Literal["strict", "policy"]] = set()
     helper_foreign = False
+    helper_launchers: set[CursorLauncherMatch] = set()
     scan_truncated = len(snapshot) > _MAX_PROCESSES
     for item in snapshot[:_MAX_PROCESSES]:
         if type(item) is not CursorMcpProcessSnapshot:
@@ -190,6 +272,8 @@ def observe_cursor_mcp_runtime(
             foreign += 1
             if item.parent_kind == "cursor_helper":
                 helper_foreign = True
+        if item.parent_kind == "cursor_helper" and item.launcher is not None:
+            helper_launchers.add(item.launcher)
     if scan_truncated or (not helper_routes and not helper_foreign):
         return CursorMcpRuntimeObservation(True, "unobserved", None, policy, strict, foreign)
     live: Literal["strict", "policy"] | None
@@ -197,11 +281,20 @@ def observe_cursor_mcp_runtime(
         live = next(iter(helper_routes))
     else:
         live = None
-    if live is not None and live == installed_route:
+    executable: CursorExecutableActivation
+    if not helper_launchers:
+        executable = "unobserved"
+    elif "different" in helper_launchers:
+        executable = "executable_mismatch"
+    elif helper_launchers == {"matched"}:
+        executable = "matched"
+    else:
+        executable = "unproven"
+    if live is not None and live == installed_route and executable != "executable_mismatch":
         activation: CursorRuntimeActivation = "matched"
     else:
         activation = "full_restart_required"
-    return CursorMcpRuntimeObservation(True, activation, live, policy, strict, foreign)
+    return CursorMcpRuntimeObservation(True, activation, live, policy, strict, foreign, executable)
 
 
 def classify_cursor_semantic_ceiling(
@@ -228,7 +321,9 @@ def classify_cursor_semantic_ceiling(
     return "genuine_route_ceiling"
 
 
-def _linux_snapshots() -> tuple[CursorMcpProcessSnapshot, ...] | None:
+def _linux_snapshots(
+    expected_launcher: tuple[str, ...] | None,
+) -> tuple[CursorMcpProcessSnapshot, ...] | None:
     proc = Path("/proc")
     if not proc.is_dir():
         return None
@@ -267,7 +362,7 @@ def _linux_snapshots() -> tuple[CursorMcpProcessSnapshot, ...] | None:
         if not raw or len(raw) > 4096:
             continue
         tokens = tuple(part.decode("utf-8", errors="ignore") for part in raw.split(b"\0") if part)
-        kind = classify_serve_suffix(tokens)
+        kind, launcher = classify_serve_argv(tokens, expected_launcher)
         if kind is None:
             continue
         try:
@@ -283,6 +378,7 @@ def _linux_snapshots() -> tuple[CursorMcpProcessSnapshot, ...] | None:
             CursorMcpProcessSnapshot(
                 "cursor_helper" if helper else "other",
                 None if kind == "foreign" else kind,
+                launcher,
             )
         )
     return tuple(classified)
@@ -307,7 +403,9 @@ def _parse_ps_table(payload: bytes) -> tuple[tuple[int, int, str], ...]:
     return tuple(rows)
 
 
-def _darwin_snapshots() -> tuple[CursorMcpProcessSnapshot, ...] | None:
+def _darwin_snapshots(
+    expected_launcher: tuple[str, ...] | None,
+) -> tuple[CursorMcpProcessSnapshot, ...] | None:
     try:
         comm_table = subprocess.run(
             [_PS_EXECUTABLE, "-ax", "-o", "pid=", "-o", "ppid=", "-o", "comm="],
@@ -338,7 +436,7 @@ def _darwin_snapshots() -> tuple[CursorMcpProcessSnapshot, ...] | None:
         if len(classified) > _MAX_PROCESSES:
             break
         tokens = tuple(args.split())
-        kind = classify_serve_suffix(tokens)
+        kind, launcher = classify_serve_argv(tokens, expected_launcher)
         if kind is None:
             continue
         parent = ppid_by_pid.get(pid)
@@ -350,17 +448,23 @@ def _darwin_snapshots() -> tuple[CursorMcpProcessSnapshot, ...] | None:
             CursorMcpProcessSnapshot(
                 "cursor_helper" if helper else "other",
                 None if kind == "foreign" else kind,
+                launcher,
             )
         )
     return tuple(classified)
 
 
+@dataclass(frozen=True, slots=True)
 class OsCursorMcpProcesses:
+    """Live OS scan. ``expected_launcher`` is the installed marker's exact bound launcher."""
+
+    expected_launcher: tuple[str, ...] | None = None
+
     def snapshot(self) -> tuple[CursorMcpProcessSnapshot, ...] | None:
         try:
-            linux = _linux_snapshots()
+            linux = _linux_snapshots(self.expected_launcher)
             if linux is not None:
                 return linux
-            return _darwin_snapshots()
+            return _darwin_snapshots(self.expected_launcher)
         except OSError, ValueError, TimeoutError:
             return None

@@ -8,6 +8,25 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- The native Cursor plugin's plugin-owned `mcp.json` now launches the exact Yoetz executable the
+  plugin's hooks bind (the `/2` marker launcher) instead of a bare `yoetz` that Cursor's sanitized
+  desktop PATH could resolve to an older ambient installation. `yoetz integrate cursor plugin
+  status` adds a `launcher` section (executable `matched|drifted|missing|unbound|unobserved`,
+  installed `mcp_binding`, and a bounded identity probed from that launcher's `version --json`)
+  and `mcp.runtime.executable_activation`, which forces `full_restart_required` when a live Cursor
+  helper child runs a different executable. Trees rendered before this fix stay marker-valid and
+  report `modified` / `mcp_binding: ambient_path` until one exact previewed replace (issue #468).
+
+- The cooperative MCP bridge latches the first availability failure of its host binding
+  (`service_unavailable`, `service_incompatible`, `protocol_mismatch`, `endpoint_unsafe`,
+  `peer_untrusted`). Later calls under a new `request_id` — including delegated workers sharing
+  the MCP process — inherit the same public error and `correlation_id` with
+  `safe_details.availability: terminal_unavailable` and `availability_inherited: true`, and mint no
+  new diagnostic, spawn, or supersede. The original `request_id` replay, a changed service holder,
+  or one quiet successful handshake clears it. Agent guidance now carries a bounded
+  `yoetz_availability` block into delegated assignments and forbids lifecycle commands from
+  `INTERNAL_ERROR` (issue #469).
+
 - Cooperative MCP calls no longer collapse typed local-control failures into opaque,
   non-retryable `INTERNAL_ERROR`. Service absence, an accepted-but-unresponsive listener,
   incompatible or mismatched installations, unsafe or untrusted endpoints, timeouts, and bounded

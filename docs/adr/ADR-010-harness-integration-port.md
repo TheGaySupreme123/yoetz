@@ -177,6 +177,26 @@ installed `policy` as that mismatch, not an owner privacy decision, and does not
 semantic check against the stale process. A live installed strict route remains the ordinary
 terminal ceiling. Recovery never authorizes egress or changes privacy settings.
 
+**Amendment (2026-08-29, issue #468): the plugin-owned Cursor `mcp.json` binds the exact launcher
+the hooks bind, and status verifies executable, package identity, control schema, and route
+separately.** A bare `command: "yoetz"` let Cursor's sanitized desktop PATH resolve an older
+ambient runtime (control schema 2.1.0) behind a marker-valid current plugin (2.3.0); the model's
+`start` then reached an incompatible bridge and no task, evidence, or receipt could exist. Cursor's
+MCP reference admits a full path in `command`, so the native entry is now `launcher[0]` plus
+`[*launcher[1:], "mcp", "serve", "--host", "cursor", …]` from the same `/2` marker launcher the
+hooks use; the entry is a managed member, so carrier bytes bind it. Route recognition accepts a
+bare `yoetz` or a known launcher (this artifact's or the installed marker's) with the exact serve
+arguments. `CursorPluginStatus.launcher` reports executable state (`matched|drifted|missing|
+unbound|unobserved`), the installed entry's `mcp_binding` (`exact_launcher|ambient_path|…`), and a
+bounded identity probed by running the installed launcher's read-only `version --json`; the live
+runtime observation compares helper-child argv prefixes with the installed launcher and reports
+`executable_activation`, forcing `full_restart_required` on a mismatch. Carrier-byte equality is
+never runtime proof; package, discovery, runtime, model-use, observation, semantic, and receipt
+facets stay separate. A tree rendered before this amendment stays marker-valid and reports
+`modified` with `mcp_binding: ambient_path` until one exact previewed replace. The portable
+Agent-Plugins carrier is byte-identical by design and keeps the bare route; it is not a native
+activation claim.
+
 The append-only local-control schema `2.1.0` admits `cursor_hook`, a keyed HMAC
 `changed_paths_digest`, and the Cursor source-coverage row while retaining `2.0.0` byte-for-byte.
 Cursor's documented `afterMCPExecution` result is content and is discarded; because the host does

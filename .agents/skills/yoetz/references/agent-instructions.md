@@ -144,6 +144,10 @@ Forbidden: "Yoetz verified the work."
 
 Never fabricate a session ID, publication, finding, verdict, or receipt. If a call fails or Yoetz is unavailable, say that no live Yoetz record or receipt is available. Every tool request's `client` is exactly `{kind, version, integration}` — never send `client.id` or any other client field.
 
+# Inherited unavailability
+
+`safe_details.availability: terminal_unavailable` means this host binding has no live Yoetz until the named repair runs; new `request_id`s inherit the same `correlation_id`. Pass it to delegates as `yoetz_availability`; an inheriting delegate makes no Yoetz call and publishes nothing. Only the coordinator repairs and replays the original `request_id`. Never run `yoetz service stop|run|restart` on `INTERNAL_ERROR`.
+
 # Non-default actions need consent
 
 Only operations explicitly listed in `catalog.default_safe` are default-safe. For anything else, run
