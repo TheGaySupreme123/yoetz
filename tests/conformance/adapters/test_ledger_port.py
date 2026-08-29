@@ -1075,13 +1075,35 @@ async def test_repository_grant_suspension_survives_memory_rebind_and_sqlite_res
     assert cleared is not None and cleared.suspension_kind is None
 
 
+def _grant_park_observation(request_suffix: str, writer_suffix: str) -> AppendCommand:
+    """Observation append on the projection-rebuild task used by grant-park checks."""
+
+    observation = ledger_command(request_suffix=request_suffix, index=1, expected_frontier=1)
+    return replace(
+        observation,
+        writer_id=f"wri_00000000-0000-4000-8000-0000000000{writer_suffix}",
+        entries=(
+            replace(
+                observation.entries[0],
+                author=Actor(
+                    actor_id("yoetz:observation-coordinator"),
+                    ActorType.HARNESS,
+                    AuthorshipAssurance.HARNESS_OBSERVED,
+                ),
+                publication_channel=PublicationChannel.HOOK_OBSERVED,
+                coverage=coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+            ),
+        ),
+    )
+
+
 @pytest.mark.anyio
 async def test_repository_grant_suspension_releases_observation_barrier() -> None:
     """A parked standing-grant check must not starve observation for the session (#445)."""
 
     command = ledger_command(request_suffix="9")
     operation_id = "req_00000000-0000-4000-8000-000000000036"
-    observation = _observation_command(request_suffix="a", expected_frontier=1, seed="c")
+    observation = _grant_park_observation("a", "c1")
     for adapter in (memory_ledger(command), sqlite_ledger(command)):
         await adapter.append_batch(command)
         lease = await _semantic_wait_lease(adapter, command, operation_id)
@@ -1101,7 +1123,7 @@ async def test_repository_grant_resume_commits_across_observation_only_suffix() 
 
     command = ledger_command(request_suffix="c")
     operation_id = "req_00000000-0000-4000-8000-000000000037"
-    observation = _observation_command(request_suffix="d", expected_frontier=1, seed="d")
+    observation = _grant_park_observation("d", "d1")
     for adapter in (memory_ledger(command), sqlite_ledger(command)):
         await adapter.append_batch(command)
         await adapter.suspend_check_for_repository_grant(
