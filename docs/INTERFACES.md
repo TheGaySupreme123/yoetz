@@ -1572,13 +1572,20 @@ closes a half-open stream on expiry. On-demand startup has one **30-second** mon
 includes its initial attempt, spawn, and polling; an accepted but silent existing endpoint is
 reported unavailable rather than causing a second daemon to be spawned.
 
-The handshake pins the exact schema-manifest digest on both sides. A listening service that does
-not share the client's digest (or hello shape) closes the connection without answering; the client
-names that outcome `handshake_rejected` (distinct from a frame truncated mid-flight) and, together
-with an answered `manifest_mismatch`, maps it to the retryable `ControlError` reason
-`service_incompatible` (public code `SERVICE_UNAVAILABLE`). The singleton lock stamp carries the
-holder's `pid`, `instance_id`, `service_version`, and `schema_manifest_digest` (bounded, advisory;
-older stamps omit the last two and are read as unknown). On-demand startup — the MCP bridge's path
+The handshake pins the exact schema-manifest digest on both sides. When a listening
+service can decode the peer's hello as a known control-hello shape but the digest does
+not match, it answers with a hello-result carrying **this** installation's digest and
+then closes without admitting a session. The client names an answered digest mismatch
+`manifest_mismatch` and a silent close (unknown hello shape, or a peer that still
+closes without answering) `handshake_rejected`; both map to the retryable
+`ControlError` reason `service_incompatible` (public code `SERVICE_UNAVAILABLE`).
+`yoetz service status --json` emits that reason plus the stamped holder identity and a
+`correlation_id` joinable with `yoetz service diagnostics --correlation-id`. Older
+pre-2.2.0 CLIs that lack `handshake_rejected` still decode the answered hello-result
+and fail on the digest themselves (`protocol_mismatch` in those binaries). The
+singleton lock stamp carries the holder's `pid`, `instance_id`, `service_version`, and
+`schema_manifest_digest` (bounded, advisory; older stamps omit the last two and are
+read as unknown). On-demand startup — the MCP bridge's path
 and `yoetz service restart` — treats an incompatible holder as an upgrade to complete: it records a
 `service_supersede` diagnostic, sends the holder its ordinary bounded-shutdown signal, waits for the
 lock to be released inside the same 30-second budget, then spawns and connects to a successor of
@@ -1869,7 +1876,13 @@ monotonic sample with the same floor rule.
 `privacy_policy_decision`, `privacy_disclosure_decision`, and `idle_relock_policy_change`.
 `CEREMONY_EXPIRY_SECONDS = 300` is the one YZH1/YZS1 challenge/binding expiry. It bounds a whole
 human ceremony, including the trip to a provider console to mint an API key, so it is a five-minute
-span rather than a keystroke timeout. The nine fixed
+span rather than a keystroke timeout. While a `SecretRequiredPhase` is live, the human-control
+handler waits for YZS1 **or** a close/cancel on the YZH1 peer. Killing the foreground ceremony
+client (EOF at the passphrase prompt) cancels the one global ceremony immediately. `service stop`
+must not wait on that mutex: `secret_completed` releases it while waiting, `close()` cancels any
+still-active ceremony, and `UnlockCoordinator.cancel` returns UNLOCKING to LOCKED without reversing
+an in-flight DRAINING/FAILED transition. Shutdown that cancels a live ceremony records
+`ceremony_shutdown` / `cancelled` in the owner-only diagnostic ring. The nine fixed
 `ConfidentialSecretPurpose` wire codes are `1=vault_initialize`, `2=vault_unlock`,
 `3=portable_recovery`, `4=provider_reauthentication`, `5=provider_credential`,
 `6=privacy_reauthentication`, `7=security_reauthentication`,
