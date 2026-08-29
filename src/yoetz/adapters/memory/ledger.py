@@ -1228,6 +1228,13 @@ class MemoryLedgerAdapter:
         return record
 
     def _has_active_frozen_case_unlocked(self, session_id: str) -> bool:
+        """True when observation must defer because a check is actively frozen.
+
+        A standing-grant park expires the lease and may never resume, so
+        ``suspension_kind=repository_grant`` is not a barrier: observation
+        continues and the same request re-acquires the barrier on replay.
+        """
+
         now = _now(self._clock)
         if any(
             reservation.session_id == session_id and reservation.expires_at > now
@@ -1240,6 +1247,7 @@ class MemoryLedgerAdapter:
             and (operation := self._state.operations.get((case_writer_id, operation_id)))
             is not None
             and operation[0].state is OperationState.PENDING
+            and operation[0].suspension_kind is not CheckSuspensionKind.REPOSITORY_GRANT
             for case_writer_id, operation_id in self._state.frozen_cases
         )
 
@@ -2052,7 +2060,12 @@ class MemoryLedgerAdapter:
             return job
 
     async def suspend_check_for_repository_grant(self, lease: OperationLease) -> None:
-        """Durably mark and expire the lease for a pre-job standing-grant suspension."""
+        """Durably mark and expire the lease for a pre-job standing-grant suspension.
+
+        The marker also releases the observation frozen-case barrier for this
+        operation: the ceremony may never complete, and same-request replay
+        re-installs the barrier when it reclaims the lease.
+        """
 
         async with self._lock:
             record = self._require_lease(lease)
@@ -2426,7 +2439,14 @@ class MemoryLedgerAdapter:
             ):
                 raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
             current = Frontier(self._state.projection.frontier, self._state.projection.head_digest)
-            if current != frozen.case.frontier or self._state.frozen_cases.get(key) != frozen.case:
+            frozen_frontier = frozen.case.frontier
+            observation_only_suffix = (
+                current.sequence > frozen_frontier.sequence
+                and self._observation_only_since_unlocked(frozen_frontier.sequence)
+            )
+            if (
+                current != frozen_frontier and not observation_only_suffix
+            ) or self._state.frozen_cases.get(key) != frozen.case:
                 failure = _frontier_conflict(current)
                 canonical = canonical_encode(
                     {

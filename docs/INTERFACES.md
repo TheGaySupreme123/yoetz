@@ -565,7 +565,9 @@ check operation is suspended, before provider construction, job creation, creden
 or dispatch. Bundle migration 0006 records `operations.suspension_kind=repository_grant`
 transactionally on that exact operation; status reads that durable discriminator and never
 reconstructs it from mutable current authority. The marker clears only when that same operation
-resumes or terminalizes. Only a successfully read, valid, exactly bound
+resumes or terminalizes. While the marker is set, the operation is not an active frozen-case
+barrier: observation-authored appends proceed, and same-request replay re-installs the barrier
+when it reclaims the lease (issue #445). Only a successfully read, valid, exactly bound
 `RepositoryPrivacyAuthority(grant_state="missing")` may create this suspension. An unbound or
 mismatched route, missing commitment, closed coordinator, invalid or unavailable policy,
 unavailable reconciliation capability, or activation/reconciliation failure is terminal
@@ -1252,8 +1254,12 @@ actor-id, actor-type, assurance, and channel predicate. The accepted batch still
 reports the real head. For `operation_kind=receipt`, that suffix must additionally contain no
 `finding_recorded` event, so the pinned receipt cannot append past a finding it did not cover. Any
 other intervening record conflicts. Observation appends receive retryable `OPERATION_PENDING` while
-a check-acquisition reservation or frozen case for their session is active; check commit equality
-with the frontier actually frozen is not relaxed.
+a check-acquisition reservation or an *active* frozen case for their session is present. A pending
+check whose `suspension_kind` is `repository_grant` is not an active barrier: the standing-grant
+ceremony may never complete, so observation continues and the same request re-installs the barrier
+on replay. Check commit keeps the frozen subject frontier and tolerates an observation-authored
+suffix after that frontier the same way acquisition and `append_batch` do; cooperative or importer
+motion still conflicts. The verdict is never retargeted to a frontier the case did not inspect.
 
 `ProjectionView` is `compact`, `assignment`, `obligations`, `findings`, `candidate_findings`,
 `evidence`, `results`, `history`, or `versions`. Application status also admits `view=operation` (operation

@@ -1075,6 +1075,130 @@ async def test_repository_grant_suspension_survives_memory_rebind_and_sqlite_res
     assert cleared is not None and cleared.suspension_kind is None
 
 
+def _grant_park_observation(request_suffix: str, writer_suffix: str) -> AppendCommand:
+    """Observation append on the projection-rebuild task used by grant-park checks."""
+
+    observation = ledger_command(request_suffix=request_suffix, index=1, expected_frontier=1)
+    return replace(
+        observation,
+        writer_id=f"wri_00000000-0000-4000-8000-0000000000{writer_suffix}",
+        entries=(
+            replace(
+                observation.entries[0],
+                author=Actor(
+                    actor_id("yoetz:observation-coordinator"),
+                    ActorType.HARNESS,
+                    AuthorshipAssurance.HARNESS_OBSERVED,
+                ),
+                publication_channel=PublicationChannel.HOOK_OBSERVED,
+                coverage=coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+            ),
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_repository_grant_suspension_releases_observation_barrier() -> None:
+    """A parked standing-grant check must not starve observation for the session (#445)."""
+
+    command = ledger_command(request_suffix="9")
+    operation_id = "req_00000000-0000-4000-8000-000000000036"
+    observation = _grant_park_observation("a", "c1")
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        lease = await _semantic_wait_lease(adapter, command, operation_id)
+        assert await adapter.has_active_frozen_case(command.session_id)
+        with pytest.raises(PublicOperationError) as blocked:
+            await adapter.append_batch(observation)
+        assert blocked.value.code is PublicErrorCode.OPERATION_PENDING
+        await adapter.suspend_check_for_repository_grant(lease)
+        assert not await adapter.has_active_frozen_case(command.session_id)
+        appended = await adapter.append_batch(observation)
+        assert appended.result_frontier.sequence == 2
+
+
+@pytest.mark.anyio
+async def test_repository_grant_resume_commits_across_observation_only_suffix() -> None:
+    """Same-request replay after a grant park must complete if only observation moved (#445)."""
+
+    command = ledger_command(request_suffix="c")
+    operation_id = "req_00000000-0000-4000-8000-000000000037"
+    observation = _grant_park_observation("d", "d1")
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        await adapter.suspend_check_for_repository_grant(
+            await _semantic_wait_lease(adapter, command, operation_id)
+        )
+        drained = await adapter.append_batch(observation)
+        resumed = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            operation_id,
+            "sha256:" + "7" * 64,
+        )
+        assert type(resumed) is FrozenCase
+        assert resumed.case.frontier.sequence == 1
+        ready = await adapter.advance_check_phase(
+            resumed.lease,
+            CheckPhase.SEMANTIC_WAIT,
+            CheckPhase.READY_TO_FINALIZE,
+        )
+        ranked = RankedFindings((), 0, CheckVerdict.NO_ISSUE_DETECTED, command.entries[0].coverage)
+        result = await adapter.commit_check_if_current(
+            FrozenCase(resumed.case, ready),
+            ranked,
+            (CheckPolicyExecution("research-evidence", "0.1.0", "run", "completed"),),
+            SemanticStatus.NOT_REQUESTED,
+            SemanticReason.DETERMINISTIC_MODE,
+            None,
+            operation_id,
+        )
+        assert result.outcome == "committed"
+        assert result.subject_frontier.sequence == 1
+        assert result.result_frontier.sequence > drained.result_frontier.sequence
+
+
+@pytest.mark.anyio
+async def test_repository_grant_resume_conflicts_on_cooperative_suffix() -> None:
+    """Cooperative motion during a grant park still conflicts at commit (#445)."""
+
+    command = ledger_command(request_suffix="e")
+    operation_id = "req_00000000-0000-4000-8000-000000000038"
+    second = ledger_command(request_suffix="f", index=1, expected_frontier=1)
+    for adapter in (memory_ledger(command), sqlite_ledger(command)):
+        await adapter.append_batch(command)
+        await adapter.suspend_check_for_repository_grant(
+            await _semantic_wait_lease(adapter, command, operation_id)
+        )
+        await adapter.append_batch(second)
+        resumed = await adapter.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            operation_id,
+            "sha256:" + "7" * 64,
+        )
+        assert type(resumed) is FrozenCase
+        ready = await adapter.advance_check_phase(
+            resumed.lease,
+            CheckPhase.SEMANTIC_WAIT,
+            CheckPhase.READY_TO_FINALIZE,
+        )
+        ranked = RankedFindings((), 0, CheckVerdict.NO_ISSUE_DETECTED, command.entries[0].coverage)
+        with pytest.raises(PublicOperationError) as caught:
+            await adapter.commit_check_if_current(
+                FrozenCase(resumed.case, ready),
+                ranked,
+                (CheckPolicyExecution("research-evidence", "0.1.0", "run", "completed"),),
+                SemanticStatus.NOT_REQUESTED,
+                SemanticReason.DETERMINISTIC_MODE,
+                None,
+                operation_id,
+            )
+        assert caught.value.code is PublicErrorCode.FRONTIER_CONFLICT
+
+
 @pytest.mark.anyio
 async def test_commit_check_if_current_contract() -> None:
     command = ledger_command()
