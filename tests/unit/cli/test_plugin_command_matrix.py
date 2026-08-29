@@ -180,12 +180,18 @@ def test_wrong_harness_at_the_dispatcher_stays_the_closed_invalid_token(
     assert capsys.readouterr().err == "codex_plugin_command_invalid\n"
 
 
+def _flatten_help(output: str) -> str:
+    """Collapse rich's wrapped, box-drawn help into one whitespace-normalized line."""
+
+    return " ".join(output.replace("│", " ").replace("╭", " ").replace("╰", " ").split())
+
+
 def test_plugin_help_marks_every_command_with_its_hosts() -> None:
     result = _RUNNER.invoke(
         app, ["integrate", "codex", "plugin", "--help"], env={"COLUMNS": "300", "TERM": "dumb"}
     )
     assert result.exit_code == 0, result.output
-    text = " ".join(result.output.split())
+    text = _flatten_help(result.output)
     assert "Codex supports only preview, status, and remove" in text
     for command in ("install", "update", "enable", "disable", "export"):
         assert f"{command} " in text
@@ -202,4 +208,4 @@ def test_plugin_help_marks_every_command_with_its_hosts() -> None:
         ["integrate", "codex", "plugin", "preview", "--help"],
         env={"COLUMNS": "300", "TERM": "dumb"},
     )
-    assert "Not used for Codex (removal only)" in " ".join(action_help.output.split())
+    assert "Not used for Codex (removal only)" in _flatten_help(action_help.output)
