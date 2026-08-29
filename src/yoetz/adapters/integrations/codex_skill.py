@@ -731,11 +731,24 @@ def _remove_tree_fd(parent_fd: int, name: str, *, depth: int = 0) -> None:
     os.rmdir(name, dir_fd=parent_fd)
 
 
-def _open_skill_parent_fd(root: Path, *, create: bool) -> int:
+def _open_skill_parent_fd(
+    root: Path,
+    *,
+    create: bool,
+    target_identity: str,
+    parent_identity: str,
+) -> int:
+    """Open the managed parent and prove the previewed inode is on the retained walk."""
+
     _require_dir_fd_primitives()
     current_fd = os.open(root, _directory_open_flags())
     try:
-        _owned_stat_not_writable(os.fstat(current_fd), directory=True)
+        root_facts = os.fstat(current_fd)
+        _owned_stat_not_writable(root_facts, directory=True)
+        root_identity = _inode_identity(root_facts)
+        if root_identity != target_identity:
+            raise _error(IntegrationReason.PREVIEW_STALE)
+        preview_parent_seen = root_identity == parent_identity
         for component in (".agents", "skills"):
             try:
                 child_fd = os.open(component, _directory_open_flags(), dir_fd=current_fd)
@@ -753,21 +766,22 @@ def _open_skill_parent_fd(root: Path, *, create: bool) -> int:
             except OSError as exc:
                 raise _error(IntegrationReason.TARGET_UNSAFE) from exc
             try:
-                _owned_stat_not_writable(os.fstat(child_fd), directory=True)
+                child_facts = os.fstat(child_fd)
+                _owned_stat_not_writable(child_facts, directory=True)
+                preview_parent_seen = (
+                    preview_parent_seen or _inode_identity(child_facts) == parent_identity
+                )
             except BaseException:
                 os.close(child_fd)
                 raise
             os.close(current_fd)
             current_fd = child_fd
+        if not preview_parent_seen:
+            raise _error(IntegrationReason.PREVIEW_STALE)
         return current_fd
     except BaseException:
         os.close(current_fd)
         raise
-
-
-def _assert_parent_identity(root: Path, expected: str) -> None:
-    if _skill_parent_identity(root) != expected:
-        raise _error(IntegrationReason.PREVIEW_STALE)
 
 
 def recover_interrupted_swap(
@@ -883,8 +897,12 @@ class CodexSkillIntegration(IntegrationsPort):
             )
             raise _error(reason)
         root, _target_identity = _validated_project(command.target)
-        _assert_parent_identity(root, inspection.parent_identity)
-        parent_fd = _open_skill_parent_fd(root, create=True)
+        parent_fd = _open_skill_parent_fd(
+            root,
+            create=True,
+            target_identity=inspection.target_identity,
+            parent_identity=inspection.parent_identity,
+        )
         stage_name = f".yoetz.stage-{command.request_id}"
         rollback_name = f".yoetz.rollback-{command.request_id}"
         destination_name = "yoetz"
@@ -957,8 +975,12 @@ class CodexSkillIntegration(IntegrationsPort):
         ):
             raise _error(IntegrationReason.REMOVE_REFUSED)
         root, _target_identity = _validated_project(command.target)
-        _assert_parent_identity(root, inspection.parent_identity)
-        parent_fd = _open_skill_parent_fd(root, create=False)
+        parent_fd = _open_skill_parent_fd(
+            root,
+            create=False,
+            target_identity=inspection.target_identity,
+            parent_identity=inspection.parent_identity,
+        )
         staging_name = f".yoetz.remove-{command.request_id}"
         try:
             if staging_name in os.listdir(parent_fd):

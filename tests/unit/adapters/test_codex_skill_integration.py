@@ -299,6 +299,55 @@ async def test_parent_replaced_between_preview_and_apply_fails_closed(tmp_path: 
 
 
 @pytest.mark.anyio
+async def test_parent_swap_after_path_identity_check_is_caught_by_retained_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#396: the descriptor itself, not a prior pathname check, binds the preview."""
+
+    import yoetz.adapters.integrations.codex_skill as module
+
+    tmp_path.chmod(0o700)
+    skills = tmp_path / ".agents" / "skills"
+    skills.mkdir(parents=True, mode=0o700)
+    (tmp_path / ".agents").chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    request = request_id("req_00000000-0000-4000-8000-000000000036")
+    preview = await adapter.preview_skill(
+        HarnessId.CODEX,
+        SkillPreviewCommand(request, target, IntegrationAction.INSTALL, False),
+    )
+
+    original = module._skill_parent_identity  # pyright: ignore[reportPrivateUsage]
+    replaced = tmp_path / ".agents" / "skills.replaced-after-check"
+
+    def swap_after_identity(root: Path) -> str:
+        identity = original(root)
+        skills.rename(replaced)
+        skills.mkdir(mode=0o700)
+        monkeypatch.setattr(module, "_skill_parent_identity", original)
+        return identity
+
+    monkeypatch.setattr(module, "_skill_parent_identity", swap_after_identity)
+
+    with pytest.raises(IntegrationError) as caught:
+        await adapter.install_skill(
+            HarnessId.CODEX,
+            SkillApplyCommand(
+                request,
+                target,
+                IntegrationAction.INSTALL,
+                preview.preview_digest,
+                True,
+                False,
+            ),
+        )
+    assert caught.value.reason is IntegrationReason.PREVIEW_STALE
+    assert not (skills / "yoetz").exists()
+    assert not (replaced / "yoetz").exists()
+
+
+@pytest.mark.anyio
 async def test_install_and_remove_stay_atomic_on_owner_directories(tmp_path: Path) -> None:
     tmp_path.chmod(0o700)
     adapter = CodexSkillIntegration(_resources(), allow_untested=True)
