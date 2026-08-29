@@ -39,7 +39,11 @@ fault/contention matrix on both advertised platforms.
    canonical event bytes never rewritten by migration; newer unknown write-schema fails closed.
 8. **Corruption response:** integrity failure quarantines the bundle (writes disabled,
    `STORAGE_CORRUPT`), preserves originals under `quarantine/`, and directs to
-   backup/restore. Projection-only corruption is repaired by generation replay. Recovery of an
+   backup/restore. Projection-only corruption is repaired by generation replay. A deterministic
+   failure to rehydrate one pending operation's resume pointer is not bundle integrity failure:
+   recovery quarantines that operation as `operation_resume_object_invalid` and keeps the ledger
+   live (issue #443). Chain, writer, and object-inventory integrity failures remain
+   bundle-terminal. Recovery of an
    existing bundle must remain cooperative with the trusted local service: decoding yields in
    bounded batches and the pure CPU replay reducer runs outside the service event loop, so one
    large or corrupt task cannot monopolize ordinary control. An observation route that encounters

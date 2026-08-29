@@ -119,6 +119,7 @@ from yoetz.ports.ledger import (
     ObligationsProjectionFilter,
     OperationKind,
     OperationLease,
+    OperationQuarantineCode,
     OperationRecord,
     OperationState,
     PendingVerdict,
@@ -211,6 +212,7 @@ def _error(
     *,
     retryable: bool = False,
     reason_code: str | None = None,
+    quarantine_code: str | None = None,
     sequence: int | None = None,
     head_digest: str | None = None,
     component: _ErrorComponent | None = None,
@@ -220,6 +222,8 @@ def _error(
     details: dict[str, str | int] = {}
     if reason_code is not None:
         details["reason_code"] = reason_code
+    if quarantine_code is not None:
+        details["quarantine_code"] = quarantine_code
     if sequence is not None:
         details["sequence"] = sequence
     if head_digest is not None:
@@ -451,6 +455,47 @@ async def load_frozen_case_from_resume(
     ):
         raise ValueError("resume_object_binding_invalid")
     return case
+
+
+def quarantine_resume_object_invalid(
+    record: OperationRecord, *, now: datetime
+) -> tuple[OperationRecord, PublicOperationError]:
+    """Terminalize one pending check whose durable resume pointer cannot be rehydrated.
+
+    The verdict belongs to this operation id, not the ledger: recovery keeps the event
+    chain, projection, and every other operation live, and same-request replay raises
+    the stored error instead of latching bundle ``STORAGE_CORRUPT``.
+    """
+
+    error = _error(
+        PublicErrorCode.STORAGE_CORRUPT,
+        quarantine_code=OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value,
+    )
+    canonical = canonical_encode(
+        {
+            "code": error.code.value,
+            "message": str(error),
+            "retryable": error.retryable,
+            "safe_details": dict(error.safe_details),
+        }
+    )
+    quarantined = replace(
+        record,
+        state=OperationState.QUARANTINED,
+        phase=CheckPhase.TERMINAL,
+        owner_generation=None,
+        lease_owner_id=None,
+        lease_generation=None,
+        lease_expires_at=None,
+        resume_object_ref=None,
+        result_canonical=canonical,
+        result_digest=f"sha256:{hashlib.sha256(canonical).hexdigest()}",
+        result_locator=None,
+        quarantine_code=OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID,
+        terminal_at=now,
+        suspension_kind=None,
+    )
+    return quarantined, error
 
 
 def _now(clock: ClockPort | None) -> datetime:
@@ -1843,7 +1888,17 @@ class MemoryLedgerAdapter:
                         raise stored_error
                     raise _error(PublicErrorCode.STORAGE_CORRUPT)
                 if record.state is OperationState.QUARANTINED:
-                    raise _error(PublicErrorCode.STORAGE_CORRUPT)
+                    stored_error = self._state.check_errors.get(key)
+                    if stored_error is not None:
+                        raise stored_error
+                    raise _error(
+                        PublicErrorCode.STORAGE_CORRUPT,
+                        quarantine_code=(
+                            record.quarantine_code.value
+                            if record.quarantine_code is not None
+                            else None
+                        ),
+                    )
                 writer = self._state.writers.get(writer_id)
                 if writer is None or writer.session_id != session_id:
                     raise _error(PublicErrorCode.SESSION_NOT_FOUND)
