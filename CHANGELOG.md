@@ -8,6 +8,13 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Reopening a task whose one pending check has an undecodable resume checkpoint no longer latches
+  non-retryable `STORAGE_CORRUPT` for the entire ledger. Recovery quarantines that operation as
+  `operation_resume_object_invalid`, stores the terminal error for same-request replay, and leaves
+  events, projection, writers, and every other operation readable and writable. A corrupt event
+  chain or object inventory row still fails the bundle once; an environmental `OSError` during
+  rehydration still retries without latching (issue #443).
+
 - Replaying a check that was suspended on a standing repository grant no longer fails with a
   non-retryable `STORAGE_CORRUPT` after the trusted `yoetz --privacy` ceremony, and a task whose
   ledger holds `evidence_recorded/1.1.0` events (any evidence carrying a `digest_binding`) no

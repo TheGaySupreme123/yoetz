@@ -37,6 +37,8 @@ from yoetz.ports.ledger import (
     CheckPhase,
     FrozenCase,
     OperationKind,
+    OperationQuarantineCode,
+    OperationState,
     ProjectionView,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
@@ -738,3 +740,100 @@ async def test_transient_recovery_failure_is_retried_not_latched(
     )
     assert projection is not None
     reopened_db.close()
+
+
+@pytest.mark.anyio
+async def test_undecodable_pending_resume_is_quarantined_not_latched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deterministic resume decode fault belongs to that operation, not the bundle (#443)."""
+
+    command, objects = command_from_records(replay_records("projection-rebuild")[:1])
+    path = tmp_path / "resume-quarantine.sqlite3"
+    ledger, db = file_sqlite_for(command, objects, path)
+    await ledger.append_batch(command)
+    check_request = uuid_id("req", 80_005)
+    request_digest = "sha256:" + "7" * 64
+    frozen = await ledger.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        check_request,
+        request_digest,
+    )
+    assert type(frozen) is FrozenCase
+    db.close()
+
+    reopened, reopened_db = file_sqlite_for(command, objects, path)
+
+    async def undecodable(*_args: object, **_kwargs: object) -> object:
+        raise ValueError("resume_object_shape_invalid")
+
+    monkeypatch.setattr(sqlite_repository, "load_frozen_case_from_resume", undecodable)
+
+    first = await reopened.load_projection(command.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    second = await reopened.load_projection(command.session_id, ProjectionView.CANDIDATE_FINDINGS)
+    assert first is not None and second is not None
+    assert reopened._recovery_failed is False  # pyright: ignore[reportPrivateUsage]
+
+    stored = await reopened.lookup_operation(command.writer_id, check_request)
+    assert stored is not None
+    assert stored.state is OperationState.QUARANTINED
+    assert stored.quarantine_code is OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID
+    assert stored.resume_object_ref is None
+    assert (command.writer_id, check_request) not in reopened._state.frozen_cases  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(PublicOperationError) as failure:
+        await reopened.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            check_request,
+            request_digest,
+        )
+    assert failure.value.code is PublicErrorCode.STORAGE_CORRUPT
+    assert failure.value.retryable is False
+    assert dict(failure.value.safe_details) == {
+        "reason_code": OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value
+    }
+
+    replacement = await reopened.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        uuid_id("req", 80_006),
+        "sha256:" + "8" * 64,
+    )
+    assert type(replacement) is FrozenCase
+    assert replacement.case == frozen.case
+    durable_row = reopened_db.execute(
+        "SELECT state, quarantine_code, resume_object_id FROM operations "
+        "WHERE writer_id=? AND operation_id=?",
+        (command.writer_id, check_request),
+    ).fetchone()
+    assert durable_row == (
+        OperationState.QUARANTINED.value,
+        OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value,
+        None,
+    )
+    reopened_db.close()
+
+    monkeypatch.undo()
+    persisted, persisted_db = file_sqlite_for(command, objects, path)
+    again = await persisted.lookup_operation(command.writer_id, check_request)
+    assert again is not None
+    assert again.state is OperationState.QUARANTINED
+    assert again.quarantine_code is OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID
+    with pytest.raises(PublicOperationError) as persisted_failure:
+        await persisted.freeze_case(
+            command.session_id,
+            command.writer_id,
+            1,
+            check_request,
+            request_digest,
+        )
+    assert persisted_failure.value.code is PublicErrorCode.STORAGE_CORRUPT
+    assert dict(persisted_failure.value.safe_details) == {
+        "reason_code": OperationQuarantineCode.OPERATION_RESUME_OBJECT_INVALID.value
+    }
+    persisted_db.close()

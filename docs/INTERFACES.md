@@ -1193,7 +1193,15 @@ deterministic envelope also stamps the kernel's rendered finding-text contract d
 stamp is absent or from different wording is superseded — the deterministic phase recomputes from
 the unchanged frozen case — never `STORAGE_CORRUPT`, so a finding-wording upgrade cannot wedge an
 in-flight check on its own request id. No
-memory-only phase-object map is recovery authority. Every successful phase
+memory-only phase-object map is recovery authority. Recovery of that resume pointer is
+operation-scoped: a deterministic rehydration failure (decode, shape, or binding of the stored
+checkpoint) quarantines that operation as `operation_resume_object_invalid`, leaves `frozen_cases`
+empty for it, and stores a terminal non-retryable `STORAGE_CORRUPT` so `freeze_case` and
+same-request replay return that error. Events, projection, writers, and every other operation on
+the task stay readable and writable. Environmental object I/O (`OSError`) during the same
+rehydration remains retryable `STORAGE_CORRUPT` without latching a bundle recovery failure. A
+corrupt event chain, writer table, or object inventory row remains bundle-terminal
+`STORAGE_CORRUPT`. Every successful phase
 advance, renewal, or reclaim returns a replacement current lease; the prior lease is spent and the
 application reconstructs `FrozenCase` with the unchanged case and replacement lease before the
 next step.

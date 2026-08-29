@@ -17,6 +17,7 @@ from yoetz.adapters.memory.ledger import (
     build_append_operation_record,
     compact_status_coverage,
     load_frozen_case_from_resume,
+    quarantine_resume_object_invalid,
 )
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.domain.events import (
@@ -76,6 +77,7 @@ from yoetz.ports.ledger import (
     FrozenCase,
     OperationKind,
     OperationLease,
+    OperationQuarantineCode,
     OperationRecord,
     OperationResultLocator,
     OperationState,
@@ -351,6 +353,88 @@ class SqliteLedger:
         except (TypeError, ValueError) as exc:
             raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
 
+    def _terminal_at(self) -> datetime:
+        return self._clock.now_utc() if self._clock is not None else datetime.now(UTC)
+
+    def _stored_check_error(self, result_canonical: bytes) -> PublicOperationError:
+        try:
+            failure_json = strict_json_parse(result_canonical)
+            if not isinstance(failure_json, Mapping):
+                raise ValueError("check_terminal_error_invalid")
+            if frozenset(failure_json) == frozenset(
+                {"code", "message", "retryable", "safe_details"}
+            ):
+                retryable = failure_json["retryable"]
+                if retryable is not False:
+                    raise ValueError("check_terminal_error_retryable")
+                return PublicOperationError(
+                    PublicErrorCode(cast(str, failure_json["code"])),
+                    cast(str, failure_json["message"]),
+                    retryable,
+                    safe_details=failure_json["safe_details"],
+                )
+            if frozenset(failure_json) == frozenset(
+                {"code", "reason_code", "sequence", "head_digest"}
+            ):
+                if (
+                    failure_json["code"] != PublicErrorCode.FRONTIER_CONFLICT.value
+                    or failure_json["reason_code"] != "frontier_changed"
+                ):
+                    raise ValueError("check_terminal_error_invalid")
+                return _public_error(
+                    PublicErrorCode.FRONTIER_CONFLICT,
+                    retryable=True,
+                    reason_code="frontier_changed",
+                    sequence=cast(int, failure_json["sequence"]),
+                    head_digest=cast(str, failure_json["head_digest"]),
+                )
+            raise ValueError("check_terminal_error_invalid")
+        except (TypeError, ValueError) as exc:
+            raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+
+    def _persist_quarantined_operations(self, records: tuple[OperationRecord, ...]) -> None:
+        if not records:
+            return
+        now = format_rfc3339_millis(self._terminal_at())
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            self._verify_owner()
+            for record in records:
+                if (
+                    record.state is not OperationState.QUARANTINED
+                    or record.quarantine_code is None
+                    or record.result_canonical is None
+                    or record.result_digest is None
+                    or record.terminal_at is None
+                ):
+                    raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+                self._db.execute(
+                    "UPDATE operations SET resume_object_id=NULL,state=?,phase=?,"
+                    "owner_generation=NULL,lease_owner_id=NULL,lease_generation=NULL,"
+                    "lease_expires_at=NULL,result_canonical=?,result_digest=?,"
+                    "result_object_id=NULL,quarantine_code=?,terminal_at=?,"
+                    "suspension_kind=NULL,updated_at=? "
+                    "WHERE writer_id=? AND operation_id=? AND state='pending'",
+                    (
+                        record.state.value,
+                        record.phase.value,
+                        record.result_canonical,
+                        record.result_digest,
+                        record.quarantine_code.value,
+                        format_rfc3339_millis(record.terminal_at),
+                        now,
+                        record.writer_id,
+                        record.operation_id,
+                    ),
+                )
+                if self._db.changes() != 1:
+                    raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
+            self._db.execute("COMMIT")
+        except BaseException:
+            if self._db.get_autocommit() is False:
+                self._db.execute("ROLLBACK")
+            raise
+
     async def _decode_durable_record(self, row: tuple[object, ...]) -> LedgerRecord:
         if len(row) != 5 or type(row[0]) is not bytes:
             raise _public_error(PublicErrorCode.STORAGE_CORRUPT)
@@ -567,6 +651,7 @@ class SqliteLedger:
                 )
             self._state.records = records
             self._state.projection = projection
+            newly_quarantined: list[OperationRecord] = []
             for pending_row in self._db.execute(
                 "SELECT writer_id,operation_id,operation_kind,request_digest,phase,"
                 "owner_generation,lease_owner_id,lease_generation,lease_expires_at,"
@@ -619,17 +704,33 @@ class SqliteLedger:
                     writer = self._state.writers[operation.writer_id]
                     if self._objects is None:
                         raise ValueError("object_store_missing")
+                except PublicOperationError:
+                    raise
+                except (KeyError, OSError, TypeError, ValueError) as exc:
+                    raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+                key = (operation.writer_id, operation.operation_id)
+                assert self._objects is not None
+                try:
                     case = await load_frozen_case_from_resume(
                         self._objects,
                         operation,
                         task=self._task_id,
                         session=writer.session_id,
                     )
-                except PublicOperationError:
-                    raise
-                except (KeyError, OSError, TypeError, ValueError) as exc:
+                except OSError as exc:
                     raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
-                key = (operation.writer_id, operation.operation_id)
+                except KeyError, TypeError, ValueError:
+                    # Decode/shape/binding of this resume pointer is operation-scoped. The
+                    # event chain already replayed; latching _recovery_failed here would make
+                    # every later call STORAGE_CORRUPT for an intact ledger (#443).
+                    quarantined, stored_error = quarantine_resume_object_invalid(
+                        operation, now=self._terminal_at()
+                    )
+                    self._state.operations[key] = (quarantined, None)
+                    self._state.check_errors[key] = stored_error
+                    newly_quarantined.append(quarantined)
+                    await asyncio.sleep(0)
+                    continue
                 self._state.frozen_cases[key] = case
                 self._state.operations[key] = (operation, None)
                 await asyncio.sleep(0)
@@ -805,41 +906,7 @@ class SqliteLedger:
                             ),
                         )
                 else:
-                    try:
-                        failure_json = strict_json_parse(cast(bytes, result_canonical))
-                        if not isinstance(failure_json, Mapping):
-                            raise ValueError("check_terminal_error_invalid")
-                        if frozenset(failure_json) == frozenset(
-                            {"code", "message", "retryable", "safe_details"}
-                        ):
-                            retryable = failure_json["retryable"]
-                            if retryable is not False:
-                                raise ValueError("check_terminal_error_retryable")
-                            check_error = PublicOperationError(
-                                PublicErrorCode(cast(str, failure_json["code"])),
-                                cast(str, failure_json["message"]),
-                                retryable,
-                                safe_details=failure_json["safe_details"],
-                            )
-                        elif frozenset(failure_json) == frozenset(
-                            {"code", "reason_code", "sequence", "head_digest"}
-                        ):
-                            if (
-                                failure_json["code"] != PublicErrorCode.FRONTIER_CONFLICT.value
-                                or failure_json["reason_code"] != "frontier_changed"
-                            ):
-                                raise ValueError("check_terminal_error_invalid")
-                            check_error = _public_error(
-                                PublicErrorCode.FRONTIER_CONFLICT,
-                                retryable=True,
-                                reason_code="frontier_changed",
-                                sequence=cast(int, failure_json["sequence"]),
-                                head_digest=cast(str, failure_json["head_digest"]),
-                            )
-                        else:
-                            raise ValueError("check_terminal_error_invalid")
-                    except (TypeError, ValueError) as exc:
-                        raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+                    check_error = self._stored_check_error(cast(bytes, result_canonical))
                 self._state.operations[(writer_value, operation_value)] = (
                     operation,
                     append_result,
@@ -849,6 +916,51 @@ class SqliteLedger:
                 if operation.operation_kind is OperationKind.CHECK and locator is None:
                     assert check_error is not None
                     self._state.check_errors[(writer_value, operation_value)] = check_error
+            for quarantine_row in self._db.execute(
+                "SELECT writer_id,operation_id,operation_kind,request_digest,phase,"
+                "result_canonical,result_digest,quarantine_code,terminal_at "
+                "FROM operations WHERE state='quarantined'"
+            ):
+                (
+                    writer_value,
+                    operation_value,
+                    kind_value,
+                    digest_value,
+                    phase_value,
+                    result_canonical,
+                    result_digest,
+                    quarantine_code_value,
+                    terminal,
+                ) = quarantine_row
+                try:
+                    operation = OperationRecord(
+                        cast(str, writer_value),
+                        cast(str, operation_value),
+                        OperationKind(cast(str, kind_value)),
+                        cast(str, digest_value),
+                        OperationState.QUARANTINED,
+                        CheckPhase(cast(str, phase_value)),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        cast(bytes, result_canonical),
+                        cast(str, result_digest),
+                        None,
+                        OperationQuarantineCode(cast(str, quarantine_code_value)),
+                        parse_rfc3339_millis(cast(str, terminal)),
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+                key = (operation.writer_id, operation.operation_id)
+                self._state.operations[key] = (operation, None)
+                if operation.operation_kind is OperationKind.CHECK:
+                    self._state.check_errors[key] = self._stored_check_error(
+                        cast(bytes, result_canonical)
+                    )
+                await asyncio.sleep(0)
+            self._persist_quarantined_operations(tuple(newly_quarantined))
             # Disclosure waits are durable but the oracle is in-memory, so a restart would
             # otherwise answer "no continuation" for a check that is genuinely still suspended —
             # exactly the unrecoverable state this work exists to remove.
