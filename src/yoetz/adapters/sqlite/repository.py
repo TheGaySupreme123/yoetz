@@ -102,7 +102,7 @@ from yoetz.protocol.coverage import (
     coverage_to_json,
 )
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
-from yoetz.protocol.models import SemanticReason, SemanticStatus
+from yoetz.protocol.models import CheckScopeModel, SemanticReason, SemanticStatus
 
 __all__ = ["CheckpointReport", "SqliteLedger"]
 
@@ -1876,6 +1876,8 @@ class SqliteLedger:
         semantic_reason: SemanticReason,
         semantic_provenance: SemanticProvenance | None,
         request_id: str,
+        *,
+        scope: CheckScopeModel | None = None,
     ) -> CheckCommitResult:
         await self._ensure_recovered()
         async with self._lock:
@@ -1900,6 +1902,7 @@ class SqliteLedger:
                     semantic_reason,
                     semantic_provenance,
                     request_id,
+                    scope=scope,
                 )
             except PublicOperationError:
                 # The memory oracle terminalizes a frontier conflict before raising it. Preserve

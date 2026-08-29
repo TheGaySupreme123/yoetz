@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
+from typing import cast, overload
 
 from yoetz.domain.events import (
     ActionRecordedPayload,
@@ -48,6 +48,7 @@ from yoetz.kernel.projections import (
     ContradictionRecord,
     DecisionProjectionRecord,
     EvidenceProjectionRecord,
+    FindingProjectionRecord,
     ObligationProjectionRecord,
     PlanProjectionRecord,
     ProjectionRecord,
@@ -105,13 +106,39 @@ def fnd(number: int) -> FindingId:
     return finding_id(f"fnd_10000000-0000-4000-8000-{number:012x}")
 
 
+@overload
+def record(payload: Finding, number: int) -> FindingProjectionRecord: ...
+
+
+@overload
+def record[T](payload: T, number: int) -> ProjectionRecord[T]: ...
+
+
 def record[T](payload: T, number: int) -> ProjectionRecord[T]:
+    if type(payload) is Finding:
+        return cast(ProjectionRecord[T], finding_record(payload, number))
     return ProjectionRecord(
         payload=payload,
         payload_digest=canonical_digest(encode_payload(cast(EventPayload, payload))),
         redacted=False,
         source_event_id=evt(number),
         source_frontier=number,
+    )
+
+
+def finding_record(
+    payload: Finding,
+    number: int,
+    *,
+    resolved_by_check_event_id: EventId | None = None,
+) -> FindingProjectionRecord:
+    return FindingProjectionRecord(
+        payload=payload,
+        payload_digest=canonical_digest(encode_payload(payload)),
+        redacted=False,
+        source_event_id=evt(number),
+        source_frontier=number,
+        resolved_by_check_event_id=resolved_by_check_event_id,
     )
 
 
@@ -165,7 +192,7 @@ def make_case(
     results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]] | None = None,
     evidence: Mapping[EvidenceId, EvidenceProjectionRecord] | None = None,
     claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload]] | None = None,
-    findings: Mapping[FindingId, ProjectionRecord[Finding]] | None = None,
+    findings: Mapping[FindingId, FindingProjectionRecord] | None = None,
     responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]] | None = None,
     contradictions: Mapping[ContradictionKey, ContradictionRecord] | None = None,
     gaps: tuple[CaseGap, ...] = (),

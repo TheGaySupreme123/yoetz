@@ -1503,7 +1503,8 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Bounded waiver is reserved for an authorized local-CLI human and is not an agent option. "
         "A readable response removes that finding from unanswered_finding_count without reducing "
         "receipt_blocking_finding_count, erasing its historical record, or closing an independent "
-        "coverage gap. Call it once per finding; a "
+        "coverage gap; only a later qualifying check of the repaired record resolves a finding. "
+        "Call it once per finding; a "
         "readable response identifying a finding that check returned is not material change and "
         "needs no recheck, while a redacted or unreadable response does. Guidance: "
         "yoetz://guidance/publication-policy.md.",
@@ -1528,8 +1529,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "source-event, payload-availability, outcome, action, and evidence facts without result "
         "prose. Read closure_readiness on any result before spending a check or a receipt: "
         "unanswered_finding_count names response work, while receipt_blocking_finding_count names "
-        "actionable findings that permanently prevent a clean receipt. findings_unanswered should "
-        "be acted on; receipt_findings_unresolved must not trigger another response loop. Call it "
+        "current actionable findings; only a later qualifying check of the repaired record "
+        "resolves one, never a response, and a resolved finding stays visible as history with "
+        "resolved=true under filter.include_resolved. findings_unanswered should be answered; "
+        "receipt_findings_unresolved should be repaired and rechecked, never answered again. Call it "
         "after a resume, a compaction, or a delegate handoff, and before a "
         "completion claim, rather than between routine tool calls. Guidance: "
         "yoetz://guidance/workflow.md.",
@@ -1612,8 +1615,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
                 "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
                 "check": "sha256:db57da2058052843ebb583f2ac141ebf7925dcf920583b0cdad6533c3f7fa29a",
-                "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
-                "status": "sha256:918ff925873d47c213c546623ec7a28ee1f5798c46fc4c5c3ad879d84d1f18a0",
+                "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
+                "status": "sha256:5147f6a2c2a6b1e2e2275dc32568fcf3c89e8f983edca6aa9b05d5bd432e9355",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1623,8 +1626,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
                 "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
                 "check": "sha256:89899d93b76ea85c90d79d3df150f076f6b64a28cdb8f410c263ce3c1aa89b91",
-                "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
-                "status": "sha256:918ff925873d47c213c546623ec7a28ee1f5798c46fc4c5c3ad879d84d1f18a0",
+                "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
+                "status": "sha256:5147f6a2c2a6b1e2e2275dc32568fcf3c89e8f983edca6aa9b05d5bd432e9355",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
                 "read_guidance": "sha256:737b75bde002ab35255e19169d29f38d40a29d580b8165c759b1bc2373dd28bd",
             }
@@ -1633,8 +1636,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:f313862ab5deb5147947907796e17f024978d9c1bcb74ac744d31e338943d0b5",
-        "strict": "sha256:1902e10bf6b00e50c94858d8dc0aabf5b4c79f70f7faf6725cc446eac1a91790",
+        "policy": "sha256:1d9cf5638ab280e43ad95cabb9d9a91c781a804fc6c86c4fde63e4f38500607a",
+        "strict": "sha256:4eb3862121e6da91bed7ac017567c507cd88852590e35510ae7cae1c6ba2ba87",
     }
 )
 

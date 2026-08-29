@@ -460,9 +460,11 @@ erases the finding.
 ## `receipt`
 
 Read `status.closure_readiness` before requesting a receipt. Respond while
-`findings_unanswered` is present. A remaining `receipt_findings_unresolved` condition is a permanent
-conclusion bound, not a reason to respond again; request the receipt and keep the final claim no
-stronger than its conclusion, coverage, freshness, receipt-blocking findings, and limitations.
+`findings_unanswered` is present. A remaining `receipt_findings_unresolved` condition means an
+actionable finding is still current: repair the record and recheck if you can, because only a later
+qualifying check resolves it, never another response. If the repaired record was rechecked and the
+issue still fires, request the receipt and keep the final claim no stronger than its conclusion,
+coverage, freshness, receipt-blocking findings, and limitations.
 
 ```json
 {

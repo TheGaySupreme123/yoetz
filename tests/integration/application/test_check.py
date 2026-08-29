@@ -71,7 +71,7 @@ from yoetz.ports.runtime import BundleRuntimePort, OwnershipFence, RouteCommand,
 from yoetz.ports.semantic import ReviewerChallenge, SamplingParams, SemanticJudgment
 from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind
-from yoetz.protocol.models import CheckRequest, SemanticReason, SemanticStatus
+from yoetz.protocol.models import CheckRequest, CheckScopeModel, SemanticReason, SemanticStatus
 
 _TASK = "tsk_30000000-0000-4000-8000-000000000001"
 _SESSION = "ses_30000000-0000-4000-8000-000000000001"
@@ -234,6 +234,8 @@ class _Ledger:
         semantic_reason: SemanticReason,
         semantic_provenance: SemanticProvenance | None,
         request_id: str,
+        *,
+        scope: CheckScopeModel | None = None,
     ) -> CheckCommitResult:
         assert frozen == self.frozen
         if self.commit_failure is not None:

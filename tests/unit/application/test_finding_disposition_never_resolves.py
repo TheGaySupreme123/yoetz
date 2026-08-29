@@ -1,10 +1,12 @@
-"""No recorded response disposition clears a finding for receipt purposes.
+"""Only a later qualifying check resolves a finding; no response disposition ever does.
 
-The agent-facing guidance now says this in plain words, because the 2026-07-30 dogfood agent
-repaired the record, recorded an evidence-backed `acknowledged` response, saw the next check return
-no findings, and still received `unresolved_findings_remain` -- which it had not expected. That
-behavior is deliberate (`application/receipt._finding_states` resolves nothing, on the reasoning
-that conservatively unresolved is always safe), so these cases lock the promise the guidance makes.
+The 2026-07-30 dogfood agent repaired the record, recorded an evidence-backed ``acknowledged``
+response, saw the next check return no findings, and still received ``unresolved_findings_remain``.
+Half of that was deliberate and still is: a disposition is an answer on the record, not proof.
+The other half was a defect (issue #458): ``application/receipt._finding_states`` hard-wired every
+current finding to ``resolved=False``, so a repaired record could never earn a clean receipt. These
+cases lock both halves of the contract the agent guidance now makes: dispositions never resolve,
+and a later deterministic qualifying check that finds the same issue absent does.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from yoetz.domain.values import (
     timestamp_from_string,
 )
 from yoetz.kernel.projections import (
+    FindingProjectionRecord,
     ProjectionRecord,
     empty_projection_state,
     unanswered_finding_count,
@@ -54,6 +57,7 @@ _HEAD = "sha256:" + "2" * 64
 _FINDING_ID = finding_id("fnd_00000000-0000-4000-8000-000000000001")
 _SOURCE_EVENT_ID = event_id("evt_00000000-0000-4000-8000-000000000001")
 _RESPONSE_EVENT_ID = event_id("evt_00000000-0000-4000-8000-000000000003")
+_CHECK_EVENT_ID = event_id("evt_00000000-0000-4000-8000-000000000004")
 
 
 def _coverage() -> Coverage:
@@ -109,15 +113,18 @@ def _response(disposition: ResponseDisposition) -> ResponseRecordedPayload:
 def _projection(
     response: ResponseRecordedPayload | None,
     kind: FindingKind = FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED,
+    *,
+    resolved: bool = False,
 ):
     finding = _finding(kind)
     findings = {
-        _FINDING_ID: ProjectionRecord(
+        _FINDING_ID: FindingProjectionRecord(
             payload=finding,
             payload_digest=canonical_digest(encode_payload(finding)),
             redacted=False,
             source_event_id=_SOURCE_EVENT_ID,
             source_frontier=1,
+            resolved_by_check_event_id=_CHECK_EVENT_ID if resolved else None,
         )
     }
     responses: dict[object, object] = {}
@@ -165,3 +172,48 @@ def test_the_finding_kind_the_dogfood_hit_is_actionable() -> None:
     """Actionable kinds are the ones that bind the receipt conclusion."""
 
     assert FINDING_KIND_TRAITS[FindingKind.REQUESTED_ITEM_NEVER_ATTEMPTED][1] is True
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    (None, ResponseDisposition.ACKNOWLEDGED, ResponseDisposition.REJECTED),
+)
+def test_a_later_qualifying_check_resolves_whatever_the_disposition(
+    disposition: ResponseDisposition | None,
+) -> None:
+    """The proof lives on the finding record, set only by the reducer from a qualifying check.
+
+    The receipt state and the status counter read that one fact, so a repaired record whose
+    issue a later check found absent earns a clean receipt with or without a response.
+    """
+
+    projection = _projection(None if disposition is None else _response(disposition), resolved=True)
+    assert [state.resolved for state in _finding_states(projection)] == [True]
+    assert receipt_blocking_finding_count(projection) == 0
+    assert unanswered_finding_count(projection) == (1 if disposition is None else 0)
+
+
+def test_provenance_dispute_pins_the_row_unresolved_on_the_released_wire() -> None:
+    """``status-result`` 1.1.0 freezes ``provenance_disputed`` rows to ``resolved=false``.
+
+    The shared rule honours that pin instead of letting the receipt and the status view disagree,
+    so a disputed finding keeps blocking even when a later check proved the issue absent.
+    """
+
+    projection = _projection(_response(ResponseDisposition.PROVENANCE_DISPUTED), resolved=True)
+    assert [state.resolved for state in _finding_states(projection)] == [False]
+    assert receipt_blocking_finding_count(projection) == 1
+
+
+def test_an_unreadable_response_keeps_a_proven_row_conservatively_unresolved() -> None:
+    projection = _projection(None, resolved=True)
+    tombstone: ProjectionRecord[ResponseRecordedPayload] = ProjectionRecord(
+        payload=None,
+        payload_digest=_DIGEST,
+        redacted=True,
+        source_event_id=_RESPONSE_EVENT_ID,
+        source_frontier=2,
+    )
+    projection = replace(projection, responses={_FINDING_ID: tombstone})
+    assert [state.resolved for state in _finding_states(projection)] == [False]
+    assert receipt_blocking_finding_count(projection) == 1

@@ -80,6 +80,7 @@ from yoetz.kernel.deterministic_checks import (
     deterministic_case_from_json,
     deterministic_case_to_json,
 )
+from yoetz.kernel.finding_resolution import finding_is_resolved
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     PROJECTION_VERSION,
@@ -1026,7 +1027,7 @@ def _projection_items(
                         else semantic_provenance_to_json(finding.provenance)
                     ),
                     disposition="none" if response is None else response.disposition.value,
-                    resolved=False,
+                    resolved=finding_is_resolved(projection, finding.finding_id),
                     response_event_id=(
                         None if response_record is None else response_record.source_event_id
                     ),
@@ -2478,6 +2479,8 @@ class MemoryLedgerAdapter:
         semantic_reason: SemanticReason,
         semantic_provenance: SemanticProvenance | None,
         request_id: str,
+        *,
+        scope: CheckScopeModel | None = None,
     ) -> CheckCommitResult:
         key = (frozen.lease.writer_id, frozen.lease.operation_id)
         async with self._lock:
@@ -2556,7 +2559,9 @@ class MemoryLedgerAdapter:
                 PolicyVersion(execution.policy_id, execution.policy_version)
                 for execution in policy_executions
             ),
-            scope=CheckScopeModel(claim_ids=(), obligation_ids=()),
+            # The normalized request scope is what a later reader needs to know which issues
+            # this check could speak to (issue #458); omitted scope is the whole case.
+            scope=CheckScopeModel(claim_ids=(), obligation_ids=()) if scope is None else scope,
             policy_executions=tuple(
                 CheckPolicyExecutionModel.model_validate(
                     {

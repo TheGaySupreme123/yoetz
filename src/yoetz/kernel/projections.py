@@ -72,6 +72,7 @@ __all__ = [
     "ContradictionRecord",
     "DecisionProjectionRecord",
     "EvidenceProjectionRecord",
+    "FindingProjectionRecord",
     "LatestTestedState",
     "ObligationProjectionRecord",
     "PlanProjectionRecord",
@@ -308,6 +309,33 @@ class DecisionProjectionRecord(ProjectionRecord[DecisionRecordedPayload]):
 
 
 @dataclass(frozen=True, slots=True)
+class FindingProjectionRecord(ProjectionRecord[Finding]):
+    """One recorded finding plus its proof-based resolution fact.
+
+    ``resolved_by_check_event_id`` names the later ``check_recorded`` event whose recorded state
+    qualified to resolve this finding's issue (``kernel/finding_resolution.py``). It is ``None``
+    while the finding is current. A response disposition never sets it; a check that returns the
+    finding again clears it; redacting the proving check clears it.
+    """
+
+    resolved_by_check_event_id: EventId | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.payload is not None and type(self.payload) is not Finding:
+            raise _invalid()
+        if self.resolved_by_check_event_id is not None:
+            try:
+                object.__setattr__(
+                    self,
+                    "resolved_by_check_event_id",
+                    event_id(self.resolved_by_check_event_id),
+                )
+            except ValueError as exc:
+                raise _invalid() from exc
+
+
+@dataclass(frozen=True, slots=True)
 class EvidenceProjectionRecord(ProjectionRecord[EvidenceRecordedPayload]):
     object_available: bool = True
     redacted_object_id: ObjectId | None = None
@@ -425,7 +453,7 @@ class ProjectionState:
     evidence: Mapping[EvidenceId, EvidenceProjectionRecord]
     claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload]]
     contradictions: Mapping[ContradictionKey, ContradictionRecord]
-    findings: Mapping[FindingId, ProjectionRecord[Finding]]
+    findings: Mapping[FindingId, FindingProjectionRecord]
     responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]]
     latest_tested_state: LatestTestedState | None
     freshness: LedgerFreshness
@@ -516,7 +544,7 @@ class ProjectionState:
         findings = self._copy_mapping(
             self.findings,
             finding_id,
-            ProjectionRecord,
+            FindingProjectionRecord,
             Finding,
             "finding_id",
         )
@@ -709,6 +737,11 @@ def _record_snapshot(record: _ProjectionRecordLike) -> dict[str, JsonValue]:
         result["object_available"] = record.object_available
         if record.redacted_object_id is not None:
             result["redacted_object_id"] = record.redacted_object_id
+    elif type(record) is FindingProjectionRecord:
+        # Emitted only when set, so every snapshot of a task whose findings were never resolved
+        # stays byte-identical to the generation-1 shape frozen before proof-based resolution.
+        if record.resolved_by_check_event_id is not None:
+            result["resolved_by_check_event_id"] = record.resolved_by_check_event_id
     return result
 
 
@@ -949,6 +982,8 @@ def _record_from_snapshot(
     elif collection == "evidence":
         required = _RECORD_KEYS | frozenset({"object_available"})
         optional = frozenset({"redacted_object_id"})
+    elif collection == "findings":
+        optional = frozenset({"resolved_by_check_event_id"})
     else:
         optional = frozenset()
     source = _snapshot_object(value, required=required, optional=optional)
@@ -1024,6 +1059,19 @@ def _record_from_snapshot(
             source_frontier=source_frontier,
             object_available=cast(bool, source["object_available"]),
             redacted_object_id=cast(ObjectId | None, source.get("redacted_object_id")),
+        )
+    if collection == "findings":
+        if "resolved_by_check_event_id" in source and source["resolved_by_check_event_id"] is None:
+            raise _invalid()
+        return FindingProjectionRecord(
+            payload=cast(Finding | None, payload),
+            payload_digest=payload_digest,
+            redacted=redacted,
+            source_event_id=source_event_id,
+            source_frontier=source_frontier,
+            resolved_by_check_event_id=cast(
+                EventId | None, source.get("resolved_by_check_event_id")
+            ),
         )
     return ProjectionRecord(
         payload=payload,
@@ -1160,7 +1208,7 @@ def projection_from_snapshot(value: JsonValue) -> ProjectionState:
             ),
             contradictions=_contradictions_from_snapshot(source["contradictions"]),
             findings=cast(
-                Mapping[FindingId, ProjectionRecord[Finding]],
+                Mapping[FindingId, FindingProjectionRecord],
                 _record_map_from_snapshot(source["findings"], collection="findings"),
             ),
             responses=cast(

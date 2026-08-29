@@ -716,6 +716,27 @@ def _count_phrase(count: int, singular: str, plural: str) -> str:
     return f"{count} {plural}"
 
 
+def _resolved_history_sentence(resolved_count: int) -> str:
+    """Name resolved historical findings apart from current ones and from coverage gaps.
+
+    A resolved finding is not erased and is not a limitation: it fired, the record was repaired,
+    and a later qualifying check found the same issue absent. Saying so beside the current count
+    is what lets a reader tell "was fixed" from "still open" without a per-finding flag, which the
+    frozen receipt document does not carry.
+    """
+
+    if resolved_count == 0:
+        return ""
+    phrase = _count_phrase(resolved_count, "earlier finding was", "earlier findings were")
+    return (
+        f" {phrase[:1].upper() + phrase[1:]} resolved by a later qualifying check and "
+        "remain visible as history."
+        if resolved_count > 1
+        else f" {phrase[:1].upper() + phrase[1:]} resolved by a later qualifying check and "
+        "remains visible as history."
+    )
+
+
 def _check_coverage_sentence(
     gap_codes: tuple[str, ...],
     frontier: Frontier,
@@ -774,18 +795,21 @@ def _sections(
     redactions: tuple[ReceiptRedaction, ...],
     plan_scope: CurrentPlanScope,
     tested_subject_sequence: str | None = None,
+    resolved_finding_ids: tuple[FindingId, ...] = (),
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
     bodies: dict[ReceiptSectionKey, str] = {}
     items: dict[ReceiptSectionKey, tuple[str, ...]] = {}
+    resolved_sentence = _resolved_history_sentence(len(resolved_finding_ids))
 
     if conclusion is ReceiptConclusion.NO_UNRESOLVED_DETERMINISTIC_FINDINGS:
         bodies[ReceiptSectionKey.SUMMARY] = (
             f"No unresolved deterministic findings were recorded at frontier {frontier.sequence}."
+            + resolved_sentence
         )
     elif conclusion is ReceiptConclusion.INSUFFICIENT_COVERAGE:
         bodies[ReceiptSectionKey.SUMMARY] = (
-            f"Coverage is insufficient at frontier {frontier.sequence}."
+            f"Coverage is insufficient at frontier {frontier.sequence}." + resolved_sentence
         )
     else:
         phrase = _count_phrase(
@@ -793,8 +817,11 @@ def _sections(
         )
         bodies[ReceiptSectionKey.SUMMARY] = (
             f"{phrase[:1].upper() + phrase[1:]} remain unresolved at frontier {frontier.sequence}."
+            + resolved_sentence
         )
-    items[ReceiptSectionKey.SUMMARY] = ()
+    # The summary's items are the resolved historical finding ids: the one place every include
+    # level carries, so a renderer can always separate resolved rows from current ones.
+    items[ReceiptSectionKey.SUMMARY] = resolved_finding_ids
 
     effective_ids = frozenset(plan_scope.effective_obligation_refs or ())
     current_obligations = tuple(
@@ -860,18 +887,21 @@ def _sections(
 
     actionable_count = unresolved_actionable_count
     if actionable_count == 0 and conclusion is not ReceiptConclusion.INSUFFICIENT_COVERAGE:
-        bodies[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS] = "No findings remain open."
+        bodies[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS] = (
+            "No findings remain open." + resolved_sentence
+        )
     elif actionable_count == 0:
         bodies[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS] = (
             "No actionable finding is selected, but weak coverage prevents the strong conclusion."
+            + resolved_sentence
         )
     elif actionable_count == 1:
         bodies[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS] = (
-            "One actionable finding remains unresolved."
+            "One actionable finding remains unresolved." + resolved_sentence
         )
     else:
         bodies[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS] = (
-            f"{actionable_count} actionable findings remain unresolved."
+            f"{actionable_count} actionable findings remain unresolved." + resolved_sentence
         )
     items[ReceiptSectionKey.FINDINGS_AND_DISPOSITIONS] = tuple(
         finding_id_value
@@ -991,6 +1021,19 @@ def build_receipt(
         responses,
         gaps,
     )
+    # Resolved history is named only for rows the profile retains: a profile that omits a
+    # finding row must not leak its id through the summary items.
+    retained_ids = frozenset(finding.finding_id for finding in retained_findings)
+    resolved_finding_ids = tuple(
+        sorted(
+            (
+                state.finding_id
+                for state in context.finding_states
+                if state.resolved and state.finding_id in retained_ids
+            ),
+            key=_ascii_key,
+        )
+    )
     sections = _sections(
         include=include,
         conclusion=conclusion,
@@ -1013,6 +1056,7 @@ def build_receipt(
             if context.projection.latest_tested_state is None
             else str(context.projection.latest_tested_state.subject_frontier.sequence)
         ),
+        resolved_finding_ids=resolved_finding_ids,
     )
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count

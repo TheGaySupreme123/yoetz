@@ -15,6 +15,7 @@ from yoetz.kernel.deterministic_checks import (
     build_deterministic_case,
     healthy_storage_availability,
 )
+from yoetz.kernel.finding_resolution import finding_is_resolved, issue_key
 from yoetz.kernel.projections import ProjectionState
 from yoetz.kernel.reducers import invalidates_recorded_check, is_material_event_family
 from yoetz.protocol.coverage import MAX_KNOWN_GAPS
@@ -45,16 +46,6 @@ class ReceiptCoverageCapacityExceeded(ValueError):
         ValueError.__init__(self, "receipt_coverage_capacity_exceeded")
 
 
-def _issue_key(finding: Finding) -> tuple[object, ...]:
-    return (
-        finding.origin,
-        finding.policy_id,
-        finding.policy_version,
-        finding.kind,
-        finding.subject_refs,
-    )
-
-
 def current_receipt_findings(projection: ProjectionState) -> tuple[Finding, ...]:
     """Select the newest readable row per receipt issue key in canonical rank order."""
 
@@ -64,7 +55,7 @@ def current_receipt_findings(projection: ProjectionState) -> tuple[Finding, ...]
     for record in projection.findings.values():
         if record.payload is None:
             continue
-        key = _issue_key(record.payload)
+        key = issue_key(record.payload)
         candidate = (record.source_frontier, record.payload)
         prior = newest.get(key)
         if prior is None or candidate[0] > prior[0]:
@@ -75,13 +66,16 @@ def current_receipt_findings(projection: ProjectionState) -> tuple[Finding, ...]
 def receipt_blocking_finding_count(projection: ProjectionState) -> int:
     """Count current actionable findings that prevent a clean receipt conclusion.
 
-    Responses record a disposition but never resolve a finding for receipt purposes. Non-actionable
-    findings remain visible and can contribute coverage gaps, but they do not by themselves select
-    ``unresolved_findings_remain``.
+    Responses record a disposition but never resolve a finding for receipt purposes; only a later
+    qualifying check does (``kernel/finding_resolution.py``), and a resolved row stays visible as
+    history without counting here. Non-actionable findings remain visible and can contribute
+    coverage gaps, but they do not by themselves select ``unresolved_findings_remain``.
     """
 
     return sum(
-        FINDING_KIND_TRAITS[finding.kind][1] for finding in current_receipt_findings(projection)
+        FINDING_KIND_TRAITS[finding.kind][1]
+        and not finding_is_resolved(projection, finding.finding_id)
+        for finding in current_receipt_findings(projection)
     )
 
 
