@@ -267,6 +267,10 @@ _TEXT_DECODE_EXTENSIONS: Final = frozenset(
     {".py", ".md", ".txt", ".json", ".toml", ".yml", ".yaml", ".sql", ".cfg", ".ini", ".lock"}
 )
 
+_REVIEWED_SOURCE_ROOT_ALIASES: Final[dict[tuple[str, str], bytes]] = {
+    ("PRIV-SESSION-002", "CLAUDE.md"): b"@AGENTS.md\n",
+}
+
 
 # --------------------------------------------------------------------------
 # Rule loading
@@ -623,9 +627,15 @@ def scan_filename(
     rules: Sequence[BoundaryRule],
     *,
     target_label: str,
+    target_kind: str | None = None,
     canary: bytes | None = None,
 ) -> tuple[BoundaryFinding, ...]:
-    """Apply every ``filename``-scoped rule to one entry's relative path."""
+    """Apply every ``filename``-scoped rule to one entry's relative path.
+
+    One reviewed repository-root agent-instruction alias is admitted only for a source tree and
+    only when both its normalized path and bytes match exactly. The same filename remains blocked
+    in artifacts, nested paths, and source files carrying any other content.
+    """
 
     findings: list[BoundaryFinding] = []
     path_bytes = entry.relative_path.encode("utf-8", errors="surrogateescape")
@@ -644,6 +654,9 @@ def scan_filename(
         )
     for rule in rules:
         if rule.detector != "filename":
+            continue
+        reviewed_alias = _REVIEWED_SOURCE_ROOT_ALIASES.get((rule.rule_id, entry.relative_path))
+        if target_kind == "source" and reviewed_alias is not None and entry.data == reviewed_alias:
             continue
         matches = len(re.findall(rule.pattern, entry.relative_path))
         if matches:
@@ -887,7 +900,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         target_rules = _applicable_rules(rules, target.kind)
         for entry in entries:
             all_findings.extend(
-                scan_filename(entry, target_rules, target_label=target.label, canary=canary)
+                scan_filename(
+                    entry,
+                    target_rules,
+                    target_label=target.label,
+                    target_kind=target.kind,
+                    canary=canary,
+                )
             )
             all_findings.extend(
                 scan_bytes(entry, target_rules, target_label=target.label, canary=canary)

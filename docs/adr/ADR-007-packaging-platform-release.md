@@ -52,8 +52,11 @@ manifests, the packaging/capability suites, and the release workflows under `.gi
    PyPI publication and with trusted-publisher provenance plus byte-for-byte download verification.
 8. **Release artifacts:** sdist + wheel, SHA-256 checksums, CycloneDX SBOM via `uv export`,
    dependency lock, support matrix, conformance summary, known limitations, changelog, security
-   policy. Sigstore signing deferred until a documented verification command exists (a signature
-   without a verifier is not a gate).
+   policy. The source publication-boundary scanner admits the reviewed repository-root
+   `CLAUDE.md` alias only when its complete bytes are exactly `@AGENTS.md\n`; nested paths,
+   different bytes, and every artifact occurrence remain blocked (issue #455). Sigstore signing
+   is deferred until a documented verification command exists (a signature without a verifier is
+   not a gate).
 9. **Install/upgrade/uninstall:** documented and tested: `uv tool install/upgrade/uninstall`, the
    foreground `yoetz service run` entrypoint suitable for a user-selected external
    supervisor, `codex mcp add/remove yoetz`, and data-retention behavior on uninstall. Native
