@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from enum import Enum
 from functools import cache
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, Final, Literal, Protocol, cast
 
 import anyio
@@ -119,7 +120,12 @@ integrate_mcp_app = typer.Typer(
     help="Manage the Yoetz MCP server registration.", no_args_is_help=True
 )
 integrate_plugin_app = typer.Typer(
-    help="Manage an explicit host plugin artifact.", no_args_is_help=True
+    help=(
+        "Manage an explicit host plugin artifact. Claude Code supports the full lifecycle plus "
+        "export; Cursor supports preview, install, status, and remove; Codex supports only "
+        "preview, status, and remove (Codex activation stays in `yoetz setup run`)."
+    ),
+    no_args_is_help=True,
 )
 setup_app = typer.Typer(help="Guided first-run harness and provider setup.", no_args_is_help=True)
 service_app = typer.Typer(help="Manage the foreground local service.", no_args_is_help=True)
@@ -1452,6 +1458,72 @@ for _mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
     integrate_mcp_app.command(_mcp_action)(_integration_mcp_command(_mcp_action))
 
 
+# The per-host plugin command surface (issue #465). Codex activation is the
+# digest-bound setup/recommendation ceremony (ADR-012), so its standalone
+# lifecycle is removal-shaped; Cursor has no update/enable/disable states; the
+# export carrier is Claude-specific. Every dispatcher fails closed on its own,
+# but the gate here refuses before any dispatch, binary discovery, or mutation
+# with an error that names the supported actions, and the help text below
+# marks each command's hosts so `--help` never advertises a dead command.
+_PLUGIN_HOSTS: Final = ("claude", "codex", "cursor")
+_PLUGIN_COMMAND_HOSTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        "preview": frozenset({"claude", "codex", "cursor"}),
+        "install": frozenset({"claude", "cursor"}),
+        "update": frozenset({"claude"}),
+        "enable": frozenset({"claude"}),
+        "disable": frozenset({"claude"}),
+        "status": frozenset({"claude", "codex", "cursor"}),
+        "remove": frozenset({"claude", "codex", "cursor"}),
+        "export": frozenset({"claude"}),
+    }
+)
+_PLUGIN_HOST_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor"}
+)
+_PLUGIN_COMMAND_SUMMARY: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "preview": "Render the exact plan and digest for a plugin change",
+        "install": "Apply a previewed plugin install",
+        "update": "Apply a previewed plugin update",
+        "enable": "Apply a previewed plugin enable",
+        "disable": "Apply a previewed plugin disable",
+        "status": "Report the installed plugin state",
+        "remove": "Apply a previewed plugin removal",
+        "export": "Render a development plugin directory for `claude --plugin-dir`",
+    }
+)
+
+
+def plugin_commands_for_host(harness: str) -> tuple[str, ...]:
+    """Return the plugin commands one host supports, in registration order."""
+
+    return tuple(name for name, hosts in _PLUGIN_COMMAND_HOSTS.items() if harness in hosts)
+
+
+def _plugin_command_help(command_name: str) -> str:
+    hosts = ", ".join(
+        _PLUGIN_HOST_LABELS[host]
+        for host in _PLUGIN_HOSTS
+        if host in _PLUGIN_COMMAND_HOSTS[command_name]
+    )
+    unsupported = ", ".join(
+        _PLUGIN_HOST_LABELS[host]
+        for host in _PLUGIN_HOSTS
+        if host not in _PLUGIN_COMMAND_HOSTS[command_name]
+    )
+    text = f"{_PLUGIN_COMMAND_SUMMARY[command_name]} ({hosts})."
+    if unsupported:
+        text += f" Not supported for {unsupported}."
+    return text
+
+
+def _refuse_unsupported_plugin_command(harness: str, command_name: str) -> None:
+    supported = ",".join(plugin_commands_for_host(harness))
+    sys.stderr.write(f"{harness}_plugin_command_unsupported:{command_name} supported={supported}\n")
+    _finish(2)
+
+
 def _host_plugin_command(command_name: str) -> Callable[..., None]:
     def command(
         context: typer.Context,
@@ -1509,7 +1581,10 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
             str | None,
             typer.Option(
                 "--action",
-                help="Preview action: install/update/enable/disable/remove (Cursor also: replace).",
+                help=(
+                    "Preview action. Claude Code: install/update/enable/disable/remove. "
+                    "Cursor: install/replace/remove. Not used for Codex (removal only)."
+                ),
             ),
         ] = None,
         request_value: Annotated[
@@ -1536,6 +1611,9 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
         json_output: _JSON = False,
     ) -> None:
         harness = cast(str, context.find_root().find_object(str) or context.obj)
+        if harness in _PLUGIN_HOSTS and harness not in _PLUGIN_COMMAND_HOSTS[command_name]:
+            _refuse_unsupported_plugin_command(harness, command_name)
+            return
         if harness == "codex":
             module = importlib.import_module("yoetz.cli.codex_plugin")
             operation = cast(Callable[..., int], getattr(module, "run_codex_plugin_command"))
@@ -1633,17 +1711,10 @@ def _host_plugin_command(command_name: str) -> Callable[..., None]:
     return command
 
 
-for _plugin_action in (
-    "preview",
-    "install",
-    "update",
-    "enable",
-    "disable",
-    "status",
-    "remove",
-    "export",
-):
-    integrate_plugin_app.command(_plugin_action)(_host_plugin_command(_plugin_action))
+for _plugin_action in _PLUGIN_COMMAND_HOSTS:
+    integrate_plugin_app.command(_plugin_action, help=_plugin_command_help(_plugin_action))(
+        _host_plugin_command(_plugin_action)
+    )
 
 
 @setup_app.command("run")

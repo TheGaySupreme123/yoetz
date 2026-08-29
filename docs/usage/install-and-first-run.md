@@ -135,8 +135,9 @@ standalone Codex CLI and does not fabricate an app installation that OpenAI does
 Re-run any time with `yoetz setup run` (the prompt-driven wizard, unchanged) or `/connect` in the
 interface. Change privacy any time with `yoetz --privacy`. Inspect posture read-only with
 `yoetz setup status`. Manage registration directly with `yoetz integrate codex mcp
-status|preview|preview-remove|install|remove`. Reverse marketplace activation with
-`yoetz integrate codex plugin preview|remove` (cache purge is default-off). See the
+status|preview|preview-remove|install|remove`. Inspect or reverse marketplace activation with
+`yoetz integrate codex plugin preview|status|remove` (cache purge is default-off); those three are
+the whole Codex plugin command surface, and activation itself stays in `yoetz setup run`. See the
 [Codex integration runbook](../runbooks/codex-integration.md) removal section.
 
 ## Re-run or repair a ceremony
