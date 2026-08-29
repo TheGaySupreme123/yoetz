@@ -146,8 +146,11 @@ publishable transitions.
 
 Semantic review that does not succeed is a coverage gap, not a retry problem. `not_configured`,
 `blocked_by_policy`, and `human_denied` will not change without owner action. `unavailable` and
-`timeout` are the only statuses retried inside a job, so by the time you see one that job already
-spent its attempt budget; `refused`, `invalid`, and `failed` are not retried in-job at all. When a
+`timeout` are retried inside a job, so by the time you see one that job already spent its attempt
+budget. An `invalid` answer with reason `response_content_invalid` (incomplete or overlong provider
+output) may spend exactly one in-job repair retry when the configured profile allows a retry, so a
+reported one has already used it; `refused`, `failed`, and every other `invalid` reason are not
+retried in-job at all. When a
 second job in one session again returns no judgment, switch to `deterministic_only`, disclose the
 gap with the recorded status and reason, and do not spend a third job on the same binding.
 

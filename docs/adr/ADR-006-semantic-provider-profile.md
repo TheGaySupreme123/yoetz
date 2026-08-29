@@ -1,6 +1,6 @@
 # ADR-006 — Semantic provider profiles behind the privacy gateway
 
-**Status:** Working decision revised 2026-07-16. Ratification requires the privacy/egress gates in
+**Status:** Working decision revised 2026-08-29 (issue #348 bounded repair retry). Ratification requires the privacy/egress gates in
 ADR-009 plus recorded capability fixtures against every advertised provider/model/endpoint profile.
 **Implemented by:** `src/yoetz/ports/semantic.py`,
 `src/yoetz/ports/privacy.py`, `src/yoetz/application/egress.py`,
@@ -75,7 +75,18 @@ and semantic/privacy capability and conformance tests.
    over the exact final application body bytes, excluding authentication metadata and HTTP/TLS
    framing. No long-lived SDK client or default-header object holds the real key. Yoetz owns the retry
    budget: at most two retries, only for approved timeout/connection/429 classes, jittered backoff,
-   all within one total deadline and one durable semantic operation. One durable attempt and one
+   all within one total deadline and one durable semantic operation. **Amended 2026-08-29 (issue
+   #348):** inside that same budget and deadline, exactly one repair retry is also admitted after
+   `invalid / response_content_invalid` — the provider was reached and its answer was incomplete
+   or overlong (`failure_class=response_content`, output-token truncation, Chat Completions
+   `finish_reason=length`). The repair resubmits the same frozen case under the same authorized
+   provider/profile/model/category/retention ceiling with unchanged sampling; it is a new physical
+   attempt with fresh dispatch, provider request, authorization, privacy receipt, transport, and
+   credential-handle identity, and no provider plaintext is retained. A second content-invalid
+   answer is terminal and both attempts remain in accounting. `response_schema_invalid`,
+   `semantic_judgment_rejected`, refusal, policy or human denial, invalid case, stale frontier,
+   quota exhaustion, secret or never-send detection, and exhausted authority are never retried.
+   One durable attempt and one
    privacy receipt, SDK client, custom transport, and credential handle are created per physical
    dispatch. For `confirm_every_request`, each physical retry also requires a fresh exact foreground
    preview/decision and a new one-dispatch proposal; the original human decision cannot cover a

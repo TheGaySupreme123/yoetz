@@ -1481,8 +1481,10 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "Semantic "
         "review that does not succeed is a coverage gap rather than a retry problem: "
         "not_configured, blocked_by_policy, and human_denied will not change without owner "
-        "action; unavailable and timeout already spent that job's own attempt budget; refused, "
-        "invalid, and failed are not retried inside the job at all. When a second job in one "
+        "action; unavailable and timeout already spent that job's own attempt budget; "
+        "response_content_invalid may spend exactly one in-job repair retry and has already done "
+        "so by the time it is reported; refused, failed, and every other invalid reason are not "
+        "retried inside the job at all. When a second job in one "
         "session again returns no judgment, stop requesting semantic review, run "
         "deterministic_only, and disclose the gap with the recorded status and reason. Guidance: "
         "yoetz://guidance/coverage-and-receipts.md.",
@@ -1609,7 +1611,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
                 "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
-                "check": "sha256:3a81f3a6d3e0f714680e221e8dc5fa90d0131629386b03d75bc55d21ab618ee1",
+                "check": "sha256:db57da2058052843ebb583f2ac141ebf7925dcf920583b0cdad6533c3f7fa29a",
                 "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
                 "status": "sha256:918ff925873d47c213c546623ec7a28ee1f5798c46fc4c5c3ad879d84d1f18a0",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1620,7 +1622,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
             {
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
                 "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
-                "check": "sha256:91b090140843ef3f50bbdf02a42dc78fc418b1968dca8685018698cf276f4557",
+                "check": "sha256:89899d93b76ea85c90d79d3df150f076f6b64a28cdb8f410c263ce3c1aa89b91",
                 "respond": "sha256:2dde93b3b755e286fcc62be84fb10c7f93825425548b59ac09b087048ac964dc",
                 "status": "sha256:918ff925873d47c213c546623ec7a28ee1f5798c46fc4c5c3ad879d84d1f18a0",
                 "receipt": "sha256:b5b2429e478f7e1fd68edd1ade7a90cd572592278f2baeea693f8a97d82200fa",
@@ -1631,8 +1633,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:328aa4b6f356d8747baa485cefa7b00037d1c5f1838267eccfbc55a1ce04cc6e",
-        "strict": "sha256:94b26da5d31ce50901a6de5c92dea388d767180a40e9cf21df2f7e1fdda6bee9",
+        "policy": "sha256:f313862ab5deb5147947907796e17f024978d9c1bcb74ac744d31e338943d0b5",
+        "strict": "sha256:1902e10bf6b00e50c94858d8dc0aabf5b4c79f70f7faf6725cc446eac1a91790",
     }
 )
 

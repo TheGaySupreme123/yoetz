@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -14,8 +15,10 @@ from yoetz.application.semantic_attempts import (
     attempt_accounting_from_rows,
     attempt_accounting_to_json,
     final_status_after_exhaustion,
+    is_repairable_semantic_outcome,
     is_retriable_semantic_outcome,
     physical_attempt_budget,
+    repair_retries_from_rows,
     run_durable_semantic_attempts,
     should_retry_after,
 )
@@ -1378,3 +1381,401 @@ async def test_retryable_claim_conflict_does_not_consume_an_attempt() -> None:
     )
     assert accounting.attempted_count == 1
     assert ledger.conflict_count == 1
+
+
+# --- issue #348: one bounded repair retry after invalid / response_content_invalid ---------------
+
+
+def _queued_job(attempt_count: int = 0) -> SemanticJobRecord:
+    return SemanticJobRecord(
+        _JOB,
+        _WRITER,
+        _OP,
+        _CASE,
+        _case_ref(),
+        "queued",
+        attempt_count,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+def _build_tuple(
+    status: SemanticStatus,
+    reason: SemanticReason,
+    evaluation: object | None,
+    accounting: SemanticAttemptAccounting,
+) -> object:
+    return (status, reason, accounting)
+
+
+async def _publish_response(handle: SemanticAttemptHandle, evaluation: object) -> ObjectRef:
+    return _response_ref()
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpiresAt:
+    value: datetime
+
+    def as_datetime(self) -> datetime:
+        return self.value
+
+
+@dataclass(frozen=True, slots=True)
+class _Continuation:
+    pending_id: str
+    expires_at: _ExpiresAt
+
+
+@dataclass(frozen=True, slots=True)
+class _AwaitingEval:
+    status: SemanticStatus
+    reason: SemanticReason
+    continuation: _Continuation
+    judgment: object | None = None
+    provenance: object | None = None
+
+
+_Scripted = _Eval | _AwaitingEval
+
+
+async def _run(
+    ledger: _FakeLedger,
+    script: list[_Scripted],
+    *,
+    max_retries: int,
+    deadline: Deadline | None = None,
+    now_monotonic: Callable[[], float] | None = None,
+) -> tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting]:
+    async def dispatch(handle: SemanticAttemptHandle, attempt_deadline: Deadline) -> _Scripted:
+        assert ledger.dispatches is not None
+        ledger.dispatches.append(handle.provider_request_id)
+        assert script, "dispatch_past_budget"
+        return script.pop(0)
+
+    clock: Callable[[], float] = now_monotonic if now_monotonic is not None else (lambda: 0.0)
+    return cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=ledger.lease,
+            job=ledger.job,
+            deadline=deadline or Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=max_retries,
+            now_monotonic=clock,
+            dispatch=dispatch,
+            publish_success_response=_publish_response,
+            sleep=lambda _: _async_noop(),
+            build_final=_build_tuple,
+        ),
+    )
+
+
+_INVALID = _Eval(SemanticStatus.INVALID, SemanticReason.RESPONSE_CONTENT_INVALID)
+_SUCCESS = _Eval(SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
+
+
+def test_repair_matrix_admits_only_response_content_invalid() -> None:
+    assert is_repairable_semantic_outcome(
+        SemanticStatus.INVALID, SemanticReason.RESPONSE_CONTENT_INVALID
+    )
+    # The repair class is not a transient class; it never enters the ADR-006 transient matrix.
+    assert not is_retriable_semantic_outcome(
+        SemanticStatus.INVALID, SemanticReason.RESPONSE_CONTENT_INVALID
+    )
+    for status, reason in (
+        (SemanticStatus.INVALID, SemanticReason.RESPONSE_SCHEMA_INVALID),
+        (SemanticStatus.INVALID, SemanticReason.SEMANTIC_JUDGMENT_REJECTED),
+        (SemanticStatus.REFUSED, SemanticReason.PROVIDER_REFUSED),
+        (SemanticStatus.HUMAN_DENIED, SemanticReason.HUMAN_DENIED),
+        (SemanticStatus.BLOCKED_BY_POLICY, SemanticReason.NETWORK_EGRESS_DENIED),
+        (SemanticStatus.BLOCKED_FORBIDDEN_DATA, SemanticReason.SECRET_DETECTED),
+        (SemanticStatus.BLOCKED_FORBIDDEN_DATA, SemanticReason.NEVER_SEND_DETECTED),
+        (SemanticStatus.STALE, SemanticReason.FRONTIER_CHANGED),
+        (SemanticStatus.UNAVAILABLE, SemanticReason.PROVIDER_QUOTA_EXHAUSTED),
+        (SemanticStatus.UNAVAILABLE, SemanticReason.CREDENTIAL_UNAVAILABLE),
+        (SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT),
+    ):
+        assert not is_repairable_semantic_outcome(status, reason), reason
+
+
+def test_should_retry_admits_exactly_one_repair_inside_budget_and_deadline() -> None:
+    def repair(
+        max_retries: int, *, deadline_expired: bool = False, repair_retries_used: int = 0
+    ) -> bool:
+        return should_retry_after(
+            status=SemanticStatus.INVALID,
+            reason=SemanticReason.RESPONSE_CONTENT_INVALID,
+            attempts_completed=1,
+            max_retries=max_retries,
+            deadline_expired=deadline_expired,
+            repair_retries_used=repair_retries_used,
+        )
+
+    assert repair(1)
+    assert repair(2)
+    # max_retries=0: no slot, unchanged single-attempt behavior.
+    assert not repair(0)
+    # The total deadline wins over the repair budget.
+    assert not repair(2, deadline_expired=True)
+    # One repair only, even when physical slots remain.
+    assert not repair(2, repair_retries_used=1)
+    # A transient class ignores the repair count.
+    assert should_retry_after(
+        status=SemanticStatus.TIMEOUT,
+        reason=SemanticReason.PROVIDER_TIMEOUT,
+        attempts_completed=2,
+        max_retries=2,
+        deadline_expired=False,
+        repair_retries_used=1,
+    )
+    with pytest.raises(ValueError, match="repair_retries_used_invalid"):
+        repair(1, repair_retries_used=-1)
+
+
+def test_repair_retries_are_counted_from_durable_rows() -> None:
+    rows = (
+        SemanticAttemptRecord(
+            _JOB, _ATT1, 1, "req_1", "expired", SemanticReason.PROVIDER_TIMEOUT, None
+        ),
+        SemanticAttemptRecord(
+            _JOB, _ATT2, 2, "req_2", "expired", SemanticReason.RESPONSE_CONTENT_INVALID, None
+        ),
+        SemanticAttemptRecord(_JOB, _ATT3, 3, "req_3", "started", None, None),
+    )
+    assert repair_retries_from_rows(()) == 0
+    assert repair_retries_from_rows(rows[:1]) == 0
+    assert repair_retries_from_rows(rows) == 1
+
+
+def test_final_status_keeps_the_honest_invalid_after_a_spent_repair() -> None:
+    for attempts, retries in ((1, 0), (2, 1), (2, 2), (3, 2)):
+        assert final_status_after_exhaustion(
+            SemanticStatus.INVALID,
+            SemanticReason.RESPONSE_CONTENT_INVALID,
+            attempts_completed=attempts,
+            max_retries=retries,
+        ) == (SemanticStatus.INVALID, SemanticReason.RESPONSE_CONTENT_INVALID)
+    # The transient exhaustion wording is untouched.
+    assert final_status_after_exhaustion(
+        SemanticStatus.TIMEOUT,
+        SemanticReason.PROVIDER_TIMEOUT,
+        attempts_completed=2,
+        max_retries=1,
+    ) == (SemanticStatus.UNAVAILABLE, SemanticReason.RETRY_BUDGET_EXHAUSTED)
+
+
+@pytest.mark.anyio
+async def test_zero_retry_invalid_is_terminal_after_exactly_one_attempt() -> None:
+    ledger = _FakeLedger(_queued_job(), _lease())
+    status, reason, accounting = await _run(ledger, [_INVALID, _SUCCESS], max_retries=0)
+    assert ledger.dispatches is not None and len(ledger.dispatches) == 1
+    assert (status, reason) == (SemanticStatus.INVALID, SemanticReason.RESPONSE_CONTENT_INVALID)
+    assert accounting.attempted_count == 1
+    assert accounting.selected_attempt_id is None
+    assert ledger.outcomes == [
+        (_ATT1, AttemptOutcome.FAILED, SemanticReason.RESPONSE_CONTENT_INVALID)
+    ]
+    assert ledger.job.state == "failed"
+
+
+@pytest.mark.anyio
+async def test_invalid_then_success_selects_the_repair_attempt() -> None:
+    ledger = _FakeLedger(_queued_job(), _lease())
+    status, reason, accounting = await _run(ledger, [_INVALID, _SUCCESS, _SUCCESS], max_retries=1)
+    assert ledger.dispatches is not None and len(ledger.dispatches) == 2
+    # Fresh physical identity for the repair: distinct attempt and provider request ids.
+    assert len(set(ledger.dispatches)) == 2
+    assert ledger.attempt_ids == [_ATT1, _ATT2]
+    assert (status, reason) == (SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
+    assert ledger.selected == _ATT2
+    assert accounting.selected_attempt_id == _ATT2
+    assert accounting.attempted_count == 2
+    assert accounting.exhausted is False
+    # The repaired attempt stays visible in accounting next to the selected one.
+    assert accounting.terminal_reason_counts == (("response_content_invalid", 1),)
+    assert ledger.outcomes == [
+        (_ATT1, AttemptOutcome.EXPIRED, SemanticReason.RESPONSE_CONTENT_INVALID),
+        (_ATT2, AttemptOutcome.RESPONSE_DURABLE, None),
+    ]
+    assert ledger.job.state == "succeeded"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("max_retries", [1, 2])
+async def test_invalid_then_invalid_stops_honestly_with_both_attempts(max_retries: int) -> None:
+    ledger = _FakeLedger(_queued_job(), _lease())
+    status, reason, accounting = await _run(
+        ledger, [_INVALID, _INVALID, _SUCCESS], max_retries=max_retries
+    )
+    # A third dispatch never happens even when max_retries=2 leaves a physical slot.
+    assert ledger.dispatches is not None and len(ledger.dispatches) == 2
+    assert len(set(ledger.dispatches)) == 2
+    assert (status, reason) == (SemanticStatus.INVALID, SemanticReason.RESPONSE_CONTENT_INVALID)
+    assert accounting.attempted_count == 2
+    assert accounting.selected_attempt_id is None
+    assert accounting.terminal_reason_counts == (("response_content_invalid", 2),)
+    # Physical exhaustion is reported only when the physical budget really was consumed.
+    assert accounting.exhausted is (max_retries == 1)
+    assert ledger.outcomes == [
+        (_ATT1, AttemptOutcome.EXPIRED, SemanticReason.RESPONSE_CONTENT_INVALID),
+        (_ATT2, AttemptOutcome.FAILED, SemanticReason.RESPONSE_CONTENT_INVALID),
+    ]
+    assert ledger.job.state == "failed"
+    assert ledger.job.terminal_code is SemanticReason.RESPONSE_CONTENT_INVALID
+
+
+@pytest.mark.anyio
+async def test_expired_deadline_blocks_the_repair_without_losing_the_first_attempt() -> None:
+    ledger = _FakeLedger(_queued_job(), _lease())
+    clock = [0.0]
+    deadline = Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0)
+
+    async def dispatch(handle: SemanticAttemptHandle, attempt_deadline: Deadline) -> _Eval:
+        assert ledger.dispatches is not None
+        ledger.dispatches.append(handle.provider_request_id)
+        clock[0] = 1000.0  # provider latency consumed the whole total deadline
+        return _INVALID
+
+    result = cast(
+        tuple[SemanticStatus, SemanticReason, SemanticAttemptAccounting],
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=ledger.lease,
+            job=ledger.job,
+            deadline=deadline,
+            max_retries=2,
+            now_monotonic=lambda: clock[0],
+            dispatch=dispatch,
+            publish_success_response=_publish_response,
+            sleep=lambda _: _async_noop(),
+            build_final=_build_tuple,
+        ),
+    )
+    assert ledger.dispatches is not None and len(ledger.dispatches) == 1
+    assert (result[0], result[1]) == (
+        SemanticStatus.INVALID,
+        SemanticReason.RESPONSE_CONTENT_INVALID,
+    )
+    assert result[2].attempted_count == 1
+    assert ledger.outcomes == [
+        (_ATT1, AttemptOutcome.FAILED, SemanticReason.RESPONSE_CONTENT_INVALID)
+    ]
+    assert ledger.attempts is not None
+    assert ledger.attempts[_ATT1].state == "failed"
+    assert ledger.attempts[_ATT1].terminal_code is SemanticReason.RESPONSE_CONTENT_INVALID
+
+
+@pytest.mark.anyio
+async def test_repair_cap_survives_a_replay_with_fresh_coordinator_state() -> None:
+    # Durable state after a crash or an awaiting_human replay: attempt 1 was already repaired
+    # (expired / response_content_invalid) and the job is queued again. A fresh loop must read
+    # that from the rows and refuse a second repair, whatever max_retries allows.
+    ledger = _FakeLedger(_queued_job(attempt_count=1), _lease())
+    assert ledger.attempts is not None
+    ledger.attempts[_ATT1] = SemanticAttemptRecord(
+        _JOB,
+        _ATT1,
+        1,
+        "req_40000000-0000-4000-8000-000000000001",
+        "expired",
+        SemanticReason.RESPONSE_CONTENT_INVALID,
+        None,
+    )
+    status, reason, accounting = await _run(ledger, [_INVALID, _SUCCESS], max_retries=2)
+    assert ledger.dispatches is not None and len(ledger.dispatches) == 1
+    assert (status, reason) == (SemanticStatus.INVALID, SemanticReason.RESPONSE_CONTENT_INVALID)
+    assert accounting.attempted_count == 2
+    assert accounting.terminal_reason_counts == (("response_content_invalid", 2),)
+    assert ledger.outcomes == [
+        (_ATT2, AttemptOutcome.FAILED, SemanticReason.RESPONSE_CONTENT_INVALID)
+    ]
+
+
+@pytest.mark.anyio
+async def test_confirm_every_request_repair_waits_for_a_fresh_decision() -> None:
+    # Under confirm_every_request the privacy gate answers every physical attempt with its own
+    # proposal. The repair attempt therefore surfaces a second awaiting_human wait bound to the
+    # new attempt; the first decision is never reused and nothing is dispatched on its authority.
+    ledger = _FakeLedger(_queued_job(), _lease())
+    second_wait = _AwaitingEval(
+        SemanticStatus.AWAITING_HUMAN,
+        SemanticReason.HUMAN_APPROVAL_REQUIRED,
+        _Continuation("pnd_repair", _ExpiresAt(datetime(2030, 1, 1, tzinfo=UTC))),
+    )
+    status, reason, accounting = await _run(ledger, [_INVALID, second_wait], max_retries=1)
+    assert ledger.dispatches is not None and len(ledger.dispatches) == 2
+    assert len(set(ledger.dispatches)) == 2
+    assert (status, reason) == (
+        SemanticStatus.AWAITING_HUMAN,
+        SemanticReason.HUMAN_APPROVAL_REQUIRED,
+    )
+    assert ledger.disclosure_waits == [(_ATT2, "pnd_repair", datetime(2030, 1, 1, tzinfo=UTC))]
+    # The repair attempt stays started and the job leased: an open wait, not a finished check.
+    assert ledger.outcomes == [
+        (_ATT1, AttemptOutcome.EXPIRED, SemanticReason.RESPONSE_CONTENT_INVALID)
+    ]
+    assert ledger.attempts is not None and ledger.attempts[_ATT2].state == "started"
+    assert ledger.job.state == "leased"
+    assert accounting.attempted_count == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (SemanticStatus.INVALID, SemanticReason.RESPONSE_SCHEMA_INVALID),
+        (SemanticStatus.INVALID, SemanticReason.SEMANTIC_JUDGMENT_REJECTED),
+        (SemanticStatus.REFUSED, SemanticReason.PROVIDER_REFUSED),
+        (SemanticStatus.HUMAN_DENIED, SemanticReason.HUMAN_DENIED),
+        (SemanticStatus.BLOCKED_BY_POLICY, SemanticReason.NETWORK_EGRESS_DENIED),
+        (SemanticStatus.BLOCKED_FORBIDDEN_DATA, SemanticReason.SECRET_DETECTED),
+        (SemanticStatus.STALE, SemanticReason.FRONTIER_CHANGED),
+        (SemanticStatus.UNAVAILABLE, SemanticReason.PROVIDER_QUOTA_EXHAUSTED),
+    ],
+)
+async def test_non_repairable_classes_never_consume_a_second_attempt(
+    status: SemanticStatus, reason: SemanticReason
+) -> None:
+    ledger = _FakeLedger(_queued_job(), _lease())
+    got_status, got_reason, accounting = await _run(
+        ledger, [_Eval(status, reason), _SUCCESS], max_retries=2
+    )
+    assert ledger.dispatches is not None and len(ledger.dispatches) == 1
+    assert (got_status, got_reason) == (status, reason)
+    assert accounting.attempted_count == 1
+    assert ledger.outcomes == [(_ATT1, AttemptOutcome.FAILED, reason)]
+
+
+@pytest.mark.anyio
+async def test_transient_then_invalid_reports_the_invalid_answer_not_exhaustion() -> None:
+    ledger = _FakeLedger(_queued_job(), _lease())
+    timeout = _Eval(SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT)
+    status, reason, accounting = await _run(ledger, [timeout, _INVALID, _SUCCESS], max_retries=1)
+    assert ledger.dispatches is not None and len(ledger.dispatches) == 2
+    assert (status, reason) == (SemanticStatus.INVALID, SemanticReason.RESPONSE_CONTENT_INVALID)
+    assert accounting.attempted_count == 2
+    assert accounting.terminal_reason_counts == (
+        ("provider_timeout", 1),
+        ("response_content_invalid", 1),
+    )
+
+
+@pytest.mark.anyio
+async def test_repair_shares_the_physical_budget_with_transient_retries() -> None:
+    # invalid (repair) -> timeout (transient) -> success: three physical attempts, never four.
+    ledger = _FakeLedger(_queued_job(), _lease())
+    timeout = _Eval(SemanticStatus.TIMEOUT, SemanticReason.PROVIDER_TIMEOUT)
+    status, reason, accounting = await _run(
+        ledger, [_INVALID, timeout, _SUCCESS, _SUCCESS], max_retries=2
+    )
+    assert ledger.dispatches is not None and len(ledger.dispatches) == 3
+    assert (status, reason) == (SemanticStatus.SUCCEEDED, SemanticReason.SEMANTIC_COMPLETED)
+    assert accounting.selected_attempt_id == _ATT3
+    assert accounting.attempted_count == 3
