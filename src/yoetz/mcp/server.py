@@ -1409,7 +1409,13 @@ async def dispatch_publish_work(
         # (issues #239, #240).
         locations = safe_validation_locations(exc)
         if not _publish_is_declared_dry_run(arguments):
-            recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)
+            # The recovery oracle is the service itself. Under a latched availability result a
+            # new request identity must not reach it (no startup, supersede, or diagnostic); the
+            # lookup is simply unavailable and the certain authoring error leads (#239, #469).
+            if await _inherit_terminal_availability(runtime, request_id) is not None:
+                recovery = _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+            else:
+                recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)
             if recovery.kind is _PublishRecoveryKind.FOUND and recovery.result is not None:
                 return recovery.result
             if recovery.kind is _PublishRecoveryKind.UNAVAILABLE:

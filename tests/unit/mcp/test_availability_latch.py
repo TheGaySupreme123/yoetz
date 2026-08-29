@@ -327,3 +327,36 @@ async def test_per_request_failures_never_latch_the_binding(
     assert again["code"] == "VAULT_LOCKED"
     assert again["correlation_id"] != locked["correlation_id"]
     assert harness.on_demand == ["connect", "connect"]
+
+
+@pytest.mark.anyio
+async def test_publish_recovery_never_reaches_the_service_under_a_latched_outage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Envelope-first publish recovery is an oracle read against the service; it must inherit."""
+
+    harness = _Harness(monkeypatch, tmp_path)
+    harness.on_demand_failure = ControlError("service_incompatible", retryable=True)
+    runtime = bridge.build_bridge_runtime()
+    _error(await bridge.dispatch_start(_start(_PARENT), runtime))
+    assert harness.on_demand == ["connect"]
+
+    # A delegate publishes an invalid body under a fresh request id with a complete envelope, so
+    # recovery would normally query the service for that request id.
+    invalid = _status(_DELEGATES[0])
+    invalid.pop("view")
+    invalid.pop("limit")
+    invalid["expected_frontier"] = {"sequence": "0", "head_digest": "genesis"}
+    invalid["event_drafts"] = "not-a-list"
+    result = _error(await bridge.dispatch_publish_work(invalid, runtime))
+
+    assert result["code"] == "INVALID_REQUEST"
+    details = cast(dict[str, object], result["safe_details"])
+    assert details["reason_code"] == "operation_recovery_unavailable"
+    assert "could not be checked" in cast(str, result["message"])
+    assert harness.on_demand == ["connect"]
+    assert harness.quiet == 1
+    assert (
+        "service_incompatible" in harness.recorded
+        and harness.recorded.count("service_incompatible") == 1
+    )

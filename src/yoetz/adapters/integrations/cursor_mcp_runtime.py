@@ -25,6 +25,7 @@ __all__ = [
     "OsCursorMcpProcesses",
     "classify_cursor_semantic_ceiling",
     "classify_serve_argv",
+    "launcher_precedes_serve_in_text",
     "observe_cursor_mcp_runtime",
 ]
 
@@ -190,6 +191,24 @@ def _launcher_match(
         # installation answered the host's spawn.
         return "different"
     return "unresolved"
+
+
+def launcher_precedes_serve_in_text(text: str, expected_launcher: tuple[str, ...]) -> bool:
+    """True when the whitespace-joined launcher immediately precedes ``mcp serve`` in ``text``.
+
+    Used for the macOS ``ps`` rendering, where argv is one string and a launcher path that
+    contains whitespace cannot be recovered by splitting. The launcher must sit at the start of
+    the text or after a space, so a longer path that merely ends with the same suffix does not
+    match.
+    """
+
+    if type(text) is not str or not expected_launcher or len(text) > 8_192:
+        return False
+    if any(type(part) is not str or not part for part in expected_launcher):
+        return False
+    needle = " ".join(expected_launcher) + " mcp serve"
+    padded = " " + text
+    return (" " + needle + " " in padded + " ") or padded.endswith(" " + needle)
 
 
 def classify_serve_argv(
@@ -439,6 +458,14 @@ def _darwin_snapshots(
         kind, launcher = classify_serve_argv(tokens, expected_launcher)
         if kind is None:
             continue
+        if (
+            expected_launcher is not None
+            and launcher != "matched"
+            and launcher_precedes_serve_in_text(args, expected_launcher)
+        ):
+            # ``ps`` renders argv as one whitespace-joined string, so a bound path that itself
+            # contains whitespace splits into fragments; the exact textual form settles it.
+            launcher = "matched"
         parent = ppid_by_pid.get(pid)
         parent_comm = comm_by_pid.get(parent, "") if parent is not None else ""
         grand = ppid_by_pid.get(parent, 0) if parent is not None else 0

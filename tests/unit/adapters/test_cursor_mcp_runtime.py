@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from yoetz.adapters.integrations.cursor_integration import (
     CursorPluginTarget,
     apply_cursor_plugin,
@@ -294,3 +296,71 @@ def test_helper_child_on_a_different_executable_requires_full_restart() -> None:
     assert bystander.activation == "matched"
     assert bystander.executable_activation == "matched"
     assert bystander.policy_process_count == 2
+
+
+def test_macos_ps_text_matches_a_launcher_path_that_contains_whitespace() -> None:
+    """``ps`` joins argv with spaces; a bound path with whitespace must still match exactly."""
+
+    from yoetz.adapters.integrations.cursor_mcp_runtime import launcher_precedes_serve_in_text
+
+    spaced = ("/Users/me/Application Support/yoetz/bin/yoetz",)
+    module = ("/Users/me/My Tools/venv/bin/python3.14", "-m", "yoetz")
+
+    assert launcher_precedes_serve_in_text(
+        "/Users/me/Application Support/yoetz/bin/yoetz mcp serve --host cursor", spaced
+    )
+    # Shebang expansion puts the interpreter first; the script token still sits before serve.
+    assert launcher_precedes_serve_in_text(
+        "/Users/me/Application Support/yoetz/bin/python3.14 "
+        "/Users/me/Application Support/yoetz/bin/yoetz mcp serve --host cursor",
+        spaced,
+    )
+    assert launcher_precedes_serve_in_text(
+        "/Users/me/My Tools/venv/bin/python3.14 -m yoetz mcp serve", module
+    )
+    # A longer path that merely ends with the same suffix is another executable.
+    assert not launcher_precedes_serve_in_text(
+        "/opt/other/Users/me/Application Support/yoetz/bin/yoetz mcp serve --host cursor", spaced
+    )
+    assert not launcher_precedes_serve_in_text("/opt/older/bin/yoetz mcp serve", spaced)
+    assert not launcher_precedes_serve_in_text("", spaced)
+
+    # The split-token path alone would call the spaced launcher ``different``; the text check
+    # is what the macOS scanner consults before reporting an executable mismatch.
+    from yoetz.adapters.integrations.cursor_mcp_runtime import classify_serve_argv
+
+    text = "/Users/me/Application Support/yoetz/bin/yoetz mcp serve --host cursor"
+    assert classify_serve_argv(tuple(text.split()), spaced) == ("policy", "different")
+
+
+def test_darwin_scanner_uses_the_text_match_for_whitespace_launchers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    import yoetz.adapters.integrations.cursor_mcp_runtime as module
+
+    spaced = ("/Users/me/Application Support/yoetz/bin/yoetz",)
+    comm_table = b"10 1 Cursor\n11 10 mcp-process\n12 11 /Users/me/Application\n"
+    arg_table = (
+        b"10 1 /Applications/Cursor.app/Contents/MacOS/Cursor\n"
+        b"11 10 mcp-process\n"
+        b"12 11 /Users/me/Application Support/yoetz/bin/yoetz mcp serve --host cursor\n"
+    )
+
+    class _Completed:
+        def __init__(self, stdout: bytes) -> None:
+            self.returncode = 0
+            self.stdout = stdout
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> _Completed:
+        del kwargs
+        calls.append(argv)
+        return _Completed(comm_table if "comm=" in argv else arg_table)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    snapshot = module._darwin_snapshots(spaced)  # pyright: ignore[reportPrivateUsage]
+    assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", "policy", "matched"),)
+    assert len(calls) == 2
