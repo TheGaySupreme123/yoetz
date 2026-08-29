@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
+from typing import cast, overload
 
 from yoetz.domain.events import (
     ActionRecordedPayload,
@@ -104,6 +104,14 @@ def clm(number: int) -> ClaimId:
 
 def fnd(number: int) -> FindingId:
     return finding_id(f"fnd_10000000-0000-4000-8000-{number:012x}")
+
+
+@overload
+def record(payload: Finding, number: int) -> FindingProjectionRecord: ...
+
+
+@overload
+def record[T](payload: T, number: int) -> ProjectionRecord[T]: ...
 
 
 def record[T](payload: T, number: int) -> ProjectionRecord[T]:

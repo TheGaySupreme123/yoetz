@@ -1001,12 +1001,6 @@ def build_receipt(
         for finding in findings
         if not states_by_id[finding.finding_id].resolved and FINDING_KIND_TRAITS[finding.kind][1]
     )
-    resolved_finding_ids = tuple(
-        sorted(
-            (state.finding_id for state in context.finding_states if state.resolved),
-            key=_ascii_key,
-        )
-    )
     conclusion = _conclusion(context, unresolved_actionable)
     obligations = _select_obligations(context, findings)
     responses = _select_responses(context, frozenset(finding.finding_id for finding in findings))
@@ -1026,6 +1020,19 @@ def build_receipt(
         obligations,
         responses,
         gaps,
+    )
+    # Resolved history is named only for rows the profile retains: a profile that omits a
+    # finding row must not leak its id through the summary items.
+    retained_ids = frozenset(finding.finding_id for finding in retained_findings)
+    resolved_finding_ids = tuple(
+        sorted(
+            (
+                state.finding_id
+                for state in context.finding_states
+                if state.resolved and state.finding_id in retained_ids
+            ),
+            key=_ascii_key,
+        )
     )
     sections = _sections(
         include=include,

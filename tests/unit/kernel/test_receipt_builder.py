@@ -25,6 +25,8 @@ from yoetz.domain.findings import (
     FindingKind,
     FindingOrigin,
     ResponseDisposition,
+    SemanticDispatchKind,
+    SemanticProvenance,
 )
 from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
@@ -71,6 +73,7 @@ from yoetz.kernel.receipt_builder import (
     ReceiptFindingState,
     build_receipt,
 )
+from yoetz.ports.semantic import SamplingParams
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.coverage import (
     ArtifactObservation,
@@ -895,3 +898,52 @@ def test_resolved_history_beside_a_current_finding_counts_only_the_current_one()
     assert "One earlier finding was resolved by a later qualifying check" in summary.body
     assert unresolved_findings_for_render(receipt) == (current,)
     assert render_receipt_compact(receipt).endswith("1 unresolved finding remains.")
+
+
+def _provenance() -> SemanticProvenance:
+    return SemanticProvenance(
+        provider="fake",
+        endpoint_profile_id="fake",
+        endpoint_profile_version="1.0.0",
+        model="fake/model",
+        sdk_version="1.0.0",
+        prompt_digest=_DIGEST,
+        schema_digest=_DIGEST,
+        policy_digest=_DIGEST,
+        privacy_policy_digest=_DIGEST,
+        sampling_params=SamplingParams(128),
+        latency_ms=1,
+        semantic_attempt_id="att_00000000-0000-4000-8000-000000000001",
+        dispatch_kind=SemanticDispatchKind.EXTERNAL,
+        privacy_receipt_id="egr_00000000-0000-4000-8000-000000000001",
+        status=SemanticStatus.SUCCEEDED,
+        reason=SemanticReason.SEMANTIC_COMPLETED,
+        provider_request_id="fake-1",
+        egress_authorization_id="aut_00000000-0000-4000-8000-000000000001",
+        request_commitment="hmac-sha256:" + "b" * 64,
+    )
+
+
+def test_redacted_share_does_not_leak_omitted_resolved_finding_ids() -> None:
+    """A profile that omits a finding row must not name its id as resolved history either."""
+
+    semantic = replace(
+        _finding(),
+        finding_id=finding_id("fnd_00000000-0000-4000-8000-000000000003"),
+        origin=FindingOrigin.SEMANTIC_MODEL_DERIVED,
+        provenance=_provenance(),
+    )
+    receipt = _build(
+        _context(
+            finding=semantic,
+            resolved=True,
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, _coverage()),
+        ),
+        profile=ReceiptRedactionProfile.REDACTED_SHARE,
+        include=ReceiptInclude.STANDARD,
+    )
+    assert receipt.findings == ()
+    summary = next(s for s in receipt.sections if s.key is ReceiptSectionKey.SUMMARY)
+    assert summary.items == ()
+    assert "resolved by a later qualifying check" not in summary.body
+    assert resolved_finding_ids_for_render(receipt) == frozenset()
