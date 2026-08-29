@@ -8,12 +8,6 @@ reverse-chronological released versions.
 
 ### Fixed
 
-- Cursor plugin status no longer treats installed `mcp.json` bytes as live MCP runtime. After a
-  plugin-managed replace, a surviving shared Cursor helper child on `yoetz mcp serve --semantic off`
-  is reported as `mcp.runtime.activation=full_restart_required` instead of looking activated, and
-  agent guidance treats `route_semantic_ceiling` against an installed `policy` route as that
-  mismatch rather than an owner privacy decision. Reload Window is not a sufficient activation
-  instruction; recovery never authorizes egress (issue #426).
 - Replaying a check that was suspended on a standing repository grant no longer fails with a
   non-retryable `STORAGE_CORRUPT` after the trusted `yoetz --privacy` ceremony, and a task whose
   ledger holds `evidence_recorded/1.1.0` events (any evidence carrying a `digest_binding`) no
@@ -24,6 +18,12 @@ reverse-chronological released versions.
   recovery after a service re-ready while the check was pending — was reported as corruption of an
   intact bundle. Snapshot records now decode under the newest wire version their family admits
   (issue #427).
+- Cursor plugin status no longer treats installed `mcp.json` bytes as live MCP runtime. After a
+  plugin-managed replace, a surviving shared Cursor helper child on `yoetz mcp serve --semantic off`
+  is reported as `mcp.runtime.activation=full_restart_required` instead of looking activated, and
+  agent guidance treats `route_semantic_ceiling` against an installed `policy` route as that
+  mismatch rather than an owner privacy decision. Reload Window is not a sufficient activation
+  instruction; recovery never authorizes egress (issue #426).
 
 ## 0.1.0 — Public alpha (2026-08-20)
 

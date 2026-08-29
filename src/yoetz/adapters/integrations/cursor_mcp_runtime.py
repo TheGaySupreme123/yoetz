@@ -27,6 +27,7 @@ __all__ = [
 _MAX_PROCESSES: Final = 64
 _MAX_TOKENS: Final = 12
 _MAX_COMM: Final = 32
+_PS_EXECUTABLE: Final = "/bin/ps"
 _POLICY_SUFFIXES: Final = frozenset(
     {
         ("mcp", "serve"),
@@ -109,15 +110,24 @@ class FixedCursorMcpProcesses:
 
 
 def _cursor_helper_comm(value: str) -> bool:
-    if type(value) is not str or not value or len(value) > _MAX_COMM:
+    if type(value) is not str or not value:
+        return False
+    value = value.rsplit("/", 1)[-1]
+    if not value or len(value) > _MAX_COMM:
         return False
     if any(ord(char) < 32 or ord(char) > 126 for char in value):
         return False
-    if value in _CURSOR_COMM_EXACT:
+    if value in _CURSOR_COMM_EXACT or value == "cursor":
         return True
-    return value.startswith(_CURSOR_COMM_PREFIXES) and all(
+    return (value.startswith(_CURSOR_COMM_PREFIXES) or value.startswith("cursor-helper")) and all(
         char.isalnum() or char in {" ", "(", ")", "-"} for char in value
     )
+
+
+def _yoetz_launcher_token(value: str) -> bool:
+    if type(value) is not str or not value or len(value) > 4_096:
+        return False
+    return value.replace("\\", "/").rsplit("/", 1)[-1] in {"yoetz", "yoetz.exe"}
 
 
 def classify_serve_suffix(
@@ -129,7 +139,13 @@ def classify_serve_suffix(
     for index, token in enumerate(tokens):
         if type(token) is not str:
             return None
-        if token == "mcp" and index + 1 < len(tokens) and tokens[index + 1] == "serve":
+        if (
+            token == "mcp"
+            and index > 0
+            and _yoetz_launcher_token(tokens[index - 1])
+            and index + 1 < len(tokens)
+            and tokens[index + 1] == "serve"
+        ):
             rest = tuple(tokens[index:])
             if len(rest) > _MAX_TOKENS:
                 return "foreign"
@@ -158,6 +174,7 @@ def observe_cursor_mcp_runtime(
     foreign = 0
     helper_routes: set[Literal["strict", "policy"]] = set()
     helper_foreign = False
+    scan_truncated = len(snapshot) > _MAX_PROCESSES
     for item in snapshot[:_MAX_PROCESSES]:
         if type(item) is not CursorMcpProcessSnapshot:
             continue
@@ -173,7 +190,7 @@ def observe_cursor_mcp_runtime(
             foreign += 1
             if item.parent_kind == "cursor_helper":
                 helper_foreign = True
-    if not helper_routes and not helper_foreign:
+    if scan_truncated or (not helper_routes and not helper_foreign):
         return CursorMcpRuntimeObservation(True, "unobserved", None, policy, strict, foreign)
     live: Literal["strict", "policy"] | None
     if len(helper_routes) == 1 and not helper_foreign:
@@ -231,7 +248,7 @@ def _linux_snapshots() -> tuple[CursorMcpProcessSnapshot, ...] | None:
             comm = path.joinpath("comm").read_text(encoding="ascii", errors="ignore").strip()
         except OSError:
             continue
-        comm_by_pid[pid] = comm[:_MAX_COMM]
+        comm_by_pid[pid] = comm
         try:
             status_text = path.joinpath("status").read_text(encoding="ascii", errors="ignore")
             for line in status_text.splitlines():
@@ -241,7 +258,7 @@ def _linux_snapshots() -> tuple[CursorMcpProcessSnapshot, ...] | None:
         except OSError, ValueError:
             continue
     for path in pid_dirs:
-        if len(classified) >= _MAX_PROCESSES:
+        if len(classified) > _MAX_PROCESSES:
             break
         try:
             raw = path.joinpath("cmdline").read_bytes()
@@ -293,26 +310,32 @@ def _parse_ps_table(payload: bytes) -> tuple[tuple[int, int, str], ...]:
 def _darwin_snapshots() -> tuple[CursorMcpProcessSnapshot, ...] | None:
     try:
         comm_table = subprocess.run(
-            ["ps", "-ax", "-o", "pid=", "-o", "ppid=", "-o", "comm="],
+            [_PS_EXECUTABLE, "-ax", "-o", "pid=", "-o", "ppid=", "-o", "comm="],
+            stdin=subprocess.DEVNULL,
             check=False,
             capture_output=True,
+            env={"LANG": "C", "LC_ALL": "C"},
+            shell=False,
             timeout=2,
         )
         arg_table = subprocess.run(
-            ["ps", "-axww", "-o", "pid=", "-o", "ppid=", "-o", "args="],
+            [_PS_EXECUTABLE, "-axww", "-o", "pid=", "-o", "ppid=", "-o", "args="],
+            stdin=subprocess.DEVNULL,
             check=False,
             capture_output=True,
+            env={"LANG": "C", "LC_ALL": "C"},
+            shell=False,
             timeout=2,
         )
-    except OSError, ValueError:
+    except OSError, ValueError, subprocess.SubprocessError:
         return None
     if comm_table.returncode != 0 or arg_table.returncode != 0:
         return None
-    comm_by_pid = {pid: comm[:_MAX_COMM] for pid, _ppid, comm in _parse_ps_table(comm_table.stdout)}
+    comm_by_pid = {pid: comm for pid, _ppid, comm in _parse_ps_table(comm_table.stdout)}
     ppid_by_pid = {pid: ppid for pid, ppid, _comm in _parse_ps_table(comm_table.stdout)}
     classified: list[CursorMcpProcessSnapshot] = []
     for pid, _ppid, args in _parse_ps_table(arg_table.stdout):
-        if len(classified) >= _MAX_PROCESSES:
+        if len(classified) > _MAX_PROCESSES:
             break
         tokens = tuple(args.split())
         kind = classify_serve_suffix(tokens)

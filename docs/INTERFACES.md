@@ -3315,9 +3315,10 @@ vault/keyring/provider/privacy state, unrelated settings, and Cursor caches.
 `inline_send|inline_create|plugin|project|user`. `CursorMcpObservation` carries observed
 `McpOwnershipState`, winning source or null, exact route or null, ordered present sources, and an
 observation boolean. `CursorPluginStatus` also carries one `CursorMcpRuntimeObservation`: whether a
-live process scan ran, exact counts of classified policy/strict/foreign `yoetz mcp serve` processes,
+live process scan ran, exact bounded counts of classified policy/strict/foreign `yoetz mcp serve` processes,
 the live helper route or null, and `activation` exactly
-`unobserved|matched|full_restart_required`. Counts and closed tokens only — never raw argv, paths,
+`unobserved|matched|full_restart_required`. Classification requires an exact `yoetz` launcher token
+and known serve suffix; an unavailable or truncated scan is `unobserved`. Counts and closed tokens only — never raw argv, paths,
 or parent command lines. File registration is not live runtime: a plugin-managed `policy` tree with
 a surviving Cursor-helper child on the strict argv is `full_restart_required`, and `HOST_ACTIVATION`
 stays `not_observed`. Reload Window is not a sufficient activation proof. SDK precedence is exactly that enum order. A higher-precedence or duplicate

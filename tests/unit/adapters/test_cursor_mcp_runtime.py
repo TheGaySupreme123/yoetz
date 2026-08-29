@@ -41,15 +41,29 @@ class _AcceptingReview:
 
 
 def test_serve_suffix_classifies_exact_policy_and_strict_argv() -> None:
-    assert classify_serve_suffix(("yoetz", "mcp", "serve")) == "policy"
+    assert classify_serve_suffix(("/opt/yoetz/bin/yoetz", "mcp", "serve")) == "policy"
     assert classify_serve_suffix(("yoetz", "mcp", "serve", "--host", "cursor")) == "policy"
     assert classify_serve_suffix(("yoetz", "mcp", "serve", "--semantic", "off")) == "strict"
     assert (
         classify_serve_suffix(("yoetz", "mcp", "serve", "--host", "cursor", "--semantic", "off"))
         == "strict"
     )
-    assert classify_serve_suffix(("/secret/path", "mcp", "serve", "--extra")) == "foreign"
+    assert classify_serve_suffix(("/secret/yoetz", "mcp", "serve", "--extra")) == "foreign"
+    assert classify_serve_suffix(("/secret/not-yoetz", "mcp", "serve")) is None
+    assert classify_serve_suffix(("python", "worker.py", "mcp", "serve")) is None
     assert classify_serve_suffix(("unrelated",)) is None
+
+
+def test_cursor_helper_comm_accepts_macos_paths_without_retaining_them() -> None:
+    import yoetz.adapters.integrations.cursor_mcp_runtime as module
+
+    assert module._cursor_helper_comm(  # pyright: ignore[reportPrivateUsage]
+        "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin)"
+    )
+    assert module._cursor_helper_comm("cursor")  # pyright: ignore[reportPrivateUsage]
+    assert not module._cursor_helper_comm(  # pyright: ignore[reportPrivateUsage]
+        "/Applications/Other.app/Contents/MacOS/Other"
+    )
 
 
 def test_installed_policy_plus_live_strict_helper_requires_full_restart() -> None:
@@ -102,6 +116,19 @@ def test_non_helper_processes_do_not_prove_cursor_activation() -> None:
     )
     assert runtime.activation == "unobserved"
     assert runtime.strict_process_count == 1
+    assert runtime.live_route_profile is None
+
+
+def test_truncated_process_inventory_never_reports_a_route_match() -> None:
+    runtime = observe_cursor_mcp_runtime(
+        installed_route="policy",
+        processes=FixedCursorMcpProcesses(
+            tuple(CursorMcpProcessSnapshot("cursor_helper", "policy") for _ in range(65))
+        ),
+    )
+
+    assert runtime.observed is True
+    assert runtime.activation == "unobserved"
     assert runtime.live_route_profile is None
 
 
