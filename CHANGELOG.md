@@ -8,6 +8,13 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- A check parked on a standing repository-grant handoff no longer refuses every observation
+  append for the rest of the session. `suspension_kind=repository_grant` expires the lease
+  and is not an active frozen-case barrier, so the drain can ledger hook-observed work
+  while the trusted ceremony is outstanding. Same-request replay re-installs the barrier
+  and still commits if only observation moved past the frozen subject frontier; cooperative
+  motion still conflicts (issue #445).
+
 - A tracked root `CLAUDE.md` whose complete bytes are the reviewed `@AGENTS.md` alias no longer
   makes every later pull request fail the source publication-boundary gate. The exception is
   source-only and exact; nested aliases, changed content, and packaged copies remain blocked
@@ -491,13 +498,6 @@ carried them; they are listed because each one describes the behavior that now s
   are untested.
 
 ### Fixed
-
-- A check parked on a standing repository-grant handoff no longer refuses every observation
-  append for the rest of the session. `suspension_kind=repository_grant` expires the lease
-  and is not an active frozen-case barrier, so the drain can ledger hook-observed work
-  while the trusted ceremony is outstanding. Same-request replay re-installs the barrier
-  and still commits if only observation moved past the frozen subject frontier; cooperative
-  motion still conflicts (issue #445).
 
 - Hook observation advice no longer tells an agent `Next: refresh_observation`. That token
   remains the snapshot next-action value, but the hook clause now names the real host-shell
