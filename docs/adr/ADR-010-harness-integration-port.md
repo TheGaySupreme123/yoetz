@@ -162,6 +162,21 @@ text, paths, file contents/edits, tool arguments/results, transcripts, command o
 `afterAgentThought` is deliberately not registered. A declaration or `sessionStart` earns no
 observation coverage; only consented accepted `cursor_hook` envelopes can do so.
 
+**Amendment (2026-08-28, issue #426): installed Cursor plugin status binds live MCP runtime
+process evidence when a bounded scan is available.** File `mcp.json` and marker route are not the process
+that answers model calls. After plugin replace, Cursor can keep a shared `mcp-process` helper
+whose child still has `yoetz mcp serve --semantic off` while the extension host already launched
+`--host cursor`. Status therefore classifies exact known serve suffixes and Cursor-helper parents
+into `mcp.runtime` (`unobserved|matched|full_restart_required`) without retaining argv. Only an exact
+`yoetz` launcher token followed by a known serve suffix is classified; an unavailable or truncated
+scan remains `unobserved`. A
+policy-installed tree with a contradictory helper child reports `full_restart_required` and must
+not be described as activated. Reload Window is not sufficient; a full application quit is the
+documented activation instruction. Agent guidance treats `route_semantic_ceiling` against
+installed `policy` as that mismatch, not an owner privacy decision, and does not mint a fresh
+semantic check against the stale process. A live installed strict route remains the ordinary
+terminal ceiling. Recovery never authorizes egress or changes privacy settings.
+
 The append-only local-control schema `2.1.0` admits `cursor_hook`, a keyed HMAC
 `changed_paths_digest`, and the Cursor source-coverage row while retaining `2.0.0` byte-for-byte.
 Cursor's documented `afterMCPExecution` result is content and is discarded; because the host does

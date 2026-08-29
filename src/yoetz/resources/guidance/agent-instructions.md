@@ -118,9 +118,13 @@ not returned by the current check, take a `receipt`, and only then answer.
 `awaiting_human` is outside this section entirely: it is nonterminal, so it is neither a gap to
 disclose nor a retry to spend. Follow its continuation.
 
-Semantic review that does not succeed is a coverage gap, not a retry problem. `not_configured`, `blocked_by_policy`, and `human_denied` will not change without owner action; take the first answer. `unavailable` and `timeout` already spent that job's own attempt budget. `refused`, `invalid`, and `failed` are not retried inside the job at all. When a second job in one session again returns no judgment, stop requesting semantic review, run `deterministic_only`, and disclose the gap naming the recorded `semantic_status` and `semantic_reason`.
+Semantic review that does not succeed is a coverage gap, not a retry problem. `not_configured`, `blocked_by_policy`, and `human_denied` will not change without owner action; take the first answer, except for the stale-runtime mismatch in the next section. `unavailable` and `timeout` already spent that job's own attempt budget. `refused`, `invalid`, and `failed` are not retried inside the job at all. When a second job in one session again returns no judgment, stop requesting semantic review, run `deterministic_only`, and disclose the gap naming the recorded `semantic_status` and `semantic_reason`.
 
 On `OPERATION_PENDING`, read `status` with `view=operation` once and replay the same `request_id` once; if it is still pending, continue with a new deterministic-only request and say the earlier operation never reached a terminal result.
+
+# Route ceiling vs stale plugin runtime
+
+`blocked_by_policy` / `route_semantic_ceiling` describes this MCP process, not installed plugin bytes. Compare initialize `Route profile` and `status` `view=versions` with installed plugin status (`mcp.route_profile` and `mcp.runtime`). If installed `policy` disagrees with a live strict process, or `mcp.runtime.activation` is `full_restart_required`, that is an activation mismatch: report the contradiction, request a full application quit (Reload Window is not enough), and do not mint a fresh semantic check against the stale process. After the live runtime matches the installed policy route, a later session may check again. A genuinely installed-and-live strict route stays the current terminal guidance. Recovery never authorizes egress or changes privacy settings.
 
 # Canonical request values
 

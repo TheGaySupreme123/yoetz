@@ -168,6 +168,7 @@ manifest.
 Cursor is the second first-party harness and remains local-only. The adapter at
 `adapters/integrations/cursor_integration.py` owns exact IDE/CLI/SDK identity capture, the
 Agent Plugins and Cursor-native projections, explicit user-scope lifecycle, MCP source precedence,
+live classified MCP process identity for activation mismatch (`cursor_mcp_runtime.py`),
 and the pinned `sdk.v1` TypeScript/Python profiles. The pinned macOS lifecycle consumes one exact
 `plugin_artifact_apply` pending only after the scoped `macos_artifact_presence.py` adapter obtains
 a fresh Apple LocalAuthentication device-owner result; this does not populate the service-wide
