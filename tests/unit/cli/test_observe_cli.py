@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -475,7 +476,9 @@ def test_status_names_an_unresolvable_locator_instead_of_internal_error(
 def test_status_command_reports_typed_workspace_failure_through_the_console(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(observe_cli, "state_dir", lambda: tmp_path, raising=False)
+    import yoetz.adapters.integrations.observation_local as local
+
+    monkeypatch.setattr(local, "state_dir", lambda: tmp_path)
     result = CliRunner().invoke(app, ["observe", "status", "--workspace", "", "--json"])
     assert result.exit_code == 2
     assert "internal_error" not in result.output
@@ -513,6 +516,180 @@ def test_status_maps_bounded_storage_refusals_to_their_public_exit(
         "STORAGE_UNSAFE",
         True,
     )
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="owner permission refusal requires a non-root POSIX process",
+)
+def test_status_maps_real_lock_open_permission_refusal_without_leaking_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The issue #428 sandbox failure is forced at the real ``os.open`` boundary."""
+
+    import yoetz.adapters.integrations.observation_local as local
+
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    observation = state / "observation"
+    observation.mkdir(mode=0o700)
+    lock_path = observation / ".store.lock"
+    lock_path.write_bytes(b"")
+    lock_path.chmod(0)
+    monkeypatch.setattr(local, "state_dir", lambda: state)
+    try:
+        result = CliRunner().invoke(
+            app, ["observe", "status", "--workspace", str(tmp_path), "--json"]
+        )
+    finally:
+        lock_path.chmod(0o600)
+
+    assert result.exit_code == 20
+    assert result.stderr == ""
+    error = json.loads(result.stdout)["error"]
+    assert error == {
+        "code": "SERVICE_UNAVAILABLE",
+        "message": (
+            "the local Yoetz observation store could not be opened or locked from this process; "
+            "make the owner-only state directory accessible and writable from the supported host "
+            "surface, then retry"
+        ),
+        "operation": "status",
+        "reason": "storage_unavailable",
+        "retryable": True,
+    }
+    assert str(state) not in result.stdout
+    assert "internal_error" not in result.stdout
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="read-only directory refusal requires a non-root POSIX process",
+)
+def test_status_maps_real_read_only_state_directory_to_storage_unavailable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+
+    def read_only_store(*, _state: Path | None = None, **_kwargs: object) -> LocalObservationStore:
+        store = LocalObservationStore(_state=_state)
+        store._root.chmod(0o500)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        return store
+
+    monkeypatch.setattr(observe_cli, "LocalObservationStore", read_only_store)
+    try:
+        code = observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=state)
+    finally:
+        (state / "observation").chmod(0o700)
+
+    captured = capsys.readouterr()
+    assert code == 20
+    error = json.loads(captured.out)["error"]
+    assert (error["reason"], error["code"], error["retryable"]) == (
+        "storage_unavailable",
+        "SERVICE_UNAVAILABLE",
+        True,
+    )
+    assert str(state) not in captured.out
+
+
+def test_status_maps_real_unsafe_lock_path_to_storage_unsafe(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    lock_path = state / "observation" / ".store.lock"
+    lock_path.parent.mkdir(mode=0o700)
+    lock_path.mkdir(mode=0o700)
+
+    code = observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=state)
+
+    captured = capsys.readouterr()
+    assert code == 20
+    error = json.loads(captured.out)["error"]
+    assert (error["reason"], error["code"], error["retryable"]) == (
+        "storage_unsafe",
+        "STORAGE_UNSAFE",
+        False,
+    )
+    assert str(state) not in captured.out
+
+
+def test_status_maps_real_missing_store_parent_to_storage_unavailable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+
+    def missing_parent_store(
+        *, _state: Path | None = None, **_kwargs: object
+    ) -> LocalObservationStore:
+        store = LocalObservationStore(_state=_state)
+        store._root.rmdir()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        return store
+
+    monkeypatch.setattr(observe_cli, "LocalObservationStore", missing_parent_store)
+    code = observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=state)
+
+    captured = capsys.readouterr()
+    assert code == 20
+    error = json.loads(captured.out)["error"]
+    assert (error["reason"], error["code"], error["retryable"]) == (
+        "storage_unavailable",
+        "SERVICE_UNAVAILABLE",
+        True,
+    )
+    assert str(state) not in captured.out
+
+
+def test_status_maps_real_lock_contention_to_storage_unavailable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.adapters.integrations.observation_local as local
+
+    if local.fcntl is None:
+        pytest.skip("POSIX flock is unavailable")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    observation = state / "observation"
+    observation.mkdir(mode=0o700)
+    lock_path = observation / ".store.lock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    local.fcntl.flock(descriptor, local.fcntl.LOCK_EX | local.fcntl.LOCK_NB)
+    monkeypatch.setattr(local, "_STORE_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(local, "_STORE_LOCK_POLL_SECONDS", 0.005)
+    try:
+        code = observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=state)
+    finally:
+        local.fcntl.flock(descriptor, local.fcntl.LOCK_UN)
+        os.close(descriptor)
+
+    captured = capsys.readouterr()
+    assert code == 20
+    error = json.loads(captured.out)["error"]
+    assert (error["reason"], error["code"], error["retryable"]) == (
+        "storage_unavailable",
+        "SERVICE_UNAVAILABLE",
+        True,
+    )
+    assert str(state) not in captured.out
+
+
+def test_status_leaves_genuinely_unexpected_defects_for_the_internal_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def defect(self: LocalObservationStore, path: str) -> str:
+        del self, path
+        raise RuntimeError("unexpected_observation_defect")
+
+    monkeypatch.setattr(LocalObservationStore, "workspace_commitment", defect)
+    with pytest.raises(RuntimeError, match="unexpected_observation_defect"):
+        observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -566,8 +743,8 @@ def test_status_maps_an_unsafe_state_path_to_storage_unsafe(
     captured = capsys.readouterr()
     assert code == 20
     assert captured.err.startswith(
-        "observation_status_failed:storage_unsafe: the local Yoetz state path is unsafe "
-        "(path_contains_symlink)"
+        "observation_status_failed:storage_unsafe: the local Yoetz observation store has an "
+        "unsafe file or path shape"
     )
 
 

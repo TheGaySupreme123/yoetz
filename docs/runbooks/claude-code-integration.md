@@ -166,6 +166,12 @@ diagnostic, so read `recent_count` together with the envelopes: no new `claude_h
 zero `recent_count` after a session that ran Yoetz tools means the hooks never reached the ingress
 or the runtime gate is disabled — not that they were dropped for binding.
 
+The shared `observe status` CLI maps an unsafe state/lock path to `storage_unsafe`, bounded
+open/permission/read-only/missing-parent/lock-acquisition failures to `storage_unavailable`, and
+invalid stored data to `storage_corrupt`; other defects retain the internal-error boundary. Its
+fixed remediation never prints the absolute state path. A result obtained from a sandboxed Claude
+carrier proves only that sandbox cell; unrestricted-terminal behavior needs its own run.
+
 Grant observation separately for the exact project. Exercise every advertised event and inspect
 `yoetz observe status`. Only consented accepted `claude_hook` envelopes earn coverage. Raw
 transcript/prompt/assistant/path/cwd/tool input/tool output/result/error values are discarded before

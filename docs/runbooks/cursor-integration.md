@@ -157,6 +157,13 @@ symlinked ancestors, root/home locators, unsafe markers, or unbounded/control-be
 `workspace_unresolvable` and `workspace_unconsented` remain distinct payload-free diagnostics
 (with `paused` for a paused grant), recorded by the shared ingress for every host.
 
+The host-neutral `observe status` boundary also keeps storage layers distinct: unsafe state/lock
+paths report `storage_unsafe`, bounded open/permission/read-only/missing-parent/lock-acquisition
+failures report `storage_unavailable`, invalid stored data reports `storage_corrupt`, and other
+defects retain the internal-error boundary. Fixed remediation omits the absolute state path. A
+sandboxed Cursor-agent result does not establish unrestricted Cursor-terminal behavior; record
+those proof cells separately.
+
 Measured on 2026-08-28 with Cursor Agent CLI `2026.08.25-3e8eec8` (payload `cursor_version`;
 `cursor-agent --version` printed `2026.08.11-e8db854`) loading the native plugin through
 `--plugin-dir` in an isolated cell: the plugin-sourced `sessionStart` hook ran with `$PWD` equal to

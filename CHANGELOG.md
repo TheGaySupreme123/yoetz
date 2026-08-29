@@ -8,6 +8,12 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- `yoetz observe status` no longer collapses bounded observation-store filesystem failures into
+  generic `internal_error`. Unsafe state/lock shapes, unavailable open/permission/read-only/
+  missing-parent/lock failures, and corrupt stored data retain distinct typed outcomes; fixed
+  remediation omits the raw absolute state path, and unexpected non-filesystem defects still reach
+  the internal-error boundary (issue #428).
+
 - Reopening a task whose one pending check has an undecodable resume checkpoint no longer latches
   non-retryable `STORAGE_CORRUPT` for the entire ledger. Recovery quarantines that operation as
   `operation_resume_object_invalid`, stores the terminal error for same-request replay, and leaves

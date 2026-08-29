@@ -2835,9 +2835,13 @@ canonical locator carries no active consent, and `paused` when consent is paused
 fired and was dropped from one that never fired (issues #420, #435). `yoetz observe` verbs report
 the same pre-store conditions as typed public outcomes rather than `internal_error`:
 `workspace_unresolvable` exits `INVALID_REQUEST` (2) with its remediation, an unsafe local state
-path exits `STORAGE_UNSAFE` (20), and a bounded storage refusal exits with its own public code;
-`--json` callers receive one `error` object carrying `code`, `reason`, `retryable`, `operation`,
-and the bounded message (issue #428).
+path or unsafe lock-file shape exits `STORAGE_UNSAFE` (20), and a bounded open, permission,
+read-only, missing-parent, or lock-acquisition failure exits `SERVICE_UNAVAILABLE` (20) with reason
+`storage_unavailable` and a retry remediation. Existing invalid stored data remains
+`STORAGE_CORRUPT` (40), while non-filesystem defects still reach the `internal_error` boundary.
+The filesystem mapping renders only fixed reason/remediation text and never includes the raw
+exception or absolute state path. `--json` callers receive one `error` object carrying `code`,
+`reason`, `retryable`, `operation`, and the bounded message (issue #428).
 A `service_unavailable` rejection retires that session's lane for the pass while other sessions
 remain eligible; no later row may step over a failed lane head. Local observation-store acquisition is capped at two
 seconds for both the process-local reentrant lock and the cross-process flock. Hook timing rows
