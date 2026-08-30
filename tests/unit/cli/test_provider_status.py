@@ -663,3 +663,100 @@ async def test_uninitialized_vault_points_to_guided_setup(
     blockers = cast(tuple[dict[str, object], ...], report["blockers"])
     assert blockers[0]["next_command"] == "yoetz setup"
     assert report["next_commands"] == ("yoetz setup",)
+
+
+def _admit_claude(project: Path) -> None:
+    (project / ".claude").mkdir(exist_ok=True)
+    (project / ".claude" / "settings.local.json").write_text(
+        json.dumps({"permissions": {"allow": ["mcp__plugin_yoetz_yoetz__check"]}}),
+        encoding="utf-8",
+    )
+
+
+async def test_host_admission_is_reported_per_host_and_unknown_when_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #467: admission is a fourth route-bound fact, read from the hosts' own files."""
+
+    _install(monkeypatch, tmp_path, provider=_provider(), mcp_route=_route("policy"))
+    project = tmp_path / "project"
+    project.mkdir()
+    _admit_claude(project)
+    (project / ".cursor").mkdir()
+    (project / ".cursor" / "permissions.json").write_bytes(b"{broken")
+
+    report = await module.provider_status_report(workspace_locator=project)
+
+    admission = cast(dict[str, dict[str, object]], report["host_admission"])
+    assert admission["claude"]["state"] == "present"
+    assert admission["codex"]["state"] == "absent"
+    assert admission["cursor"]["state"] == "unknown"
+    assert admission["cursor"]["observed"] is False
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    assert [item for item in blockers if item.get("condition") == "host_admission_drift"] == []
+    assert report["agent_route_semantic_ready"] is True
+    assert str(project) not in json.dumps(report)
+
+
+async def test_present_admission_without_a_permitting_grant_is_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(
+        monkeypatch,
+        tmp_path,
+        provider=_provider(),
+        llm_inference_enabled=False,
+        mcp_route=_route("policy"),
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    _admit_claude(project)
+
+    report = await module.provider_status_report(workspace_locator=project)
+
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    drift = [item for item in blockers if item.get("condition") == "host_admission_drift"]
+    assert drift == [
+        {
+            "condition": "host_admission_drift",
+            "state": "present",
+            "scope": "agent_route",
+            "host": "claude",
+            "next_command": (
+                "yoetz integrate claude admission preview --action revoke --project-root ."
+            ),
+        }
+    ]
+
+
+async def test_strict_codex_route_with_a_codex_admission_is_drift_for_codex_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, provider=_provider(), mcp_route=_route("strict"))
+    project = tmp_path / "project"
+    project.mkdir()
+    _admit_claude(project)
+    (project / ".codex").mkdir()
+    (project / ".codex" / "config.toml").write_text(
+        '[mcp_servers.yoetz.tools.check]\napproval_mode = "approve"\n', encoding="utf-8"
+    )
+
+    report = await module.provider_status_report(workspace_locator=project)
+
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    drift = [item for item in blockers if item.get("condition") == "host_admission_drift"]
+    assert [item["host"] for item in drift] == ["codex"]
+    # Drift never moves installation readiness (ADR-018 decision 2 still holds).
+    assert report["semantic_ready"] is True
+
+
+async def test_unknown_grant_never_reports_admission_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, provider=_provider(), service_state="locked")
+    project = tmp_path / "project"
+    project.mkdir()
+    _admit_claude(project)
+    report = await module.provider_status_report(workspace_locator=project)
+    blockers = cast(tuple[dict[str, object], ...], report["blockers"])
+    assert [item for item in blockers if item.get("condition") == "host_admission_drift"] == []

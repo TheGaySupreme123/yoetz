@@ -194,6 +194,49 @@ none of the response bytes or prose. Confirm `mapping_present: true`, then drain
 rows before claiming hook coverage. Pause, resume, revoke, deduplication, restart, and gap behavior
 require their own evidence.
 
+## Auto mode and host admission
+
+Claude Code's auto-mode classifier sees the tool name, the request JSON, user messages, and
+`CLAUDE.md`; descriptions, annotations, and tool results are stripped, so no descriptor wording
+can satisfy it. `permissions.allow` / `ask` / `deny` resolve before the classifier and are honored
+from the repository's `.claude/settings.local.json` (repository root, resolved through
+worktrees to the main checkout); a plugin cannot ship permission rules. Allow rules take the
+literal prefix `mcp__plugin_yoetz_yoetz__`. (`code.claude.com/docs/en/permissions`,
+`/permission-modes`, `/hooks`, re-read 2026-08-30.)
+
+Host admission (issue #467) writes exactly `mcp__plugin_yoetz_yoetz__check` into
+`permissions.allow` (or `permissions.ask` with `--checkpoint`), digest-bound to the file bytes:
+
+```text
+yoetz integrate claude admission preview --project-root "$PROJECT_ROOT" \
+  --claude-path "$CLAUDE_PATH" --claude-config-root "$CLAUDE_CONFIG_ROOT" \
+  --cache-root "$CACHE_ROOT" --marketplace-root "$MARKETPLACE_ROOT" \
+  --mcp-ownership plugin-managed --json
+yoetz integrate claude admission grant --project-root "$PROJECT_ROOT" ... --accept --preview-digest <digest>
+```
+
+The Claude roots are what the route observation needs (`status` on the plugin); without them
+the route is unread and a grant refuses with `host_admission_route_unobserved`. A strict route
+refuses with `route_not_policy`; a grant that does not permit review with
+`grant_not_permitting`; a service that cannot be read with `grant_unverifiable`. A wider rule
+(`mcp__plugin_yoetz_yoetz__*`, `mcp__plugin_yoetz_yoetz`), a deny rule, or the tool in both
+`allow` and `ask` is `foreign` and never edited. If `.claude/settings.local.json` is tracked in
+git or `.claude` is a symlink, Claude Code holds its rules until the folder is trusted.
+
+Reverse: `admission revoke` removes only that string; `plugin remove` and a `plugin
+install|update` onto the strict route sweep it for `--project-root` and report
+`admission_cleanup`; a privacy commit that stops external review sweeps it; a leftover entry
+shows as `host_admission_drift` in `provider status`.
+
+The rendered `hooks/hooks.json` carries a sixth hook, `PermissionDenied`, matched to exactly
+`^mcp__plugin_yoetz_yoetz__check$`. It fires after auto mode (or a rule or another hook) denies
+the call and can allow nothing; the ingress keeps only a closed token and records one
+payload-free `hook_diagnostics` reason — `host_auto_review_denied` (`source: auto_mode` or
+absent) or `host_permission_rule_denied` (`permission_rule` / `hook`) — so `observe status`
+can show a held check as host authorization, never as a semantic status. Yoetz deliberately
+ships no `PermissionRequest` hook returning `decision: allow`, which would make the plugin the
+authority over the host's own review.
+
 ## Update
 
 A released plugin byte change requires a new generated manifest version. Preview `--action update`,

@@ -13,7 +13,7 @@ import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 from yoetz.config.load import load_config
 from yoetz.config.paths import state_dir
@@ -24,6 +24,7 @@ from yoetz.service.client import connect_service
 
 __all__ = [
     "credential_human_display",
+    "host_admission_observation",
     "machine_scope_request",
     "mcp_route_observation",
     "provider_status_report",
@@ -71,6 +72,15 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
             f"observed={route.get('observed')}"
         )
     print(f"agent_route_semantic_ready: {value.get('agent_route_semantic_ready')}")
+    admission = value.get("host_admission")
+    if isinstance(admission, Mapping):
+        print(
+            "host_admission: "
+            + " ".join(
+                f"{host}={_admission_state(admission.get(host))}"
+                for host in ("claude", "codex", "cursor")
+            )
+        )
     blockers = value.get("blockers")
     if isinstance(blockers, list | tuple) and blockers:
         print("blockers:")
@@ -90,6 +100,14 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
         print("next commands:")
         for step in next_steps:
             print(f"  - {step}")
+
+
+def _admission_state(value: object) -> str:
+    if isinstance(value, Mapping):
+        state = cast(Mapping[str, object], value).get("state")
+        if type(state) is str:
+            return state
+    return "unknown"
 
 
 def credential_human_display(value: object) -> str:
@@ -229,6 +247,49 @@ async def mcp_route_observation(
     }
 
 
+def host_admission_observation(
+    workspace_locator: Path | None = None,
+    *,
+    codex_owner: str | None = None,
+) -> dict[str, JsonValue]:
+    """Report each host's project-scoped admission entry for ``check`` without inferring intent.
+
+    Reads only the three hosts' own files under the workspace (issue #467). An unreadable file
+    is ``unknown``, never ``absent``: the report must not tell an operator that a host holds no
+    admission when it simply could not read the host's rule file.
+    """
+
+    from yoetz.adapters.integrations.host_admission import (
+        ADMISSION_HOSTS,
+        HostAdmissionError,
+        observe_host_admission,
+    )
+
+    root = Path.cwd() if workspace_locator is None else workspace_locator
+    owner = codex_owner if codex_owner in {"external", "plugin"} else None
+    report: dict[str, JsonValue] = {}
+    for host in ADMISSION_HOSTS:
+        try:
+            observation = observe_host_admission(
+                host,
+                root,
+                owner=cast('Literal["external", "plugin"] | None', owner)
+                if host == "codex"
+                else None,
+            )
+        except HostAdmissionError as error:
+            report[host] = {
+                "entries": [],
+                "host": host,
+                "observed": False,
+                "reason": error.reason.value,
+                "state": "unknown",
+            }
+            continue
+        report[host] = observation.as_json()
+    return report
+
+
 def machine_scope_request() -> JsonObject:
     """Build the ``privacy_get_effective`` body for this installation's machine scope.
 
@@ -337,6 +398,16 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
     if ownership_state is None and mcp_route.get("registration_state") == "yoetz_owned":
         ownership_state = "external"
     route_observed = mcp_route.get("observed") is True
+    host_admission = host_admission_observation(
+        workspace_locator,
+        codex_owner=ownership_state if type(ownership_state) is str else None,
+    )
+    # Admission is a repository fact derived from the grant; it drifts when the grant no
+    # longer permits external review or (Codex) the registered route is strict, and a present
+    # entry then admits a call Yoetz will refuse or hold anyway. Reported, never auto-removed
+    # here: this surface is read-only.
+    grant_permits_review = llm_inference_enabled is True and repository_grant_state == "granted"
+    grant_known = llm_inference_enabled is not None and repository_grant_state is not None
 
     blockers: list[dict[str, JsonValue]] = []
     if service_state != "ready":
@@ -430,6 +501,25 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
                 "scope": "agent_route",
             }
         )
+    for host, admission in host_admission.items():
+        state = admission.get("state") if isinstance(admission, Mapping) else None
+        if state not in {"present", "partial"}:
+            continue
+        drifted = (grant_known and not grant_permits_review) or (
+            host == "codex" and route_observed and registered_profile == "strict"
+        )
+        if drifted:
+            blockers.append(
+                {
+                    "condition": "host_admission_drift",
+                    "state": state,
+                    "scope": "agent_route",
+                    "host": host,
+                    "next_command": (
+                        f"yoetz integrate {host} admission preview --action revoke --project-root ."
+                    ),
+                }
+            )
 
     readiness_determinable = (
         service_state == "ready"
@@ -467,6 +557,7 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
         "readiness_determinable": readiness_determinable,
         "semantic_ready": semantic_ready,
         "mcp_route": mcp_route,
+        "host_admission": host_admission,
         "agent_route_semantic_ready": (
             semantic_ready
             and route_observed
@@ -487,6 +578,10 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
             "terminal checks still dispatch, only the strict agent route cannot.",
             "mcp_route.observed false means ownership was not read unambiguously, not that no "
             "route exists.",
+            "host_admission reports each host's own project-scoped rule admitting the "
+            "semantic check past its automatic reviewer; it is host tool-call authorization "
+            "and proves neither dispatch nor a Yoetz decision. unknown means the host file "
+            "could not be read.",
         ),
     }
 

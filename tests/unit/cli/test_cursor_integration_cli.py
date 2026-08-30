@@ -362,3 +362,39 @@ def test_invoking_launcher_preserves_module_entrypoint(
 
     monkeypatch.setattr(cli_module.sys, "argv", ["/usr/bin/unrelated"])
     assert cli_module._invoking_launcher() is None  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_strict_preview_discloses_the_project_host_admission_it_would_revoke(
+    tmp_path: Path,
+) -> None:
+    """A strict route and a removal are reverse transitions for host admission (issue #467)."""
+
+    config = tmp_path / "cursor-testing-home" / ".cursor"
+    project = tmp_path / "project"
+    (project / ".cursor").mkdir(parents=True)
+    (project / ".cursor" / "permissions.json").write_text(
+        json.dumps({"mcpAllowlist": ["yoetz:check"]}), encoding="utf-8"
+    )
+    (project / ".cursor" / "cli.json").write_text(
+        json.dumps({"permissions": {"allow": ["Mcp(plugin-yoetz-yoetz:check)"]}}),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    preview_result = runner.invoke(app, _args(config, project, "preview"))
+    assert preview_result.exit_code == 0, preview_result.output
+    preview = json.loads(preview_result.stdout)
+    assert preview["mcp_route_profile"] == "strict"
+    assert preview["admission_cleanup"] == {
+        "host": "cursor",
+        "state": "present",
+        "surfaces": [".cursor/cli.json", ".cursor/permissions.json"],
+    }
+    # Disclosure only; nothing is removed by a preview.
+    assert (project / ".cursor" / "permissions.json").exists()
+
+    policy_args = [
+        item if item != "strict" else "policy" for item in _args(config, project, "preview")
+    ]
+    policy = runner.invoke(app, policy_args)
+    assert policy.exit_code == 0, policy.output
+    assert json.loads(policy.stdout)["admission_cleanup"] is None

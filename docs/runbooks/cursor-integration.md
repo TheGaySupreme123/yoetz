@@ -125,6 +125,38 @@ compares live Cursor-helper children with the installed launcher: `executable_mi
 `state: modified` with `mcp_binding: ambient_path`; perform one exact previewed replace, then
 fully quit Cursor.
 
+## Auto-review and host admission
+
+Cursor's Auto-review run mode sends non-allowlisted MCP calls to a classifier that may allow,
+redirect, or ask; Ask Every Time was removed in 3.5. Its inputs are undocumented and it "is not
+a security boundary" (`cursor.com/docs/agent/security/run-modes`, `/reference/permissions`,
+`/cli/reference/permissions`, re-read 2026-08-30). The levers are `mcpAllowlist` (`server:tool`,
+case-insensitive, `~/.cursor/permissions.json` and `<workspace>/.cursor/permissions.json`
+concatenate; no deny list exists) and the Agent CLI's `permissions.allow` `Mcp(server:tool)` in
+`<project>/.cursor/cli.json` (deny wins over allow).
+
+Host admission (issue #467) writes both project-scoped entries for exactly `check`:
+
+```text
+yoetz integrate cursor admission preview --project-root <project> --cursor-config-root <root> --mcp-ownership plugin-managed --json
+yoetz integrate cursor admission grant --project-root <project> --cursor-config-root <root> ... --accept --preview-digest <digest>
+```
+
+`.cursor/permissions.json` receives `yoetz:check` (the docs name the server by its `mcp.json`
+key, which is `yoetz` for every Yoetz route). `.cursor/cli.json` receives `Mcp(yoetz:check)`
+for an external registration or `Mcp(plugin-yoetz-yoetz:check)` for the plugin-managed server,
+following the exclusively observed owner: the CLI names a plugin-bundled server
+`plugin-<plugin>-<server>` (live-verified 2026-08-29). Whether the IDE names a plugin-bundled
+server the same way is undocumented and unverified; the acceptance cell in issue #467 is open.
+`status` reports `partial` when only one of the two files carries the entry. A wildcard
+(`yoetz:*`, `*:*`, `Mcp(*:*)`) or a CLI deny rule is `foreign` and never edited.
+
+Reverse: `admission revoke`; `plugin remove` and an install/replace onto the strict route sweep
+the entry when `--project-root` is given and report `admission_cleanup`; a privacy commit that
+stops external review sweeps it; `provider status` reports `host_admission_drift`. Cursor
+publishes no hook for a classifier denial, so a held check is visible only through the #187
+pause/approval flow; that gap is documented, not diagnosed.
+
 ## Upgrading Yoetz under a running service
 
 The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz

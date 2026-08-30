@@ -248,6 +248,9 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
     ]
     assert tuple(sorted(hooks)) == CLAUDE_CODE_HOOK_EVENTS
     assert "PermissionRequest" not in hooks
+    # The denial hook is scoped to the one tool a host reviewer holds (issue #467); it fires
+    # after the denial and can allow nothing.
+    assert hooks["PermissionDenied"][0]["matcher"] == "^mcp__plugin_yoetz_yoetz__check$"
     assert hooks["PostToolUse"][0]["matcher"] == (
         "^mcp__plugin_yoetz_yoetz__(start|publish_work|check|respond|status|receipt|read_guidance)$"
     )

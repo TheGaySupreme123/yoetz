@@ -1,0 +1,959 @@
+"""Host auto-review admission for the owner-authorized semantic ``check`` (issue #467).
+
+Claude Code auto mode, Codex ``approvals_reviewer = "auto_review"``, and Cursor Auto-review each
+route Yoetz's policy-route ``check`` through a model reviewer that refuses "data to a destination
+the user did not name". The owner *did* name it, in the trusted ``yoetz --privacy`` ceremony, but
+nothing about that grant is visible to a host reviewer. This adapter writes each host's own
+project-scoped admission entry for exactly ``check`` so the host's rule layer admits the call
+before its reviewer runs — the mirror image of the ADR-018 strict ceiling: the owner's trusted
+decision, never the agent and never a self-approving hook, tells the host to admit the call.
+
+Rules shared by every host surface:
+
+- Only ``check`` is ever admitted; the other tools pass every host's rules already.
+- An entry is recognized by exact bytes. A wider rule (a server-wide allow, a wildcard, a Codex
+  server-level default) or a deny rule for the same tool is ``foreign``: reported, never edited,
+  and never a reason to write beside it.
+- An unreadable, oversized, symlinked, or unparseable host file is ``unknown``, never ``absent``.
+- Grant is previewed and digest-bound, and the digest binds the exact host file bytes it read.
+- Revoke and sweep remove only the exact entries Yoetz writes and nothing else in the file.
+- Admission is host tool-call authorization. It does not prove dispatch, widen Yoetz policy, or
+  bypass any privacy, disclosure, credential, or dispatch gate.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+import tomllib
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Final, Literal, cast
+
+from yoetz.protocol.canonical import (
+    JsonValue,
+    ProtocolValueError,
+    canonical_digest,
+    strict_json_parse,
+)
+
+from .toml_tables import append_table_block, exact_table_span, strip_exact_table
+
+__all__ = [
+    "ADMISSION_HOSTS",
+    "CLAUDE_CHECK_TOOL_NAME",
+    "CODEX_EXTERNAL_ADMISSION_TABLE",
+    "CODEX_PLUGIN_ADMISSION_TABLE",
+    "CURSOR_CLI_EXTERNAL_ENTRY",
+    "CURSOR_CLI_PLUGIN_ENTRY",
+    "CURSOR_IDE_ENTRY",
+    "HostAdmissionAction",
+    "HostAdmissionEntry",
+    "HostAdmissionError",
+    "HostAdmissionHost",
+    "HostAdmissionObservation",
+    "HostAdmissionPreview",
+    "HostAdmissionReason",
+    "HostAdmissionResult",
+    "HostAdmissionState",
+    "HostAdmissionSweep",
+    "McpOwnerForm",
+    "admission_surfaces",
+    "apply_host_admission",
+    "observe_host_admission",
+    "preview_host_admission",
+    "sweep_host_admission",
+]
+
+type HostAdmissionHost = Literal["claude", "codex", "cursor"]
+type McpOwnerForm = Literal["external", "plugin"]
+
+ADMISSION_HOSTS: Final[tuple[HostAdmissionHost, ...]] = ("claude", "codex", "cursor")
+
+# Claude Code: `permissions.allow` resolves before the auto-mode classifier and is honored from
+# `.claude/settings.local.json` at the repository root. Allow rules take a literal
+# `mcp__<server>__` prefix; the plugin-scoped server is `plugin_yoetz_yoetz`.
+CLAUDE_CHECK_TOOL_NAME: Final = "mcp__plugin_yoetz_yoetz__check"
+_CLAUDE_SURFACE: Final = ".claude/settings.local.json"
+_CLAUDE_WIDER_RULES: Final = frozenset(
+    {"mcp__plugin_yoetz_yoetz", "mcp__plugin_yoetz_yoetz__*", "mcp__plugin_yoetz_yoetz__check*"}
+)
+
+# Codex: under `approval_mode = auto` a policy-route `check` (`openWorldHint: true`) always needs
+# approval, and `approvals_reviewer = "auto_review"` sends it to the guardian. A per-tool
+# `approval_mode = "approve"` means the reviewer is never invoked for that tool. Project-scoped
+# `.codex/config.toml` layers are loaded only for trusted projects and `mcp_servers` is not on
+# the project-layer denylist (openai/codex `loader/mod.rs`, read 2026-08-30).
+_CODEX_SURFACE: Final = ".codex/config.toml"
+CODEX_EXTERNAL_ADMISSION_TABLE: Final = (
+    '[mcp_servers.yoetz.tools.check]\napproval_mode = "approve"\n'
+)
+CODEX_PLUGIN_ADMISSION_TABLE: Final = (
+    '[plugins."yoetz@yoetz".mcp_servers.yoetz.tools.check]\napproval_mode = "approve"\n'
+)
+
+# Cursor: `mcpAllowlist` in `<workspace>/.cursor/permissions.json` admits `server:tool` without
+# human review under Auto-review (server name = the `mcp.json` key). The Agent CLI reads
+# `permissions.allow` from `<project>/.cursor/cli.json` and names a plugin-bundled server
+# `plugin-<plugin>-<server>` (live-verified 2026-08-29, issue #468 cell).
+_CURSOR_IDE_SURFACE: Final = ".cursor/permissions.json"
+_CURSOR_CLI_SURFACE: Final = ".cursor/cli.json"
+CURSOR_IDE_ENTRY: Final = "yoetz:check"
+CURSOR_CLI_EXTERNAL_ENTRY: Final = "Mcp(yoetz:check)"
+CURSOR_CLI_PLUGIN_ENTRY: Final = "Mcp(plugin-yoetz-yoetz:check)"
+_CURSOR_IDE_WIDER: Final = frozenset({"yoetz:*", "*:check", "*:*", "plugin-yoetz-yoetz:*"})
+_CURSOR_CLI_WIDER: Final = frozenset(
+    {"Mcp(yoetz:*)", "Mcp(*:check)", "Mcp(*:*)", "Mcp(plugin-yoetz-yoetz:*)"}
+)
+
+_MAX_FILE_BYTES: Final = 262_144
+_PREVIEW_SCHEMA: Final = "yoetz.host-admission-preview/1"
+
+
+class HostAdmissionState(str, Enum):  # noqa: UP042 - exact public token
+    ABSENT = "absent"
+    PRESENT = "present"
+    # Only for a host with more than one surface: some, not all, carry the entry.
+    PARTIAL = "partial"
+    FOREIGN = "foreign"
+    UNKNOWN = "unknown"
+
+
+class HostAdmissionAction(str, Enum):  # noqa: UP042 - exact public token
+    GRANT = "grant"
+    REVOKE = "revoke"
+    NOOP = "noop"
+
+
+class HostAdmissionReason(str, Enum):  # noqa: UP042 - exact public token
+    CONFIRMATION_REQUIRED = "confirmation_required"
+    PREVIEW_STALE = "preview_stale"
+    FOREIGN_ENTRY_PRESENT = "foreign_entry_present"
+    ENTRY_UNREADABLE = "entry_unreadable"
+    ROUTE_NOT_POLICY = "route_not_policy"
+    ROUTE_UNOBSERVED = "route_unobserved"
+    GRANT_NOT_PERMITTING = "grant_not_permitting"
+    GRANT_UNVERIFIABLE = "grant_unverifiable"
+    OWNER_REQUIRED = "owner_required"
+    TARGET_UNSAFE = "target_unsafe"
+    WRITE_FAILED = "write_failed"
+    HOST_INVALID = "host_invalid"
+
+
+class HostAdmissionError(Exception):
+    """Typed refusal; never carries file contents or paths."""
+
+    def __init__(self, reason: HostAdmissionReason) -> None:
+        super().__init__(reason.value)
+        self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class HostAdmissionEntry:
+    """One host surface: the exact entry Yoetz recognizes there and what was observed."""
+
+    surface: str
+    state: HostAdmissionState
+    entry: str
+    detail: str | None = None
+    file_digest: str | None = None
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "detail": self.detail,
+            "entry": self.entry,
+            "file_digest": self.file_digest,
+            "state": self.state.value,
+            "surface": self.surface,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HostAdmissionObservation:
+    host: HostAdmissionHost
+    state: HostAdmissionState
+    entries: tuple[HostAdmissionEntry, ...]
+
+    @property
+    def observed(self) -> bool:
+        return self.state is not HostAdmissionState.UNKNOWN
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "entries": [entry.as_json() for entry in self.entries],
+            "host": self.host,
+            "observed": self.observed,
+            "state": self.state.value,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HostAdmissionPreview:
+    host: HostAdmissionHost
+    action: HostAdmissionAction
+    state_before: HostAdmissionState
+    entries: tuple[HostAdmissionEntry, ...]
+    route_profile: str | None
+    grant_permits: bool | None
+    owner: McpOwnerForm | None
+    checkpoint: bool
+    preview_digest: str
+    warnings: tuple[str, ...]
+    files_after: Mapping[str, bytes] = field(repr=False, compare=False)
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "action": self.action.value,
+            "checkpoint": self.checkpoint,
+            "entries": [entry.as_json() for entry in self.entries],
+            "grant_permits": self.grant_permits,
+            "host": self.host,
+            "owner": self.owner,
+            "preview_digest": self.preview_digest,
+            "route_profile": self.route_profile,
+            "state_before": self.state_before.value,
+            "surfaces_changed": cast(list[JsonValue], sorted(self.files_after)),
+            "warnings": cast(list[JsonValue], list(self.warnings)),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HostAdmissionResult:
+    host: HostAdmissionHost
+    action: HostAdmissionAction
+    state_before: HostAdmissionState
+    state_after: HostAdmissionState
+    surfaces_changed: tuple[str, ...]
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "action": self.action.value,
+            "host": self.host,
+            "state_after": self.state_after.value,
+            "state_before": self.state_before.value,
+            "surfaces_changed": list(self.surfaces_changed),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HostAdmissionSweep:
+    """Outcome of one reverse transition on one host."""
+
+    host: HostAdmissionHost
+    outcome: Literal["removed", "absent", "retained_foreign", "unknown", "write_failed"]
+    surfaces_changed: tuple[str, ...] = ()
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "host": self.host,
+            "outcome": self.outcome,
+            "surfaces_changed": list(self.surfaces_changed),
+        }
+
+
+def admission_surfaces(host: HostAdmissionHost) -> tuple[str, ...]:
+    """Project-relative host files this adapter may read and edit for ``host``."""
+
+    if host == "claude":
+        return (_CLAUDE_SURFACE,)
+    if host == "codex":
+        return (_CODEX_SURFACE,)
+    if host == "cursor":
+        return (_CURSOR_IDE_SURFACE, _CURSOR_CLI_SURFACE)
+    raise HostAdmissionError(HostAdmissionReason.HOST_INVALID)
+
+
+# --- file reading -------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Read:
+    raw: bytes | None
+    problem: str | None
+
+    @property
+    def digest(self) -> str | None:
+        if self.raw is None:
+            return None
+        return f"sha256:{hashlib.sha256(self.raw).hexdigest()}"
+
+
+def _validated_root(project_root: Path) -> Path:
+    if not project_root.is_absolute():
+        raise HostAdmissionError(HostAdmissionReason.TARGET_UNSAFE)
+    try:
+        if project_root.is_symlink() or not project_root.is_dir():
+            raise HostAdmissionError(HostAdmissionReason.TARGET_UNSAFE)
+    except OSError as exc:
+        raise HostAdmissionError(HostAdmissionReason.TARGET_UNSAFE) from exc
+    return project_root
+
+
+def _read(path: Path) -> _Read:
+    try:
+        if path.is_symlink():
+            return _Read(None, "file_symlink")
+        if not path.exists():
+            return _Read(None, None)
+        if not path.is_file():
+            return _Read(None, "file_not_regular")
+        if path.stat().st_size > _MAX_FILE_BYTES:
+            return _Read(None, "file_too_large")
+        return _Read(path.read_bytes(), None)
+    except OSError:
+        return _Read(None, "file_unreadable")
+
+
+def _unknown(surface: str, entry: str, problem: str) -> HostAdmissionEntry:
+    return HostAdmissionEntry(surface, HostAdmissionState.UNKNOWN, entry, problem, None)
+
+
+# --- JSON list surfaces (Claude, Cursor) -------------------------------------------------
+
+
+def _json_object(read: _Read) -> tuple[dict[str, JsonValue] | None, str | None]:
+    """Parse a host JSON file to a mutable object, or name why it cannot be trusted."""
+
+    if read.problem is not None:
+        return None, read.problem
+    if read.raw is None:
+        return {}, None
+    try:
+        parsed = strict_json_parse(read.raw)
+    except ProtocolValueError:
+        return None, "file_invalid"
+    if not isinstance(parsed, Mapping):
+        return None, "shape_invalid"
+    return dict(cast(Mapping[str, JsonValue], parsed)), None
+
+
+def _string_list(container: Mapping[str, JsonValue], key: str) -> tuple[list[str] | None, bool]:
+    """Return ``(list, shape_ok)``; an absent key is an empty list."""
+
+    value = container.get(key)
+    if value is None:
+        return [], True
+    if not isinstance(value, list) or not all(type(item) is str for item in value):
+        return None, False
+    return [cast(str, item) for item in value], True
+
+
+def _observe_string_list_surface(
+    *,
+    surface: str,
+    read: _Read,
+    container_key: str | None,
+    allow_key: str,
+    deny_key: str | None,
+    ask_key: str | None,
+    entries: frozenset[str],
+    wider: frozenset[str],
+    case_insensitive: bool,
+) -> HostAdmissionEntry:
+    """Classify one JSON allow-list surface against the exact Yoetz entries."""
+
+    expected = sorted(entries)[0]
+    parsed, problem = _json_object(read)
+    if parsed is None:
+        return _unknown(surface, expected, problem or "file_unreadable")
+    container: Mapping[str, JsonValue] = parsed
+    if container_key is not None:
+        nested = parsed.get(container_key)
+        if nested is None:
+            nested = {}
+        if not isinstance(nested, Mapping):
+            return _unknown(surface, expected, "shape_invalid")
+        container = cast(Mapping[str, JsonValue], nested)
+
+    def fold(value: str) -> str:
+        return value.casefold() if case_insensitive else value
+
+    folded_entries = {fold(item) for item in entries}
+    folded_wider = {fold(item) for item in wider}
+    allow, allow_ok = _string_list(container, allow_key)
+    if not allow_ok or allow is None:
+        return _unknown(surface, expected, "shape_invalid")
+    deny: list[str] = []
+    if deny_key is not None:
+        deny_value, deny_ok = _string_list(container, deny_key)
+        if not deny_ok or deny_value is None:
+            return _unknown(surface, expected, "shape_invalid")
+        deny = deny_value
+    ask: list[str] = []
+    if ask_key is not None:
+        ask_value, ask_ok = _string_list(container, ask_key)
+        if not ask_ok or ask_value is None:
+            return _unknown(surface, expected, "shape_invalid")
+        ask = ask_value
+    digest = read.digest
+    if any(fold(item) in folded_entries or fold(item) in folded_wider for item in deny):
+        return HostAdmissionEntry(
+            surface, HostAdmissionState.FOREIGN, expected, "deny_rule_present", digest
+        )
+    if any(fold(item) in folded_wider for item in (*allow, *ask)):
+        return HostAdmissionEntry(
+            surface, HostAdmissionState.FOREIGN, expected, "wider_rule_present", digest
+        )
+    present_allow = [item for item in allow if fold(item) in folded_entries]
+    present_ask = [item for item in ask if fold(item) in folded_entries]
+    if present_allow and present_ask:
+        return HostAdmissionEntry(
+            surface, HostAdmissionState.FOREIGN, expected, "allow_and_ask_present", digest
+        )
+    if present_allow:
+        return HostAdmissionEntry(
+            surface, HostAdmissionState.PRESENT, present_allow[0], "allow", digest
+        )
+    if present_ask:
+        return HostAdmissionEntry(
+            surface, HostAdmissionState.PRESENT, present_ask[0], "ask", digest
+        )
+    return HostAdmissionEntry(surface, HostAdmissionState.ABSENT, expected, None, digest)
+
+
+def _json_with_list_entry(
+    read: _Read,
+    *,
+    container_key: str | None,
+    list_key: str,
+    entry: str,
+    add: bool,
+    remove_entries: frozenset[str] = frozenset(),
+    case_insensitive: bool = False,
+) -> bytes | None:
+    """Return the file bytes with ``entry`` added to or removed from one list, else ``None``.
+
+    ``None`` means no byte would change. Every other key, and the order of every other list
+    member, is preserved. The file is re-encoded with two-space indentation, the shape the hosts
+    themselves write.
+    """
+
+    parsed, problem = _json_object(read)
+    if parsed is None or problem is not None:
+        raise HostAdmissionError(HostAdmissionReason.ENTRY_UNREADABLE)
+    container: dict[str, JsonValue] = parsed
+    if container_key is not None:
+        nested = parsed.get(container_key)
+        if nested is None:
+            nested = {}
+            parsed[container_key] = nested
+        if not isinstance(nested, dict):
+            raise HostAdmissionError(HostAdmissionReason.ENTRY_UNREADABLE)
+        container = nested
+    current, ok = _string_list(container, list_key)
+    if not ok or current is None:
+        raise HostAdmissionError(HostAdmissionReason.ENTRY_UNREADABLE)
+
+    def fold(value: str) -> str:
+        return value.casefold() if case_insensitive else value
+
+    if add:
+        if any(fold(item) == fold(entry) for item in current):
+            return None
+        container[list_key] = cast(list[JsonValue], [*current, entry])
+    else:
+        targets = {fold(item) for item in remove_entries or {entry}}
+        kept = [item for item in current if fold(item) not in targets]
+        if len(kept) == len(current):
+            return None
+        if kept:
+            container[list_key] = cast(list[JsonValue], kept)
+        else:
+            del container[list_key]
+        if container_key is not None and not container:
+            del parsed[container_key]
+        if not parsed:
+            # Nothing but the Yoetz entry was ever in this file; removal restores "no file".
+            return b""
+    return (json.dumps(parsed, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+# --- Codex TOML surface -------------------------------------------------------------------
+
+
+def _table_get(table: object, key: str) -> object | None:
+    if not isinstance(table, Mapping):
+        return None
+    return cast(Mapping[str, object], table).get(key)
+
+
+def _toml_path(root: Mapping[str, object], *keys: str) -> object | None:
+    current: object | None = root
+    for key in keys:
+        current = _table_get(current, key)
+        if current is None:
+            return None
+    return current
+
+
+def _observe_codex(read: _Read, owner: McpOwnerForm | None) -> HostAdmissionEntry:
+    surface = _CODEX_SURFACE
+    expected = _codex_table(owner)
+    if read.problem is not None:
+        return _unknown(surface, expected, read.problem)
+    if read.raw is None:
+        return HostAdmissionEntry(surface, HostAdmissionState.ABSENT, expected, None, None)
+    try:
+        parsed = tomllib.loads(read.raw.decode("utf-8"))
+    except UnicodeError, tomllib.TOMLDecodeError:
+        return _unknown(surface, expected, "file_invalid")
+    digest = read.digest
+    forms: dict[McpOwnerForm, tuple[str, tuple[str, ...]]] = {
+        "external": (CODEX_EXTERNAL_ADMISSION_TABLE, ("mcp_servers", "yoetz")),
+        "plugin": (
+            CODEX_PLUGIN_ADMISSION_TABLE,
+            ("plugins", "yoetz@yoetz", "mcp_servers", "yoetz"),
+        ),
+    }
+    present: list[McpOwnerForm] = []
+    for form, (table, server_keys) in forms.items():
+        server = _toml_path(parsed, *server_keys)
+        if server is None:
+            continue
+        if not isinstance(server, Mapping):
+            return HostAdmissionEntry(
+                surface, HostAdmissionState.FOREIGN, expected, "entry_not_exact", digest
+            )
+        server_map = cast(Mapping[str, object], server)
+        if server_map.get("default_tools_approval_mode") is not None:
+            # A server-wide default admits every tool; wider than Yoetz ever writes.
+            return HostAdmissionEntry(
+                surface, HostAdmissionState.FOREIGN, expected, "server_default_present", digest
+            )
+        check = _toml_path(server_map, "tools", "check")
+        if check is None:
+            continue
+        if not isinstance(check, Mapping) or exact_table_span(read.raw, table) is None:
+            return HostAdmissionEntry(
+                surface, HostAdmissionState.FOREIGN, expected, "entry_not_exact", digest
+            )
+        present.append(form)
+    if not present:
+        return HostAdmissionEntry(surface, HostAdmissionState.ABSENT, expected, None, digest)
+    detail = "both" if len(present) == 2 else present[0]
+    entry = expected if owner is None or owner in present else forms[present[0]][0]
+    return HostAdmissionEntry(surface, HostAdmissionState.PRESENT, entry, detail, digest)
+
+
+def _codex_table(owner: McpOwnerForm | None) -> str:
+    return CODEX_PLUGIN_ADMISSION_TABLE if owner == "plugin" else CODEX_EXTERNAL_ADMISSION_TABLE
+
+
+def _codex_after(read: _Read, *, add: bool, owner: McpOwnerForm | None) -> bytes | None:
+    if read.problem is not None:
+        raise HostAdmissionError(HostAdmissionReason.ENTRY_UNREADABLE)
+    raw = read.raw or b""
+    if add:
+        table = _codex_table(owner)
+        if exact_table_span(raw, table) is not None:
+            return None
+        merged = append_table_block(raw, table)
+        try:
+            tomllib.loads(merged.decode("utf-8"))
+        except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+            # Legal owner TOML (an inline ``mcp_servers = {}``) can make the appended header a
+            # re-declaration; refuse at plan time rather than write a file Codex cannot parse.
+            raise HostAdmissionError(HostAdmissionReason.FOREIGN_ENTRY_PRESENT) from exc
+        return merged
+    after = raw
+    tables = (
+        (_codex_table(owner),)
+        if owner is not None
+        else (CODEX_EXTERNAL_ADMISSION_TABLE, CODEX_PLUGIN_ADMISSION_TABLE)
+    )
+    for table in tables:
+        after = strip_exact_table(after, table)
+    return None if after == raw else after
+
+
+# --- observation --------------------------------------------------------------------------
+
+
+def _aggregate(entries: Sequence[HostAdmissionEntry]) -> HostAdmissionState:
+    states = [entry.state for entry in entries]
+    if any(state is HostAdmissionState.UNKNOWN for state in states):
+        return HostAdmissionState.UNKNOWN
+    if any(state is HostAdmissionState.FOREIGN for state in states):
+        return HostAdmissionState.FOREIGN
+    if all(state is HostAdmissionState.PRESENT for state in states):
+        return HostAdmissionState.PRESENT
+    if all(state is HostAdmissionState.ABSENT for state in states):
+        return HostAdmissionState.ABSENT
+    return HostAdmissionState.PARTIAL
+
+
+def _cursor_cli_entries(owner: McpOwnerForm | None) -> frozenset[str]:
+    if owner == "external":
+        return frozenset({CURSOR_CLI_EXTERNAL_ENTRY})
+    if owner == "plugin":
+        return frozenset({CURSOR_CLI_PLUGIN_ENTRY})
+    return frozenset({CURSOR_CLI_EXTERNAL_ENTRY, CURSOR_CLI_PLUGIN_ENTRY})
+
+
+def _observe_entries(
+    host: HostAdmissionHost, root: Path, owner: McpOwnerForm | None
+) -> tuple[HostAdmissionEntry, ...]:
+    if host == "claude":
+        return (
+            _observe_string_list_surface(
+                surface=_CLAUDE_SURFACE,
+                read=_read(root / _CLAUDE_SURFACE),
+                container_key="permissions",
+                allow_key="allow",
+                deny_key="deny",
+                ask_key="ask",
+                entries=frozenset({CLAUDE_CHECK_TOOL_NAME}),
+                wider=_CLAUDE_WIDER_RULES,
+                case_insensitive=False,
+            ),
+        )
+    if host == "codex":
+        return (_observe_codex(_read(root / _CODEX_SURFACE), owner),)
+    if host == "cursor":
+        return (
+            _observe_string_list_surface(
+                surface=_CURSOR_IDE_SURFACE,
+                read=_read(root / _CURSOR_IDE_SURFACE),
+                container_key=None,
+                allow_key="mcpAllowlist",
+                deny_key=None,
+                ask_key=None,
+                entries=frozenset({CURSOR_IDE_ENTRY}),
+                wider=_CURSOR_IDE_WIDER,
+                case_insensitive=True,
+            ),
+            _observe_string_list_surface(
+                surface=_CURSOR_CLI_SURFACE,
+                read=_read(root / _CURSOR_CLI_SURFACE),
+                container_key="permissions",
+                allow_key="allow",
+                deny_key="deny",
+                ask_key=None,
+                entries=_cursor_cli_entries(owner),
+                wider=_CURSOR_CLI_WIDER,
+                case_insensitive=False,
+            ),
+        )
+    raise HostAdmissionError(HostAdmissionReason.HOST_INVALID)
+
+
+def observe_host_admission(
+    host: HostAdmissionHost,
+    project_root: Path,
+    *,
+    owner: McpOwnerForm | None = None,
+) -> HostAdmissionObservation:
+    """Read every admission surface of ``host`` under ``project_root`` without mutating."""
+
+    root = _validated_root(project_root)
+    entries = _observe_entries(host, root, owner)
+    return HostAdmissionObservation(host, _aggregate(entries), entries)
+
+
+# --- preview ------------------------------------------------------------------------------
+
+
+def _files_after(
+    host: HostAdmissionHost,
+    root: Path,
+    action: HostAdmissionAction,
+    owner: McpOwnerForm | None,
+    *,
+    checkpoint: bool,
+    entries: Sequence[HostAdmissionEntry],
+) -> dict[str, bytes]:
+    add = action is HostAdmissionAction.GRANT
+    changed: dict[str, bytes] = {}
+    by_surface = {entry.surface: entry for entry in entries}
+
+    def editable(surface: str) -> bool:
+        # Revoke touches only a surface that carries an exact Yoetz entry; grant touches only
+        # an absent one. A foreign or unknown surface is never edited.
+        state = by_surface[surface].state
+        if add:
+            return state is HostAdmissionState.ABSENT
+        return state is HostAdmissionState.PRESENT
+
+    if host == "claude":
+        if editable(_CLAUDE_SURFACE):
+            after = _json_with_list_entry(
+                _read(root / _CLAUDE_SURFACE),
+                container_key="permissions",
+                list_key="ask" if add and checkpoint else "allow",
+                entry=CLAUDE_CHECK_TOOL_NAME,
+                add=add,
+            )
+            if not add and after is None:
+                # The exact entry may live in the human-checkpoint list instead.
+                after = _json_with_list_entry(
+                    _read(root / _CLAUDE_SURFACE),
+                    container_key="permissions",
+                    list_key="ask",
+                    entry=CLAUDE_CHECK_TOOL_NAME,
+                    add=False,
+                )
+            if after is not None:
+                changed[_CLAUDE_SURFACE] = after
+    elif host == "codex":
+        if editable(_CODEX_SURFACE):
+            after = _codex_after(_read(root / _CODEX_SURFACE), add=add, owner=owner)
+            if after is not None:
+                changed[_CODEX_SURFACE] = after
+    elif host == "cursor":
+        if editable(_CURSOR_IDE_SURFACE):
+            after = _json_with_list_entry(
+                _read(root / _CURSOR_IDE_SURFACE),
+                container_key=None,
+                list_key="mcpAllowlist",
+                entry=CURSOR_IDE_ENTRY,
+                add=add,
+                case_insensitive=True,
+            )
+            if after is not None:
+                changed[_CURSOR_IDE_SURFACE] = after
+        if editable(_CURSOR_CLI_SURFACE):
+            cli_entries = _cursor_cli_entries(owner)
+            after = _json_with_list_entry(
+                _read(root / _CURSOR_CLI_SURFACE),
+                container_key="permissions",
+                list_key="allow",
+                entry=sorted(cli_entries)[0],
+                add=add,
+                remove_entries=cli_entries,
+            )
+            if after is not None:
+                changed[_CURSOR_CLI_SURFACE] = after
+    return changed
+
+
+def _preview_digest(
+    host: HostAdmissionHost,
+    action: HostAdmissionAction,
+    entries: Sequence[HostAdmissionEntry],
+    owner: McpOwnerForm | None,
+    *,
+    checkpoint: bool,
+    files_after: Mapping[str, bytes],
+) -> str:
+    return canonical_digest(
+        {
+            "action": action.value,
+            "checkpoint": checkpoint,
+            "entries_before": [entry.as_json() for entry in entries],
+            "files_after": {
+                surface: f"sha256:{hashlib.sha256(data).hexdigest()}"
+                for surface, data in sorted(files_after.items())
+            },
+            "host": host,
+            "owner": owner,
+            "schema": _PREVIEW_SCHEMA,
+        }
+    )
+
+
+def preview_host_admission(
+    host: HostAdmissionHost,
+    project_root: Path,
+    action: HostAdmissionAction,
+    *,
+    route_profile: str | None,
+    grant_permits: bool | None,
+    owner: McpOwnerForm | None = None,
+    checkpoint: bool = False,
+) -> HostAdmissionPreview:
+    """Plan one grant or revoke and bind it to the exact bytes it read and would write.
+
+    ``route_profile`` and ``grant_permits`` are the caller's *observed* facts (``None`` means
+    unread). A grant is refused unless the route is ``policy`` and the repository grant permits
+    external review; a revoke needs neither, because the way out must always stay open.
+    """
+
+    if action is HostAdmissionAction.NOOP:
+        raise HostAdmissionError(HostAdmissionReason.HOST_INVALID)
+    root = _validated_root(project_root)
+    if action is HostAdmissionAction.GRANT:
+        if route_profile is None:
+            raise HostAdmissionError(HostAdmissionReason.ROUTE_UNOBSERVED)
+        if route_profile != "policy":
+            raise HostAdmissionError(HostAdmissionReason.ROUTE_NOT_POLICY)
+        if grant_permits is None:
+            raise HostAdmissionError(HostAdmissionReason.GRANT_UNVERIFIABLE)
+        if grant_permits is not True:
+            raise HostAdmissionError(HostAdmissionReason.GRANT_NOT_PERMITTING)
+        if host in {"codex", "cursor"} and owner is None:
+            raise HostAdmissionError(HostAdmissionReason.OWNER_REQUIRED)
+        if checkpoint and host != "claude":
+            raise HostAdmissionError(HostAdmissionReason.HOST_INVALID)
+    entries = _observe_entries(host, root, owner)
+    state_before = _aggregate(entries)
+    warnings: list[str] = []
+    if state_before is HostAdmissionState.UNKNOWN:
+        raise HostAdmissionError(HostAdmissionReason.ENTRY_UNREADABLE)
+    if action is HostAdmissionAction.GRANT and state_before is HostAdmissionState.FOREIGN:
+        raise HostAdmissionError(HostAdmissionReason.FOREIGN_ENTRY_PRESENT)
+    if state_before is HostAdmissionState.FOREIGN:
+        warnings.append("foreign_entry_retained")
+    files_after = _files_after(host, root, action, owner, checkpoint=checkpoint, entries=entries)
+    effective = action if files_after else HostAdmissionAction.NOOP
+    if host == "codex" and effective is HostAdmissionAction.GRANT:
+        warnings.append("codex_project_layer_requires_trusted_project")
+    if host == "claude" and effective is HostAdmissionAction.GRANT:
+        warnings.append("claude_local_settings_held_until_trusted_when_tracked")
+    digest = _preview_digest(
+        host, action, entries, owner, checkpoint=checkpoint, files_after=files_after
+    )
+    return HostAdmissionPreview(
+        host,
+        effective,
+        state_before,
+        entries,
+        route_profile,
+        grant_permits,
+        owner,
+        checkpoint,
+        digest,
+        tuple(warnings),
+        files_after,
+    )
+
+
+# --- apply --------------------------------------------------------------------------------
+
+
+def _write_private(path: Path, payload: bytes) -> None:
+    parent = path.parent
+    try:
+        if parent.is_symlink():
+            raise HostAdmissionError(HostAdmissionReason.TARGET_UNSAFE)
+        if not parent.exists():
+            parent.mkdir(mode=0o700, parents=False)
+        elif not parent.is_dir():
+            raise HostAdmissionError(HostAdmissionReason.TARGET_UNSAFE)
+        if path.is_symlink():
+            raise HostAdmissionError(HostAdmissionReason.TARGET_UNSAFE)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
+    except OSError as exc:
+        raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED) from exc
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED) from exc
+
+
+def _delete_or_write(path: Path, payload: bytes) -> None:
+    if payload == b"":
+        # A host file emptied by removal reverts to "no file", the state before grant.
+        try:
+            if path.is_symlink():
+                raise HostAdmissionError(HostAdmissionReason.TARGET_UNSAFE)
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED) from exc
+        return
+    _write_private(path, payload)
+
+
+def apply_host_admission(
+    preview: HostAdmissionPreview,
+    project_root: Path,
+    *,
+    accepted_preview_digest: str,
+) -> HostAdmissionResult:
+    """Recompute the preview, refuse on any drift, then write only the previewed surfaces."""
+
+    if accepted_preview_digest != preview.preview_digest:
+        raise HostAdmissionError(HostAdmissionReason.PREVIEW_STALE)
+    if preview.action is HostAdmissionAction.NOOP:
+        # A no-op preview describes an already-selected state; nothing to bind or write.
+        return HostAdmissionResult(
+            preview.host, HostAdmissionAction.NOOP, preview.state_before, preview.state_before, ()
+        )
+    fresh = preview_host_admission(
+        preview.host,
+        project_root,
+        preview.action,
+        route_profile=preview.route_profile,
+        grant_permits=preview.grant_permits,
+        owner=preview.owner,
+        checkpoint=preview.checkpoint,
+    )
+    if fresh.preview_digest != accepted_preview_digest:
+        raise HostAdmissionError(HostAdmissionReason.PREVIEW_STALE)
+    root = _validated_root(project_root)
+    for surface, payload in sorted(fresh.files_after.items()):
+        _delete_or_write(root / surface, payload)
+    after = observe_host_admission(preview.host, root, owner=preview.owner)
+    return HostAdmissionResult(
+        preview.host,
+        fresh.action,
+        fresh.state_before,
+        after.state,
+        tuple(sorted(fresh.files_after)),
+    )
+
+
+# --- reverse transitions ------------------------------------------------------------------
+
+
+def sweep_host_admission(
+    project_root: Path,
+    hosts: Sequence[HostAdmissionHost] = ADMISSION_HOSTS,
+) -> tuple[HostAdmissionSweep, ...]:
+    """Remove exactly the entries Yoetz writes, for every listed host, and report each outcome.
+
+    Used by the reverse transitions (grant revoke, strict re-registration, host uninstall) that
+    already carry their own digest-bound authority. Foreign entries are retained and reported;
+    an unreadable surface is reported as ``unknown`` and left alone.
+    """
+
+    outcomes: list[HostAdmissionSweep] = []
+    for host in hosts:
+        try:
+            preview = preview_host_admission(
+                host,
+                project_root,
+                HostAdmissionAction.REVOKE,
+                route_profile=None,
+                grant_permits=None,
+                owner=None,
+            )
+        except HostAdmissionError as error:
+            outcomes.append(
+                HostAdmissionSweep(
+                    host,
+                    "unknown"
+                    if error.reason is HostAdmissionReason.ENTRY_UNREADABLE
+                    else "write_failed",
+                )
+            )
+            continue
+        if not preview.files_after:
+            outcomes.append(
+                HostAdmissionSweep(
+                    host,
+                    "retained_foreign"
+                    if preview.state_before is HostAdmissionState.FOREIGN
+                    else "absent",
+                )
+            )
+            continue
+        try:
+            result = apply_host_admission(
+                preview, project_root, accepted_preview_digest=preview.preview_digest
+            )
+        except HostAdmissionError:
+            outcomes.append(HostAdmissionSweep(host, "write_failed"))
+            continue
+        outcomes.append(HostAdmissionSweep(host, "removed", result.surfaces_changed))
+    return tuple(outcomes)

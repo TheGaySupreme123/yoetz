@@ -126,6 +126,54 @@ digest-bound confirmation, preserve entries already observed as foreign, and ver
 state by re-reading it. A "registered" result still never implies Codex will successfully connect
 at runtime.
 
+## Auto review and host admission
+
+Under `approval_mode = auto` (the default), Codex needs approval for an MCP call iff
+`destructiveHint == true`, else never for `readOnlyHint`, else
+`destructive.unwrap_or(true) || open_world.unwrap_or(true)` (`codex-rs/core/src/mcp_tool_call.rs`).
+Applied to Yoetz's frozen descriptors, only the policy-route `check` (`openWorldHint: true`)
+needs approval; with `approvals_reviewer = "auto_review"` that approval goes to the guardian,
+whose bundled policy requires authorization for sensitive egress to name payload and destination
+"from trusted user content" — no descriptor wording can satisfy it. `approval_mode = "approve"`
+for one tool means the reviewer is never invoked for it; `prompt` forces it every time.
+
+Host admission (issue #467) writes the per-tool override into the trusted project's
+`.codex/config.toml`, which Codex loads only when the project is trusted, deep-merges over the
+user-level `[mcp_servers.yoetz]` (`codex-rs/config/src/merge.rs`), and which cannot carry
+provider or credential keys (`mcp_servers` is not on the project-layer denylist):
+
+```toml
+[mcp_servers.yoetz.tools.check]
+approval_mode = "approve"
+```
+
+or, for a plugin-managed route, `[plugins."yoetz@yoetz".mcp_servers.yoetz.tools.check]`. The
+form follows the exclusively observed owner (`yoetz provider status --json`
+`mcp_route.ownership_state`):
+
+```text
+yoetz integrate codex admission preview --project-root <project> --json
+yoetz integrate codex admission grant --project-root <project> --accept --preview-digest <digest>
+```
+
+A strict registered route, a missing or non-permitting grant, or an unreadable service refuses
+before any write. A same-name table that is not byte-exact (another `approval_mode`, an extra
+key) or a server-level `default_tools_approval_mode` is `foreign`: reported, never edited.
+Removal strips only the exact generated table; a config that held nothing else is deleted.
+
+Reverse: `integrate codex mcp install --route-profile strict --project-root <project>` and
+`integrate codex mcp remove --project-root <project>` sweep the project's entry and report
+`admission_cleanup` (the registration is global and the admission is project-scoped, so without
+`--project-root` nothing is swept and `provider status` reports `host_admission_drift`);
+`integrate codex plugin remove` sweeps it for the bound project; a privacy commit that stops
+external review sweeps it in the ceremony.
+
+Codex exposes no typed denial signal for a guardian refusal: its `PermissionRequest` hook fires
+before the decision and may allow, so it is not a denial. A held check is visible only as the
+#187 pause/approval flow in the transcript. This is a documented gap, not a Yoetz diagnostic.
+The 2026-08-30 source read is not a live cell; the `auto_review` acceptance cell in issue #467
+remains to be run.
+
 ## Upgrading Yoetz under a running service
 
 The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz

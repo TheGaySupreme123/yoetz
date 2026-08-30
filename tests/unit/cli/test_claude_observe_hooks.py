@@ -663,3 +663,80 @@ def test_claude_ingress_names_paused_consent_distinctly(tmp_path: Path) -> None:
         == 0
     )
     assert _recorded_diagnostics(tmp_path)[-1] == ("workspace_unconsented", "SessionStart")
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("auto_mode", "host_auto_review_denied"),
+        (None, "host_auto_review_denied"),
+        ("permission_rule", "host_permission_rule_denied"),
+        ("hook", "host_permission_rule_denied"),
+    ],
+)
+def test_claude_permission_denied_on_a_scoped_check_records_one_payload_free_diagnostic(
+    tmp_path: Path, source: str | None, expected: str
+) -> None:
+    """A host reviewer held the check before Yoetz saw it (issue #467).
+
+    The typed reason is the separate representation #187 asked for: it is host tool-call
+    authorization, never a semantic status, and nothing from the host payload survives.
+    """
+
+    store, _commitment = _consented_store(tmp_path)
+    payload: dict[str, object] = {
+        "session_id": "claude-denied",
+        "hook_event_name": "PermissionDenied",
+        "tool_name": "mcp__plugin_yoetz_yoetz__check",
+        "tool_input": {"claim": "CLAIM_CANARY"},
+        "tool_use_id": "toolu_CANARY",
+        "reason": "classifier_denied",
+        "cwd": "/private/CWD_CANARY",
+        "permission_mode": "auto",
+    }
+    if source is not None:
+        payload["source"] = source
+    stdout = io.BytesIO()
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="PermissionDenied",
+            stdin_bytes=canonical_encode(cast(JsonValue, payload)),
+            stdout=stdout,
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+        == 0
+    )
+    assert stdout.getvalue() == b"{}\n"
+    assert _recorded_diagnostics(tmp_path) == [(expected, "PermissionDenied")]
+    assert store.list_envelopes(store.workspace_commitment(str(tmp_path.resolve()))) == ()
+    diagnostics_bytes = (tmp_path / "observation/hook-diagnostics.jsonl").read_bytes()
+    for canary in (b"CANARY", b"classifier_denied", str(tmp_path).encode()):
+        assert canary not in diagnostics_bytes
+
+
+def test_claude_permission_denied_for_any_other_tool_records_nothing(tmp_path: Path) -> None:
+    _consented_store(tmp_path)
+    for tool_name in ("mcp__plugin_yoetz_yoetz__start", "Bash", "mcp__yoetz__check"):
+        stdout = io.BytesIO()
+        assert (
+            observe_hooks.handle_claude_observe(
+                event_name="PermissionDenied",
+                stdin_bytes=canonical_encode(
+                    {
+                        "session_id": "claude-denied",
+                        "hook_event_name": "PermissionDenied",
+                        "tool_name": tool_name,
+                        "source": "auto_mode",
+                    }
+                ),
+                stdout=stdout,
+                workspace=str(tmp_path),
+                _state=tmp_path,
+                skip_service=True,
+            )
+            == 0
+        )
+        assert stdout.getvalue() == b"{}\n"
+    assert not (tmp_path / "observation/hook-diagnostics.jsonl").exists()

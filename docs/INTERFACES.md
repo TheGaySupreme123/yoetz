@@ -2882,6 +2882,9 @@ count in the closed one-hour `window_seconds`; timings likewise date the all-tim
 a separate recent maximum. Unreadable or future timestamps remain retained but are never classified
 as recent, so a fixed historical failure cannot masquerade as live degradation (issue #310).
 Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
+A host's automatic reviewer holding a scoped semantic `check` before Yoetz receives it is recorded
+on the `PermissionDenied` event as `host_auto_review_denied` or `host_permission_rule_denied`
+(issue #467); it is host tool-call authorization, so no semantic status is ever inferred from it.
 Every host ingress (Codex, Claude Code, Cursor) that ingests nothing because of workspace binding
 records one payload-free diagnostic naming the dropped layer: `workspace_unresolvable` when an
 explicit `--workspace` locator cannot be canonicalized (an empty value from an unset
@@ -3211,6 +3214,37 @@ privacy grant.
 `setup status` rows carry `registration_state` and `registered_route_profile`; the
 `integrate <harness> mcp status` body carries `state` and `route_profile`.
 
+**Host admission port (`adapters/integrations/host_admission.py`, issue #467).** `HostAdmissionState`
+is `absent|present|partial|foreign|unknown`; `HostAdmissionAction` is `grant|revoke|noop`;
+`HostAdmissionReason` is `confirmation_required|preview_stale|foreign_entry_present|
+entry_unreadable|route_not_policy|route_unobserved|grant_not_permitting|grant_unverifiable|
+owner_required|target_unsafe|write_failed|host_invalid`. `observe_host_admission` reads only the
+host's project-scoped surfaces and classifies by exact entry: Claude
+`mcp__plugin_yoetz_yoetz__check` in `permissions.allow` (detail `allow`) or `ask` (detail `ask`);
+Codex the byte-exact `[mcp_servers.yoetz.tools.check]` / `[plugins."yoetz@yoetz".mcp_servers.yoetz.tools.check]`
+table with `approval_mode = "approve"` (detail `external|plugin|both`); Cursor `yoetz:check` in
+`mcpAllowlist` (case-insensitive) and `Mcp(yoetz:check)` / `Mcp(plugin-yoetz-yoetz:check)` in
+`permissions.allow`. A deny rule, a wider rule (`deny_rule_present`, `wider_rule_present`), a
+non-exact table (`entry_not_exact`), a Codex server-level default (`server_default_present`), or
+the tool in both `allow` and `ask` (`allow_and_ask_present`) is `foreign`; a symlinked, oversized,
+unparseable, or wrongly shaped file is `unknown` (`file_symlink|file_too_large|file_unreadable|
+file_invalid|shape_invalid|file_not_regular`). `preview_host_admission` refuses a grant unless the
+caller's observed route is `policy` and the observed grant permits review (`None` is unread and
+refuses), refuses both actions on `unknown`, refuses a grant on `foreign`, and binds the
+`yoetz.host-admission-preview/1` digest over host, action, owner form, checkpoint, every entry
+observed, and the SHA-256 of every file it would write. `apply_host_admission` recomputes the
+preview and refuses `preview_stale` on any drift, writes each surface atomically (`0600`, parent
+`0700`, symlink refused), deletes a file that held nothing but the Yoetz entry, and re-reads the
+state. Revoke needs no route or grant and edits only a surface whose entry is `present`.
+`sweep_host_admission` is the reverse transition (outcome `removed|absent|retained_foreign|
+unknown|write_failed` per host) used by the privacy ceremony, `integrate <host> plugin remove`,
+strict plugin re-renders, `integrate codex plugin remove`, and `integrate codex mcp
+install|remove --project-root`; each reports it as `admission_cleanup` and its preview discloses
+the same. CLI: `yoetz integrate <host> admission status|preview|grant|revoke --project-root`
+(preview `--action grant|revoke`; Claude `--checkpoint`; the host roots the route observation
+needs; `--accept --preview-digest` for the apply verbs, exit 3 without them, exit 1
+`host_admission_<reason>` on refusal).
+
 `yoetz provider status` emits the read-only `yoetz.provider-status/1` schema token. It reports two
 non-substitutable verdicts. `semantic_ready` is repository-bound structural readiness:
 service ready and unlocked, `verification.semantic` not `disabled`, an endpoint bound, the bound
@@ -3233,6 +3267,15 @@ with `scope: "agent_route"` and never moves `semantic_ready` or the exit code, b
 decision 2 makes the route ceiling process-local — CLI and terminal checks still dispatch. Route
 observation is fail-soft by contract: no discovery failure, registration error, or unreadable entry
 may raise or change the exit code.
+The report also carries `host_admission` (issue #467): one object per host (`claude|codex|cursor`)
+with `state` exactly `absent|present|partial|foreign|unknown`, `observed`, and per-surface
+`entries` (`surface`, `state`, `entry`, closed `detail` token, `file_digest`), read from the hosts'
+own project-scoped files (`.claude/settings.local.json`, `.codex/config.toml`,
+`.cursor/permissions.json` + `.cursor/cli.json`) under the workspace locator. `unknown` means the
+host file could not be read, never that no admission exists. A `present|partial` admission whose
+grant is known not to permit external review, or (Codex) whose observed registered route is
+`strict`, adds a `host_admission_drift` blocker with `scope: "agent_route"` and `host`; it never
+moves `semantic_ready` or the exit code, and the report never removes anything.
 
 An unbound repository session reports `repository_grant_state=null` and `semantic_ready=false`
 rather than treating the machine ceiling as authority. Provider status remains structural readiness
@@ -3607,8 +3650,12 @@ state is unobserved `ambiguous`. Effective route is non-null only for one exact 
 owner. Scoped runtime identities are server `plugin:yoetz:yoetz` and tools
 `mcp__plugin_yoetz_yoetz__<operation>`; bare names are negative controls.
 
-The rendered artifact carries the five candidate hooks
-(`PostToolUse|PostToolUseFailure|SessionEnd|SessionStart|Stop`), but the
+The rendered artifact carries the five candidate observation hooks
+(`PostToolUse|PostToolUseFailure|SessionEnd|SessionStart|Stop`) plus a `PermissionDenied` hook
+matched to exactly `^mcp__plugin_yoetz_yoetz__check$` that produces no observation: it records
+one payload-free `hook_diagnostics` reason, `host_auto_review_denied` (`source` `auto_mode` or
+absent) or `host_permission_rule_denied` (`permission_rule|hook`), on the `PermissionDenied`
+event (issue #467), and any other tool name records nothing. But the
 `CLAUDE_CODE_HARNESS_PROFILE` hook capability cell advertises no observation events: the recorded
 evidence case observed no accepted observation, so the cell stays unpopulated until each event has
 installed-host delivery, privacy, and accepted-observation evidence. `ObservationSource` adds

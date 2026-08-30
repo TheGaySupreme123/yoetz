@@ -93,6 +93,7 @@ CLAUDE_CODE_MINIMUM_VERSION: Final = "2.1.233"
 CLAUDE_CODE_NATIVE_PROFILE_ID: Final = "claude-code-cli-local-project-2.1.241"
 CLAUDE_CODE_HOOK_MAPPING_VERSION: Final = "claude-code-hooks-2.1.241-v1"
 CLAUDE_CODE_HOOK_EVENTS: Final = (
+    "PermissionDenied",
     "PostToolUse",
     "PostToolUseFailure",
     "SessionEnd",
@@ -128,7 +129,7 @@ _MARKER_SCHEMA: Final = "yoetz.claude-code-marketplace-install/2"
 _LEGACY_MARKER_SCHEMAS: Final = frozenset({"yoetz.claude-code-marketplace-install/1"})
 _EXPORT_MARKER_NAME: Final = ".yoetz-claude-plugin-export.json"
 _EXPORT_MARKER_SCHEMA: Final = "yoetz.claude-code-plugin-export/1"
-_RENDERER_VERSION: Final = "claude-code-plugin/0.2.0"
+_RENDERER_VERSION: Final = "claude-code-plugin/0.3.0"
 _STAGE_PREFIX: Final = ".yoetz-claude-marketplace-stage-"
 _ROLLBACK_NAME: Final = ".yoetz-claude-marketplace-rollback"
 _MAX_FILE_BYTES: Final = 262_144
@@ -149,6 +150,9 @@ _GUIDANCE_NAMES: Final = (
 _YOETZ_SCOPED_TOOL_MATCHER: Final = (
     "^mcp__plugin_yoetz_yoetz__(" + "|".join(YOETZ_WORKFLOW_TOOL_NAMES) + ")$"
 )
+# Only the semantic ``check`` is routed through a host's automatic reviewer (issue #467); the
+# denial hook is scoped to it so a held check is the only thing it can ever report.
+_YOETZ_CHECK_TOOL_MATCHER: Final = "^mcp__plugin_yoetz_yoetz__check$"
 _VERSION_RE: Final = re.compile(r"^(\d+)\.(\d+)\.(\d+)$", re.ASCII)
 
 
@@ -641,6 +645,12 @@ def _hooks_json(yoetz_launcher: tuple[str, ...]) -> bytes:
         return {"command": f"{command} --event {event}", "timeout": 3, "type": "command"}
 
     hooks: dict[str, JsonValue] = {
+        # Fires when auto mode (or a rule or another hook) denies the call, after the denial;
+        # it cannot allow anything. Yoetz records one payload-free typed diagnostic so
+        # ``observe status`` can say the host held a check (issue #467).
+        "PermissionDenied": [
+            {"hooks": [hook("PermissionDenied")], "matcher": _YOETZ_CHECK_TOOL_MATCHER}
+        ],
         "PostToolUse": [{"hooks": [hook("PostToolUse")], "matcher": _YOETZ_SCOPED_TOOL_MATCHER}],
         "PostToolUseFailure": [
             {"hooks": [hook("PostToolUseFailure")], "matcher": _YOETZ_SCOPED_TOOL_MATCHER}

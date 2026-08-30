@@ -343,3 +343,22 @@ def test_storage_outcome_reasons_are_closed_tokens_shared_with_the_advisory(
     summary = hook_diagnostic_summary(_state=tmp_path)
     reasons = cast(Mapping[str, object], summary["reasons"])
     assert set(reasons) == {"storage_unsafe", "storage_corrupt", "unknown_reason"}
+
+
+def test_host_denial_reasons_are_admitted_tokens_on_the_permission_denied_event(
+    tmp_path: Path,
+) -> None:
+    """Claude Code's PermissionDenied hook lands here as a closed token (issue #467)."""
+
+    for reason in ("host_auto_review_denied", "host_permission_rule_denied"):
+        record_hook_diagnostic(reason, "PermissionDenied", _state=tmp_path)
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "observation/hook-diagnostics.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [(row["reason"], row["event"]) for row in rows] == [
+        ("host_auto_review_denied", "PermissionDenied"),
+        ("host_permission_rule_denied", "PermissionDenied"),
+    ]
