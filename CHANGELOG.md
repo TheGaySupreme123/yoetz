@@ -8,6 +8,11 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- The MCP stdio bridge no longer exits on a size-valid but excessively nested JSON frame.
+  Inbound nesting is bounded at the canonical codec's 64 levels with a non-recursive walk, any
+  decoder `RecursionError` is converted to the fixed `invalid_json` parse error, and a valid
+  request succeeds immediately after a rejected deeply nested one (issue #394).
+
 - `yoetz integrate <host> plugin --help` no longer advertises lifecycle commands a host cannot
   run. Each command's help names its hosts (Codex: `preview`, `status`, `remove`; Cursor adds
   `install`; Claude Code has the full lifecycle plus `export`), and invoking an unsupported command

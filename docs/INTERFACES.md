@@ -292,7 +292,10 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   `MAX_REVIEW_OMISSIONS = 64`, and `MAX_REVIEW_CHALLENGES = 3`.
 - MCP transport cap (`adapters/mcp_stdio.py`): `MAX_JSON_FRAME_BYTES = 1_048_576` payload bytes
   excluding the single LF. This is adapter-owned and is not exported or mirrored by
-  `protocol/models.py`.
+  `protocol/models.py`. The same adapter bounds inbound nesting at
+  `MAX_JSON_NESTING_DEPTH = MAX_JSON_DEPTH` (64 container levels including the root object) with a
+  non-recursive walk; a deeper or otherwise undecodable frame yields the fixed null-id
+  `invalid_json` parse error and the bridge keeps serving later frames (issue #394).
 - Local-service control framing (`service/control_protocol.py`):
   `MAX_CONTROL_FRAME_BYTES = 6_291_456` payload bytes excluding the four-byte length prefix, with
   `MAX_ORDINARY_CONTROL_FRAME_BYTES = 1_048_576` for every frame except the exact closed
