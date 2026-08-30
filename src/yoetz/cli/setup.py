@@ -46,6 +46,7 @@ from yoetz.application.observation_check_policy import load_observation_check_po
 from yoetz.cli.agent_start import AGENT_START_HANDOFF
 from yoetz.cli.workspace_binding import canonical_workspace_locator
 from yoetz.config.load import load_config
+from yoetz.config.models import ConfigError
 from yoetz.config.paths import PathSafetyError, setup_marker_path
 from yoetz.domain.values import RequestId, request_id
 from yoetz.ports.harness_mcp import (
@@ -2331,11 +2332,17 @@ async def run_setup_wizard(
             from yoetz.cli.unlock import HumanCeremonyCliError
             from yoetz.ports.control import ControlError
 
-            configured = load_config({}, os.environ, None)
+            try:
+                external_runtime_configured = (
+                    load_config({}, os.environ, None).external_runtime is not None
+                )
+            except ConfigError:
+                # This optional read only decides whether an API-credential probe applies. Keep
+                # the established prompt path when ambient configuration cannot be interpreted;
+                # the owning provider/setup operation will still report that configuration error.
+                external_runtime_configured = False
             credential_probe_authorized = (
-                False
-                if configured.external_runtime is not None
-                else _prompt_credential_probe_authorization()
+                False if external_runtime_configured else _prompt_credential_probe_authorization()
             )
             try:
                 privacy_result = await run_privacy_setup(
