@@ -47,10 +47,17 @@ not become a bundled consent switch.
    check. SessionStart may read only the small cached pending projection.
 
 3. **Durable decision state is local, strict, and bounded.** The owner-only
-   `recommendations.json` document uses schema `yoetz.recommendations/1` and records the last
-   evaluated version, per-id accept/decline decisions, and the bounded pending set. Invalid,
-   oversized, unsafe, or unknown state fails closed. A decline is remembered by stable id and is
-   never re-nagged; a later release that needs a genuinely new decision must register a new id.
+   `recommendations.json` document writes schema `yoetz.recommendations/2` and backward-reads
+   schema `yoetz.recommendations/1`. It records the last evaluated version, bounded decisions, the
+   pending set, and any pending exact-target identity. Invalid, oversized, unsafe, or unknown state
+   fails closed. Config and package decisions remain global by stable id. Codex activation is the
+   exception: its accept/decline identity contains only digests and binds the resolved executable
+   path, executable bytes and version, canonical Codex home, activation preview, and intended
+   host-rendered cache. A legacy unscoped activation decision is retained as history but suppresses
+   no exact target; a legacy unscoped pending activation is withheld until an exact-target
+   evaluation rebuilds actionable advice. Exact-target activation history is compacted to bounded
+   accepted and declined windows; forgetting an old row can only cause advice to be shown again and
+   never grants authority.
 
 4. **The agent is a messenger, not the decision maker.** When no other observation advice already
    occupies the bounded `additionalContext` surface, SessionStart may emit at most one cached
@@ -63,12 +70,21 @@ not become a bundled consent switch.
 
 5. **Only `yoetz recommend` applies or records a decision.** `list` re-evaluates and reports the
    current bounded set. `decline <id>` records the refusal without applying the recommendation.
-   `accept <id>` re-evaluates current state before acting and shows the exact change. A configuration
-   flip uses the ordinary typed configuration writer. Codex activation uses ADR-012's exact
+   `accept <id>` re-evaluates current state before acting and shows the exact change. Exact Codex
+   evaluations run even when a same-version historical decision left no global pending item: a
+   observed `installed_not_activated` target therefore gets fresh advice even if an earlier accepted
+   row has the same digest, while a currently active exact target stays quiet. A target-bound decline
+   suppresses only that unchanged target; it never grants activation and never applies to another
+   home. Foreign, modified, ambiguous, or otherwise non-previewable state clears stale actionable
+   advice and requires manual review. A configuration flip uses the ordinary typed configuration
+   writer. Codex activation uses ADR-012's exact
    selected-executable and explicitly supplied home, isolated pre-consent version probe,
    post-consent scoped inventory/add, source/cache, preimage, environment, digest, conflict, and
-   staleness checks; marketplace/config presence alone never satisfies the recommendation. A
-   package-update acceptance only prints the reviewed human-run upgrade command. There is no generic arbitrary
+   staleness checks; marketplace/config presence alone never satisfies the recommendation. After
+   the final confirmation, activation acceptance is durably recorded before host mutation. A store
+   failure therefore performs no activation, while a later apply failure remains an accepted
+   decision but cannot suppress recovery if reinspection is still inactive. A package-update
+   acceptance only prints the reviewed human-run upgrade command. There is no generic arbitrary
    setting setter, no force path, and no silent apply-on-upgrade behavior.
 
 6. **Consumers keep their independent authority gates.** `[observation].enabled = true` permits the
@@ -101,13 +117,20 @@ not become a bundled consent switch.
 
 Existing installations can learn about reviewed defaults without an upgrade rewriting durable
 preferences or trust surfaces. A user can accept, decline, or defer each recommendation, and a
-decline remains quiet across later sessions. SessionStart stays bounded and fast because it reads a
-cache rather than evaluating configuration, activation, or network state.
+global decline remains quiet across later sessions. An activation decline stays quiet only for its
+unchanged exact target. SessionStart stays bounded and fast because it reads a cache rather than
+evaluating configuration, activation, or network state.
 
 The registry is intentionally small and code-owned. Adding a setting requires an explicit
 satisfaction predicate and an application path with its own authority and staleness rules. A
 recommendation can improve discoverability, but it cannot prove that a plugin fired, observation
 was delivered, a package upgrade succeeded, or a resulting configuration is correct.
+
+The v2 target identity deliberately stores no executable or home path. Re-evaluation may replace
+the one cached pending target, while the bounded decision map retains only recent independent
+decisions for previous exact targets. Any inactive target requires current actionable advice unless
+that exact target was declined; generic setup `--accept` remains unable to authorize an unshown
+digest.
 
 ## Alternatives considered
 

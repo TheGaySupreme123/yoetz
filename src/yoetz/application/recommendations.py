@@ -1,13 +1,14 @@
 """Durable, owner-controlled recommended-default advisories.
 
-Recommendations are advice, not authority.  Evaluation may add a bounded pending id, but only
-an explicit CLI acceptance is allowed to apply a change.  Declines are durable and suppress the
-same recommendation permanently.
+Recommendations are advice, not authority. Evaluation may add a bounded pending id, but only an
+explicit CLI acceptance is allowed to apply a change. Global declines are durable by id; Codex
+activation decisions are durable only for the exact target and activation digest that was shown.
 """
 
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -35,8 +36,10 @@ __all__ = [
     "RecommendationDecision",
     "RecommendationState",
     "RecommendationStoreError",
+    "RecommendationTarget",
     "RecommendedDefault",
     "cached_pending_recommendations",
+    "codex_activation_recommendation_target",
     "decline_cached_recommendation",
     "evaluate_recommendation_context",
     "load_recommendation_state",
@@ -50,13 +53,17 @@ type RecommendationKind = Literal["config_flip", "activation", "package_update"]
 type RecommendationDecisionValue = Literal["accepted", "declined"]
 type RecommendationContextFactory = Callable[[], Awaitable["RecommendationContext"]]
 
-_SCHEMA: Final = "yoetz.recommendations/1"
+_SCHEMA: Final = "yoetz.recommendations/2"
+_LEGACY_SCHEMA: Final = "yoetz.recommendations/1"
 _STORE_NAME: Final = "recommendations.json"
 _LOCK_NAME: Final = "recommendations.lock"
 _MAX_STORE_BYTES: Final = 32 * 1024
-_MAX_DECISIONS: Final = 128
+_MAX_DECISIONS: Final = 32
+_MAX_ACCEPTED_ACTIVATION_HISTORY: Final = 8
+_MAX_DECLINED_ACTIVATION_HISTORY: Final = 16
 _MAX_TEXT_LENGTH: Final = 256
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$", re.ASCII)
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
 
 
 class RecommendationStoreError(Exception):
@@ -81,6 +88,7 @@ class RecommendationContext:
 
     observation_enabled: bool | None = None
     codex_activation_state: str | None = None
+    codex_activation_target: RecommendationTarget | None = None
     package_update: PackageUpdateAdvisory | None = None
 
 
@@ -106,6 +114,51 @@ class RecommendationDecision:
     decision: RecommendationDecisionValue
     decided_at: datetime
     version: str
+    recommendation_id: str = ""
+    target: RecommendationTarget | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RecommendationTarget:
+    """Digest-only identity for one exact Codex activation decision target."""
+
+    target_digest: str
+    executable_path_digest: str
+    executable_digest: str
+    codex_version: str
+    codex_home_digest: str
+    activation_preview_digest: str
+    plugin_install_digest: str
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.target_digest,
+            self.executable_path_digest,
+            self.executable_digest,
+            self.codex_home_digest,
+            self.activation_preview_digest,
+            self.plugin_install_digest,
+        ):
+            if type(value) is not str or _DIGEST.fullmatch(value) is None:
+                raise ValueError("recommendation_target_digest_invalid")
+        if (
+            type(self.codex_version) is not str
+            or not self.codex_version
+            or len(self.codex_version) > _MAX_TEXT_LENGTH
+        ):
+            raise ValueError("recommendation_target_version_invalid")
+        identity_fields = {
+            "activation_preview_digest": self.activation_preview_digest,
+            "codex_home_digest": self.codex_home_digest,
+            "codex_version": self.codex_version,
+            "executable_digest": self.executable_digest,
+            "executable_path_digest": self.executable_path_digest,
+            "plugin_install_digest": self.plugin_install_digest,
+        }
+        if self.target_digest != _sha_text(
+            json.dumps(identity_fields, separators=(",", ":"), sort_keys=True)
+        ):
+            raise ValueError("recommendation_target_identity_mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +169,38 @@ class RecommendationState:
         default_factory=lambda: MappingProxyType({})
     )
     pending: tuple[str, ...] = ()
+    pending_targets: Mapping[str, RecommendationTarget] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+
+
+def _sha_text(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def codex_activation_recommendation_target(
+    *,
+    executable_path: Path | str,
+    executable_digest: str,
+    codex_version: str,
+    codex_home: Path | str,
+    activation_preview_digest: str,
+    plugin_install_digest: str,
+) -> RecommendationTarget:
+    """Bind advice to exact target bytes without persisting either absolute path."""
+
+    resolved_executable = os.fspath(Path(executable_path).resolve(strict=True))
+    resolved_home = os.fspath(Path(codex_home).resolve(strict=False))
+    fields = {
+        "activation_preview_digest": activation_preview_digest,
+        "codex_home_digest": _sha_text(resolved_home),
+        "codex_version": codex_version,
+        "executable_digest": executable_digest,
+        "executable_path_digest": _sha_text(resolved_executable),
+        "plugin_install_digest": plugin_install_digest,
+    }
+    target_digest = _sha_text(json.dumps(fields, separators=(",", ":"), sort_keys=True))
+    return RecommendationTarget(target_digest=target_digest, **fields)
 
 
 def _observation_satisfied(context: RecommendationContext) -> bool:
@@ -125,7 +210,14 @@ def _observation_satisfied(context: RecommendationContext) -> bool:
 
 
 def _activation_satisfied(context: RecommendationContext) -> bool:
-    return context.codex_activation_state is None or context.codex_activation_state == "active"
+    # Acceptance is a recorded decision, not proof that activation still holds. Only an exact,
+    # currently previewable installed-not-activated target is actionable advice. Active targets
+    # need nothing; foreign/modified/ambiguous targets require manual review, not a stale prompt.
+    return (
+        context.codex_activation_state is None
+        or context.codex_activation_state != "installed_not_activated"
+        or context.codex_activation_target is None
+    )
 
 
 def _package_update_satisfied(context: RecommendationContext) -> bool:
@@ -185,13 +277,69 @@ def _parse_timestamp(raw: object) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _target_payload(target: RecommendationTarget) -> dict[str, str]:
+    return {
+        "target_digest": target.target_digest,
+        "executable_path_digest": target.executable_path_digest,
+        "executable_digest": target.executable_digest,
+        "codex_version": target.codex_version,
+        "codex_home_digest": target.codex_home_digest,
+        "activation_preview_digest": target.activation_preview_digest,
+        "plugin_install_digest": target.plugin_install_digest,
+    }
+
+
+def _parse_target(raw: object) -> RecommendationTarget:
+    if type(raw) is not dict:
+        raise ValueError("recommendation_target_invalid")
+    row = cast(dict[str, object], raw)
+    expected = {
+        "target_digest",
+        "executable_path_digest",
+        "executable_digest",
+        "codex_version",
+        "codex_home_digest",
+        "activation_preview_digest",
+        "plugin_install_digest",
+    }
+    if set(row) != expected or any(type(row[name]) is not str for name in expected):
+        raise ValueError("recommendation_target_invalid")
+    return RecommendationTarget(
+        target_digest=cast(str, row["target_digest"]),
+        executable_path_digest=cast(str, row["executable_path_digest"]),
+        executable_digest=cast(str, row["executable_digest"]),
+        codex_version=cast(str, row["codex_version"]),
+        codex_home_digest=cast(str, row["codex_home_digest"]),
+        activation_preview_digest=cast(str, row["activation_preview_digest"]),
+        plugin_install_digest=cast(str, row["plugin_install_digest"]),
+    )
+
+
+def _decision_key(recommendation_id: str, target: RecommendationTarget | None) -> str:
+    if target is None:
+        return recommendation_id
+    return f"{recommendation_id}@{target.target_digest.removeprefix('sha256:')}"
+
+
 def _parse_state(parsed: object) -> RecommendationState:
     if type(parsed) is not dict:
         raise ValueError("document_invalid")
     document = cast(dict[str, object], parsed)
-    if set(document) != {"schema", "last_evaluated_version", "decisions", "pending"}:
+    schema = document.get("schema")
+    expected_keys = (
+        {"schema", "last_evaluated_version", "decisions", "pending"}
+        if schema == _LEGACY_SCHEMA
+        else {
+            "schema",
+            "last_evaluated_version",
+            "decisions",
+            "pending",
+            "pending_targets",
+        }
+    )
+    if set(document) != expected_keys:
         raise ValueError("document_keys_invalid")
-    if document["schema"] != _SCHEMA:
+    if schema not in {_SCHEMA, _LEGACY_SCHEMA}:
         raise ValueError("schema_invalid")
     version = document["last_evaluated_version"]
     if version is not None and (
@@ -206,10 +354,15 @@ def _parse_state(parsed: object) -> RecommendationState:
         raise ValueError("decisions_invalid")
     decisions: dict[str, RecommendationDecision] = {}
     for key, raw in decision_rows.items():
-        if type(key) is not str or _ID.fullmatch(key) is None or type(raw) is not dict:
+        if type(key) is not str or type(raw) is not dict:
             raise ValueError("decision_invalid")
         row = cast(dict[str, object], raw)
-        if set(row) != {"decision", "decided_at", "version"}:
+        row_keys = (
+            {"decision", "decided_at", "version"}
+            if schema == _LEGACY_SCHEMA
+            else {"decision", "decided_at", "version", "recommendation_id", "target"}
+        )
+        if set(row) != row_keys:
             raise ValueError("decision_keys_invalid")
         decision = row["decision"]
         decided_version = row["version"]
@@ -221,10 +374,26 @@ def _parse_state(parsed: object) -> RecommendationState:
             or len(decided_version) > _MAX_TEXT_LENGTH
         ):
             raise ValueError("decision_version_invalid")
+        if schema == _LEGACY_SCHEMA:
+            recommendation_id = key
+            target = None
+        else:
+            recommendation_id = row["recommendation_id"]
+            if type(recommendation_id) is not str or recommendation_id not in _BY_ID:
+                raise ValueError("decision_recommendation_invalid")
+            target = None if row["target"] is None else _parse_target(row["target"])
+        if recommendation_id not in _BY_ID:
+            raise ValueError("decision_recommendation_invalid")
+        if target is not None and recommendation_id != "codex-plugin-activation":
+            raise ValueError("decision_target_invalid")
+        if key != _decision_key(recommendation_id, target):
+            raise ValueError("decision_key_invalid")
         decisions[key] = RecommendationDecision(
             decision=cast(RecommendationDecisionValue, decision),
             decided_at=_parse_timestamp(row["decided_at"]),
             version=decided_version,
+            recommendation_id=recommendation_id,
+            target=target,
         )
     raw_pending = document["pending"]
     if type(raw_pending) is not list:
@@ -236,11 +405,25 @@ def _parse_state(parsed: object) -> RecommendationState:
     for item in pending_rows:
         if type(item) is not str or item not in _BY_ID or item in pending:
             raise ValueError("pending_item_invalid")
+        # V1 could not say which executable/home/digest activation advice belonged to. Do not
+        # advertise an un-actionable accept/decline command; an exact CLI list rebuilds it.
+        if schema == _LEGACY_SCHEMA and item == "codex-plugin-activation":
+            continue
         pending.append(item)
+    pending_targets: dict[str, RecommendationTarget] = {}
+    if schema == _SCHEMA:
+        raw_targets = document["pending_targets"]
+        if type(raw_targets) is not dict:
+            raise ValueError("pending_targets_invalid")
+        for key, raw in cast(dict[object, object], raw_targets).items():
+            if key != "codex-plugin-activation" or key not in pending:
+                raise ValueError("pending_target_key_invalid")
+            pending_targets[cast(str, key)] = _parse_target(raw)
     return RecommendationState(
         last_evaluated_version=version,
         decisions=MappingProxyType(decisions),
         pending=tuple(pending),
+        pending_targets=MappingProxyType(pending_targets),
     )
 
 
@@ -316,18 +499,40 @@ def _timestamp_text(value: datetime) -> str:
 
 
 def _state_payload(state: RecommendationState) -> bytes:
+    if state.schema != _SCHEMA or len(state.decisions) > _MAX_DECISIONS:
+        raise RecommendationStoreError("recommendation_store_write_failed")
+    if (
+        any(item not in _BY_ID for item in state.pending)
+        or len(set(state.pending)) != len(state.pending)
+        or set(state.pending_targets) - set(state.pending)
+        or set(state.pending_targets) - {"codex-plugin-activation"}
+    ):
+        raise RecommendationStoreError("recommendation_store_write_failed")
+    for key, row in state.decisions.items():
+        recommendation_id = row.recommendation_id or key
+        if (
+            recommendation_id not in _BY_ID
+            or (row.target is not None and recommendation_id != "codex-plugin-activation")
+            or key != _decision_key(recommendation_id, row.target)
+        ):
+            raise RecommendationStoreError("recommendation_store_write_failed")
     document = {
-        "schema": _SCHEMA,
+        "schema": state.schema,
         "last_evaluated_version": state.last_evaluated_version,
         "decisions": {
             key: {
                 "decision": row.decision,
                 "decided_at": _timestamp_text(row.decided_at),
                 "version": row.version,
+                "recommendation_id": row.recommendation_id or key,
+                "target": None if row.target is None else _target_payload(row.target),
             }
             for key, row in sorted(state.decisions.items())
         },
         "pending": list(state.pending),
+        "pending_targets": {
+            key: _target_payload(target) for key, target in sorted(state.pending_targets.items())
+        },
     }
     payload = json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
     if len(payload) > _MAX_STORE_BYTES:
@@ -369,6 +574,7 @@ async def evaluate_recommendation_context(
     *,
     observation_enabled: bool | None = None,
     codex_activation_state: str | None = None,
+    codex_activation_target: RecommendationTarget | None = None,
     policy: PrivacyPolicy | None = None,
     network_egress_permitted: bool | None = None,
     update_checks_enabled: bool | None = None,
@@ -390,20 +596,51 @@ async def evaluate_recommendation_context(
     return RecommendationContext(
         observation_enabled=observation_enabled,
         codex_activation_state=codex_activation_state,
+        codex_activation_target=codex_activation_target,
         package_update=package_update,
     )
 
 
 def _decision_suppresses(
-    decision: RecommendationDecision | None, *, installed_version: str
+    recommendation_id: str,
+    decision: RecommendationDecision | None,
+    *,
+    installed_version: str,
 ) -> bool:
     if decision is None:
         return False
     if decision.decision == "declined":
         return True
+    if recommendation_id == "codex-plugin-activation":
+        # Re-inspection, not historical acceptance, decides whether activation advice is needed.
+        # A currently inactive target must always receive recovery, even if it returns to the exact
+        # pre-apply digest that an older acceptance recorded.
+        return False
     # Acceptance authorizes one exact action. Suppress it for this running version so a package
     # upgrade command does not immediately re-nag; a new release frontier is evaluated afresh.
     return decision.version == installed_version
+
+
+def _compact_activation_decisions(
+    decisions: dict[str, RecommendationDecision], *, current_key: str
+) -> None:
+    """Bound advisory history without ever discarding the decision just recorded."""
+
+    for value, limit in (
+        ("accepted", _MAX_ACCEPTED_ACTIVATION_HISTORY),
+        ("declined", _MAX_DECLINED_ACTIVATION_HISTORY),
+    ):
+        history = sorted(
+            (
+                (candidate_key, row)
+                for candidate_key, row in decisions.items()
+                if row.recommendation_id == "codex-plugin-activation" and row.decision == value
+            ),
+            key=lambda item: (item[0] == current_key, item[1].decided_at, item[0]),
+            reverse=True,
+        )
+        for stale_key, _row in history[limit:]:
+            del decisions[stale_key]
 
 
 def _fact_is_known(item: RecommendedDefault, context: RecommendationContext) -> bool:
@@ -447,9 +684,15 @@ async def refresh_pending(
     with _state_lock(root):
         current = load_recommendation_state(root=root)
         pending_ids: list[str] = []
+        pending_targets: dict[str, RecommendationTarget] = {}
         for item in RECOMMENDED_DEFAULTS:
+            target = (
+                resolved.codex_activation_target if item.id == "codex-plugin-activation" else None
+            )
             if _decision_suppresses(
-                current.decisions.get(item.id), installed_version=current_version
+                item.id,
+                current.decisions.get(_decision_key(item.id, target)),
+                installed_version=current_version,
             ):
                 continue
             if not _fact_is_known(item, resolved):
@@ -458,14 +701,19 @@ async def refresh_pending(
                 # a recommendation established by an earlier exact evaluation.
                 if item.id in current.pending:
                     pending_ids.append(item.id)
+                    if (retained := current.pending_targets.get(item.id)) is not None:
+                        pending_targets[item.id] = retained
                 continue
             if not item.is_satisfied(resolved):
                 pending_ids.append(item.id)
+                if target is not None:
+                    pending_targets[item.id] = target
         pending = tuple(pending_ids)
         updated = RecommendationState(
             last_evaluated_version=current_version,
             decisions=current.decisions,
             pending=pending,
+            pending_targets=MappingProxyType(pending_targets),
         )
         store_recommendation_state(updated, root=root)
         return updated
@@ -478,6 +726,7 @@ def record_recommendation_decision(
     root: Path | None = None,
     version: str | None = None,
     now: datetime | None = None,
+    target: RecommendationTarget | None = None,
 ) -> RecommendationState:
     """Record an explicit accept/decline and remove it from cached pending advice."""
 
@@ -485,21 +734,37 @@ def record_recommendation_decision(
         raise ValueError("recommendation_unknown")
     if decision not in {"accepted", "declined"}:
         raise ValueError("recommendation_decision_invalid")
+    if (target is not None) != (recommendation_id == "codex-plugin-activation"):
+        raise ValueError("recommendation_target_required")
     current_version = installed_package_version() if version is None else version
     if type(current_version) is not str or not current_version:
         raise ValueError("recommendation_version_invalid")
     with _state_lock(root):
         current = load_recommendation_state(root=root)
         decisions = dict(current.decisions)
-        decisions[recommendation_id] = RecommendationDecision(
+        key = _decision_key(recommendation_id, target)
+        decisions[key] = RecommendationDecision(
             decision=decision,
             decided_at=now if now is not None else datetime.now(tz=UTC),
             version=current_version,
+            recommendation_id=recommendation_id,
+            target=target,
         )
+        if recommendation_id == "codex-plugin-activation":
+            _compact_activation_decisions(decisions, current_key=key)
+        if len(decisions) > _MAX_DECISIONS:
+            raise RecommendationStoreError("recommendation_store_write_failed")
         updated = RecommendationState(
             last_evaluated_version=current.last_evaluated_version or current_version,
             decisions=MappingProxyType(decisions),
             pending=tuple(item for item in current.pending if item != recommendation_id),
+            pending_targets=MappingProxyType(
+                {
+                    key: value
+                    for key, value in current.pending_targets.items()
+                    if key != recommendation_id
+                }
+            ),
         )
         store_recommendation_state(updated, root=root)
         return updated
@@ -514,9 +779,9 @@ def decline_cached_recommendation(
 ) -> RecommendationState:
     """Durably decline one cached pending recommendation without re-evaluating any facts.
 
-    Decline grants nothing, so it needs no per-kind authority (no selected Codex home, no
-    network posture) and must never route through context evaluation: verification against
-    the cached pending set and the durable write happen as one transition under the lock.
+    Decline grants nothing, so it needs no per-kind authority or network posture and must never
+    route through context evaluation. Codex advice binds the cached digest-only target; global
+    advice binds its stable id. Verification and the durable write share one lock transition.
     """
 
     if recommendation_id not in _BY_ID:
@@ -528,16 +793,31 @@ def decline_cached_recommendation(
         current = load_recommendation_state(root=root)
         if recommendation_id not in current.pending:
             raise ValueError("recommendation_not_pending")
+        target = current.pending_targets.get(recommendation_id)
+        if recommendation_id == "codex-plugin-activation" and target is None:
+            raise ValueError("recommendation_target_unknown")
         decisions = dict(current.decisions)
-        decisions[recommendation_id] = RecommendationDecision(
+        key = _decision_key(recommendation_id, target)
+        decisions[key] = RecommendationDecision(
             decision="declined",
             decided_at=now if now is not None else datetime.now(tz=UTC),
             version=current_version,
+            recommendation_id=recommendation_id,
+            target=target,
         )
+        if recommendation_id == "codex-plugin-activation":
+            _compact_activation_decisions(decisions, current_key=key)
         updated = RecommendationState(
             last_evaluated_version=current.last_evaluated_version or current_version,
             decisions=MappingProxyType(decisions),
             pending=tuple(item for item in current.pending if item != recommendation_id),
+            pending_targets=MappingProxyType(
+                {
+                    key: value
+                    for key, value in current.pending_targets.items()
+                    if key != recommendation_id
+                }
+            ),
         )
         store_recommendation_state(updated, root=root)
         return updated

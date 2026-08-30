@@ -8,6 +8,17 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Codex activation recommendation decisions now bind the exact executable path/bytes/version,
+  canonical home, activation preview, and rendered-cache digest. Another Codex home or a target
+  that drifts back to `installed_not_activated` receives fresh actionable advice; active targets
+  stay quiet, declines remain exact-target-only, legacy unscoped decisions suppress nothing, and
+  activation still requires a freshly shown digest and confirmation (issue #463).
+
+- Disposable-worktree Codex dogfood now has an executable parity gate that fails before launch on
+  missing exact-worktree consent or activation and retains packaging, discovery, host delivery,
+  model use, hooks, mapping, drain, session stream, semantic provenance, receipt, influence,
+  rollback, and normal-target isolation as separate closed-state cells (issue #464).
+
 - The MCP stdio bridge no longer exits on a size-valid but excessively nested JSON frame.
   Inbound nesting is bounded at the canonical codec's 64 levels with a non-recursive walk, any
   decoder `RecursionError` is converted to the fixed `invalid_json` parse error, and a valid
