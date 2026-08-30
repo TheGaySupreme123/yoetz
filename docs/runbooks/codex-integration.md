@@ -288,6 +288,14 @@ yoetz integrate codex plugin preview --codex-home <home> --json
 yoetz integrate codex plugin remove --codex-home <home> --accept --preview-digest <digest> --json
 ```
 
+`preview`, `status`, and `remove` are the whole Codex plugin command surface. The generic
+`install`, `update`, `enable`, `disable`, and `export` commands that the shared
+`integrate <host> plugin` group also lists belong to the Claude Code (and, for `install`, Cursor)
+lifecycles; `--help` marks each command's hosts, and invoking one for Codex refuses with
+`codex_plugin_command_unsupported:<command> supported=preview,status,remove` (exit 2) before any
+binary discovery or mutation. Codex activation is the digest-bound setup/recommendation ceremony
+(`yoetz setup run`, ADR-012), not a standalone plugin command.
+
 The Codex plugin command uses the same preview → explicit accept → apply shape as Codex
 activation and MCP install: the mutation is bound to the exact preview digest. It does **not**
 consume the Cursor `plugin_artifact_apply` OS-presence cell; that cell remains the standalone

@@ -8,6 +8,13 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- `yoetz integrate <host> plugin --help` no longer advertises lifecycle commands a host cannot
+  run. Each command's help names its hosts (Codex: `preview`, `status`, `remove`; Cursor adds
+  `install`; Claude Code has the full lifecycle plus `export`), and invoking an unsupported command
+  refuses before any binary discovery or mutation with
+  `<host>_plugin_command_unsupported:<command> supported=...` instead of the bare
+  `codex_plugin_command_invalid` (issue #465).
+
 - Consented `SessionStart` hooks on Claude Code, Codex, and Cursor now auto-attach a ledger task:
   the shared hook auto-start sends the paired `workspace_ref` (canonical workspace root) and
   `external_ref` (host session) selector the `start` contract requires, validated through the

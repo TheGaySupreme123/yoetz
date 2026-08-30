@@ -25,7 +25,11 @@ release line at `1.0.24`. Nearby versions are untested, not implicitly compatibl
 
 ## Preview and install
 
-Use an explicit isolated root; never point a test at regular `~/.cursor`.
+Use an explicit isolated root; never point a test at regular `~/.cursor`. The Cursor plugin
+command surface is `preview`, `install`, `status`, and `remove` (`--action replace` previews a
+replacement); the generic `update`, `enable`, `disable`, and `export` commands listed by the shared
+group are Claude Code lifecycles and refuse for Cursor with
+`cursor_plugin_command_unsupported:<command> supported=preview,install,status,remove` (exit 2).
 
 ```text
 yoetz integrate cursor plugin preview \
