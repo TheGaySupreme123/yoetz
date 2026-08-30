@@ -143,6 +143,10 @@ The skill name is `/yoetz:yoetz`. The MCP server is `plugin:yoetz:yoetz`, and ca
 
 ## Hooks and observation
 
+Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
+therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
+the native hook/observation paths below.
+
 The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
 `PostToolUseFailure`, `Stop`, and `SessionEnd`. A bare MCP matcher is a negative control. Hooks call
 `yoetz hooks claude-observe` and are best-effort; timeouts/nonzero exits never authorize or block

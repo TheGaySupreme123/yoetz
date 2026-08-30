@@ -89,6 +89,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "id_wrong_length",
     "id_wrong_prefix",
     "id_wrong_type",
+    "import_publication_authority_required",
     "import_report_invalid",
     "input_not_bytes",
     "integer_out_of_safe_range",
@@ -214,7 +215,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 161
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 162
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

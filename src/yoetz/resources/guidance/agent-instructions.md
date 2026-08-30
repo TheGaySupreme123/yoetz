@@ -192,6 +192,23 @@ checks above are therefore load-bearing skill behavior. Target binding, expiry, 
 repository commitment, machine-policy ceilings, vault reauthentication, and no-echo result rules
 remain runtime-enforced.
 
+For bounded Codex JSONL import, do not run `consent prepare import_publication`: only the importer
+can prepare that operation after it has encrypted the source and durably fixed the publication
+plan. Run the exact `yoetz import` request once. On `PRIVACY_AUTHORITY_REQUIRED`, do not retry the
+import yet; read `yoetz consent status` and show the user the bounded danger text, operation,
+danger digest, target digest, and `import_publication_preview`. The preview is structural. Never
+paste or summarize transcript lines, source JSONL, reasoning, or excerpts into chat to obtain
+approval. State that agent-chat authorization is agent-attested rather than independent proof and
+recommend the stronger trusted local review path when it is available.
+
+Proceed only if the user explicitly approves or denies that exact pending import in the current
+chat after seeing the warning. Relay the exact pending fields through `yoetz consent authorize`;
+approve uses warning acknowledgement. Denial ends the flow without publication. After approval,
+replay the identical import body and request ID. Never add an authority token, digest, or boolean
+to the import request, create a fresh request ID, or treat approval as authority for another source,
+session, profile, plan, semantic check, or reviewer egress. A target mismatch or expired decision
+requires a new importer-created preview.
+
 `vault_initialize` never permits agent-chat authorization or an agent-selected vault secret. The
 explicit manual `yoetz service initialize-passphrase` ceremony remains separate. Locked vaults
 still need the ordinary local-human unlock ceremony. No `--yolo`.
