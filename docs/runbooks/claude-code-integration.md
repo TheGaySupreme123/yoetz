@@ -105,7 +105,10 @@ yoetz service restart
 
 `yoetz service status` names the incompatible holder's pid, version, and manifest digest. Other
 hosts' sessions still running the previous build's bridge are refused after the switch until they
-restart; that is the intended outcome of an upgrade, not a defect.
+restart; that is the intended outcome of an upgrade, not a defect. The cooperative MCP bridge
+latches that availability failure for the process and serializes the first on-demand attempt so
+concurrent tool calls share one diagnostic (issues #469, #476); that behaviour is shared across
+hosts that use this bridge, not Claude-Code-specific.
 
 ## Static and host validation
 

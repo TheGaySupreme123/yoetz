@@ -127,8 +127,10 @@ _DISCARD_CLIENT_REASONS: Final = _RECONNECT_REASONS | {"vault_locked"}
 # service holder), not one request. Once one call has reported such a failure, later calls under
 # a *new* request identity inherit that terminal state instead of re-probing, re-spawning, or
 # minting another diagnostic (issue #469: delegated Cursor workers each retried `start`). The
-# latch clears when the stamped service holder changes, when a quiet handshake succeeds for a
-# retryable class, or when the original request identity replays — the sanctioned continuation.
+# first probe is slot-scoped: concurrent arrivals before that result wait for it rather than each
+# minting a diagnostic (issue #476). The latch clears when the stamped service holder changes,
+# when a quiet handshake succeeds for a retryable class, or when the original request identity
+# replays — the sanctioned continuation.
 _AVAILABILITY_LATCH_REASONS: Final = frozenset(
     {
         "service_unavailable",
@@ -235,11 +237,23 @@ class _AvailabilityLatch:
     inherited: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _AvailabilityDecision:
+    """Whether this call inherits a latched outage or proceeds, possibly owning the first probe."""
+
+    result: types.CallToolResult | None
+    claimed_attempt: bool
+
+
 @dataclass(slots=True)
 class _ClientSlot:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     client: ServiceClient | None = None
     availability: _AvailabilityLatch | None = None
+    # Concurrent first arrivals share one on-demand probe: the owner sets attempting, waiters
+    # park on attempt_finished, then re-check the completed latch (issue #476).
+    attempting: bool = False
+    attempt_finished: asyncio.Event | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -993,6 +1007,75 @@ async def _inherit_terminal_availability(
         )
 
 
+async def _finish_availability_attempt(runtime: BridgeRuntime) -> None:
+    """Release the first-probe gate so waiters can inherit the completed latch or proceed."""
+
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    async with slot.lock:
+        slot.attempting = False
+        finished = slot.attempt_finished
+        slot.attempt_finished = None
+    if finished is not None:
+        finished.set()
+
+
+async def _prepare_availability(
+    runtime: BridgeRuntime, request_id: str | None
+) -> _AvailabilityDecision:
+    """Inherit a completed latch, wait for an in-flight first probe, or claim that probe.
+
+    ``ensure_service_client`` holds the slot lock for the whole on-demand connect, so a completed
+    latch stored *after* that release is what concurrent first arrivals used to miss. Claiming
+    ``attempting`` before the connect closes that window: later arrivals wait, then inherit
+    (issue #476). A live client or the original request-id replay proceeds without claiming.
+    """
+
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    while True:
+        inherited = await _inherit_terminal_availability(runtime, request_id)
+        if inherited is not None:
+            return _AvailabilityDecision(inherited, False)
+        waiter: asyncio.Event | None = None
+        async with slot.lock:
+            if slot.availability is not None:
+                # Inherit returned None: this is the original request identity, which always
+                # replays (issue #469).
+                return _AvailabilityDecision(None, False)
+            if slot.attempting:
+                waiter = slot.attempt_finished
+            elif slot.client is not None:
+                return _AvailabilityDecision(None, False)
+            else:
+                slot.attempting = True
+                slot.attempt_finished = asyncio.Event()
+                return _AvailabilityDecision(None, True)
+        if waiter is None:
+            return _AvailabilityDecision(None, False)
+        await waiter.wait()
+
+
+async def _inherit_after_inflight_availability(
+    runtime: BridgeRuntime, request_id: str | None
+) -> types.CallToolResult | None:
+    """Wait for an in-flight first probe, then inherit a completed latch without claiming one.
+
+    Envelope-first publish recovery is an oracle read: it must not start a second on-demand
+    attempt while another tool call already owns the first probe.
+    """
+
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    while True:
+        waiter: asyncio.Event | None = None
+        async with slot.lock:
+            if not slot.attempting:
+                break
+            waiter = slot.attempt_finished
+        if waiter is None:
+            break
+        await waiter.wait()
+    return await _inherit_terminal_availability(runtime, request_id)
+
+
 async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
     runtime: BridgeRuntime,
     request: RequestT,
@@ -1047,38 +1130,64 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             correlation_id=correlation_id,
             host_profile=runtime.host_profile,
         )
-    inherited = await _inherit_terminal_availability(runtime, request_id)
-    if inherited is not None:
-        return inherited
+    prepared = await _prepare_availability(runtime, request_id)
+    if prepared.result is not None:
+        return prepared.result
+    claimed = prepared.claimed_attempt
     # Invoke first. Once this returns, a write may already be durable; response shaping must not
     # collapse that into a non-retryable INTERNAL_ERROR that steers agents away from same-id resume.
     try:
-        result = await _invoke_with_reconnect(runtime, request, invoke)
-    except PublicOperationError as exc:
-        # Defense in depth: the ordinary client normally returns ok:false bodies, but if a
-        # PublicOperationError escapes the service boundary, keep the exact public code.
         try:
-            bound = (
-                exc
-                if exc.correlation_id is not None
-                else exc.bind_correlation_id(
-                    record_public_error_without_raising(
-                        component="mcp.bridge",
-                        operation=_public_error_operation(operation),
-                        reason=exc.code.value.lower(),
-                        request_id=request_id,
+            result = await _invoke_with_reconnect(runtime, request, invoke)
+        except PublicOperationError as exc:
+            # Defense in depth: the ordinary client normally returns ok:false bodies, but if a
+            # PublicOperationError escapes the service boundary, keep the exact public code.
+            try:
+                bound = (
+                    exc
+                    if exc.correlation_id is not None
+                    else exc.bind_correlation_id(
+                        record_public_error_without_raising(
+                            component="mcp.bridge",
+                            operation=_public_error_operation(operation),
+                            reason=exc.code.value.lower(),
+                            request_id=request_id,
+                        )
                     )
                 )
-            )
-            return _result_from_wire(
-                tool_error_envelope(bound, request_id=request_id),
+                return _result_from_wire(
+                    tool_error_envelope(bound, request_id=request_id),
+                    host_profile=runtime.host_profile,
+                )
+            except Exception as mapping_exc:
+                correlation_id = record_unexpected_exception_without_raising(
+                    mapping_exc,
+                    component="mcp.bridge",
+                    operation=f"{operation}_public_error_internal_error",
+                    request_id=request_id,
+                )
+                return structured_error_result(
+                    PublicErrorCode.INTERNAL_ERROR,
+                    "The bridge could not complete the operation.",
+                    request_id=request_id,
+                    correlation_id=correlation_id,
+                    host_profile=runtime.host_profile,
+                )
+        except ControlError as exc:
+            failure = _control_error_result(
+                exc,
+                request_id,
+                operation,
                 host_profile=runtime.host_profile,
             )
-        except Exception as mapping_exc:
+            if exc.reason in _AVAILABILITY_LATCH_REASONS:
+                return await _latch_availability(runtime, request_id, exc, failure)
+            return failure
+        except Exception as exc:
             correlation_id = record_unexpected_exception_without_raising(
-                mapping_exc,
+                exc,
                 component="mcp.bridge",
-                operation=f"{operation}_public_error_internal_error",
+                operation=f"{operation}_internal_error",
                 request_id=request_id,
             )
             return structured_error_result(
@@ -1088,52 +1197,31 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
                 correlation_id=correlation_id,
                 host_profile=runtime.host_profile,
             )
-    except ControlError as exc:
-        failure = _control_error_result(
-            exc,
-            request_id,
-            operation,
-            host_profile=runtime.host_profile,
-        )
-        if exc.reason in _AVAILABILITY_LATCH_REASONS:
-            return await _latch_availability(runtime, request_id, exc, failure)
-        return failure
-    except Exception as exc:
-        correlation_id = record_unexpected_exception_without_raising(
-            exc,
-            component="mcp.bridge",
-            operation=f"{operation}_internal_error",
-            request_id=request_id,
-        )
-        return structured_error_result(
-            PublicErrorCode.INTERNAL_ERROR,
-            "The bridge could not complete the operation.",
-            request_id=request_id,
-            correlation_id=correlation_id,
-            host_profile=runtime.host_profile,
-        )
 
-    await _clear_availability(runtime)
-    try:
-        wire = public_model_to_wire(result)
-        validated = result_type.model_validate(wire)
-        return result_from_public_model(validated, host_profile=runtime.host_profile)
-    except Exception as exc:
-        correlation_id = record_unexpected_exception_without_raising(
-            exc,
-            component="mcp.bridge",
-            operation=f"{operation}_response_projection_failed",
-            request_id=request_id,
-        )
-        return structured_error_result(
-            PublicErrorCode.INTERNAL_ERROR,
-            _RESPONSE_PROJECTION_FAILED_MESSAGE,
-            retryable=True,
-            request_id=request_id,
-            correlation_id=correlation_id,
-            safe_details=dict(_RESPONSE_PROJECTION_FAILED_DETAILS),
-            host_profile=runtime.host_profile,
-        )
+        await _clear_availability(runtime)
+        try:
+            wire = public_model_to_wire(result)
+            validated = result_type.model_validate(wire)
+            return result_from_public_model(validated, host_profile=runtime.host_profile)
+        except Exception as exc:
+            correlation_id = record_unexpected_exception_without_raising(
+                exc,
+                component="mcp.bridge",
+                operation=f"{operation}_response_projection_failed",
+                request_id=request_id,
+            )
+            return structured_error_result(
+                PublicErrorCode.INTERNAL_ERROR,
+                _RESPONSE_PROJECTION_FAILED_MESSAGE,
+                retryable=True,
+                request_id=request_id,
+                correlation_id=correlation_id,
+                safe_details=dict(_RESPONSE_PROJECTION_FAILED_DETAILS),
+                host_profile=runtime.host_profile,
+            )
+    finally:
+        if claimed:
+            await _finish_availability_attempt(runtime)
 
 
 async def dispatch_start(
@@ -1412,7 +1500,7 @@ async def dispatch_publish_work(
             # The recovery oracle is the service itself. Under a latched availability result a
             # new request identity must not reach it (no startup, supersede, or diagnostic); the
             # lookup is simply unavailable and the certain authoring error leads (#239, #469).
-            if await _inherit_terminal_availability(runtime, request_id) is not None:
+            if await _inherit_after_inflight_availability(runtime, request_id) is not None:
                 recovery = _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
             else:
                 recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)

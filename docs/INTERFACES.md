@@ -1697,9 +1697,12 @@ about its host binding (this bridge process, its route profile, and the fixed en
 one request. The first such failure is returned with `safe_details.availability =
 "terminal_unavailable"`, `host_profile`, and `route_profile` beside the existing `reason_code`, and
 is latched in the bridge's private client slot together with the request id, the public error, its
-correlation id, and the advisory singleton-holder stamp observed at that moment. Every later call
-under a *different* request id — any tool, any delegate sharing the MCP process — is answered from
-that latch: same public code, same `correlation_id`, same `retryable`, the same `safe_details` plus
+correlation id, and the advisory singleton-holder stamp observed at that moment. Concurrent first
+arrivals before that result share one on-demand attempt: a slot-scoped in-flight gate parks later
+calls until the first probe completes, then they re-check the latch and inherit it (issue #476).
+Every later call under a *different* request id — any tool, any delegate sharing the MCP process —
+is answered from that latch: same public code, same `correlation_id`, same `retryable`, the same
+`safe_details` plus
 `availability_inherited: true` and `availability_request_id` (the original id), and a message
 suffix stating that no new diagnostic was recorded; no spawn, supersede, or diagnostic occurs.
 Three continuations clear the latch: the original request id replays (the sanctioned repair-then-
