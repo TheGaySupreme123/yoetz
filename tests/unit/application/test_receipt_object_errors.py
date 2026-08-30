@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import cast
 import pytest
 
 from yoetz.application.receipt import (  # noqa: SLF001
+    _abandon_preappend_objects,  # pyright: ignore[reportPrivateUsage]
     _finalize_object,  # pyright: ignore[reportPrivateUsage]
     _read_object,  # pyright: ignore[reportPrivateUsage]
     _stage_object,  # pyright: ignore[reportPrivateUsage]
@@ -239,3 +241,49 @@ async def test_persist_object_maps_finalize_oserror_to_retryable_storage_unsafe(
         root=_diagnostic_dir,
     )
     assert "object_destination_collision" not in caught.value.message
+
+
+async def test_abandon_finishes_every_stage_before_repeated_cancellation_propagates() -> None:
+    first_ref = _receipt_ref()
+    first = StagedObject(
+        first_ref.object_id,
+        first_ref.plaintext_size,
+        first_ref.commitment,
+        first_ref.envelope_digest,
+        first_ref.encryption_format,
+        first_ref.key_slot,
+        first_ref.metadata,
+        object(),
+    )
+    second = StagedObject(
+        "obj_ffffffff-0000-4000-8000-000000000002",
+        first.plaintext_size,
+        first.commitment,
+        first.envelope_digest,
+        first.encryption_format,
+        first.key_slot,
+        first.metadata,
+        object(),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    abandoned: list[str] = []
+
+    async def abandon(staged: StagedObject) -> None:
+        abandoned.append(staged.object_id)
+        if len(abandoned) == 1:
+            started.set()
+            await release.wait()
+
+    runtime = cast(TaskRuntime, SimpleNamespace(objects=SimpleNamespace(abandon=abandon)))
+    cleanup = asyncio.create_task(
+        _abandon_preappend_objects(runtime, (first, second), request_id=_REQUEST_ID)
+    )
+    await started.wait()
+    cleanup.cancel()
+    cleanup.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
+    assert abandoned == [second.object_id, first.object_id]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass, replace
 from typing import Final, Literal, Protocol, cast
@@ -358,18 +359,35 @@ async def _abandon_preappend_objects(
 ) -> None:
     """Best-effort cleanup for exact stages whose refs were never submitted to the ledger."""
 
-    for staged in reversed(staged_objects):
+    async def abandon_all() -> None:
+        for staged in reversed(staged_objects):
+            try:
+                await runtime.objects.abandon(staged)
+            except Exception as exc:
+                # Cleanup must not replace the classified persist failure the caller needs to
+                # retry. This exact object remains eligible for delayed generation-fenced GC.
+                record_classified_exception_without_raising(
+                    exc,
+                    component="application.receipt",
+                    operation="receipt_object_abandon_failed",
+                    request_id=request_id,
+                )
+
+    cleanup = asyncio.create_task(abandon_all())
+    cancellation: asyncio.CancelledError | None = None
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError as exc:
+        cancellation = exc
+    while not cleanup.done():
         try:
-            await runtime.objects.abandon(staged)
-        except Exception as exc:
-            # Cleanup must not replace the classified persist failure the caller needs to retry.
-            # This exact object remains eligible for delayed generation-fenced orphan GC.
-            record_classified_exception_without_raising(
-                exc,
-                component="application.receipt",
-                operation="receipt_object_abandon_failed",
-                request_id=request_id,
-            )
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+    cleanup.result()
+    if cancellation is not None:
+        raise cancellation
 
 
 async def _preflight(

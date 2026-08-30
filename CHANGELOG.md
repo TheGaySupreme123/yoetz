@@ -11,8 +11,8 @@ reverse-chronological released versions.
 - Receipt creation now abandons both exact caller-owned object stages when the payload object's
   stage/finalize fails before ledger submission. This removes a receipt file even when its rename
   completed before a directory-fsync error, preserves the retryable `STORAGE_UNSAFE` result if
-  cleanup itself fails, and lets the identical request retry without accumulating one finalized
-  orphan per attempt (issue #339).
+  cleanup itself fails, waits for exact cleanup before propagating cancellation, and lets the
+  identical request retry without accumulating one finalized orphan per attempt (issue #339).
 
 - The native Cursor plugin's plugin-owned `mcp.json` now launches the exact Yoetz executable the
   plugin's hooks bind (the `/2` marker launcher) instead of a bare `yoetz` that Cursor's sanitized
