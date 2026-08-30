@@ -51,10 +51,17 @@ from yoetz.ports.ledger import (
     AppendResult,
     AppendWarning,
     CheckCommitResult,
+    OperationKind,
+    OperationState,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
-from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
 from yoetz.protocol.coverage import (
     Coverage,
     PublicationChannel,
@@ -444,7 +451,7 @@ async def _publish(
     request_id_value: str,
     drafts: tuple[EventDraft, ...],
 ) -> AppendResult:
-    frontier = await runtime.ledger.load_frontier()
+    frontier = await _publication_frontier(runtime, request_id_value)
     request = PublishWorkRequestModel.model_validate(
         {
             "protocol_version": "0.1",
@@ -466,6 +473,32 @@ async def _publish(
     if type(public) is not PublishWorkInternalResult:
         raise _error(PublicErrorCode.INTERNAL_ERROR, "Import publication failed.")
     return _append_from_public(public)
+
+
+async def _publication_frontier(runtime: TaskRuntime, request_id_value: str) -> Frontier:
+    """Recover the original pre-append frontier when importer recording lagged the ledger."""
+
+    if runtime.writer_id is None:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The import writer route is invalid.")
+    operation = await runtime.ledger.lookup_operation(runtime.writer_id, request_id_value)
+    if (
+        operation is None
+        or operation.operation_kind is not OperationKind.PUBLISH_WORK
+        or operation.state is not OperationState.COMPLETE
+    ):
+        return await runtime.ledger.load_frontier()
+    if operation.result_canonical is None:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The stored publication result is invalid.")
+    try:
+        stored = strict_json_parse(operation.result_canonical)
+        if not isinstance(stored, Mapping):
+            raise ValueError("stored_publication_result_invalid")
+        return frontier_from_json(stored["subject_frontier"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _error(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "The stored publication result is invalid.",
+        ) from exc
 
 
 def _identity(
