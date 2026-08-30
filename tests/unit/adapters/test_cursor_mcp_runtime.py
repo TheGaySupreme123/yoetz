@@ -303,24 +303,23 @@ def test_macos_ps_text_matches_a_launcher_path_that_contains_whitespace() -> Non
 
     from yoetz.adapters.integrations.cursor_mcp_runtime import launcher_precedes_serve_in_text
 
-    spaced = ("/Users/me/Application Support/yoetz/bin/yoetz",)
-    module = ("/Users/me/My Tools/venv/bin/python3.14", "-m", "yoetz")
+    spaced = ("/opt/Yoetz Tools/bin/yoetz",)
+    module = ("/opt/Yoetz Tools/venv/bin/python3.14", "-m", "yoetz")
 
     assert launcher_precedes_serve_in_text(
-        "/Users/me/Application Support/yoetz/bin/yoetz mcp serve --host cursor", spaced
+        "/opt/Yoetz Tools/bin/yoetz mcp serve --host cursor", spaced
     )
     # Shebang expansion puts the interpreter first; the script token still sits before serve.
     assert launcher_precedes_serve_in_text(
-        "/Users/me/Application Support/yoetz/bin/python3.14 "
-        "/Users/me/Application Support/yoetz/bin/yoetz mcp serve --host cursor",
+        "/opt/Yoetz Tools/bin/python3.14 /opt/Yoetz Tools/bin/yoetz mcp serve --host cursor",
         spaced,
     )
     assert launcher_precedes_serve_in_text(
-        "/Users/me/My Tools/venv/bin/python3.14 -m yoetz mcp serve", module
+        "/opt/Yoetz Tools/venv/bin/python3.14 -m yoetz mcp serve", module
     )
     # A longer path that merely ends with the same suffix is another executable.
     assert not launcher_precedes_serve_in_text(
-        "/opt/other/Users/me/Application Support/yoetz/bin/yoetz mcp serve --host cursor", spaced
+        "/opt/other/opt/Yoetz Tools/bin/yoetz mcp serve --host cursor", spaced
     )
     assert not launcher_precedes_serve_in_text("/opt/older/bin/yoetz mcp serve", spaced)
     assert not launcher_precedes_serve_in_text("", spaced)
@@ -329,7 +328,7 @@ def test_macos_ps_text_matches_a_launcher_path_that_contains_whitespace() -> Non
     # is what the macOS scanner consults before reporting an executable mismatch.
     from yoetz.adapters.integrations.cursor_mcp_runtime import classify_serve_argv
 
-    text = "/Users/me/Application Support/yoetz/bin/yoetz mcp serve --host cursor"
+    text = "/opt/Yoetz Tools/bin/yoetz mcp serve --host cursor"
     assert classify_serve_argv(tuple(text.split()), spaced) == ("policy", "different")
 
 
@@ -340,12 +339,12 @@ def test_darwin_scanner_uses_the_text_match_for_whitespace_launchers(
 
     import yoetz.adapters.integrations.cursor_mcp_runtime as module
 
-    spaced = ("/Users/me/Application Support/yoetz/bin/yoetz",)
-    comm_table = b"10 1 Cursor\n11 10 mcp-process\n12 11 /Users/me/Application\n"
+    spaced = ("/opt/Yoetz Tools/bin/yoetz",)
+    comm_table = b"10 1 Cursor\n11 10 mcp-process\n12 11 /opt/Yoetz\n"
     arg_table = (
         b"10 1 /Applications/Cursor.app/Contents/MacOS/Cursor\n"
         b"11 10 mcp-process\n"
-        b"12 11 /Users/me/Application Support/yoetz/bin/yoetz mcp serve --host cursor\n"
+        b"12 11 /opt/Yoetz Tools/bin/yoetz mcp serve --host cursor\n"
     )
 
     class _Completed:
