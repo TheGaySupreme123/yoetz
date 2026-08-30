@@ -131,6 +131,27 @@ def _status_body(status: CursorPluginStatus) -> dict[str, object]:
         "artifact_digest": status.artifact_digest,
         "format_profile": None if status.format_profile is None else status.format_profile.value,
         "installed_digest": status.installed_digest,
+        "launcher": {
+            "artifact": (
+                None
+                if status.launcher.artifact_launcher is None
+                else list(status.launcher.artifact_launcher)
+            ),
+            "executable": status.launcher.executable,
+            "identity": {
+                "control_schema_version": status.launcher.identity.control_schema_version,
+                "matched": status.launcher.identity.matched,
+                "observed": status.launcher.identity.observed,
+                "package_version": status.launcher.identity.package_version,
+                "resource_manifest_digest": status.launcher.identity.resource_manifest_digest,
+            },
+            "installed": (
+                None
+                if status.launcher.installed_launcher is None
+                else list(status.launcher.installed_launcher)
+            ),
+            "mcp_binding": status.launcher.mcp_binding,
+        },
         "marker_valid": status.marker_valid,
         "mcp": {
             "observed": status.mcp_observation.observed,
@@ -139,6 +160,7 @@ def _status_body(status: CursorPluginStatus) -> dict[str, object]:
             "route_profile": status.mcp_observation.route_profile,
             "runtime": {
                 "activation": status.runtime.activation,
+                "executable_activation": status.runtime.executable_activation,
                 "foreign_process_count": status.runtime.foreign_process_count,
                 "live_route_profile": status.runtime.live_route_profile,
                 "observed": status.runtime.observed,

@@ -80,7 +80,9 @@ from yoetz.protocol.models import (
 from yoetz.service.client import (
     ServiceClient,
     accepted_but_unresponsive,
+    connect_service,
     connect_service_on_demand,
+    service_holder_identity,
 )
 
 __all__ = [
@@ -121,6 +123,30 @@ _GUIDANCE_BY_URI: Final = MappingProxyType(
 # projection reasons are handled in place and surfaced with their own remedy.
 _RECONNECT_REASONS: Final = frozenset({"service_unavailable", "service_generation_changed"})
 _DISCARD_CLIENT_REASONS: Final = _RECONNECT_REASONS | {"vault_locked"}
+# Availability failures describe the host binding (this bridge process, its endpoint, and the
+# service holder), not one request. Once one call has reported such a failure, later calls under
+# a *new* request identity inherit that terminal state instead of re-probing, re-spawning, or
+# minting another diagnostic (issue #469: delegated Cursor workers each retried `start`). The
+# latch clears when the stamped service holder changes, when a quiet handshake succeeds for a
+# retryable class, or when the original request identity replays — the sanctioned continuation.
+_AVAILABILITY_LATCH_REASONS: Final = frozenset(
+    {
+        "service_unavailable",
+        "service_incompatible",
+        "protocol_mismatch",
+        "endpoint_unsafe",
+        "peer_untrusted",
+    }
+)
+_AVAILABILITY_TERMINAL: Final = "terminal_unavailable"
+_INHERITED_AVAILABILITY_SUFFIX: Final = (
+    " This bridge already reported this outage under the same correlation_id for an earlier "
+    "request; no new diagnostic was recorded for this call. Yoetz remains unavailable for this "
+    "host binding until the named repair changes the running service: do not retry with a new "
+    "request_id, do not probe with other Yoetz operations, and do not run service lifecycle "
+    "commands that the earlier message did not name. Only the original request_id replays after "
+    "that repair."
+)
 # One wording for both post-commit projection failures — the service's own (control reason
 # `response_projection_failed`) and the bridge's. In both the operation stands and the only safe
 # recovery is replaying the same request_id, so the caller must never see them differ.
@@ -190,9 +216,30 @@ def invalid_request_message(operation: str, locations: Sequence[Mapping[str, str
 
 
 @dataclass(slots=True)
+class _AvailabilityLatch:
+    """One terminal availability result latched for the host binding of this bridge process.
+
+    ``holder`` is the advisory singleton-holder identity stamped when the failure was observed;
+    a different stamp later means the service was started, stopped, or replaced and the binding
+    must be probed afresh. ``inherited`` counts later calls answered from the latch.
+    """
+
+    request_id: str | None
+    reason: str
+    code: PublicErrorCode
+    message: str
+    retryable: bool
+    correlation_id: str
+    safe_details: dict[str, object]
+    holder: tuple[int, str | None, str | None, str | None] | None
+    inherited: int = 0
+
+
+@dataclass(slots=True)
 class _ClientSlot:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     client: ServiceClient | None = None
+    availability: _AvailabilityLatch | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -794,6 +841,158 @@ def _mutable_json(value: object) -> object:
     return value
 
 
+def _holder_snapshot() -> tuple[int, str | None, str | None, str | None] | None:
+    """Advisory identity of the stamped live service holder, or ``None`` when unknown."""
+
+    try:
+        holder = service_holder_identity()
+    except Exception:
+        return None
+    if holder is None:
+        return None
+    return (holder.pid, holder.instance_id, holder.schema_manifest_digest, holder.service_version)
+
+
+def _wire_error(result: types.CallToolResult) -> Mapping[str, object] | None:
+    structured = result.structuredContent
+    if not isinstance(structured, Mapping):
+        return None
+    error = cast(Mapping[str, object], structured).get("error")
+    return cast(Mapping[str, object], error) if isinstance(error, Mapping) else None
+
+
+def _availability_details(
+    existing: object, host_profile: str, route_profile: str
+) -> dict[str, object]:
+    details: dict[str, object] = (
+        dict(cast(Mapping[str, object], existing)) if isinstance(existing, Mapping) else {}
+    )
+    details["availability"] = _AVAILABILITY_TERMINAL
+    details["host_profile"] = host_profile
+    details["route_profile"] = route_profile
+    return details
+
+
+async def _latch_availability(
+    runtime: BridgeRuntime,
+    request_id: str | None,
+    error: ControlError,
+    result: types.CallToolResult,
+) -> types.CallToolResult:
+    """Record a terminal availability result for this binding and return it with that fact."""
+
+    wire = _wire_error(result)
+    if wire is None:
+        return result
+    code_value = wire.get("code")
+    message = wire.get("message")
+    retryable = wire.get("retryable")
+    correlation_id = wire.get("correlation_id")
+    if (
+        type(code_value) is not str
+        or type(message) is not str
+        or type(retryable) is not bool
+        or type(correlation_id) is not str
+    ):
+        return result
+    try:
+        code = PublicErrorCode(code_value)
+    except ValueError:
+        return result
+    details = _availability_details(
+        wire.get("safe_details"), runtime.host_profile, runtime.route_profile
+    )
+    latch = _AvailabilityLatch(
+        request_id,
+        error.reason,
+        code,
+        message,
+        retryable,
+        correlation_id,
+        details,
+        _holder_snapshot(),
+    )
+    async with runtime._slot.lock:  # pyright: ignore[reportPrivateUsage]
+        runtime._slot.availability = latch  # pyright: ignore[reportPrivateUsage]
+    return structured_error_result(
+        code,
+        message,
+        retryable=retryable,
+        request_id=request_id,
+        correlation_id=correlation_id,
+        safe_details=details,
+        host_profile=runtime.host_profile,
+    )
+
+
+async def _clear_availability(runtime: BridgeRuntime) -> None:
+    async with runtime._slot.lock:  # pyright: ignore[reportPrivateUsage]
+        runtime._slot.availability = None  # pyright: ignore[reportPrivateUsage]
+
+
+async def _quiet_probe(runtime: BridgeRuntime) -> ServiceClient | None:
+    """Handshake with a service that is already listening; never spawn or supersede one."""
+
+    try:
+        client = await connect_service(
+            ControlClientKind.MCP_BRIDGE, workspace_locator=runtime.workspace_locator
+        )
+    except Exception:
+        return None
+    try:
+        await client.connect()
+    except Exception:
+        await _close_client(client)
+        return None
+    return client
+
+
+async def _inherit_terminal_availability(
+    runtime: BridgeRuntime, request_id: str | None
+) -> types.CallToolResult | None:
+    """Answer a new request identity from the latched availability result, or clear the latch.
+
+    The original request identity always passes through: replaying it after the named repair is
+    the sanctioned continuation. A changed service holder stamp clears the latch. For a retryable
+    class one quiet handshake (no spawn, no supersede, no diagnostic) is attempted first so a
+    service that recovered on its own is not reported as absent.
+    """
+
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    async with slot.lock:
+        latch = slot.availability
+        if latch is None:
+            return None
+        if request_id is not None and request_id == latch.request_id:
+            return None
+        if _holder_snapshot() != latch.holder:
+            slot.availability = None
+            return None
+        if latch.retryable:
+            probe = await _quiet_probe(runtime)
+            if probe is not None:
+                stale = slot.client
+                slot.client = probe
+                slot.availability = None
+                if stale is not None and stale is not probe:
+                    await _close_client(stale)
+                return None
+        latch.inherited += 1
+        details = dict(latch.safe_details)
+        details["availability_inherited"] = True
+        if latch.request_id is not None:
+            details["availability_request_id"] = latch.request_id
+        return structured_error_result(
+            latch.code,
+            latch.message + _INHERITED_AVAILABILITY_SUFFIX,
+            retryable=latch.retryable,
+            request_id=request_id,
+            correlation_id=latch.correlation_id,
+            safe_details=details,
+            host_profile=runtime.host_profile,
+        )
+
+
 async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
     runtime: BridgeRuntime,
     request: RequestT,
@@ -848,6 +1047,9 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             correlation_id=correlation_id,
             host_profile=runtime.host_profile,
         )
+    inherited = await _inherit_terminal_availability(runtime, request_id)
+    if inherited is not None:
+        return inherited
     # Invoke first. Once this returns, a write may already be durable; response shaping must not
     # collapse that into a non-retryable INTERNAL_ERROR that steers agents away from same-id resume.
     try:
@@ -887,12 +1089,15 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
                 host_profile=runtime.host_profile,
             )
     except ControlError as exc:
-        return _control_error_result(
+        failure = _control_error_result(
             exc,
             request_id,
             operation,
             host_profile=runtime.host_profile,
         )
+        if exc.reason in _AVAILABILITY_LATCH_REASONS:
+            return await _latch_availability(runtime, request_id, exc, failure)
+        return failure
     except Exception as exc:
         correlation_id = record_unexpected_exception_without_raising(
             exc,
@@ -908,6 +1113,7 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             host_profile=runtime.host_profile,
         )
 
+    await _clear_availability(runtime)
     try:
         wire = public_model_to_wire(result)
         validated = result_type.model_validate(wire)
@@ -1203,7 +1409,13 @@ async def dispatch_publish_work(
         # (issues #239, #240).
         locations = safe_validation_locations(exc)
         if not _publish_is_declared_dry_run(arguments):
-            recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)
+            # The recovery oracle is the service itself. Under a latched availability result a
+            # new request identity must not reach it (no startup, supersede, or diagnostic); the
+            # lookup is simply unavailable and the certain authoring error leads (#239, #469).
+            if await _inherit_terminal_availability(runtime, request_id) is not None:
+                recovery = _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
+            else:
+                recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)
             if recovery.kind is _PublishRecoveryKind.FOUND and recovery.result is not None:
                 return recovery.result
             if recovery.kind is _PublishRecoveryKind.UNAVAILABLE:

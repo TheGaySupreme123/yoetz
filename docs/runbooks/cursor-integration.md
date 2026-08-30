@@ -97,12 +97,33 @@ An inline/project/user `yoetz` server must not create a plugin-managed pass. Pro
 for each source, duplicate exact entries, a foreign same-name route, and the alternate strict/policy
 route. The exact plugin-managed routes are `yoetz mcp serve` (policy) and
 `yoetz mcp serve --semantic off` (strict) for the byte-identical portable carrier. The native
-Cursor target adds `--host cursor` (policy: `yoetz mcp serve --host cursor`; strict:
-`yoetz mcp serve --host cursor --semantic off`). That profile retains `structuredContent` and
-also repeats the exact canonical JSON body in text `content`, because pinned Cursor `3.17.x` can
-otherwise hide structured results from the model. It adds no environment or secret field and does
-not widen the service route. Raw initialize and tools/list prove only runtime registration.
-Require a correlated model-controlled `start` or `status` call for use.
+Cursor target adds `--host cursor` and binds the exact launcher: its `mcp.json` entry is
+`command: <absolute yoetz executable>` (or the interpreter, with `-m yoetz` leading `args`) followed
+by `mcp serve --host cursor` (policy) or `mcp serve --host cursor --semantic off` (strict) — the
+same launcher the native hooks use and the `/2` marker records. Cursor's MCP reference resolves a
+bare `command` through the desktop app's sanitized PATH, which in the 2026-08-29 dogfood launched
+an older ambient runtime (control schema 2.1.0) behind a marker-valid current plugin (2.3.0); the
+bound entry removes PATH from the runtime choice (issue #468). That profile retains
+`structuredContent` and also repeats the exact canonical JSON body in text `content`, because
+pinned Cursor `3.17.x` can otherwise hide structured results from the model. It adds no
+environment or secret field and does not widen the service route. Route recognition accepts a
+hand-written bare `yoetz` (external registrations) or a known launcher (this runtime's or the
+installed marker's) with the exact serve arguments; anything else is `foreign`. Raw initialize and
+tools/list prove only runtime registration. Require a correlated model-controlled `start` or
+`status` call for use.
+
+`yoetz integrate cursor plugin status` reports the binding under `launcher`: `installed` and
+`artifact` launchers; `executable` (`matched` — same launcher and it exists; `drifted` — the
+installed tree binds another installation than the one reading status; `missing` — the bound
+executable is gone; `unbound` — portable or legacy `/1` marker; `unobserved`); `mcp_binding`
+(`exact_launcher`, legacy `ambient_path`, `absent` for external registration, `foreign`); and
+`identity`, probed by running the installed launcher's read-only `version --json` and comparing
+`package_version`, the `control-result` schema version, and `resource_manifest_digest` with the
+runtime reading status (`observed: false` when it cannot answer). `mcp.runtime.executable_activation`
+compares live Cursor-helper children with the installed launcher: `executable_mismatch` forces
+`activation: full_restart_required`. A tree rendered before issue #468 stays marker-valid and shows
+`state: modified` with `mcp_binding: ambient_path`; perform one exact previewed replace, then
+fully quit Cursor.
 
 ## Upgrading Yoetz under a running service
 
@@ -121,6 +142,23 @@ yoetz service restart
 `yoetz service status` names the incompatible holder's pid, version, and manifest digest. Other
 hosts' sessions still running the previous build's bridge are refused after the switch until they
 restart; that is the intended outcome of an upgrade, not a defect.
+
+## Multitask delegation after an outage
+
+Cursor subagents inherit the parent's MCP tools, so delegated workers reach the same `yoetz`
+bridge process. The bridge latches the first availability failure of that binding
+(`service_unavailable`, `service_incompatible`, `protocol_mismatch`, `endpoint_unsafe`,
+`peer_untrusted`): the parent's error carries `safe_details.availability: terminal_unavailable`
+with `host_profile`/`route_profile`, and every later call under a new `request_id` — any tool,
+any worker — returns the same `correlation_id` with `availability_inherited: true` and mints no
+new diagnostic, startup, or supersede. It clears when the original `request_id` replays after the
+named repair, when `yoetz service run|restart|stop` changes the stamped holder, or (retryable
+classes only) when one quiet handshake succeeds. The skill tells the coordinator to carry a
+bounded `yoetz_availability` block into each assignment and tells delegates that inherit it to
+make no Yoetz call and publish nothing; lifecycle commands are never a response to
+`INTERNAL_ERROR`. In the 2026-08-29 dogfood (issue #469) the initial outage was the ambient-runtime
+mismatch above; the delegates only amplified it. Report those two facts separately, and never
+claim delegate publications or attribution without a task and session.
 
 ## SDK TypeScript and Python (deferred)
 
@@ -143,7 +181,8 @@ The native IDE plugin advertises only `sessionStart`, `sessionEnd`, `afterMCPExe
 no hook capability; the SDKs' file-based hook contract is not execution evidence. Hooks call
 `yoetz hooks cursor-observe`, are fail-open, and never enforce Cursor work.
 
-Native hook artifacts resolve the invoking `yoetz` launcher to an exact command at render time. A
+Native hook artifacts and the plugin-owned `mcp.json` resolve the invoking `yoetz` launcher to
+one exact command at render time. A
 console-script invocation resolves to that absolute executable; the documented `python -m yoetz`
 entrypoint (ADR-007) is preserved as an equivalent module invocation of the same interpreter.
 Explicit absolute and relative invocations retain their path intent and never fall back to
@@ -207,6 +246,25 @@ verbatim and `yoetz observe status` reported `source_coverage.cursor_hook: true`
 revoked, the hook emitted `{}` and recorded `workspace_unconsented`. The IDE cell (3.17.x) was
 not measured in that run.
 
+Measured on 2026-08-29 (issue #468) with the same Cursor Agent CLI build, loading a native
+`plugin_managed`/`policy` tree rendered by a development checkout through `--plugin-dir` from an
+isolated cell (`HOME` injected into the cell's `mcp.json` `env` and hook commands, which makes the
+cell entry read `foreign` to status — read status before injecting): with `PATH` sanitized to
+`/usr/bin:/bin` and a foreign `yoetz` shim placed *first* on `PATH`, the plugin's MCP child ran
+exactly `<checkout>/.venv/bin/python <checkout>/.venv/bin/yoetz mcp serve --host cursor`, that
+bridge spawned `<checkout>/.venv/bin/python -m yoetz service run` from the same installation, the
+foreign shim was never invoked, and a model-controlled `start` (`Mcp(plugin-yoetz-yoetz:*)`
+allowed in `<project>/.cursor/cli.json`; the CLI names the plugin server `plugin-yoetz-yoetz`)
+returned typed `VAULT_LOCKED` with a resolvable `correlation_id` — not `INTERNAL_ERROR` and not
+`service_incompatible`. On the same machine the regular Cursor IDE's helper child was running the
+maintainer's uv-tool channel (`~/.local/bin/yoetz`, a shebang-expanded argv), and `status` for the
+checkout's tree therefore reported `mcp.runtime.executable_activation: executable_mismatch` with
+`activation: full_restart_required`, while `launcher.executable`, `mcp_binding`, and
+`identity.matched` were `matched` / `exact_launcher` / `true` for the tree itself. The CLI's own
+process is not a `Cursor`/`mcp-process` helper, so a CLI-only cell leaves `mcp.runtime` at
+`unobserved` for its own child; the IDE cell's live executable match is the remaining
+unmeasured facet.
+
 Use the same selected path for `yoetz observe grant|status|pause|resume|revoke`: operator controls
 and setup probes apply the identical nearest-safe-Git-root normalization as hook ingress. A legacy
 grant made against an exact Git subdirectory is intentionally not searched as an ancestor fallback;
@@ -255,7 +313,10 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 | Install refuses `authority_required` after `--accept` | no `plugin_artifact_apply` review is prepared for that exact digest |
 | Install refuses `human_authority_unavailable` | LocalAuthentication was cancelled, unavailable, timed out, or the host is outside the pinned macOS authority cell; no mutation occurred |
 | Install replay reports `preview_stale` | the inferred action became `replace`; replay with `--action install` |
-| MCP entry looks right but reads `foreign` | route recognition is key-set exact; an extra `env`/`cwd` key is a foreign entry |
+| MCP entry looks right but reads `foreign` | route recognition is key-set exact; an extra `env`/`cwd` key is a foreign entry, and an absolute `command` that is neither this runtime's launcher nor the installed marker's is another installation |
+| Hooks observe but a model-controlled `start` returns `SERVICE_UNAVAILABLE` / `service_incompatible` right after install | the plugin's MCP process is another Yoetz installation; read `launcher.executable`, `launcher.mcp_binding`, `launcher.identity`, and `mcp.runtime.executable_activation`, replace a legacy `ambient_path` tree, then fully quit Cursor |
+| `launcher.executable` is `drifted` or `missing` | the installed tree binds a launcher that is not this runtime's or no longer exists; one exact previewed replace re-binds hooks and MCP together |
+| Delegated workers each report the same `correlation_id` with `availability_inherited: true` | expected: the bridge latched the parent's outage; repair once, replay the original `request_id`, and do not read those as fresh failures |
 
 Always report what is proven and the remaining cells/gaps. A clean local test never proves Cursor
 Cloud, a neighboring version, regular-profile isolation without a before/after check, provider

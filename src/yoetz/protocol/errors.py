@@ -223,11 +223,15 @@ PROTOCOL_REASON_CODES: frozenset[str] = frozenset(_PROTOCOL_REASON_CODE_VALUES)
 
 SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "actual_version",
+    "availability",
+    "availability_inherited",
+    "availability_request_id",
     "component",
     "count",
     "expected_version",
     "field",
     "head_digest",
+    "host_profile",
     "limit",
     "method",
     "operation",
@@ -235,6 +239,7 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "quarantine_code",
     "reason_code",
     "retry_after_ms",
+    "route_profile",
     "schema_name",
     "sequence",
     "session_id",
@@ -246,6 +251,17 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
 )
 
 _INTEGER_DETAIL_KEYS = frozenset({"count", "limit", "retry_after_ms", "sequence"})
+_BOOLEAN_DETAIL_KEYS = frozenset({"availability_inherited"})
+# Closed token sets for the MCP bridge's host-binding availability facts (issue #469). The
+# binding identity is the bridge's host and route profile; `availability` names the one latched
+# state a later request identity may inherit.
+_TOKEN_DETAIL_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "availability": frozenset({"terminal_unavailable"}),
+        "host_profile": frozenset({"generic", "cursor"}),
+        "route_profile": frozenset({"policy", "strict"}),
+    }
+)
 _HEAD_DIGEST_PATTERN = re.compile(r"^(?:genesis|sha256:[0-9a-f]{64})$", re.ASCII)
 _ENUM_DETAIL_KEYS = frozenset(
     {"component", "method", "operation", "phase", "state", "status", "view"}
@@ -269,6 +285,10 @@ _CORRELATION_ID_PATTERN = re.compile(
 )
 _PROTOCOL_ID_DETAIL_PATTERNS: Mapping[str, re.Pattern[str]] = MappingProxyType(
     {
+        "availability_request_id": re.compile(
+            r"^req_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            re.ASCII,
+        ),
         "session_id": re.compile(
             r"^ses_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
             re.ASCII,
@@ -339,6 +359,11 @@ def _normalize_detail(key: str, value: object) -> SafeDetailValue | None:
         if type(value) is int and 0 <= value <= _MAX_SAFE_INTEGER:
             return value
         return None
+    if key in _BOOLEAN_DETAIL_KEYS:
+        return value if type(value) is bool else None
+    tokens = _TOKEN_DETAIL_VALUES.get(key)
+    if tokens is not None:
+        return value if type(value) is str and value in tokens else None
     if key == "reason_code":
         if type(value) is str and value in PROTOCOL_REASON_CODES:
             return value

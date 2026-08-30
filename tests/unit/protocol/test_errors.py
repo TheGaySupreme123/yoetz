@@ -511,11 +511,15 @@ def test_operation_error_exception_value_contract() -> None:
 def test_safe_details_allowlist_and_types_are_exact() -> None:
     expected_keys = (
         "actual_version",
+        "availability",
+        "availability_inherited",
+        "availability_request_id",
         "component",
         "count",
         "expected_version",
         "field",
         "head_digest",
+        "host_profile",
         "limit",
         "method",
         "operation",
@@ -523,6 +527,7 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
         "quarantine_code",
         "reason_code",
         "retry_after_ms",
+        "route_profile",
         "schema_name",
         "sequence",
         "session_id",
@@ -533,9 +538,46 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
         "writer_id",
     )
     assert SAFE_DETAIL_KEYS == expected_keys
+    # Issue #469: the bridge's host-binding availability facts are closed tokens, one boolean,
+    # and one request id; anything else for those keys is dropped, never passed through.
+    availability = normalize_safe_details(
+        {
+            "availability": "terminal_unavailable",
+            "availability_inherited": True,
+            "availability_request_id": "req_00000000-0000-4000-8000-000000000001",
+            "host_profile": "cursor",
+            "route_profile": "policy",
+        }
+    )
+    assert dict(availability) == {
+        "availability": "terminal_unavailable",
+        "availability_inherited": True,
+        "availability_request_id": "req_00000000-0000-4000-8000-000000000001",
+        "host_profile": "cursor",
+        "route_profile": "policy",
+    }
+    assert (
+        dict(
+            normalize_safe_details(
+                {
+                    "availability": "unavailable",
+                    "availability_inherited": "true",
+                    "availability_request_id": "ses_00000000-0000-4000-8000-000000000001",
+                    "host_profile": "vscode",
+                    "route_profile": "open",
+                }
+            )
+        )
+        == {}
+    )
     accepted = normalize_safe_details(
         {
             "actual_version": "1.0.0+local",
+            "availability": "terminal_unavailable",
+            "availability_inherited": True,
+            "availability_request_id": "req_00000000-0000-4000-8000-000000000001",
+            "host_profile": "cursor",
+            "route_profile": "policy",
             "component": _SafeEnum.READY,
             "count": 0,
             "expected_version": "V2-rc.1",
@@ -560,7 +602,7 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
     )
     assert tuple(accepted) == expected_keys
     assert accepted["component"] == "ready"
-    assert all(type(value) in {str, int} for value in accepted.values())
+    assert all(type(value) in {str, int, bool} for value in accepted.values())
     assert isinstance(accepted, MappingProxyType)
     hostile = _KnownKeyOnlyMapping()
     assert dict(normalize_safe_details(hostile)) == {"count": 3}

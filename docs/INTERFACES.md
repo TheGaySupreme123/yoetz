@@ -84,8 +84,11 @@ ordinary dictionary with exactly `code`, `message`, `retryable`, and bound `corr
 adds `safe_details` only when nonempty, as a new ordinary dictionary in ASCII key order. The frozen
 public-error JSON Schema remains a structural superset of this exact mapping-only runtime emitter.
 Allowlisted `safe_details` keys include structural recovery fields such as `reason_code`,
-`sequence`, `head_digest` (for `FRONTIER_CONFLICT` current-head recovery), and validated
-`task_id`/`session_id`/`writer_id` selectors. `SESSION_NOT_FOUND` with
+`sequence`, `head_digest` (for `FRONTIER_CONFLICT` current-head recovery), validated
+`task_id`/`session_id`/`writer_id` selectors, and the MCP bridge's host-binding availability
+facts (`availability` = `terminal_unavailable`, boolean `availability_inherited`, validated
+`availability_request_id`, and the closed `host_profile`/`route_profile` tokens; see the
+availability latch under the local-control section). `SESSION_NOT_FOUND` with
 `reason_code: session_superseded` carries the current binding for a retired session. The separate
 `workspace_task_exists` conflict deliberately carries no task selector or count: possession of a
 workspace reference alone is not authority to discover or attach another task. For MCP
@@ -1687,6 +1690,24 @@ and names `yoetz service status` / `yoetz service stop`. `service_incompatible` 
 are told apart by `safe_details.reason_code`. That MCP `SERVICE_UNAVAILABLE` mapping for
 `protocol_mismatch` is deliberate: the CLI helper still uses `public_error_code_for_control_reason`,
 which keeps `protocol_mismatch` as `INVALID_REQUEST`.
+
+**Availability latch (issue #469).** The bridge treats the control reasons `service_unavailable`,
+`service_incompatible`, `protocol_mismatch`, `endpoint_unsafe`, and `peer_untrusted` as facts
+about its host binding (this bridge process, its route profile, and the fixed endpoint), not about
+one request. The first such failure is returned with `safe_details.availability =
+"terminal_unavailable"`, `host_profile`, and `route_profile` beside the existing `reason_code`, and
+is latched in the bridge's private client slot together with the request id, the public error, its
+correlation id, and the advisory singleton-holder stamp observed at that moment. Every later call
+under a *different* request id — any tool, any delegate sharing the MCP process — is answered from
+that latch: same public code, same `correlation_id`, same `retryable`, the same `safe_details` plus
+`availability_inherited: true` and `availability_request_id` (the original id), and a message
+suffix stating that no new diagnostic was recorded; no spawn, supersede, or diagnostic occurs.
+Three continuations clear the latch: the original request id replays (the sanctioned repair-then-
+retry path — success clears, failure re-latches with the new result); the stamped service holder
+changes (`yoetz service run|restart|stop` happened); or, for a retryable class only, one quiet
+handshake (`connect_service`, never on-demand start or supersede) succeeds, in which case that
+connection becomes the bridge's client. Per-request failures (`vault_locked`, policy, validation,
+timeouts, draining) never latch. The latch is process-local: a fresh host launch probes once.
 
 `response_projection_failed` is reserved for the window after a handler returns
 for non-`publish_work` writes (and the impossible minimal-envelope path), where a write may already
@@ -3383,7 +3404,8 @@ never contains both root `plugin.json` and `.cursor-plugin/plugin.json`.
 identity digest, current-state digest, artifact digest, preview digest, intended MCP ownership,
 observed `McpOwnershipState`, optional exact route, and sorted warnings. `CursorPluginStatus`
 carries artifact/operation state, detected format, artifact/installed digests, marker validity,
-rollback availability, one `CursorMcpObservation`, and every independent `PluginProofFacet`.
+rollback availability, one `CursorMcpObservation`, one `CursorMcpRuntimeObservation`, one
+`CursorLauncherStatus`, and every independent `PluginProofFacet`.
 `CursorPluginResult` carries request/action/operation, before/after states, format,
 preview/artifact/installed digests, and sorted changed members. Portable artifacts retain marker
 schema `yoetz.cursor-plugin-install/1`. Newly rendered native artifacts use
@@ -3395,6 +3417,27 @@ managed inventory, and marker digest. A valid legacy native `/1` marker remains 
 `modified` against the `/2` desired artifact, so an exact previewed replace or remove remains
 reachable. Neither schema carries a project path, content, credential, transcript, timestamp,
 activation, coverage, or receipt claim.
+
+Native hooks **and the plugin-owned `mcp.json`** launch that one recorded launcher (issue #468):
+the MCP entry is `command = launcher[0]`, `args = [*launcher[1:], "mcp", "serve", "--host",
+"cursor"(, "--semantic", "off")]`, never a bare `yoetz` that Cursor's sanitized desktop PATH may
+resolve to another installation. Because the entry is a managed member, its bytes are part of the
+artifact digest and the marker inventory. Route recognition (`observe_cursor_mcp`) accepts an
+exact Yoetz route as a hand-written bare `yoetz` or one of the known launchers — this artifact's
+and the installed marker's — followed by the exact serve arguments; any other command, prefix, or
+key set is `foreign`. `CursorLauncherStatus` reports `artifact_launcher`, `installed_launcher`,
+`executable` (`matched|drifted|missing|unbound|unobserved`: the installed launcher versus the one
+this runtime would render, and whether it still exists), `mcp_binding`
+(`exact_launcher|ambient_path|absent|foreign|unobserved`: what the installed plugin entry spawns),
+and `identity`, a `LauncherIdentity` probed by running the installed launcher's read-only `version
+--json` through `yoetz.adapters.integrations.launcher_probe` and comparing package version,
+`control-result` schema version, and resource-manifest digest with the status-reading runtime
+(`observed=false` when the probe cannot answer; nothing is inferred). The runtime observation adds
+`executable_activation` (`unobserved|matched|unproven|executable_mismatch`): the tokens before
+`mcp serve` in a live Cursor-helper child are compared with the installed launcher without
+retaining argv, and a child on a different explicit executable forces
+`activation=full_restart_required`. Carrier-byte equality therefore proves what the host spawns;
+the identity probe and live executable match are the separate runtime facts.
 
 Cursor lifecycle is exact-preview bound and whole-directory atomic. Install, replace, and remove
 consume the ADR-016 `review_only` single-shot trusted review of `plugin_artifact_apply` prepared

@@ -42,3 +42,12 @@ mismatch: fully quit Cursor (Reload Window is not enough), then continue only af
 matches the installed policy route. Do not mint a fresh semantic check against the stale process,
 and do not change privacy settings. A live installed strict route remains the ordinary terminal
 ceiling.
+
+Delegation after an outage: if `start` (or any call) returned `safe_details.availability:
+terminal_unavailable`, that state belongs to the host binding, and later calls under a new
+`request_id` inherit the same `correlation_id` without a new diagnostic. Carry it into every
+delegated assignment as a bounded `yoetz_availability` block (state, host binding, parent
+`correlation_id` and `request_id`, proof limit). Delegates that inherit it make no Yoetz call and
+publish nothing; only the coordinator runs the one named repair and replays the original
+`request_id`. Never run `yoetz service stop`, `service run`, or `service restart` from
+`INTERNAL_ERROR` or from a message that did not name that exact command.

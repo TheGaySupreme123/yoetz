@@ -127,6 +127,17 @@ def test_cursor_plugin_cli_binds_preview_install_status_and_remove(tmp_path: Pat
     status_body = json.loads(status.stdout)
     assert status_body["state"] == "native_managed"
     assert status_body["mcp"]["ownership_state"] == "plugin"
+    # Issue #468: the CLI status exposes the bound launcher, its MCP binding, and the identity
+    # probed from that exact executable (this venv's own console script here).
+    launcher = status_body["launcher"]
+    assert launcher["installed"] == launcher["artifact"]
+    assert Path(launcher["installed"][0]).is_absolute()
+    assert launcher["executable"] == "matched"
+    assert launcher["mcp_binding"] == "exact_launcher"
+    assert launcher["identity"]["observed"] is True
+    assert launcher["identity"]["matched"] is True
+    assert launcher["identity"]["control_schema_version"] is not None
+    assert "executable_activation" in status_body["mcp"]["runtime"]
 
     replace_preview_result = runner.invoke(
         app,

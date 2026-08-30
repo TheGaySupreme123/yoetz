@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import BinaryIO, Final, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, BinaryIO, Final, Literal, TypedDict, cast
 
 from yoetz import __version__
 from yoetz.adapters.control.unix_socket import (
@@ -95,6 +95,9 @@ from yoetz.service.control_protocol import (
     write_control_frame,
 )
 
+if TYPE_CHECKING:
+    from yoetz.service.lifecycle import SingletonHolder
+
 __all__ = [
     "GetPrivacyReceiptRequest",
     "ListPrivacyReceiptsRequest",
@@ -106,6 +109,7 @@ __all__ = [
     "accepted_but_unresponsive",
     "connect_service",
     "connect_service_on_demand",
+    "service_holder_identity",
     "supersede_incompatible_service",
     "wait_for_singleton_release",
 ]
@@ -1251,6 +1255,22 @@ def _singleton_lock_path() -> Path:
     from yoetz.service.lifecycle import SINGLETON_LOCK_NAME
 
     return state_dir() / SINGLETON_LOCK_NAME
+
+
+def service_holder_identity() -> SingletonHolder | None:
+    """Read the advisory stamped holder of the fixed service without touching lock or endpoint.
+
+    ``None`` means no live stamped holder could be read. The stamp is advisory identity only
+    (never a fence); callers compare successive snapshots to learn that the service was started,
+    stopped, or replaced, and must not infer health from it.
+    """
+
+    from yoetz.service.lifecycle import probe_singleton_holder_identity
+
+    try:
+        return probe_singleton_holder_identity(_singleton_lock_path())
+    except Exception:
+        return None
 
 
 async def wait_for_singleton_release(pid: int, *, deadline: float) -> bool:

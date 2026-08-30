@@ -31,6 +31,13 @@ from yoetz.adapters.integrations.cursor_mcp_runtime import (
     observe_cursor_mcp_runtime,
 )
 from yoetz.adapters.integrations.launcher import resolve_yoetz_launcher, valid_launcher
+from yoetz.adapters.integrations.launcher_probe import (
+    UNOBSERVED_LAUNCHER_IDENTITY,
+    LauncherIdentity,
+    LauncherProbePort,
+    OsLauncherProbe,
+    compare_launcher_identity,
+)
 from yoetz.adapters.integrations.portable_plugin import (
     PackagedPortableResources,
     RenderedPortablePlugin,
@@ -79,6 +86,7 @@ __all__ = [
     "CursorPluginArtifact",
     "CursorPluginPreview",
     "CursorPluginResult",
+    "CursorLauncherStatus",
     "CursorPluginStatus",
     "CursorPluginTarget",
     "CursorSdkBinding",
@@ -391,6 +399,57 @@ class CursorPluginPreview:
             _validate_digest(value)
 
 
+type CursorLauncherExecutableState = Literal[
+    "matched", "drifted", "missing", "unbound", "unobserved"
+]
+type CursorMcpBindingState = Literal[
+    "exact_launcher", "ambient_path", "absent", "foreign", "unobserved"
+]
+
+
+@dataclass(frozen=True, slots=True)
+class CursorLauncherStatus:
+    """Status of the exact launcher an installed native plugin binds (issue #468).
+
+    ``executable`` compares the installed marker's launcher with this runtime's: ``matched``
+    (same executable, present and executable), ``drifted`` (the installed tree binds another
+    installation), ``missing`` (the bound executable no longer exists), ``unbound`` (portable or
+    legacy ``/1`` native marker without a launcher), or ``unobserved`` (no marker-valid tree).
+    ``mcp_binding`` says what the installed plugin-owned ``mcp.json`` actually launches:
+    ``exact_launcher``, a bare ``ambient_path`` command, ``absent`` (external registration),
+    ``foreign``, or ``unobserved``. ``identity`` is the bounded runtime identity probed from the
+    installed launcher, compared with this runtime's package version, control result schema, and
+    resource-manifest digest.
+    """
+
+    artifact_launcher: tuple[str, ...] | None
+    installed_launcher: tuple[str, ...] | None
+    executable: CursorLauncherExecutableState
+    mcp_binding: CursorMcpBindingState
+    identity: LauncherIdentity
+
+    def __post_init__(self) -> None:
+        for launcher in (self.artifact_launcher, self.installed_launcher):
+            if launcher is not None and not _valid_launcher(launcher):
+                raise ValueError("cursor_launcher_status_invalid")
+        if self.executable not in {"matched", "drifted", "missing", "unbound", "unobserved"}:
+            raise ValueError("cursor_launcher_status_invalid")
+        if self.mcp_binding not in {
+            "exact_launcher",
+            "ambient_path",
+            "absent",
+            "foreign",
+            "unobserved",
+        }:
+            raise ValueError("cursor_launcher_status_invalid")
+        if type(self.identity) is not LauncherIdentity:
+            raise ValueError("cursor_launcher_status_invalid")
+        if self.installed_launcher is None and self.executable in {"matched", "drifted", "missing"}:
+            raise ValueError("cursor_launcher_status_invalid")
+        if self.installed_launcher is None and self.identity.observed:
+            raise ValueError("cursor_launcher_status_invalid")
+
+
 @dataclass(frozen=True, slots=True)
 class CursorPluginStatus:
     state: PluginArtifactState
@@ -403,8 +462,15 @@ class CursorPluginStatus:
     mcp_observation: CursorMcpObservation
     runtime: CursorMcpRuntimeObservation
     proof: tuple[PluginProofStatus, ...]
+    launcher: CursorLauncherStatus = field(
+        default_factory=lambda: CursorLauncherStatus(
+            None, None, "unobserved", "unobserved", UNOBSERVED_LAUNCHER_IDENTITY
+        )
+    )
 
     def __post_init__(self) -> None:
+        if type(self.launcher) is not CursorLauncherStatus:
+            raise ValueError("cursor_status_invalid")
         if (
             type(self.state) is not PluginArtifactState
             or type(self.operation_state) is not PluginOperationState
@@ -494,6 +560,7 @@ class _Inspection:
     installed_digest: str | None
     marker_valid: bool
     rollback_available: bool
+    installed_launcher: tuple[str, ...] | None = None
 
 
 def _error(
@@ -524,14 +591,29 @@ def _inventory(members: Mapping[str, bytes]) -> tuple[ManagedPluginFile, ...]:
     )
 
 
-def _mcp_json(route_profile: Literal["strict", "policy"]) -> bytes:
-    args = ["mcp", "serve", "--host", "cursor"]
-    if route_profile == "strict":
-        args.extend(("--semantic", "off"))
+_MCP_SERVE_ARGS: Final = ("mcp", "serve", "--host", "cursor")
+_MCP_SERVE_STRICT_ARGS: Final = (*_MCP_SERVE_ARGS, "--semantic", "off")
+
+
+def _mcp_json(route_profile: Literal["strict", "policy"], yoetz_launcher: tuple[str, ...]) -> bytes:
+    """Render the plugin-owned MCP entry bound to the exact launcher the hooks use.
+
+    Cursor resolves a bare ``command`` through the desktop app's PATH, which is sanitized and
+    can name an older ambient Yoetz while the hooks run this installation (issue #468). The entry
+    therefore names the absolute executable (plus the fixed ``-m yoetz`` arguments for the
+    module entrypoint); Cursor's MCP reference admits a full path in ``command``.
+    """
+
+    serve = _MCP_SERVE_STRICT_ARGS if route_profile == "strict" else _MCP_SERVE_ARGS
+    args = [*yoetz_launcher[1:], *serve]
     return canonical_encode(
         cast(
             JsonValue,
-            {"mcpServers": {"yoetz": {"args": args, "command": "yoetz", "type": "stdio"}}},
+            {
+                "mcpServers": {
+                    "yoetz": {"args": args, "command": yoetz_launcher[0], "type": "stdio"}
+                }
+            },
         )
     )
 
@@ -591,7 +673,7 @@ def _native_members(
         members[f"skills/yoetz/references/{name}"] = source.read_bytes(f"guidance/{name}")
     if mcp_ownership is McpOwnership.PLUGIN_MANAGED:
         assert route_profile is not None
-        members["mcp.json"] = _mcp_json(route_profile)
+        members["mcp.json"] = _mcp_json(route_profile, yoetz_launcher)
     return members
 
 
@@ -890,6 +972,7 @@ def _inspect(target: CursorPluginTarget, artifact: CursorPluginArtifact) -> _Ins
     files = _safe_tree(destination)
     current_digest = _tree_digest(files)
     valid, format_profile, installed_digest = _valid_marker(files)
+    installed_launcher = _marker_launcher(files) if valid else None
     if not valid:
         state = (
             PluginArtifactState.MODIFIED
@@ -930,7 +1013,24 @@ def _inspect(target: CursorPluginTarget, artifact: CursorPluginArtifact) -> _Ins
         installed_digest,
         True,
         False,
+        installed_launcher,
     )
+
+
+def _marker_launcher(files: Mapping[str, bytes]) -> tuple[str, ...] | None:
+    """Return the exact launcher a marker-valid native ``/2`` tree binds, else ``None``."""
+
+    raw = files.get(_MARKER_NAME)
+    marker = None if raw is None else _load_object(raw)
+    if marker is None or marker.get("schema") != _MARKER_SCHEMA_V2:
+        return None
+    launcher = marker.get("yoetz_launcher")
+    if type(launcher) is not list:
+        return None
+    candidate = tuple(cast(list[object], launcher))
+    if not _valid_launcher(candidate):
+        return None
+    return cast(tuple[str, ...], candidate)
 
 
 _ABSENT_STATE_DIGEST: Final = canonical_digest({"state": "absent"})
@@ -1074,8 +1174,21 @@ def preview_cursor_plugin(
         user_config_root=inspection.root,
         inline_create=inline_create,
         inline_send=inline_send,
+        yoetz_launchers=_known_launchers(artifact, inspection),
     )
     return _preview_from_inspection(request, action, inspection, artifact, observation)
+
+
+def _known_launchers(
+    artifact: CursorPluginArtifact, inspection: _Inspection
+) -> tuple[tuple[str, ...], ...]:
+    """Launchers an exact Yoetz MCP entry may name: this artifact's and the installed tree's."""
+
+    known: list[tuple[str, ...]] = []
+    for launcher in (artifact.yoetz_launcher, inspection.installed_launcher):
+        if launcher is not None and launcher not in known:
+            known.append(launcher)
+    return tuple(known)
 
 
 def _write_file(path: Path, data: bytes) -> None:
@@ -1456,16 +1569,25 @@ def status_cursor_plugin(
     *,
     project_root: Path | None = None,
     processes: CursorMcpProcessPort | None = None,
+    launcher_probe: LauncherProbePort | None = None,
 ) -> CursorPluginStatus:
     inspection = _inspect(target, artifact)
     observation = observe_cursor_mcp(
         plugin_root=inspection.destination,
         project_root=project_root,
         user_config_root=inspection.root,
+        yoetz_launchers=_known_launchers(artifact, inspection),
     )
     runtime = observe_cursor_mcp_runtime(
         installed_route=observation.route_profile,
-        processes=OsCursorMcpProcesses() if processes is None else processes,
+        processes=(
+            OsCursorMcpProcesses(inspection.installed_launcher) if processes is None else processes
+        ),
+    )
+    launcher = _launcher_status(
+        artifact,
+        inspection,
+        OsLauncherProbe() if launcher_probe is None else launcher_probe,
     )
     return CursorPluginStatus(
         inspection.state,
@@ -1484,6 +1606,90 @@ def status_cursor_plugin(
         observation,
         runtime,
         _proof(inspection.state),
+        launcher,
+    )
+
+
+def _installed_mcp_binding(
+    inspection: _Inspection, installed_launcher: tuple[str, ...] | None
+) -> CursorMcpBindingState:
+    """Say what the installed plugin-owned ``mcp.json`` would make Cursor spawn."""
+
+    if not inspection.marker_valid:
+        return "unobserved"
+    entry, observed = _config_entry(inspection.destination / "mcp.json")
+    if not observed:
+        return "unobserved"
+    if entry is None:
+        return "absent"
+    command = entry.get("command")
+    if command == "yoetz" and _route_profile(entry) is not None:
+        return "ambient_path"
+    if (
+        installed_launcher is not None
+        and command == installed_launcher[0]
+        and _route_profile(entry, (installed_launcher,)) is not None
+    ):
+        return "exact_launcher"
+    return "foreign"
+
+
+def _launcher_status(
+    artifact: CursorPluginArtifact,
+    inspection: _Inspection,
+    launcher_probe: LauncherProbePort,
+) -> CursorLauncherStatus:
+    installed = inspection.installed_launcher
+    binding = _installed_mcp_binding(inspection, installed)
+    if not inspection.marker_valid:
+        return CursorLauncherStatus(
+            artifact.yoetz_launcher, None, "unobserved", binding, UNOBSERVED_LAUNCHER_IDENTITY
+        )
+    if installed is None:
+        return CursorLauncherStatus(
+            artifact.yoetz_launcher, None, "unbound", binding, UNOBSERVED_LAUNCHER_IDENTITY
+        )
+    executable_path = Path(installed[0])
+    executable: CursorLauncherExecutableState
+    try:
+        present = executable_path.is_file() and os.access(executable_path, os.X_OK)
+    except OSError:
+        present = False
+    if not present:
+        executable = "missing"
+    elif installed != artifact.yoetz_launcher:
+        executable = "drifted"
+    else:
+        executable = "matched"
+    identity = UNOBSERVED_LAUNCHER_IDENTITY
+    if present:
+        identity = _probe_launcher_identity(installed, launcher_probe)
+    return CursorLauncherStatus(artifact.yoetz_launcher, installed, executable, binding, identity)
+
+
+def _probe_launcher_identity(
+    launcher: tuple[str, ...], launcher_probe: LauncherProbePort
+) -> LauncherIdentity:
+    from yoetz.version import build_version_manifest
+
+    try:
+        document = launcher_probe.probe(launcher)
+    except Exception:
+        return UNOBSERVED_LAUNCHER_IDENTITY
+    if document is None:
+        return UNOBSERVED_LAUNCHER_IDENTITY
+    try:
+        own = build_version_manifest()
+    except Exception:
+        return UNOBSERVED_LAUNCHER_IDENTITY
+    control_schema_version = dict(own.request_result_schema_versions).get("control-result")
+    if control_schema_version is None:
+        return UNOBSERVED_LAUNCHER_IDENTITY
+    return compare_launcher_identity(
+        document,
+        package_version=own.package_version,
+        control_schema_version=control_schema_version,
+        resource_manifest_digest=own.resource_manifest_digest,
     )
 
 
@@ -1509,7 +1715,24 @@ def _config_entry(path: Path) -> tuple[Mapping[str, JsonValue] | None, bool]:
     return cast(Mapping[str, JsonValue], entry), True
 
 
-def _route_profile(entry: Mapping[str, JsonValue] | None) -> Literal["strict", "policy"] | None:
+_POLICY_ROUTE_ARGS: Final = frozenset({("mcp", "serve"), _MCP_SERVE_ARGS})
+_STRICT_ROUTE_ARGS: Final = frozenset(
+    {("mcp", "serve", "--semantic", "off"), _MCP_SERVE_STRICT_ARGS}
+)
+
+
+def _route_profile(
+    entry: Mapping[str, JsonValue] | None,
+    yoetz_launchers: tuple[tuple[str, ...], ...] = (),
+) -> Literal["strict", "policy"] | None:
+    """Classify one MCP entry as an exact Yoetz route, else ``None``.
+
+    An exact route launches either a bare ``yoetz`` console script (an external registration
+    the owner wrote by hand) or one of ``yoetz_launchers`` — this artifact's exact bound
+    launcher, or the launcher the installed marker recorded — followed by the exact ``mcp
+    serve`` arguments.
+    """
+
     if entry is None:
         return None
     # Any non-exact same-name entry is foreign, so recognition is key-set exact and not merely
@@ -1518,23 +1741,27 @@ def _route_profile(entry: Mapping[str, JsonValue] | None) -> Literal["strict", "
     # foreign registration to Yoetz.
     if set(entry) != {"args", "command", "type"}:
         return None
-    expected_base = {"command": "yoetz", "type": "stdio"}
-    if any(entry.get(key) != value for key, value in expected_base.items()):
+    if entry.get("type") != "stdio":
         return None
-    args = entry.get("args")
-    if args in (
-        ["mcp", "serve"],
-        ("mcp", "serve"),
-        ["mcp", "serve", "--host", "cursor"],
-        ("mcp", "serve", "--host", "cursor"),
-    ):
+    raw_args = entry.get("args")
+    if not isinstance(raw_args, list | tuple):
+        return None
+    args = tuple(cast(Sequence[object], raw_args))
+    command = entry.get("command")
+    prefix: tuple[str, ...] | None = None
+    if command == "yoetz":
+        prefix = ()
+    else:
+        for launcher in yoetz_launchers:
+            if _valid_launcher(launcher) and command == launcher[0]:
+                prefix = launcher[1:]
+                break
+    if prefix is None or args[: len(prefix)] != prefix:
+        return None
+    rest = args[len(prefix) :]
+    if rest in _POLICY_ROUTE_ARGS:
         return "policy"
-    if args in (
-        ["mcp", "serve", "--semantic", "off"],
-        ("mcp", "serve", "--semantic", "off"),
-        ["mcp", "serve", "--host", "cursor", "--semantic", "off"],
-        ("mcp", "serve", "--host", "cursor", "--semantic", "off"),
-    ):
+    if rest in _STRICT_ROUTE_ARGS:
         return "strict"
     return None
 
@@ -1546,12 +1773,15 @@ def observe_cursor_mcp(
     user_config_root: Path,
     inline_create: Mapping[str, JsonValue] | None = None,
     inline_send: Mapping[str, JsonValue] | None = None,
+    yoetz_launchers: tuple[tuple[str, ...], ...] = (),
 ) -> CursorMcpObservation:
     """Classify exact same-name sources using Cursor SDK precedence.
 
     A successful route-shaped entry is not silently attributed to the plugin.
     Duplicate exact sources remain ambiguous (or dual for plugin+external), and
-    any same-name foreign entry remains foreign.
+    any same-name foreign entry remains foreign. ``yoetz_launchers`` are the exact
+    bound launchers (this artifact's and the installed marker's) that an exact route
+    may name beside a bare ``yoetz``.
     """
 
     candidates: list[tuple[CursorMcpSource, Mapping[str, JsonValue] | None]] = []
@@ -1590,7 +1820,7 @@ def observe_cursor_mcp(
         )
     if not candidates:
         return CursorMcpObservation(McpOwnershipState.ABSENT, None, None, (), True)
-    profiles = [(source, _route_profile(entry)) for source, entry in candidates]
+    profiles = [(source, _route_profile(entry, yoetz_launchers)) for source, entry in candidates]
     present = tuple(source for source, _profile in profiles)
     if any(profile is None for _source, profile in profiles):
         foreign_source = next(source for source, profile in profiles if profile is None)

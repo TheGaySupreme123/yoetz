@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from yoetz.adapters.integrations.cursor_integration import (
     CursorPluginTarget,
     apply_cursor_plugin,
@@ -215,3 +217,149 @@ def test_dogfood_fixture_names_the_activation_mismatch_case() -> None:
         )
         == fixture["expected_ceiling_class"]
     )
+
+
+def test_serve_argv_compares_the_tokens_before_serve_with_the_bound_launcher() -> None:
+    """Issue #468: a live helper child must be attributable to the exact bound executable."""
+
+    from yoetz.adapters.integrations.cursor_mcp_runtime import classify_serve_argv
+
+    console = ("/opt/current/bin/yoetz",)
+    module = ("/opt/current/bin/python3.14", "-m", "yoetz")
+    serve = ("mcp", "serve", "--host", "cursor")
+
+    assert classify_serve_argv((*console, *serve), console) == ("policy", "matched")
+    # A shebang console script shows the interpreter first; the script token still matches.
+    assert classify_serve_argv(("/opt/current/bin/python3.14", *console, *serve), console) == (
+        "policy",
+        "matched",
+    )
+    assert classify_serve_argv((*module, *serve, "--semantic", "off"), module) == (
+        "strict",
+        "matched",
+    )
+    # Another explicit executable answered the spawn: an ambient or neighbouring channel.
+    assert classify_serve_argv(("/opt/older/bin/yoetz", *serve), console) == (
+        "policy",
+        "different",
+    )
+    assert classify_serve_argv(("/usr/bin/python3", "-m", "yoetz", *serve), module) == (
+        "policy",
+        "different",
+    )
+    # A bare name cannot be attributed either way.
+    assert classify_serve_argv(("yoetz", *serve), console) == ("policy", "unresolved")
+    # Without an expected launcher nothing is compared.
+    assert classify_serve_argv((*console, *serve), None) == ("policy", None)
+    assert classify_serve_argv(("unrelated",), console) == (None, None)
+
+
+def test_helper_child_on_a_different_executable_requires_full_restart() -> None:
+    installed_policy_other_executable = FixedCursorMcpProcesses(
+        (CursorMcpProcessSnapshot("cursor_helper", "policy", "different"),)
+    )
+    observation = observe_cursor_mcp_runtime(
+        installed_route="policy", processes=installed_policy_other_executable
+    )
+    assert observation.activation == "full_restart_required"
+    assert observation.executable_activation == "executable_mismatch"
+    assert observation.live_route_profile == "policy"
+
+    matched = observe_cursor_mcp_runtime(
+        installed_route="policy",
+        processes=FixedCursorMcpProcesses(
+            (CursorMcpProcessSnapshot("cursor_helper", "policy", "matched"),)
+        ),
+    )
+    assert matched.activation == "matched"
+    assert matched.executable_activation == "matched"
+
+    unresolved = observe_cursor_mcp_runtime(
+        installed_route="policy",
+        processes=FixedCursorMcpProcesses(
+            (CursorMcpProcessSnapshot("cursor_helper", "policy", "unresolved"),)
+        ),
+    )
+    assert unresolved.activation == "matched"
+    assert unresolved.executable_activation == "unproven"
+
+    # A non-helper process on another executable is counted but never drives activation.
+    bystander = observe_cursor_mcp_runtime(
+        installed_route="policy",
+        processes=FixedCursorMcpProcesses(
+            (
+                CursorMcpProcessSnapshot("cursor_helper", "policy", "matched"),
+                CursorMcpProcessSnapshot("other", "policy", "different"),
+            )
+        ),
+    )
+    assert bystander.activation == "matched"
+    assert bystander.executable_activation == "matched"
+    assert bystander.policy_process_count == 2
+
+
+def test_macos_ps_text_matches_a_launcher_path_that_contains_whitespace() -> None:
+    """``ps`` joins argv with spaces; a bound path with whitespace must still match exactly."""
+
+    from yoetz.adapters.integrations.cursor_mcp_runtime import launcher_precedes_serve_in_text
+
+    spaced = ("/opt/Yoetz Tools/bin/yoetz",)
+    module = ("/opt/Yoetz Tools/venv/bin/python3.14", "-m", "yoetz")
+
+    assert launcher_precedes_serve_in_text(
+        "/opt/Yoetz Tools/bin/yoetz mcp serve --host cursor", spaced
+    )
+    # Shebang expansion puts the interpreter first; the script token still sits before serve.
+    assert launcher_precedes_serve_in_text(
+        "/opt/Yoetz Tools/bin/python3.14 /opt/Yoetz Tools/bin/yoetz mcp serve --host cursor",
+        spaced,
+    )
+    assert launcher_precedes_serve_in_text(
+        "/opt/Yoetz Tools/venv/bin/python3.14 -m yoetz mcp serve", module
+    )
+    # A longer path that merely ends with the same suffix is another executable.
+    assert not launcher_precedes_serve_in_text(
+        "/opt/other/opt/Yoetz Tools/bin/yoetz mcp serve --host cursor", spaced
+    )
+    assert not launcher_precedes_serve_in_text("/opt/older/bin/yoetz mcp serve", spaced)
+    assert not launcher_precedes_serve_in_text("", spaced)
+
+    # The split-token path alone would call the spaced launcher ``different``; the text check
+    # is what the macOS scanner consults before reporting an executable mismatch.
+    from yoetz.adapters.integrations.cursor_mcp_runtime import classify_serve_argv
+
+    text = "/opt/Yoetz Tools/bin/yoetz mcp serve --host cursor"
+    assert classify_serve_argv(tuple(text.split()), spaced) == ("policy", "different")
+
+
+def test_darwin_scanner_uses_the_text_match_for_whitespace_launchers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    import yoetz.adapters.integrations.cursor_mcp_runtime as module
+
+    spaced = ("/opt/Yoetz Tools/bin/yoetz",)
+    comm_table = b"10 1 Cursor\n11 10 mcp-process\n12 11 /opt/Yoetz\n"
+    arg_table = (
+        b"10 1 /Applications/Cursor.app/Contents/MacOS/Cursor\n"
+        b"11 10 mcp-process\n"
+        b"12 11 /opt/Yoetz Tools/bin/yoetz mcp serve --host cursor\n"
+    )
+
+    class _Completed:
+        def __init__(self, stdout: bytes) -> None:
+            self.returncode = 0
+            self.stdout = stdout
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> _Completed:
+        del kwargs
+        calls.append(argv)
+        return _Completed(comm_table if "comm=" in argv else arg_table)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    snapshot = module._darwin_snapshots(spaced)  # pyright: ignore[reportPrivateUsage]
+    assert snapshot == (CursorMcpProcessSnapshot("cursor_helper", "policy", "matched"),)
+    assert len(calls) == 2
