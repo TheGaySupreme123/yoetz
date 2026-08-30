@@ -399,3 +399,17 @@ For a disposable-worktree integration run, use the [Codex dogfood parity
 runbook](codex-dogfood.md). The ordinary setup/semantic checks above are necessary but do not prove
 exact-worktree activation, consent, host delivery, observation, rollback, or normal-target
 isolation.
+
+## Subscription evaluator is a separate Codex role
+
+Codex may be both the host carrying Yoetz and the selected external semantic evaluator, but those
+are independent cells. Host skill/plugin/MCP activation grants no ChatGPT evaluator login or
+privacy authority. Configure the evaluator only through
+`yoetz provider codex-subscription setup`; it binds a separate owner-private `CODEX_HOME` and exact
+native `0.150.1` app-server cell. Never reuse the host's ambient home, environment, session, tools,
+instructions, or repository cwd for the evaluator.
+
+The registered host route still decides whether this Codex process may request semantic work:
+`strict` proves zero evaluator launch, while `policy` only permits ADR-009 to decide. Read the
+[subscription evaluator runbook](codex-subscription-evaluator.md) before claiming live model use,
+runtime isolation, privacy receipt, or cleanup.

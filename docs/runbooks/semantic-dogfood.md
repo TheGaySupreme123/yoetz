@@ -50,8 +50,9 @@ route declined to attempt it, which is not a measurement of it.
 
 1. `registered_profile == "policy"`
 2. `agent_route_semantic_ready == true`
-3. human authorization obtained through the existing ceremony — the credential ceremony
-   (`yoetz provider credential set`) and privacy policy already in place before the run starts
+3. human authorization obtained through the existing ceremony — either the API credential
+   ceremony (`yoetz provider credential set`) or the Codex-managed subscription setup — with the
+   privacy policy already in place before the run starts
 
 Claims this run may make: everything in Profile A, plus observations about semantic output, subject
 to the provenance gate in §3.
@@ -115,7 +116,7 @@ proves an attempt happened, not that it was useful.
 | `semantic_status` | `semantic_provenance` | May score semantic usefulness |
 |---|---|---|
 | any pre-dispatch status — `not_requested`, `not_configured`, `blocked_by_policy` (incl. `route_semantic_ceiling`), `blocked_forbidden_data`, `classification_uncertain`, `awaiting_human`, `human_denied`, `approval_expired` | `null` (enforced) | **No** — not attempted |
-| `succeeded`, `refused`, `timeout`, `invalid`, `late`, `stale`; or `unavailable` with `transport_unavailable` / `provider_rate_limited` / `provider_quota_exhausted` | present (enforced) | Yes |
+| `succeeded`, `refused`, `timeout`, `invalid`, `late`, `stale`; or `unavailable` with `transport_unavailable` / `provider_rate_limited` / `provider_quota_exhausted` / `outcome_unknown` | present (enforced) | Yes; `outcome_unknown` proves an acknowledged attempt, not its outcome or usefulness |
 | `unavailable` with `credential_unavailable`, `endpoint_profile_unavailable`, `retry_budget_exhausted`, `audit_reservation_unavailable`, `receipt_persistence_unknown` | `null` (enforced) | **No** — not attempted |
 | `failed` / `coordinator_failure` | either — unconstrained | **No** — attempt indeterminate |
 
@@ -159,5 +160,7 @@ authorized to make and stop there.
 - [Privacy and semantic review](../usage/privacy-and-semantic-review.md) — the durable policy that
   authorizes disclosure.
 - [Providers](../usage/providers.md) — the readiness conditions behind `semantic_ready`.
+- [Codex subscription evaluator](codex-subscription-evaluator.md) — exact runtime cell, weaker
+  observable boundary, negative controls, and packaged proof checklist.
 - [ADR-018](../adr/ADR-018-host-declared-mcp-route-egress-ceiling.md) — why the strict route is a
   process-local ceiling and not a privacy policy.

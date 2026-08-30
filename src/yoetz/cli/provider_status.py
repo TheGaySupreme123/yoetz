@@ -256,7 +256,7 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
     config = load_config({}, os.environ, None)
     verification_semantic = config.verification.semantic
     semantic_enabled = verification_semantic != "disabled"
-    endpoint_bound = config.provider is not None
+    endpoint_bound = config.provider is not None or config.external_runtime is not None
     endpoint: dict[str, JsonValue] | None = None
     if config.provider is not None:
         endpoint = {
@@ -264,6 +264,19 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
             "model": config.provider.model,
             "endpoint_profile_id": config.provider.endpoint_profile_id,
             "endpoint_profile_version": config.provider.endpoint_profile_version,
+            "credential_authority": "yoetz_vault_api_credential",
+        }
+    elif config.external_runtime is not None:
+        runtime = config.external_runtime
+        endpoint = {
+            "provider_id": runtime.provider_id,
+            "model": runtime.model,
+            "endpoint_profile_id": runtime.endpoint_profile_id,
+            "endpoint_profile_version": runtime.endpoint_profile_version,
+            "credential_authority": runtime.credential_authority,
+            "runtime_version": runtime.runtime_version,
+            "capability_profile": runtime.capability_profile,
+            "upstream_body_observability": "unavailable",
         }
 
     service_state: str | None = None
@@ -377,17 +390,25 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
             {
                 "condition": "provider_endpoint",
                 "state": "unbound",
-                "next_command": "yoetz provider endpoint --provider <preset> --model <model>",
+                "next_command": (
+                    "yoetz provider endpoint --provider <preset> --model <model> OR "
+                    "yoetz provider codex-subscription setup --executable <path>"
+                ),
             }
         )
     if credential_connected is None:
         blockers.append({"condition": "provider_credential", "state": "unknown"})
     elif credential_connected is False:
+        credential_command = (
+            "yoetz provider codex-subscription status"
+            if config.external_runtime is not None
+            else "yoetz provider credential set"
+        )
         blockers.append(
             {
                 "condition": "provider_credential",
                 "state": "not_connected",
-                "next_command": "yoetz provider credential set",
+                "next_command": credential_command,
             }
         )
     if llm_inference_enabled is None:
@@ -478,6 +499,8 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
         "notes": (
             "semantic_ready is structural readiness only; it does not prove live provider dispatch.",
             "credential_connected reports the configured provider's credential, not any provider.",
+            "For external_runtime_oauth it means Codex structurally reported ChatGPT login; "
+            "Yoetz never reads the credential.",
             "A credential for a different provider than the bound endpoint does not count.",
             "unknown means the service could not be read, not that the step is incomplete.",
             "agent_route_semantic_ready describes one exclusively observed Codex MCP owner; "

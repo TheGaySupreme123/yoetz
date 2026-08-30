@@ -102,7 +102,7 @@ Cursor target adds `--host cursor` and binds the exact launcher: its `mcp.json` 
 by `mcp serve --host cursor` (policy) or `mcp serve --host cursor --semantic off` (strict) — the
 same launcher the native hooks use and the `/2` marker records. Cursor's MCP reference resolves a
 bare `command` through the desktop app's sanitized PATH, which in the 2026-08-29 dogfood launched
-an older ambient runtime (control schema 2.1.0) behind a marker-valid current plugin (2.3.0); the
+an older ambient runtime (control schema 2.1.0) behind a marker-valid then-current plugin (2.3.0); the
 bound entry removes PATH from the runtime choice (issue #468). That profile retains
 `structuredContent` and also repeats the exact canonical JSON body in text `content`, because
 pinned Cursor `3.17.x` can otherwise hide structured results from the model. It adds no
@@ -321,3 +321,13 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 Always report what is proven and the remaining cells/gaps. A clean local test never proves Cursor
 Cloud, a neighboring version, regular-profile isolation without a before/after check, provider
 dispatch without provenance, or workflow completion without a current receipt.
+
+## Codex subscription evaluator from Cursor
+
+A Cursor policy route may request the service-owned `codex-chatgpt-subscription@1` evaluator, but
+Cursor receives no Codex OAuth credential, home, app-server handle, or evaluator tool authority.
+Cursor plugin/MCP/hook activation and Cursor model use do not prove that semantic dispatch happened.
+A strict Cursor route must return `route_semantic_ceiling` with zero child launch. Follow the
+[subscription evaluator runbook](codex-subscription-evaluator.md) and keep host activation,
+accepted observation, runtime evidence, privacy receipt, corrective influence, and workflow receipt
+as separate cells.

@@ -64,6 +64,7 @@ __all__ = [
     "OPENAI_CREDENTIAL_MIN_BYTES",
     "OPENAI_MAX_OUTPUT_TOKENS",
     "OPENAI_MAX_RESPONSE_BODY_BYTES",
+    "SEMANTIC_REVIEW_INSTRUCTION",
     "OneAttemptCredentialTransport",
     "OpenAIProfile",
     "OpenAIResponsesEvaluator",
@@ -114,7 +115,7 @@ _HOSTNAME_PATTERN: Final = re.compile(
     re.ASCII,
 )
 
-_SYSTEM_INSTRUCTION: Final = (
+SEMANTIC_REVIEW_INSTRUCTION: Final = (
     "You are a bounded reviewer helping the main agent complete the user's stated goal. Review "
     "only the supplied packet. Distinguish agent claims, deterministic observations, and "
     "unavailable content. Never say no code changed merely because no source excerpt was "
@@ -128,6 +129,7 @@ _SYSTEM_INSTRUCTION: Final = (
     "unread. Do not invent repository facts, fetch more context, overrule deterministic results, "
     "waive findings, or claim stronger coverage than the packet."
 )
+_SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 
 _PROVIDER_JUDGMENT_ADAPTER: Final[TypeAdapter[ProviderJudgmentModel]] = TypeAdapter(
     ProviderJudgmentModel

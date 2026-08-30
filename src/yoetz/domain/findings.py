@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 from yoetz.domain.values import (
     ClaimId,
@@ -58,6 +58,7 @@ __all__ = [
     "FindingOrigin",
     "RankedFindings",
     "ResponseDisposition",
+    "RuntimeAttemptEvidence",
     "SamplingParams",
     "SemanticDispatchKind",
     "SemanticFailureClass",
@@ -80,6 +81,9 @@ _IDENTITY_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]*$", re.ASCII)
 _MODEL_IDENTITY_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$", re.ASCII)
 _VERSION_IDENTITY_PATTERN: Final = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]*$", re.ASCII)
 _PROVIDER_REQUEST_ID_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$", re.ASCII)
+_RFC3339_UTC_SECONDS_PATTERN: Final = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", re.ASCII
+)
 _CURRENCY_PATTERN: Final = re.compile(r"^[A-Z]{3}$", re.ASCII)
 _FIXED_DECIMAL_PATTERN: Final = re.compile(r"^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?$", re.ASCII)
 _SEMANTIC_VERSION_PATTERN: Final = re.compile(
@@ -134,6 +138,7 @@ class ResponseDisposition(str, Enum):  # noqa: UP042 - exact wire enum base
 
 class SemanticDispatchKind(str, Enum):  # noqa: UP042 - exact wire enum base
     EXTERNAL = "external"
+    EXTERNAL_RUNTIME_OAUTH = "external_runtime_oauth"
     LOCAL_MODEL = "local_model"
 
 
@@ -148,6 +153,84 @@ class SemanticFailureClass(str, Enum):  # noqa: UP042 - exact wire enum base
     TIMEOUT = "timeout"
     TRANSPORT = "transport"
     UNSUPPORTED_PROFILE = "unsupported_profile"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeAttemptEvidence:
+    """Bounded nonsecret evidence for one exact external-runtime attempt."""
+
+    credential_authority: Literal["external_runtime_oauth"]
+    runtime_version: str
+    runtime_source_identity: str
+    executable_sha256: str
+    app_server_schema_sha256: str
+    capability_cell_sha256: str
+    capability_profile: str
+    capability_evidence_expires_at: str
+    launcher_sha256: str
+    isolated_config_sha256: str
+    disclosed_case_sha256: str
+    instruction_sha256: str
+    output_schema_sha256: str
+    selection_sha256: str
+    upstream_body_observability: Literal["unavailable"]
+    auth_mode: Literal["chatgpt"] | None
+    plan_type: str | None
+    reasoning_effort: str
+    thread_id: str | None
+    turn_id: str | None
+    final_output_sha256: str | None
+    case_disclosed: bool
+    turn_acknowledged: bool
+    process_cleanup: Literal["not_started", "terminated", "killed", "failed"]
+
+    def __post_init__(self) -> None:
+        identity = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$", re.ASCII)
+        if self.credential_authority != "external_runtime_oauth":
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if not _valid_pattern(self.runtime_version, _VERSION_IDENTITY_PATTERN, 128):
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if not _valid_pattern(self.runtime_source_identity, identity, 256):
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if not _valid_pattern(self.capability_profile, identity, 256):
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        for value in (
+            self.executable_sha256,
+            self.app_server_schema_sha256,
+            self.capability_cell_sha256,
+            self.launcher_sha256,
+            self.isolated_config_sha256,
+            self.disclosed_case_sha256,
+            self.instruction_sha256,
+            self.output_schema_sha256,
+            self.selection_sha256,
+        ):
+            validate_sha256_digest(value)
+        if self.upstream_body_observability != "unavailable":
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if not _valid_pattern(
+            self.capability_evidence_expires_at, _RFC3339_UTC_SECONDS_PATTERN, 20
+        ):
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if self.auth_mode not in {None, "chatgpt"}:
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if self.plan_type is not None and not _valid_pattern(self.plan_type, _IDENTITY_PATTERN, 64):
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if not _valid_pattern(self.reasoning_effort, _IDENTITY_PATTERN, 64):
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        for correlation in (self.thread_id, self.turn_id):
+            if correlation is not None and not _valid_pattern(
+                correlation, _PROVIDER_REQUEST_ID_PATTERN, 256
+            ):
+                raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if self.final_output_sha256 is not None:
+            validate_sha256_digest(self.final_output_sha256)
+        if type(self.case_disclosed) is not bool or type(self.turn_acknowledged) is not bool:
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if self.turn_acknowledged and not self.case_disclosed:
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if self.process_cleanup not in {"not_started", "terminated", "killed", "failed"}:
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
 
 
 FINDING_KIND_TRAITS: Final[MappingProxyType[FindingKind, tuple[int, bool]]] = MappingProxyType(
@@ -332,6 +415,7 @@ class SemanticProvenance:
     egress_authorization_id: str | None = None
     local_disclosure_reservation_id: str | None = None
     request_commitment: str | None = None
+    runtime_evidence: RuntimeAttemptEvidence | None = None
 
     def __post_init__(self) -> None:
         if not _valid_pattern(self.provider, _IDENTITY_PATTERN, 128):
@@ -399,17 +483,31 @@ class SemanticProvenance:
         if self.request_commitment is not None:
             validate_commitment(self.request_commitment)
 
-        if self.dispatch_kind is SemanticDispatchKind.EXTERNAL:
+        if self.dispatch_kind in {
+            SemanticDispatchKind.EXTERNAL,
+            SemanticDispatchKind.EXTERNAL_RUNTIME_OAUTH,
+        }:
             if (
                 self.egress_authorization_id is None
                 or self.request_commitment is None
                 or self.local_disclosure_reservation_id is not None
             ):
                 raise ProtocolValueError("invalid_semantic_provenance")
+            if (
+                self.dispatch_kind is SemanticDispatchKind.EXTERNAL_RUNTIME_OAUTH
+                and type(self.runtime_evidence) is not RuntimeAttemptEvidence
+            ):
+                raise ProtocolValueError("invalid_semantic_provenance")
+            if (
+                self.dispatch_kind is SemanticDispatchKind.EXTERNAL
+                and self.runtime_evidence is not None
+            ):
+                raise ProtocolValueError("invalid_semantic_provenance")
         elif (
             self.local_disclosure_reservation_id is None
             or self.egress_authorization_id is not None
             or self.request_commitment is not None
+            or self.runtime_evidence is not None
         ):
             raise ProtocolValueError("invalid_semantic_provenance")
 
@@ -650,6 +748,78 @@ def _cost_fields_from_json(value: JsonValue) -> CostFields:
     )
 
 
+def _runtime_attempt_evidence_from_json(value: JsonValue | None) -> RuntimeAttemptEvidence | None:
+    if value is None:
+        return None
+    required = frozenset(
+        {
+            "app_server_schema_sha256",
+            "capability_cell_sha256",
+            "capability_evidence_expires_at",
+            "capability_profile",
+            "case_disclosed",
+            "credential_authority",
+            "disclosed_case_sha256",
+            "executable_sha256",
+            "instruction_sha256",
+            "isolated_config_sha256",
+            "launcher_sha256",
+            "output_schema_sha256",
+            "reasoning_effort",
+            "selection_sha256",
+            "process_cleanup",
+            "runtime_source_identity",
+            "runtime_version",
+            "turn_acknowledged",
+            "upstream_body_observability",
+        }
+    )
+    optional = frozenset(
+        {"auth_mode", "final_output_sha256", "plan_type", "thread_id", "turn_id"}
+    )
+    source = _require_json_object(
+        value,
+        required=required,
+        allowed=required | optional,
+        reason="runtime_attempt_evidence_json_shape_invalid",
+    )
+    if any(key in source and source[key] is None for key in optional):
+        raise ProtocolValueError("runtime_attempt_evidence_json_shape_invalid")
+    return RuntimeAttemptEvidence(
+        credential_authority=cast(Literal["external_runtime_oauth"], source["credential_authority"]),
+        runtime_version=cast(str, source["runtime_version"]),
+        runtime_source_identity=cast(str, source["runtime_source_identity"]),
+        executable_sha256=cast(str, source["executable_sha256"]),
+        app_server_schema_sha256=cast(str, source["app_server_schema_sha256"]),
+        capability_cell_sha256=cast(str, source["capability_cell_sha256"]),
+        capability_profile=cast(str, source["capability_profile"]),
+        capability_evidence_expires_at=cast(
+            str, source["capability_evidence_expires_at"]
+        ),
+        launcher_sha256=cast(str, source["launcher_sha256"]),
+        isolated_config_sha256=cast(str, source["isolated_config_sha256"]),
+        disclosed_case_sha256=cast(str, source["disclosed_case_sha256"]),
+        instruction_sha256=cast(str, source["instruction_sha256"]),
+        output_schema_sha256=cast(str, source["output_schema_sha256"]),
+        selection_sha256=cast(str, source["selection_sha256"]),
+        upstream_body_observability=cast(
+            Literal["unavailable"], source["upstream_body_observability"]
+        ),
+        auth_mode=cast(Literal["chatgpt"] | None, _optional_field(source, "auth_mode")),
+        plan_type=cast(str | None, _optional_field(source, "plan_type")),
+        reasoning_effort=cast(str, source["reasoning_effort"]),
+        thread_id=cast(str | None, _optional_field(source, "thread_id")),
+        turn_id=cast(str | None, _optional_field(source, "turn_id")),
+        final_output_sha256=cast(
+            str | None, _optional_field(source, "final_output_sha256")
+        ),
+        case_disclosed=cast(bool, source["case_disclosed"]),
+        turn_acknowledged=cast(bool, source["turn_acknowledged"]),
+        process_cleanup=cast(
+            Literal["not_started", "terminated", "killed", "failed"],
+            source["process_cleanup"],
+        ),
+    )
 _PROVENANCE_REQUIRED_KEYS: Final = frozenset(
     {
         "provider",
@@ -679,6 +849,7 @@ _PROVENANCE_OPTIONAL_KEYS: Final = frozenset(
         "egress_authorization_id",
         "local_disclosure_reservation_id",
         "request_commitment",
+        "runtime_evidence",
     }
 )
 
@@ -749,6 +920,9 @@ def semantic_provenance_from_json(value: JsonValue) -> SemanticProvenance:
             str | None, _optional_field(source, "local_disclosure_reservation_id")
         ),
         request_commitment=cast(str | None, _optional_field(source, "request_commitment")),
+        runtime_evidence=_runtime_attempt_evidence_from_json(
+            _optional_field(source, "runtime_evidence")
+        ),
     )
 
 
@@ -812,6 +986,40 @@ def semantic_provenance_to_json(value: SemanticProvenance) -> JsonObject:
         result["local_disclosure_reservation_id"] = value.local_disclosure_reservation_id
     if value.request_commitment is not None:
         result["request_commitment"] = value.request_commitment
+    if value.runtime_evidence is not None:
+        runtime = value.runtime_evidence
+        runtime_json: dict[str, JsonValue] = {
+            "app_server_schema_sha256": runtime.app_server_schema_sha256,
+            "capability_cell_sha256": runtime.capability_cell_sha256,
+            "capability_evidence_expires_at": runtime.capability_evidence_expires_at,
+            "capability_profile": runtime.capability_profile,
+            "case_disclosed": runtime.case_disclosed,
+            "credential_authority": runtime.credential_authority,
+            "disclosed_case_sha256": runtime.disclosed_case_sha256,
+            "executable_sha256": runtime.executable_sha256,
+            "instruction_sha256": runtime.instruction_sha256,
+            "isolated_config_sha256": runtime.isolated_config_sha256,
+            "launcher_sha256": runtime.launcher_sha256,
+            "output_schema_sha256": runtime.output_schema_sha256,
+            "reasoning_effort": runtime.reasoning_effort,
+            "selection_sha256": runtime.selection_sha256,
+            "process_cleanup": runtime.process_cleanup,
+            "runtime_source_identity": runtime.runtime_source_identity,
+            "runtime_version": runtime.runtime_version,
+            "turn_acknowledged": runtime.turn_acknowledged,
+            "upstream_body_observability": runtime.upstream_body_observability,
+        }
+        if runtime.auth_mode is not None:
+            runtime_json["auth_mode"] = runtime.auth_mode
+        if runtime.plan_type is not None:
+            runtime_json["plan_type"] = runtime.plan_type
+        if runtime.thread_id is not None:
+            runtime_json["thread_id"] = runtime.thread_id
+        if runtime.turn_id is not None:
+            runtime_json["turn_id"] = runtime.turn_id
+        if runtime.final_output_sha256 is not None:
+            runtime_json["final_output_sha256"] = runtime.final_output_sha256
+        result["runtime_evidence"] = JsonObject(runtime_json)
     return JsonObject(result)
 
 

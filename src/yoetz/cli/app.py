@@ -137,6 +137,9 @@ recovery_app = typer.Typer(
     no_args_is_help=True,
 )
 provider_app = typer.Typer(help="Manage provider setup.", no_args_is_help=True)
+codex_subscription_app = typer.Typer(
+    help="Manage the exact Codex-owned ChatGPT subscription evaluator.", no_args_is_help=True
+)
 credential_app = typer.Typer(
     help="Provision credentials through a trusted ceremony.", no_args_is_help=True
 )
@@ -183,6 +186,7 @@ service_app.add_typer(auto_unlock_app, name="auto-unlock")
 service_app.add_typer(recovery_app, name="recovery")
 app.add_typer(provider_app, name="provider")
 provider_app.add_typer(credential_app, name="credential")
+provider_app.add_typer(codex_subscription_app, name="codex-subscription")
 app.add_typer(privacy_app, name="privacy")
 privacy_app.add_typer(privacy_receipts_app, name="receipts")
 app.add_typer(backup_app, name="backup")
@@ -276,7 +280,7 @@ def recommend_decline_cmd(
     )
 
 
-def run_async(operation: Callable[[], Awaitable[int]]) -> int:
+def run_async[T](operation: Callable[[], Awaitable[T]]) -> T:
     """Own exactly one event-loop bridge for a CLI operation."""
 
     return anyio.run(operation)
@@ -2447,6 +2451,142 @@ credential_app.command("set")(_provider_credential_command("set"))
 credential_app.command("rotate")(_provider_credential_command("rotate"))
 
 
+@codex_subscription_app.command("setup")
+def provider_codex_subscription_setup(
+    executable: Annotated[
+        Path,
+        typer.Option(
+            "--executable",
+            help="Selected Codex CLI/native executable; its exact native binary is digest-bound.",
+        ),
+    ],
+    model: Annotated[str, typer.Option("--model", help="Exact Codex model id.")] = "gpt-5.6-sol",
+    reasoning_effort: Annotated[
+        str, typer.Option("--reasoning-effort", help="Exact reasoning effort.")
+    ] = "high",
+    codex_home: Annotated[
+        Path | None,
+        typer.Option("--codex-home", help="Dedicated owner-private evaluator CODEX_HOME."),
+    ] = None,
+    device_code: Annotated[
+        bool, typer.Option("--device-code", help="Use Codex's documented device-code flow.")
+    ] = False,
+    open_browser: Annotated[
+        bool, typer.Option("--open-browser/--no-open-browser", help="Open Codex's returned URL.")
+    ] = True,
+    switch_account: Annotated[
+        bool, typer.Option("--switch-account", help="Log out the dedicated home before login.")
+    ] = False,
+    accept: Annotated[
+        bool, typer.Option("--accept", help="Explicitly accept the displayed destination/terms notice.")
+    ] = False,
+    json_output: _JSON = False,
+) -> None:
+    """Login via Codex app-server and bind the exact subscription runtime after readiness."""
+
+    from yoetz.cli.codex_subscription import (
+        CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
+        CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT,
+        codex_subscription_setup,
+        default_codex_home,
+        resolve_supported_codex_executable,
+    )
+
+    try:
+        native, digest, source = resolve_supported_codex_executable(executable)
+        destination = default_codex_home() if codex_home is None else codex_home
+        typer.echo("Codex with ChatGPT subscription")
+        typer.echo(f"  runtime: {native}")
+        typer.echo(f"  executable_sha256: {digest}")
+        typer.echo(f"  source: {source}")
+        typer.echo(f"  capability cell: {CODEX_EVALUATOR_CAPABILITY_CELL_SHA256}")
+        typer.echo(f"  cell evidence expires: {CODEX_EVALUATOR_EVIDENCE_EXPIRES_AT}")
+        typer.echo(f"  dedicated CODEX_HOME: {destination}")
+        typer.echo(f"  model/reasoning: {model} / {reasoning_effort}")
+        typer.echo("  destination: OpenAI through Codex-managed ChatGPT authentication")
+        typer.echo("  data-use posture: unknown; your ChatGPT plan and terms apply")
+        typer.echo("  Yoetz sends only a privacy-approved case; Codex owns the upstream body.")
+        typer.echo("  disconnect: yoetz provider codex-subscription disconnect")
+        typer.echo("  rollback only: yoetz provider codex-subscription rollback")
+        if not accept:
+            if not (sys.stdin.isatty() and sys.stdout.isatty()) or not typer.confirm(
+                "Continue to Codex sign-in?", default=False
+            ):
+                _finish(20)
+                return
+        payload = run_async(
+            lambda: codex_subscription_setup(
+                executable=executable,
+                codex_home=destination,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                login_mode="device_code" if device_code else "browser",
+                open_browser=open_browser,
+                switch_account=switch_account,
+            )
+        )
+        _human_or_json(cast(Mapping[str, JsonValue], payload), json_output=json_output)
+        _finish(0)
+    except (OSError, TimeoutError, ValueError) as error:
+        _stderr(_bounded_failure_line(str(error), prefix="codex_subscription"))
+        _finish(20)
+
+
+@codex_subscription_app.command("status")
+def provider_codex_subscription_status(json_output: _JSON = False) -> None:
+    """Read exact runtime, login, plan, model, and cleanup state without task content."""
+
+    from yoetz.cli.codex_subscription import codex_subscription_status
+
+    try:
+        payload = run_async(codex_subscription_status)
+        _human_or_json(cast(Mapping[str, JsonValue], payload), json_output=json_output)
+        _finish(0 if payload.get("model_available") is True else 20)
+    except (OSError, TimeoutError, ValueError) as error:
+        _stderr(_bounded_failure_line(str(error), prefix="codex_subscription"))
+        _finish(20)
+
+
+@codex_subscription_app.command("disconnect")
+def provider_codex_subscription_disconnect(
+    accept: Annotated[
+        bool, typer.Option("--accept", help="Confirm logout of only the dedicated Codex home.")
+    ] = False,
+    json_output: _JSON = False,
+) -> None:
+    """Ask Codex to log out its dedicated home, confirm it, then remove the binding."""
+
+    from yoetz.cli.codex_subscription import codex_subscription_disconnect
+
+    if not accept and (
+        not (sys.stdin.isatty() and sys.stdout.isatty())
+        or not typer.confirm("Log out the dedicated evaluator home and remove its binding?", default=False)
+    ):
+        _finish(20)
+        return
+    try:
+        payload = run_async(codex_subscription_disconnect)
+        _human_or_json(cast(Mapping[str, JsonValue], payload), json_output=json_output)
+        _finish(0)
+    except (OSError, TimeoutError, ValueError) as error:
+        _stderr(_bounded_failure_line(str(error), prefix="codex_subscription"))
+        _finish(20)
+
+
+@codex_subscription_app.command("rollback")
+def provider_codex_subscription_rollback(json_output: _JSON = False) -> None:
+    """Remove only the Yoetz binding; preserve the Codex installation and dedicated home."""
+
+    from yoetz.cli.codex_subscription import codex_subscription_rollback
+
+    try:
+        _human_or_json(codex_subscription_rollback(), json_output=json_output)
+        _finish(0)
+    except (OSError, ValueError) as error:
+        _stderr(_bounded_failure_line(str(error), prefix="codex_subscription"))
+        _finish(20)
+
+
 @provider_app.command("status")
 def provider_status(json_output: _JSON = False) -> None:
     """Report whether external semantic review is structurally ready to dispatch."""
@@ -2549,7 +2689,11 @@ def provider_endpoint(
             if not (sys.stdin.isatty() and sys.stdout.isatty()):
                 _finish(_usage_failure())
                 return
-            prompt_provider_endpoint_binding()
+            selected = prompt_provider_endpoint_binding()
+            if selected == "codex_subscription":
+                typer.echo(
+                    "next: yoetz provider codex-subscription setup --executable <absolute-path>"
+                )
             _finish(0)
             return
         if (

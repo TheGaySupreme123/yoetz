@@ -26,7 +26,7 @@ from yoetz.config.models import (
 from yoetz.domain.privacy import ApprovedOutboundCase, ProviderBinding
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCredentialHandle
-from yoetz.ports.semantic import SemanticEvaluatorPort
+from yoetz.ports.semantic import ExternalRuntimeAuthority, SemanticEvaluatorPort
 
 __all__ = [
     "OpenAIResponsesExternalFactory",
@@ -125,6 +125,7 @@ class OpenAIResponsesExternalFactory:
 
     profile: OpenAIProfile
     clock: ClockPort
+    credential_authority: str = "yoetz_vault_api_credential"
 
     def __post_init__(self) -> None:
         self._last_rendered: RenderedOpenAIRequest | None = None
@@ -137,10 +138,12 @@ class OpenAIResponsesExternalFactory:
     def build_evaluator(
         self,
         binding: ProviderAttemptAuthBinding,
-        credential: ProviderCredentialHandle,
+        credential: ProviderCredentialHandle | ExternalRuntimeAuthority,
         request_commitment: object,
     ) -> SemanticEvaluatorPort:
         del request_commitment
+        if type(credential) is not ProviderCredentialHandle:
+            raise ValueError("openai_credential_authority_invalid")
         rendered = self._last_rendered
         if rendered is None or binding.request_body_digest != rendered.body_sha256:
             raise ValueError("openai_factory_render_required")

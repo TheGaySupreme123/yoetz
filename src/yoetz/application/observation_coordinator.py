@@ -2172,7 +2172,7 @@ class ObservationCoordinator:
                 item.coverage,
                 None,
             )
-            schema = EventSchema("finding_recorded", "1.0.0")
+            schema = EventSchema("finding_recorded", "1.1.0")
             draft = EventDraft(
                 event_id(
                     stable_observation_id(

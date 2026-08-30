@@ -6,6 +6,16 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Added
+
+- An exact Codex npm `0.150.1` macOS-arm64 app-server profile can perform ordinary privacy-gated
+  semantic review with a ChatGPT subscription. Codex remains the OAuth credential authority;
+  guided setup, structural status, account switch/logout, disconnect, and binding-only rollback
+  expose no token to Yoetz. Every attempt binds the executable/protocol/config/capability/model/
+  reasoning cell, runs one no-tool ephemeral stdio turn from an empty cwd, verifies process-group
+  cleanup, and records disclosed-case/runtime evidence with upstream-body observability explicitly
+  unavailable. API-key profiles remain separate and unchanged (issue #404).
+
 ### Fixed
 
 - The native Cursor plugin's plugin-owned `mcp.json` now launches the exact Yoetz executable the

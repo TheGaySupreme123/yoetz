@@ -158,6 +158,11 @@ bases, coverage gaps, and bounded problem-local excerpts already recorded in the
 confidential content is off, the never-send set is absolute, and only a reauthenticated local human
 can loosen policy.
 
+Provider setup distinguishes **OpenAI API / compatible API** from **Codex with ChatGPT
+subscription**. The subscription route binds one exact Codex app-server and dedicated home; Codex
+owns ChatGPT login and the upstream OpenAI request, while Yoetz receives no OAuth credential. It
+still sends only the privacy-approved packet and records the weaker observable boundary explicitly.
+
 Review then runs direct-to-agent: the reviewer returns a bounded challenge, the agent acts, supplies
 evidence, revises, disputes, or states a limitation, and rechecks. No human prompt for routine
 retries.

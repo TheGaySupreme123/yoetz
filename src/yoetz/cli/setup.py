@@ -77,6 +77,7 @@ __all__ = [
     "project_skill_preview",
     "run_provider_setup",
     "run_setup_wizard",
+    "restart_service_for_semantic_composition",
     "setup_marker_present",
     "setup_status",
     "should_offer_first_run",
@@ -92,8 +93,9 @@ _NEXT_SERVICE: Final = "run 'yoetz service run' under your selected user supervi
 _NEXT_UNLOCK: Final = "run 'yoetz service unlock' from a local terminal if the vault is locked"
 _NEXT_PRIVACY: Final = "run 'yoetz --privacy' to review or change the privacy policy"
 _NEXT_PROVIDER_TOML: Final = (
-    "run 'yoetz provider endpoint' (or edit config.toml) to choose a reviewed provider "
-    "or an owner-declared HTTPS origin+model — never put API keys in TOML"
+    "run 'yoetz provider endpoint' for an API provider, or "
+    "'yoetz provider codex-subscription setup --executable <absolute-path>' for "
+    "Codex-managed ChatGPT login — never put credentials in TOML"
 )
 _NEXT_CREDENTIAL: Final = (
     "run 'yoetz provider credential set' from a local terminal to provision the "
@@ -235,6 +237,10 @@ def _provider_setup_result(
             report.get("credential_reason")
         )
     return service, report
+
+
+def _provider_credential_ready(report: Mapping[str, object]) -> bool:
+    return report.get("credential") in {"stored", "external_runtime_oauth"}
 
 
 def _prompt_yes_no_before_credential(
@@ -1695,6 +1701,12 @@ async def _restart_service_for_semantic_composition() -> dict[str, JsonValue]:
     return {"reachable": False, "state": None, "vault_mode": None}
 
 
+async def restart_service_for_semantic_composition() -> dict[str, JsonValue]:
+    """Recompose the singleton after a semantic evaluator binding changes."""
+
+    return await _restart_service_for_semantic_composition()
+
+
 def _privacy_block_reason(reason: object) -> str:
     """Name the exact privacy cause that blocked the credential step, never free text."""
 
@@ -1833,7 +1845,37 @@ async def _interactive_provider_setup(
             return _provider_setup_result(service, provider_report)
         typer.echo(f"{preset.provider_id} model: {selected_model}")
     else:
-        written = prompt_provider_endpoint_binding(show_standalone_next_step=False)
+        written = prompt_provider_endpoint_binding(
+            show_standalone_next_step=False,
+        )
+    if written == "codex_subscription":
+        from yoetz.cli.codex_subscription import prompt_codex_subscription_setup
+
+        try:
+            status = await prompt_codex_subscription_setup()
+        except (OSError, TimeoutError, ValueError) as error:
+            provider_report["binding"] = "failed"
+            provider_report["credential"] = "external_runtime_oauth"
+            provider_report["credential_reason"] = _allowlisted_provider_setup_reason(str(error))
+            wipe_auto_passphrase()
+            return _provider_setup_result(service, provider_report)
+        provider_report.update(
+            {
+                "binding": "configured",
+                "credential": "external_runtime_oauth",
+                "auth_mode": status.get("auth_mode"),
+                "plan_type": status.get("plan_type"),
+                "model_available": status.get("model_available"),
+                "process_cleanup": status.get("process_cleanup"),
+            }
+        )
+        service = await _restart_service_for_semantic_composition()
+        if before_credential is not None:
+            blocked = await before_credential()
+            if blocked is not None:
+                provider_report["credential_reason"] = blocked
+        wipe_auto_passphrase()
+        return _provider_setup_result(service, provider_report)
     if written is None:
         wipe_auto_passphrase()
         return _provider_setup_result(service, provider_report)
@@ -2282,14 +2324,18 @@ async def run_setup_wizard(
     }
     semantic_status: dict[str, JsonValue] | None = None
     if interactive and review_mode == "semantic":
-
         async def authorize_provider_channel() -> str | None:
             nonlocal privacy
             from yoetz.cli.privacy_setup import run_privacy_setup
             from yoetz.cli.unlock import HumanCeremonyCliError
             from yoetz.ports.control import ControlError
 
-            credential_probe_authorized = _prompt_credential_probe_authorization()
+            configured = load_config({}, os.environ, None)
+            credential_probe_authorized = (
+                False
+                if configured.external_runtime is not None
+                else _prompt_credential_probe_authorization()
+            )
             try:
                 privacy_result = await run_privacy_setup(
                     recipe_hint="assisted_review",
@@ -2404,7 +2450,7 @@ async def run_setup_wizard(
                 _append_next_step(next_steps, _NEXT_PRIVACY)
             if provider.get("binding") != "configured":
                 _append_next_step(next_steps, _NEXT_PROVIDER_TOML)
-            if provider.get("credential") != "stored":
+            if not _provider_credential_ready(provider):
                 _append_next_step(next_steps, _NEXT_CREDENTIAL)
             elif provider.get("binding") == "configured":
                 _append_next_step(next_steps, _NEXT_RESTART)
@@ -2413,7 +2459,7 @@ async def run_setup_wizard(
             _append_next_step(next_steps, _NEXT_PRIVACY)
         if provider.get("binding") != "configured":
             _append_next_step(next_steps, _NEXT_PROVIDER_TOML)
-        if provider.get("credential") != "stored":
+        if not _provider_credential_ready(provider):
             _append_next_step(next_steps, _NEXT_CREDENTIAL)
     if (
         chosen is not None
@@ -2637,14 +2683,17 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
         from yoetz.cli.provider_status import credential_human_display
 
         credential = provider.get("credential")
-        typer.echo(
-            "  Credential: "
-            + credential_human_display(
-                True if credential == "stored" else (False if credential == "failed" else None)
+        if credential == "external_runtime_oauth":
+            typer.echo("  Credential authority: Codex-managed ChatGPT login")
+        else:
+            typer.echo(
+                "  Credential: "
+                + credential_human_display(
+                    True if credential == "stored" else (False if credential == "failed" else None)
+                )
             )
-        )
         credential_reason = provider.get("credential_reason")
-        if credential != "stored" and type(credential_reason) is str:
+        if not _provider_credential_ready(provider) and type(credential_reason) is str:
             typer.echo(f"  Credential reason: {credential_reason}")
     if isinstance(privacy, dict):
         line = f"  Privacy: {privacy.get('outcome')} ({privacy.get('profile')})"

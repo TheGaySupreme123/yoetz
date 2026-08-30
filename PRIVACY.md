@@ -135,6 +135,13 @@ preview, receipt, log, environment, configuration, or reusable SDK state. Encryp
 recovery secrets have no such exception. Choosing literal zero credential egress would disable
 credentialed external providers.
 
+The separate `external_runtime_oauth` authority never takes a credential from the Yoetz vault. For
+the exact Codex subscription profile, Codex owns ChatGPT login, refresh, credential storage, and
+the upstream OpenAI body. Yoetz supplies only a secret-free one-attempt authority and the already
+approved case through app-server stdin. A dedicated Codex home may be named in nonsecret config;
+Yoetz never reads, hashes, copies, logs, exports, or stores its credential bytes or account email.
+There is no API-key, proxy, generic OAuth, or undocumented-endpoint fallback.
+
 ## Local models and human authority
 
 A local model receives plaintext only after the same classification, minimization, scope, and
@@ -173,7 +180,11 @@ either later requires an explicit ADR amendment.
 Each successfully reserved terminal outbound decision and every physical attempt produces a local
 structural receipt with destination, policy/scope/category decisions, sizes, transformations,
 consent source, bounded outcome, and—only for a physical attempt—a keyed commitment to the final
-provider application-body bytes. Waiting for a human, approval, and consumed-but-unreceipted work
+application bytes at the Yoetz-controlled boundary. For HTTP profiles those are the provider body
+before authentication metadata. For `external_runtime_oauth` they are the disclosed Yoetz case;
+Codex's upstream body is explicitly unavailable, and separate runtime evidence binds the exact
+launcher/config/protocol/model/output boundary. Waiting for a human, approval, and
+consumed-but-unreceipted work
 remain resumable internal states, not finished receipts. If the initial audit reservation itself
 fails, Yoetz fails closed before preview/authorization/dispatch and returns bounded `audit_failed`
 without fabricating a receipt; this is the sole no-receipt decision exception. Receipts contain no

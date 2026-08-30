@@ -86,8 +86,9 @@ line above the active one:
    was checked.
 6. **Secure storage** — system keyring, or a Yoetz passphrase.
 7. **Review mode** — Local only, or Add semantic review.
-8. **Semantic setup, when selected** — provider/model, secure API-key handoff, and the trusted
-   recommendation-first privacy ceremony.
+8. **Semantic setup, when selected** — an explicit choice between OpenAI API / compatible API and
+   Codex with ChatGPT subscription, followed by the matching secure API-key or Codex-owned login
+   flow and the trusted recommendation-first privacy ceremony.
 9. **Finish**, with each readiness layer stated separately.
 
 You are never required to configure a provider: Local only is complete and useful. If you choose
@@ -175,11 +176,15 @@ confirmation.
 ### `/provider`
 
 Choose a preset — OpenAI, Fireworks AI, Anthropic, Google Gemini, OpenRouter, Vercel AI Gateway,
-or a custom OpenAI-compatible HTTPS endpoint — then a model. Yoetz shows the endpoint and privacy
-posture before asking for anything secret, and states plainly that storing a key does not switch
-external review on.
+or a custom OpenAI-compatible HTTPS endpoint — or choose **Codex with ChatGPT subscription**.
+Yoetz shows the endpoint/runtime and privacy posture before asking for an API key or opening Codex
+login, and states plainly that storing a binding does not switch external review on.
 
-The API key is entered through the secure prompt described under *Secrets* below.
+API-provider keys are entered through the secure prompt described under *Secrets* below. For a
+subscription, `/provider` asks for the exact Codex executable, dedicated evaluator home, model, and
+reasoning effort; validates the supported digest-bound cell; shows destination, plan/terms notice,
+privacy boundary, disconnect, and rollback; then suspends the UI for Codex's browser flow. OAuth
+credentials never pass through a widget or Yoetz vault.
 
 Afterwards Yoetz reports what it actually knows:
 
@@ -189,6 +194,10 @@ Afterwards Yoetz reports what it actually knows:
 ! Live provider connection has not been tested
 ! External semantic review is not yet proven ready
 ```
+
+The subscription variant replaces the API-key line with `✓ Codex-managed ChatGPT login is
+available`. Its status is a structural account/model read with no task case. Live semantic proof
+still requires a privacy-authorized `check` and terminal provenance/receipt.
 
 **This build exposes no bounded live provider probe**, so a connection test reports itself as
 unavailable rather than reporting a pass. A provider that fails never affects local deterministic

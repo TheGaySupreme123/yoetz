@@ -100,6 +100,22 @@ Flow for a typical task:
 5. **`receipt`** projects the honest summary: what was checked, at what coverage, what is still
    open. Available as `json`, `markdown`, or `text`.
 
+## External semantic evaluator authorities
+
+External review has two closed runtime shapes behind the same privacy gateway. HTTP profiles use a
+one-attempt credential handle minted from the Yoetz vault. The Codex subscription profile instead
+launches one exact digest-bound Codex app-server process group and gives it a secret-free attempt
+authority; Codex alone owns ChatGPT OAuth and the upstream OpenAI body. Both receive only the
+approved canonical case after repository-scoped policy authorization, and both terminate in a
+privacy receipt.
+
+The Codex process runs from an empty per-attempt directory with a dedicated owner-private home,
+scrubbed environment, strict no-tool configuration, an ephemeral thread, and app-server v2 JSONL
+over stdio. Account and model readiness happen before case disclosure. The service rejects tool
+requests or extra output and must verify process-group cleanup before success. Provenance binds the
+observable case/runtime boundary and explicitly says that the upstream body is unavailable; it
+does not invent HTTP-level evidence.
+
 ## Determinism and honesty rules
 
 These are enforced in code and locked by tests; they are the reason the system is worth trusting.

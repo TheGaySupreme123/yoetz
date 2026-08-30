@@ -81,6 +81,7 @@ from yoetz.ports.privacy import (
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCredentialHandle
 from yoetz.ports.semantic import (
     Deadline,
+    ExternalRuntimeAuthority,
     ProviderAttemptProvenance,
     SemanticEvaluatorPort,
     SemanticResult,
@@ -145,7 +146,7 @@ class ExternalProviderFactory(Protocol):
     def build_evaluator(
         self,
         binding: ProviderAttemptAuthBinding,
-        credential: ProviderCredentialHandle,
+        credential: ProviderCredentialHandle | ExternalRuntimeAuthority,
         request_commitment: RequestCommitment,
     ) -> SemanticEvaluatorPort:
         """Build a one-attempt evaluator bound to this exact credential handle and commitment."""
@@ -668,9 +669,25 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             monotonic_deadline=deadline.monotonic_deadline,
         )
 
-        try:
-            credential = await self._credential_minter.mint(binding)
-        except Exception:  # noqa: BLE001 - a foreign vault failure is bounded here
+        credential_authority = getattr(
+            factory, "credential_authority", "yoetz_vault_api_credential"
+        )
+        if credential_authority == "external_runtime_oauth":
+            credential: ProviderCredentialHandle | ExternalRuntimeAuthority = ExternalRuntimeAuthority(
+                dispatch_id=dispatch_id,
+                request_body_digest=body_digest,
+                request_commitment=commitment,
+                service_generation=registry.service_generation,
+                monotonic_deadline=deadline.monotonic_deadline,
+            )
+        elif credential_authority == "yoetz_vault_api_credential":
+            try:
+                credential = await self._credential_minter.mint(binding)
+            except Exception:  # noqa: BLE001 - a foreign vault failure is bounded here
+                return await self._preconsume_failure(
+                    case, authorization, PrivacyReason.PROVIDER_UNAVAILABLE
+                )
+        else:
             return await self._preconsume_failure(
                 case, authorization, PrivacyReason.PROVIDER_UNAVAILABLE
             )
@@ -735,6 +752,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             dispatch_started_at,
             commitment,
             body,
+            result,
             outcome,
             receipt_reason,
         )
@@ -875,9 +893,14 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         dispatch_started_at: datetime,
         commitment: str,
         body: bytes,
+        result: SemanticResult,
         outcome: PrivacyOutcome,
         reason: PrivacyReason | None,
     ) -> EgressReceipt:
+        runtime_evidence = result.provenance.runtime_evidence
+        disclosed = runtime_evidence is None or runtime_evidence.case_disclosed
+        included_items = len(case.included_item_ids) if disclosed else 0
+        final_bytes = case.byte_count if disclosed else 0
         return EgressReceipt(
             "1.0.0",
             self._ids.new(IdKind.EGRESS_RECEIPT),
@@ -900,16 +923,16 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             case.blocked_categories,
             ReceiptCounts(
                 len(case.included_item_ids),
-                len(case.included_item_ids),
-                0,
-                len(case.included_item_ids),
-                0,
+                included_items,
+                len(case.included_item_ids) - included_items,
+                included_items,
+                len(case.included_item_ids) - included_items,
                 case.byte_count,
-                case.byte_count,
+                final_bytes,
                 case.token_count,
-                len(body),
+                len(body) if disclosed else 0,
             ),
-            ReceiptTransformations(0, 0, 0),
+            ReceiptTransformations(0, 0, len(case.included_item_ids) - included_items),
             ReceiptSecretScan(_SCAN.version, _SCAN.profile_digest, 0, True),
             reason,
             1,
@@ -1074,6 +1097,13 @@ def _result_outcome(result: SemanticResult) -> tuple[PrivacyOutcome, PrivacyReas
     if type(result) is SemanticResultLate:
         return PrivacyOutcome.LATE, PrivacyReason.LATE
     if type(result) is SemanticResultUnavailable:
+        runtime = result.provenance.runtime_evidence
+        if (
+            runtime is not None
+            and runtime.turn_acknowledged
+            and result.provenance.failure_class is SemanticFailureClass.TRANSPORT
+        ):
+            return PrivacyOutcome.TRANSPORT_FAILED, PrivacyReason.OUTCOME_UNKNOWN
         return PrivacyOutcome.TRANSPORT_FAILED, PrivacyReason.TRANSPORT_FAILED
     raise TypeError("privacy_gateway_semantic_result_invalid")
 

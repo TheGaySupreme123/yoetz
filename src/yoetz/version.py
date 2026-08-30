@@ -74,7 +74,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 131
+REVIEWED_RESOURCE_COUNT: Final = 151
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -83,6 +83,7 @@ _RESOURCE_KINDS: Final = frozenset(
         "json_schema",
         "migration",
         "runtime_support",
+        "runtime_config",
         "skill",
     }
 )
@@ -91,15 +92,15 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("catalog", "4.0.0"),
     ("chat-user-attestation", "1.0.0"),
     ("check-request", "1.0.0"),
-    ("check-result", "1.0.0"),
+    ("check-result", "1.1.0"),
     ("client-info", "1.0.0"),
-    ("control-hello", "2.3.0"),
-    ("control-hello-result", "2.3.0"),
-    ("control-request", "2.3.0"),
-    ("control-result", "2.3.0"),
+    ("control-hello", "2.4.0"),
+    ("control-hello-result", "2.4.0"),
+    ("control-request", "2.4.0"),
+    ("control-result", "2.4.0"),
     ("coverage", "1.0.0"),
     ("egress-receipt", "1.0.0"),
-    ("finding", "1.0.0"),
+    ("finding", "1.1.0"),
     ("frontier", "1.0.0"),
     ("operation-result", "1.0.0"),
     ("outbound-case", "1.0.0"),
@@ -112,20 +113,21 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("publish-work-result", "1.0.0"),
     ("read-guidance-request", "1.0.0"),
     ("read-guidance-result", "1.0.0"),
-    ("receipt-document", "1.0.0"),
+    ("receipt-document", "1.1.0"),
     ("receipt-request", "1.0.0"),
-    ("receipt-result", "1.0.0"),
+    ("receipt-result", "1.1.0"),
     ("respond-request", "1.0.0"),
     ("respond-result", "1.0.0"),
     ("review-result", "4.0.0"),
-    ("semantic-provenance", "1.0.0"),
+    ("runtime-attempt-evidence", "1.0.0"),
+    ("semantic-provenance", "1.1.0"),
     ("service-status", "1.0.0"),
     ("setup-wizard-contract", "1.0.0"),
     ("start-request", "1.0.0"),
     ("start-result", "1.0.0"),
     ("status", "4.0.0"),
     ("status-request", "1.1.0"),
-    ("status-result", "1.1.0"),
+    ("status-result", "1.2.0"),
     ("subject-state-ref", "1.0.0"),
 )
 _EVENT_NAMES: Final = (
@@ -575,6 +577,7 @@ def _resource_counts(entries: tuple[_ResourceEntry, ...]) -> VersionPairs:
         "guidance_resources": sum(item.kind == "guidance" for item in entries),
         "migrations": sum(item.kind == "migration" for item in entries),
         "runtime_support_resources": sum(item.kind == "runtime_support" for item in entries),
+        "runtime_config_resources": sum(item.kind == "runtime_config" for item in entries),
         "schema_resources": sum(item.kind == "json_schema" for item in entries),
         "skill_resources": sum(
             item.kind in {"compatibility_manifest", "skill"} for item in entries
@@ -612,7 +615,20 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
         privacy_classifier_ruleset_version=PRIVACY_CLASSIFIER_RULESET_VERSION,
         request_result_schema_versions=_REQUEST_RESULT_VERSIONS,
         event_schema_versions=tuple(
-            (name, "1.1.0" if name == "evidence_recorded" else "1.0.0") for name in _EVENT_NAMES
+            (
+                name,
+                "1.1.0"
+                if name
+                in {
+                    "check_recorded",
+                    "evidence_recorded",
+                    "finding_recorded",
+                    "session_opened",
+                    "session_resumed",
+                }
+                else "1.0.0",
+            )
+            for name in _EVENT_NAMES
         ),
         policy_versions=(RESEARCH_EVIDENCE_POLICY_VERSION, WORK_INTEGRITY_POLICY_VERSION),
         object_format_version=OBJECT_FORMAT_VERSION,

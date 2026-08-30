@@ -123,7 +123,7 @@ def prompt_provider_endpoint_binding(
     *,
     path: Path | None = None,
     show_standalone_next_step: bool = True,
-) -> Path | None:
+) -> Path | Literal["codex_subscription"] | None:
     """Prompt for a reviewed provider preset or custom origin; never asks for secrets.
 
     ``show_standalone_next_step`` is false only when a composed setup flow owns the next
@@ -141,13 +141,17 @@ def prompt_provider_endpoint_binding(
     typer.echo("  6  Grok / xAI (OpenAI-compatible Chat Completions)")
     typer.echo("  7  Vercel AI Gateway (OpenAI-compatible Responses)")
     typer.echo("  8  Custom OpenAI-compatible HTTPS origin")
+    typer.echo("  9  Codex with ChatGPT subscription (Codex-managed OAuth; no API key)")
     typer.echo("  s  Skip for now")
     raw = typer.prompt("Select", default="s").strip().lower()
     if raw in {"s", "skip", ""}:
         return None
-    if raw not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
-        typer.echo("invalid_request: choose 1, 2, 3, 4, 5, 6, 7, 8, or s", err=True)
+    allowed = {"1", "2", "3", "4", "5", "6", "7", "8", "9"}
+    if raw not in allowed:
+        typer.echo("invalid_request: choose 1, 2, 3, 4, 5, 6, 7, 8, 9, or s", err=True)
         return None
+    if raw == "9":
+        return "codex_subscription"
 
     choices: dict[str, ProviderEndpointChoice] = {
         "1": "official_openai",

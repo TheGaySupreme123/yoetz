@@ -78,6 +78,7 @@ from yoetz.domain.events import (
 from yoetz.domain.findings import (
     Finding,
     ResponseDisposition,
+    RuntimeAttemptEvidence,
     SamplingParams,
     SemanticDispatchKind,
     SemanticProvenance,
@@ -456,14 +457,34 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
         SCHEMA_VERSION,
         EVIDENCE_SCHEMA_VERSION,
     }
+    assert {schema.version for schema in PAYLOAD_TYPES if schema.name == "check_recorded"} == {
+        SCHEMA_VERSION,
+        "1.1.0",
+    }
+    assert {schema.version for schema in PAYLOAD_TYPES if schema.name == "finding_recorded"} == {
+        SCHEMA_VERSION,
+        "1.1.0",
+    }
+    for family in ("session_opened", "session_resumed"):
+        assert {schema.version for schema in PAYLOAD_TYPES if schema.name == family} == {
+            SCHEMA_VERSION,
+            "1.1.0",
+        }
     assert all(
         schema.version == SCHEMA_VERSION
         for schema in PAYLOAD_TYPES
-        if schema.name != "evidence_recorded"
+        if schema.name
+        not in {
+            "check_recorded",
+            "evidence_recorded",
+            "finding_recorded",
+            "session_opened",
+            "session_resumed",
+        }
     )
     row = _ROW_BY_FAMILY["session_opened"]
     valid_payload = freeze_json(row["payload"])
-    for version in ("0.9.0", "1.0.1", "1.1.0", "2.0.0"):
+    for version in ("0.9.0", "1.0.1", "1.1.1", "2.0.0"):
         _assert_reason(
             "unknown_event_schema",
             lambda version=version: decode_payload(
@@ -556,6 +577,7 @@ def test_support_types_and_client_enum_identity_are_exact() -> None:
     assert tuple(member.value for member in RuntimeProfile) == (
         "strict-local",
         "local-openai",
+        "codex-subscription",
         "test-fake",
         "release-probe",
     )
@@ -1120,6 +1142,75 @@ def _selected_final_provenance() -> SemanticProvenance:
         egress_authorization_id="aut_00000000-0000-4000-8000-000000000003",
         request_commitment=_COMMITMENT,
     )
+
+
+def _external_runtime_evidence() -> RuntimeAttemptEvidence:
+    return RuntimeAttemptEvidence(
+        credential_authority="external_runtime_oauth",
+        runtime_version="0.150.1",
+        runtime_source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+        executable_sha256=_DIGEST,
+        app_server_schema_sha256=_DIGEST,
+        capability_cell_sha256=_DIGEST,
+        capability_profile="codex-evaluator/0.150.1/v1",
+        capability_evidence_expires_at="2026-11-30T00:00:00Z",
+        launcher_sha256=_DIGEST,
+        isolated_config_sha256=_DIGEST,
+        disclosed_case_sha256=_DIGEST,
+        instruction_sha256=_DIGEST,
+        output_schema_sha256=_DIGEST,
+        selection_sha256=_DIGEST,
+        upstream_body_observability="unavailable",
+        auth_mode="chatgpt",
+        plan_type="plus",
+        reasoning_effort="high",
+        thread_id="thread-1",
+        turn_id="turn-1",
+        final_output_sha256=_DIGEST,
+        case_disclosed=True,
+        turn_acknowledged=True,
+        process_cleanup="terminated",
+    )
+
+
+def test_subscription_profile_requires_append_only_session_event_version() -> None:
+    payload = SessionOpenedPayload(
+        task_title="subscription task",
+        client_kind=ClientKind.CODEX_CLI,
+        client_version="0.1.0",
+        integration=IntegrationKind.COOPERATIVE_MCP,
+        profile=RuntimeProfile.CODEX_SUBSCRIPTION,
+    )
+    wire = encode_payload(payload)
+
+    with pytest.raises(ProtocolValueError, match="invalid_event_value_type"):
+        decode_payload(EventSchema("session_opened", "1.0.0"), wire)
+    assert decode_payload(EventSchema("session_opened", "1.1.0"), wire) == payload
+
+
+def test_subscription_provenance_requires_append_only_check_event_version() -> None:
+    payload = cast(CheckRecordedPayload, _decode_row(_ROW_BY_FAMILY["check_recorded"]))
+    provenance = replace(
+        _selected_final_provenance(),
+        provider="openai-codex",
+        endpoint_profile_id="codex-chatgpt-subscription",
+        model="gpt-5.6-sol",
+        sdk_version="codex-app-server-0.150.1",
+        dispatch_kind=SemanticDispatchKind.EXTERNAL_RUNTIME_OAUTH,
+        runtime_evidence=_external_runtime_evidence(),
+    )
+    semantic = replace(
+        payload,
+        mode=CheckMode.SEMANTIC_REQUIRED,
+        semantic_status=SemanticStatus.SUCCEEDED,
+        semantic_reason=SemanticReason.SEMANTIC_COMPLETED,
+        semantic_provenance=provenance,
+    )
+    wire = encode_payload(semantic)
+
+    with pytest.raises(ProtocolValueError, match="invalid_event_value_type"):
+        decode_payload(EventSchema("check_recorded", "1.0.0"), wire)
+    assert decode_payload(EventSchema("check_recorded", "1.1.0"), wire) == semantic
 
 
 def test_check_payload_provenance_matches_selected_final_outcome() -> None:

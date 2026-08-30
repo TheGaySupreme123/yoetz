@@ -11,10 +11,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Literal
 
 from yoetz.config.models import (
+    CODEX_SUBSCRIPTION_ENDPOINT_PROFILE_ID,
+    CODEX_SUBSCRIPTION_PROVIDER_ID,
     ConfigError,
+    ExternalRuntimeProfileConfig,
     OwnerDeclaredEndpointConfig,
     ProviderProfileConfig,
     YoetzConfig,
@@ -25,6 +28,7 @@ from yoetz.config.privacy import safe_privacy_bootstrap
 __all__ = [
     "PROVIDER_PRESETS",
     "ProviderPreset",
+    "codex_subscription_runtime",
     "anthropic_provider",
     "default_capability_profile",
     "fireworks_provider",
@@ -40,7 +44,9 @@ __all__ = [
     "xai_provider",
     "write_config_toml",
     "write_config_toml_if_unchanged",
+    "clear_external_runtime_binding",
     "write_provider_binding",
+    "write_external_runtime_binding",
 ]
 
 _OFFICIAL_CAPABILITY: Final = "openai-responses-structured-1"
@@ -393,6 +399,47 @@ def owner_declared_openai_provider(
     )
 
 
+def codex_subscription_runtime(
+    *,
+    executable_path: str,
+    executable_sha256: str,
+    runtime_version: str,
+    source_identity: str,
+    app_server_schema_sha256: str,
+    capability_cell_sha256: str,
+    isolated_config_sha256: str,
+    capability_profile: str,
+    capability_evidence_expires_at: Literal["2026-11-30T00:00:00Z"],
+    codex_home: str,
+    model: str,
+    reasoning_effort: str,
+    timeout_seconds: int = 120,
+    max_retries: int = 2,
+) -> ExternalRuntimeProfileConfig:
+    """Build the exact nonsecret Codex app-server subscription binding."""
+
+    return ExternalRuntimeProfileConfig(
+        provider_id=CODEX_SUBSCRIPTION_PROVIDER_ID,
+        endpoint_profile_id=CODEX_SUBSCRIPTION_ENDPOINT_PROFILE_ID,
+        endpoint_profile_version="1.0.0",
+        credential_authority="external_runtime_oauth",
+        executable_path=executable_path,
+        executable_sha256=executable_sha256,
+        runtime_version=runtime_version,
+        source_identity=source_identity,
+        app_server_schema_sha256=app_server_schema_sha256,
+        capability_cell_sha256=capability_cell_sha256,
+        isolated_config_sha256=isolated_config_sha256,
+        capability_profile=capability_profile,
+        capability_evidence_expires_at=capability_evidence_expires_at,
+        codex_home=codex_home,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+    )
+
+
 def _escape_basic(value: str) -> str:
     return (
         value.replace("\\", "\\\\")
@@ -483,6 +530,33 @@ def render_config_toml(config: YoetzConfig) -> str:
                 "provider.owner_declared_endpoint",
                 {"https_origin": provider.owner_declared_endpoint.https_origin},
             )
+
+    if config.external_runtime is not None:
+        runtime = config.external_runtime
+        _emit_table(
+            lines,
+            "external_runtime",
+            {
+                "provider_id": runtime.provider_id,
+                "endpoint_profile_id": runtime.endpoint_profile_id,
+                "endpoint_profile_version": runtime.endpoint_profile_version,
+                "credential_authority": runtime.credential_authority,
+                "executable_path": runtime.executable_path,
+                "executable_sha256": runtime.executable_sha256,
+                "runtime_version": runtime.runtime_version,
+                "source_identity": runtime.source_identity,
+                "app_server_schema_sha256": runtime.app_server_schema_sha256,
+                "capability_cell_sha256": runtime.capability_cell_sha256,
+                "isolated_config_sha256": runtime.isolated_config_sha256,
+                "capability_profile": runtime.capability_profile,
+                "capability_evidence_expires_at": runtime.capability_evidence_expires_at,
+                "codex_home": runtime.codex_home,
+                "model": runtime.model,
+                "reasoning_effort": runtime.reasoning_effort,
+                "timeout_seconds": runtime.timeout_seconds,
+                "max_retries": runtime.max_retries,
+            },
+        )
 
     if config.local_model is not None:
         local = config.local_model
@@ -628,7 +702,47 @@ def write_provider_binding(
         update={
             "profile": profile,
             "provider": provider,
+            "external_runtime": None,
             "local_model": None if profile == "local-openai" else current.local_model,
+        }
+    )
+    return write_config_toml(updated, path=path)
+
+
+def write_external_runtime_binding(
+    runtime: ExternalRuntimeProfileConfig,
+    *,
+    path: Path | None = None,
+    base: YoetzConfig | None = None,
+) -> Path:
+    """Atomically select the exact external-runtime route and remove API/local fallbacks."""
+
+    if type(runtime) is not ExternalRuntimeProfileConfig:
+        raise TypeError("config_write_wrong_type")
+    source = YoetzConfig() if base is None else base
+    updated = source.model_copy(
+        update={
+            "profile": "codex-subscription",
+            "provider": None,
+            "local_model": None,
+            "external_runtime": runtime,
+        }
+    )
+    return write_config_toml(updated, path=path)
+
+
+def clear_external_runtime_binding(
+    *, path: Path | None = None, base: YoetzConfig | None = None
+) -> Path:
+    """Remove only the Codex evaluator binding; never touch its installation or home."""
+
+    source = YoetzConfig() if base is None else base
+    if source.external_runtime is None:
+        return write_config_toml(source, path=path)
+    updated = source.model_copy(
+        update={
+            "profile": "strict-local",
+            "external_runtime": None,
         }
     )
     return write_config_toml(updated, path=path)

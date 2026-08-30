@@ -49,6 +49,7 @@ def _derived_resource_counts(entries: Sequence[Any]) -> dict[str, str]:
         "canonical_vectors": str(kinds["canonical_vector"]),
         "guidance_resources": str(kinds["guidance"]),
         "migrations": str(kinds["migration"]),
+        "runtime_config_resources": str(kinds["runtime_config"]),
         "runtime_support_resources": str(kinds["runtime_support"]),
         "schema_resources": str(kinds["json_schema"]),
         "skill_resources": str(kinds["compatibility_manifest"] + kinds["skill"]),
@@ -171,6 +172,7 @@ def test_public_resource_list_matches_release_artifact() -> None:
         "guidance",
         "json_schema",
         "migration",
+        "runtime_config",
         "runtime_support",
         "skill",
     }

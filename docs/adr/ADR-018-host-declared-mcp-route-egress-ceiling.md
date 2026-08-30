@@ -1,7 +1,8 @@
 # ADR-018 — Host-declared MCP route egress ceiling
 
 **Status:** Accepted (2026-07-29), acknowledged in
-[issue #84](https://github.com/TheGaySupreme123/yoetz/issues/84).
+[issue #84](https://github.com/TheGaySupreme123/yoetz/issues/84), and amended 2026-08-30 for issue
+#404 external-runtime dispatch.
 **Implemented by:** `src/yoetz/mcp/`, `src/yoetz/application/check.py`,
 `src/yoetz/ports/control.py`, `src/yoetz/service/`, and
 `src/yoetz/adapters/integrations/codex_mcp.py`.
@@ -117,3 +118,13 @@ an enforcement mechanism.
 
 **Disable semantic review globally when strict is registered.** Rejected: a route-local trust
 choice must not silently tighten other CLI, UI, or MCP processes.
+
+## External-runtime amendment (2026-08-30, issue #404)
+
+The route ceiling applies to dispatch authority, not transport shape. A strict MCP process cannot
+request either an HTTP `yoetz_vault_api_credential` attempt or a child-process
+`external_runtime_oauth` attempt. It reaches neither provider factory, credential/runtime
+authority, privacy authorization, nor Codex child launch, and reports the existing
+`blocked_by_policy/route_semantic_ceiling` pair. A policy route merely permits the ordinary privacy
+decision path; it does not imply ChatGPT login, model entitlement, repository approval, or a live
+semantic attempt.

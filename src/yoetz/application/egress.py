@@ -1251,11 +1251,16 @@ class PrivacyCoordinator:
                 PrivacyReason.OUTCOME_UNKNOWN,
                 privacy_proposal_id=proposal.privacy_proposal_id,
             )
+        dispatch_kind = (
+            SemanticDispatchKind.EXTERNAL_RUNTIME_OAUTH
+            if result.provenance.runtime_evidence is not None
+            else SemanticDispatchKind.EXTERNAL
+        )
         return await self._map_provider_result(
             candidate.request_id,
             proposal.privacy_proposal_id,
             authorization.authorization_id,
-            SemanticDispatchKind.EXTERNAL,
+            dispatch_kind,
             proposal.prepared_case_digest,
             subject_digest,
             result,

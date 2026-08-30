@@ -2615,7 +2615,7 @@ class MemoryLedgerAdapter:
             payload_ref = await self._objects.finalize(staged)
             schema = EventSchema(
                 "finding_recorded" if type(payload) is FindingRecordedPayload else "check_recorded",
-                "1.0.0",
+                "1.1.0",
             )
             entries.append(
                 AppendEntry(
