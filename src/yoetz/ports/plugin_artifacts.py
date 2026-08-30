@@ -321,6 +321,7 @@ class PluginArtifactPreview:
     target_identity: str
     current_state_digest: str
     artifact_digest: str
+    rollback_digest: str | None
     preview_digest: str
     plan: PortablePluginPlan
     warnings: tuple[str, ...]
@@ -342,6 +343,8 @@ class PluginArtifactPreview:
             self.preview_digest,
         ):
             validate_sha256_digest(digest)
+        if self.rollback_digest is not None:
+            validate_sha256_digest(self.rollback_digest)
         warnings = tuple(_token(item) for item in self.warnings)
         if warnings != tuple(sorted(set(warnings), key=str.encode)):
             raise ValueError("plugin_preview_invalid")
