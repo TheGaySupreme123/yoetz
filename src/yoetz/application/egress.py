@@ -647,23 +647,43 @@ class PrivacyCoordinator:
                 PrivacyReason.AUDIT_FAILED,
             )
         status = state.status
-        if status == "awaiting_human":
+        if status in {"reserved", "awaiting_human"}:
+            try:
+                pending = await self._audit.load_disclosure_proposal(
+                    state.reservation.privacy_proposal_id
+                )
+            except Exception:
+                pending = None
+            if pending is None or pending.prepared_case_digest != case_digest:
+                return SemanticEgressBlocked(
+                    request_id,
+                    PrivacyOutcome.AUDIT_FAILED,
+                    PrivacyReason.AUDIT_FAILED,
+                    privacy_proposal_id=state.reservation.privacy_proposal_id,
+                )
+            if pending.expires_at <= self._clock.now_utc():
+                return SemanticEgressBlocked(
+                    request_id,
+                    PrivacyOutcome.APPROVAL_EXPIRED,
+                    PrivacyReason.AUTHORIZATION_EXPIRED,
+                    privacy_proposal_id=state.reservation.privacy_proposal_id,
+                )
             return SemanticEgressAwaitingHuman(
                 request_id,
                 state.reservation.privacy_proposal_id,
                 state.reservation.subject_digest,
-                state.reservation.reserved_at + timedelta(seconds=60),
+                pending.expires_at,
             )
-        if status in {"denied", "expired", "decision_completed"}:
+        if status in {"denied", "decision_receipt_pending", "expired", "decision_completed"}:
             return SemanticEgressBlocked(
                 request_id,
                 PrivacyOutcome.HUMAN_DENIED
-                if status == "denied"
+                if status in {"denied", "decision_receipt_pending"}
                 else PrivacyOutcome.APPROVAL_EXPIRED
                 if status == "expired"
                 else PrivacyOutcome.BLOCKED_BY_POLICY,
                 PrivacyReason.HUMAN_DENIED
-                if status == "denied"
+                if status in {"denied", "decision_receipt_pending"}
                 else PrivacyReason.AUTHORIZATION_EXPIRED
                 if status == "expired"
                 else PrivacyReason.POLICY_DENIED,
@@ -791,7 +811,7 @@ class PrivacyCoordinator:
                 effective,
                 proposal,
                 minimized,
-                ConsentSource.BASELINE_POLICY,
+                ConsentSource.PER_REQUEST_LOCAL_HUMAN,
                 deadline,
                 subject_digest=state.reservation.subject_digest,
                 authorization=authorization,
@@ -802,7 +822,7 @@ class PrivacyCoordinator:
             effective,
             proposal,
             minimized,
-            ConsentSource.BASELINE_POLICY,
+            ConsentSource.PER_REQUEST_LOCAL_HUMAN,
             deadline,
             subject_digest=state.reservation.subject_digest,
             authority_digest=authority_digest,

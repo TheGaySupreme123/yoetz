@@ -29,6 +29,7 @@ from yoetz.ports.ledger import (
     OperationLease,
     SemanticAttemptHandle,
     SemanticAttemptRecord,
+    SemanticDisclosureWait,
     SemanticJobRecord,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef
@@ -256,9 +257,11 @@ class _FakeLedger:
     renew_count: int = 0
     claim_calls: int = 0
     disclosure_waits: list[tuple[str, str, datetime]] | None = None
+    resolved_disclosure_waits: set[str] | None = None
 
     def __post_init__(self) -> None:
         self.disclosure_waits = []
+        self.resolved_disclosure_waits = set()
         self.outcomes = []
         self.dispatches = []
         self.attempt_ids = []
@@ -285,6 +288,30 @@ class _FakeLedger:
         assert lease == self.lease
         assert job_id == self.job.job_id
         self.claim_calls += 1
+        assert self.attempts is not None
+        assert self.disclosure_waits is not None
+        assert self.resolved_disclosure_waits is not None
+        if (
+            self.job.state == "leased"
+            and self.job.active_attempt_id is not None
+            and self.disclosure_waits
+            and self.job.job_id not in self.resolved_disclosure_waits
+        ):
+            current = self.attempts[self.job.active_attempt_id]
+            return SemanticAttemptHandle(
+                job_id,
+                current.attempt_id,
+                current.attempt_ordinal,
+                current.provider_request_id,
+                lease.writer_id,
+                lease.operation_id,
+                lease.owner_generation,
+                lease.lease_owner_id,
+                current.attempt_ordinal,
+                lease.lease_expires_at,
+                lease.frontier,
+                lease.dependency_digest,
+            )
         ordinal = self.job.attempt_count + 1
         att = f"att_40000000-0000-4000-8000-{ordinal:012x}"
         req = f"req_40000000-0000-4000-8000-{ordinal:012x}"
@@ -313,7 +340,6 @@ class _FakeLedger:
         )
         assert self.attempt_ids is not None
         assert self.provider_ids is not None
-        assert self.attempts is not None
         self.attempt_ids.append(att)
         self.provider_ids.append(req)
         self.attempts[att] = SemanticAttemptRecord(job_id, att, ordinal, req, "started", None, None)
@@ -426,8 +452,39 @@ class _FakeLedger:
         pending_expires_at: datetime,
     ) -> object:
         assert self.disclosure_waits is not None
+        assert self.resolved_disclosure_waits is not None
         self.disclosure_waits.append((handle.attempt_id, pending_id, pending_expires_at))
+        self.resolved_disclosure_waits.discard(handle.job_id)
         return None
+
+    async def load_disclosure_wait(
+        self, writer_id: str, operation_id: str
+    ) -> SemanticDisclosureWait | None:
+        assert (writer_id, operation_id) == (_WRITER, _OP)
+        assert self.disclosure_waits is not None
+        assert self.resolved_disclosure_waits is not None
+        if not self.disclosure_waits:
+            return None
+        attempt_id, pending_id, pending_expires_at = self.disclosure_waits[-1]
+        resolved = _JOB in self.resolved_disclosure_waits
+        return SemanticDisclosureWait(
+            _JOB,
+            attempt_id,
+            writer_id,
+            operation_id,
+            pending_id,
+            pending_expires_at,
+            "resolved" if resolved else "awaiting",
+            datetime(2026, 1, 1, tzinfo=UTC) if resolved else None,
+        )
+
+    async def resolve_disclosure_wait(self, job_id: str) -> SemanticDisclosureWait:
+        assert job_id == _JOB
+        assert self.resolved_disclosure_waits is not None
+        self.resolved_disclosure_waits.add(job_id)
+        resolved = await self.load_disclosure_wait(_WRITER, _OP)
+        assert resolved is not None
+        return resolved
 
 
 @pytest.mark.anyio
@@ -1704,19 +1761,46 @@ async def test_confirm_every_request_repair_waits_for_a_fresh_decision() -> None
     # proposal. The repair attempt therefore surfaces a second awaiting_human wait bound to the
     # new attempt; the first decision is never reused and nothing is dispatched on its authority.
     ledger = _FakeLedger(_queued_job(), _lease())
+    first_wait = _AwaitingEval(
+        SemanticStatus.AWAITING_HUMAN,
+        SemanticReason.HUMAN_APPROVAL_REQUIRED,
+        _Continuation(
+            "ppr_40000000-0000-4000-8000-000000000003",
+            _ExpiresAt(datetime(2030, 1, 1, tzinfo=UTC)),
+        ),
+    )
     second_wait = _AwaitingEval(
         SemanticStatus.AWAITING_HUMAN,
         SemanticReason.HUMAN_APPROVAL_REQUIRED,
-        _Continuation("pnd_repair", _ExpiresAt(datetime(2030, 1, 1, tzinfo=UTC))),
+        _Continuation(
+            "ppr_40000000-0000-4000-8000-000000000004",
+            _ExpiresAt(datetime(2030, 1, 1, tzinfo=UTC)),
+        ),
+    )
+    first = await _run(ledger, [first_wait], max_retries=1)
+    assert first[:2] == (
+        SemanticStatus.AWAITING_HUMAN,
+        SemanticReason.HUMAN_APPROVAL_REQUIRED,
     )
     status, reason, accounting = await _run(ledger, [_INVALID, second_wait], max_retries=1)
-    assert ledger.dispatches is not None and len(ledger.dispatches) == 2
+    assert ledger.dispatches is not None and len(ledger.dispatches) == 3
     assert len(set(ledger.dispatches)) == 2
     assert (status, reason) == (
         SemanticStatus.AWAITING_HUMAN,
         SemanticReason.HUMAN_APPROVAL_REQUIRED,
     )
-    assert ledger.disclosure_waits == [(_ATT2, "pnd_repair", datetime(2030, 1, 1, tzinfo=UTC))]
+    assert ledger.disclosure_waits == [
+        (
+            _ATT1,
+            "ppr_40000000-0000-4000-8000-000000000003",
+            datetime(2030, 1, 1, tzinfo=UTC),
+        ),
+        (
+            _ATT2,
+            "ppr_40000000-0000-4000-8000-000000000004",
+            datetime(2030, 1, 1, tzinfo=UTC),
+        ),
+    ]
     # The repair attempt stays started and the job leased: an open wait, not a finished check.
     assert ledger.outcomes == [
         (_ATT1, AttemptOutcome.EXPIRED, SemanticReason.RESPONSE_CONTENT_INVALID)
@@ -1724,6 +1808,104 @@ async def test_confirm_every_request_repair_waits_for_a_fresh_decision() -> None
     assert ledger.attempts is not None and ledger.attempts[_ATT2].state == "started"
     assert ledger.job.state == "leased"
     assert accounting.attempted_count == 2
+    active_wait = await ledger.load_disclosure_wait(_WRITER, _OP)
+    assert active_wait is not None
+    assert active_wait.state == "awaiting"
+    assert active_wait.attempt_id == _ATT2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("terminal", "expected"),
+    (
+        (
+            _Eval(SemanticStatus.HUMAN_DENIED, SemanticReason.HUMAN_DENIED),
+            (SemanticStatus.HUMAN_DENIED, SemanticReason.HUMAN_DENIED),
+        ),
+        (
+            _Eval(
+                SemanticStatus.APPROVAL_EXPIRED,
+                SemanticReason.HUMAN_APPROVAL_EXPIRED,
+            ),
+            (SemanticStatus.APPROVAL_EXPIRED, SemanticReason.HUMAN_APPROVAL_EXPIRED),
+        ),
+        (
+            _Eval(
+                SemanticStatus.BLOCKED_BY_POLICY,
+                SemanticReason.POLICY_GENERATION_REVOKED,
+            ),
+            (SemanticStatus.BLOCKED_BY_POLICY, SemanticReason.POLICY_GENERATION_REVOKED),
+        ),
+    ),
+)
+async def test_wait_replay_terminalizes_the_same_attempt_and_resolves_one_use_state(
+    terminal: _Eval,
+    expected: tuple[SemanticStatus, SemanticReason],
+) -> None:
+    ledger = _FakeLedger(_queued_job(), _lease())
+    waiting = _AwaitingEval(
+        SemanticStatus.AWAITING_HUMAN,
+        SemanticReason.HUMAN_APPROVAL_REQUIRED,
+        _Continuation(
+            "ppr_40000000-0000-4000-8000-000000000005",
+            _ExpiresAt(datetime(2030, 1, 1, tzinfo=UTC)),
+        ),
+    )
+
+    first = await _run(ledger, [waiting], max_retries=2)
+    provider_request_id = ledger.provider_ids[0] if ledger.provider_ids is not None else None
+    assert first[:2] == (
+        SemanticStatus.AWAITING_HUMAN,
+        SemanticReason.HUMAN_APPROVAL_REQUIRED,
+    )
+
+    second = await _run(ledger, [terminal], max_retries=2)
+
+    assert second[:2] == expected
+    assert ledger.provider_ids == [provider_request_id]
+    assert ledger.attempt_ids == [_ATT1]
+    assert ledger.outcomes == [(_ATT1, AttemptOutcome.FAILED, terminal.reason)]
+    assert ledger.job.state == "failed"
+    resolved = await ledger.load_disclosure_wait(_WRITER, _OP)
+    assert resolved is not None and resolved.state == "resolved"
+
+
+@pytest.mark.anyio
+async def test_cancellation_after_wait_terminalizes_before_propagating_and_resolves_wait() -> None:
+    ledger = _FakeLedger(_queued_job(), _lease())
+    waiting = _AwaitingEval(
+        SemanticStatus.AWAITING_HUMAN,
+        SemanticReason.HUMAN_APPROVAL_REQUIRED,
+        _Continuation(
+            "ppr_40000000-0000-4000-8000-000000000006",
+            _ExpiresAt(datetime(2030, 1, 1, tzinfo=UTC)),
+        ),
+    )
+    await _run(ledger, [waiting], max_retries=0)
+
+    async def cancel_dispatch(handle: SemanticAttemptHandle, attempt_deadline: Deadline) -> _Eval:
+        del handle, attempt_deadline
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_durable_semantic_attempts(
+            ledger=ledger,
+            lease=ledger.lease,
+            job=ledger.job,
+            deadline=Deadline(datetime(2030, 1, 1, tzinfo=UTC), 1000.0),
+            max_retries=0,
+            now_monotonic=lambda: 0.0,
+            dispatch=cancel_dispatch,
+            publish_success_response=_publish_response,
+            sleep=lambda _: _async_noop(),
+            build_final=_build_tuple,
+        )
+
+    assert ledger.attempt_ids == [_ATT1]
+    assert ledger.outcomes == [(_ATT1, AttemptOutcome.FAILED, SemanticReason.COORDINATOR_FAILURE)]
+    assert ledger.job.state == "failed"
+    resolved = await ledger.load_disclosure_wait(_WRITER, _OP)
+    assert resolved is not None and resolved.state == "resolved"
 
 
 @pytest.mark.anyio

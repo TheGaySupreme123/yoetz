@@ -580,6 +580,13 @@ unavailable reconciliation capability, or activation/reconciliation failure is t
 `blocked_by_policy/scope_not_authorized`, with no provider construction, job, attempt, dispatch, or
 trusted-approval instruction. Neither suspension branch is committed as a terminal result.
 
+Bundle restart recovery reconstructs the pending check operation, semantic job, physical attempt,
+and disclosure wait as one resumable state. Restoring only the wait marker is insufficient: the
+attempt coordinator would have no job to reclaim and could not preserve the approved provider
+request identity. A denial, expiry, stale-authority result, or cancellation terminalizes the job
+and attempt first, then resolves the one-use wait; a crash between those writes recovers the
+terminal job and finishes the wait cleanup without dispatching or minting a replacement attempt.
+
 The agent-facing handoff preserves that state distinction. Both a missing standing repository grant
 and a one-use `confirm_every_request` decision are nonterminal `awaiting_human` continuations bound
 to the exact original check request id. The continuation kind distinguishes them: repository setup
