@@ -59,6 +59,17 @@ _REASONS: Final = frozenset(
         "drain_lease_contended",
         "drain_preflight_failed",
         "auto_attach_retry_failed",
+        # Why a consented SessionStart (or its turn-boundary retry) produced no
+        # mapping (#459). Before these, every auto-attach failure collapsed to a
+        # silent None, so an invalid request was indistinguishable from a
+        # daemon that was merely still starting.
+        "auto_attach_workspace_unbound",
+        "auto_attach_request_invalid",
+        "auto_attach_conflict",
+        "auto_attach_refused",
+        "auto_attach_result_invalid",
+        "auto_attach_mapping_write_failed",
+        "privacy_authority_required",
         "runtime_gate_contended",
         "runtime_gate_unsafe",
         "stdout_write_failed",

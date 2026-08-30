@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
 from yoetz.adapters.integrations.codex_marketplace import (
@@ -26,7 +26,16 @@ from yoetz.ports.integrations import (
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 
-__all__ = ["run_codex_plugin_command"]
+__all__ = ["CODEX_PLUGIN_COMMANDS", "run_codex_plugin_command"]
+
+# Codex activation is the digest-bound setup/recommendation ceremony (ADR-012);
+# the standalone plugin surface is inspection and removal only (issue #465).
+CODEX_PLUGIN_COMMANDS: Final = ("preview", "status", "remove")
+# Generic lifecycle commands the shared `integrate <host> plugin` group
+# registers for other hosts; refused here by name before binary discovery.
+_UNSUPPORTED_GENERIC_COMMANDS: Final = frozenset(
+    {"install", "update", "enable", "disable", "export"}
+)
 
 
 def _emit(value: dict[str, object], *, json_output: bool) -> None:
@@ -89,7 +98,13 @@ def run_codex_plugin_command(
 ) -> int:
     """Run one path-explicit Codex marketplace removal without ambient home inference."""
 
-    if harness != "codex" or command not in {"preview", "status", "remove"}:
+    if harness == "codex" and command in _UNSUPPORTED_GENERIC_COMMANDS:
+        sys.stderr.write(
+            f"codex_plugin_command_unsupported:{command} "
+            f"supported={','.join(CODEX_PLUGIN_COMMANDS)}\n"
+        )
+        return 2
+    if harness != "codex" or command not in CODEX_PLUGIN_COMMANDS:
         sys.stderr.write("codex_plugin_command_invalid\n")
         return 2
     if codex_home is None:
