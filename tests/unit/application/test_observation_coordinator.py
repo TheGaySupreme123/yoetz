@@ -44,7 +44,7 @@ from yoetz.domain.observation import (
     observation_ingest_request_from_json,
     observation_ingest_request_to_json,
 )
-from yoetz.domain.values import JsonObject, Timestamp, finding_id
+from yoetz.domain.values import Frontier, JsonObject, Timestamp, finding_id
 from yoetz.ports.ledger import CheckPhase, OperationKind, OperationRecord, OperationState
 from yoetz.ports.runtime import TaskRuntime
 from yoetz.protocol.canonical import canonical_encode
@@ -672,6 +672,7 @@ def test_frontier_motion_commit_mismatch_advances_emitted_range_and_clamps_merge
         peeked.delivery_identity,
         emitted_to_sequence=peeked.to_sequence,
         emitted_task_id=peeked.task_id,
+        emitted_head_digest=peeked.head_digest,
     )
     remainder = store.peek_frontier_motion(workspace, "race-session")
     assert remainder is not None
@@ -689,6 +690,7 @@ def test_frontier_motion_commit_mismatch_advances_emitted_range_and_clamps_merge
         head_digest="sha256:" + "1" * 64,
         observation_record_count=2,
         task_id="tsk-frontier-test",
+        lineage_frontier=Frontier(12, "sha256:" + "2" * 64),
     )
     assert store.peek_frontier_motion(workspace, "race-session") == remainder
 
@@ -770,6 +772,114 @@ def test_frontier_motion_renote_after_delivery_drops_replay_and_clamps_stale_fro
         105,
         13,
     )
+
+
+def test_frontier_motion_same_task_rewind_discards_delivered_mark(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    delivered_digest = "sha256:" + "c" * 64
+    rewound_digest = "sha256:" + "d" * 64
+    store.note_frontier_motion(
+        workspace,
+        "rewind-session",
+        from_sequence=220,
+        to_sequence=221,
+        head_digest=delivered_digest,
+        observation_record_count=1,
+        task_id="tsk-frontier-test",
+    )
+    delivered = store.peek_frontier_motion(workspace, "rewind-session")
+    assert delivered is not None
+    store.commit_frontier_motion_delivery(workspace, "rewind-session", delivered.delivery_identity)
+
+    reloaded = LocalObservationStore(_state=tmp_path)
+    reloaded.note_frontier_motion(
+        workspace,
+        "rewind-session",
+        from_sequence=0,
+        to_sequence=5,
+        head_digest=rewound_digest,
+        observation_record_count=5,
+        task_id="tsk-frontier-test",
+        lineage_frontier=Frontier(5, rewound_digest),
+    )
+    announced = reloaded.peek_frontier_motion(workspace, "rewind-session")
+    assert announced is not None
+    assert (announced.from_sequence, announced.to_sequence, announced.observation_record_count) == (
+        0,
+        5,
+        5,
+    )
+
+
+def test_frontier_motion_historical_replay_uses_actual_current_lineage(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    current_digest = "sha256:" + "c" * 64
+    store.note_frontier_motion(
+        workspace,
+        "historical-replay",
+        from_sequence=220,
+        to_sequence=221,
+        head_digest=current_digest,
+        observation_record_count=1,
+        task_id="tsk-frontier-test",
+    )
+    delivered = store.peek_frontier_motion(workspace, "historical-replay")
+    assert delivered is not None
+    store.commit_frontier_motion_delivery(
+        workspace, "historical-replay", delivered.delivery_identity
+    )
+
+    # A completed operation from sequence 81 may be reconstructed while the
+    # routed ledger is still at the delivered 221 head. The operation result's
+    # older digest is not itself evidence of a rewind.
+    store.note_frontier_motion(
+        workspace,
+        "historical-replay",
+        from_sequence=80,
+        to_sequence=81,
+        head_digest="sha256:" + "7" * 64,
+        observation_record_count=1,
+        task_id="tsk-frontier-test",
+        lineage_frontier=Frontier(221, current_digest),
+    )
+    assert store.peek_frontier_motion(workspace, "historical-replay") is None
+
+
+def test_frontier_motion_same_sequence_digest_divergence_discards_mark(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store.note_frontier_motion(
+        workspace,
+        "diverged-session",
+        from_sequence=4,
+        to_sequence=5,
+        head_digest="sha256:" + "1" * 64,
+        observation_record_count=1,
+        task_id="tsk-frontier-test",
+    )
+    delivered = store.peek_frontier_motion(workspace, "diverged-session")
+    assert delivered is not None
+    store.commit_frontier_motion_delivery(
+        workspace, "diverged-session", delivered.delivery_identity
+    )
+
+    diverged_digest = "sha256:" + "2" * 64
+    store.note_frontier_motion(
+        workspace,
+        "diverged-session",
+        from_sequence=4,
+        to_sequence=5,
+        head_digest=diverged_digest,
+        observation_record_count=1,
+        task_id="tsk-frontier-test",
+        lineage_frontier=Frontier(5, diverged_digest),
+    )
+    assert store.peek_frontier_motion(workspace, "diverged-session") is not None
 
 
 def test_frontier_motion_delivered_mark_is_scoped_to_the_announced_task(
@@ -947,32 +1057,137 @@ def test_frontier_motion_notices_ignore_malformed_and_prune_ended_sessions(
     assert (replayed.from_sequence, replayed.to_sequence) == (4, 5)
 
 
-def test_frontier_motion_notices_are_capped(tmp_path: Path) -> None:
+def test_frontier_motion_legacy_delivered_mark_fails_open(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    digest = "sha256:" + "b" * 64
+    store.note_frontier_motion(
+        workspace,
+        "legacy-delivered",
+        from_sequence=4,
+        to_sequence=5,
+        head_digest=digest,
+        observation_record_count=1,
+        task_id="tsk-frontier-test",
+    )
+    notice = store.peek_frontier_motion(workspace, "legacy-delivered")
+    assert notice is not None
+    store.commit_frontier_motion_delivery(workspace, "legacy-delivered", notice.delivery_identity)
+
+    state_path = store._workspace_path(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    legacy = raw["frontier_motion_delivered"]["legacy-delivered"]
+    del legacy["head_digest"]
+    del legacy["recency_ordinal"]
+    state_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    reloaded = LocalObservationStore(_state=tmp_path)
+    reloaded.note_frontier_motion(
+        workspace,
+        "legacy-delivered",
+        from_sequence=4,
+        to_sequence=5,
+        head_digest=digest,
+        observation_record_count=1,
+        task_id="tsk-frontier-test",
+    )
+    assert reloaded.peek_frontier_motion(workspace, "legacy-delivered") is not None
+
+
+def test_frontier_motion_notice_cap_preserves_lru_order_across_restart(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
     digest = "sha256:" + "6" * 64
-    over_cap = 257
-    for index in range(over_cap):
+    sessions = ("z-oldest", *(f"session-{index:03d}" for index in range(254)), "a-recent")
+    for index, session in enumerate(sessions):
         store.note_frontier_motion(
             workspace,
-            f"session-{index}",
+            session,
             from_sequence=index + 1,
             to_sequence=index + 2,
             head_digest=digest,
             observation_record_count=1,
             task_id="tsk-frontier-test",
         )
+
     reloaded = LocalObservationStore(_state=tmp_path)
-    surviving = [
-        session
-        for index in range(over_cap)
-        if (session := f"session-{index}")
-        and reloaded.peek_frontier_motion(workspace, session) is not None
-    ]
-    assert len(surviving) == over_cap - 1
-    assert "session-0" not in surviving
-    assert "session-256" in surviving
+    reloaded.note_frontier_motion(
+        workspace,
+        "overflow",
+        from_sequence=300,
+        to_sequence=301,
+        head_digest=digest,
+        observation_record_count=1,
+        task_id="tsk-frontier-test",
+    )
+    assert reloaded.peek_frontier_motion(workspace, "z-oldest") is None
+    assert reloaded.peek_frontier_motion(workspace, "a-recent") is not None
+    assert reloaded.peek_frontier_motion(workspace, "overflow") is not None
+
+
+def test_frontier_motion_delivered_cap_refreshes_recency_across_restart(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    task_id = "tsk-frontier-test"
+    for index in range(256):
+        session = f"delivered-{index:03d}"
+        digest = "sha256:" + f"{index + 1:064x}"
+        store.note_frontier_motion(
+            workspace,
+            session,
+            from_sequence=0,
+            to_sequence=1,
+            head_digest=digest,
+            observation_record_count=1,
+            task_id=task_id,
+        )
+        notice = store.peek_frontier_motion(workspace, session)
+        assert notice is not None
+        store.commit_frontier_motion_delivery(workspace, session, notice.delivery_identity)
+
+    # Consulting the oldest mark is activity and refreshes its LRU position.
+    refreshed_digest = "sha256:" + f"{1:064x}"
+    store.note_frontier_motion(
+        workspace,
+        "delivered-000",
+        from_sequence=0,
+        to_sequence=1,
+        head_digest=refreshed_digest,
+        observation_record_count=1,
+        task_id=task_id,
+        lineage_frontier=Frontier(1, refreshed_digest),
+    )
+
+    reloaded = LocalObservationStore(_state=tmp_path)
+    overflow_digest = "sha256:" + "f" * 64
+    reloaded.note_frontier_motion(
+        workspace,
+        "delivered-overflow",
+        from_sequence=0,
+        to_sequence=1,
+        head_digest=overflow_digest,
+        observation_record_count=1,
+        task_id=task_id,
+    )
+    overflow = reloaded.peek_frontier_motion(workspace, "delivered-overflow")
+    assert overflow is not None
+    reloaded.commit_frontier_motion_delivery(
+        workspace, "delivered-overflow", overflow.delivery_identity
+    )
+
+    raw = json.loads(
+        reloaded._workspace_path(workspace).read_text(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            encoding="utf-8"
+        )
+    )
+    delivered = raw["frontier_motion_delivered"]
+    assert len(delivered) == 256
+    assert "delivered-000" in delivered
+    assert "delivered-001" not in delivered
+    assert "delivered-overflow" in delivered
 
 
 def test_outbox_ack_does_not_clear_source_reported_overflow(tmp_path: Path) -> None:
@@ -2893,6 +3108,145 @@ def _mapped_local(
 
 
 @pytest.mark.anyio
+async def test_duplicate_ingest_reconstructed_append_detects_same_task_rewind(
+    tmp_path: Path,
+) -> None:
+    """Exercise issue #331 through DUPLICATE -> committed result -> local notice."""
+
+    from types import SimpleNamespace
+
+    import apsw
+
+    codex_id = "rewind-duplicate"
+    local, workspace, session, mapping = _mapped_local(tmp_path, codex_id)
+    delivered_digest = "sha256:" + "c" * 64
+    local.note_frontier_motion(
+        workspace,
+        codex_id,
+        from_sequence=220,
+        to_sequence=221,
+        head_digest=delivered_digest,
+        observation_record_count=1,
+        task_id=mapping.yoetz_task_id,
+    )
+    delivered = local.peek_frontier_motion(workspace, codex_id)
+    assert delivered is not None
+    local.commit_frontier_motion_delivery(workspace, codex_id, delivered.delivery_identity)
+
+    envelope = _envelope(session=session, identity="hook:rewound-duplicate")
+    batch = materialize_observation_envelope(envelope, task_id=mapping.yoetz_task_id)
+    assert batch.drafts
+    writer_id = observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id)
+    rewound_digest = "sha256:" + "d" * 64
+    canonical = canonical_encode(
+        {
+            "accepted": (
+                {
+                    "entry_digest": rewound_digest,
+                    "event_id": batch.drafts[0].draft.event_id,
+                    "ingestion_sequence": "5",
+                    "projection_status": "projected",
+                    "writer_sequence": "1",
+                },
+            ),
+            "result_frontier": {"head_digest": rewound_digest, "sequence": "5"},
+            "subject_frontier": {
+                "head_digest": "sha256:" + "a" * 64,
+                "sequence": "4",
+            },
+            "warnings": (),
+        }
+    )
+    existing = OperationRecord(
+        writer_id,
+        PREFIX_BY_KIND[IdKind.REQUEST] + str(uuid.uuid4()),
+        OperationKind.PUBLISH_WORK,
+        "sha256:" + "e" * 64,
+        OperationState.COMPLETE,
+        CheckPhase.TERMINAL,
+        None,
+        None,
+        None,
+        None,
+        None,
+        canonical,
+        "sha256:" + hashlib.sha256(canonical).hexdigest(),
+        None,
+        None,
+        datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    class _Ledger:
+        async def lookup_operation(self, looked_up_writer: str, operation_id: str):
+            del operation_id
+            assert looked_up_writer == writer_id
+            return existing
+
+        async def load_frontier(self) -> Frontier:
+            return Frontier(5, rewound_digest)
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": mapping.yoetz_task_id, "owner_generation": "1"})
+    observation = SqliteObservationStore(db)
+    observation.grant_consent(workspace, Timestamp("2026-01-01T00:00:00.000Z"))
+    observation.bind_session(workspace, session)
+    assert (await observation.ingest(envelope)).disposition is ObservationIngestDisposition.ACCEPTED
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=writer_id,
+        ledger=_Ledger(),
+        observation=observation,
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            assert released is runtime
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Coordinator(ObservationCoordinator):
+        async def _capture_content(  # type: ignore[override]
+            self, runtime: object, store: object, **kwargs: object
+        ) -> tuple[tuple[str, ...], bool]:
+            del runtime, store, kwargs
+            return ((), False)
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(codex_session_id=codex_id, envelope=envelope)
+    )
+
+    assert result.disposition is ObservationIngestDisposition.DUPLICATE
+    notice = local.peek_frontier_motion(workspace, codex_id)
+    assert notice is not None
+    assert (notice.from_sequence, notice.to_sequence, notice.head_digest) == (
+        4,
+        5,
+        rewound_digest,
+    )
+
+
+@pytest.mark.anyio
 async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path: Path) -> None:
     """Regression for issue #309 against the real SQLite claim repository.
 
@@ -3048,7 +3402,6 @@ async def test_later_stream_failure_correction_projection_policy(
         observation_operation_digest as _digest,
     )
     from yoetz.domain.events import ActionRecordedPayload, ResultRecordedPayload, encode_payload
-    from yoetz.domain.values import Frontier
     from yoetz.kernel.projections import ProjectionRecord, empty_projection_state
     from yoetz.ports.ledger import (
         AcceptedEventSummary,
@@ -3080,6 +3433,9 @@ async def test_later_stream_failure_correction_projection_policy(
     projection_state = [projection_mode]
 
     class _Ledger:
+        async def load_frontier(self) -> Frontier:
+            return Frontier(3, head)
+
         async def load_projection(
             self, loaded_session: str, view: object
         ) -> StoredProjection | None:

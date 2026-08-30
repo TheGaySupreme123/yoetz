@@ -2936,17 +2936,24 @@ The local observation state also owns a sparse, one-shot `FrontierMotionNotice` 
 A newly accepted observation append creates it. Idempotent replay of a completed append
 reconciles a missing pending notice from that append's committed frontier metadata; a still-pending
 notice is coalesced rather than duplicated. After the hook consumer receives the notice bytes, the
-store keeps that session's delivered high-water `to_sequence`, scoped to the announced task
-ledger. A later replay at or behind that mark is dropped; an overlapping candidate is clamped so
-`from` and record count cover only the undelivered remainder. A mark recorded for a different
-task never suppresses or clamps: when the session's mapping moves to another task, the stale
-mark and any pending notice for the old task are discarded and announcements restart from the
-new ledger's motion. The notice and delivered-mark maps are capped and drop ended-session
-entries before serialization; a malformed stored value is ignored as empty. Contiguous pending
+store keeps that session's delivered high-water frontier (`to_sequence` and `head_digest`), scoped
+to the announced task ledger. The coordinator binds every candidate to the routed ledger's actual
+current frontier so an older completed-operation result is still recognized as replay when the live
+head remains at or beyond the mark. An actual head below the mark, or at the same sequence with a
+different digest, proves the stored lineage was rewound: the mark and stale pending notice are
+discarded and announcement fails open from the new lineage. Otherwise a later replay at or behind
+the mark is dropped and an overlapping candidate is clamped so `from` and record count cover only
+the undelivered remainder. A mark recorded for a different task never suppresses or clamps: when
+the session's mapping moves to another task, the stale mark and any pending notice for the old task
+are discarded and announcements restart from the new ledger's motion. The notice and delivered-mark
+maps persist per-entry recency ordinals, drop ended-session entries first, and then evict the
+least-recently-used entry at their cap even after restart. A legacy delivered mark missing
+digest/recency identity or another malformed stored value is ignored as empty, failing open to a
+duplicate. Contiguous pending
 notices coalesce, and an advice-safe `PostToolUse` hook consumes the exact notice only after
 emitting its bounded agent context. If a later append merges into the pending notice between
 peek and commit, delivery identity no longer matches; commit still advances the delivered
-high-water to the peeked `to_sequence` and clamps the merged remainder so the already-emitted
+high-water to the peeked sequence/digest and clamps the merged remainder so the already-emitted
 range is not re-announced. This context is informational: it neither weakens
 exact-frontier checks nor expands the ADR-022 predicate that permits a cooperative publish to
 retain a stale frontier across observation-authored records.

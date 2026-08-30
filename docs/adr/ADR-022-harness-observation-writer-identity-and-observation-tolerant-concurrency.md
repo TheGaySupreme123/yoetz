@@ -134,21 +134,29 @@ unsupported claims and unbounded duplicate findings.
     notice for the originating Codex session. A retry of a completed append whose local notice
     write did not land reconstructs that notice from the committed append's frontier metadata.
     After the notice's bytes reach the hook consumer, the store retains that session's delivered
-    high-water `to_sequence`, scoped to the announced task ledger, so a later replay of the same
-    append is not re-announced. Candidates at or behind that mark are dropped; overlapping
-    candidates are clamped to the undelivered remainder so `from` and record count describe only
-    motion not yet announced. A mark recorded for a different task neither drops nor clamps:
-    when a session's mapping moves to another task, the stale mark and any pending notice for
-    the old task are discarded so the new ledger's motion is announced from its start. Contiguous
-    undelivered appends coalesce their from/to sequences and record count. The per-workspace
-    notice and delivered-mark maps are capped and drop ended-session entries before serialization.
+    high-water frontier (`to_sequence` plus `head_digest`), scoped to the announced task ledger,
+    so a later replay of the same append is not re-announced. The coordinator also supplies the
+    routed ledger's actual current frontier: a historical completed-operation replay may carry an
+    older result frontier while the current lineage is still at or beyond the delivered mark, so
+    the older result digest alone never proves a rewind. When the actual current sequence is below
+    the mark, or is at the same sequence with a different digest, the stored mark and stale pending
+    notice are discarded and announcement restarts from the rewound lineage. Otherwise candidates
+    at or behind the mark are dropped and overlapping candidates are clamped to the undelivered
+    remainder so `from` and record count describe only motion not yet announced. A mark recorded
+    for a different task likewise neither drops nor clamps: when a session's mapping moves to
+    another task, the stale mark and any pending notice for the old task are discarded so the new
+    ledger's motion is announced from its start. Contiguous undelivered appends coalesce their
+    from/to sequences and record count. The per-workspace notice and delivered-mark maps persist
+    per-entry recency ordinals, evict ended sessions first, then evict the least-recently-used entry
+    at the cap even after restart. A legacy delivered mark without frontier-digest and recency
+    identity is ignored, failing open to a duplicate rather than suppressing unknown lineage.
     A later advice-safe `PostToolUse` hook surfaces that the motion was hook-observed, explains
     that held cooperative publish frontiers remain admissible only across observation-authored
     motion, and directs callers to use repair facts when an operation still conflicts. The pending notice is
     removed only after its bytes reach the hook consumer. When a contiguous merge races that
     peek/commit window, identity mismatches; commit still advances the delivered high-water to
-    the peeked `to_sequence` and clamps the merged remainder rather than re-announcing the
-    emitted range. It grants no authority, changes no
+    the peeked frontier (sequence and digest) and clamps the merged remainder rather than
+    re-announcing the emitted range. It grants no authority, changes no
     optimistic-concurrency predicate, and adds no MCP operation.
 
 12. Paired `PostToolUse` materialization consumes every host-stated outcome fact: `exit_status`
