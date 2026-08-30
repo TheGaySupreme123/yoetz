@@ -79,9 +79,7 @@ def _profile() -> CodexAppServerProfile:
 
 def test_committed_compatibility_cell_matches_runtime_constants() -> None:
     root = Path(__file__).resolve().parents[4]
-    cell = json.loads(
-        (root / "support/codex-evaluator/0.150.1/cell.json").read_text("utf-8")
-    )
+    cell = json.loads((root / "support/codex-evaluator/0.150.1/cell.json").read_text("utf-8"))
     config = (root / "support/codex-evaluator/0.150.1/config.toml").read_bytes()
 
     assert cell["runtime_version"] == module.CODEX_EVALUATOR_RUNTIME_VERSION
@@ -163,7 +161,9 @@ def _case() -> ApprovedOutboundCase:
     )
 
 
-def _attempt(case: ApprovedOutboundCase) -> tuple[ProviderAttemptAuthBinding, ExternalRuntimeAuthority]:
+def _attempt(
+    case: ApprovedOutboundCase,
+) -> tuple[ProviderAttemptAuthBinding, ExternalRuntimeAuthority]:
     body_digest = module._sha256_bytes(  # pyright: ignore[reportPrivateUsage]
         case.payload
     )
@@ -216,8 +216,7 @@ class _Runtime:
                     "item": {
                         "type": "agentMessage",
                         "text": (
-                            '{"conclusion":"no_material_discrepancy",'
-                            '"reviewer_challenges":[]}'
+                            '{"conclusion":"no_material_discrepancy","reviewer_challenges":[]}'
                         ),
                     }
                 },
@@ -382,9 +381,9 @@ async def test_stale_capability_evidence_fails_before_child_launch_or_disclosure
     monkeypatch.setattr(module, "_launch", forbidden_launch)
     case = _case()
     binding, authority = _attempt(case)
-    result = await CodexAppServerEvaluator(
-        profile, binding, authority, StaleClock()
-    ).evaluate(case, Deadline(_NOW + timedelta(seconds=30), 30.0))
+    result = await CodexAppServerEvaluator(profile, binding, authority, StaleClock()).evaluate(
+        case, Deadline(_NOW + timedelta(seconds=30), 30.0)
+    )
 
     assert type(result) is SemanticResultUnavailable
     assert result.provenance.failure_class is SemanticFailureClass.UNSUPPORTED_PROFILE
@@ -578,9 +577,7 @@ async def test_structured_rate_limit_is_bounded_without_retaining_native_error(
         "params": {
             "error": {
                 "message": "account and native details must not survive",
-                "codexErrorInfo": {
-                    "responseStreamConnectionFailed": {"httpStatusCode": 429}
-                },
+                "codexErrorInfo": {"responseStreamConnectionFailed": {"httpStatusCode": 429}},
             }
         },
     }
@@ -642,9 +639,7 @@ def test_factory_binds_every_runtime_authority_field(
     binding, authority = _attempt(case)
     factory = CodexAppServerExternalFactory(_profile(), _Clock())
     factory.render(case)
-    commitment = RequestCommitment(
-        "hmac-sha256/yoetz-privacy-egress-request-v1", _COMMITMENT
-    )
+    commitment = RequestCommitment("hmac-sha256/yoetz-privacy-egress-request-v1", _COMMITMENT)
 
     evaluator = factory.build_evaluator(binding, authority, commitment)
 

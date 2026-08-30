@@ -621,12 +621,9 @@ class PayloadRef:
 def _locator_key_kind(schema: EventSchema) -> str:
     if schema.name not in EVENT_FAMILIES:
         return "none"
-    additive = (
-        schema == EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION)
-        or (
-            schema.name in {"check_recorded", "finding_recorded"}
-            and schema.version == SEMANTIC_EVENT_SCHEMA_VERSION
-        )
+    additive = schema == EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION) or (
+        schema.name in {"check_recorded", "finding_recorded"}
+        and schema.version == SEMANTIC_EVENT_SCHEMA_VERSION
     )
     if schema.version != SCHEMA_VERSION and not additive:
         return "none"

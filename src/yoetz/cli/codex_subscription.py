@@ -242,11 +242,7 @@ async def codex_subscription_setup(
                 raise ValueError("codex_login_browser_unavailable")
 
     status = await codex_login(profile, mode=login_mode, present_challenge=present)
-    if (
-        status.auth_mode != "chatgpt"
-        or not status.model_available
-        or status.cleanup == "failed"
-    ):
+    if status.auth_mode != "chatgpt" or not status.model_available or status.cleanup == "failed":
         raise ValueError("codex_subscription_readiness_unproven")
     target = _target_config_path(config_path)
     write_external_runtime_binding(binding, path=target, base=_base_config(target))
@@ -308,9 +304,7 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
     )
 
 
-async def codex_subscription_status(
-    *, config_path: Path | None = None
-) -> dict[str, JsonValue]:
+async def codex_subscription_status(*, config_path: Path | None = None) -> dict[str, JsonValue]:
     config = _base_config(config_path)
     binding = config.external_runtime
     if binding is None:
@@ -318,9 +312,7 @@ async def codex_subscription_status(
     return _safe_status(binding, await codex_account_status(_profile(binding)))
 
 
-async def codex_subscription_disconnect(
-    *, config_path: Path | None = None
-) -> dict[str, JsonValue]:
+async def codex_subscription_disconnect(*, config_path: Path | None = None) -> dict[str, JsonValue]:
     """Confirm Codex logout, then remove only the Yoetz binding."""
 
     target = _target_config_path(config_path)

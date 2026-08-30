@@ -2478,7 +2478,8 @@ def provider_codex_subscription_setup(
         bool, typer.Option("--switch-account", help="Log out the dedicated home before login.")
     ] = False,
     accept: Annotated[
-        bool, typer.Option("--accept", help="Explicitly accept the displayed destination/terms notice.")
+        bool,
+        typer.Option("--accept", help="Explicitly accept the displayed destination/terms notice."),
     ] = False,
     json_output: _JSON = False,
 ) -> None:
@@ -2560,7 +2561,9 @@ def provider_codex_subscription_disconnect(
 
     if not accept and (
         not (sys.stdin.isatty() and sys.stdout.isatty())
-        or not typer.confirm("Log out the dedicated evaluator home and remove its binding?", default=False)
+        or not typer.confirm(
+            "Log out the dedicated evaluator home and remove its binding?", default=False
+        )
     ):
         _finish(20)
         return

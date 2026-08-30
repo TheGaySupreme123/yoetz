@@ -1327,7 +1327,10 @@ class ProviderAttemptProvenance:
             raise ProtocolValueError("invalid_semantic_failure_class")
         if self.request_commitment is not None:
             validate_commitment(self.request_commitment)
-        if self.runtime_evidence is not None and type(self.runtime_evidence) is not RuntimeAttemptEvidence:
+        if (
+            self.runtime_evidence is not None
+            and type(self.runtime_evidence) is not RuntimeAttemptEvidence
+        ):
             raise ProtocolValueError("invalid_runtime_attempt_evidence")
 
 

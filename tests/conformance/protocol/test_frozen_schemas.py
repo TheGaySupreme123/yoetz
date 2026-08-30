@@ -200,8 +200,7 @@ def test_schema_registry_is_complete() -> None:
             else (
                 "1.2.0"
                 if path == "operations/status-result-1.2.0.schema.json"
-                else
-                "1.1.0"
+                else "1.1.0"
                 if path
                 in {
                     "config/yoetz-config-1.1.0.schema.json",
@@ -209,9 +208,9 @@ def test_schema_registry_is_complete() -> None:
                     "events/event-draft-1.1.0.schema.json",
                     "events/evidence-recorded-1.1.0.schema.json",
                     "events/finding-recorded-1.1.0.schema.json",
-                        "events/opaque-unknown-event-draft-1.1.0.schema.json",
-                        "events/session-opened-1.1.0.schema.json",
-                        "events/session-resumed-1.1.0.schema.json",
+                    "events/opaque-unknown-event-draft-1.1.0.schema.json",
+                    "events/session-opened-1.1.0.schema.json",
+                    "events/session-resumed-1.1.0.schema.json",
                     "findings/finding-1.1.0.schema.json",
                     "findings/semantic-provenance-1.1.0.schema.json",
                     "operations/check-result-1.1.0.schema.json",

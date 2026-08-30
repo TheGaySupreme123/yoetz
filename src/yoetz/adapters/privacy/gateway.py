@@ -673,12 +673,14 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             factory, "credential_authority", "yoetz_vault_api_credential"
         )
         if credential_authority == "external_runtime_oauth":
-            credential: ProviderCredentialHandle | ExternalRuntimeAuthority = ExternalRuntimeAuthority(
-                dispatch_id=dispatch_id,
-                request_body_digest=body_digest,
-                request_commitment=commitment,
-                service_generation=registry.service_generation,
-                monotonic_deadline=deadline.monotonic_deadline,
+            credential: ProviderCredentialHandle | ExternalRuntimeAuthority = (
+                ExternalRuntimeAuthority(
+                    dispatch_id=dispatch_id,
+                    request_body_digest=body_digest,
+                    request_commitment=commitment,
+                    service_generation=registry.service_generation,
+                    monotonic_deadline=deadline.monotonic_deadline,
+                )
             )
         elif credential_authority == "yoetz_vault_api_credential":
             try:

@@ -184,6 +184,7 @@ def _codex_subscription_record() -> ProviderDataUseRecord:
         profile=profile,
     )
 
+
 _CATALOG: Final = MappingProxyType(
     {
         "codex-chatgpt-subscription": _codex_subscription_record(),

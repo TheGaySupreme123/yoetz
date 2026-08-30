@@ -727,9 +727,7 @@ def _semantic_provenance_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonVal
     dispatch = cast(dict[str, JsonValue], properties["dispatch_kind"])
     dispatch["enum"] = ["external", "external_runtime_oauth", "local_model"]
     properties["runtime_evidence"] = {
-        "$ref": (
-            f"{SCHEMA_NAMESPACE}findings/runtime-attempt-evidence-1.0.0.schema.json"
-        )
+        "$ref": (f"{SCHEMA_NAMESPACE}findings/runtime-attempt-evidence-1.0.0.schema.json")
     }
     rules = cast(list[JsonValue], document["allOf"])
     rules[0] = {
@@ -798,7 +796,9 @@ def _check_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     branches.append(unknown)
     success = cast(dict[str, JsonValue], definitions["success"])
     success_props = cast(dict[str, JsonValue], success["properties"])
-    reason_enum = cast(list[JsonValue], cast(dict[str, JsonValue], success_props["semantic_reason"])["enum"])
+    reason_enum = cast(
+        list[JsonValue], cast(dict[str, JsonValue], success_props["semantic_reason"])["enum"]
+    )
     reason_enum.append("outcome_unknown")
     reason_enum.sort(key=cast(Callable[[JsonValue], bytes], lambda item: str(item).encode()))
     return document
@@ -827,7 +827,9 @@ def _check_recorded_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     cast(dict[str, JsonValue], constraint_props["reason"])["const"] = "outcome_unknown"
     branches.append(unknown)
     properties = cast(dict[str, JsonValue], document["properties"])
-    reason_enum = cast(list[JsonValue], cast(dict[str, JsonValue], properties["semantic_reason"])["enum"])
+    reason_enum = cast(
+        list[JsonValue], cast(dict[str, JsonValue], properties["semantic_reason"])["enum"]
+    )
     reason_enum.append("outcome_unknown")
     reason_enum.sort(key=cast(Callable[[JsonValue], bytes], lambda item: str(item).encode()))
     return document
@@ -2236,7 +2238,9 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "request_result",
         "semantic-provenance",
         lambda: (
-            __import__("yoetz.domain.findings", fromlist=["RuntimeAttemptEvidence"]).RuntimeAttemptEvidence
+            __import__(
+                "yoetz.domain.findings", fromlist=["RuntimeAttemptEvidence"]
+            ).RuntimeAttemptEvidence
         ),
     ),
     _RegistryEntry(

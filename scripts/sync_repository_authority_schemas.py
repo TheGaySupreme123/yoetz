@@ -465,9 +465,7 @@ def _documents() -> dict[Path, bytes]:
             "2.4.0",
             _with_id("control-hello-result", "2.0.0", _load("control-hello-result")),
         ),
-        ("control-request", "2.4.0"): _with_id(
-            "control-request", "2.4.0", _status_v23_request()
-        ),
+        ("control-request", "2.4.0"): _with_id("control-request", "2.4.0", _status_v23_request()),
         ("control-result", "2.4.0"): _semantic_provenance_v24_result(),
     }
     return {

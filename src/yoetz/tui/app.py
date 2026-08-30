@@ -1333,9 +1333,7 @@ class YoetzTui(App[int]):
             return
         executable, codex_home, model = values
         try:
-            preview = self.runtime.preview_codex_subscription(
-                executable, codex_home, model, effort
-            )
+            preview = self.runtime.preview_codex_subscription(executable, codex_home, model, effort)
         except RuntimeError_ as error:
             self._report(error)
             return
@@ -1367,9 +1365,7 @@ class YoetzTui(App[int]):
             return
         try:
             status = await self.hand_over_terminal(
-                lambda: self.runtime.setup_codex_subscription(
-                    executable, codex_home, model, effort
-                )
+                lambda: self.runtime.setup_codex_subscription(executable, codex_home, model, effort)
             )
         except SuspendNotSupported:
             self.say(
@@ -1396,9 +1392,7 @@ class YoetzTui(App[int]):
         )
         try:
             report = await self.hand_over_terminal(
-                lambda: self.runtime.run_privacy_setup(
-                    "assisted_review", offer_recommended=True
-                )
+                lambda: self.runtime.run_privacy_setup("assisted_review", offer_recommended=True)
             )
         except (SuspendNotSupported, RuntimeError_) as error:
             if isinstance(error, RuntimeError_):

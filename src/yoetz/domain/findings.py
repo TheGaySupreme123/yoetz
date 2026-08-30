@@ -774,9 +774,7 @@ def _runtime_attempt_evidence_from_json(value: JsonValue | None) -> RuntimeAttem
             "upstream_body_observability",
         }
     )
-    optional = frozenset(
-        {"auth_mode", "final_output_sha256", "plan_type", "thread_id", "turn_id"}
-    )
+    optional = frozenset({"auth_mode", "final_output_sha256", "plan_type", "thread_id", "turn_id"})
     source = _require_json_object(
         value,
         required=required,
@@ -786,16 +784,16 @@ def _runtime_attempt_evidence_from_json(value: JsonValue | None) -> RuntimeAttem
     if any(key in source and source[key] is None for key in optional):
         raise ProtocolValueError("runtime_attempt_evidence_json_shape_invalid")
     return RuntimeAttemptEvidence(
-        credential_authority=cast(Literal["external_runtime_oauth"], source["credential_authority"]),
+        credential_authority=cast(
+            Literal["external_runtime_oauth"], source["credential_authority"]
+        ),
         runtime_version=cast(str, source["runtime_version"]),
         runtime_source_identity=cast(str, source["runtime_source_identity"]),
         executable_sha256=cast(str, source["executable_sha256"]),
         app_server_schema_sha256=cast(str, source["app_server_schema_sha256"]),
         capability_cell_sha256=cast(str, source["capability_cell_sha256"]),
         capability_profile=cast(str, source["capability_profile"]),
-        capability_evidence_expires_at=cast(
-            str, source["capability_evidence_expires_at"]
-        ),
+        capability_evidence_expires_at=cast(str, source["capability_evidence_expires_at"]),
         launcher_sha256=cast(str, source["launcher_sha256"]),
         isolated_config_sha256=cast(str, source["isolated_config_sha256"]),
         disclosed_case_sha256=cast(str, source["disclosed_case_sha256"]),
@@ -810,9 +808,7 @@ def _runtime_attempt_evidence_from_json(value: JsonValue | None) -> RuntimeAttem
         reasoning_effort=cast(str, source["reasoning_effort"]),
         thread_id=cast(str | None, _optional_field(source, "thread_id")),
         turn_id=cast(str | None, _optional_field(source, "turn_id")),
-        final_output_sha256=cast(
-            str | None, _optional_field(source, "final_output_sha256")
-        ),
+        final_output_sha256=cast(str | None, _optional_field(source, "final_output_sha256")),
         case_disclosed=cast(bool, source["case_disclosed"]),
         turn_acknowledged=cast(bool, source["turn_acknowledged"]),
         process_cleanup=cast(
@@ -820,6 +816,8 @@ def _runtime_attempt_evidence_from_json(value: JsonValue | None) -> RuntimeAttem
             source["process_cleanup"],
         ),
     )
+
+
 _PROVENANCE_REQUIRED_KEYS: Final = frozenset(
     {
         "provider",

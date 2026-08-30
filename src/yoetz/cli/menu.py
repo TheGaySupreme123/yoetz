@@ -336,6 +336,7 @@ def _provider_menu() -> None:
         )
 
         if choice == "4":
+
             async def setup_subscription() -> object:
                 from yoetz.cli.setup import restart_service_for_semantic_composition
 

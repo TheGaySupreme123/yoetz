@@ -218,14 +218,14 @@ _PREDISCLOSURE_NOTIFICATION_METHODS: Final = frozenset(
     }
 )
 _LAUNCH_OVERRIDES: Final = (
-    'analytics.enabled=false',
+    "analytics.enabled=false",
     'approval_policy="never"',
-    'features.apps=false',
-    'features.hooks=false',
-    'features.memories=false',
-    'features.multi_agent=false',
-    'features.plugins=false',
-    'features.shell_tool=false',
+    "features.apps=false",
+    "features.hooks=false",
+    "features.memories=false",
+    "features.multi_agent=false",
+    "features.plugins=false",
+    "features.shell_tool=false",
     'forced_login_method="chatgpt"',
     'model_provider="openai"',
     'otel.environment="none"',
@@ -371,9 +371,10 @@ class CodexAppServerProfile:
         verify_private_local_bundle(self.codex_home)
         config_path = self.codex_home / "config.toml"
         config_bytes = config_path.read_bytes()
-        if config_bytes != CODEX_EVALUATOR_CONFIG.encode() or _sha256_bytes(
-            config_bytes
-        ) != self.isolated_config_sha256:
+        if (
+            config_bytes != CODEX_EVALUATOR_CONFIG.encode()
+            or _sha256_bytes(config_bytes) != self.isolated_config_sha256
+        ):
             raise ValueError("codex_runtime_config_changed")
 
 
@@ -534,6 +535,7 @@ async def _cleanup(
         return "not_started"
     process = runtime.process
     outcome: Literal["terminated", "killed", "failed"] = "terminated"
+
     def group_exists() -> bool:
         try:
             os.killpg(process.pid, 0)
@@ -578,7 +580,9 @@ async def _cleanup(
         except BaseException:
             pass
         expected_parent = runtime.profile.codex_home / "runtime"
-        if runtime.workdir.parent == expected_parent and runtime.workdir.name.startswith("attempt-"):
+        if runtime.workdir.parent == expected_parent and runtime.workdir.name.startswith(
+            "attempt-"
+        ):
             try:
                 shutil.rmtree(runtime.workdir)
             except OSError:
@@ -1090,9 +1094,9 @@ class CodexAppServerEvaluator:
         turn_id: str | None = None
         judgment = None
         final_output_sha256: str | None = None
-        failure: Literal[
-            "timeout", "post_ack_unknown", "invalid", "refused", "unavailable"
-        ] | None = None
+        failure: (
+            Literal["timeout", "post_ack_unknown", "invalid", "refused", "unavailable"] | None
+        ) = None
         failure_class = SemanticFailureClass.UNSUPPORTED_PROFILE
         raw_size = 0
         try:
@@ -1174,8 +1178,10 @@ class CodexAppServerEvaluator:
             messages = list(runtime.pending_notifications)
             runtime.pending_notifications.clear()
             for _ in range(_MAX_EVENT_COUNT):
-                message = messages.pop(0) if messages else await runtime.read(
-                    _remaining(deadline, self.clock)
+                message = (
+                    messages.pop(0)
+                    if messages
+                    else await runtime.read(_remaining(deadline, self.clock))
                 )
                 if "method" in message and "id" in message:
                     raise ValueError("codex_app_server_tool_request_forbidden")

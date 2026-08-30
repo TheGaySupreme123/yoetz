@@ -2324,6 +2324,7 @@ async def run_setup_wizard(
     }
     semantic_status: dict[str, JsonValue] | None = None
     if interactive and review_mode == "semantic":
+
         async def authorize_provider_channel() -> str | None:
             nonlocal privacy
             from yoetz.cli.privacy_setup import run_privacy_setup
