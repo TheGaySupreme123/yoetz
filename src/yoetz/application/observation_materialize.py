@@ -23,6 +23,10 @@ from yoetz.domain.events import (
     DecisionRecordedPayload,
     EventDraft,
     EventSchema,
+    EvidenceContentAvailability,
+    EvidenceDigestBinding,
+    EvidenceDigestProvenance,
+    EvidenceDigestSubject,
     EvidenceImmutability,
     EvidenceKind,
     EvidenceRecordedPayload,
@@ -31,18 +35,27 @@ from yoetz.domain.events import (
     encode_payload,
     media_type_for,
 )
-from yoetz.domain.observation import ObservationEnvelope, ObservationGapCode, ObservationSource
+from yoetz.domain.observation import (
+    ObservationContentKind,
+    ObservationContentManifest,
+    ObservationEnvelope,
+    ObservationGapCode,
+    ObservationInspectionSnapshot,
+    ObservationSource,
+)
 from yoetz.domain.values import (
     Actor,
     ActorType,
     JsonObject,
     JsonValue,
+    SubjectStateRef,
     Timestamp,
     action_id,
     actor_id,
     claim_id,
     event_id,
     evidence_id,
+    object_id,
     result_id,
 )
 from yoetz.protocol.canonical import request_digest
@@ -65,6 +78,7 @@ __all__ = [
     "STREAM_COMPLETED_EVENT_KINDS",
     "canonical_logical_identity",
     "materialize_observation_envelope",
+    "materialize_observation_inspection_snapshot",
     "materialize_observation_outcome_correction",
     "observation_claim_identity",
     "observation_writer_id",
@@ -72,8 +86,11 @@ __all__ = [
     "stream_event_is_completed_tool",
 ]
 
-MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.3.0"
-MATERIALIZATION_LEGACY_MAPPING_VERSIONS: Final = ("obs-ledger/1.2.0",)
+MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.4.0"
+MATERIALIZATION_LEGACY_MAPPING_VERSIONS: Final = (
+    "obs-ledger/1.3.0",
+    "obs-ledger/1.2.0",
+)
 # One bounded coverage condition for "the host emitted a paired tool result with
 # no outcome semantics at all" (#350). It rides the entry coverage of the
 # affected action/result records, so any number of outcome-less observed calls
@@ -121,6 +138,13 @@ STREAM_COMPLETED_EVENT_KINDS: Final = frozenset(
         "function_call_output",
         "item.completed",
         "item_completed",
+    }
+)
+_CAPTURED_EVIDENCE_KINDS: Final = frozenset(
+    {
+        ObservationContentKind.TOOL_OUTPUT,
+        ObservationContentKind.CHANGED_FILE,
+        ObservationContentKind.WORKSPACE_DIFF,
     }
 )
 
@@ -258,31 +282,49 @@ def _action_kind(tool: str | None) -> ActionKind:
     return ActionKind.OTHER
 
 
-def _coverage_for(envelope: ObservationEnvelope) -> Coverage:
-    if envelope.source is ObservationSource.CODEX_HOOK and not envelope.gap_codes:
+def _coverage_for(
+    envelope: ObservationEnvelope,
+    *,
+    gaps: tuple[str, ...] | None = None,
+    content_captured: bool = False,
+) -> Coverage:
+    effective_gaps = envelope.gap_codes if gaps is None else gaps
+    if (
+        envelope.source is ObservationSource.CODEX_HOOK
+        and not effective_gaps
+        and not content_captured
+    ):
         return coverage_for_channel(PublicationChannel.HOOK_OBSERVED)
     baseline = coverage_for_channel(PublicationChannel.HOOK_OBSERVED)
-    gaps = tuple(sorted({*baseline.known_gaps, *envelope.gap_codes}, key=str.encode))
+    known_gaps = tuple(sorted({*baseline.known_gaps, *effective_gaps}, key=str.encode))
     # Weaker honest coverage when gaps or stream-only evidence.
     observation = (
-        ArtifactObservation.HOOK_OBSERVED
+        ArtifactObservation.CONTENT_CAPTURED
+        if content_captured
+        else ArtifactObservation.HOOK_OBSERVED
         if envelope.source is ObservationSource.CODEX_HOOK
-        and ObservationGapCode.UNSUPPORTED_EVENT.value not in envelope.gap_codes
+        and ObservationGapCode.UNSUPPORTED_EVENT.value not in effective_gaps
         else ArtifactObservation.PUBLISHED_ONLY
     )
     authorship = (
         AuthorshipAssurance.HARNESS_OBSERVED
-        if observation is ArtifactObservation.HOOK_OBSERVED
+        if envelope.source is ObservationSource.CODEX_HOOK
+        and observation
+        in {ArtifactObservation.HOOK_OBSERVED, ArtifactObservation.CONTENT_CAPTURED}
         else AuthorshipAssurance.SERVICE_AUTHENTICATED
     )
     return Coverage(
         publication_channels=(PublicationChannel.HOOK_OBSERVED,),
         authorship_assurance=authorship,
         artifact_observation=observation,
-        evidence_immutability=baseline.evidence_immutability,
+        evidence_immutability=(
+            EvidenceImmutability.IMMUTABLE_SNAPSHOT
+            if content_captured
+            else baseline.evidence_immutability
+        ),
         ledger_freshness=baseline.ledger_freshness,
         check_types=baseline.check_types,
-        known_gaps=gaps,
+        known_gaps=known_gaps,
     )
 
 
@@ -293,6 +335,8 @@ def _draft(
     occurred_at: Timestamp,
     payload: object,
     parents: tuple[str, ...] = (),
+    artifact_refs: tuple[str, ...] = (),
+    evidence_refs: tuple[str, ...] = (),
     role: str,
 ) -> MaterializedObservationDraft:
     from yoetz.protocol.canonical import canonical_encode
@@ -307,8 +351,8 @@ def _draft(
         occurred_at,
         tuple(event_id(parent) for parent in parents),
         payload,  # pyright: ignore[reportArgumentType]
-        (),
-        (),
+        tuple(object_id(value) for value in artifact_refs),
+        tuple(evidence_id(value) for value in evidence_refs),
     )
     encoded = encode_payload(payload)  # pyright: ignore[reportArgumentType]
     return MaterializedObservationDraft(
@@ -319,10 +363,221 @@ def _draft(
     )
 
 
+def _eligible_captured_content(
+    envelope: ObservationEnvelope,
+    manifests: tuple[ObservationContentManifest, ...],
+) -> tuple[tuple[ObservationContentManifest, ...], tuple[str, ...]]:
+    """Select only service-bound content and name every missing eligible object honestly."""
+
+    by_object = {
+        item.object_id: item for item in manifests if type(item) is ObservationContentManifest
+    }
+    gaps = set(envelope.gap_codes)
+    eligible: list[ObservationContentManifest] = []
+    for ref in envelope.content_object_refs:
+        if not ref.startswith("obj_"):
+            continue
+        manifest = by_object.get(ref)
+        if manifest is None:
+            gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+            continue
+        if manifest.content_kind not in _CAPTURED_EVIDENCE_KINDS:
+            gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
+            continue
+        if manifest.content_digest is None or manifest.content_bytes is None:
+            gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
+            continue
+        if manifest.redacted:
+            gaps.add(ObservationGapCode.CONTENT_REDACTED.value)
+        eligible.append(manifest)
+    return (
+        tuple(sorted(eligible, key=lambda item: item.object_id.encode("ascii"))),
+        tuple(sorted(gaps, key=str.encode)),
+    )
+
+
+def _captured_evidence_drafts(
+    envelope: ObservationEnvelope,
+    *,
+    task_id: str,
+    manifests: tuple[ObservationContentManifest, ...],
+    parents: tuple[str, ...] = (),
+) -> tuple[tuple[MaterializedObservationDraft, ...], tuple[str, ...]]:
+    drafts: list[MaterializedObservationDraft] = []
+    refs: list[str] = []
+    for item in manifests:
+        source = f"{envelope.source_identity}:captured:{item.object_id}"
+        evidence = stable_observation_id(
+            kind=IdKind.EVIDENCE,
+            task_id=task_id,
+            source_identity=source,
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            role="captured_evidence",
+        )
+        event = stable_observation_id(
+            kind=IdKind.EVENT,
+            task_id=task_id,
+            source_identity=source,
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            role="captured_evidence_event",
+        )
+        refs.append(evidence)
+        drafts.append(
+            _draft(
+                event=event,
+                schema_name="evidence_recorded",
+                occurred_at=envelope.receipt_time,
+                payload=EvidenceRecordedPayload(
+                    evidence_id(evidence),
+                    EvidenceKind.OTHER,
+                    EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+                    envelope.receipt_time,
+                    captured_object_id=object_id(item.object_id),
+                    content_digest=item.content_digest,
+                    description=(
+                        f"Observation-captured {item.content_kind.value} bytes "
+                        f"part={item.part_index + 1}/{item.part_count}"
+                    ),
+                    digest_binding=EvidenceDigestBinding(
+                        subject=EvidenceDigestSubject.BOUNDED_EXCERPT,
+                        content_availability=EvidenceContentAvailability.CAPTURED,
+                        byte_count=cast(int, item.content_bytes),
+                        provenance=EvidenceDigestProvenance.OBSERVATION_CAPTURED,
+                    ),
+                ),
+                parents=parents,
+                artifact_refs=(item.object_id,),
+                role=(
+                    f"captured_{item.content_kind.value}_{item.part_index}_"
+                    f"{item.content_digest}"
+                ),
+            )
+        )
+    return tuple(drafts), tuple(refs)
+
+
+def materialize_observation_inspection_snapshot(
+    snapshot: ObservationInspectionSnapshot,
+    *,
+    task_id: str,
+) -> MaterializedObservationBatch:
+    """Materialize trusted inspection objects without exposing their captured bytes.
+
+    Inspection facts and excerpts are independently encrypted before this seam. The ledger binds
+    their exact secret-scanned plaintext digests and object identities, while descriptions remain
+    structural so observation intake does not silently become semantic-review egress.
+    """
+
+    baseline = coverage_for_channel(PublicationChannel.HOOK_OBSERVED)
+    if type(snapshot) is not ObservationInspectionSnapshot:
+        return MaterializedObservationBatch(
+            (), baseline, PublicationChannel.HOOK_OBSERVED, (), "invalid_inspection_snapshot"
+        )
+    subject_state = SubjectStateRef(
+        described_state=f"observation-inspection:{snapshot.subject_state_digest}"
+    )
+    candidates = (
+        (
+            "facts",
+            snapshot.facts_object_id,
+            snapshot.facts_content_digest,
+            snapshot.facts_content_bytes,
+            "Observation inspection facts snapshot",
+        ),
+        (
+            "excerpt",
+            snapshot.excerpt_object_id,
+            snapshot.excerpt_content_digest,
+            snapshot.excerpt_content_bytes,
+            "Observation inspection bounded excerpt snapshot",
+        ),
+    )
+    drafts: list[MaterializedObservationDraft] = []
+    for role, captured_object, content_digest, content_bytes, description in candidates:
+        if captured_object is None:
+            continue
+        source = f"inspection:{snapshot.snapshot_id}:{role}:{captured_object}"
+        evidence = stable_observation_id(
+            kind=IdKind.EVIDENCE,
+            task_id=task_id,
+            source_identity=source,
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            role=f"inspection_{role}",
+        )
+        event = stable_observation_id(
+            kind=IdKind.EVENT,
+            task_id=task_id,
+            source_identity=source,
+            mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            role=f"inspection_{role}_event",
+        )
+        drafts.append(
+            _draft(
+                event=event,
+                schema_name="evidence_recorded",
+                occurred_at=snapshot.recorded_at,
+                payload=EvidenceRecordedPayload(
+                    evidence_id=evidence_id(evidence),
+                    evidence_kind=EvidenceKind.OTHER,
+                    strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+                    observed_at=snapshot.recorded_at,
+                    captured_object_id=object_id(captured_object),
+                    content_digest=cast(str, content_digest),
+                    description=description,
+                    subject_state=subject_state,
+                    digest_binding=EvidenceDigestBinding(
+                        subject=EvidenceDigestSubject.BOUNDED_EXCERPT,
+                        content_availability=EvidenceContentAvailability.CAPTURED,
+                        byte_count=cast(int, content_bytes),
+                        provenance=EvidenceDigestProvenance.OBSERVATION_CAPTURED,
+                    ),
+                ),
+                artifact_refs=(captured_object,),
+                role=f"inspection_{role}",
+            )
+        )
+    if not drafts:
+        gap = ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value
+        coverage = Coverage(
+            publication_channels=baseline.publication_channels,
+            authorship_assurance=baseline.authorship_assurance,
+            artifact_observation=baseline.artifact_observation,
+            evidence_immutability=baseline.evidence_immutability,
+            ledger_freshness=baseline.ledger_freshness,
+            check_types=baseline.check_types,
+            known_gaps=tuple(sorted({*baseline.known_gaps, gap}, key=str.encode)),
+        )
+        return MaterializedObservationBatch(
+            (), coverage, PublicationChannel.HOOK_OBSERVED, (gap,), "inspection_content_unavailable"
+        )
+    inspection_gaps = set(baseline.known_gaps)
+    if snapshot.excerpt_redacted:
+        inspection_gaps.add(ObservationGapCode.CONTENT_REDACTED.value)
+    if snapshot.excerpt_truncated:
+        inspection_gaps.add(ObservationGapCode.TRUNCATED_PAYLOAD.value)
+    coverage = Coverage(
+        publication_channels=(PublicationChannel.HOOK_OBSERVED,),
+        authorship_assurance=AuthorshipAssurance.HARNESS_OBSERVED,
+        artifact_observation=ArtifactObservation.CONTENT_CAPTURED,
+        evidence_immutability=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        ledger_freshness=baseline.ledger_freshness,
+        check_types=baseline.check_types,
+        known_gaps=tuple(sorted(inspection_gaps, key=str.encode)),
+    )
+    return MaterializedObservationBatch(
+        tuple(drafts),
+        coverage,
+        PublicationChannel.HOOK_OBSERVED,
+        tuple(sorted(inspection_gaps, key=str.encode)),
+        None,
+    )
+
+
 def materialize_observation_envelope(
     envelope: ObservationEnvelope,
     *,
     task_id: str,
+    captured_content: tuple[ObservationContentManifest, ...] = (),
 ) -> MaterializedObservationBatch:
     """Map one envelope to zero or more ledger drafts.
 
@@ -339,8 +594,8 @@ def materialize_observation_envelope(
         )
 
     structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
-    gaps = tuple(envelope.gap_codes)
-    coverage = _coverage_for(envelope)
+    captured, gaps = _eligible_captured_content(envelope, captured_content)
+    coverage = _coverage_for(envelope, gaps=gaps, content_captured=bool(captured))
     channel = PublicationChannel.HOOK_OBSERVED
     mapping = envelope.cursor.mapping_version or MATERIALIZATION_MAPPING_VERSION
     kind = envelope.event_kind
@@ -376,7 +631,7 @@ def materialize_observation_envelope(
     routine_read = structural.get("action") == "routine_read"
 
     if kind == "PreToolUse":
-        if routine_read:
+        if routine_read and not captured:
             # The full envelope remains in the observation store. Successful read-only calls are
             # rate-limited at the task-ledger boundary rather than minting one pending action per
             # file lookup; a failed PostToolUse still materializes below.
@@ -423,6 +678,13 @@ def materialize_observation_envelope(
                 role="action",
             )
         )
+        captured_drafts, _captured_refs = _captured_evidence_drafts(
+            envelope,
+            task_id=task_id,
+            manifests=captured,
+            parents=(event,),
+        )
+        drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind == "PostToolUse":
@@ -431,7 +693,7 @@ def materialize_observation_envelope(
         # action/result identity and folded host_outcome_unavailable gap under
         # ADR-022 decision 12; treating UNKNOWN as a successful read would
         # discard that limitation before the materializer can record it.
-        if routine_read and _post_outcome(structural) is ResultOutcome.SUCCESS:
+        if routine_read and not captured and _post_outcome(structural) is ResultOutcome.SUCCESS:
             return MaterializedObservationBatch(
                 (), coverage, channel, gaps, "routine_read_coalesced"
             )
@@ -472,6 +734,13 @@ def materialize_observation_envelope(
                     role="unpaired_evidence",
                 )
             )
+            captured_drafts, _captured_refs = _captured_evidence_drafts(
+                envelope,
+                task_id=task_id,
+                manifests=captured,
+                parents=(event,),
+            )
+            drafts.extend(captured_drafts)
             merged_gaps = tuple(
                 sorted({*gaps, ObservationGapCode.UNPAIRED_EVENT.value}, key=str.encode)
             )
@@ -528,6 +797,13 @@ def materialize_observation_envelope(
                 role="action",
             )
         )
+        captured_drafts, captured_refs = _captured_evidence_drafts(
+            envelope,
+            task_id=task_id,
+            manifests=captured,
+            parents=(action_event,),
+        )
+        drafts.extend(captured_drafts)
         exit_status = _exit_status(structural)
         outcome = _post_outcome(structural)
         if outcome is ResultOutcome.UNKNOWN:
@@ -557,8 +833,15 @@ def materialize_observation_envelope(
                     outcome,
                     exit_status=exit_status,
                     summary=f"Observed result status={outcome.value}",
+                    evidence_refs=tuple(evidence_id(value) for value in captured_refs),
                 ),
-                parents=(action_event,),
+                parents=tuple(
+                    sorted(
+                        (action_event, *(item.draft.event_id for item in captured_drafts)),
+                        key=str.encode,
+                    )
+                ),
+                evidence_refs=captured_refs,
                 role="result",
             )
         )
@@ -591,6 +874,10 @@ def materialize_observation_envelope(
                 role="permission",
             )
         )
+        captured_drafts, _captured_refs = _captured_evidence_drafts(
+            envelope, task_id=task_id, manifests=captured, parents=(event,)
+        )
+        drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind in _SUBAGENT_START or kind in _SUBAGENT_STOP:
@@ -629,6 +916,10 @@ def materialize_observation_envelope(
                 role="subagent",
             )
         )
+        captured_drafts, _captured_refs = _captured_evidence_drafts(
+            envelope, task_id=task_id, manifests=captured, parents=(event,)
+        )
+        drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     explicit_claim_kind = structural.get("claim_kind")
@@ -663,6 +954,10 @@ def materialize_observation_envelope(
                 role="claim",
             )
         )
+        captured_drafts, _captured_refs = _captured_evidence_drafts(
+            envelope, task_id=task_id, manifests=captured, parents=(event,)
+        )
+        drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     if kind in _COMPLETION_KINDS or kind.endswith("Complete") or "claim" in kind.lower():
@@ -695,6 +990,10 @@ def materialize_observation_envelope(
                 role="completion_signal",
             )
         )
+        captured_drafts, _captured_refs = _captured_evidence_drafts(
+            envelope, task_id=task_id, manifests=captured, parents=(event,)
+        )
+        drafts.extend(captured_drafts)
         return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
     # Opaque structural observation for unrecognized but admitted kinds.
@@ -727,6 +1026,10 @@ def materialize_observation_envelope(
             role="opaque",
         )
     )
+    captured_drafts, _captured_refs = _captured_evidence_drafts(
+        envelope, task_id=task_id, manifests=captured, parents=(event,)
+    )
+    drafts.extend(captured_drafts)
     return MaterializedObservationBatch(tuple(drafts), coverage, channel, gaps, None)
 
 

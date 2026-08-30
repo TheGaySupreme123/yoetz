@@ -221,6 +221,12 @@ only from real observation evidence. `AdviceSnapshot` surfaces via nonblocking h
 path fails, use the ordinary manual resume/compaction procedure and cooperative publication; do not
 infer support from a different Codex version.
 
+For supported content-bearing Codex events, the ready service secret-scans and encrypts selected
+tool output, changed-file, and workspace-diff bytes before materializing their exact digest/object
+bindings as `observation_captured` ledger evidence. Inspection facts and bounded excerpts receive
+separate evidence records. This proves retained byte identity only; it is not an approved check,
+artifact verification, independent reproduction, or permission to send the bytes to a model.
+
 ### Legacy synchronous-hook latency
 
 Codex versions older than `0.148.0-alpha.6` use a synchronous `hooks spool` command for

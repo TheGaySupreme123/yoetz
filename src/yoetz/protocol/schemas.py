@@ -56,7 +56,7 @@ __all__ = [
 SCHEMA_NAMESPACE: Final = "https://schemas.yoetz.dev/0.1/"
 SCHEMA_MANIFEST_SCHEMA: Final = "yoetz.schema-manifest/1.0.0"
 SCHEMA_MANIFEST_VERSION: Final = "1.0.0"
-SCHEMA_MEMBER_COUNT: Final = 92
+SCHEMA_MEMBER_COUNT: Final = 94
 
 _DRAFT_2020_12: Final = "https://json-schema.org/draft/2020-12/schema"
 _SCHEMA_MEDIA_TYPE: Final = "application/schema+json"
@@ -1678,7 +1678,8 @@ def _selected_family_for(error: ValidationError) -> tuple[str, str] | None:
     never from the instance, so nothing caller-controlled can travel under either.
 
     The version travels with the name because a family may have several admitted versions
-    (``evidence_recorded`` has 1.0.0 and 1.1.0). A consumer that keys a per-family presentation
+    (``evidence_recorded`` has 1.0.0, 1.1.0, and 1.2.0). A consumer that keys a per-family
+    presentation
     branch on the name alone would answer a 1.1.0 failure with the 1.0.0 contract (issue #239).
     """
 

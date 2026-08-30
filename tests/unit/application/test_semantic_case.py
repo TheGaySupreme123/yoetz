@@ -58,7 +58,7 @@ from yoetz.domain.privacy import (
     ReviewSelectionPolicy,
 )
 from yoetz.domain.receipts import SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
-from yoetz.domain.values import EvidenceId, timestamp_from_string
+from yoetz.domain.values import EvidenceId, object_id, timestamp_from_string
 from yoetz.kernel.deterministic_checks import (
     CaseAvailabilityFacts,
     DeterministicCase,
@@ -432,6 +432,58 @@ def test_case_envelope_serializes_excerpt_digest_provenance() -> None:
     assert provenance["evidence_kind"] == "test_result"
     assert provenance["strength"] == "content_digest"
     assert "approval_commitment" not in provenance
+
+
+def test_observation_captured_excerpt_exposes_provenance_not_stored_object_bytes() -> None:
+    case = _case_with_material(with_evidence=True)
+    record = case.projection.evidence[evd(1)]
+    assert record.payload is not None
+    payload = EvidenceRecordedPayload(
+        evidence_id=record.payload.evidence_id,
+        evidence_kind=EvidenceKind.OTHER,
+        strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        observed_at=record.payload.observed_at,
+        captured_object_id=object_id("obj_00000000-0000-4000-8000-000000000302"),
+        content_digest="sha256:" + "3" * 64,
+        description="Observation-captured tool output bytes part=1/1",
+        digest_binding=EvidenceDigestBinding(
+            subject=EvidenceDigestSubject.BOUNDED_EXCERPT,
+            content_availability=EvidenceContentAvailability.CAPTURED,
+            byte_count=512,
+            provenance=EvidenceDigestProvenance.OBSERVATION_CAPTURED,
+        ),
+    )
+    observed = make_case(
+        plans=case.projection.plans,
+        obligations=case.projection.obligations,
+        claims=case.projection.claims,
+        evidence={evd(1): evidence_record(payload, 4)},
+        extra_refs=(clm(1), obl(1), evd(1)),
+    )
+    semantic = _build(
+        observed, ReviewContextProfile.ASSISTED, findings=_findings_for(observed)
+    )
+    excerpt = semantic.packet.targeted_excerpts[0]
+    item = next(row for row in semantic.items if row.item_id == excerpt.excerpt_item_id)
+    assert item.content == b"Observation-captured tool output bytes part=1/1"
+    assert b"captured-object-secret-marker" not in bounded_case_envelope(semantic)
+    assert excerpt.digest_provenance is not None
+    assert (
+        excerpt.digest_provenance.provenance
+        is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+    )
+    assert (
+        excerpt.digest_provenance.content_availability
+        is EvidenceContentAvailability.CAPTURED
+    )
+    document = strict_json_parse(bounded_case_envelope(semantic))
+    assert isinstance(document, Mapping)
+    packet = document["review_packet"]
+    assert isinstance(packet, Mapping)
+    rows = packet["targeted_excerpts"]
+    assert isinstance(rows, list) and rows
+    provenance = cast(Mapping[str, object], cast(Mapping[str, object], rows[0])["digest_provenance"])
+    assert provenance["provenance"] == "observation_captured"
 
 
 def test_assisted_legacy_digest_is_an_explicit_omission() -> None:

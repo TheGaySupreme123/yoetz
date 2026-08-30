@@ -16,7 +16,7 @@ from enum import Enum
 from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.events import (
-    EVIDENCE_SCHEMA_VERSION,
+    EVIDENCE_TYPED_SCHEMA_VERSION,
     PAYLOAD_TYPES,
     EventDraft,
     EventPayload,
@@ -1148,7 +1148,7 @@ def report_evidence_draft(
 ) -> EventDraft:
     return EventDraft(
         event_id=event_id(job.report_event_id),
-        schema=EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION),
+        schema=EventSchema("evidence_recorded", EVIDENCE_TYPED_SCHEMA_VERSION),
         occurred_at=observed_at,
         causal_parents=(),
         payload=EvidenceRecordedPayload(

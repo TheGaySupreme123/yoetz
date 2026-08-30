@@ -143,6 +143,11 @@ The skill name is `/yoetz:yoetz`. The MCP server is `plugin:yoetz:yoetz`, and ca
 
 ## Hooks and observation
 
+Claude Code remains structural-only for issue #302: the scoped hook path discards raw prompt,
+result, transcript, path, and error content before storage and therefore cannot mint
+`observation_captured` evidence. Any future content-bearing profile is a separate capability and
+privacy decision with its own fixture and consent proof.
+
 The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
 `PostToolUseFailure`, `Stop`, and `SessionEnd`. A bare MCP matcher is a negative control. Hooks call
 `yoetz hooks claude-observe` and are best-effort; timeouts/nonzero exits never authorize or block

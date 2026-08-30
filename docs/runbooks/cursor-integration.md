@@ -175,6 +175,11 @@ and keep each support claim bounded by its actual proof facets.
 
 ## Hooks and observation
 
+Cursor remains structural-only for issue #302: its native hooks retain digests and allowlisted
+outcome metadata but no captured content object, so they do not mint `observation_captured`
+evidence. Adding Cursor content capture requires a separately acknowledged capability/privacy
+expansion and exact host fixtures.
+
 The native IDE plugin advertises only `sessionStart`, `sessionEnd`, `afterMCPExecution`,
 `afterFileEdit`, and `stop` for the pinned local profile. It intentionally excludes
 `afterAgentThought`. The portable CLI artifact advertises no hooks. SDK fixture metadata advertises

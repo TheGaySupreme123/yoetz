@@ -8,6 +8,15 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Consented hook capture no longer stops at encrypted observation-store references. Eligible
+  secret-scanned tool output, selected changed-file bytes, workspace diffs, and bounded inspection
+  snapshots now materialize as immutable ledger evidence with exact object, digest, byte-count,
+  redaction/truncation limitations, and `observation_captured` provenance. Additive
+  `evidence_recorded/1.2.0` and
+  `outbound-case/1.1.0` contracts keep their prior versions frozen; migration 0008 leaves legacy
+  rows readable but weak when no inner-content binding exists. Capture remains distinct from
+  verification, reproduction, and egress authority (issue #302).
+
 - The native Cursor plugin's plugin-owned `mcp.json` now launches the exact Yoetz executable the
   plugin's hooks bind (the `/2` marker launcher) instead of a bare `yoetz` that Cursor's sanitized
   desktop PATH could resolve to an older ambient installation. `yoetz integrate cursor plugin

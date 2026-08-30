@@ -91,7 +91,8 @@ Flow for a typical task:
 
 1. **`start`** opens a task and issues a session and a writer identity.
 2. **`publish_work`** records bounded, participant-published facts: plan, obligations, claims,
-   actions, results, evidence. The participant publishes; Yoetz does not observe the workspace.
+   actions, results, evidence. On this cooperative path the participant publishes; Yoetz does not
+   infer observation or verification from those assertions.
 3. **`check`** runs the deterministic policy packs over the recorded state, producing findings with
    an exact coverage vector. If semantic review is configured and requested, an advisory
    provenance-labeled pass runs inside the privacy policy and is deterministically fenced.
@@ -99,6 +100,12 @@ Flow for a typical task:
    unresolved limitation. A response never erases a finding.
 5. **`receipt`** projects the honest summary: what was checked, at what coverage, what is still
    open. Available as `json`, `markdown`, or `text`.
+
+With separate project consent, first-party harness hooks may retain selected visible content as
+secret-scanned encrypted objects. The observation coordinator can materialize only eligible tool
+output, changed-file, diff, and bounded inspection objects as `observation_captured` immutable
+evidence. That path proves retention and byte identity, not correctness, reproduction, or egress
+authority; ordinary `publish_work` cannot self-award it.
 
 ## Determinism and honesty rules
 
@@ -125,6 +132,8 @@ One SQLite bundle per task holds structural rows; content-bearing material lives
 object store and is referenced by digest. Migrations under `migrations/` are append-only and CI
 enforces that ([ADR-003](adr/ADR-003-storage-sqlite-durability.md)). Recovery paths — backup,
 restore, migrate, quarantine — are documented in [`docs/runbooks/`](runbooks/).
+Observation migration 0008 adds only nullable digest/byte bindings for the secret-scanned inner
+content; it adds no plaintext column and leaves older unbound rows readable at weaker coverage.
 
 Catalog migration preserves accepted machine-policy bytes. It may consume only bounded
 pre-upgrade route or one first-repository entitlement to clone that authority into a narrower child
