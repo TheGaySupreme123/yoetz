@@ -9,9 +9,10 @@ import shlex
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol, cast
 
 from yoetz.adapters.integrations.codex_lifecycle import (
@@ -74,7 +75,7 @@ from yoetz.domain.values import (
 )
 from yoetz.ports.integrations import YOETZ_WORKFLOW_TOOL_NAMES
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
-from yoetz.protocol.errors import ProtocolValueError
+from yoetz.protocol.errors import ProtocolValueError, PublicErrorCode
 
 if TYPE_CHECKING:
     from yoetz.cli import hooks as hooks_cli
@@ -268,6 +269,71 @@ class _StartClient(Protocol):
     async def start(self, request: object, *, deadline_ms: int | None = None) -> object: ...
 
     async def close(self) -> None: ...
+
+
+type HookStartConnector = Callable[[ControlClientKind], Awaitable[_StartClient]]
+
+
+@dataclass(frozen=True, slots=True)
+class AutoAttachOutcome:
+    """Result of one consented auto-attach attempt.
+
+    Exactly one of the two fields is set: a start-derived mapping, or the closed
+    hook-diagnostic reason explaining why no mapping resulted (#459). A None
+    mapping without a reason is not a legal outcome.
+    """
+
+    mapping: LifecycleMapping | None
+    reason: str | None
+
+    def __post_init__(self) -> None:
+        if (self.mapping is None) == (self.reason is None):
+            raise ValueError("auto_attach_outcome_invalid")
+
+
+# Service-side `start` refusals, classified over the exhaustive public error
+# table into the closed hook-diagnostic vocabulary. Retry-later classes share
+# `service_unavailable` because the turn-boundary retry (#275) covers them; the
+# rest name a cause that a retry will not clear.
+_AUTO_ATTACH_ERROR_REASONS: Final[Mapping[PublicErrorCode, str]] = MappingProxyType(
+    {
+        PublicErrorCode.INVALID_REQUEST: "auto_attach_refused",
+        PublicErrorCode.PROTOCOL_VERSION_UNSUPPORTED: "auto_attach_refused",
+        PublicErrorCode.SESSION_NOT_FOUND: "auto_attach_refused",
+        PublicErrorCode.EVENT_INVALID: "auto_attach_refused",
+        PublicErrorCode.LIMIT_EXCEEDED: "auto_attach_refused",
+        PublicErrorCode.PROVIDER_REFUSED: "auto_attach_refused",
+        PublicErrorCode.SEMANTIC_RESULT_INVALID: "auto_attach_refused",
+        PublicErrorCode.SESSION_CONFLICT: "auto_attach_conflict",
+        PublicErrorCode.IDEMPOTENCY_CONFLICT: "auto_attach_conflict",
+        PublicErrorCode.REQUEST_IDENTITY_CONFLICT: "auto_attach_conflict",
+        PublicErrorCode.OPERATION_PENDING: "service_unavailable",
+        PublicErrorCode.FRONTIER_CONFLICT: "service_unavailable",
+        PublicErrorCode.BUNDLE_BUSY: "service_unavailable",
+        PublicErrorCode.MIGRATION_REQUIRED: "service_unavailable",
+        PublicErrorCode.SERVICE_UNAVAILABLE: "service_unavailable",
+        PublicErrorCode.PROVIDER_UNAVAILABLE: "service_unavailable",
+        PublicErrorCode.PROVIDER_TIMEOUT: "service_unavailable",
+        PublicErrorCode.CANCELLED: "service_unavailable",
+        PublicErrorCode.INTERNAL_ERROR: "service_unavailable",
+        PublicErrorCode.STORAGE_UNSAFE: "storage_unsafe",
+        PublicErrorCode.STORAGE_CORRUPT: "storage_corrupt",
+        PublicErrorCode.VAULT_LOCKED: "vault_locked",
+        PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED: "privacy_authority_required",
+    }
+)
+if set(_AUTO_ATTACH_ERROR_REASONS) != set(PublicErrorCode):
+    raise RuntimeError("auto_attach_error_reasons_not_exhaustive")
+
+# Transport-level failures over the closed ControlError reason set; reasons
+# absent here (a future addition) fall back to `service_unavailable`.
+_AUTO_ATTACH_CONTROL_REASONS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "vault_locked": "vault_locked",
+        "request_timeout": "timeout",
+        "privacy_projection_blocked": "privacy_authority_required",
+    }
+)
 
 
 def _now() -> Timestamp:
@@ -1150,22 +1216,33 @@ async def _try_auto_start(
     *,
     _state: Path | None,
     harness_id: Literal["claude", "codex", "cursor"] = "codex",
-) -> LifecycleMapping | None:
-    """Best-effort service start for consented SessionStart auto-attach.
+    workspace_locator: str | None,
+    connect: HookStartConnector | None = None,
+) -> AutoAttachOutcome:
+    """Service `start` for consented SessionStart auto-attach, or a typed reason.
+
+    The request carries the paired identity the start contract requires:
+    ``workspace_ref`` is the canonical workspace locator the hook already bound
+    consent to (the stable project identity), and ``external_ref`` is the
+    host-session identity. The service persists only HMAC commitments of both;
+    nothing here writes the raw locator. Without a locator there is no legal
+    request, so the attempt stops before any service call (#459).
 
     Honesty: when this succeeds the mapping is start-derived. When it fails, callers keep an
     observation session binding only — later MCP/CLI ``start`` can merge.
     """
 
-    from yoetz import __version__
-    from yoetz.ports.control import ControlClientKind
-    from yoetz.protocol.ids import IdKind, new_id
-    from yoetz.protocol.models import StartRequest
+    if workspace_locator is None:
+        return AutoAttachOutcome(None, "auto_attach_workspace_unbound")
 
-    connector = cast(Callable[[ControlClientKind], Awaitable[object]], _connect_service())
-    client = None
+    from pydantic import ValidationError
+
+    from yoetz import __version__
+    from yoetz.ports.control import ControlClientKind, ControlError
+    from yoetz.protocol.ids import IdKind, new_id
+    from yoetz.protocol.models import OperationFailureModel, StartRequest
+
     try:
-        client = cast("_StartClient", await connector(ControlClientKind.CLI))
         request = StartRequest.model_validate(
             {
                 "protocol_version": "0.1",
@@ -1183,31 +1260,60 @@ async def _try_auto_start(
                 "mode": "create_or_attach",
                 "task_title": f"{harness_id.title()} observation auto-attach",
                 "requested_view": "compact",
-                "session_id": None,
                 "external_ref": (
                     f"{harness_id}-session:{codex_session_id.removeprefix(f'{harness_id}:')}"
                 ),
-                "workspace_ref": None,
+                "workspace_ref": workspace_locator,
             }
         )
-        result = await client.start(request, deadline_ms=5_000)
-        branch = getattr(result, "root", result)
-        if getattr(branch, "ok", None) is not True:
-            return None
-        task_id = getattr(branch, "task_id", None)
-        session_id = getattr(branch, "session_id", None)
-        writer_id = getattr(branch, "writer_id", None)
-        if type(task_id) is not str or type(session_id) is not str or type(writer_id) is not str:
-            return None
-        frontier = getattr(branch, "frontier", None)
-        last_frontier = None
-        if frontier is not None:
-            sequence = getattr(frontier, "sequence", None)
-            digest = getattr(frontier, "head_digest", None)
-            if type(sequence) is str and type(digest) is str:
-                from yoetz.adapters.integrations.codex_lifecycle import encode_frontier_token
+    except ValidationError, ValueError, TypeError:
+        # An authoring defect in this function, never a runtime condition: it
+        # must be visible, not collapsed into an absent mapping.
+        return AutoAttachOutcome(None, "auto_attach_request_invalid")
 
+    connector = cast(HookStartConnector, _connect_service()) if connect is None else connect
+    client: _StartClient | None = None
+    try:
+        client = await connector(ControlClientKind.CLI)
+        result = await client.start(request, deadline_ms=5_000)
+    except ControlError as error:
+        return AutoAttachOutcome(
+            None, _AUTO_ATTACH_CONTROL_REASONS.get(error.reason, "service_unavailable")
+        )
+    except TimeoutError:
+        return AutoAttachOutcome(None, "timeout")
+    except Exception:
+        return AutoAttachOutcome(None, "service_unavailable")
+    finally:
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.close()
+
+    branch = getattr(result, "root", result)
+    if isinstance(branch, OperationFailureModel):
+        return AutoAttachOutcome(
+            None, _AUTO_ATTACH_ERROR_REASONS.get(branch.error.code, "auto_attach_refused")
+        )
+    if getattr(branch, "ok", None) is not True:
+        return AutoAttachOutcome(None, "auto_attach_result_invalid")
+    task_id = getattr(branch, "task_id", None)
+    session_id = getattr(branch, "session_id", None)
+    writer_id = getattr(branch, "writer_id", None)
+    if type(task_id) is not str or type(session_id) is not str or type(writer_id) is not str:
+        return AutoAttachOutcome(None, "auto_attach_result_invalid")
+    frontier = getattr(branch, "frontier", None)
+    last_frontier = None
+    if frontier is not None:
+        sequence = getattr(frontier, "sequence", None)
+        digest = getattr(frontier, "head_digest", None)
+        if type(sequence) is str and type(digest) is str:
+            from yoetz.adapters.integrations.codex_lifecycle import encode_frontier_token
+
+            try:
                 last_frontier = encode_frontier_token(sequence=sequence, head_digest=digest)
+            except Exception:
+                return AutoAttachOutcome(None, "auto_attach_result_invalid")
+    try:
         mapping = mapping_from_start_ids(
             codex_session_id=codex_session_id,
             yoetz_task_id=task_id,
@@ -1215,14 +1321,30 @@ async def _try_auto_start(
             yoetz_writer_id=writer_id,
             last_frontier=last_frontier,
         )
-        store_mapping(mapping, _state=_state)
-        return mapping
     except Exception:
-        return None
-    finally:
-        if client is not None:
-            with contextlib.suppress(Exception):
-                await client.close()
+        return AutoAttachOutcome(None, "auto_attach_result_invalid")
+    try:
+        store_mapping(mapping, _state=_state)
+    except Exception:
+        return AutoAttachOutcome(None, "auto_attach_mapping_write_failed")
+    return AutoAttachOutcome(mapping, None)
+
+
+def _record_auto_attach(
+    outcome: AutoAttachOutcome,
+    event_name: str,
+    *,
+    _state: Path | None,
+) -> LifecycleMapping | None:
+    """Surface a failed auto-attach as a payload-free diagnostic; return the mapping."""
+
+    if outcome.mapping is not None:
+        return outcome.mapping
+    reason = outcome.reason if outcome.reason is not None else "service_unavailable"
+    _stderr_line(f"hook_auto_attach_failed: {reason}")
+    with contextlib.suppress(Exception):
+        record_hook_diagnostic(reason, event_name, _state=_state)
+    return None
 
 
 def _note_dropped_event_gap(
@@ -1632,19 +1754,20 @@ def handle_observe(
                         if mapping is None and not skip_advice_loop:
                             if not skip_service:
 
-                                async def _attach() -> LifecycleMapping | None:
-                                    if harness_id == "codex":
-                                        return await _try_auto_start(
-                                            codex_session_id,
-                                            _state=_state,
-                                        )
+                                async def _attach() -> AutoAttachOutcome:
                                     return await _try_auto_start(
                                         codex_session_id,
                                         _state=_state,
                                         harness_id=harness_id,
+                                        workspace_locator=workspace_locator,
+                                        connect=cast(HookStartConnector | None, connect),
                                     )
 
-                                mapping = cast(LifecycleMapping | None, _resolve_runner()(_attach))
+                                mapping = _record_auto_attach(
+                                    cast(AutoAttachOutcome, _resolve_runner()(_attach)),
+                                    resolved_event,
+                                    _state=_state,
+                                )
                             if mapping is None:
                                 # Static advisory for the unattached binding: it needs no
                                 # service, so local-only mode still emits it (issue #280).
@@ -1739,17 +1862,15 @@ def handle_observe(
                     mapping = load_mapping(codex_session_id, _state=_state)
                     if mapping is None:
 
-                        async def _attach_retry() -> LifecycleMapping | None:
+                        async def _attach_retry() -> AutoAttachOutcome:
                             import asyncio
 
-                            attach = (
-                                _try_auto_start(codex_session_id, _state=_state)
-                                if harness_id == "codex"
-                                else _try_auto_start(
-                                    codex_session_id,
-                                    _state=_state,
-                                    harness_id=harness_id,
-                                )
+                            attach = _try_auto_start(
+                                codex_session_id,
+                                _state=_state,
+                                harness_id=harness_id,
+                                workspace_locator=workspace_locator,
+                                connect=cast(HookStartConnector | None, connect),
                             )
                             return await asyncio.wait_for(
                                 attach,
@@ -1757,18 +1878,18 @@ def handle_observe(
                             )
 
                         try:
-                            mapping = cast(
-                                LifecycleMapping | None, _resolve_runner()(_attach_retry)
-                            )
+                            outcome = cast(AutoAttachOutcome, _resolve_runner()(_attach_retry))
+                        except TimeoutError:
+                            outcome = AutoAttachOutcome(None, "timeout")
                         except Exception:
+                            outcome = AutoAttachOutcome(None, "service_unavailable")
+                        mapping = _record_auto_attach(outcome, resolved_event, _state=_state)
+                        if mapping is None:
+                            # The retry marker names the path; the typed reason
+                            # above names the cause.
                             record_hook_diagnostic(
                                 "auto_attach_retry_failed", resolved_event, _state=_state
                             )
-                        else:
-                            if mapping is None:
-                                record_hook_diagnostic(
-                                    "auto_attach_retry_failed", resolved_event, _state=_state
-                                )
 
         if not skip_service and resolved_event != "SessionStart":
             # Every later mapped hook drains the complete session outbox, so the

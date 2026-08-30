@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from yoetz.application.recommendations import (
     RECOMMENDED_DEFAULTS,
     RecommendationContext,
     RecommendationStoreError,
+    RecommendationTarget,
     cached_pending_recommendations,
     decline_cached_recommendation,
     evaluate_recommendation_context,
@@ -24,6 +26,47 @@ from yoetz.application.recommendations import (
 _NOW = datetime(2026, 8, 12, 9, 30, tzinfo=UTC)
 
 
+def _target_from_fields(fields: dict[str, str]) -> RecommendationTarget:
+    target_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(fields, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+    )
+    return RecommendationTarget(target_digest=target_digest, **fields)
+
+
+def _activation_target(seed: str) -> RecommendationTarget:
+    values = [f"sha256:{character * 64}" for character in seed[:5]]
+    return _target_from_fields(
+        {
+            "executable_path_digest": values[0],
+            "executable_digest": values[1],
+            "codex_version": "0.148.0",
+            "codex_home_digest": values[2],
+            "activation_preview_digest": values[3],
+            "plugin_install_digest": values[4],
+        }
+    )
+
+
+def _rebound_target(
+    target: RecommendationTarget, *, home: str | None = None, preview: str | None = None
+) -> RecommendationTarget:
+    return _target_from_fields(
+        {
+            "executable_path_digest": target.executable_path_digest,
+            "executable_digest": target.executable_digest,
+            "codex_version": target.codex_version,
+            "codex_home_digest": target.codex_home_digest if home is None else home,
+            "activation_preview_digest": (
+                target.activation_preview_digest if preview is None else preview
+            ),
+            "plugin_install_digest": target.plugin_install_digest,
+        }
+    )
+
+
 def _newer() -> PackageUpdateAdvisory:
     return build_package_update_advisory(
         installed_version="0.1.0", latest_version="0.2.0", source="cache"
@@ -32,10 +75,12 @@ def _newer() -> PackageUpdateAdvisory:
 
 @pytest.mark.anyio
 async def test_registry_evaluates_all_three_recommended_defaults(tmp_path: Path) -> None:
+    target = _activation_target("abcdef")
     state = await refresh_pending(
         context=RecommendationContext(
             observation_enabled=False,
             codex_activation_state="installed_not_activated",
+            codex_activation_target=target,
             package_update=_newer(),
         ),
         root=tmp_path,
@@ -46,15 +91,18 @@ async def test_registry_evaluates_all_three_recommended_defaults(tmp_path: Path)
     assert [item.id for item in cached_pending_recommendations(root=tmp_path)] == list(
         state.pending
     )
+    assert state.pending_targets == {"codex-plugin-activation": target}
     store = tmp_path / "recommendations.json"
     assert stat.S_IMODE(store.stat().st_mode) == 0o600
 
 
 @pytest.mark.anyio
 async def test_decline_is_remembered_across_release_frontiers(tmp_path: Path) -> None:
+    target = _activation_target("abcdef")
     context = RecommendationContext(
         observation_enabled=True,
         codex_activation_state="installed_not_activated",
+        codex_activation_target=target,
     )
     await refresh_pending(context=context, root=tmp_path, version="0.1.0")
     declined = record_recommendation_decision(
@@ -63,13 +111,248 @@ async def test_decline_is_remembered_across_release_frontiers(tmp_path: Path) ->
         root=tmp_path,
         version="0.1.0",
         now=_NOW,
+        target=target,
     )
     assert declined.pending == ()
 
     reevaluated = await refresh_pending(context=context, root=tmp_path, version="0.2.0")
 
     assert reevaluated.pending == ()
-    assert reevaluated.decisions["codex-plugin-activation"].decision == "declined"
+    assert next(iter(reevaluated.decisions.values())).decision == "declined"
+
+
+@pytest.mark.anyio
+async def test_activation_acceptance_is_exact_target_and_drift_bound(tmp_path: Path) -> None:
+    first_target = _activation_target("abcde")
+    second_home = _rebound_target(first_target, home="sha256:" + ("1" * 64))
+    drifted_first_target = _rebound_target(first_target, preview="sha256:" + ("2" * 64))
+    context = RecommendationContext(
+        codex_activation_state="installed_not_activated",
+        codex_activation_target=first_target,
+    )
+    await refresh_pending(context=context, root=tmp_path, version="0.1.0", force=True)
+    accepted = record_recommendation_decision(
+        "codex-plugin-activation",
+        "accepted",
+        root=tmp_path,
+        version="0.1.0",
+        now=_NOW,
+        target=first_target,
+    )
+    assert accepted.pending == ()
+
+    same_inactive = await refresh_pending(
+        context=context, root=tmp_path, version="0.1.0", force=True
+    )
+    assert same_inactive.pending == ("codex-plugin-activation",)
+
+    active = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="active",
+            codex_activation_target=None,
+        ),
+        root=tmp_path,
+        version="0.1.0",
+        force=True,
+    )
+    assert active.pending == ()
+
+    other = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="installed_not_activated",
+            codex_activation_target=second_home,
+        ),
+        root=tmp_path,
+        version="0.1.0",
+        force=True,
+    )
+    assert other.pending == ("codex-plugin-activation",)
+    assert other.pending_targets["codex-plugin-activation"] == second_home
+
+    drifted = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="installed_not_activated",
+            codex_activation_target=drifted_first_target,
+        ),
+        root=tmp_path,
+        version="0.1.0",
+        force=True,
+    )
+    assert drifted.pending == ("codex-plugin-activation",)
+    assert drifted.pending_targets["codex-plugin-activation"] == drifted_first_target
+
+
+@pytest.mark.anyio
+async def test_foreign_or_nonpreviewable_activation_clears_stale_advice(tmp_path: Path) -> None:
+    target = _activation_target("abcde")
+    await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="installed_not_activated",
+            codex_activation_target=target,
+        ),
+        root=tmp_path,
+        force=True,
+    )
+
+    foreign = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="foreign",
+            codex_activation_target=None,
+        ),
+        root=tmp_path,
+        force=True,
+    )
+    assert foreign.pending == ()
+
+    nonpreviewable = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="installed_not_activated",
+            codex_activation_target=None,
+        ),
+        root=tmp_path,
+        force=True,
+    )
+    assert nonpreviewable.pending == ()
+
+
+def test_activation_decision_history_is_bounded_without_losing_current_decision(
+    tmp_path: Path,
+) -> None:
+    base = _activation_target("abcde")
+    accepted_targets: list[RecommendationTarget] = []
+    for index in range(12):
+        target = _rebound_target(base, preview=f"sha256:{index:064x}")
+        accepted_targets.append(target)
+        record_recommendation_decision(
+            "codex-plugin-activation",
+            "accepted",
+            root=tmp_path,
+            now=_NOW + timedelta(seconds=index),
+            target=target,
+        )
+    accepted = load_recommendation_state(root=tmp_path)
+    accepted_rows = [row for row in accepted.decisions.values() if row.decision == "accepted"]
+    assert len(accepted_rows) == 8
+    assert {row.target for row in accepted_rows} == set(accepted_targets[-8:])
+
+    declined_targets: list[RecommendationTarget] = []
+    for index in range(24):
+        target = _rebound_target(base, home=f"sha256:{index + 100:064x}")
+        declined_targets.append(target)
+        record_recommendation_decision(
+            "codex-plugin-activation",
+            "declined",
+            root=tmp_path,
+            now=_NOW + timedelta(minutes=index),
+            target=target,
+        )
+    full = load_recommendation_state(root=tmp_path)
+    declined_rows = [row for row in full.decisions.values() if row.decision == "declined"]
+    assert len(full.decisions) == 24
+    assert len(declined_rows) == 16
+    assert {row.target for row in declined_rows} == set(declined_targets[-16:])
+
+    current = _rebound_target(base, home="sha256:" + ("f" * 64))
+    record_recommendation_decision(
+        "codex-plugin-activation",
+        "declined",
+        root=tmp_path,
+        now=_NOW - timedelta(days=1),
+        target=current,
+    )
+    bounded = load_recommendation_state(root=tmp_path)
+    assert len(bounded.decisions) == 24
+    assert any(row.target == current for row in bounded.decisions.values())
+
+
+@pytest.mark.anyio
+async def test_activation_decline_is_target_aware_and_active_target_stays_quiet(
+    tmp_path: Path,
+) -> None:
+    declined_target = _activation_target("abcde")
+    other_target = _activation_target("12345")
+    await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="installed_not_activated",
+            codex_activation_target=declined_target,
+        ),
+        root=tmp_path,
+        version="0.1.0",
+        force=True,
+    )
+    decline_cached_recommendation(
+        "codex-plugin-activation", root=tmp_path, version="0.1.0", now=_NOW
+    )
+
+    declined = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="installed_not_activated",
+            codex_activation_target=declined_target,
+        ),
+        root=tmp_path,
+        version="0.2.0",
+        force=True,
+    )
+    assert declined.pending == ()
+
+    other = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="installed_not_activated",
+            codex_activation_target=other_target,
+        ),
+        root=tmp_path,
+        version="0.2.0",
+        force=True,
+    )
+    assert other.pending == ("codex-plugin-activation",)
+
+    active = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="active",
+            codex_activation_target=other_target,
+        ),
+        root=tmp_path,
+        version="0.2.0",
+        force=True,
+    )
+    assert active.pending == ()
+
+
+@pytest.mark.anyio
+async def test_legacy_global_activation_decision_never_suppresses_exact_target(
+    tmp_path: Path,
+) -> None:
+    legacy: dict[str, object] = {
+        "schema": "yoetz.recommendations/1",
+        "last_evaluated_version": "0.1.0",
+        "decisions": {
+            "codex-plugin-activation": {
+                "decision": "accepted",
+                "decided_at": "2026-08-12T09:30:00Z",
+                "version": "0.1.0",
+            }
+        },
+        "pending": ["codex-plugin-activation"],
+    }
+    path = tmp_path / "recommendations.json"
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    path.chmod(0o600)
+    assert load_recommendation_state(root=tmp_path).pending == ()
+
+    target = _activation_target("abcde")
+    refreshed = await refresh_pending(
+        context=RecommendationContext(
+            codex_activation_state="installed_not_activated",
+            codex_activation_target=target,
+        ),
+        root=tmp_path,
+        version="0.1.0",
+        force=True,
+    )
+
+    assert refreshed.pending == ("codex-plugin-activation",)
+    assert refreshed.pending_targets["codex-plugin-activation"] == target
+    assert json.loads(path.read_text(encoding="utf-8"))["schema"] == "yoetz.recommendations/2"
 
 
 @pytest.mark.anyio

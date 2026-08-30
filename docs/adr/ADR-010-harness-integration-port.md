@@ -128,6 +128,20 @@ The through-line is that "Codex is first" had been encoded as "Codex is the only
    coalescing/loop, gap, and failure behavior from an installed-artifact run before a cell advertises
    either arm. Unproven cells remain `None`.
 
+   **Exact-worktree Codex dogfood parity amendment (2026-08-29, issue #464).** A retained Codex
+   dogfood cell may not start substantive model work until the exact disposable Git root, candidate
+   package, launcher, executable/home, route, plugin source/inventory/cache/activation, and that
+   root's independent observation consent all pass the executable parity gate in
+   `scripts/check_codex_dogfood_parity.py`. Primary-checkout consent and normal-target activation
+   never transfer. `installed_not_activated` is a failed preflight with the exact-target
+   recommendation recovery path; missing consent is blocked with the trusted local grant path.
+   After launch, skill delivery, a correlated model-issued MCP call, advertised hook events,
+   mapping, accepted envelopes, drain, advertised session-stream reconciliation, semantic
+   provenance, receipt, influence scope, rollback, and unchanged normal state remain separate
+   cells. Unsupported and not-run states stay explicit and cannot be aggregated into green. Any
+   performed or failed cell must be placed in scope; an out-of-scope pass, failure, or block makes
+   the report invalid instead of silently disappearing from aggregation.
+
    The current Codex `0.144.5` capability candidate exposes `PreToolUse`, `PermissionRequest`,
    `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
    `SubagentStop`, and `Stop`. This inventory nominates candidates but does not freeze support:

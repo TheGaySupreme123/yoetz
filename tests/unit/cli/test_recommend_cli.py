@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tomllib
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -7,6 +9,7 @@ from types import MappingProxyType, SimpleNamespace
 import anyio
 from typer.testing import CliRunner
 
+import yoetz.cli.recommend as recommend_module
 from yoetz.application.package_update import (
     build_package_update_advisory,
     installed_package_version,
@@ -15,7 +18,9 @@ from yoetz.application.recommendations import (
     RecommendationContext,
     RecommendationState,
     RecommendationStoreError,
+    RecommendationTarget,
     load_recommendation_state,
+    record_recommendation_decision,
     refresh_pending,
     store_recommendation_state,
 )
@@ -25,6 +30,28 @@ from yoetz.config.write import write_config_toml
 from yoetz.ports.integrations import IntegrationTarget
 
 _RUNNER = CliRunner()
+
+
+def _activation_target(seed: str = "abcdef") -> RecommendationTarget:
+    values = [f"sha256:{character * 64}" for character in seed[:5]]
+    fields = {
+        "executable_path_digest": values[0],
+        "executable_digest": values[1],
+        "codex_version": "0.148.0-alpha.6",
+        "codex_home_digest": values[2],
+        "activation_preview_digest": values[3],
+        "plugin_install_digest": values[4],
+    }
+    target_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(fields, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+    )
+    return RecommendationTarget(
+        target_digest=target_digest,
+        **fields,
+    )
 
 
 def _patch_state_root(monkeypatch: object, tmp_path: Path) -> None:
@@ -38,7 +65,10 @@ def _patch_pending_context(monkeypatch: object, recommendation_id: str) -> None:
         if recommendation_id == "observation-enabled":
             return RecommendationContext(observation_enabled=False)
         if recommendation_id == "codex-plugin-activation":
-            return RecommendationContext(codex_activation_state="installed_not_activated")
+            return RecommendationContext(
+                codex_activation_state="installed_not_activated",
+                codex_activation_target=_activation_target(),
+            )
         return RecommendationContext(
             package_update=build_package_update_advisory(
                 installed_version="0.1.0", latest_version="0.2.0", source="cache"
@@ -155,12 +185,216 @@ def test_list_renders_pending_actions(monkeypatch: object) -> None:
     assert "yoetz recommend decline observation-enabled" in result.stdout
 
 
+def test_list_reoffers_activation_for_another_target_and_same_target_drift(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    _patch_state_root(monkeypatch, tmp_path)
+    first = _activation_target("abcde")
+    second = _activation_target("12345")
+    drifted = _activation_target("fedcb")
+    anyio.run(
+        lambda: refresh_pending(
+            context=RecommendationContext(
+                codex_activation_state="installed_not_activated",
+                codex_activation_target=first,
+            ),
+            root=tmp_path,
+            force=True,
+        )
+    )
+    record_recommendation_decision(
+        "codex-plugin-activation", "accepted", root=tmp_path, target=first
+    )
+
+    selected = second
+
+    async def context(**_kwargs: object) -> RecommendationContext:
+        return RecommendationContext(
+            codex_activation_state="installed_not_activated",
+            codex_activation_target=selected,
+        )
+
+    monkeypatch.setattr("yoetz.cli.recommend._current_context", context)  # type: ignore[attr-defined]
+    other = _RUNNER.invoke(
+        app,
+        [
+            "recommend",
+            "list",
+            "--codex-path",
+            str(tmp_path / "codex"),
+            "--codex-home",
+            str(tmp_path / "home-b"),
+        ],
+    )
+    assert other.exit_code == 0, other.output
+    assert "codex-plugin-activation" in other.stdout
+    assert second.target_digest in other.stdout
+
+    selected = drifted
+    changed = _RUNNER.invoke(
+        app,
+        [
+            "recommend",
+            "list",
+            "--codex-path",
+            str(tmp_path / "codex"),
+            "--codex-home",
+            str(tmp_path / "home-a"),
+        ],
+    )
+    assert changed.exit_code == 0, changed.output
+    assert "codex-plugin-activation" in changed.stdout
+    assert drifted.target_digest in changed.stdout
+
+
+def test_activation_context_binds_the_exact_preview_target(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"codex-binary")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    preview = SimpleNamespace(
+        executable_path=executable,
+        executable_digest="sha256:" + ("a" * 64),
+        codex_version="0.148.0",
+        codex_home=home,
+        preview_digest="sha256:" + ("b" * 64),
+        plugin_install_digest="sha256:" + ("c" * 64),
+    )
+
+    def inspect(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(state=SimpleNamespace(value="installed_not_activated"))
+
+    def preview_target(*_args: object, **_kwargs: object) -> object:
+        return preview
+
+    def import_adapter(_name: str) -> object:
+        return adapter
+
+    adapter = SimpleNamespace(
+        inspect_activation=inspect,
+        preview_activation=preview_target,
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "yoetz.cli.recommend.importlib.import_module", import_adapter
+    )
+
+    state, target = recommend_module._activation_context(  # pyright: ignore[reportPrivateUsage]
+        tmp_path, executable_path=executable, codex_home=home
+    )
+
+    assert state == "installed_not_activated"
+    assert target is not None
+    assert target.executable_digest == preview.executable_digest
+    assert target.activation_preview_digest == preview.preview_digest
+    assert target.plugin_install_digest == preview.plugin_install_digest
+    assert str(executable) not in repr(target)
+    assert str(home) not in repr(target)
+
+
+def test_activation_context_preserves_foreign_state_without_previewing(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"codex-binary")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    preview_calls = 0
+
+    def inspect(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(state=SimpleNamespace(value="foreign"))
+
+    def preview_target(*_args: object, **_kwargs: object) -> object:
+        nonlocal preview_calls
+        preview_calls += 1
+        raise AssertionError("foreign target must not be previewed")
+
+    adapter = SimpleNamespace(
+        inspect_activation=inspect,
+        preview_activation=preview_target,
+    )
+
+    def import_adapter(_name: str) -> object:
+        return adapter
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "yoetz.cli.recommend.importlib.import_module", import_adapter
+    )
+
+    state, target = recommend_module._activation_context(  # pyright: ignore[reportPrivateUsage]
+        tmp_path, executable_path=executable, codex_home=home
+    )
+
+    assert state == "foreign"
+    assert target is None
+    assert preview_calls == 0
+
+
+def test_activation_preview_failure_clears_cached_actionable_advice(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    _patch_state_root(monkeypatch, tmp_path)
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        recommend_module, "config_file_path", lambda: config_path
+    )
+    target = _activation_target()
+    store_recommendation_state(
+        RecommendationState(
+            last_evaluated_version=installed_package_version(),
+            pending=("codex-plugin-activation",),
+            pending_targets=MappingProxyType({"codex-plugin-activation": target}),
+        ),
+        root=tmp_path,
+    )
+    executable = tmp_path / "codex"
+    executable.write_bytes(b"codex-binary")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+
+    def inspect(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(state=SimpleNamespace(value="installed_not_activated"))
+
+    def preview_target(*_args: object, **_kwargs: object) -> object:
+        raise OSError("preview refused modified target")
+
+    adapter = SimpleNamespace(
+        inspect_activation=inspect,
+        preview_activation=preview_target,
+    )
+
+    def import_adapter(_name: str) -> object:
+        return adapter
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        recommend_module.importlib, "import_module", import_adapter
+    )
+
+    result = _RUNNER.invoke(
+        app,
+        [
+            "recommend",
+            "list",
+            "--codex-path",
+            str(executable),
+            "--codex-home",
+            str(home),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    state = load_recommendation_state(root=tmp_path)
+    assert "codex-plugin-activation" not in state.pending
+
+
 def test_activation_accept_repreviews_and_applies_exact_digest(
     tmp_path: Path, monkeypatch: object
 ) -> None:
     _patch_state_root(monkeypatch, tmp_path)
     applied: list[tuple[IntegrationTarget, str]] = []
     executable = tmp_path / "codex-testing-bin"
+    executable.write_bytes(b"codex-testing")
     codex_home = tmp_path / "codex-testing"
     preview = SimpleNamespace(
         marketplace_bytes=b'{"plugins":[]}\n',
@@ -200,6 +434,11 @@ def test_activation_accept_repreviews_and_applies_exact_digest(
     ) -> None:
         assert executable_path == str(executable)
         assert Path(codex_home).resolve() == expected_home
+        state = load_recommendation_state(root=tmp_path)
+        assert any(
+            row.recommendation_id == "codex-plugin-activation" and row.decision == "accepted"
+            for row in state.decisions.values()
+        ), "activation decision must commit before host mutation"
         applied.append((target, approved_digest))
 
     def make_preview(
@@ -254,6 +493,81 @@ def test_activation_accept_repreviews_and_applies_exact_digest(
     assert f"CODEX_TESTING_HOME={codex_home}" in result.stdout
     assert applied and applied[0][1] == preview.preview_digest
     assert "fresh Codex process/session" in result.stdout
+
+
+def test_activation_store_failure_prevents_host_mutation(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    _patch_state_root(monkeypatch, tmp_path)
+    _patch_pending_context(monkeypatch, "codex-plugin-activation")
+    executable = tmp_path / "codex-testing-bin"
+    executable.write_bytes(b"codex-testing")
+    codex_home = tmp_path / "codex-testing"
+    preview = SimpleNamespace(
+        marketplace_bytes=b"{}\n",
+        config_toml_block='[plugins."yoetz@yoetz"]\nenabled = true\n',
+        preview_digest="sha256:" + "a" * 64,
+        codex_home=codex_home,
+        plugin_install_path=codex_home / "plugins" / "cache" / "yoetz",
+        plugin_source_digest="sha256:" + "b" * 64,
+        plugin_install_digest="sha256:" + "c" * 64,
+        executable_path=executable,
+        executable_digest="sha256:" + "d" * 64,
+        codex_version="0.148.0-alpha.6",
+        probe_command=("--version",),
+        inventory_command=("plugin", "list", "--marketplace", "yoetz", "--json"),
+        install_command=("plugin", "add", "yoetz@yoetz", "--json"),
+        probe_environment="temporary_owner_private_home",
+        activation_environment=(
+            ("CODEX_HOME", str(codex_home)),
+            ("CODEX_TESTING_HOME", str(codex_home)),
+        ),
+        marketplace_preimage_digest="sha256:" + "e" * 64,
+        config_preimage_digest="sha256:" + "f" * 64,
+        cache_mutation_planned=True,
+        inspection=SimpleNamespace(inventory_verified=False),
+    )
+    applied = False
+
+    def make_preview(*_args: object, **_kwargs: object) -> object:
+        return preview
+
+    def apply(*_args: object, **_kwargs: object) -> None:
+        nonlocal applied
+        applied = True
+
+    adapter = SimpleNamespace(preview_activation=make_preview, apply_activation=apply)
+
+    def import_adapter(_name: str) -> object:
+        return adapter
+
+    def fail_store(*_args: object, **_kwargs: object) -> RecommendationState:
+        raise RecommendationStoreError("recommendation_store_write_failed")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        recommend_module, "record_recommendation_decision", fail_store
+    )
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        recommend_module.importlib, "import_module", import_adapter
+    )
+
+    result = _RUNNER.invoke(
+        app,
+        [
+            "recommend",
+            "accept",
+            "codex-plugin-activation",
+            "--codex-path",
+            str(executable),
+            "--codex-home",
+            str(codex_home),
+        ],
+        input="y\n",
+    )
+
+    assert result.exit_code == 2
+    assert "recommendation_store_write_failed" in result.output
+    assert applied is False
 
 
 def test_unknown_recommendation_is_rejected_without_creating_state(
@@ -318,6 +632,7 @@ def test_activation_preview_requires_explicit_post_preview_confirmation(
     _patch_pending_context(monkeypatch, "codex-plugin-activation")
     applied: list[str] = []
     executable = tmp_path / "codex-testing-bin"
+    executable.write_bytes(b"codex-testing")
     codex_home = tmp_path / "codex-testing"
     preview = SimpleNamespace(
         marketplace_bytes=b"{}\n",
@@ -500,10 +815,12 @@ def test_activation_decline_needs_no_codex_authority_and_is_durable(
     tmp_path: Path, monkeypatch: object
 ) -> None:
     _patch_state_root(monkeypatch, tmp_path)
+    target = _activation_target()
     store_recommendation_state(
         RecommendationState(
             last_evaluated_version=installed_package_version(),
             pending=("codex-plugin-activation",),
+            pending_targets=MappingProxyType({"codex-plugin-activation": target}),
         ),
         root=tmp_path,
     )
@@ -511,21 +828,24 @@ def test_activation_decline_needs_no_codex_authority_and_is_durable(
     result = _RUNNER.invoke(app, ["recommend", "decline", "codex-plugin-activation"])
 
     assert result.exit_code == 0, result.output
-    assert "will not be shown again" in result.stdout
+    assert "this exact target and activation digest" in result.stdout
     state = load_recommendation_state(root=tmp_path)
     assert state.pending == ()
-    assert state.decisions["codex-plugin-activation"].decision == "declined"
+    assert next(iter(state.decisions.values())).decision == "declined"
 
     refreshed = anyio.run(
         lambda: refresh_pending(
-            context=RecommendationContext(codex_activation_state="installed_not_activated"),
+            context=RecommendationContext(
+                codex_activation_state="installed_not_activated",
+                codex_activation_target=target,
+            ),
             root=tmp_path,
             force=True,
         )
     )
 
     assert "codex-plugin-activation" not in refreshed.pending
-    assert refreshed.decisions["codex-plugin-activation"].decision == "declined"
+    assert next(iter(refreshed.decisions.values())).decision == "declined"
 
 
 def test_decline_requires_cached_pending(tmp_path: Path, monkeypatch: object) -> None:

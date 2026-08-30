@@ -167,6 +167,18 @@ diagnostic, so read `recent_count` together with the envelopes: no new `claude_h
 zero `recent_count` after a session that ran Yoetz tools means the hooks never reached the ingress
 or the runtime gate is disabled — not that they were dropped for binding.
 
+A consented `SessionStart` auto-attaches a ledger task without an explicit MCP `start`: the hook
+sends `start mode=create_or_attach` with the canonical project root as `workspace_ref` and
+`claude-session:<session_id>` as `external_ref` (both persisted only as HMAC commitments). Success
+shows as `mapping_present: true` in `observe status` and the session's queued rows drain in the
+same pass. A failed attempt records its cause as a payload-free `hook_diagnostics` reason
+(`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_conflict`,
+`auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
+`privacy_authority_required`, `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`,
+or `storage_corrupt`) and the session keeps an observation-only binding; turn-boundary events retry
+under the bounded budget. An explicit cooperative MCP `start` bound from its exact `PostToolUse`
+result remains the recovery path, not a substitute proof that natural auto-attach works.
+
 The shared `observe status` CLI maps an unsafe state/lock path to `storage_unsafe`, bounded
 open/permission/read-only/missing-parent/lock-acquisition failures to `storage_unavailable`, and
 invalid stored data to `storage_corrupt`; other defects retain the internal-error boundary. Its

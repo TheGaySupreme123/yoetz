@@ -10,7 +10,8 @@ import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import Literal, cast
 
 import pytest
 
@@ -1463,9 +1464,9 @@ def test_unmapped_session_reattempts_auto_attach_on_turn_events_only(
     store.grant_consent(workspace)
     calls: list[str] = []
 
-    async def fake_auto_start(codex_session_id: str, *, _state: Path | None) -> object | None:
+    async def fake_auto_start(codex_session_id: str, **_kwargs: object) -> object | None:
         calls.append(codex_session_id)
-        return None
+        return observe_hooks_module.AutoAttachOutcome(None, "service_unavailable")
 
     monkeypatch.setattr(observe_hooks_module, "_try_auto_start", fake_auto_start)
 
@@ -1486,6 +1487,8 @@ def test_unmapped_session_reattempts_auto_attach_on_turn_events_only(
     assert calls == ["late-attach"]
     diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
     assert '"reason":"auto_attach_retry_failed"' in diagnostics
+    # The typed cause lands next to the path marker (#459).
+    assert '"reason":"service_unavailable"' in diagnostics
 
     code = handle_observe(
         event_name="PostToolUse",
@@ -1512,17 +1515,19 @@ def test_claude_session_start_auto_attach_preserves_the_harness_identity(
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str | None]] = []
 
     async def fake_auto_start(
         codex_session_id: str,
         *,
         _state: Path | None,
         harness_id: str = "codex",
+        workspace_locator: str | None,
+        connect: object = None,
     ) -> object | None:
-        del _state
-        calls.append((codex_session_id, harness_id))
-        return None
+        del _state, connect
+        calls.append((codex_session_id, harness_id, workspace_locator))
+        return observe_hooks_module.AutoAttachOutcome(None, "service_unavailable")
 
     monkeypatch.setattr(observe_hooks_module, "_try_auto_start", fake_auto_start)
 
@@ -1542,7 +1547,7 @@ def test_claude_session_start_auto_attach_preserves_the_harness_identity(
     )
 
     assert code == 0
-    assert calls == [("claude:auto-attach", "claude")]
+    assert calls == [("claude:auto-attach", "claude", str(tmp_path.resolve()))]
 
 
 def test_auto_attach_retry_exception_records_diagnostic(
@@ -1552,8 +1557,8 @@ def test_auto_attach_retry_exception_records_diagnostic(
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
 
-    async def fail_auto_start(codex_session_id: str, *, _state: Path | None) -> object | None:
-        del codex_session_id, _state
+    async def fail_auto_start(codex_session_id: str, **_kwargs: object) -> object | None:
+        del codex_session_id
         raise TimeoutError("bounded auto-attach timeout")
 
     monkeypatch.setattr(observe_hooks_module, "_try_auto_start", fail_auto_start)
@@ -1575,6 +1580,7 @@ def test_auto_attach_retry_exception_records_diagnostic(
     assert code == 0
     diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
     assert diagnostics.count('"reason":"auto_attach_retry_failed"') == 1
+    assert diagnostics.count('"reason":"timeout"') == 1
 
 
 def test_session_reason_stamping_preserves_a_rows_observed_cause(tmp_path: Path) -> None:
@@ -1999,6 +2005,316 @@ class _InstantAckClient:
 
     async def close(self) -> None:
         return None
+
+
+_START_IDS = {
+    "task_id": "tsk_1b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5b",
+    "session_id": "ses_1b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5c",
+    "writer_id": "wri_1b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5d",
+}
+
+
+class _StartOkClient(_InstantAckClient):
+    """A start client that answers like the service and records the exact request."""
+
+    def __init__(self, sink: list[object] | None = None) -> None:
+        self.requests: list[object] = [] if sink is None else sink
+
+    async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
+        del deadline_ms
+        self.requests.append(request)
+        return SimpleNamespace(
+            ok=True,
+            frontier=SimpleNamespace(sequence="3", head_digest="sha256:" + "a" * 64),
+            **_START_IDS,
+        )
+
+
+class _StartFailureClient(_InstantAckClient):
+    def __init__(self, code: PublicErrorCode) -> None:
+        self.code = code
+
+    async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
+        del request, deadline_ms
+        from yoetz.protocol.ids import IdKind, new_id
+        from yoetz.protocol.models import OperationFailureModel
+
+        return OperationFailureModel.model_validate(
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "ok": False,
+                "error": {
+                    "code": self.code.value,
+                    "message": "refused",
+                    "retryable": False,
+                    "correlation_id": new_id(IdKind.CORRELATION),
+                },
+            }
+        )
+
+
+def _connector(client: object):
+    async def connect(_kind: object):
+        return client
+
+    return connect
+
+
+def _auto_start(
+    harness_id: str,
+    session: str,
+    *,
+    _state: Path,
+    workspace_locator: str | None,
+    connect: object,
+) -> observe_hooks_module.AutoAttachOutcome:
+    return asyncio.run(
+        observe_hooks_module._try_auto_start(  # pyright: ignore[reportPrivateUsage]
+            session,
+            _state=_state,
+            harness_id=cast(Literal["claude", "codex", "cursor"], harness_id),
+            workspace_locator=workspace_locator,
+            connect=cast(observe_hooks_module.HookStartConnector, connect),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("harness_id", "session"),
+    [("claude", "claude:auto-1"), ("codex", "codex-auto-1"), ("cursor", "cursor:auto-1")],
+)
+def test_auto_start_request_is_a_valid_paired_start_for_every_harness(
+    tmp_path: Path, harness_id: str, session: str
+) -> None:
+    """The real request construction validates through StartRequest with paired refs (#459)."""
+
+    from yoetz.protocol.models import StartRequest
+
+    client = _StartOkClient()
+    locator = str(tmp_path.resolve())
+    outcome = _auto_start(
+        harness_id, session, _state=tmp_path, workspace_locator=locator, connect=_connector(client)
+    )
+
+    assert outcome.reason is None
+    assert outcome.mapping is not None
+    assert outcome.mapping.codex_session_id == session
+    assert outcome.mapping.yoetz_task_id == _START_IDS["task_id"]
+    assert outcome.mapping.last_frontier == "3:sha256:" + "a" * 64
+    stored = observe_hooks_module.load_mapping(session, _state=tmp_path)
+    assert stored == outcome.mapping
+
+    (request,) = client.requests
+    assert isinstance(request, StartRequest)
+    assert request.mode == "create_or_attach"
+    assert request.session_id is None
+    assert request.workspace_ref == locator
+    assert request.external_ref == f"{harness_id}-session:{session.removeprefix(harness_id + ':')}"
+    assert request.actor.actor_id == f"yoetz:{harness_id}-observe"
+    # Byte-level contract: the wire shape round-trips through the public schema.
+    wire = request.model_dump(mode="json", exclude_none=True)
+    assert "session_id" not in wire
+    StartRequest.model_validate(wire)
+
+
+def test_auto_start_without_a_workspace_locator_stops_before_any_service_call(
+    tmp_path: Path,
+) -> None:
+    calls: list[object] = []
+
+    async def connect(_kind: object):
+        calls.append(_kind)
+        raise AssertionError("no service call without a paired workspace reference")
+
+    outcome = _auto_start(
+        "codex", "unbound-1", _state=tmp_path, workspace_locator=None, connect=connect
+    )
+    assert outcome.mapping is None
+    assert outcome.reason == "auto_attach_workspace_unbound"
+    assert calls == []
+    assert observe_hooks_module.load_mapping("unbound-1", _state=tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    ("code", "reason"),
+    [
+        (PublicErrorCode.VAULT_LOCKED, "vault_locked"),
+        (PublicErrorCode.SESSION_CONFLICT, "auto_attach_conflict"),
+        (PublicErrorCode.IDEMPOTENCY_CONFLICT, "auto_attach_conflict"),
+        (PublicErrorCode.INVALID_REQUEST, "auto_attach_refused"),
+        (PublicErrorCode.OPERATION_PENDING, "service_unavailable"),
+        (PublicErrorCode.STORAGE_UNSAFE, "storage_unsafe"),
+        (PublicErrorCode.STORAGE_CORRUPT, "storage_corrupt"),
+        (PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED, "privacy_authority_required"),
+    ],
+)
+def test_auto_start_service_refusals_map_to_closed_diagnostic_reasons(
+    tmp_path: Path, code: PublicErrorCode, reason: str
+) -> None:
+    outcome = _auto_start(
+        "claude",
+        "claude:refused",
+        _state=tmp_path,
+        workspace_locator=str(tmp_path.resolve()),
+        connect=_connector(_StartFailureClient(code)),
+    )
+    assert outcome.mapping is None
+    assert outcome.reason == reason
+    assert observe_hooks_module.load_mapping("claude:refused", _state=tmp_path) is None
+
+
+def test_auto_start_error_classes_stay_closed_hook_diagnostic_reasons() -> None:
+    from yoetz.cli import hook_diagnostics
+
+    reasons = hook_diagnostics._REASONS  # pyright: ignore[reportPrivateUsage]
+    classified = set(
+        observe_hooks_module._AUTO_ATTACH_ERROR_REASONS.values()  # pyright: ignore[reportPrivateUsage]
+    ) | set(
+        observe_hooks_module._AUTO_ATTACH_CONTROL_REASONS.values()  # pyright: ignore[reportPrivateUsage]
+    )
+    classified |= {
+        "auto_attach_workspace_unbound",
+        "auto_attach_request_invalid",
+        "auto_attach_result_invalid",
+        "auto_attach_mapping_write_failed",
+        "timeout",
+    }
+    assert classified <= reasons
+
+
+@pytest.mark.parametrize(
+    ("control_reason", "reason"),
+    [
+        ("service_unavailable", "service_unavailable"),
+        ("vault_locked", "vault_locked"),
+        ("request_timeout", "timeout"),
+        ("privacy_projection_blocked", "privacy_authority_required"),
+        ("service_incompatible", "service_unavailable"),
+    ],
+)
+def test_auto_start_transport_failures_map_to_closed_diagnostic_reasons(
+    tmp_path: Path, control_reason: str, reason: str
+) -> None:
+    from yoetz.ports.control import ControlError
+
+    async def connect(_kind: object):
+        raise ControlError(control_reason)
+
+    outcome = _auto_start(
+        "cursor",
+        "cursor:transport",
+        _state=tmp_path,
+        workspace_locator=str(tmp_path.resolve()),
+        connect=connect,
+    )
+    assert outcome.mapping is None
+    assert outcome.reason == reason
+
+
+def test_auto_start_malformed_success_is_result_invalid_not_a_mapping(tmp_path: Path) -> None:
+    class _Malformed(_InstantAckClient):
+        async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
+            del request, deadline_ms
+            return SimpleNamespace(ok=True, task_id="tsk_not-a-uuid", session_id=None)
+
+    outcome = _auto_start(
+        "codex",
+        "malformed",
+        _state=tmp_path,
+        workspace_locator=str(tmp_path.resolve()),
+        connect=_connector(_Malformed()),
+    )
+    assert outcome.mapping is None
+    assert outcome.reason == "auto_attach_result_invalid"
+    assert observe_hooks_module.load_mapping("malformed", _state=tmp_path) is None
+
+
+def test_auto_attach_outcome_requires_exactly_one_of_mapping_or_reason() -> None:
+    with pytest.raises(ValueError, match="auto_attach_outcome_invalid"):
+        observe_hooks_module.AutoAttachOutcome(None, None)
+
+
+@pytest.mark.parametrize(
+    ("source", "session"),
+    [
+        (ObservationSource.CODEX_HOOK, "codex-start-1"),
+        (ObservationSource.CLAUDE_HOOK, "claude:start-1"),
+        (ObservationSource.CURSOR_HOOK, "cursor:start-1"),
+    ],
+)
+def test_session_start_auto_attaches_maps_and_drains_for_every_host(
+    tmp_path: Path, source: ObservationSource, session: str
+) -> None:
+    """Natural SessionStart produces mapping_present and a drained outbox (#459)."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    client = _StartOkClient()
+    out = io.BytesIO()
+
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": session, "hook_event_name": "SessionStart", "source": "startup"}
+        ).encode(),
+        stdout=out,
+        workspace=locator,
+        _state=tmp_path,
+        connect=_connector(client),  # type: ignore[arg-type]
+        source=source,
+        # The cursor-observe entry passes the raw host event for output rendering.
+        _output_event_name="sessionStart" if source is ObservationSource.CURSOR_HOOK else None,
+    )
+
+    assert code == 0
+    assert len(client.requests) == 1
+    mapping = observe_hooks_module.load_mapping(session, _state=tmp_path)
+    assert mapping is not None
+    assert mapping.yoetz_task_id == _START_IDS["task_id"]
+    assert store.find_workspace_for_codex_session(session) == workspace
+    assert store.list_pending_outbox_rows(workspace) == ()
+    rendered = out.getvalue().decode()
+    assert _START_IDS["task_id"] in rendered
+    assert "no ledger task is mapped yet" not in rendered
+    diagnostics_path = tmp_path / "observation/hook-diagnostics.jsonl"
+    if diagnostics_path.exists():
+        assert "auto_attach" not in diagnostics_path.read_text()
+        assert '"reason":"service_unavailable"' not in diagnostics_path.read_text()
+
+
+def test_session_start_records_the_typed_cause_when_auto_attach_fails(tmp_path: Path) -> None:
+    from yoetz.ports.control import ControlError
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+
+    async def connect(_kind: object):
+        raise ControlError("vault_locked")
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": "claude:locked", "hook_event_name": "SessionStart"}
+        ).encode(),
+        stdout=out,
+        workspace=locator,
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+        source=ObservationSource.CLAUDE_HOOK,
+    )
+
+    assert code == 0
+    assert observe_hooks_module.load_mapping("claude:locked", _state=tmp_path) is None
+    assert "no ledger task is mapped yet" in out.getvalue().decode()
+    diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"vault_locked"' in diagnostics
+    assert '"event":"SessionStart"' in diagnostics
 
 
 def test_hook_invocation_parses_the_state_file_once_not_seventeen_times(

@@ -288,6 +288,14 @@ yoetz integrate codex plugin preview --codex-home <home> --json
 yoetz integrate codex plugin remove --codex-home <home> --accept --preview-digest <digest> --json
 ```
 
+`preview`, `status`, and `remove` are the whole Codex plugin command surface. The generic
+`install`, `update`, `enable`, `disable`, and `export` commands that the shared
+`integrate <host> plugin` group also lists belong to the Claude Code (and, for `install`, Cursor)
+lifecycles; `--help` marks each command's hosts, and invoking one for Codex refuses with
+`codex_plugin_command_unsupported:<command> supported=preview,status,remove` (exit 2) before any
+binary discovery or mutation. Codex activation is the digest-bound setup/recommendation ceremony
+(`yoetz setup run`, ADR-012), not a standalone plugin command.
+
 The Codex plugin command uses the same preview → explicit accept → apply shape as Codex
 activation and MCP install: the mutation is bound to the exact preview digest. It does **not**
 consume the Cursor `plugin_artifact_apply` OS-presence cell; that cell remains the standalone
@@ -364,7 +372,7 @@ remove`.
 | Compatibility is `unsupported` | Automatic activation is unprofiled; use a supported Yoetz/Codex version pair when capability evidence is required. |
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$yoetz` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |
-| Setup reports `installed_not_activated` | Re-run setup/recommendation preview for the exact selected executable. Review canonical inventory and the versioned cache; marketplace/config presence alone is insufficient. A marker-consistent stale cache is refreshed by an ordinary approved re-run. |
+| Setup reports `installed_not_activated` | Run `yoetz recommend list --codex-path <exact-executable> --codex-home <exact-home>`, then accept only the freshly shown target/preview digest. Historical acceptance cannot suppress an observed inactive target; a decline suppresses only its unchanged exact target. Review canonical inventory and the versioned cache; marketplace/config presence alone is insufficient. A marker-consistent stale cache is refreshed by an ordinary approved re-run. |
 | Activation reports `destination_conflict` | The versioned cache (or a config/marketplace surface) holds foreign, marker-inconsistent, or modified content. Review it by hand; setup only replaces trees that match their own Yoetz install marker. |
 | Activation failed with an explicit `--codex-home` | Read the actual `reason` in `registration.plugin_activation`/`readiness.plugin_activation`; the bound home and config path are echoed there. `codex_home_required` appears only when no home was passed. |
 | Setup reports plugin source files but no Yoetz skill appears | Check `.agents/skills/yoetz`; source installation and plugin activation do not prove project-skill discovery. |
@@ -373,6 +381,7 @@ remove`.
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |
 | Trigger absent or failed | Use the manual re-grounding procedure; never edit hook configuration through this integration. |
 | `observe status` shows no envelopes for a session | Read `hook_diagnostics.reasons`: `workspace_unresolvable` means the hook's `--workspace` locator could not be canonicalized; `workspace_unconsented` means the session's Git root carries no active consent (a session started in a subdirectory canonicalizes to the same root as the consent, so grant consent at the repository root); `paused` means consent is paused. A successful ingest records no diagnostic, so read `recent_count` together with the envelopes: no new envelopes and a zero `recent_count` means the hooks never reached the ingress or the runtime gate is disabled, not that a binding drop occurred. |
+| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`; read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (the session bound consent without a canonical locator, so no paired request was legal), `auto_attach_request_invalid` (an authoring defect in the request — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path. |
 | `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
 
 ## 10. Security, privacy, and prohibited actions
@@ -385,3 +394,8 @@ state, source/installed/preview digests, the bounded reason token, and file-stat
 - Never force an overwrite or a removal.
 - Never claim skill installation changed MCP configuration.
 - Never claim support for a Codex version outside the current tested set.
+
+For a disposable-worktree integration run, use the [Codex dogfood parity
+runbook](codex-dogfood.md). The ordinary setup/semantic checks above are necessary but do not prove
+exact-worktree activation, consent, host delivery, observation, rollback, or normal-target
+isolation.
