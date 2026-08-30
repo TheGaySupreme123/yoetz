@@ -265,6 +265,7 @@ class _PrivacyContentObjectStore:
     def __init__(self, ids: IdPort) -> None:
         self._ids = ids
         self._objects: dict[str, bytes] = {}
+        self._abandoned_ids: set[str] = set()
 
     async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
         if type(source) is not ObjectSource or source.data is None:
@@ -284,6 +285,8 @@ class _PrivacyContentObjectStore:
         )
 
     async def finalize(self, staged: StagedObject) -> ObjectRef:
+        if staged.object_id in self._abandoned_ids:
+            raise ValueError("abandoned_staged_object")
         handle = staged.staging_handle
         if type(handle) is not bytes:
             raise ValueError("privacy_audit_stage_invalid")
@@ -297,6 +300,10 @@ class _PrivacyContentObjectStore:
             staged.key_slot,
             staged.metadata,
         )
+
+    async def abandon(self, staged: StagedObject) -> None:
+        self._objects.pop(staged.object_id, None)
+        self._abandoned_ids.add(staged.object_id)
 
 
 class _MinimalImporter:

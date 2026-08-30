@@ -245,6 +245,58 @@ def test_stage_fsync_rename_dirfsync_finalize(
     assert asyncio.run(store.finalize(staged)) == ref
 
 
+def test_abandon_removes_a_final_file_after_post_rename_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #339: a failed dir fsync after rename must leave an exact removable stage."""
+
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    store = object_store(tmp_path, now)
+    metadata = ObjectMetadata(ObjectKind.RECEIPT, "application/json", _TASK_ID, now)
+    staged = asyncio.run(store.stage(ObjectSource(data=b"{}"), metadata))
+    final_path = tmp_path / "objects" / staged.object_id[4:6] / staged.object_id
+    staging_root = tmp_path / "objects" / ".staging"
+    real_fsync_directory = EncryptedFilesObjectStore._fsync_directory  # pyright: ignore[reportPrivateUsage]
+    calls = 0
+
+    def fail_first_directory_fsync(path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("simulated_dir_fsync_failure")
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(
+        EncryptedFilesObjectStore,
+        "_fsync_directory",
+        staticmethod(fail_first_directory_fsync),
+    )
+    with pytest.raises(OSError, match="simulated_dir_fsync_failure"):
+        asyncio.run(store.finalize(staged))
+    assert final_path.exists()
+    assert not tuple(staging_root.iterdir())
+
+    asyncio.run(store.abandon(staged))
+    assert not final_path.exists()
+    asyncio.run(store.abandon(staged))
+    with pytest.raises(ValueError, match="abandoned_staged_object"):
+        asyncio.run(store.finalize(staged))
+
+
+def test_abandon_fails_closed_when_the_owned_final_bytes_drift(tmp_path: Path) -> None:
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    store = object_store(tmp_path, now)
+    metadata = ObjectMetadata(ObjectKind.RECEIPT, "application/json", _TASK_ID, now)
+    staged = asyncio.run(store.stage(ObjectSource(data=b"{}"), metadata))
+    ref = asyncio.run(store.finalize(staged))
+    final_path = tmp_path / "objects" / ref.object_id[4:6] / ref.object_id
+    final_path.write_bytes(b"drifted")
+
+    with pytest.raises(OSError, match="object_destination_collision"):
+        asyncio.run(store.abandon(staged))
+    assert final_path.read_bytes() == b"drifted"
+
+
 def test_verified_open_reads_only_finalized_objects(tmp_path: Path) -> None:
     now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
     store = object_store(tmp_path, now)

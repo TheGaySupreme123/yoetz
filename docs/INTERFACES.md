@@ -1248,7 +1248,13 @@ Classified receipt object-store faults record a resolvable `correlation_id` at t
 site with a bounded exception-class reason and optional `yoetz` origin; the daemon reuses that
 id on the `ok:false` envelope and does not mint an `internal_error` diagnostic. Pre-append object
 `stage`/`finalize` I/O on a fresh receipt is retryable `STORAGE_UNSAFE` because nothing has
-committed.
+committed. `execute_receipt` retains both stage handles until the complete prepared append exists.
+Any failure before ledger submission abandons both exact stages in reverse order, including a file
+renamed before a failing directory fsync, so a second-object failure cannot accumulate one
+finalized receipt per retry. Cleanup failure never hides the original public error, and the exact
+unreferenced object remains eligible for delayed generation-fenced orphan GC. After ledger
+submission begins, receipt code never abandons either object because commit outcome may be
+ambiguous.
 Receipt replay binding mismatches use the same application-site correlation contract with one of
 the closed structural reasons `receipt_digest_mismatch`, `receipt_id_mismatch`,
 `receipt_frontier_mismatch`, `receipt_conclusion_mismatch`, or
@@ -1487,6 +1493,9 @@ repository-privacy commitment, and cannot select or inherit disclosure authority
   non-publishing, used to build a logical request digest before object publication;
 - `stage(ObjectSource, ObjectMetadata) -> StagedObject`;
 - `finalize(StagedObject) -> ObjectRef`;
+- `abandon(StagedObject) -> None` — idempotently remove the exact caller-owned temp or finalized
+  bytes only while the caller can prove that its reference has not been submitted to a durable
+  owner; a byte mismatch fails closed and an abandoned stage cannot be finalized later;
 - `resolve_verified(object_id, envelope_digest) -> ObjectRef` — bounded exact finalized-object
   resolution for catalog-pinned START crash resume; deterministic verification failures raise
   `ValueError("object_verification_failed")`, while environmental I/O re-raises `OSError` for the

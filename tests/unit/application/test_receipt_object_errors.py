@@ -11,11 +11,18 @@ from typing import cast
 import pytest
 
 from yoetz.application.receipt import (  # noqa: SLF001
-    _persist_object,  # pyright: ignore[reportPrivateUsage]
+    _finalize_object,  # pyright: ignore[reportPrivateUsage]
     _read_object,  # pyright: ignore[reportPrivateUsage]
+    _stage_object,  # pyright: ignore[reportPrivateUsage]
 )
 from yoetz.observability.diagnostics import lookup_diagnostic_records
-from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
+from yoetz.ports.objects import (
+    ObjectKind,
+    ObjectMetadata,
+    ObjectRef,
+    ObjectSource,
+    StagedObject,
+)
 from yoetz.ports.runtime import TaskRuntime
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
@@ -178,7 +185,7 @@ async def test_persist_object_maps_stage_oserror_to_retryable_storage_unsafe(
         raise AssertionError("finalize must not run after stage failure")
 
     with pytest.raises(PublicOperationError) as caught:
-        await _persist_object(
+        await _stage_object(
             _runtime_with_store(stage=stage, finalize=finalize),
             ObjectSource(data=b"{}", declared_size=2),
             _receipt_ref().metadata,
@@ -205,11 +212,21 @@ async def test_persist_object_maps_finalize_oserror_to_retryable_storage_unsafe(
     async def finalize(_staged: object) -> ObjectRef:
         raise OSError("object_destination_collision")
 
+    ref = _receipt_ref()
+    staged = StagedObject(
+        ref.object_id,
+        ref.plaintext_size,
+        ref.commitment,
+        ref.envelope_digest,
+        ref.encryption_format,
+        ref.key_slot,
+        ref.metadata,
+        object(),
+    )
     with pytest.raises(PublicOperationError) as caught:
-        await _persist_object(
+        await _finalize_object(
             _runtime_with_store(stage=stage, finalize=finalize),
-            ObjectSource(data=b"{}", declared_size=2),
-            _receipt_ref().metadata,
+            staged,
             request_id=_REQUEST_ID,
         )
     _assert_classified(

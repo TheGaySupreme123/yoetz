@@ -167,6 +167,7 @@ class _FileStageHandle:
 class _StageState:
     staged: StagedObject
     finalized: ObjectRef | None = None
+    abandoned: bool = False
 
 
 class EncryptedFilesObjectStore:
@@ -240,6 +241,8 @@ class EncryptedFilesObjectStore:
     async def finalize(self, staged: StagedObject) -> ObjectRef:
         with self._lock:
             state, handle = self._state_for(staged)
+            if state.abandoned:
+                raise ValueError("abandoned_staged_object")
             if state.finalized is not None:
                 return state.finalized
             self._prepare_directories()
@@ -255,6 +258,30 @@ class EncryptedFilesObjectStore:
             result = object_ref_from_staged(staged)
             state.finalized = result
             return result
+
+    async def abandon(self, staged: StagedObject) -> None:
+        """Remove one exact caller-owned stage before its reference is durably admitted."""
+
+        with self._lock:
+            state, handle = self._state_for(staged)
+            if state.abandoned:
+                return
+            self._prepare_directories()
+            for path in (handle.temp_path, handle.final_path):
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    continue
+                self._validate_private_directory(path.parent)
+                if self._digest_file(path) != staged.envelope_digest:
+                    raise OSError("object_destination_collision")
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                self._fsync_directory(path.parent)
+            state.finalized = None
+            state.abandoned = True
 
     async def _open_verified_bytes(self, ref: ObjectRef) -> bytes:
         if type(ref) is not ObjectRef or ref.key_slot != self._keys.key_slot:

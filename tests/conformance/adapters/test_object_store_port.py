@@ -212,6 +212,28 @@ async def test_stage_finalize_open_parity(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_abandon_removes_unadmitted_staged_and_finalized_objects(tmp_path: Path) -> None:
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    metadata = ObjectMetadata(ObjectKind.RECEIPT, "application/json", _TASK_ID, now)
+    for store in _stores(tmp_path, now):
+        staged = await store.stage(ObjectSource(data=b"{}"), metadata)
+        ref = await store.finalize(staged)
+
+        await store.abandon(staged)
+        await store.abandon(staged)
+
+        with pytest.raises(ValueError, match="object_verification_failed"):
+            await _read(ref, store)
+        with pytest.raises(ValueError, match="abandoned_staged_object"):
+            await store.finalize(staged)
+
+        unfinalized = await store.stage(ObjectSource(data=b'{"next":true}'), metadata)
+        await store.abandon(unfinalized)
+        with pytest.raises(ValueError, match="abandoned_staged_object"):
+            await store.finalize(unfinalized)
+
+
+@pytest.mark.anyio
 async def test_failure_atomicity_parity(tmp_path: Path) -> None:
     now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
     metadata = ObjectMetadata(ObjectKind.IMPORT_STDERR, "text/plain", _TASK_ID, now)
