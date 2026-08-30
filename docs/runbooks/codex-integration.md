@@ -263,6 +263,12 @@ in object-shape position. A raw inventory proves what Codex received from Yoetz;
 itself prove what a model was shown. Keep before and after captures side by side and state that
 evidence boundary explicitly.
 
+Claim correction is an ordinary `publish_work` capability, not a Codex-hook mapping. A current
+descriptor advertises `publish-work-request/1.1.0`, which admits `claim_recorded/1.1.0`; older
+descriptors remain limited to the frozen v1.0 draft union. The CLI command uses the same public
+request and service boundary. Neither Codex hooks nor imported observations synthesize, replace,
+or supersede claims.
+
 ## 8. Remove
 
 Skill removal and activation/MCP removal are separate, consent-gated operations. Skill removal

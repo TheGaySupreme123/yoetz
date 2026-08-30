@@ -226,7 +226,9 @@ def test_event_draft_schema_describes_occurred_at_as_claim() -> None:
 
     for relative in (
         "schemas/events/event-draft-1.0.0.schema.json",
+        "schemas/events/event-draft-1.1.0.schema.json",
         "schemas/events/opaque-unknown-event-draft-1.0.0.schema.json",
+        "schemas/events/opaque-unknown-event-draft-1.1.0.schema.json",
     ):
         draft = json.loads(Path(relative).read_text(encoding="utf-8"))
         occurred = draft["properties"]["occurred_at"]

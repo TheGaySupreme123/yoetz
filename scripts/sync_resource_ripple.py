@@ -21,7 +21,7 @@ _SCRIPT_ROOT = Path(__file__).resolve().parent
 _DEFAULT_REPO_ROOT = _SCRIPT_ROOT.parent
 
 _MAX_PASSES: Final = 5
-_VERSION_MANIFEST_SCHEMA: Final = "version/version-manifest-2.1.0.schema.json"
+_VERSION_MANIFEST_SCHEMA: Final = "version/version-manifest-2.2.0.schema.json"
 _OWNED_ROOTS: Final = ("schemas", "src/yoetz/resources")
 _OWNED_FILES: Final = (
     "skills/codex/yoetz/manifest.json",
@@ -36,7 +36,7 @@ from jsonschema import Draft202012Validator
 from yoetz.version import build_version_manifest, version_manifest_json
 
 schema = json.loads(
-    pathlib.Path("schemas/version/version-manifest-2.1.0.schema.json").read_bytes()
+    pathlib.Path("schemas/version/version-manifest-2.2.0.schema.json").read_bytes()
 )
 document = json.loads(version_manifest_json(build_version_manifest(), include_resources=True))
 Draft202012Validator(schema).validate(document)

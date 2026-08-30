@@ -317,7 +317,8 @@ Use `claim_recorded/1.1.0` for new claims. Its payload keeps admissible evidence
 results, and resolved obligations in `supporting_refs`, while partial or failed results belong in
 `limitation_refs`. It also admits `claim_id`, `claim_kind`, `disputes_refs`, `obligation_refs`,
 `statement`, `subject_state`, and `supersedes_claim_refs` — never `attempted_items`, which lives on
-`action_recorded`.
+`action_recorded`. The current descriptor selects `publish-work-request/1.1.0`, but the public
+request body's `schema_version` remains `1.0.0` as shown below.
 
 ```json
 {

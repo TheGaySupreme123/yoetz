@@ -438,6 +438,15 @@ finding/check, response, and receipt families enter through `start`, `check`, `r
 fails before object staging with `event_family_not_admitted`; caller actor/client tokens never
 widen the matrix.
 
+The released `event-draft/1.0.0`, `opaque-unknown-event-draft/1.0.0`, and
+`publish-work-request/1.0.0` bytes stay frozen. Claim correction is authorable only through the
+additive `event-draft/1.1.0` and `publish-work-request/1.1.0` schemas; the latter selects the v1.1
+draft union while preserving the public request body's `schema_version: "1.0.0"`. MCP descriptors
+select that catalog version for `publish_work`, and local service control `2.4.0` carries it. The
+frozen v1.0 draft remains forward-compatible and classifies the new pair as opaque; v1.1 recognizes
+it exactly and excludes it from its opaque branch. The manifest-bound handshake supersedes a stale
+2.3.0 service before publication, so the old runtime never gets to interpret that opaque shape.
+
 Shared domain types: `EventDraft` (client-shaped, pre-acceptance), `AcceptedEvent` (the canonical
 structural envelope frozen by `domain/events.py` plus decoded payload handle), `UnknownEvent`
 (opaque preserved,

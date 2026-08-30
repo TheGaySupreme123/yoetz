@@ -143,6 +143,13 @@ yoetz service restart
 hosts' sessions still running the previous build's bridge are refused after the switch until they
 restart; that is the intended outcome of an upgrade, not a defect.
 
+Claim correction is carried by the shared `publish_work` descriptor at
+`publish-work-request/1.1.0`; Cursor hooks and subagent inheritance do not synthesize a replacement
+claim. The matching local-control schema is 2.4.0; manifest mismatch stops an older 2.3.0 helper
+before its frozen opaque branch can classify the new pair. Fully restart the exact Cursor profile
+and re-prove descriptor plus correlated model use after upgrading before reporting the capability
+as active.
+
 ## Multitask delegation after an outage
 
 Cursor subagents inherit the parent's MCP tools, so delegated workers reach the same `yoetz`

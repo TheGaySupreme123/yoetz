@@ -28,6 +28,13 @@ Append-only history must remain intact, so mutation or erasure is not an accepta
    `supporting_refs` retains its v1 meaning. Frozen `claim_recorded/1.0.0` bytes and decode behavior
    remain unchanged.
 
+   The authoring path is additive too: `event-draft/1.1.0` adds the exact new pair,
+   `opaque-unknown-event-draft/1.1.0` excludes it from opaque admission, and
+   `publish-work-request/1.1.0` selects that union. Their 1.0 predecessors remain byte-identical.
+   The frozen v1.0 union still admits the future pair as opaque; local control 2.4.0 embeds the
+   exact-known request, while the manifest-bound handshake prevents a stale service from receiving
+   it as an ordinary publication.
+
 2. **Replacement is explicit and whole-claim.** A replacement uses a fresh claim id, names one or
    more prior effective claims of the same kind, and declares obligation scope overlapping every
    target. The replacement becomes the effective current claim; the targets remain immutable in

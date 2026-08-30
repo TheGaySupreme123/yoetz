@@ -13,7 +13,8 @@ reverse-chronological released versions.
   `limitation_refs` instead of treating them as support. Dry-run rejects missing, stale, disjoint,
   contradictory, no-op, or incompletely linked replacements before append; current checks,
   candidate findings, semantic review, and receipts evaluate the replacement while status/history
-  retains the original claim (issue #432).
+  retains the original claim. Additive event-draft/publish-work request schemas and control schema
+  2.4.0 carry the new event without changing released 1.0 schema bytes (issue #432).
 
 ### Fixed
 

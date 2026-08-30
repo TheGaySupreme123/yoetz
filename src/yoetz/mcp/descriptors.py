@@ -43,11 +43,16 @@ __all__ = [
 type McpRouteProfile = Literal["policy", "strict"]
 
 _SCHEMA_VERSION: Final = "1.0.0"
-_TOOL_SCHEMA_VERSIONS: Final = MappingProxyType({"status": "1.1.0"})
+_TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType({"publish_work": "1.1.0", "status": "1.1.0"})
+_TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType({"status": "1.1.0"})
 
 
-def _tool_schema_version(name: str) -> str:
-    return _TOOL_SCHEMA_VERSIONS.get(name, _SCHEMA_VERSION)
+def _tool_input_schema_version(name: str) -> str:
+    return _TOOL_INPUT_SCHEMA_VERSIONS.get(name, _SCHEMA_VERSION)
+
+
+def _tool_output_schema_version(name: str) -> str:
+    return _TOOL_OUTPUT_SCHEMA_VERSIONS.get(name, _SCHEMA_VERSION)
 
 
 # Exactly the entry document. Every other guidance document is fetched on demand: the catalog
@@ -89,9 +94,9 @@ _COMMON_INLINE_SCHEMA_IDS: Final[frozenset[str]] = frozenset(
         f"{SCHEMA_NAMESPACE}common/frontier-1.0.0.schema.json",
     }
 )
-_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.0.0.schema.json"
+_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.1.0.schema.json"
 _OPAQUE_EVENT_DRAFT_SCHEMA_ID: Final = (
-    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.0.0.schema.json"
+    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.1.0.schema.json"
 )
 
 # Reviewed keyword budgets for tools/list presentation schemas (agent-usability guardrails).
@@ -1332,27 +1337,29 @@ class ToolDescriptor:
     @property
     def input_schema(self) -> Mapping[str, JsonValue]:
         return _mcp_presentation_schema(
-            f"{self.name.replace('_', '-')}-request", _tool_schema_version(self.name)
+            f"{self.name.replace('_', '-')}-request", _tool_input_schema_version(self.name)
         )
 
     @property
     def output_schema(self) -> Mapping[str, JsonValue]:
         return _mcp_output_presentation_schema(
-            f"{self.name.replace('_', '-')}-result", _tool_schema_version(self.name)
+            f"{self.name.replace('_', '-')}-result", _tool_output_schema_version(self.name)
         )
 
     @property
     def catalog_output_schema(self) -> Mapping[str, JsonValue]:
         """Full catalog-bundled output schema before MCP root-object projection."""
 
-        return _mcp_schema(f"{self.name.replace('_', '-')}-result", _tool_schema_version(self.name))
+        return _mcp_schema(
+            f"{self.name.replace('_', '-')}-result", _tool_output_schema_version(self.name)
+        )
 
     @property
     def catalog_input_schema(self) -> Mapping[str, JsonValue]:
         """Full catalog-bundled input schema (admission dual-surface; not tools/list)."""
 
         return _mcp_schema(
-            f"{self.name.replace('_', '-')}-request", _tool_schema_version(self.name)
+            f"{self.name.replace('_', '-')}-request", _tool_input_schema_version(self.name)
         )
 
 
@@ -1366,16 +1373,17 @@ def _descriptor(
     open_world: bool = False,
 ) -> ToolDescriptor:
     schema_name = name.replace("_", "-")
-    schema_version = _tool_schema_version(name)
+    input_schema_version = _tool_input_schema_version(name)
+    output_schema_version = _tool_output_schema_version(name)
     return ToolDescriptor(
         name=name,
         title=title,
         description=description,
         input_schema_ref=(
-            f"{SCHEMA_NAMESPACE}operations/{schema_name}-request-{schema_version}.schema.json"
+            f"{SCHEMA_NAMESPACE}operations/{schema_name}-request-{input_schema_version}.schema.json"
         ),
         output_schema_ref=(
-            f"{SCHEMA_NAMESPACE}operations/{schema_name}-result-{schema_version}.schema.json"
+            f"{SCHEMA_NAMESPACE}operations/{schema_name}-result-{output_schema_version}.schema.json"
         ),
         annotations=ToolAnnotations(
             read_only=read_only,
@@ -1623,7 +1631,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
-                "publish_work": "sha256:0103569ec6045850aa6e3bab491342bb374025a9c3b5b406f838bfa2304bab5b",
+                "publish_work": "sha256:dd9725bbf8cadd9582c7be95f3314e74d642d56dd34d4f30a6c1ed6d9a32f367",
                 "check": "sha256:db57da2058052843ebb583f2ac141ebf7925dcf920583b0cdad6533c3f7fa29a",
                 "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
                 "status": "sha256:5147f6a2c2a6b1e2e2275dc32568fcf3c89e8f983edca6aa9b05d5bd432e9355",
@@ -1634,7 +1642,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
-                "publish_work": "sha256:0103569ec6045850aa6e3bab491342bb374025a9c3b5b406f838bfa2304bab5b",
+                "publish_work": "sha256:dd9725bbf8cadd9582c7be95f3314e74d642d56dd34d4f30a6c1ed6d9a32f367",
                 "check": "sha256:89899d93b76ea85c90d79d3df150f076f6b64a28cdb8f410c263ce3c1aa89b91",
                 "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
                 "status": "sha256:5147f6a2c2a6b1e2e2275dc32568fcf3c89e8f983edca6aa9b05d5bd432e9355",
@@ -1646,8 +1654,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:955be2650e68a62d1647e29ea6cf06400bd9f85ad8e97754327cbdd117d051ed",
-        "strict": "sha256:55bb7931ecec7a92be167ecc9d7b7650abc0991b1559a17d61d570cc3790d0a2",
+        "policy": "sha256:dba64015fdf21506ec059dd61f1fb9c77f899d2b31bdfbb81a8a5d37338873b3",
+        "strict": "sha256:1eef9bddd8429c49ac033574a9624357b3c80feed34bc15988695d68f5311f9d",
     }
 )
 
