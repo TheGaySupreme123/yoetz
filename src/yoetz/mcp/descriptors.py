@@ -111,12 +111,12 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
         "publish-work-request": MappingProxyType(
             {
                 "max_oneof_nodes": 8,
-                "max_oneof_branches": 32,
+                "max_oneof_branches": 28,
                 "max_ref_nodes": 0,
                 "max_conditional_nodes": 0,
                 "max_defs_count": 20,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 40_000,
+                "max_encoded_bytes": 32_000,
             }
         ),
         "check-request": MappingProxyType(
@@ -638,6 +638,34 @@ def _event_family_from_draft_branch(branch: Mapping[str, JsonValue]) -> str | No
     return None
 
 
+def _event_version_from_draft_branch(branch: Mapping[str, JsonValue]) -> str | None:
+    properties = branch.get("properties")
+    if not isinstance(properties, Mapping):
+        return None
+    props = cast(Mapping[str, JsonValue], properties)
+    schema_node = props.get("schema")
+    if isinstance(schema_node, Mapping):
+        nested_props = cast(Mapping[str, JsonValue], schema_node).get("properties")
+        if isinstance(nested_props, Mapping):
+            version_node = cast(Mapping[str, JsonValue], nested_props).get("version")
+            if isinstance(version_node, Mapping):
+                const_version = cast(Mapping[str, JsonValue], version_node).get("const")
+                if type(const_version) is str:
+                    return const_version
+    payload = props.get("payload")
+    if not isinstance(payload, Mapping):
+        return None
+    ref = cast(Mapping[str, JsonValue], payload).get("$ref")
+    if type(ref) is not str or not ref.startswith(SCHEMA_NAMESPACE):
+        return None
+    stem = ref.partition("#")[0].rsplit("/", 1)[-1].removesuffix(".schema.json")
+    for delimiter in (index for index, char in enumerate(stem) if char == "-"):
+        version = stem[delimiter + 1 :]
+        if SCHEMA_VERSION_PATTERN.fullmatch(version) is not None:
+            return version
+    return None
+
+
 def _project_event_draft_for_ordinary_mcp(
     event_draft: Mapping[str, JsonValue],
 ) -> dict[str, JsonValue]:
@@ -656,6 +684,11 @@ def _project_event_draft_for_ordinary_mcp(
             continue
         family = _event_family_from_draft_branch(branch_map)
         if family in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES:
+            if (
+                family == "evidence_recorded"
+                and _event_version_from_draft_branch(branch_map) == "1.2.0"
+            ):
+                continue
             kept.append(_mutable_json(branch_map))
             kept_families.add(family)
     if kept_families != set(ORDINARY_MCP_PUBLISH_EVENT_FAMILIES):
