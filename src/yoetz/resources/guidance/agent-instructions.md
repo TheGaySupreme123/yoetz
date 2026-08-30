@@ -33,6 +33,12 @@ Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, o
 
 Publish the material completion claim and its current evidence, call `check`, disposition any findings, then call `receipt`. Recheck after a material change or new evidence; a readable response to a finding this check returned is not material change, a redacted or unreadable response is.
 
+Use `claim_recorded/1.1.0` for new completion claims. Keep admissible support in
+`supporting_refs`, partial/failed results in `limitation_refs`, and prior effective claim ids in
+`supersedes_claim_refs` when correcting an append-only claim. Read `candidate_findings`, `history`,
+and `results`, then dry-run the exact correction before append. `disputes_refs` and a decision's
+`supersedes_event_id` do not replace a claim.
+
 For `check` mode: use `semantic_if_configured` for most material implementation/review claims; use `semantic_required` when the completion claim depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; use `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Omitting `mode` resolves via the configured verification policy (default optional → `semantic_if_configured`).
 
 # A recorded finding stays recorded

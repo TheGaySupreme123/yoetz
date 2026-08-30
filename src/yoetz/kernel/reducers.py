@@ -12,7 +12,10 @@ from yoetz.domain.events import (
     ActionRecordedPayload,
     AssignmentRecordedPayload,
     CheckRecordedPayload,
+    ClaimKind,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
+    ClaimRevisionMismatch,
     DecisionRecordedPayload,
     EvidenceRecordedPayload,
     FindingRecordedPayload,
@@ -25,6 +28,7 @@ from yoetz.domain.events import (
     PlanRevisedPayload,
     RedactionRecordedPayload,
     ResponseRecordedPayload,
+    ResultOutcome,
     ResultRecordedPayload,
     UnknownEvent,
     encode_payload,
@@ -515,6 +519,188 @@ def _apply_obligation(
     )
 
 
+def _claim_scope(
+    payload: ClaimRecordedPayload | ClaimRecordedPayloadV1_1,
+) -> frozenset[ObligationId]:
+    return frozenset(payload.obligation_refs)
+
+
+def _result_is_relevant_to_claim(
+    payload: ClaimRecordedPayload | ClaimRecordedPayloadV1_1,
+    result_record: ProjectionRecord[ResultRecordedPayload],
+    actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]],
+    *,
+    claim_frontier: int,
+) -> bool:
+    if result_record.payload is None or result_record.source_frontier > claim_frontier:
+        return False
+    action = actions.get(result_record.payload.action_id)
+    if action is None or action.payload is None:
+        return True
+    claim_scope = _claim_scope(payload)
+    action_scope = frozenset(action.payload.obligation_refs)
+    return not claim_scope or not action_scope or not claim_scope.isdisjoint(action_scope)
+
+
+def _claim_effective_meaning(
+    payload: ClaimRecordedPayload | ClaimRecordedPayloadV1_1,
+) -> tuple[object, ...]:
+    """Comparable claim meaning, excluding identity and revision linkage."""
+
+    return (
+        payload.claim_kind,
+        payload.statement,
+        payload.supporting_refs,
+        payload.subject_state,
+        payload.obligation_refs,
+        payload.disputes_refs,
+        payload.limitation_refs if type(payload) is ClaimRecordedPayloadV1_1 else (),
+    )
+
+
+def _limitation_scope_is_authorable(
+    payload: ClaimRecordedPayloadV1_1,
+    result_record: ProjectionRecord[ResultRecordedPayload],
+    actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]],
+    *,
+    claim_frontier: int,
+) -> bool:
+    """Require readable action scope for a limitation a caller wants to link."""
+
+    if result_record.payload is None:
+        return False
+    action = actions.get(result_record.payload.action_id)
+    return (
+        action is not None
+        and action.payload is not None
+        and _result_is_relevant_to_claim(
+            payload,
+            result_record,
+            actions,
+            claim_frontier=claim_frontier,
+        )
+    )
+
+
+def _apply_claim(
+    claims: dict[ClaimId, ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1]],
+    actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]],
+    results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]],
+    event: AcceptedEvent,
+) -> None:
+    key = _locator_id(event, claim_id)
+    if event.payload is None:
+        claims[key] = _tombstone(event, ClaimRecordedPayload)
+        return
+    payload = cast(ClaimRecordedPayload, event.payload)
+    if type(payload) is ClaimRecordedPayloadV1_1:
+        if key in claims:
+            raise ClaimRevisionMismatch(
+                "claim_id",
+                "claim_id_must_be_fresh",
+                event.event_id,
+            )
+        if payload.supersedes_claim_refs and payload.disputes_refs:
+            raise ClaimRevisionMismatch(
+                "disputes_refs",
+                "replacement_must_not_dispute",
+                event.event_id,
+            )
+        if any(
+            (record := results.get(result_id(result_ref))) is not None
+            and record.payload is not None
+            and record.payload.outcome in {ResultOutcome.FAILURE, ResultOutcome.PARTIAL}
+            for result_ref in payload.supporting_refs
+            if result_ref.startswith("res_")
+        ):
+            raise ClaimRevisionMismatch(
+                "supporting_refs",
+                "supporting_refs_must_exclude_limitations",
+                event.event_id,
+            )
+        relevant = frozenset(
+            result_id_value
+            for result_id_value, record in results.items()
+            if record.payload is not None
+            and record.payload.outcome in {ResultOutcome.FAILURE, ResultOutcome.PARTIAL}
+            and _result_is_relevant_to_claim(
+                payload,
+                record,
+                actions,
+                claim_frontier=event.ledger.ingestion_sequence,
+            )
+        )
+        supplied = frozenset(payload.limitation_refs)
+        if any(
+            (record := results.get(result_ref)) is None
+            or record.payload is None
+            or record.payload.outcome not in {ResultOutcome.FAILURE, ResultOutcome.PARTIAL}
+            or not _limitation_scope_is_authorable(
+                payload,
+                record,
+                actions,
+                claim_frontier=event.ledger.ingestion_sequence,
+            )
+            for result_ref in payload.limitation_refs
+        ):
+            raise ClaimRevisionMismatch(
+                "limitation_refs",
+                "limitation_refs_must_be_relevant_non_success_results",
+                event.event_id,
+            )
+        if payload.claim_kind is ClaimKind.COMPLETION and supplied != relevant:
+            raise ClaimRevisionMismatch(
+                "limitation_refs",
+                "limitation_refs_complete",
+                event.event_id,
+            )
+        if payload.supersedes_claim_refs:
+            already_superseded = {
+                target
+                for record in claims.values()
+                if type(record.payload) is ClaimRecordedPayloadV1_1
+                for target in record.payload.supersedes_claim_refs
+            }
+            for target in payload.supersedes_claim_refs:
+                prior = claims.get(target)
+                if prior is None or prior.payload is None:
+                    raise ClaimRevisionMismatch(
+                        "supersedes_claim_refs",
+                        "superseded_claim_must_exist",
+                        event.event_id,
+                    )
+                if target in already_superseded:
+                    raise ClaimRevisionMismatch(
+                        "supersedes_claim_refs",
+                        "superseded_claim_must_be_effective",
+                        event.event_id,
+                    )
+                if prior.payload.claim_kind is not payload.claim_kind:
+                    raise ClaimRevisionMismatch(
+                        "claim_kind",
+                        "claim_kind_must_match",
+                        event.event_id,
+                    )
+                prior_scope = _claim_scope(prior.payload)
+                current_scope = _claim_scope(payload)
+                if not prior_scope or not current_scope or prior_scope.isdisjoint(current_scope):
+                    raise ClaimRevisionMismatch(
+                        "obligation_refs",
+                        "scope_overlap_required",
+                        event.event_id,
+                    )
+            if len(payload.supersedes_claim_refs) == 1:
+                prior = claims[payload.supersedes_claim_refs[0]]
+                assert prior.payload is not None
+                if _claim_effective_meaning(prior.payload) == _claim_effective_meaning(payload):
+                    raise ClaimRevisionMismatch(
+                        "supersedes_claim_refs",
+                        "replacement_must_change_effective_claim",
+                        event.event_id,
+                    )
+    claims[key] = _projection_record(event, payload)
+
+
 def _redact_current_records(
     target_event_ids: tuple[EventId, ...],
     plans: dict[int, PlanProjectionRecord],
@@ -524,7 +710,7 @@ def _redact_current_records(
     actions: dict[ActionId, ProjectionRecord[ActionRecordedPayload]],
     results: dict[ResultId, ProjectionRecord[ResultRecordedPayload]],
     evidence: dict[EvidenceId, EvidenceProjectionRecord],
-    claims: dict[ClaimId, ProjectionRecord[ClaimRecordedPayload]],
+    claims: dict[ClaimId, ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1]],
     findings: dict[FindingId, FindingProjectionRecord],
     responses: dict[FindingId, ProjectionRecord[ResponseRecordedPayload]],
 ) -> None:
@@ -565,7 +751,7 @@ def _recompute_secondary_effects(
     plans: dict[int, PlanProjectionRecord],
     obligations: dict[ObligationId, ObligationProjectionRecord],
     decisions: dict[EventId, DecisionProjectionRecord],
-    claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload]],
+    claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1]],
 ) -> dict[ContradictionKey, ContradictionRecord]:
     for key, record in tuple(plans.items()):
         plans[key] = replace(record, superseded_by_plan_version=None)
@@ -623,12 +809,13 @@ def _recompute_secondary_effects(
         claims.values(),
         key=lambda item: (item.source_frontier, _ascii_key(item.source_event_id)),
     ):
-        if type(record.payload) is not ClaimRecordedPayload:
+        if type(record.payload) not in {ClaimRecordedPayload, ClaimRecordedPayloadV1_1}:
             continue
-        for disputed_ref in record.payload.disputes_refs:
-            key = ContradictionKey(record.payload.claim_id, disputed_ref)
+        claim = cast(ClaimRecordedPayload | ClaimRecordedPayloadV1_1, record.payload)
+        for disputed_ref in claim.disputes_refs:
+            key = ContradictionKey(claim.claim_id, disputed_ref)
             contradictions[key] = ContradictionRecord(
-                disputing_claim_id=record.payload.claim_id,
+                disputing_claim_id=claim.claim_id,
                 disputed_ref=disputed_ref,
                 source_event_id=record.source_event_id,
                 source_frontier=record.source_frontier,
@@ -669,7 +856,7 @@ def _recompute_missing_gaps(
     actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]],
     results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]],
     evidence: Mapping[EvidenceId, EvidenceProjectionRecord],
-    claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload]],
+    claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1]],
     findings: Mapping[FindingId, FindingProjectionRecord],
     responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]],
 ) -> tuple[str, ...]:
@@ -726,6 +913,11 @@ def _recompute_missing_gaps(
                 require(record.source_event_id, target)
             for target in record.payload.disputes_refs:
                 if target.startswith("clm_"):
+                    require(record.source_event_id, target)
+            if type(record.payload) is ClaimRecordedPayloadV1_1:
+                for target in record.payload.limitation_refs:
+                    require(record.source_event_id, target)
+                for target in record.payload.supersedes_claim_refs:
                     require(record.source_event_id, target)
     for record in findings.values():
         if record.payload is not None:
@@ -883,12 +1075,7 @@ def reduce_event(
                 source_frontier=accepted.ledger.ingestion_sequence,
             )
         elif family == "claim_recorded":
-            key = _locator_id(accepted, claim_id)
-            claims[key] = (
-                _tombstone(accepted, ClaimRecordedPayload)
-                if payload is None
-                else _projection_record(accepted, cast(ClaimRecordedPayload, payload))
-            )
+            _apply_claim(claims, actions, results, accepted)
         elif family == "finding_recorded":
             key = _locator_id(accepted, finding_id)
             findings[key] = _finding_record(

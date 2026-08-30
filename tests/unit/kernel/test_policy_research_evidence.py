@@ -22,6 +22,7 @@ from yoetz.domain.events import (
     ActionRecordedPayload,
     ClaimKind,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
     EvidenceKind,
     EvidenceRecordedPayload,
     ObligationChangeKind,
@@ -140,6 +141,25 @@ def test_cited_non_success_result_is_limitation_disclosure_not_support_mismatch(
     assert FindingKind.MATERIAL_LIMITATION_OMITTED not in kinds
 
 
+def test_versioned_claim_uses_limitation_refs_without_treating_them_as_support() -> None:
+    claim = ClaimRecordedPayloadV1_1(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Partial result retained as a limitation",
+        supporting_refs=(evd(1),),
+        limitation_refs=(res(1),),
+    )
+    case = make_case(
+        actions={act(1): record(_action(), 1)},
+        results={res(1): record(_result(ResultOutcome.PARTIAL), 2)},
+        evidence={evd(1): evidence_record(_evidence(), 3)},
+        claims={clm(1): record(claim, 4)},
+    )
+    kinds = _kinds(case)
+    assert FindingKind.MATERIAL_LIMITATION_OMITTED not in kinds
+    assert FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM not in kinds
+
+
 def test_diff_does_not_match_account_and_equal_digest_nontrigger() -> None:
     old = SubjectStateRef(tree_digest=_DIGEST_A)
     new = SubjectStateRef(tree_digest=_DIGEST_B)
@@ -197,6 +217,8 @@ def test_material_limitation_omitted_and_exact_link_nontrigger() -> None:
     )
     assert finding.basis.required_but_missing_facts[0].fact_code == ("limitation_disclosure_absent")
     assert f"Omitted limitation basis: limiting result {res(1)}." in finding.candidate.detail
+    assert f"limitation_refs [{res(1)}]" in finding.candidate.detail
+    assert f"supersedes_claim_refs names [{clm(1)}]" in finding.candidate.detail
     assert omitted.statement not in finding.candidate.detail
     disclosed = ClaimRecordedPayload(
         claim_id=clm(1),

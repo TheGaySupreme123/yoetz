@@ -13,6 +13,7 @@ from yoetz.domain.events import (
     ActionRecordedPayload,
     AssignmentRecordedPayload,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
     DecisionRecordedPayload,
     EventPayload,
     EventSchema,
@@ -451,7 +452,7 @@ class ProjectionState:
     actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]]
     results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]]
     evidence: Mapping[EvidenceId, EvidenceProjectionRecord]
-    claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload]]
+    claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1]]
     contradictions: Mapping[ContradictionKey, ContradictionRecord]
     findings: Mapping[FindingId, FindingProjectionRecord]
     responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]]
@@ -538,7 +539,7 @@ class ProjectionState:
             self.claims,
             claim_id,
             ProjectionRecord,
-            ClaimRecordedPayload,
+            (ClaimRecordedPayload, ClaimRecordedPayloadV1_1),
             "claim_id",
         )
         findings = self._copy_mapping(
@@ -629,7 +630,7 @@ class ProjectionState:
         source: Mapping[K, T],
         key_validator: Callable[[object], K],
         record_type: type[object],
-        payload_type: type[object],
+        payload_type: type[object] | tuple[type[object], ...],
         payload_key: str,
     ) -> dict[K, T]:
         if not isinstance(cast(object, source), Mapping):
@@ -644,7 +645,10 @@ class ProjectionState:
                 raise _invalid()
             self._validate_record(record)
             if record.payload is not None:
-                if type(record.payload) is not payload_type:
+                allowed_types: tuple[type[object], ...] = (
+                    payload_type if isinstance(payload_type, tuple) else (payload_type,)
+                )
+                if type(record.payload) not in allowed_types:
                     raise _invalid()
                 if getattr(record.payload, payload_key) != key:
                     raise _invalid()
@@ -1203,7 +1207,10 @@ def projection_from_snapshot(value: JsonValue) -> ProjectionState:
                 _record_map_from_snapshot(source["evidence"], collection="evidence"),
             ),
             claims=cast(
-                Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload]],
+                Mapping[
+                    ClaimId,
+                    ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1],
+                ],
                 _record_map_from_snapshot(source["claims"], collection="claims"),
             ),
             contradictions=_contradictions_from_snapshot(source["contradictions"]),

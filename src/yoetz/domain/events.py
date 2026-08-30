@@ -99,6 +99,7 @@ __all__ = [
     "MAX_TEXT_BYTES",
     "OBSERVATION_COORDINATOR_ACTOR_ID",
     "PAYLOAD_TYPES",
+    "CLAIM_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "EVIDENCE_SCHEMA_VERSION",
     "AcceptedEvent",
@@ -109,6 +110,8 @@ __all__ = [
     "CheckRecordedPayload",
     "ClaimKind",
     "ClaimRecordedPayload",
+    "ClaimRecordedPayloadV1_1",
+    "ClaimRevisionMismatch",
     "ClientKind",
     "DecisionRecordedPayload",
     "EventDraft",
@@ -137,6 +140,7 @@ __all__ = [
     "obligation_meaning_field_diffs",
     "public_error_for_obligation_resolution_mismatch",
     "public_error_for_no_obligations_reason_mismatch",
+    "public_error_for_claim_revision_mismatch",
     "PayloadRef",
     "PlanPublishedPayload",
     "PlanRevisedPayload",
@@ -170,6 +174,7 @@ OBSERVATION_COORDINATOR_ACTOR_ID: Final = "yoetz:observation-coordinator"
 
 SCHEMA_VERSION: Final = "1.0.0"
 EVIDENCE_SCHEMA_VERSION: Final = "1.1.0"
+CLAIM_SCHEMA_VERSION: Final = "1.1.0"
 MAX_TEXT_BYTES: Final = 8_192
 MAX_REASON_BYTES: Final = 4_096
 MAX_LABEL_BYTES: Final = 256
@@ -616,9 +621,10 @@ class PayloadRef:
 def _locator_key_kind(schema: EventSchema) -> str:
     if schema.name not in EVENT_FAMILIES:
         return "none"
-    if schema.version != SCHEMA_VERSION and schema != EventSchema(
-        "evidence_recorded", EVIDENCE_SCHEMA_VERSION
-    ):
+    if schema.version != SCHEMA_VERSION and schema not in {
+        EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION),
+        EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION),
+    }:
         return "none"
     schema_name = schema.name
     if schema_name in {"plan_published", "plan_revised"}:
@@ -865,6 +871,55 @@ class NoObligationsReasonMismatch(ValueError):
         return "no_obligations_reason_conflict"
 
 
+_CLAIM_REVISION_FIELDS: Final = frozenset(
+    {
+        "claim_id",
+        "claim_kind",
+        "disputes_refs",
+        "limitation_refs",
+        "obligation_refs",
+        "supporting_refs",
+        "supersedes_claim_refs",
+    }
+)
+_CLAIM_REVISION_INVARIANTS: Final = frozenset(
+    {
+        "claim_id_must_be_fresh",
+        "claim_kind_must_match",
+        "limitation_refs_complete",
+        "limitation_refs_must_be_relevant_non_success_results",
+        "replacement_must_change_effective_claim",
+        "replacement_must_not_dispute",
+        "scope_overlap_required",
+        "supporting_refs_must_exclude_limitations",
+        "superseded_claim_must_be_effective",
+        "superseded_claim_must_exist",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimRevisionMismatch(ValueError):
+    """Typed, content-free rejection for an invalid claim_recorded/1.1 revision."""
+
+    field: str
+    invariant: str
+    event_id: EventId | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.field) is not str or self.field not in _CLAIM_REVISION_FIELDS:
+            raise ProtocolValueError("invalid_event_value_type")
+        if type(self.invariant) is not str or self.invariant not in _CLAIM_REVISION_INVARIANTS:
+            raise ProtocolValueError("invalid_event_value_type")
+        if self.event_id is not None:
+            object.__setattr__(self, "event_id", event_id(self.event_id))
+        ValueError.__init__(self, "claim_revision_mismatch")
+
+    @property
+    def reason_code(self) -> str:
+        return "claim_revision_mismatch"
+
+
 def public_error_for_no_obligations_reason_mismatch(
     mismatch: NoObligationsReasonMismatch,
     *,
@@ -883,6 +938,33 @@ def public_error_for_no_obligations_reason_mismatch(
             "The event batch is invalid. no_obligations_reason requires a readable effective "
             "current plan with zero obligation_refs. Remove no_obligations_reason or revise the "
             "plan declaration before retrying."
+        ),
+        False,
+        safe_details=details,
+    )
+
+
+def public_error_for_claim_revision_mismatch(
+    mismatch: ClaimRevisionMismatch,
+    *,
+    event_index: int | None = None,
+) -> PublicOperationError:
+    """Project the same authorable claim-revision error on preview and append paths."""
+
+    if type(mismatch) is not ClaimRevisionMismatch:
+        raise TypeError("claim_revision_mismatch_wrong_type")
+    details: dict[str, str] = {"reason_code": mismatch.reason_code}
+    if type(event_index) is int and 0 <= event_index < _MAX_EVENTS_PER_BATCH_FOR_POINTER:
+        details["field"] = f"/event_drafts/{event_index}/payload/{mismatch.field}"
+    return PublicOperationError(
+        PublicErrorCode.EVENT_INVALID,
+        (
+            "The event batch is invalid. claim_recorded/1.1.0 correction requires invariant "
+            f"{mismatch.invariant} at {mismatch.field}. Use supersedes_claim_refs only for exact "
+            "prior effective claim ids with overlapping obligation scope and a fresh, materially "
+            "changed claim. Keep partial or failed result ids in limitation_refs rather than "
+            "supporting_refs, and do not combine replacement with disputes_refs. Read status views "
+            "candidate_findings, history, and results before retrying."
         ),
         False,
         safe_details=details,
@@ -1327,6 +1409,30 @@ class ClaimRecordedPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class ClaimRecordedPayloadV1_1(ClaimRecordedPayload):
+    """Append-only claim correction with support and limitations kept distinct."""
+
+    limitation_refs: tuple[ResultId, ...] = ()
+    supersedes_claim_refs: tuple[ClaimId, ...] = ()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        limitations = _id_tuple(self.limitation_refs, result_id, field="limitation_refs")
+        superseded = _id_tuple(
+            self.supersedes_claim_refs,
+            claim_id,
+            maximum=MAX_ALTERNATIVES,
+            field="supersedes_claim_refs",
+        )
+        if set(limitations) & set(self.supporting_refs):
+            raise ProtocolValueError("claim_revision_invalid", field="limitation_refs")
+        if self.claim_id in superseded:
+            raise ProtocolValueError("claim_revision_invalid", field="supersedes_claim_refs")
+        object.__setattr__(self, "limitation_refs", limitations)
+        object.__setattr__(self, "supersedes_claim_refs", superseded)
+
+
+@dataclass(frozen=True, slots=True)
 class PlanRevisedPayload:
     plan_version: int
     supersedes_plan_version: int
@@ -1577,6 +1683,7 @@ type EventPayload = (
     | ResultRecordedPayload
     | EvidenceRecordedPayload
     | ClaimRecordedPayload
+    | ClaimRecordedPayloadV1_1
     | PlanRevisedPayload
     | Finding
     | ResponseRecordedPayload
@@ -1599,6 +1706,7 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("evidence_recorded", SCHEMA_VERSION): EvidenceRecordedPayload,
         EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION): EvidenceRecordedPayload,
         EventSchema("claim_recorded", SCHEMA_VERSION): ClaimRecordedPayload,
+        EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION): ClaimRecordedPayloadV1_1,
         EventSchema("plan_revised", SCHEMA_VERSION): PlanRevisedPayload,
         EventSchema("finding_recorded", SCHEMA_VERSION): Finding,
         EventSchema("response_recorded", SCHEMA_VERSION): ResponseRecordedPayload,
@@ -1968,6 +2076,8 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
     required, optional = _PAYLOAD_SHAPES[schema.name]
     if schema == EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION):
         optional = frozenset({*optional, "digest_binding"})
+    if schema == EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION):
+        required = frozenset({*required, "limitation_refs", "supersedes_claim_refs"})
     source = _closed_object(frozen, required=required, optional=optional)
 
     if schema.name == "session_opened":
@@ -2117,24 +2227,49 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         state = _optional(source, "subject_state")
         obligations = _optional(source, "obligation_refs")
         disputes = _optional(source, "disputes_refs")
-        return ClaimRecordedPayload(
-            claim_id=claim_id(_field(source, "claim_id")),
-            claim_kind=_enum_from_json(_field(source, "claim_kind"), ClaimKind),
-            statement=cast(str, _field(source, "statement")),
-            supporting_refs=cast(
-                tuple[EvidenceId | ResultId | ObligationId, ...],
-                tuple(_array(_field(source, "supporting_refs"))),
-            ),
-            subject_state=None if state is None else _decode_subject_state(state),
-            obligation_refs=(
+        claim_id_value = claim_id(_field(source, "claim_id"))
+        claim_kind_value = _enum_from_json(_field(source, "claim_kind"), ClaimKind)
+        statement = cast(str, _field(source, "statement"))
+        supporting_refs = cast(
+            tuple[EvidenceId | ResultId | ObligationId, ...],
+            tuple(_array(_field(source, "supporting_refs"))),
+        )
+        subject_state = None if state is None else _decode_subject_state(state)
+        obligation_refs = (
+            ()
+            if obligations is None
+            else cast(tuple[ObligationId, ...], tuple(_array(obligations)))
+        )
+        disputes_refs = (
+            () if disputes is None else cast(tuple[ClaimId | EventId, ...], tuple(_array(disputes)))
+        )
+        if schema.version != CLAIM_SCHEMA_VERSION:
+            return ClaimRecordedPayload(
+                claim_id=claim_id_value,
+                claim_kind=claim_kind_value,
+                statement=statement,
+                supporting_refs=supporting_refs,
+                subject_state=subject_state,
+                obligation_refs=obligation_refs,
+                disputes_refs=disputes_refs,
+            )
+        limitations = _optional(source, "limitation_refs")
+        superseded = _optional(source, "supersedes_claim_refs")
+        return ClaimRecordedPayloadV1_1(
+            claim_id=claim_id_value,
+            claim_kind=claim_kind_value,
+            statement=statement,
+            supporting_refs=supporting_refs,
+            subject_state=subject_state,
+            obligation_refs=obligation_refs,
+            disputes_refs=disputes_refs,
+            limitation_refs=(
                 ()
-                if obligations is None
-                else cast(tuple[ObligationId, ...], tuple(_array(obligations)))
+                if limitations is None
+                else cast(tuple[ResultId, ...], tuple(_array(limitations)))
             ),
-            disputes_refs=(
-                ()
-                if disputes is None
-                else cast(tuple[ClaimId | EventId, ...], tuple(_array(disputes)))
+            supersedes_claim_refs=(
+                () if superseded is None else cast(tuple[ClaimId, ...], tuple(_array(superseded)))
             ),
         )
     if schema.name == "plan_revised":
@@ -2401,8 +2536,8 @@ def encode_payload(payload: EventPayload) -> JsonValue:
             None if value.digest_binding is None else _encode_digest_binding(value.digest_binding),
         )
         return _json_object(result)
-    if payload_type is ClaimRecordedPayload:
-        value = cast(ClaimRecordedPayload, payload)
+    if payload_type in {ClaimRecordedPayload, ClaimRecordedPayloadV1_1}:
+        value = cast(ClaimRecordedPayload | ClaimRecordedPayloadV1_1, payload)
         result = {
             "claim_id": value.claim_id,
             "claim_kind": value.claim_kind.value,
@@ -2416,6 +2551,11 @@ def encode_payload(payload: EventPayload) -> JsonValue:
         )
         _optional_tuple(result, "obligation_refs", cast(tuple[object, ...], value.obligation_refs))
         _optional_tuple(result, "disputes_refs", cast(tuple[object, ...], value.disputes_refs))
+        if type(value) is ClaimRecordedPayloadV1_1:
+            result["limitation_refs"] = cast(tuple[JsonValue, ...], value.limitation_refs)
+            result["supersedes_claim_refs"] = cast(
+                tuple[JsonValue, ...], value.supersedes_claim_refs
+            )
         return _json_object(result)
     if payload_type is PlanRevisedPayload:
         value = cast(PlanRevisedPayload, payload)
@@ -2681,8 +2821,8 @@ def _expected_locator_key(payload: EventPayload, envelope_event_id: EventId) -> 
         return cast(ResultRecordedPayload, payload).result_id
     if payload_type is EvidenceRecordedPayload:
         return cast(EvidenceRecordedPayload, payload).evidence_id
-    if payload_type is ClaimRecordedPayload:
-        return cast(ClaimRecordedPayload, payload).claim_id
+    if payload_type in {ClaimRecordedPayload, ClaimRecordedPayloadV1_1}:
+        return cast(ClaimRecordedPayload | ClaimRecordedPayloadV1_1, payload).claim_id
     if payload_type is Finding:
         return cast(Finding, payload).finding_id
     if payload_type is ResponseRecordedPayload:

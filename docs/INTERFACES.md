@@ -505,17 +505,19 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   `caller_asserted`; approved-check and import provenance are reserved to their authenticated
   channels. Schema `1.0.0` stays exact-readable and an untyped legacy digest remains unknown rather
   than inheriting a subject from prose.
-- `claim_recorded`: `claim_id`, `claim_kind` (`completion`|`material`), `statement`,
-  `supporting_refs` (evidence/result/obligation IDs), optional `subject_state`.
-  Citing a `failure` or `partial` result on a completion claim's `supporting_refs` is
-  the typed disclosure of that limitation (`material_limitation_omitted` /
-  `failed_work_omitted` do not fire).
-  Research-evidence `evidence_does_not_support_claim` does not treat that citation as a
-  support mismatch. An `unknown` result cited as completion support still mismatches
-  (an outcome-less observation does not become completion evidence). Observed
-  `claim_support_present` with required-missing `claim_support_mismatch` is reserved for
-  a cited ref whose subject state, unknown outcome, or open obligation status cannot
-  support the claim.
+- `claim_recorded/1.0.0`: frozen `claim_id`, `claim_kind` (`completion`|`material`),
+  `statement`, `supporting_refs` (evidence/result/obligation IDs), optional `subject_state`,
+  `obligation_refs`, and `disputes_refs`. Its historical rule remains: citing a `failure` or
+  `partial` result on a completion claim's `supporting_refs` discloses that limitation rather than
+  creating `evidence_does_not_support_claim`. An `unknown` result still mismatches.
+- `claim_recorded/1.1.0`: the same fields plus required `limitation_refs` (partial/failed result
+  IDs) and `supersedes_claim_refs` (prior effective claim IDs), using empty arrays when neither
+  applies. Admissible support stays in
+  `supporting_refs`; non-success results never do. A replacement uses a fresh claim id, same claim
+  kind, overlapping declared obligation scope, and the complete relevant limitation set. Replay
+  rejects missing/already-replaced targets, disjoint scope, wrong result outcomes, irrelevant
+  limitations, or incomplete linkage before append. A limiting result must predate the claim and
+  have an action whose obligation scope overlaps the claim; an unscoped side remains task-wide.
 - `plan_revised`: `plan_version`, `supersedes_plan_version`, `reason`, `summary`,
   `obligation_changes`, and optional `no_obligations_reason` using the same closed values. A
   revision restates the effective current declaration: omission clears an earlier reason, and a
@@ -913,6 +915,12 @@ single predicate deciding between the two, shared by the receipt and by compact 
   edges previously asserted by that claim with its new exact `disputes_refs`; a decision alone does
   not clear an edge. Orphan action/result links remain their visible record plus a coverage gap and
   policy input, not a second contradiction family.
+- `effective_claim_ids`, owned by `kernel/claims.py`, removes only claims explicitly named by a
+  readable `claim_recorded/1.1.0.supersedes_claim_refs`. Deterministic current-claim rules,
+  semantic claim sections, and receipt current-claim selection consume that set. Projection and
+  status history retain both old and replacement records; finding resolution remains a later-check
+  transition and never deletion. `disputes_refs` and `decision_recorded.supersedes_event_id` are
+  not claim-supersession aliases.
 - `EvidenceObjectSource` is the frozen `(evidence_id, source_event_id)` pair. `ReplayIndex` is the
   frozen non-plaintext `(frontier, head_digest, payload_event_by_object,
   evidence_sources_by_object, redaction_root_by_object)` reverse index derived solely from the
@@ -1325,6 +1333,9 @@ filtering, or resolution. The obligations row also returns `requested_items` and
 omission under a stricter client policy, while item kinds and attempt matching remain structural.
 Results returns only `result_id`, source event id, payload availability, outcome, linked action id,
 and evidence ids; it never returns result prose, command text, exit output, or subject-state content.
+Together with history's claim event/schema identity and candidate findings' bounded claim/result
+ids, this is the minimum public projection needed to author and dry-run a v1.1 replacement without
+reading raw ledger internals.
 Evidence strength is exact, availability concerns only declared captured
 content (never a path/URL probe), and freshness is the weaker source-envelope/projection freshness
 capped at `redacted_gap` for unavailable captured content. History is accepted-envelope metadata

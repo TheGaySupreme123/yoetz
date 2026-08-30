@@ -23,7 +23,7 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 92
+_EXPECTED_MEMBER_COUNT = 93
 _EXPECTED_REQUEST_RESULT_VERSION_COUNT = 40
 _EXPECTED_EVENT_VERSION_COUNT = 16
 
@@ -199,6 +199,7 @@ def test_schema_registry_is_complete() -> None:
                 "1.1.0"
                 if path
                 in {
+                    "events/claim-recorded-1.1.0.schema.json",
                     "events/evidence-recorded-1.1.0.schema.json",
                     "operations/status-request-1.1.0.schema.json",
                     "operations/status-result-1.1.0.schema.json",

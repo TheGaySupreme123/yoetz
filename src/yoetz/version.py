@@ -74,7 +74,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 131
+REVIEWED_RESOURCE_COUNT: Final = 133
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -612,7 +612,11 @@ def build_version_manifest(*, include_optional_probes: bool = False) -> VersionM
         privacy_classifier_ruleset_version=PRIVACY_CLASSIFIER_RULESET_VERSION,
         request_result_schema_versions=_REQUEST_RESULT_VERSIONS,
         event_schema_versions=tuple(
-            (name, "1.1.0" if name == "evidence_recorded" else "1.0.0") for name in _EVENT_NAMES
+            (
+                name,
+                "1.1.0" if name in {"claim_recorded", "evidence_recorded"} else "1.0.0",
+            )
+            for name in _EVENT_NAMES
         ),
         policy_versions=(RESEARCH_EVIDENCE_POLICY_VERSION, WORK_INTEGRITY_POLICY_VERSION),
         object_format_version=OBJECT_FORMAT_VERSION,

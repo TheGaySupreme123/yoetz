@@ -116,7 +116,7 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
                 "max_conditional_nodes": 0,
                 "max_defs_count": 20,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 32_000,
+                "max_encoded_bytes": 34_000,
             }
         ),
         "check-request": MappingProxyType(
@@ -195,7 +195,7 @@ SERVER_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
 # worst observed host behavior, one full copy of the instructions block charged to each of the
 # seven advertised tools, which is what the total is computed against.
 ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
-    {"instructions_copies_per_tool": 1, "max_encoded_bytes": 200_000}
+    {"instructions_copies_per_tool": 1, "max_encoded_bytes": 205_000}
 )
 
 
@@ -488,7 +488,10 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                             "claim_kind": "completion",
                             "statement": "The requested change is implemented and covered.",
                             "supporting_refs": [_example_id("evidence", 1)],
+                            "limitation_refs": [],
+                            "supersedes_claim_refs": [],
                         },
+                        version="1.1.0",
                     ),
                 ],
                 "actor": dict(_EXAMPLE_ACTOR),
@@ -1415,7 +1418,14 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "claim_recorded. decision_recorded authority is a structural actor id such as "
         "harness:cli, never approval prose; the approval story belongs in rationale. action_kind "
         "is a closed enum of command, edit, research, review, and other; a source or file change "
-        "is edit, and command additionally requires the command field. Each draft "
+        "is edit, and command additionally requires the command field. "
+        "claim_recorded at schema 1.1.0 keeps admissible supporting_refs separate from partial or "
+        "failed limitation_refs; a correction names only exact prior effective claim ids in "
+        "supersedes_claim_refs. Dry-run validates target and limitation existence, result outcome, "
+        "scope overlap, replacement effectiveness, and complete limitation linkage before append. "
+        "Read candidate_findings, history, and results to author the correction; disputes_refs "
+        "and decision supersedes_event_id keep their existing meanings and do not replace a claim. "
+        "Each draft "
         "occurred_at is a caller-asserted RFC 3339 UTC time with millisecond precision: use the "
         "best real time available and do not copy the illustrative example timestamp. Ledger order "
         "follows ingestion sequence; receipt freshness is frontier-bound. Service accepted_at is "
@@ -1613,7 +1623,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
-                "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
+                "publish_work": "sha256:0103569ec6045850aa6e3bab491342bb374025a9c3b5b406f838bfa2304bab5b",
                 "check": "sha256:db57da2058052843ebb583f2ac141ebf7925dcf920583b0cdad6533c3f7fa29a",
                 "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
                 "status": "sha256:5147f6a2c2a6b1e2e2275dc32568fcf3c89e8f983edca6aa9b05d5bd432e9355",
@@ -1624,7 +1634,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
-                "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
+                "publish_work": "sha256:0103569ec6045850aa6e3bab491342bb374025a9c3b5b406f838bfa2304bab5b",
                 "check": "sha256:89899d93b76ea85c90d79d3df150f076f6b64a28cdb8f410c263ce3c1aa89b91",
                 "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
                 "status": "sha256:5147f6a2c2a6b1e2e2275dc32568fcf3c89e8f983edca6aa9b05d5bd432e9355",
@@ -1636,8 +1646,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:1d9cf5638ab280e43ad95cabb9d9a91c781a804fc6c86c4fde63e4f38500607a",
-        "strict": "sha256:4eb3862121e6da91bed7ac017567c507cd88852590e35510ae7cae1c6ba2ba87",
+        "policy": "sha256:955be2650e68a62d1647e29ea6cf06400bd9f85ad8e97754327cbdd117d051ed",
+        "strict": "sha256:55bb7931ecec7a92be167ecc9d7b7650abc0991b1559a17d61d570cc3790d0a2",
     }
 )
 

@@ -18,6 +18,8 @@ from yoetz.domain.events import (
     CheckMode,
     CheckRecordedPayload,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
+    ClaimRevisionMismatch,
     DecisionRecordedPayload,
     EventDraft,
     EventPayload,
@@ -45,6 +47,7 @@ from yoetz.domain.events import (
     is_observation_authored,
     is_observation_authorship,
     media_type_for,
+    public_error_for_claim_revision_mismatch,
     public_error_for_no_obligations_reason_mismatch,
     public_error_for_obligation_resolution_mismatch,
 )
@@ -519,6 +522,8 @@ def _logical_key(payload: EventPayload, event_id: str) -> str | None:
         return payload.result_id
     if type(payload) is EvidenceRecordedPayload:
         return payload.evidence_id
+    if type(payload) is ClaimRecordedPayloadV1_1:
+        return payload.claim_id
     if type(payload) is ClaimRecordedPayload:
         return payload.claim_id
     if type(payload) is FindingRecordedPayload:
@@ -1470,6 +1475,16 @@ class MemoryLedgerAdapter:
                             draft_index = index
                             break
                 raise public_error_for_obligation_resolution_mismatch(
+                    exc, event_index=draft_index
+                ) from exc
+            except ClaimRevisionMismatch as exc:
+                draft_index = None
+                if exc.event_id is not None:
+                    for index, item in enumerate(command.entries):
+                        if item.draft.event_id == exc.event_id:
+                            draft_index = index
+                            break
+                raise public_error_for_claim_revision_mismatch(
                     exc, event_index=draft_index
                 ) from exc
             except ValueError as exc:

@@ -6,6 +6,15 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Added
+
+- `claim_recorded/1.1.0` adds append-only completion-claim correction: a fresh replacement names
+  prior effective claims in `supersedes_claim_refs` and records partial or failed results in
+  `limitation_refs` instead of treating them as support. Dry-run rejects missing, stale, disjoint,
+  contradictory, no-op, or incompletely linked replacements before append; current checks,
+  candidate findings, semantic review, and receipts evaluate the replacement while status/history
+  retains the original claim (issue #432).
+
 ### Fixed
 
 - The native Cursor plugin's plugin-owned `mcp.json` now launches the exact Yoetz executable the

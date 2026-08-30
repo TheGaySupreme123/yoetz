@@ -22,6 +22,7 @@ from yoetz.application.check import (
 from yoetz.domain.events import (
     ActionKind,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
     DecisionRecordedPayload,
     EvidenceKind,
     EvidenceRecordedPayload,
@@ -43,6 +44,7 @@ from yoetz.domain.privacy import (
 )
 from yoetz.domain.receipts import SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
 from yoetz.domain.values import SubjectStateRelation
+from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     DeterministicCase,
@@ -467,7 +469,7 @@ def build_semantic_case(
             )
 
     # --- Claims ---
-    for claim_id, record in sorted(projection.claims.items(), key=lambda pair: str(pair[0])):
+    for claim_id, record in effective_claim_items(projection):
         ref = str(claim_id)
         if ref not in allowed:
             continue
@@ -485,7 +487,7 @@ def build_semantic_case(
                 )
             )
             continue
-        assert type(payload) is ClaimRecordedPayload
+        assert type(payload) in {ClaimRecordedPayload, ClaimRecordedPayloadV1_1}
         text, content_omitted = _bounded_json(
             cast(Mapping[str, JsonValue], encode_payload(payload))
         )
@@ -863,7 +865,7 @@ def build_semantic_case(
         linked_subjects: set[str] = set()
         for finding in findings:
             linked_subjects.update(str(ref) for ref in finding.subject_refs)
-        for claim_id in projection.claims:
+        for claim_id, _ in effective_claim_items(projection):
             linked_subjects.add(str(claim_id))
         for obligation_id in projection.obligations:
             linked_subjects.add(str(obligation_id))
@@ -872,7 +874,7 @@ def build_semantic_case(
             linked_subjects.update(str(ref) for ref in assessment.supporting_refs)
             for fact in (*assessment.observed_facts, *assessment.required_but_missing_facts):
                 linked_subjects.update(str(ref) for ref in fact.subject_refs)
-        for claim_record in projection.claims.values():
+        for _, claim_record in effective_claim_items(projection):
             if claim_record.payload is None:
                 continue
             linked_subjects.update(str(ref) for ref in claim_record.payload.supporting_refs)
@@ -986,7 +988,7 @@ def build_semantic_case(
                         str(record.source_event_id),
                         *(
                             str(claim_id)
-                            for claim_id, claim_record in projection.claims.items()
+                            for claim_id, claim_record in effective_claim_items(projection)
                             if claim_record.payload is not None
                             and any(
                                 str(support) == ref

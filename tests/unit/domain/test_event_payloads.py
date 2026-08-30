@@ -22,6 +22,7 @@ from hypothesis import strategies as st
 from hypothesis.strategies import SearchStrategy
 
 from yoetz.domain.events import (
+    CLAIM_SCHEMA_VERSION,
     EVENT_FAMILIES,
     EVIDENCE_SCHEMA_VERSION,
     PAYLOAD_TYPES,
@@ -33,6 +34,7 @@ from yoetz.domain.events import (
     CheckRecordedPayload,
     ClaimKind,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
     ClientKind,
     EventDraft,
     EventPayload,
@@ -89,10 +91,14 @@ from yoetz.domain.values import (
     JsonObject,
     SubjectStateRef,
     actor_id,
+    claim_id,
     event_id,
+    evidence_id,
     freeze_json,
     object_id,
+    obligation_id,
     request_id,
+    result_id,
     session_id,
     task_id,
     timestamp_from_string,
@@ -456,10 +462,14 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
         SCHEMA_VERSION,
         EVIDENCE_SCHEMA_VERSION,
     }
+    assert {schema.version for schema in PAYLOAD_TYPES if schema.name == "claim_recorded"} == {
+        SCHEMA_VERSION,
+        CLAIM_SCHEMA_VERSION,
+    }
     assert all(
         schema.version == SCHEMA_VERSION
         for schema in PAYLOAD_TYPES
-        if schema.name != "evidence_recorded"
+        if schema.name not in {"claim_recorded", "evidence_recorded"}
     )
     row = _ROW_BY_FAMILY["session_opened"]
     valid_payload = freeze_json(row["payload"])
@@ -480,6 +490,47 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
     _assert_reason(
         "unknown_payload_field",
         lambda: decode_payload(_schema_for(row), freeze_json(malformed)),
+    )
+
+
+def test_claim_1_1_round_trip_keeps_revision_and_limitations_separate() -> None:
+    payload = ClaimRecordedPayloadV1_1(
+        claim_id=claim_id("clm_00000000-0000-4000-8000-000000000002"),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Narrowed completion with a disclosed partial result",
+        supporting_refs=(evidence_id("evd_00000000-0000-4000-8000-000000000001"),),
+        obligation_refs=(obligation_id("obl_00000000-0000-4000-8000-000000000001"),),
+        limitation_refs=(result_id("res_00000000-0000-4000-8000-000000000001"),),
+        supersedes_claim_refs=(claim_id("clm_00000000-0000-4000-8000-000000000001"),),
+    )
+    encoded_json = encode_payload(payload)
+    encoded = cast(dict[str, Any], encoded_json)
+    assert encoded["limitation_refs"] == ("res_00000000-0000-4000-8000-000000000001",)
+    assert encoded["supersedes_claim_refs"] == ("clm_00000000-0000-4000-8000-000000000001",)
+    assert (
+        decode_payload(EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION), encoded_json) == payload
+    )
+    _assert_reason(
+        "unknown_payload_field",
+        lambda: decode_payload(EventSchema("claim_recorded", SCHEMA_VERSION), encoded_json),
+    )
+
+    missing_limitations = dict(encoded)
+    missing_limitations.pop("limitation_refs")
+    _assert_reason(
+        "missing_payload_field",
+        lambda: decode_payload(
+            EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION), freeze_json(missing_limitations)
+        ),
+    )
+
+    overlapping = dict(encoded)
+    overlapping["supporting_refs"] = overlapping["limitation_refs"]
+    _assert_reason(
+        "claim_revision_invalid",
+        lambda: decode_payload(
+            EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION), freeze_json(overlapping)
+        ),
     )
 
 

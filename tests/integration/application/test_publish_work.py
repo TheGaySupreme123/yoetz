@@ -17,6 +17,7 @@ from builders.ledger_adapters import (
 from yoetz.application.publish_work import Application, execute_publish_work
 from yoetz.application.status import Application as StatusApplication
 from yoetz.application.status import execute_status
+from yoetz.domain.events import ClaimRecordedPayload, ClaimRecordedPayloadV1_1
 from yoetz.domain.values import Frontier, session_id
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.ports.diagnostics import RuntimeCapability
@@ -28,8 +29,10 @@ from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
     PublishWorkDryRunModel,
     PublishWorkRequestModel,
+    StatusHistoryPageModel,
     StatusOperationPageModel,
     StatusRequest,
+    StatusResultsPageModel,
 )
 
 pytestmark = pytest.mark.anyio
@@ -939,6 +942,411 @@ async def test_obligation_resolution_mismatch_is_identical_on_dry_run_and_publis
 
     assert dict(dry.value.safe_details) == dict(durable.value.safe_details)
     assert dry.value.message == durable.value.message
+
+
+def _claim_revision_action_draft(event_tail: int, action_tail: int) -> dict[str, object]:
+    draft = _draft(event_tail=event_tail, action_tail=action_tail)
+    payload = cast(dict[str, object], draft["payload"])
+    payload["obligation_refs"] = [_OBLIGATION_ID]
+    return draft
+
+
+def _claim_revision_result_draft(
+    event_tail: int,
+    *,
+    action_tail: int,
+    result_tail: int,
+) -> dict[str, object]:
+    return {
+        "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
+        "schema": {"name": "result_recorded", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (f"evt_00000000-0000-4000-8000-{event_tail - 1:012d}",),
+        "payload": {
+            "result_id": f"res_00000000-0000-4000-8000-{result_tail:012d}",
+            "action_id": f"act_00000000-0000-4000-8000-{action_tail:012d}",
+            "outcome": "partial",
+            "summary": "The bounded action completed only in part.",
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
+def _claim_revision_draft(
+    event_tail: int,
+    *,
+    claim_tail: int,
+    version: str,
+    supporting_refs: list[str],
+    limitation_refs: list[str] | None = None,
+    supersedes_claim_refs: list[str] | None = None,
+    disputes_refs: list[str] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "claim_id": f"clm_00000000-0000-4000-8000-{claim_tail:012d}",
+        "claim_kind": "completion",
+        "statement": "The declared scope is complete subject to the named limitation.",
+        "supporting_refs": supporting_refs,
+        "obligation_refs": [_OBLIGATION_ID],
+    }
+    if limitation_refs is not None:
+        payload["limitation_refs"] = limitation_refs
+    if supersedes_claim_refs is not None:
+        payload["supersedes_claim_refs"] = supersedes_claim_refs
+    if disputes_refs is not None:
+        payload["disputes_refs"] = disputes_refs
+    return {
+        "event_id": f"evt_00000000-0000-4000-8000-{event_tail:012d}",
+        "schema": {"name": "claim_recorded", "version": version},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": payload,
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+
+
+async def test_partial_result_claim_repair_preflights_and_preserves_history() -> None:
+    """The #419 dogfood sequence is repairable without rewriting the overclaim."""
+
+    app, objects = _composition()
+    result_ref = "res_00000000-0000-4000-8000-000000000732"
+    old_claim = "clm_00000000-0000-4000-8000-000000000733"
+    new_claim = "clm_00000000-0000-4000-8000-000000000734"
+    initial = _request(
+        request_tail=729,
+        event_drafts=(
+            _obligation_draft(730, dict(_OPEN_MEANING)),
+            _claim_revision_action_draft(731, 731),
+            _claim_revision_result_draft(732, action_tail=731, result_tail=732),
+            _claim_revision_draft(
+                733,
+                claim_tail=733,
+                version="1.0.0",
+                supporting_refs=[result_ref],
+            ),
+        ),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    accepted = await execute_publish_work(cast(Application, app), initial)
+    assert accepted.outcome == "accepted"
+
+    seed = append_command()
+    status = await execute_status(
+        cast(StatusApplication, app),
+        StatusRequest.model_validate(
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": "req_00000000-0000-4000-8000-000000000736",
+                "session_id": seed.session_id,
+                "writer_id": seed.writer_id,
+                "view": "results",
+                "limit": "10",
+                "at_frontier": str(accepted.result_frontier.sequence),
+                "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+                "client": {
+                    "kind": "test_client",
+                    "version": "0.1.0",
+                    "integration": "local_cli",
+                },
+            }
+        ),
+    )
+    result_item = cast(StatusResultsPageModel, status.page).items[0]
+    assert result_item.result_id == result_ref
+    assert result_item.source_event_id == "evt_00000000-0000-4000-8000-000000000732"
+    assert result_item.outcome == "partial"
+
+    frontier = await app.runtime.task.ledger.load_frontier()
+    incomplete = _request(
+        request_tail=735,
+        event_drafts=(
+            _claim_revision_draft(
+                734,
+                claim_tail=734,
+                version="1.1.0",
+                supporting_refs=[],
+                limitation_refs=[],
+                supersedes_claim_refs=[old_claim],
+            ),
+        ),
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    incomplete_wire = incomplete.model_dump(mode="json", by_alias=True, exclude_none=True)
+    incomplete_wire["dry_run"] = True
+    object_count = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(PublicOperationError) as rejected:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(incomplete_wire)
+        )
+    assert rejected.value.safe_details == {
+        "reason_code": "claim_revision_mismatch",
+        "field": "/event_drafts/0/payload/limitation_refs",
+    }
+    assert "limitation_refs_complete" in rejected.value.message
+    assert len(objects._data) == object_count  # pyright: ignore[reportPrivateUsage]
+    assert await app.runtime.task.ledger.load_frontier() == frontier
+
+    disputed = _request(
+        request_tail=737,
+        event_drafts=(
+            _claim_revision_draft(
+                737,
+                claim_tail=737,
+                version="1.1.0",
+                supporting_refs=[],
+                limitation_refs=[result_ref],
+                supersedes_claim_refs=[old_claim],
+                disputes_refs=[old_claim],
+            ),
+        ),
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    disputed_wire = disputed.model_dump(mode="json", by_alias=True, exclude_none=True)
+    disputed_wire["dry_run"] = True
+    with pytest.raises(PublicOperationError) as contradiction:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(disputed_wire)
+        )
+    assert contradiction.value.safe_details == {
+        "reason_code": "claim_revision_mismatch",
+        "field": "/event_drafts/0/payload/disputes_refs",
+    }
+    assert "replacement_must_not_dispute" in contradiction.value.message
+
+    overwrite = _request(
+        request_tail=739,
+        event_drafts=(
+            _claim_revision_draft(
+                739,
+                claim_tail=733,
+                version="1.1.0",
+                supporting_refs=[],
+                limitation_refs=[result_ref],
+                supersedes_claim_refs=[],
+            ),
+        ),
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    overwrite_wire = overwrite.model_dump(mode="json", by_alias=True, exclude_none=True)
+    overwrite_wire["dry_run"] = True
+    with pytest.raises(PublicOperationError) as identity:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(overwrite_wire)
+        )
+    assert identity.value.safe_details == {
+        "reason_code": "claim_revision_mismatch",
+        "field": "/event_drafts/0/payload/claim_id",
+    }
+    assert "claim_id_must_be_fresh" in identity.value.message
+
+    corrected = _request(
+        request_tail=735,
+        event_drafts=(
+            _claim_revision_draft(
+                734,
+                claim_tail=734,
+                version="1.1.0",
+                supporting_refs=[],
+                limitation_refs=[result_ref],
+                supersedes_claim_refs=[old_claim],
+            ),
+        ),
+        expected_frontier={
+            "sequence": str(frontier.sequence),
+            "head_digest": frontier.head_digest,
+        },
+    )
+    corrected_wire = corrected.model_dump(mode="json", by_alias=True, exclude_none=True)
+    corrected_wire["dry_run"] = True
+    preview = await execute_publish_work(
+        cast(Application, app), PublishWorkRequestModel.model_validate(corrected_wire)
+    )
+    assert preview.outcome == "dry_run"
+    repaired = await execute_publish_work(cast(Application, app), corrected)
+    assert repaired.outcome == "accepted"
+
+    history = await execute_status(
+        cast(StatusApplication, app),
+        StatusRequest.model_validate(
+            {
+                "protocol_version": "0.1",
+                "schema_version": "1.0.0",
+                "request_id": "req_00000000-0000-4000-8000-000000000745",
+                "session_id": seed.session_id,
+                "writer_id": seed.writer_id,
+                "view": "history",
+                "limit": "10",
+                "at_frontier": str(repaired.result_frontier.sequence),
+                "actor": {"actor_id": "harness:test", "actor_type": "harness"},
+                "client": {
+                    "kind": "test_client",
+                    "version": "0.1.0",
+                    "integration": "local_cli",
+                },
+            }
+        ),
+    )
+    claim_history = tuple(
+        (item.event_id, item.schema_version)
+        for item in cast(StatusHistoryPageModel, history.page).items
+        if item.schema_name == "claim_recorded"
+    )
+    assert claim_history == (
+        ("evt_00000000-0000-4000-8000-000000000733", "1.0.0"),
+        ("evt_00000000-0000-4000-8000-000000000734", "1.1.0"),
+    )
+
+    records = tuple(
+        [record async for record in app.runtime.task.ledger.load_events(seed.session_id)]
+    )
+    claims = [record.payload for record in records if record.schema.name == "claim_recorded"]
+    assert len(claims) == 2
+    assert type(claims[0]) is ClaimRecordedPayload
+    assert type(claims[1]) is ClaimRecordedPayloadV1_1
+    replacement = claims[1]
+    assert type(replacement) is ClaimRecordedPayloadV1_1
+    assert replacement.claim_id == new_claim
+    assert replacement.limitation_refs == (result_ref,)
+    assert replacement.supersedes_claim_refs == (old_claim,)
+
+    stale = _request(
+        request_tail=738,
+        event_drafts=(
+            _claim_revision_draft(
+                738,
+                claim_tail=738,
+                version="1.1.0",
+                supporting_refs=[],
+                limitation_refs=[result_ref],
+                supersedes_claim_refs=[old_claim],
+            ),
+        ),
+        expected_frontier={
+            "sequence": str(repaired.result_frontier.sequence),
+            "head_digest": repaired.result_frontier.head_digest,
+        },
+    )
+    stale_wire = stale.model_dump(mode="json", by_alias=True, exclude_none=True)
+    stale_wire["dry_run"] = True
+    with pytest.raises(PublicOperationError) as ineffective:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(stale_wire)
+        )
+    assert ineffective.value.safe_details == {
+        "reason_code": "claim_revision_mismatch",
+        "field": "/event_drafts/0/payload/supersedes_claim_refs",
+    }
+    assert "superseded_claim_must_be_effective" in ineffective.value.message
+
+
+async def test_claim_replacement_must_change_effective_meaning() -> None:
+    app, _objects = _composition()
+    old_claim = "clm_00000000-0000-4000-8000-000000000741"
+    initial = _request(
+        request_tail=740,
+        event_drafts=(
+            _obligation_draft(740, dict(_OPEN_MEANING)),
+            _claim_revision_draft(
+                741,
+                claim_tail=741,
+                version="1.0.0",
+                supporting_refs=[],
+            ),
+        ),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    accepted = await execute_publish_work(cast(Application, app), initial)
+    no_op = _request(
+        request_tail=742,
+        event_drafts=(
+            _claim_revision_draft(
+                742,
+                claim_tail=742,
+                version="1.1.0",
+                supporting_refs=[],
+                limitation_refs=[],
+                supersedes_claim_refs=[old_claim],
+            ),
+        ),
+        expected_frontier={
+            "sequence": str(accepted.result_frontier.sequence),
+            "head_digest": accepted.result_frontier.head_digest,
+        },
+    )
+    wire = no_op.model_dump(mode="json", by_alias=True, exclude_none=True)
+    wire["dry_run"] = True
+    with pytest.raises(PublicOperationError) as rejected:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(wire)
+        )
+    assert rejected.value.safe_details == {
+        "reason_code": "claim_revision_mismatch",
+        "field": "/event_drafts/0/payload/supersedes_claim_refs",
+    }
+    assert "replacement_must_change_effective_claim" in rejected.value.message
+
+
+async def test_claim_replacement_rejects_unreadable_limitation_scope() -> None:
+    app, _objects = _composition()
+    result_ref = "res_00000000-0000-4000-8000-000000000751"
+    old_claim = "clm_00000000-0000-4000-8000-000000000751"
+    partial = _claim_revision_result_draft(751, action_tail=751, result_tail=751)
+    partial["causal_parents"] = ()
+    initial = _request(
+        request_tail=750,
+        event_drafts=(
+            _obligation_draft(750, dict(_OPEN_MEANING)),
+            partial,
+            _claim_revision_draft(
+                752,
+                claim_tail=751,
+                version="1.0.0",
+                supporting_refs=[result_ref],
+            ),
+        ),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    accepted = await execute_publish_work(cast(Application, app), initial)
+    replacement = _request(
+        request_tail=753,
+        event_drafts=(
+            _claim_revision_draft(
+                753,
+                claim_tail=752,
+                version="1.1.0",
+                supporting_refs=[],
+                limitation_refs=[result_ref],
+                supersedes_claim_refs=[old_claim],
+            ),
+        ),
+        expected_frontier={
+            "sequence": str(accepted.result_frontier.sequence),
+            "head_digest": accepted.result_frontier.head_digest,
+        },
+    )
+    wire = replacement.model_dump(mode="json", by_alias=True, exclude_none=True)
+    wire["dry_run"] = True
+    with pytest.raises(PublicOperationError) as rejected:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(wire)
+        )
+    assert rejected.value.safe_details == {
+        "reason_code": "claim_revision_mismatch",
+        "field": "/event_drafts/0/payload/limitation_refs",
+    }
+    assert "limitation_refs_must_be_relevant_non_success_results" in rejected.value.message
 
 
 async def test_no_obligations_reason_conflict_is_identical_on_dry_run_and_publish() -> None:

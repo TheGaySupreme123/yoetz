@@ -21,6 +21,12 @@ from yoetz.domain.values import (
     SubjectStateRelation,
     subject_state_relation,
 )
+from yoetz.kernel.claims import (
+    claim_discloses_result,
+    effective_claim_ids,
+    effective_claim_items,
+    result_is_relevant_to_claim,
+)
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     DeterministicCase,
@@ -210,9 +216,7 @@ def _response_support_admissible(
 
 def _completion_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
     output: list[DeterministicAssessment] = []
-    for claim_id, claim_record in sorted(
-        case.projection.claims.items(), key=lambda item: _ascii(item[0])
-    ):
+    for claim_id, claim_record in effective_claim_items(case.projection):
         claim = claim_record.payload
         if claim is None or claim.claim_kind is not ClaimKind.COMPLETION:
             continue
@@ -272,18 +276,17 @@ def _requested_item_findings(case: DeterministicCase) -> list[DeterministicAsses
 
 def _failed_work_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
     output: list[DeterministicAssessment] = []
-    failures = tuple(
-        result_id
-        for result_id, record in case.projection.results.items()
-        if record.payload is not None
-        and record.payload.outcome in {ResultOutcome.FAILURE, ResultOutcome.PARTIAL}
-    )
-    for claim_id, claim_record in case.projection.claims.items():
+    for claim_id, claim_record in effective_claim_items(case.projection):
         claim = claim_record.payload
         if claim is None or claim.claim_kind is not ClaimKind.COMPLETION:
             continue
-        for result_id in failures:
-            if result_id in claim.supporting_refs:
+        for result_id, record in case.projection.results.items():
+            if (
+                record.payload is None
+                or record.payload.outcome not in {ResultOutcome.FAILURE, ResultOutcome.PARTIAL}
+                or not result_is_relevant_to_claim(case.projection, claim_record, result_id)
+                or claim_discloses_result(claim, result_id)
+            ):
                 continue
             output.append(
                 build_policy_assessment(
@@ -301,7 +304,7 @@ def _failed_work_findings(case: DeterministicCase) -> list[DeterministicAssessme
 
 def _unsupported_claim_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
     output: list[DeterministicAssessment] = []
-    for claim_id, record in case.projection.claims.items():
+    for claim_id, record in effective_claim_items(case.projection):
         claim = record.payload
         if claim is None:
             continue
@@ -414,7 +417,7 @@ def _state_pairs(
     case: DeterministicCase,
 ) -> tuple[tuple[EvidenceId, FindingBasisRef, SubjectStateRef, SubjectStateRef], ...]:
     pairs: set[tuple[EvidenceId, FindingBasisRef, SubjectStateRef, SubjectStateRef]] = set()
-    for claim_id, record in case.projection.claims.items():
+    for claim_id, record in effective_claim_items(case.projection):
         claim = record.payload
         if claim is None or claim.subject_state is None:
             continue
@@ -483,10 +486,13 @@ def _stale_evidence_findings(case: DeterministicCase) -> list[DeterministicAsses
 
 def _contradiction_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
     output: list[DeterministicAssessment] = []
+    effective = effective_claim_ids(case.projection)
     for key in sorted(
         case.projection.contradictions,
         key=lambda item: (_ascii(item.disputing_claim_id), _ascii(item.disputed_ref)),
     ):
+        if key.disputing_claim_id not in effective:
+            continue
         refs = _refs((key.disputing_claim_id, key.disputed_ref))
         if any(ref not in case.allowed_ids for ref in refs):
             continue
