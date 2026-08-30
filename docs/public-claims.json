@@ -21,7 +21,8 @@
         "not_a_general_network_sandbox",
         "host_and_unrelated_processes_out_of_scope",
         "registration_does_not_prove_activation",
-        "host_admission_is_host_authorization_not_dispatch_proof"
+        "host_admission_is_host_authorization_not_dispatch_proof",
+        "host_config_not_compare_and_swap"
       ],
       "surfaces": [
         "SECURITY.md",

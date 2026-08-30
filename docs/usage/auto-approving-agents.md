@@ -85,7 +85,9 @@ pass every host's rules.
 
 What each host receives:
 
-- **Claude Code** — `permissions.allow: ["mcp__plugin_yoetz_yoetz__check"]` in the
+- **Claude Code** — `permissions.allow: ["mcp__yoetz__check"]` for an external registration named
+  `yoetz`, or
+  `permissions.allow: ["mcp__plugin_yoetz_yoetz__check"]` for the plugin-owned route in the
   repository's `.claude/settings.local.json`, which Claude Code resolves before its auto-mode
   classifier. Pass `--checkpoint` to write `permissions.ask` instead, which keeps a human prompt
   on every check that the classifier can never auto-approve. Claude Code holds the rules in this
@@ -97,6 +99,12 @@ What each host receives:
 - **Cursor** — `mcpAllowlist: ["yoetz:check"]` in the workspace's `.cursor/permissions.json`
   for Auto-review, and `Mcp(yoetz:check)` (or `Mcp(plugin-yoetz-yoetz:check)` for a
   plugin-bundled server) in `.cursor/cli.json` for the Agent CLI.
+
+The preview warns `host_config_not_compare_and_swap` for a mutation. Quit or pause settings
+editors and other processes that may rewrite these host files while applying the accepted preview.
+Yoetz rechecks the exact bytes immediately before each atomic replacement or deletion and verifies
+the result, but an ordinary host configuration file has no portable compare-and-swap operation
+that can exclude a non-cooperating process in the final filesystem syscall window.
 
 ### The way out
 

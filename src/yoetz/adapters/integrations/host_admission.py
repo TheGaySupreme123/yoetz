@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import tomllib
 from collections.abc import Mapping, Sequence
@@ -46,6 +47,8 @@ from .toml_tables import append_table_block, exact_table_span, strip_exact_table
 __all__ = [
     "ADMISSION_HOSTS",
     "CLAUDE_CHECK_TOOL_NAME",
+    "CLAUDE_EXTERNAL_CHECK_TOOL_NAME",
+    "CLAUDE_PLUGIN_CHECK_TOOL_NAME",
     "CODEX_EXTERNAL_ADMISSION_TABLE",
     "CODEX_PLUGIN_ADMISSION_TABLE",
     "CURSOR_CLI_EXTERNAL_ENTRY",
@@ -76,11 +79,25 @@ ADMISSION_HOSTS: Final[tuple[HostAdmissionHost, ...]] = ("claude", "codex", "cur
 
 # Claude Code: `permissions.allow` resolves before the auto-mode classifier and is honored from
 # `.claude/settings.local.json` at the repository root. Allow rules take a literal
-# `mcp__<server>__` prefix; the plugin-scoped server is `plugin_yoetz_yoetz`.
-CLAUDE_CHECK_TOOL_NAME: Final = "mcp__plugin_yoetz_yoetz__check"
+# `mcp__<server>__` prefix. A normal registration uses the configured key `yoetz`; a plugin-owned
+# server is scoped by Claude as `plugin_yoetz_yoetz`.
+CLAUDE_EXTERNAL_CHECK_TOOL_NAME: Final = "mcp__yoetz__check"
+CLAUDE_PLUGIN_CHECK_TOOL_NAME: Final = "mcp__plugin_yoetz_yoetz__check"
+# Compatibility name retained for the plugin-rendered hook and older callers.
+CLAUDE_CHECK_TOOL_NAME: Final = CLAUDE_PLUGIN_CHECK_TOOL_NAME
+_CLAUDE_CHECK_TOOL_NAMES: Final = frozenset(
+    {CLAUDE_EXTERNAL_CHECK_TOOL_NAME, CLAUDE_PLUGIN_CHECK_TOOL_NAME}
+)
 _CLAUDE_SURFACE: Final = ".claude/settings.local.json"
 _CLAUDE_WIDER_RULES: Final = frozenset(
-    {"mcp__plugin_yoetz_yoetz", "mcp__plugin_yoetz_yoetz__*", "mcp__plugin_yoetz_yoetz__check*"}
+    {
+        "mcp__yoetz",
+        "mcp__yoetz__*",
+        "mcp__yoetz__check*",
+        "mcp__plugin_yoetz_yoetz",
+        "mcp__plugin_yoetz_yoetz__*",
+        "mcp__plugin_yoetz_yoetz__check*",
+    }
 )
 
 # Codex: under `approval_mode = auto` a policy-route `check` (`openWorldHint: true`) always needs
@@ -203,7 +220,14 @@ class HostAdmissionPreview:
     checkpoint: bool
     preview_digest: str
     warnings: tuple[str, ...]
+    _requested_action: HostAdmissionAction = field(repr=False, compare=False)
     files_after: Mapping[str, bytes] = field(repr=False, compare=False)
+
+    @property
+    def requested_action(self) -> HostAdmissionAction:
+        """The requested transition retained when the public effective action is ``noop``."""
+
+        return self._requested_action
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
@@ -294,16 +318,51 @@ def _validated_root(project_root: Path) -> Path:
 
 
 def _read(path: Path) -> _Read:
+    """Read one bounded regular file without following its final symlink.
+
+    Host configuration writers do not share a lock with Yoetz. Retaining one descriptor and
+    comparing its before/after metadata prevents a replace or in-place write during this read from
+    being accepted as a coherent preimage. Apply performs another read immediately before its
+    mutation; the remaining final syscall window is disclosed separately.
+    """
+
     try:
-        if path.is_symlink():
+        if path.parent.is_symlink() or path.is_symlink():
             return _Read(None, "file_symlink")
-        if not path.exists():
-            return _Read(None, None)
-        if not path.is_file():
-            return _Read(None, "file_not_regular")
-        if path.stat().st_size > _MAX_FILE_BYTES:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return _Read(None, None)
+    except OSError:
+        return _Read(None, "file_unreadable")
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                return _Read(None, "file_not_regular")
+            if before.st_size > _MAX_FILE_BYTES:
+                return _Read(None, "file_too_large")
+            raw = handle.read(_MAX_FILE_BYTES + 1)
+            after = os.fstat(handle.fileno())
+        if len(raw) > _MAX_FILE_BYTES:
             return _Read(None, "file_too_large")
-        return _Read(path.read_bytes(), None)
+        before_snapshot = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        after_snapshot = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if before_snapshot != after_snapshot or len(raw) != after.st_size:
+            return _Read(None, "file_unreadable")
+        return _Read(raw, None)
     except OSError:
         return _Read(None, "file_unreadable")
 
@@ -334,9 +393,9 @@ def _json_object(read: _Read) -> tuple[dict[str, JsonValue] | None, str | None]:
 def _string_list(container: Mapping[str, JsonValue], key: str) -> tuple[list[str] | None, bool]:
     """Return ``(list, shape_ok)``; an absent key is an empty list."""
 
-    value = container.get(key)
-    if value is None:
+    if key not in container:
         return [], True
+    value = container[key]
     if not isinstance(value, list) or not all(type(item) is str for item in value):
         return None, False
     return [cast(str, item) for item in value], True
@@ -362,9 +421,10 @@ def _observe_string_list_surface(
         return _unknown(surface, expected, problem or "file_unreadable")
     container: Mapping[str, JsonValue] = parsed
     if container_key is not None:
-        nested = parsed.get(container_key)
-        if nested is None:
+        if container_key not in parsed:
             nested = {}
+        else:
+            nested = parsed[container_key]
         if not isinstance(nested, Mapping):
             return _unknown(surface, expected, "shape_invalid")
         container = cast(Mapping[str, JsonValue], nested)
@@ -400,7 +460,7 @@ def _observe_string_list_surface(
         )
     present_allow = [item for item in allow if fold(item) in folded_entries]
     present_ask = [item for item in ask if fold(item) in folded_entries]
-    if present_allow and present_ask:
+    if {fold(item) for item in present_allow} & {fold(item) for item in present_ask}:
         return HostAdmissionEntry(
             surface, HostAdmissionState.FOREIGN, expected, "allow_and_ask_present", digest
         )
@@ -437,10 +497,11 @@ def _json_with_list_entry(
         raise HostAdmissionError(HostAdmissionReason.ENTRY_UNREADABLE)
     container: dict[str, JsonValue] = parsed
     if container_key is not None:
-        nested = parsed.get(container_key)
-        if nested is None:
+        if container_key not in parsed:
             nested = {}
             parsed[container_key] = nested
+        else:
+            nested = parsed[container_key]
         if not isinstance(nested, dict):
             raise HostAdmissionError(HostAdmissionReason.ENTRY_UNREADABLE)
         container = nested
@@ -534,9 +595,18 @@ def _observe_codex(read: _Read, owner: McpOwnerForm | None) -> HostAdmissionEntr
         present.append(form)
     if not present:
         return HostAdmissionEntry(surface, HostAdmissionState.ABSENT, expected, None, digest)
+    if owner is not None and owner not in present:
+        # An exact table for the inactive owner is Yoetz-shaped but does not admit the active
+        # route. Report the applicable entry absent so grant appends the owner-selected form.
+        return HostAdmissionEntry(
+            surface,
+            HostAdmissionState.ABSENT,
+            expected,
+            f"inactive_{present[0]}_entry_present",
+            digest,
+        )
     detail = "both" if len(present) == 2 else present[0]
-    entry = expected if owner is None or owner in present else forms[present[0]][0]
-    return HostAdmissionEntry(surface, HostAdmissionState.PRESENT, entry, detail, digest)
+    return HostAdmissionEntry(surface, HostAdmissionState.PRESENT, expected, detail, digest)
 
 
 def _codex_table(owner: McpOwnerForm | None) -> str:
@@ -594,6 +664,14 @@ def _cursor_cli_entries(owner: McpOwnerForm | None) -> frozenset[str]:
     return frozenset({CURSOR_CLI_EXTERNAL_ENTRY, CURSOR_CLI_PLUGIN_ENTRY})
 
 
+def _claude_check_entries(owner: McpOwnerForm | None) -> frozenset[str]:
+    if owner == "external":
+        return frozenset({CLAUDE_EXTERNAL_CHECK_TOOL_NAME})
+    if owner == "plugin":
+        return frozenset({CLAUDE_PLUGIN_CHECK_TOOL_NAME})
+    return _CLAUDE_CHECK_TOOL_NAMES
+
+
 def _observe_entries(
     host: HostAdmissionHost, root: Path, owner: McpOwnerForm | None
 ) -> tuple[HostAdmissionEntry, ...]:
@@ -606,7 +684,7 @@ def _observe_entries(
                 allow_key="allow",
                 deny_key="deny",
                 ask_key="ask",
-                entries=frozenset({CLAUDE_CHECK_TOOL_NAME}),
+                entries=_claude_check_entries(owner),
                 wider=_CLAUDE_WIDER_RULES,
                 case_insensitive=False,
             ),
@@ -680,22 +758,39 @@ def _files_after(
 
     if host == "claude":
         if editable(_CLAUDE_SURFACE):
-            after = _json_with_list_entry(
-                _read(root / _CLAUDE_SURFACE),
-                container_key="permissions",
-                list_key="ask" if add and checkpoint else "allow",
-                entry=CLAUDE_CHECK_TOOL_NAME,
-                add=add,
-            )
-            if not add and after is None:
-                # The exact entry may live in the human-checkpoint list instead.
+            claude_entries = _claude_check_entries(owner)
+            before = _read(root / _CLAUDE_SURFACE)
+            if add:
                 after = _json_with_list_entry(
-                    _read(root / _CLAUDE_SURFACE),
+                    before,
                     container_key="permissions",
-                    list_key="ask",
-                    entry=CLAUDE_CHECK_TOOL_NAME,
-                    add=False,
+                    list_key="ask" if checkpoint else "allow",
+                    entry=sorted(claude_entries)[0],
+                    add=True,
+                    remove_entries=claude_entries,
                 )
+            else:
+                after_allow = _json_with_list_entry(
+                    before,
+                    container_key="permissions",
+                    list_key="allow",
+                    entry=sorted(claude_entries)[0],
+                    add=False,
+                    remove_entries=claude_entries,
+                )
+                if after_allow == b"":
+                    after = after_allow
+                else:
+                    after_allow_read = before if after_allow is None else _Read(after_allow, None)
+                    after_ask = _json_with_list_entry(
+                        after_allow_read,
+                        container_key="permissions",
+                        list_key="ask",
+                        entry=sorted(claude_entries)[0],
+                        add=False,
+                        remove_entries=claude_entries,
+                    )
+                    after = after_ask if after_ask is not None else after_allow
             if after is not None:
                 changed[_CLAUDE_SURFACE] = after
     elif host == "codex":
@@ -775,6 +870,9 @@ def preview_host_admission(
     if action is HostAdmissionAction.NOOP:
         raise HostAdmissionError(HostAdmissionReason.HOST_INVALID)
     root = _validated_root(project_root)
+    # Revoke is ownership-independent: its job is to remove every exact Yoetz admission form,
+    # including one left behind by an earlier route-owner transition.
+    effective_owner = owner if action is HostAdmissionAction.GRANT else None
     if action is HostAdmissionAction.GRANT:
         if route_profile is None:
             raise HostAdmissionError(HostAdmissionReason.ROUTE_UNOBSERVED)
@@ -784,11 +882,11 @@ def preview_host_admission(
             raise HostAdmissionError(HostAdmissionReason.GRANT_UNVERIFIABLE)
         if grant_permits is not True:
             raise HostAdmissionError(HostAdmissionReason.GRANT_NOT_PERMITTING)
-        if host in {"codex", "cursor"} and owner is None:
+        if effective_owner is None:
             raise HostAdmissionError(HostAdmissionReason.OWNER_REQUIRED)
         if checkpoint and host != "claude":
             raise HostAdmissionError(HostAdmissionReason.HOST_INVALID)
-    entries = _observe_entries(host, root, owner)
+    entries = _observe_entries(host, root, effective_owner)
     state_before = _aggregate(entries)
     warnings: list[str] = []
     if state_before is HostAdmissionState.UNKNOWN:
@@ -797,14 +895,18 @@ def preview_host_admission(
         raise HostAdmissionError(HostAdmissionReason.FOREIGN_ENTRY_PRESENT)
     if state_before is HostAdmissionState.FOREIGN:
         warnings.append("foreign_entry_retained")
-    files_after = _files_after(host, root, action, owner, checkpoint=checkpoint, entries=entries)
+    files_after = _files_after(
+        host, root, action, effective_owner, checkpoint=checkpoint, entries=entries
+    )
     effective = action if files_after else HostAdmissionAction.NOOP
+    if effective is not HostAdmissionAction.NOOP:
+        warnings.append("host_config_not_compare_and_swap")
     if host == "codex" and effective is HostAdmissionAction.GRANT:
         warnings.append("codex_project_layer_requires_trusted_project")
     if host == "claude" and effective is HostAdmissionAction.GRANT:
         warnings.append("claude_local_settings_held_until_trusted_when_tracked")
     digest = _preview_digest(
-        host, action, entries, owner, checkpoint=checkpoint, files_after=files_after
+        host, action, entries, effective_owner, checkpoint=checkpoint, files_after=files_after
     )
     return HostAdmissionPreview(
         host,
@@ -813,10 +915,11 @@ def preview_host_admission(
         entries,
         route_profile,
         grant_permits,
-        owner,
+        effective_owner,
         checkpoint,
         digest,
         tuple(warnings),
+        action,
         files_after,
     )
 
@@ -824,7 +927,20 @@ def preview_host_admission(
 # --- apply --------------------------------------------------------------------------------
 
 
-def _write_private(path: Path, payload: bytes) -> None:
+def _require_expected_file(path: Path, expected_digest: str | None) -> None:
+    """Refuse when the current path is not the exact byte preimage used by the fresh preview."""
+
+    try:
+        if path.parent.is_symlink() or path.is_symlink():
+            raise HostAdmissionError(HostAdmissionReason.TARGET_UNSAFE)
+    except OSError as exc:
+        raise HostAdmissionError(HostAdmissionReason.TARGET_UNSAFE) from exc
+    current = _read(path)
+    if current.problem is not None or current.digest != expected_digest:
+        raise HostAdmissionError(HostAdmissionReason.PREVIEW_STALE)
+
+
+def _write_private(path: Path, payload: bytes, *, expected_digest: str | None) -> None:
     parent = path.parent
     try:
         if parent.is_symlink():
@@ -845,23 +961,32 @@ def _write_private(path: Path, payload: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temporary, 0o600)
+        # Re-read after staging, immediately before replacement. A non-cooperating same-UID writer
+        # can still win the final syscall window; the preview warning and runbook disclose that
+        # host limitation instead of claiming a compare-and-swap primitive POSIX does not provide.
+        _require_expected_file(path, expected_digest)
         os.replace(temporary, path)
+    except HostAdmissionError:
+        temporary.unlink(missing_ok=True)
+        raise
     except OSError as exc:
         temporary.unlink(missing_ok=True)
         raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED) from exc
 
 
-def _delete_or_write(path: Path, payload: bytes) -> None:
+def _delete_or_write(path: Path, payload: bytes, *, expected_digest: str | None) -> None:
+    _require_expected_file(path, expected_digest)
     if payload == b"":
         # A host file emptied by removal reverts to "no file", the state before grant.
         try:
-            if path.is_symlink():
-                raise HostAdmissionError(HostAdmissionReason.TARGET_UNSAFE)
+            # Keep the byte and symlink check adjacent to unlink. This narrows the host-writer
+            # window and, critically, never follows a symlinked host-config parent.
+            _require_expected_file(path, expected_digest)
             path.unlink(missing_ok=True)
         except OSError as exc:
             raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED) from exc
         return
-    _write_private(path, payload)
+    _write_private(path, payload, expected_digest=expected_digest)
 
 
 def apply_host_admission(
@@ -874,15 +999,10 @@ def apply_host_admission(
 
     if accepted_preview_digest != preview.preview_digest:
         raise HostAdmissionError(HostAdmissionReason.PREVIEW_STALE)
-    if preview.action is HostAdmissionAction.NOOP:
-        # A no-op preview describes an already-selected state; nothing to bind or write.
-        return HostAdmissionResult(
-            preview.host, HostAdmissionAction.NOOP, preview.state_before, preview.state_before, ()
-        )
     fresh = preview_host_admission(
         preview.host,
         project_root,
-        preview.action,
+        preview.requested_action,
         route_profile=preview.route_profile,
         grant_permits=preview.grant_permits,
         owner=preview.owner,
@@ -890,10 +1010,52 @@ def apply_host_admission(
     )
     if fresh.preview_digest != accepted_preview_digest:
         raise HostAdmissionError(HostAdmissionReason.PREVIEW_STALE)
+    if fresh.action is HostAdmissionAction.NOOP:
+        # A second read keeps a no-op from reporting success after its accepted state changed in
+        # the gap between the fresh preview and this return.
+        final = preview_host_admission(
+            preview.host,
+            project_root,
+            preview.requested_action,
+            route_profile=preview.route_profile,
+            grant_permits=preview.grant_permits,
+            owner=preview.owner,
+            checkpoint=preview.checkpoint,
+        )
+        if final.preview_digest != accepted_preview_digest:
+            raise HostAdmissionError(HostAdmissionReason.PREVIEW_STALE)
+        return HostAdmissionResult(
+            preview.host, HostAdmissionAction.NOOP, fresh.state_before, final.state_before, ()
+        )
     root = _validated_root(project_root)
+    expected_by_surface = {entry.surface: entry.file_digest for entry in fresh.entries}
+    mutation_started = False
     for surface, payload in sorted(fresh.files_after.items()):
-        _delete_or_write(root / surface, payload)
-    after = observe_host_admission(preview.host, root, owner=preview.owner)
+        try:
+            _delete_or_write(
+                root / surface,
+                payload,
+                expected_digest=expected_by_surface[surface],
+            )
+        except HostAdmissionError as error:
+            if mutation_started and error.reason in {
+                HostAdmissionReason.PREVIEW_STALE,
+                HostAdmissionReason.TARGET_UNSAFE,
+            }:
+                raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED) from error
+            raise
+        mutation_started = True
+    try:
+        after = observe_host_admission(preview.host, root, owner=preview.owner)
+    except HostAdmissionError as error:
+        raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED) from error
+    expected_state = (
+        HostAdmissionState.PRESENT
+        if preview.requested_action is HostAdmissionAction.GRANT
+        else HostAdmissionState.ABSENT
+    )
+    if after.state is not expected_state:
+        raise HostAdmissionError(HostAdmissionReason.WRITE_FAILED)
     return HostAdmissionResult(
         preview.host,
         fresh.action,

@@ -3219,31 +3219,43 @@ is `absent|present|partial|foreign|unknown`; `HostAdmissionAction` is `grant|rev
 `HostAdmissionReason` is `confirmation_required|preview_stale|foreign_entry_present|
 entry_unreadable|route_not_policy|route_unobserved|grant_not_permitting|grant_unverifiable|
 owner_required|target_unsafe|write_failed|host_invalid`. `observe_host_admission` reads only the
-host's project-scoped surfaces and classifies by exact entry: Claude
-`mcp__plugin_yoetz_yoetz__check` in `permissions.allow` (detail `allow`) or `ask` (detail `ask`);
+host's project-scoped surfaces and classifies by exact entry: Claude `mcp__yoetz__check` for an
+external registration or `mcp__plugin_yoetz_yoetz__check` for the plugin-owned route in
+`permissions.allow` (detail `allow`) or `ask` (detail `ask`);
 Codex the byte-exact `[mcp_servers.yoetz.tools.check]` / `[plugins."yoetz@yoetz".mcp_servers.yoetz.tools.check]`
 table with `approval_mode = "approve"` (detail `external|plugin|both`); Cursor `yoetz:check` in
 `mcpAllowlist` (case-insensitive) and `Mcp(yoetz:check)` / `Mcp(plugin-yoetz-yoetz:check)` in
 `permissions.allow`. A deny rule, a wider rule (`deny_rule_present`, `wider_rule_present`), a
 non-exact table (`entry_not_exact`), a Codex server-level default (`server_default_present`), or
 the tool in both `allow` and `ask` (`allow_and_ask_present`) is `foreign`; a symlinked, oversized,
-unparseable, or wrongly shaped file is `unknown` (`file_symlink|file_too_large|file_unreadable|
+unparseable, or wrongly shaped file (including JSON `null` where an object or list is required) is
+`unknown` (`file_symlink|file_too_large|file_unreadable|
 file_invalid|shape_invalid|file_not_regular`). `preview_host_admission` refuses a grant unless the
-caller's observed route is `policy` and the observed grant permits review (`None` is unread and
+caller's exclusively observed owner is `external|plugin`, its route is `policy`, and the observed
+grant permits review (`None` is unread and
 refuses), refuses both actions on `unknown`, refuses a grant on `foreign`, and binds the
 `yoetz.host-admission-preview/1` digest over host, action, owner form, checkpoint, every entry
 observed, and the SHA-256 of every file it would write. `apply_host_admission` recomputes the
-preview and refuses `preview_stale` on any drift, writes each surface atomically (`0600`, parent
-`0700`, symlink refused), deletes a file that held nothing but the Yoetz entry, and re-reads the
-state. Revoke needs no route or grant and edits only a surface whose entry is `present`.
+preview, rechecks each exact byte preimage immediately before mutation, and refuses `preview_stale`
+on pre-mutation drift. It writes each surface atomically (`0600`, created parent `0700`, file or
+parent symlink refused), deletes a file that held nothing but a Yoetz entry, and re-reads and
+verifies the resulting state. A mutating preview carries `host_config_not_compare_and_swap`:
+ordinary host files cannot exclude a non-cooperating same-UID writer in the final syscall window,
+so callers must quiesce host configuration writers during apply; a conflict after an earlier
+surface changed is `write_failed`, not an atomic rollback claim. For Codex, an exact table belonging
+only to the inactive owner does not make the active owner `present`; grant adds the applicable
+table. Revoke needs no route, grant, or current owner and removes every exact external/plugin form
+Yoetz can write.
 `sweep_host_admission` is the reverse transition (outcome `removed|absent|retained_foreign|
 unknown|write_failed` per host) used by the privacy ceremony, `integrate <host> plugin remove`,
 strict plugin re-renders, `integrate codex plugin remove`, and `integrate codex mcp
 install|remove --project-root`; each reports it as `admission_cleanup` and its preview discloses
-the same. CLI: `yoetz integrate <host> admission status|preview|grant|revoke --project-root`
+the same, including when the primary MCP registration action is already a `noop`. CLI:
+`yoetz integrate <host> admission status|preview|grant|revoke --project-root`
 (preview `--action grant|revoke`; Claude `--checkpoint`; the host roots the route observation
 needs; `--accept --preview-digest` for the apply verbs, exit 3 without them, exit 1
-`host_admission_<reason>` on refusal).
+`host_admission_<reason>` on refusal); raw path, OS, and parser exception text never crosses this
+boundary.
 
 `yoetz provider status` emits the read-only `yoetz.provider-status/1` schema token. It reports two
 non-substitutable verdicts. `semantic_ready` is repository-bound structural readiness:
@@ -3649,10 +3661,15 @@ owners are `ambiguous`, non-exact same-name configuration is `foreign`, and unre
 state is unobserved `ambiguous`. Effective route is non-null only for one exact external or plugin
 owner. Scoped runtime identities are server `plugin:yoetz:yoetz` and tools
 `mcp__plugin_yoetz_yoetz__<operation>`; bare names are negative controls.
+`ClaudeCodeMcpObservation.host_admission_supported` is true only for one exact external or plugin
+route whose configured server key is exactly `yoetz`; an exact route under another alias remains
+observable for ownership but cannot be mapped to a fixed permission-rule name and therefore makes
+an admission grant refuse with `owner_required` rather than writing the wrong rule.
 
 The rendered artifact carries the five candidate observation hooks
 (`PostToolUse|PostToolUseFailure|SessionEnd|SessionStart|Stop`) plus a `PermissionDenied` hook
-matched to exactly `^mcp__plugin_yoetz_yoetz__check$` that produces no observation: it records
+matched to exactly the external `mcp__yoetz__check` and plugin-owned
+`mcp__plugin_yoetz_yoetz__check` names. It produces no observation and records
 one payload-free `hook_diagnostics` reason, `host_auto_review_denied` (`source` `auto_mode` or
 absent) or `host_permission_rule_denied` (`permission_rule|hook`), on the `PermissionDenied`
 event (issue #467), and any other tool name records nothing. But the

@@ -174,6 +174,7 @@ def _status_body(status: ClaudeCodePluginStatus) -> dict[str, object]:
         "marketplace_registered": status.marketplace_registered,
         "marker_valid": status.marker_valid,
         "mcp": {
+            "host_admission_supported": status.mcp_observation.host_admission_supported,
             "observed": status.mcp_observation.observed,
             "ownership_state": status.mcp_observation.ownership_state.value,
             "present_sources": [item.value for item in status.mcp_observation.present_sources],

@@ -134,7 +134,7 @@ def _claude_route(
     observation = status.mcp_observation
     return (
         observation.route_profile,
-        _owner(observation.ownership_state.value),
+        _owner(observation.ownership_state.value) if observation.host_admission_supported else None,
         observation.observed,
     )
 
@@ -357,8 +357,13 @@ async def run_host_admission_command(
     except HostAdmissionError as error:
         sys.stderr.write(f"host_admission_{error.reason.value}\n")
         return 1
-    except (OSError, ValueError) as error:
-        reason = getattr(error, "reason", None)
-        token = str(getattr(reason, "value", None) or error)
-        sys.stderr.write(f"host_admission_{token}\n")
+    except OSError:
+        # Paths and raw OS errors are user-controlled content under the repository privacy rule.
+        sys.stderr.write("host_admission_target_unsafe\n")
+        return 1
+    except ValueError:
+        sys.stderr.write("host_admission_host_invalid\n")
+        return 1
+    except Exception:  # noqa: BLE001 - public CLI boundary must never reflect raw exception text
+        sys.stderr.write("host_admission_host_invalid\n")
         return 1

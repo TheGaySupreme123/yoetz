@@ -21,7 +21,7 @@ from yoetz.cli.app import app
 def _facts(
     *,
     route: str | None = "policy",
-    owner: str | None = "external",
+    owner: str | None = "plugin",
     grant: str | None = "granted",
     llm: bool | None = True,
 ) -> module.AdmissionFacts:
@@ -60,9 +60,10 @@ def test_preview_grant_and_revoke_round_trip_through_the_cli(
     preview = json.loads(out)
     assert preview["action"] == "grant"
     assert preview["state_before"] == "absent"
-    assert preview["route"] == {"observed": True, "owner": "external", "route_profile": "policy"}
+    assert preview["route"] == {"observed": True, "owner": "plugin", "route_profile": "policy"}
     assert preview["grant"]["permits_external_review"] is True
     assert preview["surfaces_changed"] == [".claude/settings.local.json"]
+    assert "host_config_not_compare_and_swap" in preview["warnings"]
     assert "claude_local_settings_held_until_trusted_when_tracked" in preview["warnings"]
     assert str(tmp_path) not in out
 
@@ -168,6 +169,30 @@ def test_codex_and_cursor_grants_follow_the_observed_owner(
     }
 
 
+def test_claude_external_registration_uses_its_configured_server_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_facts(monkeypatch, _facts(owner="external"))
+    code, out, _err = _run(monkeypatch, tmp_path, "claude", "admission", "preview")
+    assert code == 0, out
+    preview = json.loads(out)
+    code, out, _err = _run(
+        monkeypatch,
+        tmp_path,
+        "claude",
+        "admission",
+        "grant",
+        "--accept",
+        "--preview-digest",
+        preview["preview_digest"],
+    )
+    assert code == 0, out
+    settings = json.loads(
+        (tmp_path / ".claude" / "settings.local.json").read_text(encoding="utf-8")
+    )
+    assert settings == {"permissions": {"allow": ["mcp__yoetz__check"]}}
+
+
 def test_status_reads_without_facts_and_reports_unknown_for_an_unreadable_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -226,6 +251,29 @@ def test_unknown_action_and_host_are_usage_errors(
     code, _out, err = _run(monkeypatch, tmp_path, "vim", "admission", "status")
     assert code == 2
     assert "host_admission_command_invalid" in err
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (FileNotFoundError("PRIVATE_PATH"), "host_admission_target_unsafe\n"),
+        (RuntimeError("PRIVATE_PATH"), "host_admission_host_invalid\n"),
+    ],
+)
+def test_raw_observation_errors_are_reduced_to_path_free_tokens(
+    failure: Exception, expected: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    private_path = tmp_path / "owner-secret-project"
+    failure.args = (str(private_path),)
+
+    async def fail(*_args: object, **_kwargs: object) -> module.AdmissionFacts:
+        raise failure
+
+    monkeypatch.setattr(module, "gather_admission_facts", fail)
+    code, _out, err = _run(monkeypatch, tmp_path, "claude", "admission", "preview")
+    assert code == 1
+    assert err == expected
+    assert str(private_path) not in err
 
 
 def test_reverse_sweep_and_its_preview_disclosure_touch_only_yoetz_entries(tmp_path: Path) -> None:

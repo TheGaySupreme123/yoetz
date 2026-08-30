@@ -2086,7 +2086,7 @@ def _claude_capability_profile_id(claude_version: object) -> str:
     return _CLAUDE_VERSION_TO_PROFILE.get(token, _CLAUDE_UNTESTED_PROFILE_ID)
 
 
-_CLAUDE_CHECK_TOOL_NAME: Final = "mcp__plugin_yoetz_yoetz__check"
+_CLAUDE_CHECK_TOOL_NAMES: Final = frozenset({"mcp__yoetz__check", "mcp__plugin_yoetz_yoetz__check"})
 
 
 def _record_claude_permission_denied(
@@ -2100,7 +2100,7 @@ def _record_claude_permission_denied(
     matcher is scoped to ``check`` and this ingress must not widen it.
     """
 
-    if payload.get("tool_name") != _CLAUDE_CHECK_TOOL_NAME:
+    if payload.get("tool_name") not in _CLAUDE_CHECK_TOOL_NAMES:
         return
     source = payload.get("source")
     reason = (

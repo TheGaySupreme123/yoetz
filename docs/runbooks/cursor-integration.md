@@ -151,6 +151,12 @@ server the same way is undocumented and unverified; the acceptance cell in issue
 `status` reports `partial` when only one of the two files carries the entry. A wildcard
 (`yoetz:*`, `*:*`, `Mcp(*:*)`) or a CLI deny rule is `foreign` and never edited.
 
+A mutating preview warns `host_config_not_compare_and_swap`; keep Cursor and other settings writers
+quiescent during apply. Yoetz rechecks each exact preimage immediately before its atomic mutation
+and verifies the combined result, but ordinary files cannot exclude a non-cooperating same-UID
+writer in the final syscall window. If the second surface drifts after the first changed, the
+operation reports `write_failed` rather than claiming a transaction-wide rollback.
+
 Reverse: `admission revoke`; `plugin remove` and an install/replace onto the strict route sweep
 the entry when `--project-root` is given and report `admission_cleanup`; a privacy commit that
 stops external review sweeps it; `provider status` reports `host_admission_drift`. Cursor

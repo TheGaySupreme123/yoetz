@@ -1334,8 +1334,26 @@ def test_integrate_mcp_interactive_remove_surfaces_complete_warning_bound_previe
 
 
 def test_integrate_mcp_remove_absent_entry_is_noop(wizard_env: dict[str, object]) -> None:
+    project = cast(Path, wizard_env["marker"]).parent / "project-remove-noop"
+    config = project / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[mcp_servers.yoetz.tools.check]\napproval_mode = "approve"\n',
+        encoding="utf-8",
+    )
     wizard_env["outputs"] = _absent_mcp()
-    previewed = _RUNNER.invoke(cli.app, ["integrate", "codex", "mcp", "preview-remove", "--json"])
+    previewed = _RUNNER.invoke(
+        cli.app,
+        [
+            "integrate",
+            "codex",
+            "mcp",
+            "preview-remove",
+            "--project-root",
+            str(project),
+            "--json",
+        ],
+    )
     assert previewed.exit_code == 0, (previewed.output, previewed.exception)
     preview_digest = json.loads(previewed.stdout)["preview_digest"]
 
@@ -1350,11 +1368,49 @@ def test_integrate_mcp_remove_absent_entry_is_noop(wizard_env: dict[str, object]
             "--accept",
             "--preview-digest",
             preview_digest,
+            "--project-root",
+            str(project),
             "--json",
         ],
     )
     assert result.exit_code == 0, (result.output, result.exception)
-    assert json.loads(result.stdout)["action"] == "noop"
+    body = json.loads(result.stdout)
+    assert body["action"] == "noop"
+    assert body["admission_cleanup"]["outcome"] == "removed"
+    assert not config.exists()
+
+
+def test_integrate_mcp_strict_install_noop_still_revokes_host_admission(
+    wizard_env: dict[str, object],
+) -> None:
+    project = cast(Path, wizard_env["marker"]).parent / "project-strict-noop"
+    config = project / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[mcp_servers.yoetz.tools.check]\napproval_mode = "approve"\n',
+        encoding="utf-8",
+    )
+    wizard_env["outputs"] = [_yoetz_entry("strict")]
+    result = _RUNNER.invoke(
+        cli.app,
+        [
+            "integrate",
+            "codex",
+            "mcp",
+            "install",
+            "--accept",
+            "--route-profile",
+            "strict",
+            "--project-root",
+            str(project),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    body = json.loads(result.stdout)
+    assert body["action"] == "noop"
+    assert body["admission_cleanup"]["outcome"] == "removed"
+    assert not config.exists()
 
 
 def test_integrate_mcp_remove_refuses_foreign_entry(wizard_env: dict[str, object]) -> None:

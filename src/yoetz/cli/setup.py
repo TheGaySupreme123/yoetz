@@ -2792,6 +2792,7 @@ async def integrate_mcp(
                 _emit(
                     {
                         "action": "noop",
+                        "admission_cleanup": _admission_reverse_sweep(project_root),
                         "harness": harness,
                         "state_after": preview.state_before.value,
                         "state_before": preview.state_before.value,
@@ -2872,6 +2873,11 @@ async def integrate_mcp(
             _emit(
                 {
                     "action": "noop",
+                    "admission_cleanup": (
+                        _admission_reverse_sweep(project_root)
+                        if preview.route_profile == "strict"
+                        else None
+                    ),
                     "harness": harness,
                     "state_after": preview.state_before.value,
                     "state_before": preview.state_before.value,

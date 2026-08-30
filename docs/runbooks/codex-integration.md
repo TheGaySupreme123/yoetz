@@ -159,14 +159,22 @@ yoetz integrate codex admission grant --project-root <project> --accept --previe
 A strict registered route, a missing or non-permitting grant, or an unreadable service refuses
 before any write. A same-name table that is not byte-exact (another `approval_mode`, an extra
 key) or a server-level `default_tools_approval_mode` is `foreign`: reported, never edited.
-Removal strips only the exact generated table; a config that held nothing else is deleted.
+An exact table for only the inactive owner does not make the active owner present; grant adds the
+applicable table instead of returning a false no-op. Removal strips every exact generated owner
+form; a config that held nothing else is deleted.
+
+A mutating preview warns `host_config_not_compare_and_swap`; keep Codex and other settings writers
+quiescent during apply. Yoetz rechecks the exact preimage immediately before mutation and verifies
+the result, but an ordinary file cannot exclude a non-cooperating same-UID writer in the final
+syscall window.
 
 Reverse: `integrate codex mcp install --route-profile strict --project-root <project>` and
 `integrate codex mcp remove --project-root <project>` sweep the project's entry and report
 `admission_cleanup` (the registration is global and the admission is project-scoped, so without
 `--project-root` nothing is swept and `provider status` reports `host_admission_drift`);
 `integrate codex plugin remove` sweeps it for the bound project; a privacy commit that stops
-external review sweeps it in the ceremony.
+external review sweeps it in the ceremony. The sweep still runs when MCP install/remove is already
+a no-op, because the route state and the project admission state are independent.
 
 Codex exposes no typed denial signal for a guardian refusal: its `PermissionRequest` hook fires
 before the decision and may allow, so it is not a denial. A held check is visible only as the

@@ -19,6 +19,8 @@ import pytest
 from yoetz.adapters.integrations import host_admission as module
 from yoetz.adapters.integrations.host_admission import (
     CLAUDE_CHECK_TOOL_NAME,
+    CLAUDE_EXTERNAL_CHECK_TOOL_NAME,
+    CLAUDE_PLUGIN_CHECK_TOOL_NAME,
     CODEX_EXTERNAL_ADMISSION_TABLE,
     CODEX_PLUGIN_ADMISSION_TABLE,
     CURSOR_CLI_PLUGIN_ENTRY,
@@ -37,6 +39,8 @@ from yoetz.adapters.integrations.host_admission import (
 def _grant(
     host: module.HostAdmissionHost, root: Path, **kwargs: object
 ) -> module.HostAdmissionResult:
+    if host == "claude" and "owner" not in kwargs:
+        kwargs["owner"] = "plugin"
     preview = preview_host_admission(
         host,
         root,
@@ -103,8 +107,8 @@ def test_revoke_needs_neither_route_nor_grant(tmp_path: Path) -> None:
     assert not (tmp_path / ".claude" / "settings.local.json").exists()
 
 
-def test_codex_and_cursor_grants_need_an_observed_owner(tmp_path: Path) -> None:
-    for host in ("codex", "cursor"):
+def test_every_host_grant_needs_an_observed_owner(tmp_path: Path) -> None:
+    for host in module.ADMISSION_HOSTS:
         with pytest.raises(HostAdmissionError) as failure:
             preview_host_admission(
                 host,  # type: ignore[arg-type]
@@ -147,10 +151,35 @@ def test_claude_grant_writes_only_the_exact_allow_rule_and_preserves_the_rest(
 
     # Idempotent: a second grant is a no-op preview, not a duplicate rule.
     again = preview_host_admission(
-        "claude", tmp_path, HostAdmissionAction.GRANT, route_profile="policy", grant_permits=True
+        "claude",
+        tmp_path,
+        HostAdmissionAction.GRANT,
+        route_profile="policy",
+        grant_permits=True,
+        owner="plugin",
     )
     assert again.action is HostAdmissionAction.NOOP
     assert again.files_after == {}
+
+
+@pytest.mark.parametrize(
+    ("owner", "expected"),
+    [
+        ("external", CLAUDE_EXTERNAL_CHECK_TOOL_NAME),
+        ("plugin", CLAUDE_PLUGIN_CHECK_TOOL_NAME),
+    ],
+)
+def test_claude_grant_follows_the_observed_route_owner(
+    tmp_path: Path, owner: module.McpOwnerForm, expected: str
+) -> None:
+    _grant("claude", tmp_path, owner=owner)
+    settings = json.loads(
+        (tmp_path / ".claude" / "settings.local.json").read_text(encoding="utf-8")
+    )
+    assert settings == {"permissions": {"allow": [expected]}}
+    assert (
+        observe_host_admission("claude", tmp_path, owner=owner).state is HostAdmissionState.PRESENT
+    )
 
 
 def test_claude_revoke_removes_exactly_the_entry_and_leaves_owner_rules(tmp_path: Path) -> None:
@@ -209,6 +238,7 @@ def test_claude_foreign_rules_are_reported_and_never_edited(
             HostAdmissionAction.GRANT,
             route_profile="policy",
             grant_permits=True,
+            owner="plugin",
         )
     assert failure.value.reason is HostAdmissionReason.FOREIGN_ENTRY_PRESENT
     # Revoke likewise leaves a foreign rule alone: nothing to remove, file untouched.
@@ -225,6 +255,8 @@ def test_claude_foreign_rules_are_reported_and_never_edited(
     [
         (b"{not json", "file_invalid"),
         (b"[]", "shape_invalid"),
+        (b'{"permissions": null}', "shape_invalid"),
+        (b'{"permissions": {"allow": null}}', "shape_invalid"),
         (b'{"permissions": {"allow": "Bash"}}', "shape_invalid"),
         (b'{"permissions": []}', "shape_invalid"),
     ],
@@ -242,7 +274,12 @@ def test_an_unreadable_host_file_is_unknown_never_absent(
     for action in (HostAdmissionAction.GRANT, HostAdmissionAction.REVOKE):
         with pytest.raises(HostAdmissionError) as failure:
             preview_host_admission(
-                "claude", tmp_path, action, route_profile="policy", grant_permits=True
+                "claude",
+                tmp_path,
+                action,
+                route_profile="policy",
+                grant_permits=True,
+                owner="plugin",
             )
         assert failure.value.reason is HostAdmissionReason.ENTRY_UNREADABLE
     assert settings.read_bytes() == content
@@ -256,6 +293,33 @@ def test_a_symlinked_host_file_is_unknown_and_never_followed(tmp_path: Path) -> 
     observation = observe_host_admission("claude", tmp_path)
     assert observation.state is HostAdmissionState.UNKNOWN
     assert observation.entries[0].detail == "file_symlink"
+
+
+def test_a_symlinked_host_parent_is_unknown_and_revoke_never_deletes_through_it(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    settings = outside / "settings.local.json"
+    original = json.dumps({"permissions": {"allow": [CLAUDE_PLUGIN_CHECK_TOOL_NAME]}}).encode(
+        "utf-8"
+    )
+    settings.write_bytes(original)
+    (tmp_path / ".claude").symlink_to(outside, target_is_directory=True)
+
+    observation = observe_host_admission("claude", tmp_path)
+    assert observation.state is HostAdmissionState.UNKNOWN
+    assert observation.entries[0].detail == "file_symlink"
+    with pytest.raises(HostAdmissionError) as failure:
+        preview_host_admission(
+            "claude",
+            tmp_path,
+            HostAdmissionAction.REVOKE,
+            route_profile=None,
+            grant_permits=None,
+        )
+    assert failure.value.reason is HostAdmissionReason.ENTRY_UNREADABLE
+    assert settings.read_bytes() == original
 
 
 # --- Codex --------------------------------------------------------------------------------
@@ -300,6 +364,29 @@ def test_codex_plugin_owner_uses_the_plugin_form_and_a_file_it_created_is_remove
     assert observe_host_admission("codex", tmp_path).entries[0].detail == "plugin"
     _revoke("codex", tmp_path, owner="plugin")
     assert not config.exists()
+
+
+def test_codex_grant_adds_the_active_owner_form_when_only_the_inactive_form_exists(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_bytes(CODEX_PLUGIN_ADMISSION_TABLE.encode("utf-8"))
+
+    inactive = observe_host_admission("codex", tmp_path, owner="external")
+    assert inactive.state is HostAdmissionState.ABSENT
+    assert inactive.entries[0].detail == "inactive_plugin_entry_present"
+    result = _grant("codex", tmp_path, owner="external")
+
+    assert result.action is HostAdmissionAction.GRANT
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["mcp_servers"]["yoetz"]["tools"]["check"] == {"approval_mode": "approve"}
+    assert parsed["plugins"]["yoetz@yoetz"]["mcp_servers"]["yoetz"]["tools"]["check"] == {
+        "approval_mode": "approve"
+    }
+    assert observe_host_admission("codex", tmp_path, owner="external").state is (
+        HostAdmissionState.PRESENT
+    )
 
 
 @pytest.mark.parametrize(
@@ -423,12 +510,37 @@ def test_cursor_wider_or_deny_rules_are_foreign(
     assert foreign.detail == detail
 
 
+@pytest.mark.parametrize(
+    ("surface", "content"),
+    [
+        (".cursor/permissions.json", {"mcpAllowlist": None}),
+        (".cursor/cli.json", {"permissions": None}),
+        (".cursor/cli.json", {"permissions": {"allow": None}}),
+    ],
+)
+def test_cursor_null_shapes_are_unknown_never_absent(
+    tmp_path: Path, surface: str, content: dict[str, object]
+) -> None:
+    path = tmp_path / surface
+    path.parent.mkdir()
+    path.write_text(json.dumps(content), encoding="utf-8")
+    observation = observe_host_admission("cursor", tmp_path, owner="external")
+    assert observation.state is HostAdmissionState.UNKNOWN
+    entry = next(item for item in observation.entries if item.surface == surface)
+    assert entry.detail == "shape_invalid"
+
+
 # --- digest binding and sweeps --------------------------------------------------------------
 
 
 def test_apply_refuses_a_stale_digest_and_a_file_changed_after_preview(tmp_path: Path) -> None:
     preview = preview_host_admission(
-        "claude", tmp_path, HostAdmissionAction.GRANT, route_profile="policy", grant_permits=True
+        "claude",
+        tmp_path,
+        HostAdmissionAction.GRANT,
+        route_profile="policy",
+        grant_permits=True,
+        owner="plugin",
     )
     with pytest.raises(HostAdmissionError) as failure:
         apply_host_admission(preview, tmp_path, accepted_preview_digest="sha256:" + "0" * 64)
@@ -446,10 +558,89 @@ def test_apply_refuses_a_stale_digest_and_a_file_changed_after_preview(tmp_path:
     }
 
 
+def test_apply_rechecks_bytes_immediately_before_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = tmp_path / ".claude" / "settings.local.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({"permissions": {"allow": ["Bash(ls)"]}}))
+    preview = preview_host_admission(
+        "claude",
+        tmp_path,
+        HostAdmissionAction.GRANT,
+        route_profile="policy",
+        grant_permits=True,
+        owner="plugin",
+    )
+    original_mutator = module._delete_or_write  # pyright: ignore[reportPrivateUsage]
+
+    def mutate_then_apply(path: Path, payload: bytes, *, expected_digest: str | None) -> None:
+        settings.write_text(json.dumps({"permissions": {"allow": ["Bash(git status)"]}}))
+        original_mutator(path, payload, expected_digest=expected_digest)
+
+    monkeypatch.setattr(module, "_delete_or_write", mutate_then_apply)
+    with pytest.raises(HostAdmissionError) as failure:
+        apply_host_admission(preview, tmp_path, accepted_preview_digest=preview.preview_digest)
+
+    assert failure.value.reason is HostAdmissionReason.PREVIEW_STALE
+    assert json.loads(settings.read_text()) == {"permissions": {"allow": ["Bash(git status)"]}}
+
+
+def test_cursor_second_surface_drift_after_first_mutation_reports_write_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preview = preview_host_admission(
+        "cursor",
+        tmp_path,
+        HostAdmissionAction.GRANT,
+        route_profile="policy",
+        grant_permits=True,
+        owner="external",
+    )
+    original_mutator = module._delete_or_write  # pyright: ignore[reportPrivateUsage]
+
+    def drift_second_surface(path: Path, payload: bytes, *, expected_digest: str | None) -> None:
+        if path.name == "permissions.json":
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps({"mcpAllowlist": ["github:search"]}))
+        original_mutator(path, payload, expected_digest=expected_digest)
+
+    monkeypatch.setattr(module, "_delete_or_write", drift_second_surface)
+    with pytest.raises(HostAdmissionError) as failure:
+        apply_host_admission(preview, tmp_path, accepted_preview_digest=preview.preview_digest)
+
+    assert failure.value.reason is HostAdmissionReason.WRITE_FAILED
+    assert (tmp_path / ".cursor" / "cli.json").exists()
+    assert json.loads((tmp_path / ".cursor" / "permissions.json").read_text()) == {
+        "mcpAllowlist": ["github:search"]
+    }
+
+
+def test_noop_apply_rechecks_the_accepted_state(tmp_path: Path) -> None:
+    _grant("claude", tmp_path)
+    preview = preview_host_admission(
+        "claude",
+        tmp_path,
+        HostAdmissionAction.GRANT,
+        route_profile="policy",
+        grant_permits=True,
+        owner="plugin",
+    )
+    assert preview.action is HostAdmissionAction.NOOP
+    (tmp_path / ".claude" / "settings.local.json").unlink()
+
+    with pytest.raises(HostAdmissionError) as failure:
+        apply_host_admission(preview, tmp_path, accepted_preview_digest=preview.preview_digest)
+    assert failure.value.reason is HostAdmissionReason.PREVIEW_STALE
+
+
 def test_preview_digest_binds_host_action_owner_and_checkpoint(tmp_path: Path) -> None:
     def digest(**kwargs: object) -> str:
+        host = kwargs.pop("host", "claude")
+        if host == "claude" and "owner" not in kwargs:
+            kwargs["owner"] = "plugin"
         return preview_host_admission(
-            kwargs.pop("host", "claude"),  # type: ignore[arg-type]
+            host,  # type: ignore[arg-type]
             tmp_path,
             HostAdmissionAction.GRANT,
             route_profile="policy",
@@ -503,6 +694,24 @@ def test_sweep_with_no_owner_removes_both_codex_forms(tmp_path: Path) -> None:
     assert config.read_bytes() == b'model = "x"\n'
 
 
+def test_revoke_removes_every_exact_claude_owner_form(tmp_path: Path) -> None:
+    settings = tmp_path / ".claude" / "settings.local.json"
+    settings.parent.mkdir()
+    settings.write_text(
+        json.dumps(
+            {
+                "permissions": {
+                    "allow": [CLAUDE_EXTERNAL_CHECK_TOOL_NAME],
+                    "ask": [CLAUDE_PLUGIN_CHECK_TOOL_NAME],
+                }
+            }
+        )
+    )
+    result = _revoke("claude", tmp_path, owner="external")
+    assert result.state_after is HostAdmissionState.ABSENT
+    assert not settings.exists()
+
+
 def test_relative_or_missing_project_root_is_unsafe(tmp_path: Path) -> None:
     with pytest.raises(HostAdmissionError) as failure:
         observe_host_admission("claude", Path("relative"))
@@ -520,7 +729,12 @@ def test_errors_and_reports_never_carry_paths_or_contents(tmp_path: Path) -> Non
     assert "SECRET_CANARY" not in rendered
     assert str(tmp_path) not in rendered
     preview = preview_host_admission(
-        "claude", tmp_path, HostAdmissionAction.GRANT, route_profile="policy", grant_permits=True
+        "claude",
+        tmp_path,
+        HostAdmissionAction.GRANT,
+        route_profile="policy",
+        grant_permits=True,
+        owner="plugin",
     )
     rendered = json.dumps(preview.as_json())
     assert "SECRET_CANARY" not in rendered

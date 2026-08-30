@@ -666,16 +666,16 @@ def test_claude_ingress_names_paused_consent_distinctly(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("source", "expected"),
+    ("tool_name", "source", "expected"),
     [
-        ("auto_mode", "host_auto_review_denied"),
-        (None, "host_auto_review_denied"),
-        ("permission_rule", "host_permission_rule_denied"),
-        ("hook", "host_permission_rule_denied"),
+        ("mcp__yoetz__check", "auto_mode", "host_auto_review_denied"),
+        ("mcp__plugin_yoetz_yoetz__check", None, "host_auto_review_denied"),
+        ("mcp__yoetz__check", "permission_rule", "host_permission_rule_denied"),
+        ("mcp__plugin_yoetz_yoetz__check", "hook", "host_permission_rule_denied"),
     ],
 )
 def test_claude_permission_denied_on_a_scoped_check_records_one_payload_free_diagnostic(
-    tmp_path: Path, source: str | None, expected: str
+    tmp_path: Path, tool_name: str, source: str | None, expected: str
 ) -> None:
     """A host reviewer held the check before Yoetz saw it (issue #467).
 
@@ -687,7 +687,7 @@ def test_claude_permission_denied_on_a_scoped_check_records_one_payload_free_dia
     payload: dict[str, object] = {
         "session_id": "claude-denied",
         "hook_event_name": "PermissionDenied",
-        "tool_name": "mcp__plugin_yoetz_yoetz__check",
+        "tool_name": tool_name,
         "tool_input": {"claim": "CLAIM_CANARY"},
         "tool_use_id": "toolu_CANARY",
         "reason": "classifier_denied",
@@ -718,7 +718,7 @@ def test_claude_permission_denied_on_a_scoped_check_records_one_payload_free_dia
 
 def test_claude_permission_denied_for_any_other_tool_records_nothing(tmp_path: Path) -> None:
     _consented_store(tmp_path)
-    for tool_name in ("mcp__plugin_yoetz_yoetz__start", "Bash", "mcp__yoetz__check"):
+    for tool_name in ("mcp__plugin_yoetz_yoetz__start", "Bash", "mcp__other__check"):
         stdout = io.BytesIO()
         assert (
             observe_hooks.handle_claude_observe(
