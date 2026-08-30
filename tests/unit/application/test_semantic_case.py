@@ -460,29 +460,23 @@ def test_observation_captured_excerpt_exposes_provenance_not_stored_object_bytes
         evidence={evd(1): evidence_record(payload, 4)},
         extra_refs=(clm(1), obl(1), evd(1)),
     )
-    semantic = _build(
-        observed, ReviewContextProfile.ASSISTED, findings=_findings_for(observed)
-    )
+    semantic = _build(observed, ReviewContextProfile.ASSISTED, findings=_findings_for(observed))
     excerpt = semantic.packet.targeted_excerpts[0]
     item = next(row for row in semantic.items if row.item_id == excerpt.excerpt_item_id)
     assert item.content == b"Observation-captured tool output bytes part=1/1"
     assert b"captured-object-secret-marker" not in bounded_case_envelope(semantic)
     assert excerpt.digest_provenance is not None
-    assert (
-        excerpt.digest_provenance.provenance
-        is EvidenceDigestProvenance.OBSERVATION_CAPTURED
-    )
-    assert (
-        excerpt.digest_provenance.content_availability
-        is EvidenceContentAvailability.CAPTURED
-    )
+    assert excerpt.digest_provenance.provenance is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+    assert excerpt.digest_provenance.content_availability is EvidenceContentAvailability.CAPTURED
     document = strict_json_parse(bounded_case_envelope(semantic))
     assert isinstance(document, Mapping)
     packet = document["review_packet"]
     assert isinstance(packet, Mapping)
     rows = packet["targeted_excerpts"]
     assert isinstance(rows, list) and rows
-    provenance = cast(Mapping[str, object], cast(Mapping[str, object], rows[0])["digest_provenance"])
+    provenance = cast(
+        Mapping[str, object], cast(Mapping[str, object], rows[0])["digest_provenance"]
+    )
     assert provenance["provenance"] == "observation_captured"
 
 

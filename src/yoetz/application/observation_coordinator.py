@@ -1634,9 +1634,7 @@ class ObservationCoordinator:
             loaded = store.load_content_manifest(ref)
             if loaded is not None:
                 try:
-                    await runtime.objects.resolve_verified(
-                        loaded.object_id, loaded.envelope_digest
-                    )
+                    await runtime.objects.resolve_verified(loaded.object_id, loaded.envelope_digest)
                 except Exception:
                     any_unavailable = True
                     await self._local(
@@ -1998,9 +1996,7 @@ class ObservationCoordinator:
                 )
             )
         if inspection_snapshot is not None:
-            inspection_result = await self._append_inspection_snapshot(
-                runtime, inspection_snapshot
-            )
+            inspection_result = await self._append_inspection_snapshot(runtime, inspection_snapshot)
             if inspection_result is not None and codex_session_id is not None:
                 await self._local(
                     partial(

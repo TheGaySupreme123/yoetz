@@ -288,11 +288,7 @@ def _evidence_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
                     "approved_check",
                     "caller_asserted",
                     "import_observed",
-                    *(
-                        ["observation_captured"]
-                        if entry.schema_version == "1.2.0"
-                        else []
-                    ),
+                    *(["observation_captured"] if entry.schema_version == "1.2.0" else []),
                 ],
                 "type": "string",
             },
@@ -487,7 +483,7 @@ def _event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     if legacy_index is None:
         raise SchemaGenerationError(
             "event_draft_schema_template_invalid", entries=(entry.relative_path,)
-    )
+        )
     for offset, version in enumerate(("1.1.0", "1.2.0"), start=1):
         suffix = "_".join(version.split(".")[:2])
         definitions[f"schema_identity_evidence_recorded_{suffix}"] = {
@@ -562,8 +558,7 @@ def _outbound_case_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Add observation provenance to outbound-case v1.1 without rewriting v1.0."""
 
     source = (
-        Path(__file__).resolve().parent.parent
-        / "schemas/privacy/outbound-case-1.0.0.schema.json"
+        Path(__file__).resolve().parent.parent / "schemas/privacy/outbound-case-1.0.0.schema.json"
     )
     try:
         document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))

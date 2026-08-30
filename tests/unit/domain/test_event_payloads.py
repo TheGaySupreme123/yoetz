@@ -566,14 +566,11 @@ def test_evidence_1_2_requires_closed_compatible_digest_provenance() -> None:
     )
     assert decoded_captured.digest_binding is not None
     assert (
-        decoded_captured.digest_binding.provenance
-        is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+        decoded_captured.digest_binding.provenance is EvidenceDigestProvenance.OBSERVATION_CAPTURED
     )
     _assert_reason(
         "evidence_digest_provenance_invalid",
-        lambda: decode_payload(
-            EventSchema("evidence_recorded", "1.1.0"), freeze_json(captured)
-        ),
+        lambda: decode_payload(EventSchema("evidence_recorded", "1.1.0"), freeze_json(captured)),
     )
 
 

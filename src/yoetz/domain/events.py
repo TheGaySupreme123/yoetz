@@ -2105,9 +2105,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         content_digest = cast(str | None, _optional(source, "content_digest"))
         if schema.version == SCHEMA_VERSION and raw_binding is not None:
             raise ProtocolValueError("invalid_event_value_type")
-        if schema.version != SCHEMA_VERSION and (
-            (content_digest is None) != (raw_binding is None)
-        ):
+        if schema.version != SCHEMA_VERSION and ((content_digest is None) != (raw_binding is None)):
             raise ProtocolValueError("evidence_digest_binding_required")
         decoded = EvidenceRecordedPayload(
             evidence_id=evidence_id(_field(source, "evidence_id")),
@@ -2128,8 +2126,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         if (
             schema.version == EVIDENCE_TYPED_SCHEMA_VERSION
             and decoded.digest_binding is not None
-            and decoded.digest_binding.provenance
-            is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+            and decoded.digest_binding.provenance is EvidenceDigestProvenance.OBSERVATION_CAPTURED
         ):
             raise ProtocolValueError("evidence_digest_provenance_invalid")
         return decoded
@@ -2568,15 +2565,16 @@ def _validate_evidence_schema_payload(
         if evidence.digest_binding is not None:
             raise ProtocolValueError("invalid_event_value_type")
         return
-    if schema.name == "evidence_recorded" and schema.version != SCHEMA_VERSION and (
-        (evidence.content_digest is None) != (evidence.digest_binding is None)
+    if (
+        schema.name == "evidence_recorded"
+        and schema.version != SCHEMA_VERSION
+        and ((evidence.content_digest is None) != (evidence.digest_binding is None))
     ):
         raise ProtocolValueError("evidence_digest_binding_required")
     if (
         schema.version == EVIDENCE_TYPED_SCHEMA_VERSION
         and evidence.digest_binding is not None
-        and evidence.digest_binding.provenance
-        is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+        and evidence.digest_binding.provenance is EvidenceDigestProvenance.OBSERVATION_CAPTURED
     ):
         raise ProtocolValueError("evidence_digest_provenance_invalid")
 

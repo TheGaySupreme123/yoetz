@@ -76,9 +76,7 @@ def _inputs() -> tuple[str, ObservationEnvelope, tuple[ObservationContentManifes
 def test_captured_evidence_matches_golden_vector_and_excludes_narrative_content() -> None:
     task_id, envelope, manifests = _inputs()
     expected = _case()["expected"]
-    batch = materialize_observation_envelope(
-        envelope, task_id=task_id, captured_content=manifests
-    )
+    batch = materialize_observation_envelope(envelope, task_id=task_id, captured_content=manifests)
 
     assert [item.draft.schema.name for item in batch.drafts] == expected["draft_schema_names"]
     evidence_draft = batch.drafts[1].draft
@@ -94,15 +92,11 @@ def test_captured_evidence_matches_golden_vector_and_excludes_narrative_content(
         payload.digest_binding.content_availability.value
         == expected["evidence"]["content_availability"]
     )
-    assert batch.coverage.artifact_observation.value == expected["coverage"][
-        "artifact_observation"
-    ]
-    assert batch.coverage.authorship_assurance.value == expected["coverage"][
-        "authorship_assurance"
-    ]
-    assert batch.coverage.evidence_immutability.value == expected["coverage"][
-        "evidence_immutability"
-    ]
+    assert batch.coverage.artifact_observation.value == expected["coverage"]["artifact_observation"]
+    assert batch.coverage.authorship_assurance.value == expected["coverage"]["authorship_assurance"]
+    assert (
+        batch.coverage.evidence_immutability.value == expected["coverage"]["evidence_immutability"]
+    )
     assert [item.value for item in batch.coverage.publication_channels] == expected["coverage"][
         "publication_channels"
     ]

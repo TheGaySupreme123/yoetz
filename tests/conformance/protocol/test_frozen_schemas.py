@@ -262,12 +262,12 @@ def test_observation_capture_provenance_is_additive_only() -> None:
     outbound_1_1 = _load_manifest(
         (_ROOT_SCHEMA_DIR / "privacy/outbound-case-1.1.0.schema.json").read_bytes()
     )
-    old_outbound = outbound_1_0["$defs"]["targeted_excerpt"]["properties"][
-        "digest_provenance"
-    ]["properties"]["provenance"]["enum"]
-    new_outbound = outbound_1_1["$defs"]["targeted_excerpt"]["properties"][
-        "digest_provenance"
-    ]["properties"]["provenance"]["enum"]
+    old_outbound = outbound_1_0["$defs"]["targeted_excerpt"]["properties"]["digest_provenance"][
+        "properties"
+    ]["provenance"]["enum"]
+    new_outbound = outbound_1_1["$defs"]["targeted_excerpt"]["properties"]["digest_provenance"][
+        "properties"
+    ]["provenance"]["enum"]
     assert "observation_captured" not in old_outbound
     assert "observation_captured" in new_outbound
 

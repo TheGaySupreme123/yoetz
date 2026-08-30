@@ -778,8 +778,7 @@ async def test_typed_digest_subject_mismatch_and_reserved_provenance_fail_before
     with pytest.raises(PublicOperationError) as captured_authority:
         await execute_publish_work(cast(Application, app), captured)
     assert (
-        captured_authority.value.safe_details["reason_code"]
-        == "evidence_digest_provenance_invalid"
+        captured_authority.value.safe_details["reason_code"] == "evidence_digest_provenance_invalid"
     )
     assert len(objects._data) == before  # pyright: ignore[reportPrivateUsage]
 

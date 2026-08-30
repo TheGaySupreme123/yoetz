@@ -111,12 +111,12 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
         "publish-work-request": MappingProxyType(
             {
                 "max_oneof_nodes": 8,
-                "max_oneof_branches": 28,
+                "max_oneof_branches": 32,
                 "max_ref_nodes": 0,
                 "max_conditional_nodes": 0,
                 "max_defs_count": 20,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 32_000,
+                "max_encoded_bytes": 40_000,
             }
         ),
         "check-request": MappingProxyType(

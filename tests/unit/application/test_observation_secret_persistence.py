@@ -227,9 +227,7 @@ async def test_observation_capture_secret_scans_before_digest_binding(tmp_path: 
     captured_inner = base64.b64decode(json.loads(captured_envelope)["content_b64"])
     assert _SECRET not in captured_inner
     assert manifests[0].redacted is True
-    assert manifests[0].content_digest == (
-        "sha256:" + hashlib.sha256(captured_inner).hexdigest()
-    )
+    assert manifests[0].content_digest == ("sha256:" + hashlib.sha256(captured_inner).hexdigest())
 
 
 def test_changed_file_prefix_canary_persists_only_redaction_metadata() -> None:

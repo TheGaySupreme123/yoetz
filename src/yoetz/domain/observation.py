@@ -638,6 +638,7 @@ class ObservationInspectionSnapshot:
                 validate_sha256_digest(cast(str, digest_value))
                 _positive(byte_value, maximum=4_194_304)
 
+
 def _content_chunks(value: object) -> tuple[ObservationContentChunk, ...]:
     raw = _exact_tuple(value, maximum=_MAX_CONTENT_CHUNKS)
     chunks: list[ObservationContentChunk] = []

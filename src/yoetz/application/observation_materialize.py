@@ -309,8 +309,7 @@ def _coverage_for(
     authorship = (
         AuthorshipAssurance.HARNESS_OBSERVED
         if envelope.source is ObservationSource.CODEX_HOOK
-        and observation
-        in {ArtifactObservation.HOOK_OBSERVED, ArtifactObservation.CONTENT_CAPTURED}
+        and observation in {ArtifactObservation.HOOK_OBSERVED, ArtifactObservation.CONTENT_CAPTURED}
         else AuthorshipAssurance.SERVICE_AUTHENTICATED
     )
     return Coverage(
@@ -448,8 +447,7 @@ def _captured_evidence_drafts(
                 parents=parents,
                 artifact_refs=(item.object_id,),
                 role=(
-                    f"captured_{item.content_kind.value}_{item.part_index}_"
-                    f"{item.content_digest}"
+                    f"captured_{item.content_kind.value}_{item.part_index}_{item.content_digest}"
                 ),
             )
         )
