@@ -1699,7 +1699,9 @@ one request. The first such failure is returned with `safe_details.availability 
 is latched in the bridge's private client slot together with the request id, the public error, its
 correlation id, and the advisory singleton-holder stamp observed at that moment. Concurrent first
 arrivals before that result share one on-demand attempt: a slot-scoped in-flight gate parks later
-calls until the first probe completes, then they re-check the latch and inherit it (issue #476).
+calls until the first probe completes, then they inherit that completed latch without a quiet
+probe. This includes a concurrent duplicate of the winning request id; only a replay that arrives
+after the first attempt has completed takes the sanctioned repair path (issue #476).
 The same in-flight gate covers a previously live client that then fails its handshake or
 reconnects after an availability `ControlError`, so that path also produces one on-demand attempt.
 Every later call under a *different* request id — any tool, any delegate sharing the MCP process —
