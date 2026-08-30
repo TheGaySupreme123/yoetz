@@ -177,7 +177,15 @@ deepest root containing `CURSOR_PROJECT_DIR` or refuses. The reusable git-root h
 ancestors for the nearest `.git` directory or worktree file, without running Git, and refuses
 symlinked ancestors, root/home locators, unsafe markers, or unbounded/control-bearing values.
 `workspace_unresolvable` and `workspace_unconsented` remain distinct payload-free diagnostics
-(with `paused` for a paused grant), recorded by the shared ingress for every host.
+(with `paused` for a paused grant), recorded by the shared ingress for every host. A consented
+`sessionStart` auto-attaches through the shared `start mode=create_or_attach` request, pairing the
+resolved workspace root as `workspace_ref` with `cursor-session:<session_id>` as `external_ref`;
+a failed attempt records its typed cause (`auto_attach_workspace_unbound`,
+`auto_attach_request_invalid`, `auto_attach_conflict`, `auto_attach_refused`,
+`auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
+`service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
+same diagnostics file, and the session keeps an observation-only binding until a retry or an
+explicit `start` maps it.
 
 The host-neutral `observe status` boundary also keeps storage layers distinct: unsafe state/lock
 paths report `storage_unsafe`, bounded open/permission/read-only/missing-parent/lock-acquisition

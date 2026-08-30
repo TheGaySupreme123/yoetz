@@ -2827,7 +2827,19 @@ across workspace sessions under a nonblocking per-workspace lease; within one pa
 `mapping_missing` rejection retires that session's remaining rows (stamped with the shared cause),
 and an ended unmapped session is terminally quarantined because no future mapping can deliver it,
 but only after atomically acquiring its lifecycle lock so an attach already in flight wins.
-Turn-boundary hooks retry auto-attach under a bounded budget and record a payload-free diagnostic
+A consented `SessionStart` auto-attaches by sending the service a `start` request in
+`create_or_attach` mode whose selector is the paired identity the start contract requires: the
+canonical workspace locator the hook already bound consent to as `workspace_ref`, and the
+host-session identity as `external_ref`; the service persists only HMAC commitments of both, and a
+hook that reached consent through the legacy session→workspace map without a canonical locator
+never sends an unpaired request (issue #459). The request validates through the public
+`StartRequest` contract before dispatch. Every failed attempt records a closed hook-diagnostic
+reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
+`auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
+conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
+`privacy_authority_required`, or the shared `service_unavailable`, `vault_locked`, `timeout`,
+`storage_unsafe`, and `storage_corrupt` tokens. Turn-boundary hooks retry auto-attach under a
+bounded budget and record the same typed cause next to the `auto_attach_retry_failed` path marker
 when no mapping results. A status read against a mapping whose Yoetz session or writer was replaced
 classifies `SESSION_CONFLICT` and `SESSION_NOT_FOUND` as `mapping_stale`, not service unavailability:
 the hook preserves the mapping, tells the agent to call `start mode=attach` with the mapped

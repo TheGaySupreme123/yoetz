@@ -15,6 +15,16 @@ reverse-chronological released versions.
   `<host>_plugin_command_unsupported:<command> supported=...` instead of the bare
   `codex_plugin_command_invalid` (issue #465).
 
+- Consented `SessionStart` hooks on Claude Code, Codex, and Cursor now auto-attach a ledger task:
+  the shared hook auto-start sends the paired `workspace_ref` (canonical workspace root) and
+  `external_ref` (host session) selector the `start` contract requires, validated through the
+  public request model before dispatch. Previously the request was always invalid and the failure
+  was swallowed, so natural auto-attachment never happened and `observe status` showed no mapping
+  without a cause. Every failed attempt now records a closed payload-free `hook_diagnostics`
+  reason (`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_conflict`,
+  `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
+  `privacy_authority_required`, or the shared service/vault/timeout/storage tokens) (issue #459).
+
 - Cooperative MCP calls no longer collapse typed local-control failures into opaque,
   non-retryable `INTERNAL_ERROR`. Service absence, an accepted-but-unresponsive listener,
   incompatible or mismatched installations, unsafe or untrusted endpoints, timeouts, and bounded
