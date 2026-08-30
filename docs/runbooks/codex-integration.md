@@ -288,6 +288,14 @@ yoetz integrate codex plugin preview --codex-home <home> --json
 yoetz integrate codex plugin remove --codex-home <home> --accept --preview-digest <digest> --json
 ```
 
+`preview`, `status`, and `remove` are the whole Codex plugin command surface. The generic
+`install`, `update`, `enable`, `disable`, and `export` commands that the shared
+`integrate <host> plugin` group also lists belong to the Claude Code (and, for `install`, Cursor)
+lifecycles; `--help` marks each command's hosts, and invoking one for Codex refuses with
+`codex_plugin_command_unsupported:<command> supported=preview,status,remove` (exit 2) before any
+binary discovery or mutation. Codex activation is the digest-bound setup/recommendation ceremony
+(`yoetz setup run`, ADR-012), not a standalone plugin command.
+
 The Codex plugin command uses the same preview → explicit accept → apply shape as Codex
 activation and MCP install: the mutation is bound to the exact preview digest. It does **not**
 consume the Cursor `plugin_artifact_apply` OS-presence cell; that cell remains the standalone
@@ -373,6 +381,7 @@ remove`.
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |
 | Trigger absent or failed | Use the manual re-grounding procedure; never edit hook configuration through this integration. |
 | `observe status` shows no envelopes for a session | Read `hook_diagnostics.reasons`: `workspace_unresolvable` means the hook's `--workspace` locator could not be canonicalized; `workspace_unconsented` means the session's Git root carries no active consent (a session started in a subdirectory canonicalizes to the same root as the consent, so grant consent at the repository root); `paused` means consent is paused. A successful ingest records no diagnostic, so read `recent_count` together with the envelopes: no new envelopes and a zero `recent_count` means the hooks never reached the ingress or the runtime gate is disabled, not that a binding drop occurred. |
+| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`; read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (the session bound consent without a canonical locator, so no paired request was legal), `auto_attach_request_invalid` (an authoring defect in the request — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path. |
 | `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
 
 ## 10. Security, privacy, and prohibited actions

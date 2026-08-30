@@ -19,6 +19,28 @@ reverse-chronological released versions.
   model use, hooks, mapping, drain, session stream, semantic provenance, receipt, influence,
   rollback, and normal-target isolation as separate closed-state cells (issue #464).
 
+- The MCP stdio bridge no longer exits on a size-valid but excessively nested JSON frame.
+  Inbound nesting is bounded at the canonical codec's 64 levels with a non-recursive walk, any
+  decoder `RecursionError` is converted to the fixed `invalid_json` parse error, and a valid
+  request succeeds immediately after a rejected deeply nested one (issue #394).
+
+- `yoetz integrate <host> plugin --help` no longer advertises lifecycle commands a host cannot
+  run. Each command's help names its hosts (Codex: `preview`, `status`, `remove`; Cursor adds
+  `install`; Claude Code has the full lifecycle plus `export`), and invoking an unsupported command
+  refuses before any binary discovery or mutation with
+  `<host>_plugin_command_unsupported:<command> supported=...` instead of the bare
+  `codex_plugin_command_invalid` (issue #465).
+
+- Consented `SessionStart` hooks on Claude Code, Codex, and Cursor now auto-attach a ledger task:
+  the shared hook auto-start sends the paired `workspace_ref` (canonical workspace root) and
+  `external_ref` (host session) selector the `start` contract requires, validated through the
+  public request model before dispatch. Previously the request was always invalid and the failure
+  was swallowed, so natural auto-attachment never happened and `observe status` showed no mapping
+  without a cause. Every failed attempt now records a closed payload-free `hook_diagnostics`
+  reason (`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_conflict`,
+  `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
+  `privacy_authority_required`, or the shared service/vault/timeout/storage tokens) (issue #459).
+
 - Cooperative MCP calls no longer collapse typed local-control failures into opaque,
   non-retryable `INTERNAL_ERROR`. Service absence, an accepted-but-unresponsive listener,
   incompatible or mismatched installations, unsafe or untrusted endpoints, timeouts, and bounded

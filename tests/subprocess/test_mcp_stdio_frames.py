@@ -97,6 +97,31 @@ def test_exact_payload_limit_is_accepted() -> None:
     assert json.loads(result.stdout)["id"] == 9
 
 
+def test_deeply_nested_frame_is_invalid_json_and_the_bridge_keeps_serving() -> None:
+    """Excessive nesting yields the fixed parse error, never a RecursionError exit (#394)."""
+
+    from yoetz.adapters.mcp_stdio import MAX_JSON_FRAME_BYTES
+
+    levels = sys.getrecursionlimit() * 4
+    nested = (
+        b'{"jsonrpc":"2.0","id":7,"method":"ping","params":{"a":'
+        + (b"[" * levels + b"]" * levels)
+        + b"}}"
+    )
+    assert len(nested) < MAX_JSON_FRAME_BYTES
+    result = _run(nested + b"\n" + _request(8) + b"\n", MAX_JSON_FRAME_BYTES)
+    assert result.returncode == 0, result.stderr
+    assert b"Traceback" not in result.stderr
+    assert b"RecursionError" not in result.stderr
+    rows = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [row.get("id") for row in rows] == [None, 8]
+    assert rows[0]["error"] == {
+        "code": -32700,
+        "message": "Parse error",
+        "data": {"reason": "invalid_json"},
+    }
+
+
 def test_invalid_utf8_nul_and_partial_eof_never_enter_sdk_stream() -> None:
     result = _run(b'\xff\n{"jsonrpc":"2.0",\x00}\n' + _request(4)[:-1])
     rows = [json.loads(line) for line in result.stdout.splitlines()]

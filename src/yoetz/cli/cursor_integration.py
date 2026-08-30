@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
 from yoetz.adapters.integrations.cursor_integration import (
     CursorIntegrationError,
@@ -34,7 +34,12 @@ from yoetz.ports.plugin_artifacts import (
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 
-__all__ = ["run_cursor_plugin_command"]
+__all__ = ["CURSOR_PLUGIN_COMMANDS", "run_cursor_plugin_command"]
+
+# Cursor's portable artifact has no update/enable/disable states and no
+# development export carrier (issue #465).
+CURSOR_PLUGIN_COMMANDS: Final = ("preview", "install", "status", "remove")
+_UNSUPPORTED_GENERIC_COMMANDS: Final = frozenset({"update", "enable", "disable", "export"})
 
 
 def _artifact_authority(
@@ -173,7 +178,13 @@ def run_cursor_plugin_command(
 ) -> int:
     """Run one path-explicit Cursor operation without reading ambient Cursor state."""
 
-    if harness != "cursor" or command not in {"preview", "install", "status", "remove"}:
+    if harness == "cursor" and command in _UNSUPPORTED_GENERIC_COMMANDS:
+        sys.stderr.write(
+            f"cursor_plugin_command_unsupported:{command} "
+            f"supported={','.join(CURSOR_PLUGIN_COMMANDS)}\n"
+        )
+        return 2
+    if harness != "cursor" or command not in CURSOR_PLUGIN_COMMANDS:
         sys.stderr.write("cursor_plugin_command_invalid\n")
         return 2
     try:
