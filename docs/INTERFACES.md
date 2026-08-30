@@ -1700,6 +1700,8 @@ is latched in the bridge's private client slot together with the request id, the
 correlation id, and the advisory singleton-holder stamp observed at that moment. Concurrent first
 arrivals before that result share one on-demand attempt: a slot-scoped in-flight gate parks later
 calls until the first probe completes, then they re-check the latch and inherit it (issue #476).
+The same in-flight gate covers a previously live client that then fails its handshake or
+reconnects after an availability `ControlError`, so that path also produces one on-demand attempt.
 Every later call under a *different* request id — any tool, any delegate sharing the MCP process —
 is answered from that latch: same public code, same `correlation_id`, same `retryable`, the same
 `safe_details` plus
