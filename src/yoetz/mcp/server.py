@@ -1032,15 +1032,10 @@ async def _prepare_availability(
 
     slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
     while True:
-        inherited = await _inherit_terminal_availability(runtime, request_id)
-        if inherited is not None:
-            return _AvailabilityDecision(inherited, False)
         waiter: asyncio.Event | None = None
         async with slot.lock:
             if slot.availability is not None:
-                # Inherit returned None: this is the original request identity, which always
-                # replays (issue #469).
-                return _AvailabilityDecision(None, False)
+                break
             if slot.attempting:
                 waiter = slot.attempt_finished
             elif slot.client is not None:
@@ -1050,8 +1045,13 @@ async def _prepare_availability(
                 slot.attempt_finished = asyncio.Event()
                 return _AvailabilityDecision(None, True)
         if waiter is None:
-            return _AvailabilityDecision(None, False)
+            break
         await waiter.wait()
+    inherited = await _inherit_terminal_availability(runtime, request_id)
+    if inherited is not None:
+        return _AvailabilityDecision(inherited, False)
+    # Latch present and inherit returned None: original request identity replay (issue #469).
+    return _AvailabilityDecision(None, False)
 
 
 async def _inherit_after_inflight_availability(
