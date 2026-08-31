@@ -24,7 +24,13 @@ from yoetz.protocol.chat_user_authority import ChatUserAttestationModel
 from yoetz.protocol.consent import ConsentReviewResultModel
 from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instance
 from yoetz.service.confidential_protocol import ProviderCredentialResult, VaultStateResult
-from yoetz.service.elevated_bootstrap import ElevatedBootstrapError, load_pending
+from yoetz.service.elevated_bootstrap import (
+    ElevatedBootstrapError,
+    consume_import_publication_authorization,
+    load_import_publication_authorization,
+    load_pending,
+    prepare_pending,
+)
 
 
 class _Console:
@@ -90,6 +96,38 @@ def _chat_attestation(
         "target_digest": pending.target_digest,
         "warning_acknowledged": warning,
         "decision": decision,
+    }
+
+
+def _import_preview(target_digest: str) -> dict[str, object]:
+    return {
+        "schema": "yoetz.import-publication-preview/1",
+        "authorization_target_digest": target_digest,
+        "source_identity_digest": "sha256:" + "1" * 64,
+        "capture_manifest_commitment": "hmac-sha256:" + "2" * 64,
+        "publication_plan_digest": "sha256:" + "3" * 64,
+        "task_id": "tsk_10000000-0000-4000-8000-000000000001",
+        "session_id": "ses_10000000-0000-4000-8000-000000000002",
+        "writer_id": "wri_10000000-0000-4000-8000-000000000003",
+        "codex_capability_profile_id": "codex-exec-jsonl/0.139.0/v1",
+        "codex_capability_profile_digest": "sha256:" + "4" * 64,
+        "codex_version": "0.139.0",
+        "mapping_version": "codex-jsonl/1.0.0",
+        "source_byte_count": 120,
+        "source_line_count": 3,
+        "candidate_count_upper_bound": 6,
+        "gap_count_upper_bound": 3,
+        "batch_count": 1,
+        "publication_count": 2,
+        "max_source_bytes": 4_194_304,
+        "max_line_bytes": 1_048_576,
+        "max_lines": 20_000,
+        "max_excerpt_bytes": 8_192,
+        "max_events_per_batch": 100,
+        "max_batches": 1_024,
+        "complete_transcript_included": False,
+        "reasoning_items_included": False,
+        "reviewer_egress_changed": False,
     }
 
 
@@ -217,7 +255,7 @@ def test_chat_user_authorize_consumes_exact_provider_request_and_wipes_input(
     assert observed == [b"chat-secret"]
     assert result["authority_channel"] == "agent_attested_chat_instruction"
     assert result["outcome"] == "completed"
-    validate_schema_instance("review-result", "4.0.0", result)
+    validate_schema_instance("review-result", "5.0.0", result)
     assert load_pending(_state=tmp_path) is None
     assert "chat-secret" not in json.dumps(result)
 
@@ -423,7 +461,7 @@ def test_agent_chat_attestation_mismatch_does_not_consume_pending(
     anyio.run(run)
 
 
-def test_agent_chat_authorize_rejects_vault_and_missing_or_forbidden_credential(
+def test_agent_chat_authorize_initializes_vault_and_rejects_missing_or_forbidden_credential(
     tmp_path: Path,
 ) -> None:
     async def run() -> None:
@@ -432,10 +470,16 @@ def test_agent_chat_authorize_rejects_vault_and_missing_or_forbidden_credential(
             elevated.prepare_elevated("vault_initialize")
             vault_pending = load_pending(_state=vault_state)
             assert vault_pending is not None
-            with pytest.raises(ElevatedBootstrapError) as vault_error:
-                await elevated.authorize_elevated(_chat_attestation(vault_pending))
-            assert vault_error.value.reason == "chat_user_operation_forbidden"
-            assert load_pending(_state=vault_state) == vault_pending
+            with patch(
+                "yoetz.cli.elevated._complete_vault_initialize_generated",
+                return_value={"state": "ready", "reason": "succeeded"},
+            ) as initialize:
+                vault_result = await elevated.authorize_elevated(_chat_attestation(vault_pending))
+            initialize.assert_awaited_once_with()
+            assert vault_result["authority_channel"] == "agent_attested_chat_instruction"
+            assert vault_result["result"] == {"state": "ready", "reason": "succeeded"}
+            validate_schema_instance("review-result", "5.0.0", vault_result)
+            assert load_pending(_state=vault_state) is None
 
         credential_state = tmp_path / "credential"
         with _patch_state(credential_state):
@@ -494,10 +538,10 @@ def test_catalog_and_prepare_are_agent_safe(tmp_path: Path) -> None:
     with _patch_state(tmp_path):
         catalog = cast(dict[str, Any], elevated.catalog_elevated())
         prepared = cast(dict[str, Any], elevated.prepare_elevated("vault_initialize"))
-    assert catalog["schema"] == "yoetz.consent.catalog/4"
-    assert prepared["schema"] == "yoetz.elevated-bootstrap.prepare-result/4"
+    assert catalog["schema"] == "yoetz.consent.catalog/5"
+    assert prepared["schema"] == "yoetz.elevated-bootstrap.prepare-result/5"
     assert prepared["pending"]["review_command"] == ["yoetz", "consent", "review"]
-    validate_schema_instance("prepare-result", "4.0.0", prepared)
+    validate_schema_instance("prepare-result", "5.0.0", prepared)
     rendered = json.dumps({"catalog": catalog, "prepared": prepared})
     for forbidden in (
         "approve_command",
@@ -506,6 +550,93 @@ def test_catalog_and_prepare_are_agent_safe(tmp_path: Path) -> None:
         "secret_fds",
     ):
         assert forbidden not in rendered
+
+
+def test_import_publication_requires_service_prepared_preview(tmp_path: Path) -> None:
+    with _patch_state(tmp_path):
+        with pytest.raises(ElevatedBootstrapError) as caught:
+            elevated.prepare_elevated("import_publication", target_digest="sha256:" + "a" * 64)
+    assert caught.value.reason == "import_publication_preview_required"
+
+
+def test_import_publication_authorization_is_exact_internal_and_one_use(tmp_path: Path) -> None:
+    target = "sha256:" + "a" * 64
+
+    async def run() -> dict[str, Any]:
+        with _patch_state(tmp_path):
+            pending = prepare_pending(
+                "import_publication",
+                target_digest=target,
+                import_publication_preview=cast(Any, _import_preview(target)),
+                _state=tmp_path,
+            )
+            projected = cast(dict[str, Any], elevated.status_elevated())
+            assert projected["pending"]["import_publication_preview"] == _import_preview(target)
+            result = cast(
+                dict[str, Any],
+                await elevated.authorize_elevated(_chat_attestation(pending)),
+            )
+            authorization = load_import_publication_authorization(target, _state=tmp_path)
+            assert authorization is not None
+            assert (
+                load_import_publication_authorization("sha256:" + "b" * 64, _state=tmp_path) is None
+            )
+            consume_import_publication_authorization(authorization, _state=tmp_path)
+            assert load_import_publication_authorization(target, _state=tmp_path) is None
+            return result
+
+    result = anyio.run(run)
+    assert result["result"] == {
+        "authorization_target_digest": target,
+        "outcome": "authorized",
+    }
+    validate_schema_instance("review-result", "5.0.0", result)
+
+
+def test_import_publication_denial_creates_no_authorization(tmp_path: Path) -> None:
+    target = "sha256:" + "c" * 64
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            pending = prepare_pending(
+                "import_publication",
+                target_digest=target,
+                import_publication_preview=cast(Any, _import_preview(target)),
+                _state=tmp_path,
+            )
+            result = await elevated.authorize_elevated(
+                _chat_attestation(pending, decision="deny", warning=False)
+            )
+            assert result["outcome"] == "denied"
+            assert load_import_publication_authorization(target, _state=tmp_path) is None
+
+    anyio.run(run)
+
+
+def test_trusted_import_review_displays_the_structural_preview(tmp_path: Path) -> None:
+    target = "sha256:" + "d" * 64
+    console = _Console(b"deny")
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            prepare_pending(
+                "import_publication",
+                target_digest=target,
+                import_publication_preview=cast(Any, _import_preview(target)),
+                _state=tmp_path,
+            )
+            with (
+                _patch_verified_presence(),
+                patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=console),
+            ):
+                await elevated.review_elevated()
+
+    anyio.run(run)
+    rendered = "".join(console.output)
+    assert "Import publication preview (structural JSON):" in rendered
+    assert target in rendered
+    assert '"complete_transcript_included":false' in rendered
+    assert "source_bytes_base64" not in rendered
 
 
 def test_review_result_rejects_unknown_or_unbounded_result_fields(tmp_path: Path) -> None:
@@ -554,7 +685,7 @@ def test_review_result_binds_operation_outcome_and_result_in_model_and_schema(
     result: dict[str, object],
 ) -> None:
     payload = {
-        "schema": "yoetz.elevated-bootstrap.result/4",
+        "schema": "yoetz.elevated-bootstrap.result/5",
         "pending_id": "a" * 64,
         "operation": operation,
         "risk_class": risk_class,
@@ -566,7 +697,7 @@ def test_review_result_binds_operation_outcome_and_result_in_model_and_schema(
     with pytest.raises(ValidationError):
         ConsentReviewResultModel.model_validate(payload)
     with pytest.raises(SchemaInstanceInvalid):
-        validate_schema_instance("review-result", "4.0.0", cast(Any, payload))
+        validate_schema_instance("review-result", "5.0.0", cast(Any, payload))
 
 
 def test_review_approval_consumes_pending_and_returns_no_secret(tmp_path: Path) -> None:
@@ -586,9 +717,9 @@ def test_review_approval_consumes_pending_and_returns_no_secret(tmp_path: Path) 
                 return cast(dict[str, Any], await elevated.review_elevated())
 
     result = anyio.run(run)
-    assert result["schema"] == "yoetz.elevated-bootstrap.result/4"
+    assert result["schema"] == "yoetz.elevated-bootstrap.result/5"
     assert result["outcome"] == "completed"
-    validate_schema_instance("review-result", "4.0.0", result)
+    validate_schema_instance("review-result", "5.0.0", result)
     assert load_pending(_state=tmp_path) is None
     assert "human-entered-secret" not in json.dumps(result)
 
@@ -714,6 +845,88 @@ def test_generated_initialization_secret_is_submitted_then_overwritten() -> None
     assert observed == [b"g" * 64]
     assert bytes(generated) == b"\x00" * 64
     assert result == {"state": "ready", "reason": "succeeded"}
+
+
+def test_agent_generated_initialization_secret_never_enters_agent_result() -> None:
+    generated = bytearray(b"z" * 64)
+    observed: list[bytes] = []
+
+    class _Store:
+        def create_for_initialization(self) -> bytearray:
+            return generated
+
+    async def ceremony(
+        _kind: object,
+        _target: object,
+        **kwargs: object,
+    ) -> VaultStateResult:
+        supplied = cast(bytearray, kwargs["passphrase"])
+        observed.append(bytes(supplied))
+        return VaultStateResult("ready", "succeeded")
+
+    async def run() -> dict[str, object]:
+        with (
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=_Store()),
+            patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
+        ):
+            return cast(
+                dict[str, object],
+                await elevated._complete_vault_initialize_generated(),  # pyright: ignore[reportPrivateUsage]
+            )
+
+    result = anyio.run(run)
+    assert observed == [b"z" * 64]
+    assert bytes(generated) == b"\x00" * 64
+    assert result == {"state": "ready", "reason": "succeeded"}
+    assert b"z" * 16 not in json.dumps(result).encode()
+
+
+def test_agent_generated_rotation_uses_only_local_store_bytes_and_promotes() -> None:
+    current = bytearray(b"c" * 64)
+    replacement = bytearray(b"r" * 64)
+    observed: list[tuple[bytes, bytes]] = []
+
+    class _Store:
+        promoted = False
+
+        def load(self) -> bytearray:
+            return current
+
+        def stage_for_rotation(self) -> bytearray:
+            return replacement
+
+        def promote_staged_rotation(self) -> None:
+            self.promoted = True
+
+    store = _Store()
+
+    async def ceremony(_kind: object, _target: object, **kwargs: object) -> VaultStateResult:
+        observed.append(
+            (
+                bytes(cast(bytearray, kwargs["passphrase"])),
+                bytes(cast(bytearray, kwargs["vault_rewrap_secret"])),
+            )
+        )
+        return VaultStateResult("ready", "succeeded")
+
+    async def run() -> dict[str, object]:
+        with (
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
+            patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
+        ):
+            return cast(
+                dict[str, object],
+                await elevated._complete_vault_passphrase_rotate_generated(),  # pyright: ignore[reportPrivateUsage]
+            )
+
+    result = anyio.run(run)
+    assert observed == [(b"c" * 64, b"r" * 64)]
+    assert store.promoted is True
+    assert bytes(current) == b"\x00" * 64
+    assert bytes(replacement) == b"\x00" * 64
+    assert result == {"state": "ready", "reason": "succeeded"}
+    assert b"c" * 16 not in json.dumps(result).encode()
+    assert b"r" * 16 not in json.dumps(result).encode()
 
 
 def test_trusted_review_displays_exact_provider_binding(tmp_path: Path) -> None:

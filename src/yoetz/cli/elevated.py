@@ -15,7 +15,7 @@ from yoetz.cli.unlock import (
     run_human_ceremony,
     run_human_ceremony_on_terminal,
 )
-from yoetz.protocol.canonical import JsonValue, canonical_digest
+from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.chat_user_authority import (
     ChatUserAttestationModel,
     agent_chat_attestation_supported,
@@ -32,6 +32,7 @@ from yoetz.service.confidential_protocol import (
     ProviderCredentialResult,
     ProviderCredentialTarget,
     VaultStateResult,
+    human_target_json,
 )
 from yoetz.service.elevated_bootstrap import (
     ElevatedBootstrapError,
@@ -45,6 +46,7 @@ from yoetz.service.elevated_bootstrap import (
     operation_spec,
     prepare_pending,
     projection_for_status,
+    record_import_publication_authorization,
     status_payload,
 )
 
@@ -59,6 +61,12 @@ __all__ = [
 
 class _AutoUnlockStore(Protocol):
     def create_for_initialization(self) -> bytearray: ...
+
+    def load(self) -> bytearray | None: ...
+
+    def stage_for_rotation(self) -> bytearray: ...
+
+    def promote_staged_rotation(self) -> None: ...
 
 
 def status_elevated() -> dict[str, JsonValue]:
@@ -85,7 +93,7 @@ def prepare_elevated(
     )
     model = ConsentPrepareResultModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.prepare-result/4",
+            "schema": "yoetz.elevated-bootstrap.prepare-result/5",
             "pending": projection_for_status(pending),
         }
     )
@@ -106,6 +114,9 @@ def _render_review(console: TrustedForegroundConsole, pending: PendingElevatedCo
         detail += "Provider binding:\n"
         for key in sorted(pending.provider_binding, key=str.encode):
             detail += f"  {key}: {pending.provider_binding[key]}\n"
+    if pending.import_publication_preview is not None:
+        preview = canonical_encode(dict(pending.import_publication_preview)).decode("utf-8")
+        detail += f"Import publication preview (structural JSON):\n{preview}\n"
     console.write(detail + pending.danger_text + "\n")
 
 
@@ -120,7 +131,7 @@ def _review_result(
 ) -> dict[str, JsonValue]:
     model = ConsentReviewResultModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.result/4",
+            "schema": "yoetz.elevated-bootstrap.result/5",
             "pending_id": pending.pending_id,
             "operation": pending.operation,
             "risk_class": pending.risk_class,
@@ -200,10 +211,18 @@ async def _complete_approved(
 ) -> dict[str, JsonValue]:
     if pending.operation == "vault_initialize":
         return await _complete_vault_initialize(console)
+    if pending.operation == "vault_passphrase_rotate":
+        return await _complete_vault_passphrase_rotate_generated()
     if pending.operation in {"provider_credential_set", "provider_credential_rotate"}:
         return await _complete_provider_credential(console, pending)
     if pending.operation == "repository_privacy_grant":
         raise ElevatedBootstrapError("repository_privacy_grant_requires_yoetz_privacy")
+    if pending.operation == "import_publication":
+        authorization = record_import_publication_authorization(pending)
+        return {
+            "authorization_target_digest": authorization.target_digest,
+            "outcome": "authorized",
+        }
     raise ElevatedBootstrapError("operation_not_implemented")
 
 
@@ -269,11 +288,21 @@ async def authorize_elevated(
                 result={"decision": "denied"},
                 authority_channel="agent_attested_chat_instruction",
             )
-        if pending.operation in {"provider_credential_set", "provider_credential_rotate"}:
+        if pending.operation == "vault_initialize":
+            result = await _complete_vault_initialize_generated()
+        elif pending.operation == "vault_passphrase_rotate":
+            result = await _complete_vault_passphrase_rotate_generated()
+        elif pending.operation in {"provider_credential_set", "provider_credential_rotate"}:
             assert provider_credential is not None
             result = await _complete_provider_credential_supplied(pending, provider_credential)
         elif pending.operation == "repository_privacy_grant":
             result = await _complete_repository_privacy_grant(pending)
+        elif pending.operation == "import_publication":
+            authorization = record_import_publication_authorization(pending)
+            result = {
+                "authorization_target_digest": authorization.target_digest,
+                "outcome": "authorized",
+            }
         else:
             raise ElevatedBootstrapError("chat_user_operation_forbidden")
         complete_review(pending, outcome="approved")
@@ -340,6 +369,73 @@ async def _complete_vault_initialize(
     if type(result) is not VaultStateResult:
         raise ElevatedBootstrapError("result_invalid")
     return {"state": result.state, "reason": result.reason}
+
+
+async def _complete_vault_initialize_generated() -> dict[str, JsonValue]:
+    """Generate and submit a scoped secret locally without any agent-visible secret channel."""
+
+    from yoetz.adapters.keys.os_keyring import OSKeyringError
+
+    generated: bytearray | None = None
+    try:
+        try:
+            generated = _auto_unlock_store().create_for_initialization()
+        except OSKeyringError as exc:
+            raise ElevatedBootstrapError(f"auto_unlock_{exc.reason}") from exc
+        result = await run_human_ceremony(
+            HumanCeremonyKind.VAULT_INITIALIZE,
+            EmptyVaultTarget(expected_mode="uninitialized"),
+            passphrase=bytearray(generated),
+        )
+    except ConfidentialClientError as exc:
+        raise ElevatedBootstrapError(f"ceremony_{exc.reason}") from exc
+    except HumanCeremonyCliError as exc:
+        raise ElevatedBootstrapError(exc.reason) from exc
+    finally:
+        if generated is not None:
+            overwrite_secret_buffer(generated)
+    if type(result) is not VaultStateResult:
+        raise ElevatedBootstrapError("result_invalid")
+    return {"state": result.state, "reason": result.reason}
+
+
+async def _complete_vault_passphrase_rotate_generated() -> dict[str, JsonValue]:
+    """Rotate using only locally loaded/generated keyring bytes and structural output."""
+
+    from yoetz.adapters.keys.os_keyring import OSKeyringError
+
+    current: bytearray | None = None
+    replacement: bytearray | None = None
+    try:
+        store = _auto_unlock_store()
+        current = store.load()
+        if current is None:
+            raise ElevatedBootstrapError("chat_user_reauthentication_unavailable")
+        try:
+            replacement = store.stage_for_rotation()
+        except OSKeyringError as exc:
+            raise ElevatedBootstrapError(f"auto_unlock_{exc.reason}") from exc
+        result = await run_human_ceremony(
+            HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE,
+            EmptyVaultTarget(expected_mode="passphrase"),
+            passphrase=bytearray(current),
+            vault_rewrap_secret=bytearray(replacement),
+        )
+        if type(result) is not VaultStateResult:
+            raise ElevatedBootstrapError("result_invalid")
+        # Promote only after the service reports a completed rewrap. On any ambiguous failure the
+        # staged slot intentionally remains for daemon restart reconciliation.
+        store.promote_staged_rotation()
+        return {"state": result.state, "reason": result.reason}
+    except ConfidentialClientError as exc:
+        raise ElevatedBootstrapError(f"ceremony_{exc.reason}") from exc
+    except HumanCeremonyCliError as exc:
+        raise ElevatedBootstrapError(exc.reason) from exc
+    finally:
+        if current is not None:
+            overwrite_secret_buffer(current)
+        if replacement is not None:
+            overwrite_secret_buffer(replacement)
 
 
 async def _complete_provider_credential(
@@ -531,6 +627,8 @@ def _target_digest(
         raise ElevatedBootstrapError("operation_not_implemented")
     if operation == "vault_initialize":
         return canonical_digest({"expected_mode": "uninitialized", "kind": "empty_vault"})
+    if operation == "vault_passphrase_rotate":
+        return canonical_digest(human_target_json(EmptyVaultTarget(expected_mode="passphrase")))
     if operation in {"provider_credential_set", "provider_credential_rotate"}:
         if provider_binding is None:
             raise ElevatedBootstrapError("provider_binding_required")
@@ -552,6 +650,8 @@ def _target_digest(
         if grant_binding is None:
             raise ElevatedBootstrapError("grant_binding_required")
         return grant_target_digest(grant_binding)
+    if operation == "import_publication":
+        raise ElevatedBootstrapError("import_publication_preview_required")
     if spec.requires_target_digest_arg:
         if target_digest is None:
             raise ElevatedBootstrapError("target_digest_required")

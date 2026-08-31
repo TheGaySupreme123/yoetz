@@ -9,12 +9,14 @@ from yoetz.domain.observation import (
     AdviceSnapshot,
     ObservationContentChunk,
     ObservationContentKind,
+    ObservationContentManifest,
     ObservationControlCommand,
     ObservationCursor,
     ObservationEnvelope,
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestResult,
+    ObservationInspectionSnapshot,
     ObservationLifecycle,
     ObservationRevokeCommand,
     ObservationSource,
@@ -32,12 +34,14 @@ __all__ = [
     "AdviceSnapshot",
     "ObservationControlCommand",
     "ObservationContentChunk",
+    "ObservationContentManifest",
     "ObservationContentKind",
     "ObservationCursor",
     "ObservationEnvelope",
     "ObservationGapCode",
     "ObservationIngestDisposition",
     "ObservationIngestResult",
+    "ObservationInspectionSnapshot",
     "ObservationLifecycle",
     "ObservationPort",
     "ObservationRevokeCommand",
@@ -125,10 +129,24 @@ class TaskObservationPort(Protocol):
         subject_state_digest: str,
         changed_paths_digest: str,
         relative_paths: tuple[str, ...],
-        facts_object_id: str | None,
-        excerpt_object_id: str | None,
+        facts_ref: ObjectRef | None,
+        facts_content_digest: str | None,
+        facts_content_bytes: int | None,
+        excerpt_ref: ObjectRef | None,
+        excerpt_content_digest: str | None,
+        excerpt_content_bytes: int | None,
+        excerpt_redacted: bool,
+        excerpt_truncated: bool,
         recorded_at: Timestamp,
     ) -> None: ...
+
+    def load_inspection_snapshot(
+        self,
+        *,
+        workspace: str,
+        yoetz_session_id: str,
+        subject_state_digest: str,
+    ) -> ObservationInspectionSnapshot | None: ...
 
     def record_advice_history(
         self,
@@ -148,6 +166,8 @@ class TaskObservationPort(Protocol):
         logical_identity: str,
         chunk: ObservationContentChunk,
         ref: ObjectRef,
+        content_digest: str,
+        content_bytes: int,
         recorded_at: Timestamp,
     ) -> None: ...
 
@@ -158,6 +178,8 @@ class TaskObservationPort(Protocol):
         logical_identity: str,
         chunk: ObservationContentChunk,
     ) -> str | None: ...
+
+    def load_content_manifest(self, object_id: str) -> ObservationContentManifest | None: ...
 
     def bind_workspace_locator(
         self,

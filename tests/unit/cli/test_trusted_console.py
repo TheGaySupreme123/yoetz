@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -90,6 +91,43 @@ def test_posix_eof_is_distinct_from_empty_input() -> None:
     assert exc.value.reason == "eof"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX terminal checks are unavailable")
+def test_posix_hidden_input_renders_live_masks_and_erases_on_backspace() -> None:
+    import termios
+
+    adapter = trusted_console._PosixConsoleAdapter()  # pyright: ignore[reportPrivateUsage]
+    adapter._fd = 9  # pyright: ignore[reportPrivateUsage]
+    incoming = iter(b"abc\x7fd\n")
+    writes: list[str] = []
+    attributes: list[int | list[bytes]] = [
+        0,
+        0,
+        0,
+        termios.ECHO | termios.ICANON,
+        0,
+        0,
+        [],
+    ]
+
+    def read_one(_fd: int, buffers: list[memoryview]) -> int:
+        buffers[0][0] = next(incoming)
+        return 1
+
+    with (
+        patch("yoetz.cli.trusted_console._PosixConsoleAdapter.write", side_effect=writes.append),
+        patch("yoetz.cli.trusted_console.os.readv", side_effect=read_one),
+        patch("termios.tcgetattr", return_value=attributes),
+        patch("termios.tcsetattr") as set_attributes,
+    ):
+        secret = adapter.read_line("Secret: ", 64, hidden=True)
+
+    assert secret == bytearray(b"abd")
+    assert writes == ["Secret: ", "*", "*", "*", "\b \b", "*", "\n"]
+    changed = set_attributes.call_args_list[0].args[2]
+    assert cast(int, changed[3]) & (termios.ECHO | termios.ICANON) == 0
+    assert set_attributes.call_args_list[-1].args[2] is attributes
+
+
 class _WindowsApi:
     def __init__(
         self,
@@ -131,9 +169,13 @@ class _WindowsApi:
         del handle
         self.secret_writes.append(bytes(value))
 
-    def read_line(self, handle: int, maximum: int, *, hidden: bool) -> bytearray:
-        del handle, maximum
+    def read_line(
+        self, input_handle: int, output_handle: int, maximum: int, *, hidden: bool
+    ) -> bytearray:
+        del input_handle, maximum
         self.hidden_reads.append(hidden)
+        if hidden:
+            self.write(output_handle, "******")
         return bytearray(b"secret")
 
     def close(self, handle: int) -> None:
@@ -161,7 +203,7 @@ def test_windows_invalid_or_redirected_console_fails_closed(
     assert bool(api.closed) is opened
 
 
-def test_windows_reads_secrets_without_echo_through_console_api() -> None:
+def test_windows_reads_secrets_with_masked_feedback_through_console_api() -> None:
     api = _WindowsApi()
     adapter = trusted_console._WindowsConsoleAdapter(api)  # pyright: ignore[reportPrivateUsage]
     adapter.open()
@@ -171,7 +213,7 @@ def test_windows_reads_secrets_without_echo_through_console_api() -> None:
         adapter.close()
     assert secret == bytearray(b"secret")
     assert api.hidden_reads == [True]
-    assert api.writes == ["Secret: ", "\n"]
+    assert api.writes == ["Secret: ", "******", "\n"]
     assert api.closed == [202, 101]
 
 

@@ -15,6 +15,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
 from yoetz import __version__
+from yoetz.adapters.integrations.codex_plugin import render_plugin_install_tree
 from yoetz.domain.values import RequestId
 from yoetz.domain.values import request_id as validate_request_id
 from yoetz.ports.plugin_artifacts import (
@@ -204,7 +205,11 @@ class _Inspection:
     current_state_digest: str
     installed_digest: str | None
     marker_valid: bool
-    rollback_available: bool
+    rollback_digest: str | None
+
+    @property
+    def rollback_available(self) -> bool:
+        return self.rollback_digest is not None
 
     def __repr__(self) -> str:
         return (
@@ -824,35 +829,45 @@ def _recorded_tree_valid(
     return True, artifact if type(artifact) is str else _tree_digest(content)
 
 
-def _native_rollback_valid(path: Path) -> bool:
+def _canonical_native_tree_digest(
+    path: Path,
+    canonical_members: Mapping[str, bytes],
+) -> str | None:
     if path.is_symlink() or not path.is_dir():
-        return False
+        return None
     try:
         files = _safe_tree_files(path)
-    except PluginArtifactError:
-        return False
-    marker = _parsed_marker(files)
-    if (
-        marker is None
-        or marker.get("schema") != _NATIVE_MARKER_SCHEMA
-        or not _marker_self_valid(marker)
-    ):
-        return False
-    valid, _ = _recorded_tree_valid(files, marker)
-    return valid
+    except OSError, PluginArtifactError:
+        return None
+    if files != canonical_members:
+        return None
+    return _tree_digest(files)
 
 
 def _inspect(
     target: ArtifactTarget,
     rendered: RenderedPortablePlugin,
+    resource_source: PortableResourceSource | None,
 ) -> _Inspection:
+    canonical_native_members: Mapping[str, bytes] | None = None
+
+    def _canonical_native_members() -> Mapping[str, bytes]:
+        nonlocal canonical_native_members
+        if canonical_native_members is None:
+            canonical_native_members = render_plugin_install_tree(resource_source=resource_source)
+        return canonical_native_members
+
     root, target_identity = _validate_project(target)
     parent = _plugin_parent(root, create=False)
     destination = parent / "yoetz"
     rollback = parent / _NATIVE_ROLLBACK_NAME
     rollback_present = rollback.exists() or rollback.is_symlink()
-    rollback_valid = rollback_present and _native_rollback_valid(rollback)
-    if rollback_present and not rollback_valid:
+    rollback_digest = (
+        _canonical_native_tree_digest(rollback, _canonical_native_members())
+        if rollback_present
+        else None
+    )
+    if rollback_present and rollback_digest is None:
         return _Inspection(
             root,
             parent,
@@ -862,7 +877,7 @@ def _inspect(
             canonical_digest({"state": "rollback_ambiguous"}),
             None,
             False,
-            False,
+            None,
         )
     if parent.exists():
         interrupted = any(
@@ -878,10 +893,10 @@ def _inspect(
                 canonical_digest({"state": "recovery_required"}),
                 None,
                 False,
-                rollback_valid,
+                rollback_digest,
             )
     if not destination.exists():
-        if rollback_valid:
+        if rollback_digest is not None:
             return _Inspection(
                 root,
                 parent,
@@ -891,7 +906,7 @@ def _inspect(
                 canonical_digest({"state": "rollback_without_destination"}),
                 None,
                 False,
-                True,
+                rollback_digest,
             )
         return _Inspection(
             root,
@@ -902,7 +917,7 @@ def _inspect(
             canonical_digest({"state": "absent"}),
             None,
             False,
-            False,
+            None,
         )
     if destination.is_symlink() or not destination.is_dir():
         raise _error(PluginArtifactReason.TARGET_UNSAFE)
@@ -919,7 +934,7 @@ def _inspect(
             current_digest,
             None,
             False,
-            rollback_valid,
+            rollback_digest,
         )
     recorded_valid, installed_digest = _recorded_tree_valid(files, marker)
     if not recorded_valid:
@@ -932,11 +947,15 @@ def _inspect(
             current_digest,
             installed_digest,
             False,
-            rollback_valid,
+            rollback_digest,
         )
     schema = marker.get("schema")
     if schema == _NATIVE_MARKER_SCHEMA:
-        state = PluginArtifactState.NATIVE_MANAGED
+        state = (
+            PluginArtifactState.NATIVE_MANAGED
+            if files == _canonical_native_members()
+            else PluginArtifactState.MODIFIED
+        )
     elif schema == _MARKER_SCHEMA:
         state = (
             PluginArtifactState.PORTABLE_EXACT
@@ -954,7 +973,7 @@ def _inspect(
         current_digest,
         installed_digest,
         state is not PluginArtifactState.UNMANAGED,
-        rollback_valid,
+        rollback_digest,
     )
 
 
@@ -1017,6 +1036,11 @@ def _preview(
             key=str.encode,
         )
     )
+    rollback_digest = (
+        inspection.current_state_digest
+        if inspection.state is PluginArtifactState.NATIVE_MANAGED
+        else inspection.rollback_digest
+    )
     preview_digest = canonical_digest(
         {
             "action": effective.value,
@@ -1036,22 +1060,24 @@ def _preview(
             "mcp_route_profile": rendered.plan.mcp_route_profile,
             "renderer_version": rendered.plan.renderer_version,
             "request_id": request,
+            "rollback_digest": rollback_digest,
             "schema_version": rendered.plan.specification_version,
             "state_before": inspection.state.value,
             "target_identity": inspection.target_identity,
         }
     )
     return PluginArtifactPreview(
-        request,
-        effective,
-        inspection.state,
-        mcp_owner_state,
-        inspection.target_identity,
-        inspection.current_state_digest,
-        rendered.artifact_digest,
-        preview_digest,
-        rendered.plan,
-        warnings,
+        request_id=request,
+        action=effective,
+        state_before=inspection.state,
+        mcp_ownership_state=mcp_owner_state,
+        target_identity=inspection.target_identity,
+        current_state_digest=inspection.current_state_digest,
+        artifact_digest=rendered.artifact_digest,
+        rollback_digest=rollback_digest,
+        preview_digest=preview_digest,
+        plan=rendered.plan,
+        warnings=warnings,
     )
 
 
@@ -1263,7 +1289,7 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
         return _preview(
             normalized,
             action,
-            _inspect(target, rendered),
+            _inspect(target, rendered, self._resource_source),
             rendered,
             self._owner_state(target),
         )
@@ -1302,7 +1328,7 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
         if type(command) is not PluginArtifactStatusCommand:
             raise _error(PluginArtifactReason.SOURCE_INVALID)
         rendered = self._rendered()
-        inspection = _inspect(command.target, rendered)
+        inspection = _inspect(command.target, rendered, self._resource_source)
         operation_state = PluginOperationState.NOT_STARTED
         if command.request_id is not None and command.request_id in self._operations:
             operation_state = self._operations[command.request_id][1].operation_state
@@ -1351,7 +1377,7 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
         if replay is not None:
             return replay
         rendered = self._rendered()
-        inspection = _inspect(command.target, rendered)
+        inspection = _inspect(command.target, rendered, self._resource_source)
         preview = _preview(
             command.request_id,
             command.action,
@@ -1362,6 +1388,16 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
         if preview.preview_digest != command.accepted_preview_digest:
             raise _error(PluginArtifactReason.PREVIEW_STALE)
         self._authorize(command)
+        inspection = _inspect(command.target, rendered, self._resource_source)
+        preview = _preview(
+            command.request_id,
+            command.action,
+            inspection,
+            rendered,
+            self._owner_state(command.target),
+        )
+        if preview.preview_digest != command.accepted_preview_digest:
+            raise _error(PluginArtifactReason.PREVIEW_STALE)
         if preview.action is PluginArtifactAction.NOOP:
             return self._store(
                 command,
@@ -1399,7 +1435,7 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
                 _fsync_dir(parent)
             os.replace(stage, destination)
             _fsync_dir(parent)
-            final = _inspect(command.target, rendered)
+            final = _inspect(command.target, rendered, self._resource_source)
             if final.state is not PluginArtifactState.PORTABLE_EXACT:
                 raise OSError("installed_verification_failed")
             if portable_moved is not None and portable_moved.exists():
@@ -1465,7 +1501,7 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
         if replay is not None:
             return replay
         rendered = self._rendered()
-        inspection = _inspect(command.target, rendered)
+        inspection = _inspect(command.target, rendered, self._resource_source)
         preview = _preview(
             command.request_id,
             command.action,
@@ -1476,6 +1512,16 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
         if preview.preview_digest != command.accepted_preview_digest:
             raise _error(PluginArtifactReason.PREVIEW_STALE)
         self._authorize(command)
+        inspection = _inspect(command.target, rendered, self._resource_source)
+        preview = _preview(
+            command.request_id,
+            command.action,
+            inspection,
+            rendered,
+            self._owner_state(command.target),
+        )
+        if preview.preview_digest != command.accepted_preview_digest:
+            raise _error(PluginArtifactReason.PREVIEW_STALE)
         parent = inspection.parent
         destination = inspection.destination
         removal = parent / f"{_REMOVE_PREFIX}{command.request_id}"
@@ -1511,7 +1557,7 @@ class PortablePluginArtifactAdapter(PluginArtifactPort):
                 PluginArtifactReason.WRITE_FAILED,
                 {"operation_state": PluginOperationState.OUTCOME_UNKNOWN.value},
             ) from exc
-        final = _inspect(command.target, rendered)
+        final = _inspect(command.target, rendered, self._resource_source)
         expected = PluginArtifactState.NATIVE_MANAGED if restored else PluginArtifactState.ABSENT
         if final.state is not expected:
             raise _error(PluginArtifactReason.WRITE_FAILED)

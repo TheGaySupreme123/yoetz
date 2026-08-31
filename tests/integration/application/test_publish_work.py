@@ -14,6 +14,9 @@ from builders.ledger_adapters import (
     memory_adapter,
     ownership_fence,
 )
+from yoetz.application.import_review import (
+    _publication_frontier,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.application.publish_work import Application, execute_publish_work
 from yoetz.application.status import Application as StatusApplication
 from yoetz.application.status import execute_status
@@ -279,6 +282,26 @@ async def test_same_request_id_replay_returns_the_stored_result_without_rewritin
     )
     # No second write: the replay reads stored state rather than re-publishing.
     assert len(objects._data) == durable_after_first  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_import_replay_recovers_the_original_subject_frontier_after_ambiguous_append() -> (
+    None
+):
+    app, _objects = _composition()
+    original = _request(expected_frontier={"sequence": "0", "head_digest": "genesis"})
+    first = await execute_publish_work(cast(Application, app), original)
+
+    # Simulate the importer crashing after the ledger commit but before record_batch. Its own row
+    # still selects this batch while the task head has advanced past the original request frontier.
+    assert await app.runtime.task.ledger.load_frontier() == first.result_frontier
+    recovered = await _publication_frontier(app.runtime.task, original.request_id)
+    assert recovered == first.subject_frontier == Frontier.genesis()
+    assert original.expected_frontier is not None
+    assert original.expected_frontier.model_dump(mode="json") == dict(recovered.as_wire())
+
+    replay = await execute_publish_work(cast(Application, app), original)
+    assert replay.outcome == "replayed"
+    assert replay.result_frontier == first.result_frontier
 
 
 async def test_same_id_changed_logical_request_conflicts_before_reencryption() -> None:
@@ -703,12 +726,17 @@ def _typed_evidence_draft(
     provenance: str = "caller_asserted",
 ) -> dict[str, object]:
     draft = _evidence_draft(event_tail)
-    draft["schema"] = {"name": "evidence_recorded", "version": "1.1.0"}
+    draft["schema"] = {
+        "name": "evidence_recorded",
+        "version": "1.2.0" if provenance == "observation_captured" else "1.1.0",
+    }
     payload = cast(dict[str, object], draft["payload"])
     payload["evidence_kind"] = evidence_kind
     payload["digest_binding"] = {
         "subject": digest_subject,
-        "content_availability": "digest_only",
+        "content_availability": (
+            "captured" if provenance == "observation_captured" else "digest_only"
+        ),
         "byte_count": 128,
         "provenance": provenance,
     }
@@ -716,6 +744,10 @@ def _typed_evidence_draft(
         binding = cast(dict[str, object], payload["digest_binding"])
         binding["approval_commitment"] = "sha256:" + "22" * 32
         binding["approved_check_result_digest"] = "sha256:" + "33" * 32
+    elif provenance == "observation_captured":
+        payload["strength"] = "immutable_snapshot"
+        payload["captured_object_id"] = "obj_00000000-0000-4000-8000-000000000302"
+        draft["artifact_refs"] = (payload["captured_object_id"],)
     return draft
 
 
@@ -752,6 +784,25 @@ async def test_typed_digest_subject_mismatch_and_reserved_provenance_fail_before
     with pytest.raises(PublicOperationError) as authority:
         await execute_publish_work(cast(Application, app), reserved)
     assert authority.value.safe_details["reason_code"] == "evidence_digest_provenance_invalid"
+    assert len(objects._data) == before  # pyright: ignore[reportPrivateUsage]
+
+    captured = _request(
+        request_tail=696,
+        event_drafts=(
+            _typed_evidence_draft(
+                697,
+                evidence_kind="artifact",
+                digest_subject="bounded_excerpt",
+                provenance="observation_captured",
+            ),
+        ),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    with pytest.raises(PublicOperationError) as captured_authority:
+        await execute_publish_work(cast(Application, app), captured)
+    assert (
+        captured_authority.value.safe_details["reason_code"] == "evidence_digest_provenance_invalid"
+    )
     assert len(objects._data) == before  # pyright: ignore[reportPrivateUsage]
 
 

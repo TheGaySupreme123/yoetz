@@ -37,6 +37,7 @@ _SCHEMA_HOST: Final = "https://schemas.yoetz.dev/0.1/"
 _PRIVACY_SCHEMA_NAMES: Final = (
     "egress-receipt-1.0.0.schema.json",
     "outbound-case-1.0.0.schema.json",
+    "outbound-case-1.1.0.schema.json",
     "privacy-policy-1.0.0.schema.json",
     "setup-wizard-contract-1.0.0.schema.json",
 )

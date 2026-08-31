@@ -454,6 +454,7 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
     assert tuple(dict.fromkeys(schema.name for schema in PAYLOAD_TYPES)) == EVENT_FAMILIES
     assert {schema.version for schema in PAYLOAD_TYPES if schema.name == "evidence_recorded"} == {
         SCHEMA_VERSION,
+        "1.1.0",
         EVIDENCE_SCHEMA_VERSION,
     }
     assert all(
@@ -483,7 +484,7 @@ def test_exact_schema_pair_dispatch_and_unknown_boundary() -> None:
     )
 
 
-def test_evidence_1_1_requires_closed_compatible_digest_provenance() -> None:
+def test_evidence_1_2_requires_closed_compatible_digest_provenance() -> None:
     legacy_row = _ROW_BY_FAMILY["evidence_recorded"]
     legacy_payload = cast(dict[str, Any], legacy_row["payload"])
     assert encode_payload(decode_payload(_schema_for(legacy_row), freeze_json(legacy_payload))) == (
@@ -545,6 +546,31 @@ def test_evidence_1_1_requires_closed_compatible_digest_provenance() -> None:
                 "evidence_refs": [],
             },
         ),
+    )
+
+    captured = deepcopy(versioned)
+    captured["strength"] = "immutable_snapshot"
+    captured["captured_object_id"] = "obj_00000000-0000-4000-8000-000000000302"
+    captured["digest_binding"] = {
+        "subject": "bounded_excerpt",
+        "content_availability": "captured",
+        "byte_count": 128,
+        "provenance": "observation_captured",
+    }
+    decoded_captured = cast(
+        EvidenceRecordedPayload,
+        decode_payload(
+            EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION),
+            freeze_json(captured),
+        ),
+    )
+    assert decoded_captured.digest_binding is not None
+    assert (
+        decoded_captured.digest_binding.provenance is EvidenceDigestProvenance.OBSERVATION_CAPTURED
+    )
+    _assert_reason(
+        "evidence_digest_provenance_invalid",
+        lambda: decode_payload(EventSchema("evidence_recorded", "1.1.0"), freeze_json(captured)),
     )
 
 

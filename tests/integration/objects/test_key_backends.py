@@ -127,6 +127,62 @@ def test_initialization_refuses_preexisting_auto_unlock_entry(
     assert wiped and set(wiped[-1]) <= {0}
 
 
+def test_auto_unlock_rotation_stages_recovers_and_promotes_without_secret_output(
+    tmp_path: Path,
+) -> None:
+    backend = _AtomicBackend()
+    store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+    active = store.load_or_create()
+    staged = store.stage_for_rotation()
+
+    candidates, reason = store.load_candidates_with_reason()
+    assert reason == "none"
+    assert [(bytes(value), is_staged) for value, is_staged in candidates] == [
+        (bytes(active), False),
+        (bytes(staged), True),
+    ]
+
+    store.promote_staged_rotation()
+    loaded = store.load()
+    recovered, recovered_reason = store.load_candidates_with_reason()
+    assert loaded == staged
+    assert recovered_reason == "none"
+    assert [(bytes(value), is_staged) for value, is_staged in recovered] == [(bytes(staged), False)]
+    assert all("staged-rotation" not in account for _service, account in backend.values)
+
+
+def test_auto_unlock_rotation_discard_preserves_active_entry(tmp_path: Path) -> None:
+    backend = _AtomicBackend()
+    store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+    active = store.load_or_create()
+    staged = store.stage_for_rotation()
+
+    store.discard_staged_rotation()
+
+    assert store.load() == active
+    assert bytes(staged) != bytes(active)
+    assert all("staged-rotation" not in account for _service, account in backend.values)
+
+
+def test_auto_unlock_rotation_can_stage_an_exact_user_selected_value(tmp_path: Path) -> None:
+    backend = _AtomicBackend()
+    store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+    active = store.load_or_create()
+    selected = bytearray(b"user selected replacement passphrase")
+
+    store.stage_value_for_rotation(selected)
+    candidates, reason = store.load_candidates_with_reason()
+
+    assert reason == "none"
+    assert [(bytes(value), is_staged) for value, is_staged in candidates] == [
+        (bytes(active), False),
+        (bytes(selected), True),
+    ]
+
+
 class _WriteRaisesBackend:
     def get_password(self, _service: str, _username: str) -> None:
         return None

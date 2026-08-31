@@ -36,7 +36,7 @@ def test_schema_two_upgrade_survives_restart_and_file_copy_restore(tmp_path: Pat
     db = _schema_two(source)
     assert db.execute("PRAGMA user_version").fetchone() == (2,)
     report = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
-    assert report.applied_versions == ("0003", "0004", "0005", "0006", "0007")
+    assert report.applied_versions == ("0003", "0004", "0005", "0006", "0007", "0008")
     expected = {
         "observation_workspace_bindings",
         "observation_content_manifests",
@@ -60,17 +60,17 @@ def test_schema_two_upgrade_survives_restart_and_file_copy_restore(tmp_path: Pat
     db.close()
 
     reopened = apsw.Connection(str(source))
-    assert reopened.execute("PRAGMA user_version").fetchone() == (7,)
+    assert reopened.execute("PRAGMA user_version").fetchone() == (8,)
     assert reopened.execute(
         "SELECT value FROM bundle_meta WHERE key='storage_schema_version'"
-    ).fetchone() == ("7",)
+    ).fetchone() == ("8",)
     reopened.close()
 
     restored_path = tmp_path / "restored.sqlite3"
     restored_path.write_bytes(source.read_bytes())
     restored = apsw.Connection(str(restored_path))
     assert restored.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-    assert restored.execute("PRAGMA user_version").fetchone() == (7,)
+    assert restored.execute("PRAGMA user_version").fetchone() == (8,)
 
 
 def test_failed_followup_migration_rolls_back_atomically(tmp_path: Path) -> None:

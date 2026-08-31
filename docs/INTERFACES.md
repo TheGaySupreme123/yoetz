@@ -355,7 +355,7 @@ The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
 `config/* -> config`, `version/* -> version_manifest`, and
 `common/*|operations/*|findings/*|receipts/*|privacy/*|service/* -> request_result`. The manifest
 records both typed values and the catalog re-derives each from its own map. These prefixes exhaust
-the 53 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
+the 96 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
 
 ## 5. Coverage (`protocol/coverage.py`)
 
@@ -468,9 +468,9 @@ are sufficient to rebuild the pure reverse `ReplayIndex` after payload deletion 
 content, paths, URLs, or human redaction text.
 
 The supported payload dispatch map is keyed by the complete `EventSchema`. All sixteen families
-decode at `1.0.0`; `evidence_recorded/1.1.0` is also exact-known. Every other syntactically valid
-pair is preserved as `UnknownEvent`. A malformed payload for an exact supported pair is invalid and
-never falls back to opaque handling.
+decode at `1.0.0`; `evidence_recorded/1.1.0` and `evidence_recorded/1.2.0` are also exact-known.
+Every other syntactically valid pair is preserved as `UnknownEvent`. A malformed payload for an
+exact supported pair is invalid and never falls back to opaque handling.
 
 Both ledger-record variants carry the complete accepted-envelope fields. `UnknownEvent` replaces
 the typed handle with `JsonValue | None` and adds `canonical_payload_digest` plus the fixed
@@ -499,12 +499,16 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   `unknown`), optional `exit_status`, `subject_state`, `evidence_refs`.
 - `evidence_recorded`: `evidence_id`, `strength` (mirrors `EvidenceImmutability`), `reference`
   (mutable ref) and/or `captured_object_id` + `content_digest`, `observed_at`, `evidence_kind`.
-  New digest-bearing records use schema `1.1.0` and require `digest_binding` with closed `subject`,
+  New digest-bearing records require `digest_binding` with closed `subject`,
   `content_availability`, `byte_count`, and `provenance`. Kind/subject compatibility is closed;
-  `test_result` cannot bind `source_diff`. Ordinary publication can assert only
-  `caller_asserted`; approved-check and import provenance are reserved to their authenticated
-  channels. Schema `1.0.0` stays exact-readable and an untyped legacy digest remains unknown rather
-  than inheriting a subject from prose.
+  `test_result` cannot bind `source_diff`. Schema `1.1.0` admits `caller_asserted`,
+  `approved_check`, and `import_observed`; additive schema `1.2.0` also admits
+  `observation_captured`. Ordinary publication can assert only `caller_asserted`; approved-check,
+  import, and observation provenance are reserved to their authenticated authors/channels.
+  `observation_captured` requires the observation coordinator (`harness_observed` on
+  `hook_observed`) and never means verified or independently reproduced. Schemas `1.0.0` and
+  `1.1.0` remain exact-readable; an untyped legacy digest remains unknown rather than inheriting a
+  subject from prose.
 - `claim_recorded`: `claim_id`, `claim_kind` (`completion`|`material`), `statement`,
   `supporting_refs` (evidence/result/obligation IDs), optional `subject_state`.
   Citing a `failure` or `partial` result on a completion claim's `supporting_refs` is
@@ -579,6 +583,13 @@ mismatched route, missing commitment, closed coordinator, invalid or unavailable
 unavailable reconciliation capability, or activation/reconciliation failure is terminal
 `blocked_by_policy/scope_not_authorized`, with no provider construction, job, attempt, dispatch, or
 trusted-approval instruction. Neither suspension branch is committed as a terminal result.
+
+Bundle restart recovery reconstructs the pending check operation, semantic job, physical attempt,
+and disclosure wait as one resumable state. Restoring only the wait marker is insufficient: the
+attempt coordinator would have no job to reclaim and could not preserve the approved provider
+request identity. A denial, expiry, stale-authority result, or cancellation terminalizes the job
+and attempt first, then resolves the one-use wait; a crash between those writes recovers the
+terminal job and finishes the wait cleanup without dispatching or minting a replacement attempt.
 
 The agent-facing handoff preserves that state distinction. Both a missing standing repository grant
 and a one-use `confirm_every_request` decision are nonterminal `awaiting_human` continuations bound
@@ -1707,9 +1718,16 @@ about its host binding (this bridge process, its route profile, and the fixed en
 one request. The first such failure is returned with `safe_details.availability =
 "terminal_unavailable"`, `host_profile`, and `route_profile` beside the existing `reason_code`, and
 is latched in the bridge's private client slot together with the request id, the public error, its
-correlation id, and the advisory singleton-holder stamp observed at that moment. Every later call
-under a *different* request id — any tool, any delegate sharing the MCP process — is answered from
-that latch: same public code, same `correlation_id`, same `retryable`, the same `safe_details` plus
+correlation id, and the advisory singleton-holder stamp observed at that moment. Concurrent first
+arrivals before that result share one on-demand attempt: a slot-scoped in-flight gate parks later
+calls until the first probe completes, then they inherit that completed latch without a quiet
+probe. This includes a concurrent duplicate of the winning request id; only a replay that arrives
+after the first attempt has completed takes the sanctioned repair path (issue #476).
+The same in-flight gate covers a previously live client that then fails its handshake or
+reconnects after an availability `ControlError`, so that path also produces one on-demand attempt.
+Every later call under a *different* request id — any tool, any delegate sharing the MCP process —
+is answered from that latch: same public code, same `correlation_id`, same `retryable`, the same
+`safe_details` plus
 `availability_inherited: true` and `availability_request_id` (the original id), and a message
 suffix stating that no new diagnostic was recorded; no spawn, supersede, or diagnostic occurs.
 Three continuations clear the latch: the original request id replays (the sanctioned repair-then-
@@ -1964,7 +1982,7 @@ receive or retain the real credential; HTTP/TLS internals may copy header bytes,
 zero-copy claim is made.
 
 Pure `service/confidential_protocol.py` owns both closed client-safe wire contracts. YZH1 is the
-multi-phase structural channel with `HUMAN_PROTOCOL_MAGIC`, version/cap, exact ten
+multi-phase structural channel with `HUMAN_PROTOCOL_MAGIC`, version/cap, exact eleven
 `HumanCeremonyKind` values, `HumanOpenTarget`/`HumanPreview`/`HumanAction`/`HumanPhase`/
 `HumanResult` unions, ceremony/decision bindings, eight correlated envelope types, bounded errors,
 and terminal close. YZS1 is the one-secret binary channel with `SECRET_PROTOCOL_MAGIC`, version/
@@ -1981,7 +1999,7 @@ Every serialized YZH1 ceremony/decision binding and YZS1 `SecretIngressBinding` 
 `CEREMONY_EXPIRY_SECONDS * 1000`; no float is serialized. Expiry comparison converts the current
 monotonic sample with the same floor rule.
 
-`HumanCeremonyKind` is exactly `vault_initialize`, `vault_unlock`, `keyring_retry`,
+`HumanCeremonyKind` is exactly `vault_initialize`, `vault_passphrase_rotate`, `vault_unlock`, `keyring_retry`,
 `portable_recovery`, `installation_recovery`, `provider_credential_set`, `provider_credential_rotate`,
 `privacy_policy_decision`, `privacy_disclosure_decision`, and `idle_relock_policy_change`.
 `CEREMONY_EXPIRY_SECONDS = 300` is the one YZH1/YZS1 challenge/binding expiry. It bounds a whole
@@ -2048,9 +2066,12 @@ no server-side `edit` action. Idle-policy secret reauthentication uses only wire
 `ConfidentialSecretClient`; it imports only the pure protocol and connect-only local transport.
 `cli/trusted_console.py` owns the `TrustedForegroundConsole` boundary and `cli/unlock.py` owns the
 confidential ceremony driver. On macOS/Linux the console opens `/dev/tty`, matches the standard
-input/error terminal identity, verifies the foreground process group, and performs no-echo reads.
-On Windows it opens `CONIN$`/`CONOUT$`, validates real console handles and current-process
-attachment, and performs no-echo reads through Win32 console APIs. It never falls back to
+input/error terminal identity, verifies the foreground process group, disables raw secret echo,
+and writes one `*` mask marker per accepted input unit. On Windows it opens
+`CONIN$`/`CONOUT$`, validates real console handles and current-process attachment, disables raw
+secret echo, and writes the same mask feedback through Win32 console APIs. Backspace removes one
+marker. The mask intentionally reveals entered length to a local terminal observer, never content.
+It never falls back to
 redirected standard streams. These channels are absent from
 `ControlClientPort`, ordinary CLI/MCP import graphs and schemas, argv, environment, config, stdin,
 logs, traces, transcripts, and LLM context. These console properties protect secret ingress but
@@ -2059,8 +2080,8 @@ authorization signals.
 
 Elevated consent (`service/elevated_bootstrap.py`, CLI `yoetz consent` /
 `yoetz elevated-bootstrap`) is a separate owner-only pending-file lane outside
-`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/4`) and creates
-digest-bound pending records (`yoetz.elevated-bootstrap.pending/2`). The v3 agent-safe projection
+`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/5`) and creates
+digest-bound pending records (`yoetz.elevated-bootstrap.pending/3`). The agent-safe projection
 contains only operation, risk class, bounded danger text, exact digests, expiry, pending ID, an
 exact bounded repository recipe when applicable, the fixed `["yoetz","consent","review"]`
 command, and an authorize command only for operations that permit agent-chat authorization. A
@@ -2078,16 +2099,18 @@ process, argv, environment, stdin, MCP, JSON, or caller boolean can authorize co
 `client_kind`, `instruction_source=explicit_current_chat_user`, exact
 pending/operation/danger/target digests, decision, and `warning_acknowledged` for approve).
 Yoetz treats the assertion as authority but cannot independently authenticate its chat provenance;
-a compromised agent can forge it. Implemented agent-chat operations are
-`provider_credential_set`, `provider_credential_rotate`, and `repository_privacy_grant`. Credential
-approve may read one secret from stdin (`--provider-credential-stdin`); results are presence-only
-and never echo secret bytes. Vault initialization stays helper/console-only. This lane does not
+a compromised agent can forge it. Implemented agent-chat operations are `vault_initialize`,
+`vault_passphrase_rotate`, `provider_credential_set`, `provider_credential_rotate`,
+`repository_privacy_grant`, and the service-prepared `import_publication`.
+Credential approve may read one secret from stdin (`--provider-credential-stdin`); results are
+presence-only and never echo secret bytes. Vault initialization accepts no caller secret: the local
+helper generates and scoped-credential-store-verifies it before confidential submission. This lane does not
 unlock an already-locked vault. The six MCP tools (ADR-011) are unchanged; authorize is local
 CLI control.
 
 The current public JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
-`review-result`, and `status`, each at version `4.0.0` under `schemas/consent/`; frozen versions
-`2.0.0` and `3.0.0` remain shipped for compatibility. The current version report is
+`review-result`, and `status`, each at version `5.0.0` under `schemas/consent/`; frozen versions
+`2.0.0` through `4.0.0` remain shipped for compatibility. The current version report is
 `version/version-manifest-2.0.0.schema.json`; its released `1.0.0` predecessor remains byte-frozen.
 `yoetz.chat-user-attestation/1` is version 1.0.0.
 `review_only` irreversible
@@ -2104,8 +2127,17 @@ and cannot widen policy. Keyring mode without measured presence has no passphras
 stored policy/credentials. No decision JSON, reusable token, proof, preview, or secret returns to
 ordinary CLI/MCP/stdout.
 This ready-local behavior applies only to already committed keyring mode. On pristine
-uninitialized state, missing presence evidence blocks keyring creation and leaves explicit
-passphrase initialization as a separate local-human choice.
+uninitialized state, missing presence evidence blocks immutable keyring-mode creation. Explicit
+manual passphrase initialization and exact agent-authorized helper-generated passphrase
+initialization remain separate choices.
+
+Passphrase rotation is the `vault_passphrase_rotate` ceremony over an
+`EmptyVaultTarget(expected_mode=passphrase)`. It consumes a security-reauthentication secret and a
+distinct `vault_rewrap` replacement, keeps the IVK and vault records unchanged, and atomically
+replaces only the authenticated envelope. Manual rotation stages the user-selected replacement;
+agent-authorized rotation stages a locally generated replacement. Startup reconciliation tries
+the active and staged scoped credential entries and retains only the candidate that authenticates
+the committed envelope.
 
 ### Privacy policy, disclosure, and outbound gateway
 
@@ -2564,6 +2596,7 @@ stored in the START result object/catalog.
 - `reserve_or_resume(command: ImportCommand, source: CapturedImportSource) -> ImportAllocation`;
 - `prepare_plan(allocation) -> PreparedImportPlan`;
 - `publish_plan(allocation, plan) -> ImportAllocation`;
+- `release_lease_for_authorization(allocation) -> None` (prepared, unpublished plans only);
 - `next_batch(allocation) -> ImportBatchSelection` (refreshed allocation plus batch or `None`);
 - `record_batch(allocation, batch, result: AppendResult) -> ImportAllocation`;
 - `prepare_report(allocation, report: EncryptedImportReportRef) -> ImportAllocation`;
@@ -2606,6 +2639,26 @@ completion. `status` returns only bounded structural pending/terminal counts, so
 digest, phase, and report evidence locator. `check` and `receipt` return retryable
 `OPERATION_PENDING` while an import for that session is pending; public `status` discloses it.
 
+Publication is not admitted merely because a request has importer-shaped client metadata. The
+first call captures the exact source, prepares and durably stores encrypted batch-plan objects,
+creates one `import_publication` pending consent with a content-free
+`yoetz.import-publication-preview/1`, releases the import lease, and returns non-retryable
+`PRIVACY_AUTHORITY_REQUIRED`. The preview binds the source identity, capture-manifest commitment,
+plan digest, task/session/writer, capability profile digest and version, mapping version,
+structural bounds, and fixed source/line/excerpt/batch limits. It explicitly says complete
+transcript inclusion, reasoning inclusion, and reviewer-egress widening are false.
+
+Approval creates an owner-only internal authorization record, never a bearer value or CLI/MCP
+argument. Replaying the same import request reacquires its lease and activates the grant only in
+that execution context. Before each append the importer binds admission to the next persisted
+batch or report request ID and its exact ordered event IDs; ordinary `publish_work` additionally
+checks the bound session/writer and the fixed importer actor/client/channel metadata, and admits
+that publication only once. The record stays available across restart until terminal import
+completion, then is consumed. Denial creates no record. Any source, manifest, plan, target,
+profile/version, mapping-version, or limit change produces another target digest and cannot reuse
+the decision. This is a local intake permission and does not authorize semantic-review or other
+egress.
+
 Importer publication identity is permanently reserved in both directions: the publishing
 writer/request pair and the source/ordinal pair are unique. Ordinals `0..batch_count-1` name
 batches and ordinal `batch_count` names the final report. Plan publication and ledger append both
@@ -2647,7 +2700,9 @@ Ledger materialization uses ADR-022's derived harness writer identity:
 `observation`, and admission unions that id with writers from completed starts without fabricating a
 start operation. Observation-derived lifecycle records are evidence under that writer, not claims
 on the cooperative agent's behalf. Materialization emits `evidence_recorded` unless the structural
-payload itself carries an explicitly admitted `claim_kind`.
+payload itself carries an explicitly admitted `claim_kind`. Mapping `obs-ledger/1.4.0` additionally
+materializes trusted eligible capture manifests as `evidence_recorded/1.2.0`; legacy 1.3/1.2
+operation identities remain replay-only upgrade candidates.
 
 Shared closed types:
 
@@ -2661,6 +2716,13 @@ Shared closed types:
   `content_kind`, correlation identity, source commitment, media type, part index/count, redaction
   flag, and bytes. At most 16 chunks and 700,000 aggregate input bytes keep the request below the
   ordinary 1 MiB control-frame cap; each assembled encrypted object remains below 4 MiB.
+- `ObservationContentManifest` — trusted-local binding from an encrypted captured-object envelope
+  to the SHA-256 digest and byte count of its secret-scanned inner bytes. A row created before
+  migration 0008 has NULL bindings and cannot earn capture provenance by inference.
+- `ObservationInspectionSnapshot` — one current subject-state/changed-path selection with optional
+  independently encrypted facts and bounded-excerpt objects, each carrying its own inner-content
+  digest and byte count. Durable redaction/truncation flags preserve weakening without reopening
+  the object.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
   mapping version. Codex session-stream cursors use `codex-obs-stream/1.2.0` (rollout JSONL
   grammar). Cursors are crash-stable and generation-fenced. A private HMAC of the source
@@ -2784,6 +2846,14 @@ Independent verification support (local control, not MCP):
   output digest/byte count and encrypted output-object identity, subject state before/after, and
   freshness. It uses `evidence_recorded/1.1.0` with `approved_check` provenance; no cooperative
   request can mint that provenance.
+- Eligible observation capture is narrower than retention: tool output, selected changed-file
+  bytes, and workspace-diff bytes become `observation_captured` immutable evidence. Visible
+  messages, tool input, locators, unsupported visible payloads, and approved-check output do not.
+  Inspection fact/excerpt objects materialize through their own idempotent evidence operation.
+  Missing, deleted, or pre-0008 bindings add `content_capture_unavailable`; deliberately excluded
+  retained kinds add `content_unselected`; retained redacted bytes add `content_redacted`; and a
+  bounded inspection prefix adds `truncated_payload`. Capture never upgrades to
+  `artifact_verified` or `independently_reproduced`.
 - `ObservationVerificationSupervisor` — ready-lifecycle background owner that wakes on enqueue,
   discovers pending work at startup, drains one serialized check per workspace through the
   enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest
@@ -2841,8 +2911,8 @@ materialization mapping version and exact draft-role tuple, so phases of one hos
 different materializations (for example pre-action versus paired action/result) cannot collide,
 while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
 The claim stores the source-independent materialization version, never the hook/stream cursor
-version (issue #309). Before staging under `obs-ledger/1.3.0`, upgrade replay checks the current and
-legacy observation writers for committed `1.3.0` and `1.2.0` operations; a `1.2.0` hit repairs its
+version (issue #309). Before staging under `obs-ledger/1.4.0`, upgrade replay checks the current and
+legacy observation writers for committed `1.4.0`, `1.3.0`, and `1.2.0` operations; a legacy hit repairs its
 claim with the original mapping version. Because a replayed `1.2.0` operation may be a pre-upgrade
 hook operation whose result is `UNKNOWN`, it still enters the correction path: the committed result
 is consulted through the replayed operation's accepted event ids (its `1.2.0` record identities
@@ -2892,6 +2962,9 @@ count in the closed one-hour `window_seconds`; timings likewise date the all-tim
 a separate recent maximum. Unreadable or future timestamps remain retained but are never classified
 as recent, so a fixed historical failure cannot masquerade as live degradation (issue #310).
 Workspace-global rejections (`vault_locked`, disabled, paused) end the pass.
+A host's automatic reviewer holding a scoped semantic `check` before Yoetz receives it is recorded
+on the `PermissionDenied` event as `host_auto_review_denied` or `host_permission_rule_denied`
+(issue #467); it is host tool-call authorization, so no semantic status is ever inferred from it.
 Every host ingress (Codex, Claude Code, Cursor) that ingests nothing because of workspace binding
 records one payload-free diagnostic naming the dropped layer: `workspace_unresolvable` when an
 explicit `--workspace` locator cannot be canonicalized (an empty value from an unset
@@ -2946,18 +3019,28 @@ The local observation state also owns a sparse, one-shot `FrontierMotionNotice` 
 A newly accepted observation append creates it. Idempotent replay of a completed append
 reconciles a missing pending notice from that append's committed frontier metadata; a still-pending
 notice is coalesced rather than duplicated. After the hook consumer receives the notice bytes, the
-store keeps that session's delivered high-water `to_sequence`, scoped to the announced task
-ledger. A later replay at or behind that mark is dropped; an overlapping candidate is clamped so
-`from` and record count cover only the undelivered remainder. A mark recorded for a different
-task never suppresses or clamps: when the session's mapping moves to another task, the stale
-mark and any pending notice for the old task are discarded and announcements restart from the
-new ledger's motion. The notice and delivered-mark maps are capped and drop ended-session
-entries before serialization; a malformed stored value is ignored as empty. Contiguous pending
+store keeps that session's delivered high-water frontier (`to_sequence` and `head_digest`), scoped
+to the announced task ledger. The coordinator binds every candidate to the routed ledger's actual
+current frontier so an older completed-operation result is still recognized as replay when the live
+head remains at or beyond the mark. An actual head below the mark, or at the same sequence with a
+different digest, proves the stored lineage was rewound: the mark and stale pending notice are
+discarded and announcement fails open from the new lineage. Otherwise a later replay at or behind
+the mark is dropped and an overlapping candidate is clamped so `from` and record count cover only
+the undelivered remainder. A mark recorded for a different task never suppresses or clamps: when
+the session's mapping moves to another task, the stale mark and any pending notice for the old task
+are discarded and announcements restart from the new ledger's motion. The notice and delivered-mark
+maps persist per-entry recency ordinals, drop ended-session entries first, and then evict the
+least-recently-used entry at their cap even after restart. A legacy delivered mark missing
+digest/recency identity or another malformed stored value is ignored as empty, failing open to a
+duplicate. Contiguous pending
 notices coalesce, and an advice-safe `PostToolUse` hook consumes the exact notice only after
 emitting its bounded agent context. If a later append merges into the pending notice between
 peek and commit, delivery identity no longer matches; commit still advances the delivered
-high-water to the peeked `to_sequence` and clamps the merged remainder so the already-emitted
-range is not re-announced. This context is informational: it neither weakens
+high-water to the peeked sequence/digest and clamps the merged remainder so the already-emitted
+range is not re-announced. If the queued same-task notice instead proves the emitted frontier was
+rewound away after the peek (a lower sequence, or the same sequence with a different digest),
+commit records no mark and leaves the rewind notice queued so the new lineage's prefix is still
+announced. This context is informational: it neither weakens
 exact-frontier checks nor expands the ADR-022 predicate that permits a cooperative publish to
 retain a stale frontier across observation-authored records.
 
@@ -2969,8 +3052,10 @@ Existing v0.1 ledger/object/import data remains readable without rewrite. Migrat
 encrypted observation-content/workspace-binding references, logical identity claims, exact-digest
 trust, verification jobs/leases/results, and advice history/delivery state in addition to `0002`
 consent/cursor/dedup/current-advice state. Migration `0004` owns inspection snapshots,
-workspace→Yoetz-session routing, and session-scoped current advice without rewriting `0003`. Neither
-adds a plaintext content column.
+workspace→Yoetz-session routing, and session-scoped current advice without rewriting `0003`.
+Migration `0008` adds nullable inner-content digest and byte-count bindings to content manifests
+and inspection snapshots plus inspection redaction/truncation flags. NULL historical rows stay
+readable but weak. None adds a plaintext content column.
 
 ### Maintenance
 
@@ -3221,6 +3306,51 @@ privacy grant.
 `setup status` rows carry `registration_state` and `registered_route_profile`; the
 `integrate <harness> mcp status` body carries `state` and `route_profile`.
 
+**Host admission port (`adapters/integrations/host_admission.py`, issue #467).** `HostAdmissionState`
+is `absent|present|partial|foreign|unknown`; `HostAdmissionAction` is `grant|revoke|noop`;
+`HostAdmissionReason` is `confirmation_required|preview_stale|foreign_entry_present|
+entry_unreadable|route_not_policy|route_unobserved|grant_not_permitting|grant_unverifiable|
+owner_required|target_unsafe|write_failed|host_invalid`. `observe_host_admission` reads only the
+host's project-scoped surfaces and classifies by exact entry: Claude `mcp__yoetz__check` for an
+external registration or `mcp__plugin_yoetz_yoetz__check` for the plugin-owned route in
+`permissions.allow` (detail `allow`) or `ask` (detail `ask`);
+Codex the byte-exact `[mcp_servers.yoetz.tools.check]` / `[plugins."yoetz@yoetz".mcp_servers.yoetz.tools.check]`
+table with `approval_mode = "approve"` (detail `external|plugin|both`); Cursor `yoetz:check` in
+`mcpAllowlist` (case-insensitive) and `Mcp(yoetz:check)` / `Mcp(plugin-yoetz-yoetz:check)` in
+`permissions.allow`. A deny rule, a wider rule (`deny_rule_present`, `wider_rule_present`), a
+non-exact table (`entry_not_exact`), a Codex server-level default (`server_default_present`), or
+the tool in both `allow` and `ask` (`allow_and_ask_present`) is `foreign`; a symlinked, oversized,
+unparseable, or wrongly shaped file (including JSON `null` where an object or list is required) is
+`unknown` (`file_symlink|file_too_large|file_unreadable|
+file_invalid|shape_invalid|file_not_regular`). `preview_host_admission` refuses a grant unless the
+caller's exclusively observed owner is `external|plugin`, its route is `policy`, and the observed
+grant permits review (`None` is unread and
+refuses), refuses both actions on `unknown`, refuses a grant on `foreign`, and binds the
+`yoetz.host-admission-preview/1` digest over host, action, owner form, checkpoint, every entry
+observed, and the SHA-256 of every file it would write. `apply_host_admission` recomputes the
+preview, rechecks each exact byte preimage immediately before mutation, and refuses `preview_stale`
+on pre-mutation drift. It writes each surface atomically (`0600`, created parent `0700`, file or
+parent symlink refused), deletes a file that held nothing but a Yoetz entry, and re-reads and
+verifies the resulting state. A mutating preview carries `host_config_not_compare_and_swap`:
+ordinary host files cannot exclude a non-cooperating same-UID writer in the final syscall window,
+so callers must quiesce host configuration writers during apply; a conflict after an earlier
+surface changed is `write_failed`, not an atomic rollback claim. For Codex, an exact table belonging
+only to the inactive owner does not make the active owner `present`; grant adds the applicable
+table. For Claude, a grant whose exact entry already sits in the other list is a mode change:
+preview moves the entry between `allow` and `ask` under the same digest-bound preimage recheck;
+only a grant whose requested mode is already set is `noop`. Revoke needs no route, grant, or
+current owner and removes every exact external/plugin form Yoetz can write.
+`sweep_host_admission` is the reverse transition (outcome `removed|absent|retained_foreign|
+unknown|write_failed` per host) used by the privacy ceremony, `integrate <host> plugin remove`,
+strict plugin re-renders, `integrate codex plugin remove`, and `integrate codex mcp
+install|remove --project-root`; each reports it as `admission_cleanup` and its preview discloses
+the same, including when the primary MCP registration action is already a `noop`. CLI:
+`yoetz integrate <host> admission status|preview|grant|revoke --project-root`
+(preview `--action grant|revoke`; Claude `--checkpoint`; the host roots the route observation
+needs; `--accept --preview-digest` for the apply verbs, exit 3 without them, exit 1
+`host_admission_<reason>` on refusal); raw path, OS, and parser exception text never crosses this
+boundary.
+
 `yoetz provider status` emits the read-only `yoetz.provider-status/1` schema token. It reports two
 non-substitutable verdicts. `semantic_ready` is repository-bound structural readiness:
 service ready and unlocked, `verification.semantic` not `disabled`, an endpoint bound, the bound
@@ -3243,6 +3373,18 @@ with `scope: "agent_route"` and never moves `semantic_ready` or the exit code, b
 decision 2 makes the route ceiling process-local — CLI and terminal checks still dispatch. Route
 observation is fail-soft by contract: no discovery failure, registration error, or unreadable entry
 may raise or change the exit code.
+The report also carries `host_admission` (issue #467): one object per host (`claude|codex|cursor`)
+with `state` exactly `absent|present|partial|foreign|unknown`, `observed`, and per-surface
+`entries` (`surface`, `state`, `entry`, closed `detail` token, `file_digest`), read from the hosts'
+own project-scoped files (`.claude/settings.local.json`, `.codex/config.toml`,
+`.cursor/permissions.json` + `.cursor/cli.json`) under the repository root resolved from the
+workspace locator: the locator is absolutized without resolving its final symlink, then walked up
+to the nearest `.git` entry, so a subdirectory launch reports the root's files rather than
+`absent`, and a symlinked root still reads `unknown`. `unknown` means the
+host file could not be read, never that no admission exists. A `present|partial` admission whose
+grant is known not to permit external review, or (Codex) whose observed registered route is
+`strict`, adds a `host_admission_drift` blocker with `scope: "agent_route"` and `host`; it never
+moves `semantic_ready` or the exit code, and the report never removes anything.
 
 An unbound repository session reports `repository_grant_state=null` and `semantic_ready=false`
 rather than treating the machine ceiling as authority. Provider status remains structural readiness
@@ -3354,7 +3496,8 @@ observation store are intentionally left in place.
 The implemented artifact operation is exactly `plugin_artifact_apply`. Its prepare target is the
 portable preview digest, which already binds target identity, current-state digest, action,
 format/schema/renderer versions, intended and current MCP ownership, optional route profile, exact
-route bytes through the artifact inventory/digest, and the complete sorted future inventory.
+route bytes through the artifact inventory/digest, the exact rollback digest when present, and the
+complete sorted future inventory.
 It is `review_only`, never agent-chat-authorizable, and its one pending review is consumed before
 one install/replace/remove attempt. Same-request replay returns the stored process result; after
 restart or an ambiguous filesystem outcome the caller must reconcile through `status_artifact`,
@@ -3376,8 +3519,12 @@ The #150 artifact wire-neutral domain shapes are closed:
   the adapter consumes the corresponding injected authority port, and the default adapter denies
   both channels.
 - `PluginArtifactPreview` carries request ID, action, state before, current `McpOwnershipState`, target-identity digest,
-  current-state digest, artifact digest, preview digest, the complete `PortablePluginPlan`, and
-  sorted structural warnings. It carries no raw target path or member contents.
+  current-state digest, artifact digest, the exact canonical-native rollback digest when migration
+  would preserve or removal would restore one, preview digest, the complete `PortablePluginPlan`,
+  and sorted structural warnings. The preview digest binds the rollback digest, so the consumed
+  authority target binds those exact bytes; a missing or changed rollback is stale and refuses
+  before mutation. Apply revalidates the bound preview after authority consumption and before its
+  first filesystem mutation. It carries no raw target path or member contents.
   For plugin-managed mode that owner state must be composed from plugin and external/global
   observations by the caller; the neutral artifact adapter cannot infer the latter from tree
   absence, so its uncomposed default is `ambiguous` and refuses preview.
@@ -3394,6 +3541,10 @@ The `yoetz.portable-plugin-install/1` marker contains only schema, format profil
 renderer versions, exact MCP ownership and optional route profile, artifact digest, complete sorted managed-file rows
 (`relative_path`, `size`, `sha256`), and its canonical marker digest. It contains no project path,
 user value, timestamp, credential, secret reference, transcript, host-activation claim, or receipt.
+The native rollback candidate must additionally byte-match the current canonical
+`render_plugin_install_tree(codex_version=None)` projection, including its native marker's adapter,
+harness, scope, and Yoetz version identity. A marker-consistent prior or fabricated native tree is
+not a rollback candidate and remains preserved as `modified` or `recovery_required`.
 
 ### Cursor local harness contract (issue #153)
 
@@ -3616,9 +3767,21 @@ owners are `ambiguous`, non-exact same-name configuration is `foreign`, and unre
 state is unobserved `ambiguous`. Effective route is non-null only for one exact external or plugin
 owner. Scoped runtime identities are server `plugin:yoetz:yoetz` and tools
 `mcp__plugin_yoetz_yoetz__<operation>`; bare names are negative controls.
+`ClaudeCodeMcpObservation.host_admission_supported` is true only for one exact external or plugin
+route whose configured server key is exactly `yoetz`; an exact route under another alias remains
+observable for ownership but cannot be mapped to a fixed permission-rule name and therefore makes
+an admission grant refuse with `owner_required` rather than writing the wrong rule. The flag is
+name-mappability only and deliberately independent of the route profile: a strict route keeps it
+true, and the policy-route requirement is enforced separately at grant, which refuses
+`route_not_policy`.
 
-The rendered artifact carries the five candidate hooks
-(`PostToolUse|PostToolUseFailure|SessionEnd|SessionStart|Stop`), but the
+The rendered artifact carries the five candidate observation hooks
+(`PostToolUse|PostToolUseFailure|SessionEnd|SessionStart|Stop`) plus a `PermissionDenied` hook
+matched to exactly the external `mcp__yoetz__check` and plugin-owned
+`mcp__plugin_yoetz_yoetz__check` names. It produces no observation and records
+one payload-free `hook_diagnostics` reason, `host_auto_review_denied` (`source` `auto_mode` or
+absent) or `host_permission_rule_denied` (`permission_rule|hook`), on the `PermissionDenied`
+event (issue #467), and any other tool name records nothing. But the
 `CLAUDE_CODE_HARNESS_PROFILE` hook capability cell advertises no observation events: the recorded
 evidence case observed no accepted observation, so the cell stays unpopulated until each event has
 installed-host delivery, privacy, and accepted-observation evidence. `ObservationSource` adds
@@ -3790,6 +3953,9 @@ facade and are never MCP tools.
   `CODEX_JSONL_MAPPING_VERSION`, `CODEX_OPAQUE_SCHEMA`, `SUPPORTED_CODEX_PROFILES`,
   `CodexCapabilityProfile`, and the `profile_for_codex_version`/`parse_codex_jsonl`/
   `plan_codex_mapping`/`materialize_codex_mapping`/`sanitize_codex_argv` pipeline.
+- `adapters/importers/codex_plan.py`: production composition of that pure mapping pipeline with
+  identifier allocation, encrypted batch-plan objects, canonical plan-manifest identity, and
+  exact plan re-read for crash-safe SQLite resume.
 - `adapters/integrations/codex_skill.py`: implements the trusted-project `IntegrationsPort`.
 - `adapters/memory/`: reference `LedgerPort`/`StartCatalogPort`/`ObjectStorePort`/`ImporterPort`
   implementations used by conformance. Start routing exports `MemoryStartCatalogAdapter`,

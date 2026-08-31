@@ -92,6 +92,7 @@ __all__ = [
     "ServerPhaseEnvelope",
     "ServerResultEnvelope",
     "VaultInitializePreview",
+    "VaultPassphraseRotatePreview",
     "VaultStateResult",
     "VaultUnlockPreview",
     "decode_human_frame",
@@ -161,6 +162,7 @@ class ConfidentialProtocolError(Exception):
 
 class HumanCeremonyKind(str, Enum):  # noqa: UP042 - fixed wire strings
     VAULT_INITIALIZE = "vault_initialize"
+    VAULT_PASSPHRASE_ROTATE = "vault_passphrase_rotate"
     VAULT_UNLOCK = "vault_unlock"
     KEYRING_RETRY = "keyring_retry"
     PORTABLE_RECOVERY = "portable_recovery"
@@ -489,6 +491,16 @@ class VaultInitializePreview:
 
 
 @dataclass(frozen=True, slots=True)
+class VaultPassphraseRotatePreview:
+    current_mode: Literal["passphrase"] = "passphrase"
+    kind: Literal["vault_passphrase_rotate"] = "vault_passphrase_rotate"
+
+    def __post_init__(self) -> None:
+        if self.current_mode != "passphrase" or self.kind != "vault_passphrase_rotate":
+            raise ValueError("vault_passphrase_rotate_preview_invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class VaultUnlockPreview:
     current_mode: Literal["passphrase"] = "passphrase"
     kind: Literal["vault_unlock"] = "vault_unlock"
@@ -733,6 +745,7 @@ class IdleRelockPolicyChangePreview:
 
 type HumanPreview = (
     VaultInitializePreview
+    | VaultPassphraseRotatePreview
     | VaultUnlockPreview
     | KeyringRetryPreview
     | PortableRecoveryPreview
@@ -1165,6 +1178,7 @@ def _validate_open_combination(kind: HumanCeremonyKind, target: HumanOpenTarget)
     expected: type[object]
     if kind in {
         HumanCeremonyKind.VAULT_INITIALIZE,
+        HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE,
         HumanCeremonyKind.VAULT_UNLOCK,
         HumanCeremonyKind.KEYRING_RETRY,
     }:
@@ -1846,6 +1860,8 @@ def _preview_to_json(value: HumanPreview) -> dict[str, JsonValue]:
             "kind": value.kind,
             "selected_mode": value.selected_mode,
         }
+    if type(value) is VaultPassphraseRotatePreview:
+        return {"current_mode": value.current_mode, "kind": value.kind}
     if type(value) is VaultUnlockPreview:
         return {"current_mode": value.current_mode, "kind": value.kind}
     if type(value) is KeyringRetryPreview:
@@ -1923,6 +1939,12 @@ def _preview_from_json(value: JsonValue) -> HumanPreview:
         return VaultInitializePreview(
             selected_mode=cast(Literal["passphrase"], source["selected_mode"]),
             irreversible=cast(Literal[True], source["irreversible"]),
+        )
+    if kind == "vault_passphrase_rotate":
+        _keys(source, {"current_mode", "kind"})
+        return VaultPassphraseRotatePreview(
+            current_mode=cast(Literal["passphrase"], source["current_mode"]),
+            kind=cast(Literal["vault_passphrase_rotate"], kind),
         )
     if kind == "vault_unlock":
         _keys(source, {"current_mode", "kind"})

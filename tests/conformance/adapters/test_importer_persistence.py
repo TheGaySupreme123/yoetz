@@ -478,6 +478,10 @@ async def test_prepare_and_review_sources_are_memory_sqlite_equivalent(tmp_path:
         prepared = await importer.prepare_plan(allocation)
         assert prepared == plan
         allocation = await importer.publish_plan(allocation, prepared)
+        await importer.release_lease_for_authorization(allocation)
+        allocation = await importer.reserve_or_resume(_command(identity, 4_002), source)
+        assert allocation.outcome is ImportAllocationOutcome.RESUMED
+        assert allocation.plan_digest == plan.plan_digest
         pending_review = await importer.load_review_source(
             identity.identity_digest, Frontier.genesis()
         )

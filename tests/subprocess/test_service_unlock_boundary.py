@@ -8,7 +8,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
-import pytest
 from helpers.child import (
     ChildLimits,
     ChildResult,
@@ -127,10 +126,16 @@ class _SecretTerminal:
     def __init__(self, values: list[bytearray]) -> None:
         self.values = values
         self.bounds: list[int] = []
+        self.prompts: list[str] = []
+        self.output: list[str] = []
 
-    def read_secret(self, _prompt: str, maximum: int) -> bytearray:
+    def read_secret(self, prompt: str, maximum: int) -> bytearray:
+        self.prompts.append(prompt)
         self.bounds.append(maximum)
         return self.values.pop(0)
+
+    def write(self, value: str) -> None:
+        self.output.append(value)
 
 
 def _unlock_secret_reader() -> Callable[[object, object, object, object], bytearray]:
@@ -161,11 +166,40 @@ def test_initialize_confirms_twice_locally_and_returns_only_first_buffer() -> No
     assert result is first
     assert confirmation == bytearray(len(_PASSPHRASE_CANARY))
     assert terminal.bounds == [1_024, 1_024]
+    assert terminal.prompts[0] == ("Passphrase (16-1024 UTF-8 bytes; no control characters): ")
+    assert terminal.prompts[1] == (
+        "Confirm passphrase (16-1024 UTF-8 bytes; no control characters): "
+    )
     result[:] = b"\x00" * len(result)
 
 
-def test_initialize_mismatch_overwrites_both_and_sends_nothing() -> None:
-    from yoetz.cli.unlock import HumanCeremonyCliError
+def test_rotate_replacement_uses_new_vault_passphrase_prompt() -> None:
+    from yoetz.service.confidential_protocol import (
+        ConfidentialSecretPurpose,
+        EmptyVaultTarget,
+        HumanCeremonyKind,
+    )
+
+    first = bytearray(_PASSPHRASE_CANARY)
+    confirmation = bytearray(_PASSPHRASE_CANARY)
+    terminal = _SecretTerminal([first, confirmation])
+    result = _unlock_secret_reader()(
+        terminal,
+        HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE,
+        EmptyVaultTarget(expected_mode="passphrase"),
+        ConfidentialSecretPurpose.VAULT_REWRAP,
+    )
+    assert result is first
+    assert terminal.prompts[0] == (
+        "New vault passphrase (16-1024 UTF-8 bytes; no control characters): "
+    )
+    assert terminal.prompts[1] == (
+        "Confirm passphrase (16-1024 UTF-8 bytes; no control characters): "
+    )
+    result[:] = b"\x00" * len(result)
+
+
+def test_initialize_mismatch_overwrites_both_and_reprompts() -> None:
     from yoetz.service.confidential_protocol import (
         ConfidentialSecretPurpose,
         EmptyVaultTarget,
@@ -174,16 +208,48 @@ def test_initialize_mismatch_overwrites_both_and_sends_nothing() -> None:
 
     first = bytearray(_PASSPHRASE_CANARY)
     confirmation = bytearray(b"different-secret-value-2026")
-    terminal = _SecretTerminal([first, confirmation])
-    with pytest.raises(HumanCeremonyCliError, match="confirmation_mismatch"):
-        _unlock_secret_reader()(
-            terminal,
-            HumanCeremonyKind.VAULT_INITIALIZE,
-            EmptyVaultTarget(expected_mode="uninitialized"),
-            ConfidentialSecretPurpose.VAULT_INITIALIZE,
-        )
+    accepted = bytearray(b"replacement-secret-value-2026")
+    accepted_confirmation = bytearray(accepted)
+    terminal = _SecretTerminal([first, confirmation, accepted, accepted_confirmation])
+    result = _unlock_secret_reader()(
+        terminal,
+        HumanCeremonyKind.VAULT_INITIALIZE,
+        EmptyVaultTarget(expected_mode="uninitialized"),
+        ConfidentialSecretPurpose.VAULT_INITIALIZE,
+    )
     assert first == bytearray(len(first))
     assert confirmation == bytearray(len(confirmation))
+    assert accepted_confirmation == bytearray(len(accepted_confirmation))
+    assert terminal.output == ["Passphrases did not match. Try again.\n"]
+    assert result is accepted
+    result[:] = b"\x00" * len(result)
+
+
+def test_initialize_invalid_passphrase_is_overwritten_and_reprompted() -> None:
+    from yoetz.service.confidential_protocol import (
+        ConfidentialSecretPurpose,
+        EmptyVaultTarget,
+        HumanCeremonyKind,
+    )
+
+    invalid = bytearray(b"too short")
+    accepted = bytearray(_PASSPHRASE_CANARY)
+    confirmation = bytearray(_PASSPHRASE_CANARY)
+    terminal = _SecretTerminal([invalid, accepted, confirmation])
+    result = _unlock_secret_reader()(
+        terminal,
+        HumanCeremonyKind.VAULT_INITIALIZE,
+        EmptyVaultTarget(expected_mode="uninitialized"),
+        ConfidentialSecretPurpose.VAULT_INITIALIZE,
+    )
+
+    assert invalid == bytearray(len(invalid))
+    assert confirmation == bytearray(len(_PASSPHRASE_CANARY))
+    assert terminal.output == [
+        "Passphrase must be 16-1024 UTF-8 bytes with no control characters. Try again.\n"
+    ]
+    assert result is accepted
+    result[:] = b"\x00" * len(result)
 
 
 def test_unlock_reads_one_bounded_buffer_without_confirmation() -> None:

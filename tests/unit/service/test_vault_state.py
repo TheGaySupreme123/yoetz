@@ -58,6 +58,7 @@ def _service(
     *,
     publish_mode: Callable[[VaultMode, VaultRootEnvelope | None, str], None] | None = None,
     replace_mode: Callable[[VaultMode, VaultRootEnvelope, str, int], None] | None = None,
+    replace_passphrase: Callable[[VaultRootEnvelope], None] | None = None,
 ) -> VaultService:
     vault_dir = tmp_path / "vault"
     return VaultService(
@@ -70,6 +71,7 @@ def _service(
         pristine_state_digest="sha256:" + "1" * 64,
         publish_mode=publish_mode,
         replace_mode=replace_mode,
+        replace_passphrase=replace_passphrase,
     )
 
 
@@ -105,6 +107,56 @@ async def test_passphrase_initialization_is_distinct_and_first_install_only(tmp_
     another = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"another secure phrase"))
     with pytest.raises(VaultError, match="initialization_forbidden"):
         await service.initialize_passphrase(another, "sha256:" + "2" * 64)
+
+
+@pytest.mark.anyio
+async def test_ready_passphrase_rewrap_keeps_vault_data_and_replaces_only_envelope(
+    tmp_path: Path,
+) -> None:
+    memory = LocalSecretMemory()
+    published: list[VaultRootEnvelope] = []
+    replaced: list[VaultRootEnvelope] = []
+
+    def publish(mode: VaultMode, envelope: VaultRootEnvelope | None, digest: str) -> None:
+        assert mode is VaultMode.PASSPHRASE
+        assert envelope is not None
+        assert digest.startswith("sha256:")
+        published.append(envelope)
+
+    service = _service(
+        tmp_path,
+        memory,
+        _Clock(),
+        publish_mode=publish,
+        replace_passphrase=replaced.append,
+    )
+    await _initialize(service, memory)
+    await service.create_bundle_keys(_TASK_ID)
+    result = await service.rewrap_passphrase(
+        memory.capture(SecretPurpose.VAULT_REWRAP, bytearray(b"new correct horse battery"))
+    )
+    assert result.state is VaultState.READY
+    assert len(replaced) == 1
+    assert replaced[0] != published[0]
+    await service.lock()
+    memory.close()
+
+    reopened_memory = LocalSecretMemory()
+    reopened = VaultService(
+        installation_id=_INSTALLATION_ID,
+        service_generation=8,
+        mode=VaultMode.PASSPHRASE,
+        secret_memory=reopened_memory,
+        clock=_Clock(),  # pyright: ignore[reportArgumentType]
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        root_envelope=replaced[0],
+    )
+    await reopened.unlock(
+        reopened_memory.capture(SecretPurpose.VAULT_UNLOCK, bytearray(b"new correct horse battery"))
+    )
+    assert reopened.ready
+    assert await reopened.load_bundle_keys(_TASK_ID)
+    reopened_memory.close()
 
 
 @pytest.mark.anyio

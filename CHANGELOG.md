@@ -6,6 +6,17 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Added
+
+- Consented hook capture no longer stops at encrypted observation-store references. Eligible
+  secret-scanned tool output, selected changed-file bytes, workspace diffs, and bounded inspection
+  snapshots now materialize as immutable ledger evidence with exact object, digest, byte-count,
+  redaction/truncation limitations, and `observation_captured` provenance. Additive
+  `evidence_recorded/1.2.0`, `event-draft/1.1.0`, `opaque-unknown-event-draft/1.1.0`, and
+  `outbound-case/1.1.0` contracts keep their prior versions frozen; migration 0008 leaves legacy
+  rows readable but weak when no inner-content binding exists. Capture remains distinct from
+  verification, reproduction, and egress authority (issue #302).
+
 ### Fixed
 
 - Receipt creation now abandons both exact caller-owned object stages when the payload object's
@@ -13,6 +24,14 @@ reverse-chronological released versions.
   completed before a directory-fsync error, preserves the retryable `STORAGE_UNSAFE` result if
   cleanup itself fails, waits for exact cleanup before propagating cancellation, and lets the
   identical request retry without accumulating one finalized orphan per attempt (issue #339).
+
+- Frontier-motion delivery marks now retain the announced head digest and are compared with the
+  routed ledger's actual current frontier. A same-task restore below the delivered high-water (or
+  a different digest at the same sequence) discards the stale mark and announces the rewound
+  lineage, while an old completed-operation replay is still suppressed when the live ledger has
+  not rewound. Notice and delivered-mark caps persist LRU ordinals across restarts, refresh active
+  marks, and evict ended sessions before the least-recently-used live entry; legacy marks without
+  lineage identity fail open to a duplicate announcement (issue #331, consolidating #332/#333).
 
 - The native Cursor plugin's plugin-owned `mcp.json` now launches the exact Yoetz executable the
   plugin's hooks bind (the `/2` marker launcher) instead of a bare `yoetz` that Cursor's sanitized
@@ -25,13 +44,14 @@ reverse-chronological released versions.
 
 - The cooperative MCP bridge latches the first availability failure of its host binding
   (`service_unavailable`, `service_incompatible`, `protocol_mismatch`, `endpoint_unsafe`,
-  `peer_untrusted`). Later calls under a new `request_id` — including delegated workers sharing
-  the MCP process — inherit the same public error and `correlation_id` with
+  `peer_untrusted`). Concurrent first arrivals before that result share one on-demand attempt and
+  one diagnostic; later calls under a new `request_id` — including delegated workers sharing the
+  MCP process — inherit the same public error and `correlation_id` with
   `safe_details.availability: terminal_unavailable` and `availability_inherited: true`, and mint no
   new diagnostic, spawn, or supersede. The original `request_id` replay, a changed service holder,
   or one quiet successful handshake clears it. Agent guidance now carries a bounded
   `yoetz_availability` block into delegated assignments and forbids lifecycle commands from
-  `INTERNAL_ERROR` (issue #469).
+  `INTERNAL_ERROR` (issues #469, #476).
 
 - Codex activation recommendation decisions now bind the exact executable path/bytes/version,
   canonical home, activation preview, and rendered-cache digest. Another Codex home or a target

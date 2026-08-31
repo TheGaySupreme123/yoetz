@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import importlib.resources as resources
 import importlib.util
+import json
 from collections.abc import Iterator, Mapping
 from importlib.resources.abc import Traversable
 from pathlib import Path, PurePosixPath
@@ -23,7 +24,7 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 92
+_EXPECTED_MEMBER_COUNT = 101
 _EXPECTED_REQUEST_RESULT_VERSION_COUNT = 40
 _EXPECTED_EVENT_VERSION_COUNT = 16
 
@@ -165,7 +166,16 @@ def test_schema_registry_is_complete() -> None:
     for member in members:
         path = member["path"]
         expected = (
-            "4.0.0"
+            "5.0.0"
+            if path
+            in {
+                "consent/catalog-5.0.0.schema.json",
+                "consent/pending-agent-5.0.0.schema.json",
+                "consent/prepare-result-5.0.0.schema.json",
+                "consent/review-result-5.0.0.schema.json",
+                "consent/status-5.0.0.schema.json",
+            }
+            else "4.0.0"
             if path
             in {
                 "consent/catalog-4.0.0.schema.json",
@@ -195,13 +205,18 @@ def test_schema_registry_is_complete() -> None:
                 and path != "consent/chat-user-attestation-1.0.0.schema.json"
             )
             or path.endswith("-2.0.0.schema.json")
+            else "1.2.0"
+            if path == "events/evidence-recorded-1.2.0.schema.json"
             else (
                 "1.1.0"
                 if path
                 in {
+                    "events/event-draft-1.1.0.schema.json",
                     "events/evidence-recorded-1.1.0.schema.json",
+                    "events/opaque-unknown-event-draft-1.1.0.schema.json",
                     "operations/status-request-1.1.0.schema.json",
                     "operations/status-result-1.1.0.schema.json",
+                    "privacy/outbound-case-1.1.0.schema.json",
                 }
                 else "1.0.0"
             )
@@ -239,6 +254,56 @@ def test_schema_documents_are_reference_closed() -> None:
 
     for rel_path in member_paths:
         _assert_reference_closed((_ROOT_SCHEMA_DIR / rel_path).read_bytes(), member_ids)
+
+
+def test_observation_capture_provenance_is_additive_only() -> None:
+    evidence_1_1 = _load_manifest(
+        (_ROOT_SCHEMA_DIR / "events/evidence-recorded-1.1.0.schema.json").read_bytes()
+    )
+    evidence_1_2 = _load_manifest(
+        (_ROOT_SCHEMA_DIR / "events/evidence-recorded-1.2.0.schema.json").read_bytes()
+    )
+    old_provenance = evidence_1_1["$defs"]["evidence_digest_provenance"]["enum"]
+    new_provenance = evidence_1_2["$defs"]["evidence_digest_provenance"]["enum"]
+    assert "observation_captured" not in old_provenance
+    assert "observation_captured" in new_provenance
+
+    outbound_1_0 = _load_manifest(
+        (_ROOT_SCHEMA_DIR / "privacy/outbound-case-1.0.0.schema.json").read_bytes()
+    )
+    outbound_1_1 = _load_manifest(
+        (_ROOT_SCHEMA_DIR / "privacy/outbound-case-1.1.0.schema.json").read_bytes()
+    )
+    old_outbound = outbound_1_0["$defs"]["targeted_excerpt"]["properties"]["digest_provenance"][
+        "properties"
+    ]["provenance"]["enum"]
+    new_outbound = outbound_1_1["$defs"]["targeted_excerpt"]["properties"]["digest_provenance"][
+        "properties"
+    ]["provenance"]["enum"]
+    assert "observation_captured" not in old_outbound
+    assert "observation_captured" in new_outbound
+
+    event_draft_1_0 = _load_manifest(
+        (_ROOT_SCHEMA_DIR / "events/event-draft-1.0.0.schema.json").read_bytes()
+    )
+    event_draft_1_1 = _load_manifest(
+        (_ROOT_SCHEMA_DIR / "events/event-draft-1.1.0.schema.json").read_bytes()
+    )
+    old_event_draft_text = json.dumps(event_draft_1_0)
+    new_event_draft_text = json.dumps(event_draft_1_1)
+    assert "evidence-recorded-1.2.0.schema.json" not in old_event_draft_text
+    assert "opaque-unknown-event-draft-1.1.0.schema.json" not in old_event_draft_text
+    assert "evidence-recorded-1.2.0.schema.json" in new_event_draft_text
+    assert "opaque-unknown-event-draft-1.1.0.schema.json" in new_event_draft_text
+
+    opaque_1_0 = _load_manifest(
+        (_ROOT_SCHEMA_DIR / "events/opaque-unknown-event-draft-1.0.0.schema.json").read_bytes()
+    )
+    opaque_1_1 = _load_manifest(
+        (_ROOT_SCHEMA_DIR / "events/opaque-unknown-event-draft-1.1.0.schema.json").read_bytes()
+    )
+    assert '"1.2.0"' not in json.dumps(opaque_1_0)
+    assert '"1.2.0"' in json.dumps(opaque_1_1)
 
 
 def test_schema_documents_are_frozen_when_catalog_available() -> None:

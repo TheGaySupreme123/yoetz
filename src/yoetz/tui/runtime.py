@@ -68,6 +68,32 @@ def _agent_route_detail(provider: ProviderPosture) -> str:
     return "external review is off for this installation"
 
 
+def _host_admission_layer_state(provider: ProviderPosture) -> LayerState:
+    """Verified when at least one host admits and no host reads as drifted or unreadable."""
+
+    states = {state for _host, state in provider.host_admission}
+    if not states or "unknown" in states:
+        return LayerState.UNKNOWN
+    drifted = any(condition == "host_admission_drift" for condition, _state in provider.blockers)
+    if drifted:
+        return LayerState.NOT_CONFIGURED
+    if "present" in states:
+        return LayerState.VERIFIED
+    return LayerState.NOT_CONFIGURED
+
+
+def _host_admission_detail(provider: ProviderPosture) -> str:
+    if not provider.host_admission:
+        return "host admission could not be read"
+    summary = ", ".join(f"{host} {state}" for host, state in provider.host_admission)
+    drifted = any(condition == "host_admission_drift" for condition, _state in provider.blockers)
+    if drifted:
+        return f"{summary}; an admission outlives its grant or route, revoke it"
+    if all(state == "absent" for _host, state in provider.host_admission):
+        return f"{summary}; 'yoetz integrate <host> admission preview' to admit the check"
+    return summary
+
+
 def _serve_command_display(route_profile: Literal["policy", "strict"]) -> str:
     """Render the exact argv this route registers, for the screen that asks for approval.
 
@@ -737,7 +763,9 @@ class YoetzRuntime:
     async def provider_posture(self) -> ProviderPosture:
         from yoetz.cli.provider_status import provider_status_report
 
-        report = await provider_status_report(workspace_locator=self._cwd)
+        # The repository root, not the launch directory: host admission files live at the
+        # root, and a subdirectory launch must not report them absent (issue #478 review).
+        report = await provider_status_report(workspace_locator=self.project_root())
         endpoint_map = _mapping(report.get("endpoint"))
         blockers: list[tuple[str, str]] = []
         raw_blockers = report.get("blockers")
@@ -748,6 +776,12 @@ class YoetzRuntime:
                     blockers.append((str(row.get("condition")), str(row.get("state") or "unknown")))
         route_map = _mapping(report.get("mcp_route"))
         raw_agent_ready = report.get("agent_route_semantic_ready")
+        admission_map = _mapping(report.get("host_admission"))
+        host_admission = tuple(
+            (host, str(_mapping(admission_map.get(host)).get("state") or "unknown"))
+            for host in ("claude", "codex", "cursor")
+            if host in admission_map
+        )
         return ProviderPosture(
             agent_route_semantic_ready=(
                 raw_agent_ready if isinstance(raw_agent_ready, bool) else None
@@ -763,6 +797,7 @@ class YoetzRuntime:
             semantic_ready=report.get("semantic_ready") is True,
             readiness_determinable=report.get("readiness_determinable") is True,
             blockers=tuple(blockers),
+            host_admission=host_admission,
         )
 
     # -- confidential ceremonies ---------------------------------------
@@ -832,6 +867,14 @@ class YoetzRuntime:
             await initialize_passphrase_vault()
         except HumanCeremonyCliError as error:
             raise RuntimeError_(error.reason, "the vault could not be initialized")
+
+    async def rotate_vault_passphrase(self) -> None:
+        from yoetz.cli.unlock import HumanCeremonyCliError, rotate_vault_passphrase
+
+        try:
+            await rotate_vault_passphrase()
+        except HumanCeremonyCliError as error:
+            raise RuntimeError_(error.reason, "the passphrase could not be changed")
 
     async def initialize_system_keyring(self) -> None:
         from yoetz.cli.unlock import HumanCeremonyCliError, retry_keyring
@@ -1120,6 +1163,16 @@ class YoetzRuntime:
                     else LayerState.NOT_CONFIGURED
                 ),
                 detail=_agent_route_detail(provider),
+            ),
+            # Host admission is the owner's per-host, per-repository decision to let an
+            # automatic reviewer admit the check (issue #467). Its own layer, because a ready
+            # installation with no admission is exactly the state where a Claude auto-mode,
+            # Codex auto_review, or Cursor Auto-review session holds every semantic check.
+            ReadinessLayer(
+                "host_admission",
+                "Host auto-review admits the semantic check",
+                _host_admission_layer_state(provider),
+                detail=_host_admission_detail(provider),
             ),
         )
 

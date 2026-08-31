@@ -238,6 +238,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         "application/json",
         True,
     ),
+    (
+        "fixtures/canonical/OBS-001-captured-evidence.case.json",
+        "canonical_vector",
+        "application/vnd.yoetz.fixture-case+json",
+        True,
+    ),
     ("guidance/agent-instructions.md", "guidance", "text/markdown", True),
     ("guidance/coverage-and-receipts.md", "guidance", "text/markdown", True),
     ("guidance/publication-policy.md", "guidance", "text/markdown", True),
@@ -250,6 +256,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ("migrations/bundle/0005.sql", "migration", "application/sql", True),
     ("migrations/bundle/0006.sql", "migration", "application/sql", True),
     ("migrations/bundle/0007.sql", "migration", "application/sql", True),
+    ("migrations/bundle/0008.sql", "migration", "application/sql", True),
     ("migrations/catalog/0001.sql", "migration", "application/sql", True),
     ("migrations/catalog/0002.sql", "migration", "application/sql", True),
     ("migrations/catalog/0003.sql", "migration", "application/sql", True),
@@ -310,6 +317,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/consent/catalog-5.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/consent/chat-user-attestation-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -334,6 +347,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/consent/pending-agent-5.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/consent/prepare-result-2.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -347,6 +366,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/consent/prepare-result-4.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/prepare-result-5.0.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -370,6 +395,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/consent/review-result-5.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/consent/status-2.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -383,6 +414,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/consent/status-4.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/consent/status-5.0.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -430,6 +467,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/events/event-draft-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/events/evidence-recorded-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -437,6 +480,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/events/evidence-recorded-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/evidence-recorded-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -455,6 +504,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/events/opaque-unknown-event-draft-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/opaque-unknown-event-draft-1.1.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -625,6 +680,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/privacy/outbound-case-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/privacy/outbound-case-1.1.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

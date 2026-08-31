@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
@@ -48,10 +51,17 @@ from yoetz.ports.ledger import (
     AppendResult,
     AppendWarning,
     CheckCommitResult,
+    OperationKind,
+    OperationState,
 )
 from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
-from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
 from yoetz.protocol.coverage import (
     Coverage,
     PublicationChannel,
@@ -74,6 +84,7 @@ __all__ = [
     "ReviewInternal",
     "execute_import_codex_jsonl",
     "execute_review",
+    "import_request_from_control",
 ]
 
 _MAPPING_VERSION = "codex-jsonl/1.0.0"
@@ -139,6 +150,58 @@ class ImportCodexJsonlRequest:
         return "ImportCodexJsonlRequest(<redacted>)"
 
     __str__ = __repr__
+
+
+class _ControlImportByteSource:
+    def __init__(self, value: bytes) -> None:
+        self._value = value
+        self._closed = False
+
+    @property
+    def declared_size(self) -> int:
+        return len(self._value)
+
+    async def _chunks(self) -> AsyncIterator[bytes]:
+        if not self._closed:
+            yield self._value
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self._chunks()
+
+    async def close(self) -> None:
+        self._closed = True
+
+
+def import_request_from_control(value: object) -> ImportCodexJsonlRequest:
+    """Decode the already schema-bounded control body without retaining its base64 copy."""
+
+    if not isinstance(value, Mapping):
+        raise _error(PublicErrorCode.INVALID_REQUEST, "The import request is invalid.")
+    source = cast(Mapping[str, object], value)
+    try:
+        if source["source_encoding"] != "base64":
+            raise ValueError("import_source_encoding_invalid")
+        encoded = source["source_bytes_base64"]
+        if type(encoded) is not str:
+            raise ValueError("import_source_encoding_invalid")
+        raw = base64.b64decode(encoded, validate=True)
+        return ImportCodexJsonlRequest(
+            schema_version=cast(Literal["1.0.0"], source["schema_version"]),
+            codex_capability_profile_id=cast(str, source["codex_capability_profile_id"]),
+            codex_version=cast(str, source["codex_version"]),
+            exit_status=cast(int, source["exit_status"]),
+            mapping_version=cast(str, source["mapping_version"]),
+            request_id=request_id(source["request_id"]),
+            session_id=session_id(source["session_id"]),
+            source=_ControlImportByteSource(raw),
+            source_kind=cast(Literal["file", "stdin"], source["source_kind"]),
+            stderr_captured_bytes=cast(Literal[0], source["stderr_captured_bytes"]),
+            stderr_present=cast(Literal[False], source["stderr_present"]),
+            stderr_truncated=cast(Literal[False], source["stderr_truncated"]),
+            writer_id=writer_id(source["writer_id"]),
+        )
+    except (KeyError, TypeError, ValueError, binascii.Error) as exc:
+        raise _error(PublicErrorCode.INVALID_REQUEST, "The import request is invalid.") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +392,20 @@ class Application(Protocol):
 
     def authorizes_import_publication(self, request: PublishWorkRequestModel) -> bool: ...
 
+    def activate_import_publication(self, allocation: ImportAllocation) -> object: ...
+
+    def bind_import_publication(
+        self,
+        token: object,
+        *,
+        request_id: str,
+        event_ids: tuple[str, ...],
+    ) -> None: ...
+
+    def deactivate_import_publication(self, token: object, *, completed: bool) -> None: ...
+
+    def reconcile_completed_import_publication(self, allocation: ImportAllocation) -> None: ...
+
 
 def _draft_json(value: EventDraft) -> JsonObject:
     payload = (
@@ -374,7 +451,7 @@ async def _publish(
     request_id_value: str,
     drafts: tuple[EventDraft, ...],
 ) -> AppendResult:
-    frontier = await runtime.ledger.load_frontier()
+    frontier = await _publication_frontier(runtime, request_id_value)
     request = PublishWorkRequestModel.model_validate(
         {
             "protocol_version": "0.1",
@@ -396,6 +473,32 @@ async def _publish(
     if type(public) is not PublishWorkInternalResult:
         raise _error(PublicErrorCode.INTERNAL_ERROR, "Import publication failed.")
     return _append_from_public(public)
+
+
+async def _publication_frontier(runtime: TaskRuntime, request_id_value: str) -> Frontier:
+    """Recover the original pre-append frontier when importer recording lagged the ledger."""
+
+    if runtime.writer_id is None:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The import writer route is invalid.")
+    operation = await runtime.ledger.lookup_operation(runtime.writer_id, request_id_value)
+    if (
+        operation is None
+        or operation.operation_kind is not OperationKind.PUBLISH_WORK
+        or operation.state is not OperationState.COMPLETE
+    ):
+        return await runtime.ledger.load_frontier()
+    if operation.result_canonical is None:
+        raise _error(PublicErrorCode.STORAGE_CORRUPT, "The stored publication result is invalid.")
+    try:
+        stored = strict_json_parse(operation.result_canonical)
+        if not isinstance(stored, Mapping):
+            raise ValueError("stored_publication_result_invalid")
+        return frontier_from_json(stored["subject_frontier"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _error(
+            PublicErrorCode.STORAGE_CORRUPT,
+            "The stored publication result is invalid.",
+        ) from exc
 
 
 def _identity(
@@ -631,63 +734,88 @@ async def execute_import_codex_jsonl(
                 raise _error(PublicErrorCode.STORAGE_CORRUPT, "The import is quarantined.")
             if allocation.terminal_result is None:
                 raise _error(PublicErrorCode.STORAGE_CORRUPT, "The import replay is incomplete.")
+            app.reconcile_completed_import_publication(allocation)
             return _report_from_json(allocation.terminal_result)
 
         if allocation.phase is ImportPhase.SOURCE_RESERVED:
             plan = await runtime.importer.prepare_plan(allocation)
             allocation = await runtime.importer.publish_plan(allocation, plan)
-        while allocation.phase in {ImportPhase.PLAN_READY, ImportPhase.PUBLISHING}:
-            selection = await runtime.importer.next_batch(allocation)
-            allocation = selection.allocation
-            if selection.batch is None:
-                break
-            result = await _publish(
-                app,
-                runtime,
-                selection.batch.request_id,
-                selection.batch.event_drafts,
-            )
-            allocation = await runtime.importer.record_batch(allocation, selection.batch, result)
-
-        report: ImportReportInternal
-        report_ref: EncryptedImportReportRef
-        if allocation.phase in {ImportPhase.PLAN_READY, ImportPhase.PUBLISHING}:
-            frontier = await runtime.ledger.load_frontier()
-            review_source = await runtime.importer.load_review_source(
-                identity.identity_digest, frontier
-            )
-            if review_source is None:
-                raise _error(PublicErrorCode.STORAGE_CORRUPT, "The import source disappeared.")
-            report, report_ref = await _build_report(app, runtime, request, captured, review_source)
-            allocation = await runtime.importer.prepare_report(allocation, report_ref)
-        else:
-            report_ref = _report_ref(allocation)
-            if allocation.terminal_result is None:
-                raise _error(
-                    PublicErrorCode.STORAGE_CORRUPT, "The stored report result is missing."
+        try:
+            authority_token = app.activate_import_publication(allocation)
+        except BaseException:
+            await runtime.importer.release_lease_for_authorization(allocation)
+            raise
+        completed = False
+        try:
+            while allocation.phase in {ImportPhase.PLAN_READY, ImportPhase.PUBLISHING}:
+                selection = await runtime.importer.next_batch(allocation)
+                allocation = selection.allocation
+                if selection.batch is None:
+                    break
+                app.bind_import_publication(
+                    authority_token,
+                    request_id=selection.batch.request_id,
+                    event_ids=tuple(selection.batch.event_ids),
                 )
-            report = _report_from_json(allocation.terminal_result)
+                result = await _publish(
+                    app,
+                    runtime,
+                    selection.batch.request_id,
+                    selection.batch.event_drafts,
+                )
+                allocation = await runtime.importer.record_batch(
+                    allocation, selection.batch, result
+                )
 
-        if allocation.phase is ImportPhase.REPORT_READY:
-            if allocation.report_evidence_draft is None or allocation.report_request_id is None:
-                raise _error(PublicErrorCode.STORAGE_CORRUPT, "Report evidence is incomplete.")
-            evidence_result = await _publish(
-                app,
-                runtime,
-                allocation.report_request_id,
-                (allocation.report_evidence_draft,),
-            )
-            allocation = await runtime.importer.publish_report(
-                allocation, report_ref, evidence_result
-            )
-        if allocation.phase is ImportPhase.REPORT_PUBLISHED:
-            allocation = await runtime.importer.complete(allocation)
-        if (
-            allocation.state is not ImportState.COMPLETE
-            or allocation.phase is not ImportPhase.TERMINAL
-        ):
-            raise _error(PublicErrorCode.STORAGE_CORRUPT, "Import completion is inconsistent.")
-        return report
+            report: ImportReportInternal
+            report_ref: EncryptedImportReportRef
+            if allocation.phase in {ImportPhase.PLAN_READY, ImportPhase.PUBLISHING}:
+                frontier = await runtime.ledger.load_frontier()
+                review_source = await runtime.importer.load_review_source(
+                    identity.identity_digest, frontier
+                )
+                if review_source is None:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT, "The import source disappeared.")
+                report, report_ref = await _build_report(
+                    app, runtime, request, allocation.captured_source, review_source
+                )
+                allocation = await runtime.importer.prepare_report(allocation, report_ref)
+            else:
+                report_ref = _report_ref(allocation)
+                if allocation.terminal_result is None:
+                    raise _error(
+                        PublicErrorCode.STORAGE_CORRUPT, "The stored report result is missing."
+                    )
+                report = _report_from_json(allocation.terminal_result)
+
+            if allocation.phase is ImportPhase.REPORT_READY:
+                if allocation.report_evidence_draft is None or allocation.report_request_id is None:
+                    raise _error(PublicErrorCode.STORAGE_CORRUPT, "Report evidence is incomplete.")
+                app.bind_import_publication(
+                    authority_token,
+                    request_id=allocation.report_request_id,
+                    event_ids=(allocation.report_evidence_draft.event_id,),
+                )
+                evidence_result = await _publish(
+                    app,
+                    runtime,
+                    allocation.report_request_id,
+                    (allocation.report_evidence_draft,),
+                )
+                allocation = await runtime.importer.publish_report(
+                    allocation, report_ref, evidence_result
+                )
+            if allocation.phase is ImportPhase.REPORT_PUBLISHED:
+                allocation = await runtime.importer.complete(allocation)
+            if (
+                allocation.state is not ImportState.COMPLETE
+                or allocation.phase is not ImportPhase.TERMINAL
+            ):
+                raise _error(PublicErrorCode.STORAGE_CORRUPT, "Import completion is inconsistent.")
+            completed = True
+            return report
+        finally:
+            app.deactivate_import_publication(authority_token, completed=completed)
     finally:
         await app.runtime.release(runtime)
 

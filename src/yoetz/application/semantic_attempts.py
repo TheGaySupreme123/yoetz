@@ -330,7 +330,51 @@ class _SemanticAttemptLedger(Protocol):
         pending_expires_at: datetime,
     ) -> object: ...
 
+    async def load_disclosure_wait(self, writer_id: str, operation_id: str) -> object | None: ...
+
+    async def resolve_disclosure_wait(self, job_id: str) -> object: ...
+
     async def renew_leases(self, lease: OperationLease) -> OperationLease: ...
+
+
+async def _resolve_disclosure_wait_after_terminal(
+    ledger: _SemanticAttemptLedger,
+    lease: OperationLease,
+    job_id: str,
+    attempt_id: str | None = None,
+) -> None:
+    """Close an exact one-use wait only after its bound attempt is terminal.
+
+    The attempt write is the authoritative transition. Resolving the side-table wait afterwards
+    keeps crash recovery safe: a crash before this cleanup still recovers the terminal attempt,
+    while resolving first could expose a started attempt as though it were no longer waiting. The
+    job may itself be terminal or queued for a separately authorized physical retry.
+    """
+
+    try:
+        wait = await ledger.load_disclosure_wait(lease.writer_id, lease.operation_id)
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="semantic_attempts",
+            operation="semantic_disclosure_wait_load_after_terminal_failed",
+        )
+        return
+    if (
+        wait is None
+        or getattr(wait, "job_id", None) != job_id
+        or getattr(wait, "state", None) != "awaiting"
+        or (attempt_id is not None and getattr(wait, "attempt_id", None) != attempt_id)
+    ):
+        return
+    try:
+        await ledger.resolve_disclosure_wait(job_id)
+    except Exception as exc:
+        record_unexpected_exception_without_raising(
+            exc,
+            component="semantic_attempts",
+            operation="semantic_disclosure_wait_resolve_after_terminal_failed",
+        )
 
 
 class _AttemptEvaluation(Protocol):
@@ -379,6 +423,7 @@ async def _recover_terminal_job(
 ) -> object:
     """Rebuild the final evaluation from a durable terminal job without re-claiming."""
 
+    await _resolve_disclosure_wait_after_terminal(ledger, lease, job.job_id)
     accounting = await _accounting_for(ledger, lease, job.job_id, max_retries=max_retries)
     if job.state == "succeeded":
         evaluation: _AttemptEvaluation | None = None
@@ -458,6 +503,12 @@ async def _terminalize_after_failure(
                 component="semantic_attempts",
                 operation="semantic_terminalize_job_failed",
             )
+    await _resolve_disclosure_wait_after_terminal(
+        ledger,
+        lease_holder(),
+        job_id,
+        None if handle is None else handle.attempt_id,
+    )
     try:
         return await _accounting_for(ledger, lease_holder(), job_id, max_retries=max_retries)
     except Exception as exc:
@@ -589,6 +640,7 @@ async def run_durable_semantic_attempts(
                     job.job_id,
                     SemanticReason.PROVIDER_TIMEOUT,
                 )
+                await _resolve_disclosure_wait_after_terminal(ledger, current_lease, job.job_id)
                 accounting = await _accounting_for(
                     ledger, current_lease, job.job_id, max_retries=max_retries
                 )
@@ -605,6 +657,7 @@ async def run_durable_semantic_attempts(
                 max_retries=max_retries,
             )
             await ledger.fail_semantic_job(current_lease, job.job_id, reason)
+            await _resolve_disclosure_wait_after_terminal(ledger, current_lease, job.job_id)
             accounting = await _accounting_for(
                 ledger, current_lease, job.job_id, max_retries=max_retries
             )
@@ -671,6 +724,9 @@ async def run_durable_semantic_attempts(
                 handle, AttemptOutcome.RESPONSE_DURABLE, response_ref
             )
             await ledger.select_attempt(current_lease, handle, response_ref)
+            await _resolve_disclosure_wait_after_terminal(
+                ledger, current_lease, job.job_id, handle.attempt_id
+            )
             accounting = await _accounting_for(
                 ledger, current_lease, job.job_id, max_retries=max_retries
             )
@@ -734,6 +790,9 @@ async def run_durable_semantic_attempts(
                 AttemptOutcome.EXPIRED,
                 terminal_code=evaluation.reason,
             )
+            await _resolve_disclosure_wait_after_terminal(
+                ledger, current_lease, job.job_id, handle.attempt_id
+            )
             # A repair is not waiting out a transport fault; resubmit without backoff.
             repair = is_repairable_semantic_outcome(evaluation.status, evaluation.reason)
             delay = backoff_seconds(handle.attempt_ordinal, kind="none" if repair else "transient")
@@ -752,6 +811,9 @@ async def run_durable_semantic_attempts(
             AttemptOutcome.FAILED,
             terminal_code=terminal_reason,
         )
+        await _resolve_disclosure_wait_after_terminal(
+            ledger, current_lease, job.job_id, handle.attempt_id
+        )
         accounting = await _accounting_for(
             ledger, current_lease, job.job_id, max_retries=max_retries
         )
@@ -763,6 +825,7 @@ async def run_durable_semantic_attempts(
             job.job_id,
             SemanticReason.RETRY_BUDGET_EXHAUSTED,
         )
+        await _resolve_disclosure_wait_after_terminal(ledger, current_lease, job.job_id)
         accounting = await _accounting_for(
             ledger, current_lease, job.job_id, max_retries=max_retries
         )
@@ -779,5 +842,6 @@ async def run_durable_semantic_attempts(
         max_retries=max_retries,
     )
     await ledger.fail_semantic_job(current_lease, job.job_id, reason)
+    await _resolve_disclosure_wait_after_terminal(ledger, current_lease, job.job_id)
     accounting = await _accounting_for(ledger, current_lease, job.job_id, max_retries=max_retries)
     return build_final(status, reason, last, accounting)
