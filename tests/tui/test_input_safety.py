@@ -125,7 +125,7 @@ async def test_escape_on_a_stop_the_service_confirmation_leaves_it_running(
     async with app.run_test(size=WIDE) as pilot:
         await pilot.pause()
         await run_command(pilot, app, "/service")
-        await pilot.press("down", "down", "down", "enter")  # Stop the service
+        await pilot.press("down", "down", "down", "down", "enter")  # Stop the service
         await pilot.pause()
         assert app.open_view is not None
         assert app.open_view.view_name == "service-stop"
@@ -226,7 +226,7 @@ async def test_a_number_selects_only_when_no_field_owns_the_keyboard(
         view = app.open_view
         assert view is not None
         assert view.accepts_printable_shortcuts is True
-        await pilot.press("3")  # "Lock now"
+        await pilot.press("4")  # "Lock now"
         await pilot.pause()
         assert "Locked." in transcript(app)
 

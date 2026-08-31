@@ -1551,6 +1551,9 @@ def _patch_auto_unlock_store(
     monkeypatch: pytest.MonkeyPatch,
     secret: bytes | None,
     reason: str = "none",
+    *,
+    staged: bool = False,
+    promote_error: Exception | None = None,
 ) -> None:
     class _Store:
         def load_with_reason(self) -> tuple[bytearray | None, str]:
@@ -1563,10 +1566,11 @@ def _patch_auto_unlock_store(
         ) -> tuple[tuple[tuple[bytearray, bool], ...], str]:
             if secret is None:
                 return (), reason
-            return ((bytearray(secret), False),), reason
+            return ((bytearray(secret), staged),), reason
 
         def promote_staged_rotation(self) -> None:
-            return None
+            if promote_error is not None:
+                raise promote_error
 
         def discard_staged_rotation(self) -> None:
             return None
@@ -1636,6 +1640,135 @@ async def test_soft_lock_auto_ready_reopens_on_next_ordinary_dispatch(
     assert daemon.status().state_reason == "none"
     assert application.start_calls == 1
     await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_staged_promote_failure_after_unlock_keeps_vault_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keyring promote failure after the staged candidate unlocked is hygiene, not a relock.
+
+    The unlock already succeeded, so failing to reconcile the staged platform-store entry must
+    not send a ready vault back to LOCKED (clients would see vault_locked until restart).
+    """
+
+    application = _Application()
+    vault = _PassphraseVault()
+    secret = b"correct horse battery staple!!"
+    vault.expect_secret(secret)
+
+    async def factory(service_generation: int, vault_generation: int) -> _Application:
+        del service_generation, vault_generation
+        return application
+
+    _patch_auto_unlock_store(
+        monkeypatch,
+        secret,
+        staged=True,
+        promote_error=OSError("keyring write failed"),
+    )
+    daemon = _soft_lock_daemon(tmp_path, factory=factory, vault=vault)
+    await daemon.start()
+    daemon._state_reason = "idle_relock"  # pyright: ignore[reportPrivateUsage]
+
+    result = await daemon.dispatch(
+        ControlClientKind.MCP_BRIDGE,
+        _request(daemon, ControlMethod.START, _start_body()),
+    )
+
+    assert result.outcome == "ok"
+    assert vault.unlock_count == 1
+    assert vault.ready is True
+    assert vault.lock_count == 0, "a promote failure must not relock the ready vault"
+    assert daemon.status().state is ServiceState.READY
+    assert daemon.status().state_reason == "none"
+    assert application.start_calls == 1
+    await daemon.close()
+
+
+@pytest.mark.anyio
+async def test_production_composition_promote_failure_keeps_unlocked_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Startup auto-unlock must leave a ready vault when staged promote fails (#492)."""
+
+    from yoetz.adapters.keys.encrypted_vault import EncryptedVaultStore
+    from yoetz.adapters.keys.secret_memory import LocalSecretMemory
+    from yoetz.ports.secret_memory import SecretPurpose
+    from yoetz.service.unlock import UnlockThrottleStore
+    from yoetz.service.vault import VaultService
+
+    root = tmp_path / "data"
+    metadata = tmp_path / "state"
+    root.mkdir(mode=0o700)
+    metadata.mkdir(mode=0o700)
+    secret = b"correct horse battery staple!!"
+    clock = _Clock()
+    throttle = UnlockThrottleStore(
+        metadata / "unlock-throttle.json",
+        installation_id=INSTALLATION_ID,
+        writer_instance_id=_INSTANCE_ID,
+        clock=clock,  # pyright: ignore[reportArgumentType]
+    )
+    record = throttle.stage_initial_record()
+    marker_store = daemon_module._InstallationStateStore(  # pyright: ignore[reportPrivateUsage]
+        root / "installation-state.json",
+        metadata / "unlock-throttle.json",
+        metadata / "service-generation.json",
+    )
+    memory = LocalSecretMemory()
+    setup_vault = VaultService(
+        installation_id=INSTALLATION_ID,
+        service_generation=1,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=clock,  # pyright: ignore[reportArgumentType]
+        vault_store_factory=lambda: EncryptedVaultStore(root / "vault"),
+        pristine_state_digest="sha256:" + "1" * 64,
+        publish_mode=marker_store.publish,
+    )
+    await setup_vault.initialize_passphrase(
+        memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(secret)),
+        record.record_digest,
+    )
+    await setup_vault.close()
+    memory.close()
+
+    _patch_auto_unlock_store(
+        monkeypatch,
+        secret,
+        staged=True,
+        promote_error=OSError("keyring write failed"),
+    )
+
+    paths = daemon_module._ProductionPaths(  # pyright: ignore[reportPrivateUsage]
+        root,
+        metadata / "service-generation.json",
+        metadata / "unlock-throttle.json",
+        metadata / "service.lock",
+        metadata,
+    )
+
+    async def bind(_kind: str) -> _Listener:
+        return _Listener()
+
+    binders = daemon_module._ListenerBinders(  # pyright: ignore[reportPrivateUsage]
+        lambda: bind("control"),  # pyright: ignore[reportArgumentType]
+        lambda: bind("secret"),  # pyright: ignore[reportArgumentType]
+        lambda: bind("human"),  # pyright: ignore[reportArgumentType]
+    )
+    composition = await daemon_module._production_composition(  # pyright: ignore[reportPrivateUsage]
+        _config=YoetzConfig(),
+        _paths=paths,
+        _binders=binders,
+    )
+    daemon = ServiceDaemon(_composition=composition)
+    try:
+        assert composition.vault.ready is True
+        assert composition.auto_unlock_reason == "none"
+        await composition.lifecycle.transition(ServiceState.LOCKED)
+    finally:
+        await daemon.close()
 
 
 @pytest.mark.anyio

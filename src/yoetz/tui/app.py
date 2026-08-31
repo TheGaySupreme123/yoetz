@@ -1420,6 +1420,11 @@ class YoetzTui(App[int]):
                 options=[
                     Option("unlock", "Unlock", "Uses the secure prompt on this terminal."),
                     Option("init", "Set up a passphrase", "First install only."),
+                    Option(
+                        "rotate",
+                        "Change the passphrase",
+                        "Confirms the current one, then asks for a new one.",
+                    ),
                     Option("lock", "Lock now"),
                     Option("stop", "Stop the service", "Yoetz will not restart it for you."),
                 ],
@@ -1435,6 +1440,12 @@ class YoetzTui(App[int]):
                 "Choose a Yoetz passphrase",
                 self.runtime.initialize_passphrase_vault,
                 fallback_command="yoetz service unlock --initialize",
+            )
+        elif choice == "rotate":
+            await self._run_confidential(
+                "Change your Yoetz passphrase",
+                self.runtime.rotate_vault_passphrase,
+                fallback_command="yoetz service rotate-passphrase",
             )
         elif choice == "lock":
             state = await self.runtime.service_lock()

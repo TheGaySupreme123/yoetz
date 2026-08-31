@@ -167,6 +167,35 @@ def test_initialize_confirms_twice_locally_and_returns_only_first_buffer() -> No
     assert confirmation == bytearray(len(_PASSPHRASE_CANARY))
     assert terminal.bounds == [1_024, 1_024]
     assert terminal.prompts[0] == ("Passphrase (16-1024 UTF-8 bytes; no control characters): ")
+    assert terminal.prompts[1] == (
+        "Confirm passphrase (16-1024 UTF-8 bytes; no control characters): "
+    )
+    result[:] = b"\x00" * len(result)
+
+
+def test_rotate_replacement_uses_new_vault_passphrase_prompt() -> None:
+    from yoetz.service.confidential_protocol import (
+        ConfidentialSecretPurpose,
+        EmptyVaultTarget,
+        HumanCeremonyKind,
+    )
+
+    first = bytearray(_PASSPHRASE_CANARY)
+    confirmation = bytearray(_PASSPHRASE_CANARY)
+    terminal = _SecretTerminal([first, confirmation])
+    result = _unlock_secret_reader()(
+        terminal,
+        HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE,
+        EmptyVaultTarget(expected_mode="passphrase"),
+        ConfidentialSecretPurpose.VAULT_REWRAP,
+    )
+    assert result is first
+    assert terminal.prompts[0] == (
+        "New vault passphrase (16-1024 UTF-8 bytes; no control characters): "
+    )
+    assert terminal.prompts[1] == (
+        "Confirm passphrase (16-1024 UTF-8 bytes; no control characters): "
+    )
     result[:] = b"\x00" * len(result)
 
 

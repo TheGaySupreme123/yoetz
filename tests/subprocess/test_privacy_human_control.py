@@ -325,7 +325,12 @@ def test_policy_approval_reauthenticates_without_echo_or_secret_output() -> None
     assert b"6 of 7 changes below make it less restrictive" in shown
     assert b"Diff digest: sha256:" + b"4" * 64 in shown
     os.write(master_fd, b"approve\n")
-    _read_until(master_fd, transcript, b"Passphrase: ", deadline)
+    _read_until(
+        master_fd,
+        transcript,
+        b"Passphrase (16-1024 UTF-8 bytes; no control characters): ",
+        deadline,
+    )
     os.write(master_fd, _SECRET_CANARY + b"\n")
     observed, stdout = _finish_tty_probe(process, master_fd, slave_fd, transcript)
     assert observed == {
@@ -350,7 +355,7 @@ def test_policy_approval_uses_provisioned_reauthentication_without_prompting() -
         "result": "committed",
         "secret_lengths": [len(_SECRET_CANARY)],
     }
-    assert b"Passphrase: " not in transcript
+    assert b"Passphrase" not in transcript
     assert _SECRET_CANARY not in transcript
     assert _SECRET_CANARY not in stdout
 

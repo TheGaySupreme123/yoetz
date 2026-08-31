@@ -99,6 +99,8 @@ _FIXED_ERROR_REASONS: Final = frozenset(
         "trusted_console_required",
     }
 )
+_PASSPHRASE_PROMPT_SUFFIX: Final = " (16-1024 UTF-8 bytes; no control characters): "
+_IGNORABLE_ROTATION_STAGE_REASONS: Final = frozenset({"missing", "unsupported"})
 
 
 class HumanCeremonyCliError(Exception):
@@ -729,6 +731,28 @@ def _needs_confirmation(
     )
 
 
+def _passphrase_prompt(stem: str) -> str:
+    """Prompt stem plus the shared length/control-character contract suffix."""
+
+    return f"{stem}{_PASSPHRASE_PROMPT_SUFFIX}"
+
+
+def _raise_for_rotation_stage_error(exc: Exception) -> None:
+    """Map a staged-keyring write failure without calling the user's input invalid.
+
+    Missing or unsupported backends cannot hold a stage; other keyring failures are
+    ceremony-result problems, not a malformed passphrase.
+    """
+
+    from yoetz.adapters.keys.os_keyring import OSKeyringError
+
+    if type(exc) is not OSKeyringError:
+        raise HumanCeremonyCliError("result_invalid") from exc
+    if exc.reason in _IGNORABLE_ROTATION_STAGE_REASONS:
+        return
+    raise HumanCeremonyCliError("result_invalid") from exc
+
+
 def _read_secret(
     terminal: _CeremonyTerminal,
     kind: HumanCeremonyKind,
@@ -740,14 +764,14 @@ def _read_secret(
     label = (
         "Provider credential: "
         if purpose is ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
-        else "Recovery code or passphrase: "
-        if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
-        else "New vault passphrase: "
-        if purpose is ConfidentialSecretPurpose.VAULT_REWRAP
-        else "Passphrase: "
+        else _passphrase_prompt(
+            "Recovery code or passphrase"
+            if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
+            else "New vault passphrase"
+            if purpose is ConfidentialSecretPurpose.VAULT_REWRAP
+            else "Passphrase"
+        )
     )
-    if is_passphrase:
-        label = f"{label[:-2]} (16-1024 UTF-8 bytes; no control characters): "
     while True:
         first = terminal.read_secret(label, maximum)
         accepted = False
@@ -766,9 +790,11 @@ def _read_secret(
                 accepted = True
                 return first
             confirmation = terminal.read_secret(
-                "Confirm recovery passphrase: "
-                if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
-                else "Confirm passphrase: ",
+                _passphrase_prompt(
+                    "Confirm recovery passphrase"
+                    if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
+                    else "Confirm passphrase"
+                ),
                 maximum,
             )
             try:
@@ -927,8 +953,7 @@ async def _drive_session(
                 try:
                     store.stage_value_for_rotation(secret_buffer)
                 except OSKeyringError as exc:
-                    if exc.reason not in {"missing", "unsupported"}:
-                        raise HumanCeremonyCliError("input_invalid") from exc
+                    _raise_for_rotation_stage_error(exc)
                 else:
                     rotation_store = store
                     rotation_staged = True

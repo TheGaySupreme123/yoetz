@@ -192,25 +192,10 @@ checks above are therefore load-bearing skill behavior. Target binding, expiry, 
 repository commitment, machine-policy ceilings, vault reauthentication, and no-echo result rules
 remain runtime-enforced.
 
-`vault_initialize` permits agent-chat authorization only after an explicit current-chat user
-instruction for that exact prepared action. Use `yoetz consent prepare vault_initialize`, show the
-returned danger text and exact digests, then relay those exact values through `yoetz consent
-authorize`; never generate, request, receive, or pass a vault secret yourself. Yoetz generates the
-secret locally, stores it in the scoped platform credential store, sends it through confidential
-ingress, and returns only structural state. A pre-existing entry or non-pristine vault still fails
-closed. For the manual alternative, `yoetz service initialize-passphrase` shows `*` feedback and
-requires 16–1024 UTF-8 bytes with no control characters; invalid input and mismatched confirmation
-re-prompt locally. Locked existing vaults still need the ordinary local-human unlock ceremony. No
-`--yolo`.
-
-`vault_passphrase_rotate` uses the same exact prepare/show/authorize sequence for a ready
-passphrase vault. Never ask for either passphrase. The helper loads the current scoped secret,
-stages a fresh random replacement in the platform credential store, reauthenticates and rewraps
-locally, then returns only `state` and `reason`. If interrupted ambiguously, do not delete or retry
-the staged entry; tell the user to restart the Yoetz service, whose startup reconciliation tries
-both bounded candidates and keeps only the one that authenticates the envelope. A user who knows
-their passphrase may instead run `yoetz service rotate-passphrase` locally and choose the
-replacement through the masked trusted prompt.
+`vault_initialize` and `vault_passphrase_rotate` follow that same delegated authorization path;
+never handle or ask for a vault passphrase. If rotation is interrupted, leave the staged entry
+and restart the service; reconciliation keeps the authenticating candidate. Locked vaults keep
+the human unlock ceremony. No `--yolo`.
 
 # Recommended defaults remain user decisions
 
