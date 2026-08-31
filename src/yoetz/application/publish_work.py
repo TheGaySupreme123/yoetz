@@ -599,7 +599,10 @@ def _validate_admission(
                     subfield="payload",
                     payload_field="digest_binding",
                 )
-            if trusted_import and provenance is EvidenceDigestProvenance.APPROVED_CHECK:
+            if trusted_import and provenance not in {
+                EvidenceDigestProvenance.CALLER_ASSERTED,
+                EvidenceDigestProvenance.IMPORT_OBSERVED,
+            }:
                 raise _event_invalid(
                     "evidence_digest_provenance_invalid",
                     event_index=index,

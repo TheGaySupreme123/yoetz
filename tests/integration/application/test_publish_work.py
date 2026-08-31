@@ -729,12 +729,17 @@ def _typed_evidence_draft(
     provenance: str = "caller_asserted",
 ) -> dict[str, object]:
     draft = _evidence_draft(event_tail)
-    draft["schema"] = {"name": "evidence_recorded", "version": "1.1.0"}
+    draft["schema"] = {
+        "name": "evidence_recorded",
+        "version": "1.2.0" if provenance == "observation_captured" else "1.1.0",
+    }
     payload = cast(dict[str, object], draft["payload"])
     payload["evidence_kind"] = evidence_kind
     payload["digest_binding"] = {
         "subject": digest_subject,
-        "content_availability": "digest_only",
+        "content_availability": (
+            "captured" if provenance == "observation_captured" else "digest_only"
+        ),
         "byte_count": 128,
         "provenance": provenance,
     }
@@ -742,6 +747,10 @@ def _typed_evidence_draft(
         binding = cast(dict[str, object], payload["digest_binding"])
         binding["approval_commitment"] = "sha256:" + "22" * 32
         binding["approved_check_result_digest"] = "sha256:" + "33" * 32
+    elif provenance == "observation_captured":
+        payload["strength"] = "immutable_snapshot"
+        payload["captured_object_id"] = "obj_00000000-0000-4000-8000-000000000302"
+        draft["artifact_refs"] = (payload["captured_object_id"],)
     return draft
 
 
@@ -778,6 +787,25 @@ async def test_typed_digest_subject_mismatch_and_reserved_provenance_fail_before
     with pytest.raises(PublicOperationError) as authority:
         await execute_publish_work(cast(Application, app), reserved)
     assert authority.value.safe_details["reason_code"] == "evidence_digest_provenance_invalid"
+    assert len(objects._data) == before  # pyright: ignore[reportPrivateUsage]
+
+    captured = _request(
+        request_tail=696,
+        event_drafts=(
+            _typed_evidence_draft(
+                697,
+                evidence_kind="artifact",
+                digest_subject="bounded_excerpt",
+                provenance="observation_captured",
+            ),
+        ),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    with pytest.raises(PublicOperationError) as captured_authority:
+        await execute_publish_work(cast(Application, app), captured)
+    assert (
+        captured_authority.value.safe_details["reason_code"] == "evidence_digest_provenance_invalid"
+    )
     assert len(objects._data) == before  # pyright: ignore[reportPrivateUsage]
 
 

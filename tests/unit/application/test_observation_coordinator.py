@@ -2938,9 +2938,9 @@ async def test_check_barrier_deferral_is_designed_backpressure(
     class _Coordinator(ObservationCoordinator):
         async def _capture_content(  # type: ignore[override]
             self, runtime: object, store: object, **kwargs: object
-        ) -> tuple[tuple[str, ...], bool]:
+        ) -> tuple[tuple[str, ...], bool, bool]:
             del runtime, store, kwargs
-            return ((), False)
+            return ((), False, False)
 
         async def _append_materialized(  # type: ignore[override]
             self, *args: object, **kwargs: object
@@ -3303,9 +3303,9 @@ async def test_duplicate_ingest_reconstructed_append_detects_same_task_rewind(
     class _Coordinator(ObservationCoordinator):
         async def _capture_content(  # type: ignore[override]
             self, runtime: object, store: object, **kwargs: object
-        ) -> tuple[tuple[str, ...], bool]:
+        ) -> tuple[tuple[str, ...], bool, bool]:
             del runtime, store, kwargs
-            return ((), False)
+            return ((), False, False)
 
         async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
             del args, kwargs
@@ -3381,9 +3381,9 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
     class _Coordinator(ObservationCoordinator):
         async def _capture_content(  # type: ignore[override]
             self, runtime: object, store: object, **kwargs: object
-        ) -> tuple[tuple[str, ...], bool]:
+        ) -> tuple[tuple[str, ...], bool, bool]:
             del runtime, store, kwargs
-            return ((), False)
+            return ((), False, False)
 
         async def _append_materialized(  # type: ignore[override]
             self,
@@ -3596,9 +3596,9 @@ async def test_later_stream_failure_correction_projection_policy(
     class _Coordinator(ObservationCoordinator):
         async def _capture_content(  # type: ignore[override]
             self, runtime: object, store: object, **kwargs: object
-        ) -> tuple[tuple[str, ...], bool]:
+        ) -> tuple[tuple[str, ...], bool, bool]:
             del runtime, store, kwargs
-            return ((), False)
+            return ((), False, False)
 
         async def _append_materialized(  # type: ignore[override]
             self,
@@ -3798,9 +3798,9 @@ async def test_identity_claim_conflict_rejects_one_envelope_without_latching(
     class _Coordinator(ObservationCoordinator):
         async def _capture_content(  # type: ignore[override]
             self, runtime: object, store: object, **kwargs: object
-        ) -> tuple[tuple[str, ...], bool]:
+        ) -> tuple[tuple[str, ...], bool, bool]:
             del runtime, store, kwargs
-            return ((), False)
+            return ((), False, False)
 
         async def _append_materialized(  # type: ignore[override]
             self, *args: object, **kwargs: object

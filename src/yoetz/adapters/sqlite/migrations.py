@@ -76,6 +76,7 @@ BUNDLE_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration("0005", _load_resource("bundle", "0005")),
     Migration("0006", _load_resource("bundle", "0006")),
     Migration("0007", _load_resource("bundle", "0007")),
+    Migration("0008", _load_resource("bundle", "0008")),
 )
 
 

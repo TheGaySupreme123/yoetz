@@ -20,7 +20,8 @@ Deterministic evidence says what a reviewed rule computed from the accepted reco
 Observation-derived records are evidence of what the harness observed. They are not claims on the
 agent's behalf. Completion and material claims come only from an explicit cooperative publication
 or an explicit admitted claim signal; a lifecycle `Stop` or agent-message envelope alone cannot
-support completion wording.
+support completion wording. Only the observation coordinator on `hook_observed` may record
+`observation_captured`, and that provenance never means verified.
 
 Digest-bearing evidence separates four facts: the evidence family, the exact byte subject, whether
 the bytes were retained, and who established that binding. Ordinary publication remains
