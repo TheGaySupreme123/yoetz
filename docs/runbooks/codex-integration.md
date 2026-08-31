@@ -367,7 +367,29 @@ entry is not positively observed absent; a generic failed named lookup is not su
 Plugin-managed MCP is not this command: it goes away with the plugin artifact, not with `codex mcp
 remove`.
 
-## 9. Troubleshooting and recovery
+## 9. Bounded `codex exec --json` import
+
+The import support command is Codex-only and local. It accepts the exact request documented in
+[`docs/usage/importing-codex-jsonl.md`](../usage/importing-codex-jsonl.md); it does not read rollout
+files, add an MCP operation, hook event, or dedicated TUI screen, and it does not change
+external-review policy. The CLI import and consent commands are the owning terminal surfaces.
+
+The first `yoetz import --input <request> --json` call must stop with
+`PRIVACY_AUTHORITY_REQUIRED` after the source and plan are durable. Run
+`yoetz consent status --json` and review the `import_publication_preview`. The preview is
+structural only: never copy source lines or excerpts into an agent chat. For agent-attested
+authorization, show the exact danger text and digests, wait for an explicit current-chat approve
+or deny instruction, then relay that exact pending item through `yoetz consent authorize` with
+`--warning-acknowledged`. Agent attestation is not independent proof. After approval, replay the
+identical import request; do not add an approval argument or mint a new request ID.
+
+The owner-only authorization survives a service restart only for the same stored plan. It is
+consumed after terminal completion. A source, manifest, target task/session/writer,
+profile/version, mapping, plan, or limit change must produce another preview. Denial, expiry, or a
+different pending consent publishes nothing. Import intake never authorizes semantic-provider or
+reviewer egress.
+
+## 10. Troubleshooting and recovery
 
 | Symptom | Action |
 |---|---|
@@ -390,7 +412,7 @@ remove`.
 | `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`; read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (the session bound consent without a canonical locator, so no paired request was legal), `auto_attach_request_invalid` (an authoring defect in the request — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path. |
 | `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
 
-## 10. Security, privacy, and prohibited actions
+## 11. Security, privacy, and prohibited actions
 
 Never paste modified skill content, repository content, paths, Codex configuration, a transcript, a
 prompt, a key, an environment variable, or a raw exception into public support. Share only versions,

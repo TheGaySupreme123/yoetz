@@ -14,6 +14,9 @@ from builders.ledger_adapters import (
     memory_adapter,
     ownership_fence,
 )
+from yoetz.application.import_review import (
+    _publication_frontier,  # pyright: ignore[reportPrivateUsage]
+)
 from yoetz.application.publish_work import Application, execute_publish_work
 from yoetz.application.status import Application as StatusApplication
 from yoetz.application.status import execute_status
@@ -282,6 +285,26 @@ async def test_same_request_id_replay_returns_the_stored_result_without_rewritin
     )
     # No second write: the replay reads stored state rather than re-publishing.
     assert len(objects._data) == durable_after_first  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_import_replay_recovers_the_original_subject_frontier_after_ambiguous_append() -> (
+    None
+):
+    app, _objects = _composition()
+    original = _request(expected_frontier={"sequence": "0", "head_digest": "genesis"})
+    first = await execute_publish_work(cast(Application, app), original)
+
+    # Simulate the importer crashing after the ledger commit but before record_batch. Its own row
+    # still selects this batch while the task head has advanced past the original request frontier.
+    assert await app.runtime.task.ledger.load_frontier() == first.result_frontier
+    recovered = await _publication_frontier(app.runtime.task, original.request_id)
+    assert recovered == first.subject_frontier == Frontier.genesis()
+    assert original.expected_frontier is not None
+    assert original.expected_frontier.model_dump(mode="json") == dict(recovered.as_wire())
+
+    replay = await execute_publish_work(cast(Application, app), original)
+    assert replay.outcome == "replayed"
+    assert replay.result_frontier == first.result_frontier
 
 
 async def test_same_id_changed_logical_request_conflicts_before_reencryption() -> None:

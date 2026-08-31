@@ -196,7 +196,7 @@ This is an agent-attested trust model, not host-verified proof: Yoetz cannot ind
 authenticate the chat provenance, and a compromised agent could forge the assertion. Your source
 checks above are therefore load-bearing skill behavior. Target binding, expiry, single-use claim,
 repository commitment, machine-policy ceilings, vault reauthentication, and no-echo result rules
-remain runtime-enforced.
+remain runtime-enforced. JSONL: no chat source.
 
 `vault_initialize` never permits agent-chat authorization or an agent-selected vault secret. The
 explicit manual `yoetz service initialize-passphrase` ceremony remains separate. Locked vaults

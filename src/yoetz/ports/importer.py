@@ -641,6 +641,7 @@ class ImportAllocation:
     lease_owner_id: str | None
     lease_generation: int | None
     lease_expires_at: Timestamp | None
+    captured_source: CapturedImportSource
     source_object: ObjectRef
     source_commitment: str
     plan_digest: str | None
@@ -680,9 +681,17 @@ class ImportAllocation:
         if type(self.state) is not ImportState or type(self.phase) is not ImportPhase:
             raise _invalid("import_allocation_invalid")
         _positive(self.owner_generation, maximum=_MAX_SQLITE_INTEGER)
+        if type(self.captured_source) is not CapturedImportSource:
+            raise _invalid("import_allocation_invalid")
         _object_ref(self.source_object, ObjectKind.IMPORT_SOURCE)
         validate_commitment(self.source_commitment)
-        if self.source_object.commitment != self.source_commitment:
+        if (
+            self.source_object.commitment != self.source_commitment
+            or self.captured_source.source_object != self.source_object
+            or self.captured_source.source_commitment != self.source_commitment
+            or self.captured_source.codex_capability_profile_id
+            != self.source_identity.codex_capability_profile_id
+        ):
             raise _invalid("import_allocation_invalid")
         plan_digest = _digest_or_none(self.plan_digest)
         object.__setattr__(self, "plan_digest", plan_digest)
@@ -994,6 +1003,8 @@ class ImporterPort(Protocol):
         allocation: ImportAllocation,
         plan: PreparedImportPlan,
     ) -> ImportAllocation: ...
+
+    async def release_lease_for_authorization(self, allocation: ImportAllocation) -> None: ...
 
     async def next_batch(self, allocation: ImportAllocation) -> ImportBatchSelection: ...
 

@@ -696,6 +696,18 @@ class MemoryImporter:
         )
         return ImportBatchSelection(refreshed, batch)
 
+    async def release_lease_for_authorization(self, allocation: ImportAllocation) -> None:
+        """Make a prepared, unpublished plan immediately resumable after consent."""
+
+        async with self._lock:
+            job = self._require_lease(allocation, {ImportPhase.PLAN_READY})
+            self._state.jobs[job.identity.identity_digest] = replace(
+                job,
+                revision=job.revision + 1,
+                lease_expires_at=self._clock.now_utc(),
+            )
+            self._state.revision += 1
+
     async def record_batch(
         self, allocation: ImportAllocation, batch: ImportBatch, result: AppendResult
     ) -> ImportAllocation:
@@ -1114,6 +1126,7 @@ class MemoryImporter:
             lease_expires_at=None
             if job.lease_expires_at is None
             else timestamp_from_datetime(job.lease_expires_at),
+            captured_source=job.source,
             source_object=job.source.source_object,
             source_commitment=job.source.source_commitment,
             plan_digest=job.plan_digest,
@@ -1204,7 +1217,11 @@ def event_draft_from_json(value: object) -> EventDraft:
         causal_parents=tuple(
             event_id(item) for item in cast(tuple[object, ...], row["causal_parents"])
         ),
-        payload=decode_payload(schema, cast(DomainJsonValue, row["payload"])),
+        payload=(
+            decode_payload(schema, cast(DomainJsonValue, row["payload"]))
+            if schema in PAYLOAD_TYPES
+            else cast(DomainJsonValue, row["payload"])
+        ),
         artifact_refs=tuple(
             object_id(item) for item in cast(tuple[object, ...], row["artifact_refs"])
         ),
