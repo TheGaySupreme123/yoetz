@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+import shutil
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -42,7 +43,12 @@ from yoetz.ports.plugin_artifacts import (
     PluginOperationState,
     PluginProofFacet,
 )
-from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.canonical import (
+    JsonValue,
+    canonical_digest,
+    canonical_encode,
+    strict_json_parse,
+)
 from yoetz.service.elevated_bootstrap import catalog_payload, load_pending
 from yoetz.version import read_verified_resource
 
@@ -58,6 +64,53 @@ def _target(tmp_path: Path) -> ArtifactTarget:
 
 def _setup_authority(preview_digest: str) -> ArtifactAuthority:
     return ArtifactAuthority("setup_composition", preview_digest)
+
+
+def _tree_digest(members: Mapping[str, bytes]) -> str:
+    return canonical_digest(
+        {
+            "files": [
+                {
+                    "relative_path": path,
+                    "sha256": f"sha256:{hashlib.sha256(data).hexdigest()}",
+                    "size": len(data),
+                }
+                for path, data in sorted(members.items(), key=lambda item: item[0].encode("ascii"))
+            ]
+        }
+    )
+
+
+def _make_native_tree_self_consistent_but_noncanonical(
+    root: Path,
+    mutation: str,
+) -> None:
+    marker_path = root / ".yoetz-plugin-install.json"
+    parsed = strict_json_parse(marker_path.read_bytes())
+    assert isinstance(parsed, Mapping)
+    marker = dict(cast(Mapping[str, Any], parsed))
+    if mutation == "member":
+        member_path = root / "hooks/hooks.json"
+        changed = member_path.read_bytes() + b"\n"
+        member_path.write_bytes(changed)
+        raw_rows = marker["managed_files"]
+        assert type(raw_rows) is list
+        rows: list[dict[str, Any]] = []
+        for raw_row in cast(list[object], raw_rows):
+            assert isinstance(raw_row, Mapping)
+            row = dict(cast(Mapping[str, Any], raw_row))
+            if row["relative_path"] == "hooks/hooks.json":
+                row["sha256"] = f"sha256:{hashlib.sha256(changed).hexdigest()}"
+                row["size"] = len(changed)
+            rows.append(row)
+        marker["managed_files"] = rows
+    elif mutation == "renderer":
+        marker["adapter_version"] = "codex-plugin/noncanonical"
+    else:
+        raise AssertionError("unknown mutation")
+    body = {name: value for name, value in marker.items() if name != "marker_digest"}
+    body["marker_digest"] = canonical_digest(cast(JsonValue, body))
+    marker_path.write_bytes(canonical_encode(cast(JsonValue, body)) + b"\n")
 
 
 class _Presence:
@@ -81,6 +134,15 @@ class _SetupAuthority:
     def consume_artifact_review(self, authority: ArtifactAuthority, preview_digest: str) -> None:
         del authority, preview_digest
         raise AssertionError("review-only authority was not expected")
+
+
+class _MutatingSetupAuthority(_SetupAuthority):
+    def __init__(self, mutation: Callable[[], None]) -> None:
+        self._mutation = mutation
+
+    def consume_setup_authority(self, authority: ArtifactAuthority, preview_digest: str) -> None:
+        super().consume_setup_authority(authority, preview_digest)
+        self._mutation()
 
 
 class _Resources:
@@ -742,6 +804,7 @@ async def test_codex_native_tree_migrates_as_one_directory_and_remove_rolls_back
         request_id(_request(4)), target, PluginArtifactAction.REPLACE
     )
     assert replace_preview.state_before is PluginArtifactState.NATIVE_MANAGED
+    assert replace_preview.rollback_digest == _tree_digest(native_before)
     await adapter.install_artifact(
         PluginArtifactApplyCommand(
             request_id(_request(4)),
@@ -754,6 +817,7 @@ async def test_codex_native_tree_migrates_as_one_directory_and_remove_rolls_back
     remove_preview = await adapter.preview_artifact(
         request_id(_request(5)), target, PluginArtifactAction.REMOVE
     )
+    assert remove_preview.rollback_digest == replace_preview.rollback_digest
     removed = await adapter.remove_artifact(
         PluginArtifactApplyCommand(
             request_id(_request(5)),
@@ -770,6 +834,157 @@ async def test_codex_native_tree_migrates_as_one_directory_and_remove_rolls_back
         if path.is_file()
     }
     assert native_after == native_before
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mutation", ["member", "renderer"])
+async def test_self_consistent_noncanonical_native_tree_is_not_a_rollback_candidate(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    target = _target(tmp_path)
+    install_plugin(
+        IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path)),
+        allow_untested=True,
+    )
+    _make_native_tree_self_consistent_but_noncanonical(
+        tmp_path / AGENT_PLUGIN_ROOT,
+        mutation,
+    )
+    adapter = PortablePluginArtifactAdapter(review=_SetupAuthority())
+
+    status = await adapter.status_artifact(PluginArtifactStatusCommand(target))
+    assert status.state is PluginArtifactState.MODIFIED
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.preview_artifact(
+            request_id(_request(18)), target, PluginArtifactAction.REPLACE
+        )
+    assert caught.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+    assert (tmp_path / AGENT_PLUGIN_ROOT).is_dir()
+
+
+@pytest.mark.anyio
+async def test_replace_rechecks_native_rollback_bytes_after_authority(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    install_plugin(
+        IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path)),
+        allow_untested=True,
+    )
+    native_root = tmp_path / AGENT_PLUGIN_ROOT
+    adapter = PortablePluginArtifactAdapter(
+        review=_MutatingSetupAuthority(
+            lambda: _make_native_tree_self_consistent_but_noncanonical(native_root, "member")
+        )
+    )
+    preview = await adapter.preview_artifact(
+        request_id(_request(23)), target, PluginArtifactAction.REPLACE
+    )
+
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.install_artifact(
+            PluginArtifactApplyCommand(
+                request_id(_request(23)),
+                target,
+                PluginArtifactAction.REPLACE,
+                preview.preview_digest,
+                _setup_authority(preview.preview_digest),
+            )
+        )
+    assert caught.value.reason is PluginArtifactReason.DESTINATION_CONFLICT
+    assert native_root.is_dir()
+    assert not (tmp_path / ".agents/plugins/.yoetz.plugin-native-rollback").exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mutation", ["member", "renderer"])
+async def test_self_consistent_noncanonical_rollback_is_preserved_and_refused(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    target = _target(tmp_path)
+    install_plugin(
+        IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path)),
+        allow_untested=True,
+    )
+    adapter = PortablePluginArtifactAdapter(review=_SetupAuthority())
+    replace_preview = await adapter.preview_artifact(
+        request_id(_request(19)), target, PluginArtifactAction.REPLACE
+    )
+    await adapter.install_artifact(
+        PluginArtifactApplyCommand(
+            request_id(_request(19)),
+            target,
+            PluginArtifactAction.REPLACE,
+            replace_preview.preview_digest,
+            _setup_authority(replace_preview.preview_digest),
+        )
+    )
+    rollback = tmp_path / ".agents/plugins/.yoetz.plugin-native-rollback"
+    remove_adapter = PortablePluginArtifactAdapter(
+        review=_MutatingSetupAuthority(
+            lambda: _make_native_tree_self_consistent_but_noncanonical(rollback, mutation)
+        )
+    )
+    remove_preview = await remove_adapter.preview_artifact(
+        request_id(_request(20)), target, PluginArtifactAction.REMOVE
+    )
+
+    with pytest.raises(PluginArtifactError) as caught:
+        await remove_adapter.remove_artifact(
+            PluginArtifactApplyCommand(
+                request_id(_request(20)),
+                target,
+                PluginArtifactAction.REMOVE,
+                remove_preview.preview_digest,
+                _setup_authority(remove_preview.preview_digest),
+            )
+        )
+    assert caught.value.reason is PluginArtifactReason.RECOVERY_REQUIRED
+    status = await remove_adapter.status_artifact(PluginArtifactStatusCommand(target))
+    assert status.state is PluginArtifactState.RECOVERY_REQUIRED
+    assert status.rollback_available is False
+    assert rollback.is_dir()
+    assert (tmp_path / AGENT_PLUGIN_ROOT / "plugin.json").is_file()
+
+
+@pytest.mark.anyio
+async def test_remove_rejects_missing_previewed_rollback_before_mutation(tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    install_plugin(
+        IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path)),
+        allow_untested=True,
+    )
+    adapter = PortablePluginArtifactAdapter(review=_SetupAuthority())
+    replace_preview = await adapter.preview_artifact(
+        request_id(_request(21)), target, PluginArtifactAction.REPLACE
+    )
+    await adapter.install_artifact(
+        PluginArtifactApplyCommand(
+            request_id(_request(21)),
+            target,
+            PluginArtifactAction.REPLACE,
+            replace_preview.preview_digest,
+            _setup_authority(replace_preview.preview_digest),
+        )
+    )
+    remove_preview = await adapter.preview_artifact(
+        request_id(_request(22)), target, PluginArtifactAction.REMOVE
+    )
+    rollback = tmp_path / ".agents/plugins/.yoetz.plugin-native-rollback"
+    shutil.rmtree(rollback)
+
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.remove_artifact(
+            PluginArtifactApplyCommand(
+                request_id(_request(22)),
+                target,
+                PluginArtifactAction.REMOVE,
+                remove_preview.preview_digest,
+                _setup_authority(remove_preview.preview_digest),
+            )
+        )
+    assert caught.value.reason is PluginArtifactReason.PREVIEW_STALE
+    assert (tmp_path / AGENT_PLUGIN_ROOT / "plugin.json").is_file()
 
 
 @pytest.mark.anyio

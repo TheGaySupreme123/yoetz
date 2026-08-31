@@ -14,6 +14,8 @@ import apsw
 from yoetz.adapters.memory.ledger import (
     MemoryLedgerAdapter,
     MemoryLedgerState,
+    _AttemptState,  # pyright: ignore[reportPrivateUsage]
+    _case_dependency_digest,  # pyright: ignore[reportPrivateUsage]
     build_append_operation_record,
     compact_status_coverage,
     load_frozen_case_from_resume,
@@ -961,12 +963,156 @@ class SqliteLedger:
                     )
                 await asyncio.sleep(0)
             self._persist_quarantined_operations(tuple(newly_quarantined))
+            # Semantic jobs and attempts back every durable disclosure wait. Recovering only the
+            # side-table marker makes operation status look resumable while the attempt
+            # coordinator sees no job and cannot actually resume it after restart.
+            for job_row in self._db.execute(
+                "SELECT job_id,writer_id,operation_id,case_digest,case_object_id,state,"
+                "active_attempt_id,selected_attempt_id,attempt_count,lease_owner_id,"
+                "lease_generation,lease_expires_at,selected_result_object_id,terminal_code,"
+                "terminal_at FROM semantic_jobs AS jobs WHERE EXISTS ("
+                "SELECT 1 FROM operations AS operations "
+                "WHERE operations.writer_id=jobs.writer_id "
+                "AND operations.operation_id=jobs.operation_id "
+                "AND operations.state='pending')"
+            ):
+                (
+                    job_id_value,
+                    job_writer,
+                    job_operation,
+                    case_digest,
+                    case_object_id,
+                    job_state,
+                    active_attempt_id,
+                    selected_attempt_id,
+                    attempt_count,
+                    job_lease_owner,
+                    job_lease_generation,
+                    job_lease_expires,
+                    selected_result_object_id,
+                    terminal_code,
+                    terminal_at,
+                ) = job_row
+                try:
+                    case_ref = self._object_ref_from_inventory(
+                        cast(str, case_object_id),
+                        self._task_id,
+                        "application/vnd.yoetz.semantic-case+json",
+                    )
+                    selected_ref = (
+                        None
+                        if selected_result_object_id is None
+                        else self._object_ref_from_inventory(
+                            cast(str, selected_result_object_id),
+                            self._task_id,
+                            "application/vnd.yoetz.semantic-response+json",
+                        )
+                    )
+                    job = SemanticJobRecord(
+                        cast(str, job_id_value),
+                        cast(str, job_writer),
+                        cast(str, job_operation),
+                        cast(str, case_digest),
+                        case_ref,
+                        cast(
+                            Literal["queued", "leased", "succeeded", "failed", "quarantined"],
+                            job_state,
+                        ),
+                        cast(int, attempt_count),
+                        cast(str | None, active_attempt_id),
+                        cast(str | None, selected_attempt_id),
+                        cast(str | None, job_lease_owner),
+                        cast(int | None, job_lease_generation),
+                        None
+                        if job_lease_expires is None
+                        else parse_rfc3339_millis(cast(str, job_lease_expires)),
+                        selected_ref,
+                        None if terminal_code is None else SemanticReason(cast(str, terminal_code)),
+                        None
+                        if terminal_at is None
+                        else parse_rfc3339_millis(cast(str, terminal_at)),
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+                self._state.jobs[job.job_id] = job
+                self._state.job_by_case[(job.writer_id, job.operation_id, job.case_digest)] = (
+                    job.job_id
+                )
+
+            for attempt_row in self._db.execute(
+                "SELECT attempt_id,job_id,attempt_ordinal,provider_request_id,owner_generation,"
+                "lease_owner_id,lease_generation,state,result_object_id,terminal_code "
+                "FROM semantic_attempts WHERE job_id IN ("
+                "SELECT job_id FROM semantic_jobs AS jobs WHERE EXISTS ("
+                "SELECT 1 FROM operations AS operations "
+                "WHERE operations.writer_id=jobs.writer_id "
+                "AND operations.operation_id=jobs.operation_id "
+                "AND operations.state='pending'))"
+            ):
+                (
+                    attempt_id_value,
+                    attempt_job_id,
+                    attempt_ordinal,
+                    provider_request_id,
+                    attempt_owner_generation,
+                    attempt_lease_owner,
+                    attempt_lease_generation,
+                    attempt_state,
+                    attempt_result_object_id,
+                    attempt_terminal_code,
+                ) = attempt_row
+                try:
+                    job = self._state.jobs[cast(str, attempt_job_id)]
+                    operation = self._state.operations[(job.writer_id, job.operation_id)][0]
+                    case = self._state.frozen_cases[(job.writer_id, job.operation_id)]
+                    if operation.lease_expires_at is None:
+                        raise ValueError("semantic_attempt_operation_lease_missing")
+                    result_ref = (
+                        None
+                        if attempt_result_object_id is None
+                        else self._object_ref_from_inventory(
+                            cast(str, attempt_result_object_id),
+                            self._task_id,
+                            "application/vnd.yoetz.semantic-response+json",
+                        )
+                    )
+                    handle = SemanticAttemptHandle(
+                        job.job_id,
+                        cast(str, attempt_id_value),
+                        cast(int, attempt_ordinal),
+                        cast(str, provider_request_id),
+                        job.writer_id,
+                        job.operation_id,
+                        cast(str, attempt_owner_generation),
+                        cast(str, attempt_lease_owner),
+                        cast(int, attempt_lease_generation),
+                        operation.lease_expires_at,
+                        case.frontier,
+                        _case_dependency_digest(case),
+                    )
+                    attempt = _AttemptState(
+                        handle,
+                        cast(str, attempt_state),
+                        result_ref,
+                        None
+                        if attempt_terminal_code is None
+                        else SemanticReason(cast(str, attempt_terminal_code)),
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise _public_error(PublicErrorCode.STORAGE_CORRUPT) from exc
+                self._state.attempts[handle.attempt_id] = attempt
+
             # Disclosure waits are durable but the oracle is in-memory, so a restart would
             # otherwise answer "no continuation" for a check that is genuinely still suspended —
             # exactly the unrecoverable state this work exists to remove.
             for wait_row in self._db.execute(
                 "SELECT job_id,attempt_id,writer_id,operation_id,pending_id,"
-                "pending_expires_at,state,resolved_at FROM semantic_disclosure_waits"
+                "pending_expires_at,state,resolved_at FROM semantic_disclosure_waits "
+                "WHERE job_id IN (SELECT job_id FROM semantic_jobs AS jobs WHERE EXISTS ("
+                "SELECT 1 FROM operations AS operations "
+                "WHERE operations.writer_id=jobs.writer_id "
+                "AND operations.operation_id=jobs.operation_id "
+                "AND operations.state='pending'))"
             ):
                 (
                     job_value,
