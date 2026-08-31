@@ -827,6 +827,62 @@ def _permits_external_review(policy: PrivacyPolicy) -> bool:
     )
 
 
+def _reconcile_host_admission(policy: PrivacyPolicy, workspace_locator: Path) -> None:
+    """Keep each host's admission entry for ``check`` consistent with the committed grant.
+
+    Host admission (issue #467) is derived from the repository grant, so the trusted ceremony
+    that changes the grant is the place where the reverse transition happens: a policy that no
+    longer permits external review removes exactly the entries Yoetz wrote, and a policy that
+    does permit it names the hosts that will still hold every semantic check. Advisory output
+    only; a failed sweep is reported, never hidden, and never fails the ceremony.
+    """
+
+    from yoetz.adapters.integrations.host_admission import (
+        ADMISSION_HOSTS,
+        HostAdmissionError,
+        observe_host_admission,
+        sweep_host_admission,
+    )
+
+    try:
+        if _permits_external_review(policy):
+            missing = [
+                host
+                for host in ADMISSION_HOSTS
+                if observe_host_admission(host, workspace_locator).state.value == "absent"
+            ]
+            if missing:
+                typer.echo("")
+                typer.echo(
+                    "  Note: no host auto-review admission for this repository on "
+                    + ", ".join(missing)
+                    + ". An automatic reviewer there will still hold every semantic check."
+                )
+                typer.echo(
+                    "  Run 'yoetz integrate <host> admission preview --project-root .' to let "
+                    "that host admit the owner-authorized check."
+                )
+            return
+        outcomes = sweep_host_admission(workspace_locator)
+        removed = [item.host for item in outcomes if item.outcome == "removed"]
+        failed = [item.host for item in outcomes if item.outcome in {"write_failed", "unknown"}]
+        if removed:
+            typer.echo("")
+            typer.echo(
+                "  Host auto-review admission removed for this repository: " + ", ".join(removed)
+            )
+        if failed:
+            typer.echo("")
+            typer.echo(
+                "  Could not remove host auto-review admission on "
+                + ", ".join(failed)
+                + "; run 'yoetz integrate <host> admission preview --action revoke "
+                "--project-root .' and review the host file."
+            )
+    except HostAdmissionError, OSError:
+        return
+
+
 async def _warn_if_agent_route_cannot_dispatch(policy: PrivacyPolicy) -> None:
     """Say so when the committed policy allows external review the agent route cannot reach.
 
@@ -1223,6 +1279,7 @@ async def run_privacy_setup(
     )
     if proposal_id is None:
         await _warn_if_agent_route_cannot_dispatch(candidate)
+        _reconcile_host_admission(candidate, locator)
         return PrivacySetupReport(
             "configured",
             candidate.profile.value,
@@ -1235,6 +1292,7 @@ async def run_privacy_setup(
     status = getattr(decision, "status", None)
     if status == "committed":
         await _warn_if_agent_route_cannot_dispatch(candidate)
+        _reconcile_host_admission(candidate, locator)
         return PrivacySetupReport(
             "configured",
             candidate.profile.value,

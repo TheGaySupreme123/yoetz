@@ -8,6 +8,14 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Frontier-motion delivery marks now retain the announced head digest and are compared with the
+  routed ledger's actual current frontier. A same-task restore below the delivered high-water (or
+  a different digest at the same sequence) discards the stale mark and announces the rewound
+  lineage, while an old completed-operation replay is still suppressed when the live ledger has
+  not rewound. Notice and delivered-mark caps persist LRU ordinals across restarts, refresh active
+  marks, and evict ended sessions before the least-recently-used live entry; legacy marks without
+  lineage identity fail open to a duplicate announcement (issue #331, consolidating #332/#333).
+
 - The native Cursor plugin's plugin-owned `mcp.json` now launches the exact Yoetz executable the
   plugin's hooks bind (the `/2` marker launcher) instead of a bare `yoetz` that Cursor's sanitized
   desktop PATH could resolve to an older ambient installation. `yoetz integrate cursor plugin
@@ -19,13 +27,14 @@ reverse-chronological released versions.
 
 - The cooperative MCP bridge latches the first availability failure of its host binding
   (`service_unavailable`, `service_incompatible`, `protocol_mismatch`, `endpoint_unsafe`,
-  `peer_untrusted`). Later calls under a new `request_id` — including delegated workers sharing
-  the MCP process — inherit the same public error and `correlation_id` with
+  `peer_untrusted`). Concurrent first arrivals before that result share one on-demand attempt and
+  one diagnostic; later calls under a new `request_id` — including delegated workers sharing the
+  MCP process — inherit the same public error and `correlation_id` with
   `safe_details.availability: terminal_unavailable` and `availability_inherited: true`, and mint no
   new diagnostic, spawn, or supersede. The original `request_id` replay, a changed service holder,
   or one quiet successful handshake clears it. Agent guidance now carries a bounded
   `yoetz_availability` block into delegated assignments and forbids lifecycle commands from
-  `INTERNAL_ERROR` (issue #469).
+  `INTERNAL_ERROR` (issues #469, #476).
 
 - Codex activation recommendation decisions now bind the exact executable path/bytes/version,
   canonical home, activation preview, and rendered-cache digest. Another Codex home or a target

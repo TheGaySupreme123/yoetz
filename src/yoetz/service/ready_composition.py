@@ -16,6 +16,7 @@ import apsw
 
 import yoetz.adapters.sqlite.connection as connection_module
 import yoetz.adapters.sqlite.recovery as recovery_module
+from yoetz.adapters.importers.codex_plan import CodexImportPlans
 from yoetz.adapters.integrations.hook_spool import HookSpool
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
@@ -27,11 +28,13 @@ from yoetz.adapters.providers.local_model import InstalledLocalModelProfileRegis
 from yoetz.adapters.providers.openai_responses_factory import provider_binding_from_config
 from yoetz.adapters.runtime import RuntimeAdapterFactories, open_local_bundle_runtime
 from yoetz.adapters.sqlite.connection import (
+    SqliteWriterThread,
     open_catalog_writer,
     open_read_only,
     open_writer,
     verify_schema_identity,
 )
+from yoetz.adapters.sqlite.importer import SqliteImporter
 from yoetz.adapters.sqlite.migrations import (
     CATALOG_MIGRATIONS,
     initialize_bundle,
@@ -115,7 +118,6 @@ from yoetz.domain.values import (
     disclosure_continuation,
     format_rfc3339_millis,
     repository_grant_continuation,
-    session_id,
 )
 from yoetz.domain.values import (
     JsonValue as DomainJsonValue,
@@ -131,7 +133,7 @@ from yoetz.observability.logging import (
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.control import ControlError, ControlMethod
 from yoetz.ports.diagnostics import DiagnosticsPort, RuntimeCapability, StartupCheckResult
-from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
+from yoetz.ports.importer import ImporterPort
 from yoetz.ports.keys import BundleKeys, MacKeyHandle, MacKeyPurpose
 from yoetz.ports.ledger import FrozenCase, LedgerPort
 from yoetz.ports.objects import (
@@ -173,6 +175,7 @@ from yoetz.protocol.canonical import canonical_digest, canonical_encode, strict_
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, validate_id
 from yoetz.protocol.models import SemanticReason, SemanticStatus
+from yoetz.service.import_publication_authority import ImportPublicationAuthority
 from yoetz.service.vault import ProviderCredentialBinding, provider_credential_profile_binding
 from yoetz.version import build_version_manifest, version_manifest_json
 
@@ -296,18 +299,6 @@ class _PrivacyContentObjectStore:
             staged.encryption_format,
             staged.key_slot,
             staged.metadata,
-        )
-
-
-class _MinimalImporter:
-    async def status(self, value: str) -> ImportStatusSnapshot:
-        return ImportStatusSnapshot(session_id(value), 0, 0, (), ())
-
-    def __getattr__(self, name: str) -> object:
-        raise PublicOperationError(
-            PublicErrorCode.INVALID_REQUEST,
-            f"Importer method unavailable: {name}",
-            False,
         )
 
 
@@ -802,6 +793,7 @@ def build_runtime_adapter_factories(
     _install_recovery_persistence(_RecoveryPersistence(catalog_path, clock))
     opened_dbs: dict[int, apsw.Connection] = {}
     object_root_dbs: dict[int, apsw.Connection] = {}
+    importer_writers: dict[int, SqliteWriterThread] = {}
 
     async def inspect_route(route: object, access: RouteAccess) -> object:
         del access
@@ -945,8 +937,36 @@ def build_runtime_adapter_factories(
         fence: OwnershipFence,
         access: RouteAccess,
     ) -> ImporterPort:
-        del inspection, objects, ledger, fence, access
-        return cast(ImporterPort, _MinimalImporter())
+        del access
+        if type(inspection) is not _BundleInspection:
+            raise ValueError("runtime_importer_invalid")
+        route = inspection.route
+        plans = CodexImportPlans(
+            task_id=cast(str, getattr(route, "task_id")),
+            objects=objects,
+            clock=clock,
+            ids=ids,
+        )
+        writer = SqliteWriterThread(inspection.ledger_path)
+        try:
+            importer = SqliteImporter(
+                task_id=cast(str, getattr(route, "task_id")),
+                admitted_session_id=cast(str, getattr(route, "session_id")),
+                ownership_fence=fence,
+                writer=writer,
+                read_factory=lambda: open_read_only(inspection.ledger_path),
+                objects=objects,
+                ledger=ledger,
+                clock=clock,
+                ids=ids,
+                plan_preparer=plans.prepare,
+                plan_reader=plans.read,
+            )
+            importer_writers[id(importer)] = writer
+            return importer
+        except BaseException:
+            writer.close()
+            raise
 
     async def verify_start(
         inspection: object,
@@ -1001,7 +1021,10 @@ def build_runtime_adapter_factories(
         importer: object | None,
         fence: OwnershipFence | None,
     ) -> None:
-        del importer
+        if importer is not None:
+            writer = importer_writers.pop(id(importer), None)
+            if writer is not None:
+                writer.close()
         if objects is not None:
             _close_db(object_root_dbs.pop(id(objects), None))
         if ledger is not None:
@@ -2108,7 +2131,25 @@ def _privacy_gated_semantic_evaluator(
                     scope=scope,
                     provider_binding=provider,
                 )
-                result = await privacy.evaluate_semantic(candidate, attempt_deadline)
+                wait = await runtime.ledger.load_disclosure_wait(
+                    handle.writer_id, handle.operation_id
+                )
+                if (
+                    wait is not None
+                    and wait.job_id == handle.job_id
+                    and wait.attempt_id == handle.attempt_id
+                    and wait.state == "awaiting"
+                ):
+                    # Exact replay after a trusted local decision resumes the already-prepared
+                    # proposal. Starting the semantic pipeline again would mint a replacement
+                    # proposal and could never observe the decision bound to this attempt.
+                    result = await privacy.resume(
+                        handle.provider_request_id,
+                        semantic_case.case_digest,
+                        attempt_deadline,
+                    )
+                else:
+                    result = await privacy.evaluate_semantic(candidate, attempt_deadline)
                 return _map_egress_to_final(
                     result,
                     ids,
@@ -2614,6 +2655,7 @@ async def provide_service_ready_context(
     if privacy_app is not None:
         support_handlers.update(build_privacy_support_handlers(privacy_app))
 
+    import_publication_authority = ImportPublicationAuthority(state_path=paths.state)
     return ServiceReadyContext(
         service_generation=service_generation,
         vault_generation=vault_generation,
@@ -2634,7 +2676,7 @@ async def provide_service_ready_context(
         disclosure_scope_for=disclosure_scope_for,
         receipt_version_resolver=lambda _: versions,
         waiver_authorizer=lambda _: False,
-        import_publication_authorizer=lambda _: False,
+        import_publication_authorizer=import_publication_authority,
         profile=_profile(config),
         policy_packs=_policy_packs(manifest),
         version_manifest=manifest,

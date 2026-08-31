@@ -67,3 +67,44 @@ def test_an_unread_registration_is_unknown_rather_than_a_blocker() -> None:
     provider = _provider(agent_route_semantic_ready=None, registered_route_profile=None)
     assert _layer(provider) is LayerState.UNKNOWN
     assert "could not be read" in _detail(provider)
+
+
+def _admission_layer(provider: ProviderPosture) -> tuple[LayerState, str]:
+    runtime = YoetzRuntime()
+    layers = runtime._provider_layers(provider, _PRIVACY)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    layer = next(layer for layer in layers if layer.key == "host_admission")
+    return layer.state, layer.detail
+
+
+def test_host_admission_is_its_own_layer_and_names_each_host() -> None:
+    """Issue #467: a ready installation with no admission is where auto-review hosts hold checks."""
+
+    ready = _provider(agent_route_semantic_ready=True, registered_route_profile="policy")
+    state, detail = _admission_layer(ready)
+    assert state is LayerState.UNKNOWN
+    assert "could not be read" in detail
+
+    present = _provider(
+        host_admission=(("claude", "present"), ("codex", "absent"), ("cursor", "absent"))
+    )
+    state, detail = _admission_layer(present)
+    assert state is LayerState.VERIFIED
+    assert detail == "claude present, codex absent, cursor absent"
+
+    absent = _provider(
+        host_admission=(("claude", "absent"), ("codex", "absent"), ("cursor", "absent"))
+    )
+    state, detail = _admission_layer(absent)
+    assert state is LayerState.NOT_CONFIGURED
+    assert "yoetz integrate <host> admission preview" in detail
+
+    unreadable = _provider(host_admission=(("claude", "unknown"), ("codex", "absent")))
+    assert _admission_layer(unreadable)[0] is LayerState.UNKNOWN
+
+    drifted = _provider(
+        host_admission=(("claude", "present"), ("codex", "absent"), ("cursor", "absent")),
+        blockers=(("host_admission_drift", "present"),),
+    )
+    state, detail = _admission_layer(drifted)
+    assert state is LayerState.NOT_CONFIGURED
+    assert "revoke" in detail

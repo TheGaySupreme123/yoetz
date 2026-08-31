@@ -47,6 +47,7 @@ from yoetz.domain.observation import (
     workspace_commitment_from_path,
 )
 from yoetz.domain.values import (
+    Frontier,
     JsonObject,
     JsonValue,
     Timestamp,
@@ -334,6 +335,10 @@ class FrontierMotionNotice:
     head_digest: str
     observation_record_count: int
     task_id: str
+    # Persistence-only LRU clock. It is deliberately excluded from notice
+    # equality and delivery identity: touching an entry must not change the
+    # bytes the hook already peeked.
+    recency_ordinal: int = dataclasses.field(default=0, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -341,9 +346,11 @@ class FrontierMotionNotice:
             or type(self.to_sequence) is not int
             or type(self.observation_record_count) is not int
             or type(self.task_id) is not str
+            or type(self.recency_ordinal) is not int
             or not self.task_id
             or not 0 <= self.from_sequence < self.to_sequence <= _MAX_SAFE_INTEGER
             or not 1 <= self.observation_record_count <= self.to_sequence - self.from_sequence
+            or not 0 <= self.recency_ordinal <= _MAX_SAFE_INTEGER
         ):
             raise ProtocolValueError("invalid_event_value_type")
         validate_sha256_digest(self.head_digest)
@@ -389,6 +396,28 @@ def _clamp_frontier_motion_notice(
         remainder_count,
         notice.task_id,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _FrontierMotionDelivered:
+    """One lineage-bound delivered mark with a persistence-stable LRU clock."""
+
+    task_id: str
+    to_sequence: int
+    head_digest: str
+    recency_ordinal: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.task_id) is not str
+            or not self.task_id
+            or type(self.to_sequence) is not int
+            or not 1 <= self.to_sequence <= _MAX_SAFE_INTEGER
+            or type(self.recency_ordinal) is not int
+            or not 0 <= self.recency_ordinal <= _MAX_SAFE_INTEGER
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
+        validate_sha256_digest(self.head_digest)
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,9 +496,10 @@ class _WorkspaceState:
     session_advice: dict[str, AdviceSnapshot] | None = None
     session_advice_suppression: dict[str, str] | None = None
     frontier_motion_notices: dict[str, FrontierMotionNotice] | None = None
-    # Last delivered notice ``to_sequence`` per Codex session. Survives notice
+    # Last delivered frontier identity per Codex session. Survives notice
     # deletion so a replayed append cannot re-announce already-delivered motion.
-    frontier_motion_delivered: dict[str, tuple[str, int]] | None = None
+    frontier_motion_delivered: dict[str, _FrontierMotionDelivered] | None = None
+    frontier_motion_recency: int = 0
     open_pre: dict[str, str] | None = None
     stream_cursors: dict[str, ObservationCursor] | None = None
     stream_partials: dict[str, bytes] | None = None
@@ -591,28 +621,106 @@ def _load_frontier_motion_notices(raw: object) -> dict[str, FrontierMotionNotice
                 cast(str, notice.get("head_digest")),
                 cast(int, notice.get("observation_record_count")),
                 cast(str, notice.get("task_id")),
+                cast(int, notice.get("recency_ordinal", 0)),
             )
         except ProtocolValueError, TypeError, ValueError:
             continue
     return result
 
 
-def _load_frontier_motion_delivered(raw: object) -> dict[str, tuple[str, int]]:
+def _load_frontier_motion_delivered(raw: object) -> dict[str, _FrontierMotionDelivered]:
     if not isinstance(raw, Mapping):
         return {}
-    result: dict[str, tuple[str, int]] = {}
+    result: dict[str, _FrontierMotionDelivered] = {}
     for key, value in cast(Mapping[str, JsonValue], raw).items():
         if type(key) is not str or not isinstance(value, Mapping):
             continue
         entry = cast(Mapping[str, JsonValue], value)
-        task_id = entry.get("task_id")
-        to_sequence = entry.get("to_sequence")
-        if type(task_id) is not str or not task_id or type(to_sequence) is not int:
+        try:
+            # Marks written before head/recency identity existed are ignored.
+            # They cannot distinguish a replay from a same-task rewind, so the
+            # only honest upgrade behavior is to fail open to a duplicate.
+            result[key] = _FrontierMotionDelivered(
+                cast(str, entry.get("task_id")),
+                cast(int, entry.get("to_sequence")),
+                cast(str, entry.get("head_digest")),
+                cast(int, entry.get("recency_ordinal")),
+            )
+        except ProtocolValueError, TypeError, ValueError:
             continue
-        if not 1 <= to_sequence <= _MAX_SAFE_INTEGER:
-            continue
-        result[key] = (task_id, to_sequence)
     return result
+
+
+def _renumber_frontier_motion_recency(state: _WorkspaceState) -> None:
+    """Compact the bounded LRU clock before its canonical integer can overflow."""
+
+    notices = state.frontier_motion_notices or {}
+    delivered = state.frontier_motion_delivered or {}
+    ordered = sorted(
+        (
+            *((notice.recency_ordinal, 0, session) for session, notice in notices.items()),
+            *((mark.recency_ordinal, 1, session) for session, mark in delivered.items()),
+        ),
+        key=lambda item: (item[0], item[1], item[2].encode()),
+    )
+    for ordinal, (_prior, kind, session) in enumerate(ordered, 1):
+        if kind == 0:
+            notices[session] = dataclasses.replace(notices[session], recency_ordinal=ordinal)
+        else:
+            delivered[session] = dataclasses.replace(delivered[session], recency_ordinal=ordinal)
+    state.frontier_motion_recency = len(ordered)
+
+
+def _next_frontier_motion_recency(state: _WorkspaceState) -> int:
+    if state.frontier_motion_recency >= _MAX_SAFE_INTEGER:
+        _renumber_frontier_motion_recency(state)
+    state.frontier_motion_recency += 1
+    return state.frontier_motion_recency
+
+
+def _touch_frontier_motion_notice(
+    state: _WorkspaceState,
+    session_id: str,
+    notice: FrontierMotionNotice,
+) -> None:
+    assert state.frontier_motion_notices is not None
+    state.frontier_motion_notices[session_id] = dataclasses.replace(
+        notice,
+        recency_ordinal=_next_frontier_motion_recency(state),
+    )
+
+
+def _touch_frontier_motion_delivered(
+    state: _WorkspaceState,
+    session_id: str,
+    *,
+    task_id: str,
+    to_sequence: int,
+    head_digest: str,
+) -> _FrontierMotionDelivered:
+    assert state.frontier_motion_delivered is not None
+    mark = _FrontierMotionDelivered(
+        task_id,
+        to_sequence,
+        head_digest,
+        _next_frontier_motion_recency(state),
+    )
+    state.frontier_motion_delivered[session_id] = mark
+    return mark
+
+
+def _frontier_lineage_rewound(
+    *,
+    current_sequence: int,
+    current_head_digest: str,
+    recorded_sequence: int,
+    recorded_head_digest: str,
+) -> bool:
+    """Return whether the actual routed head proves a stored frontier is gone."""
+
+    return current_sequence < recorded_sequence or (
+        current_sequence == recorded_sequence and current_head_digest != recorded_head_digest
+    )
 
 
 def _advice_delivery_scope_key(
@@ -1291,8 +1399,9 @@ class LocalObservationStore:
         head_digest: str,
         observation_record_count: int,
         task_id: str,
+        lineage_frontier: Frontier | None = None,
     ) -> None:
-        """Merge contiguous undelivered observation appends into one pending notice."""
+        """Merge contiguous undelivered appends against the actual routed lineage."""
 
         candidate = FrontierMotionNotice(
             from_sequence,
@@ -1301,6 +1410,16 @@ class LocalObservationStore:
             observation_record_count,
             task_id,
         )
+        if lineage_frontier is None:
+            # Compatibility for direct local-store callers. The application
+            # coordinator always supplies the actual routed head so a replayed
+            # operation result cannot masquerade as the current lineage.
+            lineage_frontier = Frontier(candidate.to_sequence, candidate.head_digest)
+        if (
+            type(lineage_frontier) is not Frontier
+            or lineage_frontier.sequence < candidate.to_sequence
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
         with self._lock:
             state = self._load(workspace)
             assert state.frontier_motion_notices is not None
@@ -1308,18 +1427,46 @@ class LocalObservationStore:
             notices = state.frontier_motion_notices
             delivered = state.frontier_motion_delivered
             mutated = False
-            # The delivered mark is scoped to the task ledger it was announced
-            # for. A session whose mapping moves to another task (or whose
-            # prior ledger was announced under a different task id) must not
-            # have the new ledger's motion suppressed by the old mark.
+            # The delivered mark is scoped to one task and one observed ledger
+            # lineage. The actual current routed frontier distinguishes a
+            # historical completed-operation replay (current head still at or
+            # beyond the mark) from a same-task restore whose head fell behind
+            # or diverged at the marked sequence.
             delivered_entry = delivered.get(codex_session_id)
-            if delivered_entry is not None and delivered_entry[0] != task_id:
+            if delivered_entry is not None and delivered_entry.task_id != task_id:
                 del delivered[codex_session_id]
                 delivered_entry = None
                 mutated = True
-            delivered_to = delivered_entry[1] if delivered_entry is not None else 0
+            elif delivered_entry is not None and _frontier_lineage_rewound(
+                current_sequence=lineage_frontier.sequence,
+                current_head_digest=lineage_frontier.head_digest,
+                recorded_sequence=delivered_entry.to_sequence,
+                recorded_head_digest=delivered_entry.head_digest,
+            ):
+                del delivered[codex_session_id]
+                delivered_entry = None
+                mutated = True
+            elif delivered_entry is not None:
+                delivered_entry = _touch_frontier_motion_delivered(
+                    state,
+                    codex_session_id,
+                    task_id=delivered_entry.task_id,
+                    to_sequence=delivered_entry.to_sequence,
+                    head_digest=delivered_entry.head_digest,
+                )
+                mutated = True
+            delivered_to = delivered_entry.to_sequence if delivered_entry is not None else 0
             prior = notices.get(codex_session_id)
             if prior is not None and prior.task_id != task_id:
+                del notices[codex_session_id]
+                prior = None
+                mutated = True
+            elif prior is not None and _frontier_lineage_rewound(
+                current_sequence=lineage_frontier.sequence,
+                current_head_digest=lineage_frontier.head_digest,
+                recorded_sequence=prior.to_sequence,
+                recorded_head_digest=prior.head_digest,
+            ):
                 del notices[codex_session_id]
                 prior = None
                 mutated = True
@@ -1348,7 +1495,7 @@ class LocalObservationStore:
                 notices.pop(codex_session_id, None)
                 self._save(workspace, state)
                 return
-            notices[codex_session_id] = clamped
+            _touch_frontier_motion_notice(state, codex_session_id, clamped)
             self._save(workspace, state)
 
     def peek_frontier_motion(
@@ -1366,12 +1513,16 @@ class LocalObservationStore:
         *,
         emitted_to_sequence: int | None = None,
         emitted_task_id: str | None = None,
+        emitted_head_digest: str | None = None,
     ) -> None:
         """Advance the delivered mark for the notice bytes that reached the hook consumer.
 
         Identity match removes that exact notice. A merge that races peek and commit
-        changes identity; the peeked ``emitted_to_sequence`` still advances high-water
-        and clamps any same-task remainder so the emitted range is not re-announced.
+        changes identity; the peeked emitted frontier still advances high-water and
+        clamps any same-task remainder so the emitted range is not re-announced.
+        A queued same-task notice below the emitted frontier proves the observed
+        lineage rewound after the peek: the emitted mark is not reinstalled and the
+        rewind notice stays queued so the new lineage's prefix is still announced.
         """
 
         with self._lock:
@@ -1384,34 +1535,75 @@ class LocalObservationStore:
                     or type(emitted_task_id) is not str
                     or not emitted_task_id
                     or not 0 < emitted_to_sequence <= _MAX_SAFE_INTEGER
+                    or type(emitted_head_digest) is not str
                 ):
+                    return
+                try:
+                    validate_sha256_digest(emitted_head_digest)
+                except ProtocolValueError:
+                    return
+                if (
+                    current is not None
+                    and current.task_id == emitted_task_id
+                    and _frontier_lineage_rewound(
+                        current_sequence=current.to_sequence,
+                        current_head_digest=current.head_digest,
+                        recorded_sequence=emitted_to_sequence,
+                        recorded_head_digest=emitted_head_digest,
+                    )
+                ):
+                    # A same-task rewind was queued between peek and commit.
+                    # Writing the emitted mark would clamp the rewind notice out
+                    # of existence and silently drop the new lineage's prefix.
                     return
                 assert state.frontier_motion_delivered is not None
                 delivered = state.frontier_motion_delivered
                 previous = delivered.pop(codex_session_id, None)
-                previous_to = (
-                    previous[1] if previous is not None and previous[0] == emitted_task_id else 0
+                if (
+                    previous is not None
+                    and previous.task_id == emitted_task_id
+                    and previous.to_sequence > emitted_to_sequence
+                ):
+                    delivered_to = previous.to_sequence
+                    delivered_head_digest = previous.head_digest
+                else:
+                    delivered_to = emitted_to_sequence
+                    delivered_head_digest = emitted_head_digest
+                _touch_frontier_motion_delivered(
+                    state,
+                    codex_session_id,
+                    task_id=emitted_task_id,
+                    to_sequence=delivered_to,
+                    head_digest=delivered_head_digest,
                 )
-                delivered_to = max(previous_to, emitted_to_sequence)
-                delivered[codex_session_id] = (emitted_task_id, delivered_to)
                 if current is not None and current.task_id == emitted_task_id:
                     clamped = _clamp_frontier_motion_notice(current, delivered_to)
                     if clamped is None:
                         notices.pop(codex_session_id, None)
                     else:
-                        notices[codex_session_id] = clamped
+                        _touch_frontier_motion_notice(state, codex_session_id, clamped)
                 self._save(workspace, state)
                 return
             del notices[codex_session_id]
             assert state.frontier_motion_delivered is not None
             delivered = state.frontier_motion_delivered
             previous = delivered.pop(codex_session_id, None)
-            previous_to = (
-                previous[1] if previous is not None and previous[0] == current.task_id else 0
-            )
-            delivered[codex_session_id] = (
-                current.task_id,
-                max(previous_to, current.to_sequence),
+            if (
+                previous is not None
+                and previous.task_id == current.task_id
+                and previous.to_sequence > current.to_sequence
+            ):
+                delivered_to = previous.to_sequence
+                delivered_head_digest = previous.head_digest
+            else:
+                delivered_to = current.to_sequence
+                delivered_head_digest = current.head_digest
+            _touch_frontier_motion_delivered(
+                state,
+                codex_session_id,
+                task_id=current.task_id,
+                to_sequence=delivered_to,
+                head_digest=delivered_head_digest,
             )
             self._save(workspace, state)
 
@@ -2602,14 +2794,28 @@ class LocalObservationStore:
                 if _session_ended(session_id):
                     del notices[session_id]
             while len(notices) > _MAX_FRONTIER_MOTION_NOTICES:
-                del notices[next(iter(notices))]
+                oldest = min(
+                    notices,
+                    key=lambda session_id: (
+                        notices[session_id].recency_ordinal,
+                        session_id.encode(),
+                    ),
+                )
+                del notices[oldest]
         delivered = state.frontier_motion_delivered
         if delivered:
             for session_id in tuple(delivered):
                 if _session_ended(session_id):
                     del delivered[session_id]
             while len(delivered) > _MAX_FRONTIER_MOTION_NOTICES:
-                del delivered[next(iter(delivered))]
+                oldest = min(
+                    delivered,
+                    key=lambda session_id: (
+                        delivered[session_id].recency_ordinal,
+                        session_id.encode(),
+                    ),
+                )
+                del delivered[oldest]
 
     def _encode_state(self, workspace_commitment: str, state: _WorkspaceState) -> bytes:
         """Encode one state to its on-disk bytes, attributing the cost (#290)."""
@@ -3147,6 +3353,8 @@ class LocalObservationStore:
             payload["storage_corrupt_sessions"] = tuple(
                 sorted(state.storage_corrupt_sessions, key=str.encode)
             )
+        if state.frontier_motion_notices or state.frontier_motion_delivered:
+            payload["frontier_motion_recency"] = state.frontier_motion_recency
         if state.frontier_motion_notices:
             payload["frontier_motion_notices"] = JsonObject(
                 {
@@ -3155,6 +3363,7 @@ class LocalObservationStore:
                             "from_sequence": notice.from_sequence,
                             "head_digest": notice.head_digest,
                             "observation_record_count": notice.observation_record_count,
+                            "recency_ordinal": notice.recency_ordinal,
                             "task_id": notice.task_id,
                             "to_sequence": notice.to_sequence,
                         }
@@ -3168,7 +3377,14 @@ class LocalObservationStore:
         if state.frontier_motion_delivered:
             payload["frontier_motion_delivered"] = JsonObject(
                 {
-                    key: JsonObject({"task_id": value[0], "to_sequence": value[1]})
+                    key: JsonObject(
+                        {
+                            "head_digest": value.head_digest,
+                            "recency_ordinal": value.recency_ordinal,
+                            "task_id": value.task_id,
+                            "to_sequence": value.to_sequence,
+                        }
+                    )
                     for key, value in sorted(
                         state.frontier_motion_delivered.items(),
                         key=lambda item: item[0].encode(),
@@ -3517,7 +3733,21 @@ class LocalObservationStore:
         frontier_motion_delivered = _load_frontier_motion_delivered(
             raw.get("frontier_motion_delivered")
         )
-        return _WorkspaceState(
+        raw_frontier_motion_recency = raw.get("frontier_motion_recency", 0)
+        frontier_motion_recency = (
+            raw_frontier_motion_recency
+            if type(raw_frontier_motion_recency) is int
+            and 0 <= raw_frontier_motion_recency <= _MAX_SAFE_INTEGER
+            else 0
+        )
+        frontier_motion_recency = max(
+            [
+                frontier_motion_recency,
+                *(notice.recency_ordinal for notice in frontier_motion_notices.values()),
+                *(mark.recency_ordinal for mark in frontier_motion_delivered.values()),
+            ]
+        )
+        state = _WorkspaceState(
             consent=consent,
             session_workspaces=session_workspaces,
             cursors=cursors,
@@ -3542,6 +3772,7 @@ class LocalObservationStore:
             },
             frontier_motion_notices=frontier_motion_notices,
             frontier_motion_delivered=frontier_motion_delivered,
+            frontier_motion_recency=frontier_motion_recency,
             open_pre=open_pre,
             stream_cursors=stream_cursors,
             stream_partials=stream_partials,
@@ -3576,6 +3807,14 @@ class LocalObservationStore:
             codex_session_bindings=bindings,
             storage_corrupt_sessions=storage_corrupt_sessions,
         )
+        if any(notice.recency_ordinal == 0 for notice in frontier_motion_notices.values()) or any(
+            mark.recency_ordinal == 0 for mark in frontier_motion_delivered.values()
+        ):
+            # Notices persisted before the LRU clock existed load with ordinal
+            # 0. Fold them into the clock once so they hold a real position
+            # instead of tying at zero until the next touch.
+            _renumber_frontier_motion_recency(state)
+        return state
 
 
 def workspace_commitment_for_path(path: str, *, _state: Path | None = None) -> str:

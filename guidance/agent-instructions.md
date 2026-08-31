@@ -192,10 +192,11 @@ checks above are therefore load-bearing skill behavior. Target binding, expiry, 
 repository commitment, machine-policy ceilings, vault reauthentication, and no-echo result rules
 remain runtime-enforced.
 
-`vault_initialize` and `vault_passphrase_rotate` follow that same delegated authorization path;
-never handle or ask for a vault passphrase. If rotation is interrupted, leave the staged entry
-and restart the service; reconciliation keeps the authenticating candidate. Locked vaults keep
-the human unlock ceremony. No `--yolo`.
+For Codex JSONL import, follow its skill; never put source/excerpts in chat.
+
+`vault_initialize` and `vault_passphrase_rotate` use that same path; never handle or ask for a
+passphrase. Interrupted rotation: leave the staged entry and restart. Locked vaults keep the
+human unlock ceremony. No `--yolo`.
 
 # Recommended defaults remain user decisions
 

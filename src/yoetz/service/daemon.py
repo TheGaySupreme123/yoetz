@@ -1060,6 +1060,7 @@ class ServiceDaemon:
             ControlMethod.RESPOND,
             ControlMethod.STATUS,
             ControlMethod.RECEIPT,
+            ControlMethod.IMPORT_CODEX_JSONL,
             ControlMethod.PRIVACY_GET_SETUP,
             ControlMethod.PRIVACY_GET_EFFECTIVE,
             ControlMethod.PRIVACY_PROPOSE_POLICY,

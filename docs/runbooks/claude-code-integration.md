@@ -105,7 +105,10 @@ yoetz service restart
 
 `yoetz service status` names the incompatible holder's pid, version, and manifest digest. Other
 hosts' sessions still running the previous build's bridge are refused after the switch until they
-restart; that is the intended outcome of an upgrade, not a defect.
+restart; that is the intended outcome of an upgrade, not a defect. The cooperative MCP bridge
+latches that availability failure for the process and serializes the first on-demand attempt so
+concurrent tool calls share one diagnostic (issues #469, #476); that behaviour is shared across
+hosts that use this bridge, not Claude-Code-specific.
 
 ## Static and host validation
 
@@ -142,6 +145,10 @@ The skill name is `/yoetz:yoetz`. The MCP server is `plugin:yoetz:yoetz`, and ca
 `start`/`status` call through that scoped name; a list/details/MCP handshake alone is insufficient.
 
 ## Hooks and observation
+
+Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
+therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
+the native hook/observation paths below.
 
 The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
 `PostToolUseFailure`, `Stop`, and `SessionEnd`. A bare MCP matcher is a negative control. Hooks call
@@ -193,6 +200,61 @@ the returned task/session/writer identifiers and frontier to bind the Claude ses
 none of the response bytes or prose. Confirm `mapping_present: true`, then drain and require accepted
 rows before claiming hook coverage. Pause, resume, revoke, deduplication, restart, and gap behavior
 require their own evidence.
+
+## Auto mode and host admission
+
+Claude Code's auto-mode classifier sees the tool name, the request JSON, user messages, and
+`CLAUDE.md`; descriptions, annotations, and tool results are stripped, so no descriptor wording
+can satisfy it. `permissions.allow` / `ask` / `deny` resolve before the classifier and are honored
+from the repository's `.claude/settings.local.json` (repository root, resolved through
+worktrees to the main checkout); a plugin cannot ship permission rules. Allow rules use the
+configured server name: `mcp__yoetz__check` for an external `yoetz` registration and
+`mcp__plugin_yoetz_yoetz__check` for the plugin-owned server. (`code.claude.com/docs/en/permissions`,
+`/permission-modes`, `/hooks`, re-read 2026-08-30.)
+
+Host admission (issue #467) follows the exclusively observed MCP owner and writes exactly its
+`check` name into `permissions.allow` (or `permissions.ask` with `--checkpoint`), digest-bound to
+the file bytes. An external route must use the configured server key `yoetz`; a differently named
+exact Yoetz route remains visible to ownership status but refuses admission because its callable
+permission name is not the fixed supported surface:
+
+```text
+yoetz integrate claude admission preview --project-root "$PROJECT_ROOT" \
+  --claude-path "$CLAUDE_PATH" --claude-config-root "$CLAUDE_CONFIG_ROOT" \
+  --cache-root "$CACHE_ROOT" --marketplace-root "$MARKETPLACE_ROOT" \
+  --mcp-ownership <external-registration|plugin-managed> --json
+yoetz integrate claude admission grant --project-root "$PROJECT_ROOT" ... --accept --preview-digest <digest>
+```
+
+The Claude roots are what the route observation needs (`status` on the plugin); without them
+the route is unread and a grant refuses with `host_admission_route_unobserved`. A strict route
+refuses with `route_not_policy`; a grant that does not permit review with
+`grant_not_permitting`; a service that cannot be read with `grant_unverifiable`. A grant whose
+exact entry already sits in the other list is a mode change — `grant` after `grant --checkpoint`
+(or the reverse) moves the entry between `allow` and `ask` under the same digest-bound preview;
+only re-granting the mode already set is a `noop`. A wider rule
+(`mcp__plugin_yoetz_yoetz__*`, `mcp__plugin_yoetz_yoetz`), a deny rule, or the tool in both
+`allow` and `ask` is `foreign` and never edited. A mutating preview warns
+`host_config_not_compare_and_swap`; keep Claude and other settings writers quiescent during apply.
+Yoetz rechecks the exact preimage immediately before mutation and verifies the result, but an
+ordinary file cannot exclude a non-cooperating same-UID writer in the final syscall window. If
+`.claude/settings.local.json` is tracked in git or `.claude` is a symlink, Claude Code holds its
+rules until the folder is trusted; Yoetz itself refuses to edit through the symlink.
+
+Reverse: `admission revoke` removes both exact owner forms; `plugin remove` and a `plugin
+install|update` onto the strict route sweep it for `--project-root` and report
+`admission_cleanup`; a privacy commit that stops external review sweeps it; a leftover entry
+shows as `host_admission_drift` in `provider status`. That report walks from the launch
+directory to the repository root, so a subdirectory cwd does not read as `absent`.
+
+The rendered `hooks/hooks.json` carries a sixth hook, `PermissionDenied`, matched to exactly the
+external and plugin-owned `check` names. It fires after auto mode (or a rule or another hook)
+denies the call and can allow nothing; the ingress keeps only a closed token and records one
+payload-free `hook_diagnostics` reason — `host_auto_review_denied` (`source: auto_mode` or
+absent) or `host_permission_rule_denied` (`permission_rule` / `hook`) — so `observe status`
+can show a held check as host authorization, never as a semantic status. Yoetz deliberately
+ships no `PermissionRequest` hook returning `decision: allow`, which would make the plugin the
+authority over the host's own review.
 
 ## Update
 

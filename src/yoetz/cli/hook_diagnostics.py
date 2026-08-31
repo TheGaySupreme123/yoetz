@@ -33,6 +33,7 @@ _EVENTS: Final = frozenset(
         "UserPromptSubmit",
         "PreToolUse",
         "PostToolUse",
+        "PermissionDenied",
         "PermissionRequest",
         "PreCompact",
         "PostCompact",
@@ -89,6 +90,12 @@ _REASONS: Final = frozenset(
         # enforcement point. Aborting mid-hook would drop ingest.
         "hook_budget_exceeded",
         "hook_slo_breached",
+        # A host's automatic tool-call reviewer (Claude Code auto mode) denied a
+        # scoped semantic ``check`` before Yoetz received it, or a permission
+        # rule / another hook did (issue #467). Host tool-call authorization,
+        # not a Yoetz semantic result: no semantic status can be inferred.
+        "host_auto_review_denied",
+        "host_permission_rule_denied",
     }
 )
 _STAGES: Final = frozenset(

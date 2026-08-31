@@ -23,6 +23,7 @@ from yoetz.adapters.integrations.portable_plugin import (
     ArtifactUserPresencePort,
     ElevatedPortableArtifactReview,
 )
+from yoetz.cli.host_admission import admission_cleanup_preview, reverse_sweep
 from yoetz.domain.values import RequestId, request_id
 from yoetz.ports.plugin_artifacts import (
     ArtifactAuthority,
@@ -30,11 +31,12 @@ from yoetz.ports.plugin_artifacts import (
     PluginArtifactAction,
     PluginFormatProfile,
     PluginMutationReviewPort,
+    PluginOperationState,
 )
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 
-__all__ = ["CURSOR_PLUGIN_COMMANDS", "run_cursor_plugin_command"]
+__all__ = ["CURSOR_PLUGIN_COMMANDS", "plugin_artifact", "run_cursor_plugin_command"]
 
 # Cursor's portable artifact has no update/enable/disable states and no
 # development export carrier (issue #465).
@@ -79,7 +81,7 @@ def _emit(value: dict[str, object], *, json_output: bool) -> None:
         sys.stdout.write(f"{key}: {rendered}\n")
 
 
-def _artifact(
+def plugin_artifact(
     format_name: str, ownership_name: str, route_name: str | None
 ) -> CursorPluginArtifact:
     formats = {
@@ -210,7 +212,7 @@ def run_cursor_plugin_command(
         sys.stderr.write("cursor_plugin_command_invalid\n")
         return 2
     try:
-        artifact = _artifact(format_name, ownership_name, route_profile)
+        artifact = plugin_artifact(format_name, ownership_name, route_profile)
         target = CursorPluginTarget(str(cursor_config_root.expanduser().absolute()))
         project = None if project_root is None else project_root.expanduser().absolute()
         status = status_cursor_plugin(target, artifact, project_root=project)
@@ -236,6 +238,12 @@ def run_cursor_plugin_command(
             if requested_action not in allowed_action_values:
                 raise ValueError("cursor_plugin_action_invalid")
             action = PluginArtifactAction(requested_action)
+        # A removal and an install/replace onto the strict route are reverse transitions for
+        # the project's host-admission entry (issue #467); with no explicit project root there
+        # is no project file to sweep, and status/drift reporting remains the way to see it.
+        reverse_admission = project is not None and (
+            action is PluginArtifactAction.REMOVE or artifact.plan.mcp_route_profile == "strict"
+        )
         if command == "preview":
             # Only the preview command renders a plan. Computing one here for install/remove
             # would also refuse an already-committed replay before the adapter can reconcile it.
@@ -243,6 +251,11 @@ def run_cursor_plugin_command(
             _emit(
                 {
                     "action": preview.action.value,
+                    "admission_cleanup": (
+                        admission_cleanup_preview("cursor", project)
+                        if reverse_admission and project is not None
+                        else None
+                    ),
                     "artifact_digest": preview.artifact_digest,
                     "authorization": {
                         "operation": "plugin_artifact_apply",
@@ -305,6 +318,13 @@ def run_cursor_plugin_command(
         _emit(
             {
                 "action": result.action.value,
+                "admission_cleanup": (
+                    reverse_sweep("cursor", project)
+                    if reverse_admission
+                    and project is not None
+                    and result.operation_state is PluginOperationState.COMPLETED
+                    else None
+                ),
                 "artifact_digest": result.artifact_digest,
                 "changed_files": list(result.changed_files),
                 "format_profile": result.format_profile.value,

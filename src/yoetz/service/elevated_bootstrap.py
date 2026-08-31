@@ -32,6 +32,7 @@ from yoetz.protocol.consent import (
     AgentSafePendingModel,
     ConsentCatalogModel,
     ConsentStatusModel,
+    ImportPublicationPreviewModel,
     RepositoryPrivacyRecipe,
 )
 from yoetz.service.confidential_protocol import ProviderCredentialTarget
@@ -42,16 +43,20 @@ __all__ = [
     "ElevatedBootstrapError",
     "ElevatedOperation",
     "PendingElevatedConsent",
+    "ImportPublicationAuthorization",
     "RiskClass",
     "catalog_payload",
     "claim_pending_for_review",
     "clear_pending",
     "complete_review",
     "grant_target_digest",
+    "consume_import_publication_authorization",
+    "load_import_publication_authorization",
     "load_pending",
     "operation_spec",
     "prepare_pending",
     "projection_for_status",
+    "record_import_publication_authorization",
     "status_payload",
 ]
 
@@ -69,6 +74,7 @@ ElevatedOperation = Literal[
     "provider_credential_set",
     "provider_credential_rotate",
     "repository_privacy_grant",
+    "import_publication",
     "idle_relock_disable",
     "privacy_policy_widen",
     "backup_execute",
@@ -79,13 +85,16 @@ ElevatedOperation = Literal[
     "harness_mcp_register",
 ]
 
-_SCHEMA: Final = "yoetz.elevated-bootstrap.pending/2"
-_LEGACY_SCHEMA: Final = "yoetz.elevated-bootstrap.pending/1"
+_SCHEMA: Final = "yoetz.elevated-bootstrap.pending/3"
+_LEGACY_SCHEMAS: Final = frozenset(
+    {"yoetz.elevated-bootstrap.pending/1", "yoetz.elevated-bootstrap.pending/2"}
+)
 _TTL_SECONDS: Final = 15 * 60
 _PENDING_NAME: Final = "elevated-bootstrap-pending.json"
 _REVIEW_NAME: Final = "elevated-bootstrap-reviewing.json"
 _REVIEW_LOCK_NAME: Final = ".elevated-bootstrap.lock"
 _AUDIT_NAME: Final = "elevated-bootstrap-audit.jsonl"
+_IMPORT_AUTHORIZATION_NAME: Final = "import-publication-authorization.json"
 _FORBIDDEN: Final = ("mcp", "argv", "env", "stdin", "config", "transcript")
 _PROVIDER_BINDING_KEYS: Final = (
     "provider_id",
@@ -208,6 +217,22 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         ),
         requires_provider_binding=False,
         requires_grant_binding=True,
+        requires_target_digest_arg=False,
+        implemented=True,
+        agent_chat_authorize_allowed=True,
+    ),
+    ConsentOperationSpec(
+        operation="import_publication",
+        risk_class="review_only",
+        summary="Publish one exact bounded Codex JSONL import plan.",
+        danger_text=(
+            "DANGER — Codex JSONL import publication. Publishes only the prepared bounded plan "
+            "shown below into the exact local task/session. Reasoning remains excluded, excerpt "
+            "and source limits remain enforced, and this does not authorize reviewer egress. "
+            "Authorization is one-use and any source, target, profile, or plan change invalidates it."
+        ),
+        requires_provider_binding=False,
+        requires_grant_binding=False,
         requires_target_digest_arg=False,
         implemented=True,
         agent_chat_authorize_allowed=True,
@@ -356,6 +381,7 @@ class PendingElevatedConsent:
     target_digest: str
     provider_binding: Mapping[str, str] | None
     grant_binding: Mapping[str, str] | None = None
+    import_publication_preview: Mapping[str, JsonValue] | None = None
 
     def as_json(self) -> dict[str, JsonValue]:
         payload: dict[str, JsonValue] = {
@@ -374,7 +400,28 @@ class PendingElevatedConsent:
             payload["provider_binding"] = dict(self.provider_binding)
         if self.grant_binding is not None:
             payload["grant_binding"] = dict(self.grant_binding)
+        if self.import_publication_preview is not None:
+            payload["import_publication_preview"] = dict(self.import_publication_preview)
         return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ImportPublicationAuthorization:
+    """Owner-only, exact, non-bearer handoff from consent to the importer."""
+
+    pending_id: str
+    danger_digest: str
+    target_digest: str
+    expires_at_unix: int
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "schema": "yoetz.import-publication-authorization/1",
+            "pending_id": self.pending_id,
+            "danger_digest": self.danger_digest,
+            "target_digest": self.target_digest,
+            "expires_at_unix": self.expires_at_unix,
+        }
 
 
 def operation_spec(operation: str) -> ConsentOperationSpec:
@@ -397,6 +444,10 @@ def pending_path(*, _state: Path | None = None) -> Path:
 
 def review_path(*, _state: Path | None = None) -> Path:
     return elevated_dir(_state=_state) / _REVIEW_NAME
+
+
+def _import_authorization_path(*, _state: Path | None = None) -> Path:
+    return elevated_dir(_state=_state) / _IMPORT_AUTHORIZATION_NAME
 
 
 class _PendingStateLock:
@@ -491,6 +542,7 @@ def _danger_digest(
     expires_at_unix: int,
     provider_binding: Mapping[str, str] | None,
     grant_binding: Mapping[str, str] | None = None,
+    import_publication_preview: Mapping[str, JsonValue] | None = None,
 ) -> str:
     body: dict[str, JsonValue] = {
         "danger_text": danger_text,
@@ -505,6 +557,8 @@ def _danger_digest(
         body["provider_binding"] = dict(provider_binding)
     if grant_binding is not None:
         body["grant_binding"] = dict(grant_binding)
+    if import_publication_preview is not None:
+        body["import_publication_preview"] = dict(import_publication_preview)
     return canonical_digest(body)
 
 
@@ -514,6 +568,7 @@ def prepare_pending(
     target_digest: str,
     provider_binding: Mapping[str, str] | None = None,
     grant_binding: Mapping[str, str] | None = None,
+    import_publication_preview: Mapping[str, JsonValue] | None = None,
     _state: Path | None = None,
 ) -> PendingElevatedConsent:
     spec = operation_spec(operation)
@@ -527,6 +582,25 @@ def prepare_pending(
         raise ElevatedBootstrapError("grant_binding_required")
     if not spec.requires_grant_binding and grant_binding is not None:
         raise ElevatedBootstrapError("grant_binding_forbidden")
+    if operation == "import_publication":
+        if import_publication_preview is None:
+            raise ElevatedBootstrapError("import_publication_preview_required")
+        try:
+            preview_model = ImportPublicationPreviewModel.model_validate(
+                dict(import_publication_preview)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ElevatedBootstrapError("import_publication_preview_invalid") from exc
+        preview = cast(
+            dict[str, JsonValue],
+            preview_model.model_dump(mode="json", by_alias=True),
+        )
+        if preview_model.authorization_target_digest != target_digest:
+            raise ElevatedBootstrapError("import_publication_preview_invalid")
+    elif import_publication_preview is not None:
+        raise ElevatedBootstrapError("import_publication_preview_forbidden")
+    else:
+        preview = None
     binding = (
         _validated_provider_binding(provider_binding) if provider_binding is not None else None
     )
@@ -536,6 +610,11 @@ def prepare_pending(
     except ProtocolValueError as exc:
         raise ElevatedBootstrapError("target_digest_invalid") from exc
     with _PendingStateLock(_state):
+        if (
+            operation == "import_publication"
+            and _load_import_authorization_unlocked(_state=_state) is not None
+        ):
+            raise ElevatedBootstrapError("import_publication_authorization_active")
         if review_path(_state=_state).is_file():
             raise ElevatedBootstrapError("review_in_progress")
         existing = _load_pending_unlocked(_state=_state)
@@ -554,6 +633,7 @@ def prepare_pending(
             expires_at_unix=expires,
             provider_binding=binding,
             grant_binding=grant,
+            import_publication_preview=preview,
         )
         pending = PendingElevatedConsent(
             pending_id=pending_id,
@@ -566,6 +646,7 @@ def prepare_pending(
             target_digest=validated_digest,
             provider_binding=binding,
             grant_binding=grant,
+            import_publication_preview=preview,
         )
         _write_pending(pending, _state=_state)
         _audit(
@@ -704,7 +785,7 @@ def _load_pending_path(
     if not isinstance(raw, dict):
         raise ElevatedBootstrapError("pending_corrupt")
     source = cast(dict[str, object], raw)
-    if source.get("schema") == _LEGACY_SCHEMA:
+    if source.get("schema") in _LEGACY_SCHEMAS:
         _invalidate_legacy(path, _state=_state)
     try:
         if source.get("schema") != _SCHEMA:
@@ -725,6 +806,8 @@ def _load_pending_path(
             expected_keys.add("provider_binding")
         if "grant_binding" in source:
             expected_keys.add("grant_binding")
+        if "import_publication_preview" in source:
+            expected_keys.add("import_publication_preview")
         if set(source) != expected_keys or source.get("state") != "pending":
             raise ElevatedBootstrapError("pending_corrupt")
         operation = _require_str(source["operation"])
@@ -771,6 +854,25 @@ def _load_pending_path(
             raise ElevatedBootstrapError("pending_corrupt")
         if not spec.requires_grant_binding and grant is not None:
             raise ElevatedBootstrapError("pending_corrupt")
+        preview_raw = source.get("import_publication_preview")
+        preview: dict[str, JsonValue] | None
+        if preview_raw is None:
+            preview = None
+        elif isinstance(preview_raw, dict):
+            try:
+                preview_model = ImportPublicationPreviewModel.model_validate(preview_raw)
+            except (TypeError, ValueError) as exc:
+                raise ElevatedBootstrapError("pending_corrupt") from exc
+            preview = cast(
+                dict[str, JsonValue], preview_model.model_dump(mode="json", by_alias=True)
+            )
+        else:
+            raise ElevatedBootstrapError("pending_corrupt")
+        if operation == "import_publication":
+            if preview is None or preview["authorization_target_digest"] != source["target_digest"]:
+                raise ElevatedBootstrapError("pending_corrupt")
+        elif preview is not None:
+            raise ElevatedBootstrapError("pending_corrupt")
         risk = _require_str(source["risk_class"])
         danger_text = _require_str(source["danger_text"])
         if risk != spec.risk_class or danger_text != spec.danger_text:
@@ -792,6 +894,7 @@ def _load_pending_path(
             target_digest=target_digest,
             provider_binding=binding,
             grant_binding=grant,
+            import_publication_preview=preview,
         )
     except ElevatedBootstrapError:
         raise
@@ -806,6 +909,7 @@ def _load_pending_path(
         expires_at_unix=pending.expires_at_unix,
         provider_binding=pending.provider_binding,
         grant_binding=pending.grant_binding,
+        import_publication_preview=pending.import_publication_preview,
     )
     if not _exact_match(expected, pending.danger_digest):
         raise ElevatedBootstrapError("pending_tampered")
@@ -846,6 +950,140 @@ def clear_pending(*, _state: Path | None = None) -> None:
             path.unlink(missing_ok=True)
         except OSError as exc:
             raise ElevatedBootstrapError("pending_clear_failed") from exc
+
+
+def _load_import_authorization_unlocked(
+    *, _state: Path | None = None, expire: bool = True
+) -> ImportPublicationAuthorization | None:
+    path = _import_authorization_path(_state=_state)
+    if not path.is_file():
+        return None
+    try:
+        decoded = json.loads(path.read_bytes().decode("utf-8"))
+        if not isinstance(decoded, dict):
+            raise ElevatedBootstrapError("import_publication_authorization_corrupt")
+        raw = cast(dict[str, object], decoded)
+        if set(raw) != {
+            "schema",
+            "pending_id",
+            "danger_digest",
+            "target_digest",
+            "expires_at_unix",
+        }:
+            raise ElevatedBootstrapError("import_publication_authorization_corrupt")
+        if raw.get("schema") != "yoetz.import-publication-authorization/1":
+            raise ElevatedBootstrapError("import_publication_authorization_corrupt")
+        authorization = ImportPublicationAuthorization(
+            pending_id=_validated_pending_id(raw["pending_id"]),
+            danger_digest=validate_sha256_digest(_require_str(raw["danger_digest"])),
+            target_digest=validate_sha256_digest(_require_str(raw["target_digest"])),
+            expires_at_unix=_require_int(raw["expires_at_unix"]),
+        )
+    except ElevatedBootstrapError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ElevatedBootstrapError("import_publication_authorization_corrupt") from exc
+    if authorization.expires_at_unix <= int(time.time()):
+        if expire:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise ElevatedBootstrapError(
+                    "import_publication_authorization_clear_failed"
+                ) from exc
+            _audit(
+                {
+                    "event": "import_publication_authorization_expired",
+                    "target_digest": authorization.target_digest,
+                },
+                _state=_state,
+            )
+        return None
+    return authorization
+
+
+def load_import_publication_authorization(
+    target_digest: str, *, _state: Path | None = None
+) -> ImportPublicationAuthorization | None:
+    """Load only an exact unexpired internal grant; no token is returned to callers."""
+
+    try:
+        expected = validate_sha256_digest(target_digest)
+    except ProtocolValueError as exc:
+        raise ElevatedBootstrapError("target_digest_invalid") from exc
+    with _PendingStateLock(_state):
+        authorization = _load_import_authorization_unlocked(_state=_state)
+        if authorization is None or not _exact_match(authorization.target_digest, expected):
+            return None
+        return authorization
+
+
+def record_import_publication_authorization(
+    pending: PendingElevatedConsent, *, _state: Path | None = None
+) -> ImportPublicationAuthorization:
+    """Record the one exact owner-only handoff after an approved consent decision."""
+
+    if (
+        type(pending) is not PendingElevatedConsent
+        or pending.operation != "import_publication"
+        or pending.import_publication_preview is None
+    ):
+        raise ElevatedBootstrapError("import_publication_preview_required")
+    authorization = ImportPublicationAuthorization(
+        pending.pending_id,
+        pending.danger_digest,
+        pending.target_digest,
+        pending.expires_at_unix,
+    )
+    with _PendingStateLock(_state):
+        existing = _load_import_authorization_unlocked(_state=_state)
+        if existing is not None and existing != authorization:
+            raise ElevatedBootstrapError("import_publication_authorization_active")
+        path = _import_authorization_path(_state=_state)
+        payload = canonical_encode(authorization.as_json())
+        tmp = path.with_suffix(".tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(tmp, flags, 0o600)
+        try:
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+        _audit(
+            {
+                "event": "import_publication_authorized",
+                "pending_id": pending.pending_id,
+                "target_digest": pending.target_digest,
+            },
+            _state=_state,
+        )
+    return authorization
+
+
+def consume_import_publication_authorization(
+    authorization: ImportPublicationAuthorization, *, _state: Path | None = None
+) -> None:
+    """Consume the exact handoff only after terminal import completion."""
+
+    if type(authorization) is not ImportPublicationAuthorization:
+        raise TypeError("import_publication_authorization_invalid")
+    with _PendingStateLock(_state):
+        observed = _load_import_authorization_unlocked(_state=_state, expire=False)
+        if observed is None or observed != authorization:
+            raise ElevatedBootstrapError("import_publication_authorization_mismatch")
+        try:
+            _import_authorization_path(_state=_state).unlink()
+        except OSError as exc:
+            raise ElevatedBootstrapError("import_publication_authorization_clear_failed") from exc
+        _audit(
+            {
+                "event": "import_publication_authorization_consumed",
+                "target_digest": authorization.target_digest,
+            },
+            _state=_state,
+        )
 
 
 def _exact_match(left: str, right: str) -> bool:
@@ -961,7 +1199,7 @@ def projection_for_status(
     if pending is None:
         return None
     model = AgentSafePendingModel(
-        schema="yoetz.consent.pending-agent/4",
+        schema="yoetz.consent.pending-agent/5",
         operation=pending.operation,
         risk_class=pending.risk_class,
         pending_id=pending.pending_id,
@@ -975,6 +1213,13 @@ def projection_for_status(
             else cast(
                 RepositoryPrivacyRecipe,
                 pending.grant_binding["recipe"],
+            )
+        ),
+        import_publication_preview=(
+            None
+            if pending.import_publication_preview is None
+            else ImportPublicationPreviewModel.model_validate(
+                dict(pending.import_publication_preview)
             )
         ),
         review_command=("yoetz", "consent", "review"),
@@ -992,7 +1237,11 @@ def catalog_payload() -> dict[str, JsonValue]:
 
     operations: list[JsonValue] = []
     for spec in CONSENT_OPERATIONS:
-        hint = f"yoetz consent prepare {spec.operation}"
+        hint = (
+            "yoetz import --request <bounded-json>"
+            if spec.operation == "import_publication"
+            else f"yoetz consent prepare {spec.operation}"
+        )
         if spec.requires_target_digest_arg:
             hint += " --target-digest <sha256:...>"
         if spec.requires_grant_binding:
@@ -1020,7 +1269,7 @@ def catalog_payload() -> dict[str, JsonValue]:
         )
     model = ConsentCatalogModel.model_validate(
         {
-            "schema": "yoetz.consent.catalog/4",
+            "schema": "yoetz.consent.catalog/5",
             "default_safe": [
                 "mcp.start",
                 "mcp.publish_work",
@@ -1055,7 +1304,7 @@ def catalog_payload() -> dict[str, JsonValue]:
 def status_payload(*, _state: Path | None = None) -> dict[str, JsonValue]:
     model = ConsentStatusModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.status/4",
+            "schema": "yoetz.elevated-bootstrap.status/5",
             "pending": projection_for_status(load_pending(_state=_state)),
             "consent_catalog": catalog_payload(),
         }

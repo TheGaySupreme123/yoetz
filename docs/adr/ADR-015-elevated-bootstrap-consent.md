@@ -3,6 +3,7 @@
 **Status:** Amended 2026-07-31; amended 2026-08-09 for agent-attested chat authorize
 (issue #164); amended 2026-08-18 for atomic concurrent review claims (issue #344); amended
 2026-08-25 to name Codex marketplace/MCP removal as outside this OS-presence lane (issue #419);
+amended 2026-08-30 for exact bounded Codex JSONL import publication (issue #301);
 amended 2026-08-31 for helper-generated agent-authorized vault initialization and masked terminal
 input (issues #490 and #491).
 Superseded in scope by ADR-016 for the general non-default consent catalog. Console `yoetz consent
@@ -28,7 +29,8 @@ generate and store one locally without any secret-bearing agent channel.
 ## Decisions
 
 1. **Implemented bootstrap operations.** `vault_initialize`, `vault_passphrase_rotate`,
-   `provider_credential_set`, `provider_credential_rotate`, and `repository_privacy_grant` use this lane. It is not a
+   `provider_credential_set`, `provider_credential_rotate`, `repository_privacy_grant`, and
+   `import_publication` use this lane. It is not a
    vault-unlock API, recovery API, or standing elevation mode.
 
    **Amendment (2026-08-25, issue #419).** Codex marketplace/plugin removal
@@ -40,13 +42,16 @@ generate and store one locally without any secret-bearing agent channel.
    is not extended to either removal command.
 
 2. **Agent-safe preparation.** `yoetz consent prepare` creates one owner-only
-   `yoetz.elevated-bootstrap.pending/2` record. Its agent projection is
-   `yoetz.consent.pending-agent/4` and contains only operation, risk class, bounded danger text,
+   `yoetz.elevated-bootstrap.pending/3` record. Its agent projection is
+   `yoetz.consent.pending-agent/5` and contains only operation, risk class, bounded danger text,
    exact danger and target digests, expiry, pending ID, an exact bounded repository recipe when
    applicable, the fixed `["yoetz","consent","review"]` command, and an authorize command only
-   for operations that permit agent-chat authorization. Frozen public v2 schemas remain shipped;
-   the v3 family carries the breaking projection changes. Version-1 durable pending records are
-   invalidated, not migrated.
+   for operations that permit agent-chat authorization. For `import_publication` it also carries
+   a closed structural preview: exact source/manifest/plan/target digests, task/session/writer and
+   profile identity, counts and caps, plus explicit false facts for complete-transcript inclusion,
+   reasoning inclusion, and reviewer-egress widening. It contains no source line or excerpt.
+   Frozen public v2-v4 schemas remain shipped. Version-1 and version-2 durable pending records are
+   invalidated rather than reinterpreted.
 
 3. **Two approval surfaces.** `yoetz consent review` takes no authority-bearing arguments. Before
    opening a console or claiming pending state, it requires an independently authenticated,
@@ -82,6 +87,17 @@ generate and store one locally without any secret-bearing agent channel.
    reviewers fail closed. An ambiguous crash may leave the private reviewing marker (and, if the
    crash preceded winner cleanup, its public hard-link name) in place; the marker blocks both reuse
    and a new preparation until an explicit repair path is designed.
+
+   **Import-publication amendment (2026-08-30, issue #301).** The importer, not
+   `yoetz consent prepare`, creates the pending request after durably preparing its exact batch
+   plan. Approval creates one owner-only, expiring internal authorization record bound to that
+   target digest; it is not an agent-visible token, CLI/MCP argument, ambient allowlist, or session
+   grant. Publication admission is active only in the current importer execution context for the
+   bound session/writer and is rebound before every append to that persisted batch/report request's
+   exact ordered event IDs and fixed importer provenance; each binding admits once. The record
+   remains until terminal completion so a restart can resume the same plan, then is consumed. A
+   different source identity, capture manifest, plan, task/session, profile/version, mapping
+   version, or limit contract cannot reuse it. Denial creates no record.
 
 5. **Vault initialization secret.** The trusted helper generates a high-entropy passphrase,
    round-trips it through the exact bundle-scoped platform credential store, and submits it
@@ -128,15 +144,17 @@ does not imply support for the full Windows service transport, peer authenticati
 release surface.
 
 Native OS-authenticated prompts, host-verified chat provenance, approved-machine profiles,
-durable grants, E2EE service authority, and expanding the six MCP tools for consent remain
+reusable or agent-visible durable grants, E2EE service authority, and expanding the six MCP tools
+for consent remain
 separate design work. Agent-chat authorize is a local CLI control path, so ADR-011's six MCP tools
 stay intact.
 
 ## Alternatives considered
 
 **Reusable agent-visible approval value.** Rejected because the requesting channel could replay it.
-The accepted agent assertion is exact, short-lived, and single-use, with its forgery limitation
-made explicit.
+The accepted assertion is exact, short-lived, and single-use. Import publication uses an
+owner-only internal handoff retained only for crash-safe completion of the same prepared job; it is
+never returned as a bearer value.
 
 **Agent-supplied initialization secret.** Rejected because it lets the agent control the vault
 root secret even if a human approved the operation.

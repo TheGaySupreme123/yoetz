@@ -15,7 +15,7 @@ from yoetz.cli.unlock import (
     run_human_ceremony,
     run_human_ceremony_on_terminal,
 )
-from yoetz.protocol.canonical import JsonValue, canonical_digest
+from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.chat_user_authority import (
     ChatUserAttestationModel,
     agent_chat_attestation_supported,
@@ -46,6 +46,7 @@ from yoetz.service.elevated_bootstrap import (
     operation_spec,
     prepare_pending,
     projection_for_status,
+    record_import_publication_authorization,
     status_payload,
 )
 
@@ -92,7 +93,7 @@ def prepare_elevated(
     )
     model = ConsentPrepareResultModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.prepare-result/4",
+            "schema": "yoetz.elevated-bootstrap.prepare-result/5",
             "pending": projection_for_status(pending),
         }
     )
@@ -113,6 +114,9 @@ def _render_review(console: TrustedForegroundConsole, pending: PendingElevatedCo
         detail += "Provider binding:\n"
         for key in sorted(pending.provider_binding, key=str.encode):
             detail += f"  {key}: {pending.provider_binding[key]}\n"
+    if pending.import_publication_preview is not None:
+        preview = canonical_encode(dict(pending.import_publication_preview)).decode("utf-8")
+        detail += f"Import publication preview (structural JSON):\n{preview}\n"
     console.write(detail + pending.danger_text + "\n")
 
 
@@ -127,7 +131,7 @@ def _review_result(
 ) -> dict[str, JsonValue]:
     model = ConsentReviewResultModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.result/4",
+            "schema": "yoetz.elevated-bootstrap.result/5",
             "pending_id": pending.pending_id,
             "operation": pending.operation,
             "risk_class": pending.risk_class,
@@ -213,6 +217,12 @@ async def _complete_approved(
         return await _complete_provider_credential(console, pending)
     if pending.operation == "repository_privacy_grant":
         raise ElevatedBootstrapError("repository_privacy_grant_requires_yoetz_privacy")
+    if pending.operation == "import_publication":
+        authorization = record_import_publication_authorization(pending)
+        return {
+            "authorization_target_digest": authorization.target_digest,
+            "outcome": "authorized",
+        }
     raise ElevatedBootstrapError("operation_not_implemented")
 
 
@@ -287,6 +297,12 @@ async def authorize_elevated(
             result = await _complete_provider_credential_supplied(pending, provider_credential)
         elif pending.operation == "repository_privacy_grant":
             result = await _complete_repository_privacy_grant(pending)
+        elif pending.operation == "import_publication":
+            authorization = record_import_publication_authorization(pending)
+            result = {
+                "authorization_target_digest": authorization.target_digest,
+                "outcome": "authorized",
+            }
         else:
             raise ElevatedBootstrapError("chat_user_operation_forbidden")
         complete_review(pending, outcome="approved")
@@ -634,6 +650,8 @@ def _target_digest(
         if grant_binding is None:
             raise ElevatedBootstrapError("grant_binding_required")
         return grant_target_digest(grant_binding)
+    if operation == "import_publication":
+        raise ElevatedBootstrapError("import_publication_preview_required")
     if spec.requires_target_digest_arg:
         if target_digest is None:
             raise ElevatedBootstrapError("target_digest_required")
