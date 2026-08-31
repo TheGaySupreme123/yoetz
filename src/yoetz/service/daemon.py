@@ -1815,8 +1815,8 @@ class ServiceDaemon:
             )
             return False
         try:
-            accepted_staged: bool | None = None
-            for auto_passphrase, is_staged in candidates:
+            accepted_slot: str | None = None
+            for auto_passphrase, slot in candidates:
                 try:
                     handle = cast(LocalSecretMemory, memory).capture(
                         SecretPurpose.VAULT_UNLOCK, auto_passphrase
@@ -1824,9 +1824,9 @@ class ServiceDaemon:
                     await vault.unlock(handle)
                 except VaultError:
                     continue
-                accepted_staged = is_staged
+                accepted_slot = slot
                 break
-            if accepted_staged is None:
+            if accepted_slot is None:
                 raise VaultError("unlock_wrong")
         except VaultError:
             self._state_reason = "auto_unlock_stale"
@@ -1847,22 +1847,19 @@ class ServiceDaemon:
             )
             return False
         finally:
-            for candidate, _is_staged in candidates:
+            for candidate, _slot in candidates:
                 for index in range(len(candidate)):
                     candidate[index] = 0
-        # The vault is ready from here on. Reconciling the staged keyring rotation entry is
+        # The vault is ready from here on. Reconciling the staged keyring entries is
         # credential-store hygiene only: a promote/discard failure must never relock a ready
         # vault, so log it and continue activation (#492 review).
         try:
-            if accepted_staged:
-                await asyncio.to_thread(store.promote_staged_rotation)
-            elif any(staged for _value, staged in candidates):
-                await asyncio.to_thread(store.discard_staged_rotation)
+            await asyncio.to_thread(_reconcile_staged_slots, store, accepted_slot)
         except Exception:
             get_logger("service.daemon").warning(
                 "auto_unlock",
                 outcome="degraded",
-                reason="staged_rotation_reconcile_failed",
+                reason="staged_reconcile_failed",
             )
         if not vault.ready:
             self._state_reason = "unlock_failed"
@@ -1937,6 +1934,27 @@ class ServiceDaemon:
                 loop.add_signal_handler(signum, self._stop_event.set)
             except NotImplementedError, RuntimeError:
                 continue
+
+
+def _reconcile_staged_slots(store: AutoUnlockPassphraseStore, accepted_slot: str) -> None:
+    """Promote the proven staged entry, then discard staged entries the proof made stale.
+
+    Called only after one candidate unlocked the vault. The envelope authenticates exactly one
+    passphrase, so that success disproves every non-equal staged entry, and a staged entry
+    byte-equal to the now-active value is a redundant copy from an interrupted promotion.
+    Either way, any staged slot still present afterwards is safe to remove; invalid slots are
+    left in place for the status surface.
+    """
+
+    if accepted_slot == "staged_rotation":
+        store.promote_staged_rotation()
+    elif accepted_slot == "staged_initialization":
+        store.promote_staged_initialization()
+    report = store.slot_report()
+    if report.get("staged_rotation") == "present":
+        store.discard_staged_rotation()
+    if report.get("staged_initialization") == "present":
+        store.discard_staged_initialization()
 
 
 def _is_ready_application(value: object) -> bool:
@@ -3694,9 +3712,9 @@ async def _production_composition(
             auto_unlock_store = AutoUnlockPassphraseStore(paths.bundle)
             candidates, load_reason = auto_unlock_store.load_candidates_with_reason()
             if candidates:
-                accepted_staged: bool | None = None
+                accepted_slot: str | None = None
                 try:
-                    for auto_passphrase, is_staged in candidates:
+                    for auto_passphrase, slot in candidates:
                         try:
                             handle = secret_memory.capture(
                                 SecretPurpose.VAULT_UNLOCK, auto_passphrase
@@ -3704,31 +3722,28 @@ async def _production_composition(
                             await vault.unlock(handle)
                         except VaultError:
                             continue
-                        accepted_staged = is_staged
+                        accepted_slot = slot
                         break
-                    if accepted_staged is None:
+                    if accepted_slot is None:
                         auto_unlock_result = "failed"
                         auto_unlock_reason = "auto_unlock_stale"
                 except Exception:
                     auto_unlock_result = "failed"
                     auto_unlock_reason = "auto_unlock_rejected"
                 finally:
-                    for candidate, _is_staged in candidates:
+                    for candidate, _slot in candidates:
                         for index in range(len(candidate)):
                             candidate[index] = 0
-                if accepted_staged is not None:
-                    # Unlock succeeded; the staged keyring entry is hygiene only. A
+                if accepted_slot is not None:
+                    # Unlock succeeded; the staged keyring entries are hygiene only. A
                     # promote/discard failure must not degrade a ready vault (#492 review).
                     try:
-                        if accepted_staged:
-                            auto_unlock_store.promote_staged_rotation()
-                        elif any(staged for _value, staged in candidates):
-                            auto_unlock_store.discard_staged_rotation()
+                        _reconcile_staged_slots(auto_unlock_store, accepted_slot)
                     except Exception:
                         get_logger("service.daemon").warning(
                             "auto_unlock",
                             outcome="degraded",
-                            reason="staged_rotation_reconcile_failed",
+                            reason="staged_reconcile_failed",
                         )
             else:
                 auto_unlock_result = (

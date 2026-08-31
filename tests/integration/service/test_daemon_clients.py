@@ -1563,16 +1563,31 @@ def _patch_auto_unlock_store(
 
         def load_candidates_with_reason(
             self,
-        ) -> tuple[tuple[tuple[bytearray, bool], ...], str]:
+        ) -> tuple[tuple[tuple[bytearray, str], ...], str]:
             if secret is None:
                 return (), reason
-            return ((bytearray(secret), staged),), reason
+            slot = "staged_rotation" if staged else "active"
+            return ((bytearray(secret), slot),), reason
+
+        def slot_report(self) -> dict[str, str]:
+            return {
+                "active": "absent" if staged or secret is None else "present",
+                "staged_initialization": "absent",
+                "staged_rotation": "present" if staged and secret is not None else "absent",
+            }
 
         def promote_staged_rotation(self) -> None:
             if promote_error is not None:
                 raise promote_error
 
         def discard_staged_rotation(self) -> None:
+            return None
+
+        def promote_staged_initialization(self) -> None:
+            if promote_error is not None:
+                raise promote_error
+
+        def discard_staged_initialization(self) -> None:
             return None
 
     def _factory(_bundle: Path) -> _Store:

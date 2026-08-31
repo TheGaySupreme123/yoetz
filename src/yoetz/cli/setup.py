@@ -178,10 +178,12 @@ _PROVIDER_SETUP_AUTO_UNLOCK_REASONS: Final = frozenset(
         "entry_exists",
         "entry_invalid",
         "human_authority_unavailable",
+        "initialization_in_progress",
         "locked",
         "migration_not_proven",
         "missing",
         "readback_failed",
+        "staged_entry_exists",
         "unsupported",
         "unverified",
     }
@@ -227,6 +229,14 @@ def _allowlisted_provider_setup_reason(reason: object) -> str:
     if reason.startswith("auto_unlock_"):
         auto_unlock_reason = reason.removeprefix("auto_unlock_")
         if auto_unlock_reason in _PROVIDER_SETUP_AUTO_UNLOCK_REASONS:
+            return reason
+    if reason.startswith("vault_result_"):
+        # The suffix comes from a schema-validated VaultStateResult reason, never caller text;
+        # the structural bound here keeps the allowlist self-contained.
+        vault_reason = reason.removeprefix("vault_result_")
+        if 0 < len(vault_reason) <= 64 and all(
+            character in "abcdefghijklmnopqrstuvwxyz_" for character in vault_reason
+        ):
             return reason
     return "credential_setup_failed"
 
@@ -1774,13 +1784,67 @@ async def _interactive_provider_setup(
                 )
                 try:
                     # ADR-015 decision 5 / ADR-008: generate a fresh scoped secret for
-                    # vault_initialize. Never adopt a pre-existing entry (load_or_create).
-                    # Matches elevated create_for_initialization fail-closed on entry_exists.
-                    auto_passphrase = auto_store.create_for_initialization()
+                    # vault_initialize. Never adopt a pre-existing entry; the active slot stays
+                    # fail-closed on entry_exists. The guard is held across stage, ceremony,
+                    # and promote so no concurrent repair or retry can act on a stale status.
+                    # A leftover staged-initialization entry from an earlier failed attempt is
+                    # discarded only after a fresh service status, read under the guard, proves
+                    # the vault is still uninitialized and idle (#511) — any other state keeps
+                    # it for proof-based restart reconciliation.
+                    with auto_store.staged_initialization_guard():
+                        if auto_store.slot_report().get("staged_initialization") == "present":
+                            fresh = await _service_reachability()
+                            if (
+                                fresh.get("state") == "locked"
+                                and fresh.get("vault_mode") == "uninitialized"
+                            ):
+                                auto_store.discard_staged_initialization()
+                        auto_passphrase = auto_store.stage_for_initialization()
+                        typer.echo("Secure vault setup (platform credential store auto-unlock)")
+                        init_result = await initialize_passphrase_vault(bytearray(auto_passphrase))
+                        if init_result.state == "ready" and init_result.reason == "succeeded":
+                            try:
+                                auto_store.promote_staged_initialization()
+                            except OSKeyringError:
+                                # The vault committed and activated; the staged entry remains
+                                # the proven candidate and restart reconciliation promotes it.
+                                pass
+                        else:
+                            # Failure atomicity (#511): remove the same-attempt staged
+                            # credential when the service proves no envelope was committed;
+                            # otherwise keep it for proof-based restart reconciliation.
+                            try:
+                                fresh = await _service_reachability()
+                                if (
+                                    fresh.get("state") == "locked"
+                                    and fresh.get("vault_mode") == "uninitialized"
+                                ):
+                                    auto_store.discard_staged_initialization()
+                            except OSKeyringError:
+                                pass
+                            provider_report["credential_reason"] = (
+                                f"vault_result_{init_result.reason}"
+                            )
+                            wipe_auto_passphrase()
+                            return _provider_setup_result(service, provider_report)
                 except OSKeyringError as error:
                     if error.reason != "unsupported":
                         provider_report["credential_reason"] = f"auto_unlock_{error.reason}"
-                        if error.reason == "entry_exists":
+                        if error.reason == "initialization_in_progress":
+                            typer.echo(
+                                "Another Yoetz vault initialization is already in progress. "
+                                "Wait for it to finish, then rerun 'yoetz setup'.",
+                                err=True,
+                            )
+                        elif error.reason == "staged_entry_exists":
+                            typer.echo(
+                                "A staged credential from an earlier vault-initialization "
+                                "attempt is not yet reconciled. Restart the service "
+                                "('yoetz service restart') so it can resolve the entry by "
+                                "proof, then rerun 'yoetz setup'.",
+                                err=True,
+                            )
+                        elif error.reason == "entry_exists":
                             entry_service, entry_account = auto_store.entry_identity
                             typer.echo(
                                 "A pre-existing platform credential entry blocks vault "
@@ -1808,9 +1872,6 @@ async def _interactive_provider_setup(
                     typer.echo("Platform credential store unavailable; choose a vault passphrase")
                     typer.echo("Secure vault setup (hidden local-terminal input)")
                     await initialize_passphrase_vault()
-                else:
-                    typer.echo("Secure vault setup (platform credential store auto-unlock)")
-                    await initialize_passphrase_vault(bytearray(auto_passphrase))
             elif service.get("vault_mode") == "passphrase":
                 typer.echo("")
                 current_config = load_config({}, os.environ, None)

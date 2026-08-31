@@ -2005,47 +2005,72 @@ def service_auto_unlock_status(json_output: _JSON = False) -> None:
 
 
 async def _service_auto_unlock_status(json_output: bool) -> int:
-    """Compose platform-entry and live-service evidence into one bounded report."""
+    """Compose platform-entry and live-service evidence into one bounded report.
+
+    The per-slot report distinguishes a genuinely pre-existing active entry, a same-attempt
+    staged or orphaned initialization entry, an established active entry, and an invalid entry
+    (#511) without exposing credential material.
+    """
 
     store = _auto_unlock_store()
     secret, reason = store.load_with_reason()
     if secret is not None:
         for index in range(len(secret)):
             secret[index] = 0
+    slots = store.slot_report()
     service_state: str | None = None
     service_reason: str | None = None
+    vault_mode: str | None = None
     try:
         client = await build_service_client()
         try:
             status = await client.service_status()
             service_state = status.state.value
             service_reason = status.state_reason
+            vault_mode = status.vault_mode
         finally:
             await client.close()
     except ControlError as error:
         service_state = error.reason
         service_reason = error.reason
-    state = (
-        "rejected"
-        if service_reason == "auto_unlock_rejected"
-        else "stale"
-        if service_reason == "auto_unlock_stale"
-        else "provisioned"
-        if reason == "none"
-        else "absent"
-        if reason == "auto_unlock_absent"
-        else "backend_unsupported"
-        if reason == "auto_unlock_backend_unavailable"
-        else "rejected"
-    )
+    staged_initialization = slots.get("staged_initialization")
+    if service_reason == "auto_unlock_rejected":
+        state = "rejected"
+    elif service_reason == "auto_unlock_stale":
+        state = "stale"
+    elif staged_initialization == "present":
+        # A staged-initialization entry exists only because an authorized initialization
+        # attempt has not been reconciled. With a provably uninitialized vault it is an
+        # orphan repair can discard; otherwise restart reconciliation resolves it by proof.
+        state = (
+            "initialization_orphaned"
+            if vault_mode == "uninitialized"
+            else "initialization_unreconciled"
+        )
+    elif reason == "none":
+        # An active entry beside an uninitialized vault predates initialization and is never
+        # adopted; it must be removed out of band before initialization can proceed.
+        state = "pre_existing_unadoptable" if vault_mode == "uninitialized" else "provisioned"
+    elif reason == "auto_unlock_absent":
+        state = "absent"
+    elif reason == "auto_unlock_backend_unavailable":
+        state = "backend_unsupported"
+    else:
+        state = "rejected"
+    if state in {"stale", "absent", "rejected", "initialization_orphaned"}:
+        next_command: str | None = "yoetz service auto-unlock repair"
+    elif state == "initialization_unreconciled":
+        next_command = "yoetz service restart"
+    else:
+        next_command = None
     report: JsonValue = {
-        "schema": "yoetz.auto-unlock-status/1",
+        "schema": "yoetz.auto-unlock-status/2",
         "state": state,
+        "slots": dict(slots),
         "service_state": service_state,
         "service_state_reason": service_reason,
-        "next_command": (
-            "yoetz service auto-unlock repair" if state in {"stale", "absent", "rejected"} else None
-        ),
+        "vault_mode": vault_mode,
+        "next_command": next_command,
     }
     _human_or_json(report, json_output=json_output)
     return 0 if state == "provisioned" else 20
@@ -2079,6 +2104,43 @@ async def _service_auto_unlock_repair(json_output: bool) -> int:
             await client.close()
     except ControlError as error:
         return _control_failure(error)
+    if status.vault_mode == "uninitialized":
+        # An orphan left by a failed initialization attempt (#511) is removed with verified
+        # read-back, but only under the bundle-scoped guard with the vault state re-proven
+        # while it is held: no initializer can stage, commit, or promote while the guard is
+        # taken, so the status cannot go stale between the read and the delete. Active entries
+        # are never deleted by this command.
+        orphan_store = _auto_unlock_store()
+        if orphan_store.slot_report().get("staged_initialization") == "present":
+            try:
+                with orphan_store.staged_initialization_guard():
+                    try:
+                        client = await build_service_client()
+                        try:
+                            proven = await client.service_status()
+                        finally:
+                            await client.close()
+                    except ControlError as error:
+                        return _control_failure(error)
+                    if proven.state.value != "locked" or proven.vault_mode != "uninitialized":
+                        _stderr(
+                            "auto_unlock_repair_unproven: the vault state changed; rerun "
+                            "'yoetz service auto-unlock status'"
+                        )
+                        return 20
+                    if orphan_store.slot_report().get("staged_initialization") == "present":
+                        orphan_store.discard_staged_initialization()
+            except OSKeyringError as error:
+                _stderr(f"auto_unlock_{error.reason}")
+                return 20
+            report = {
+                "schema": "yoetz.auto-unlock-repair/1",
+                "outcome": "initialization_orphan_cleared",
+                "service_state": status.state.value,
+                "next_command": "yoetz consent prepare vault_initialize",
+            }
+            _human_or_json(cast(JsonValue, report), json_output=json_output)
+            return 0
     if status.vault_mode != "passphrase":
         _stderr("auto_unlock_unavailable: the vault is not in passphrase mode")
         return 20

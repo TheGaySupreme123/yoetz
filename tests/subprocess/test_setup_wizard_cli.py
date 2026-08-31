@@ -1887,13 +1887,23 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
     supplied: list[bytes] = []
     loaded_env: list[object] = []
 
-    def fake_create_for_initialization(_store: object) -> bytearray:
-        calls.append("create_for_initialization")
+    def fake_slot_report(_store: object) -> dict[str, str]:
+        return {
+            "active": "absent",
+            "staged_initialization": "absent",
+            "staged_rotation": "absent",
+        }
+
+    def fake_stage_for_initialization(_store: object) -> bytearray:
+        calls.append("stage_for_initialization")
         return bytearray(b"a" * 48)
+
+    def fake_promote(_store: object) -> None:
+        calls.append("promote_staged_initialization")
 
     async def fake_initialize(passphrase: bytearray | None = None) -> object:
         supplied.append(bytes(passphrase or b""))
-        return object()
+        return SimpleNamespace(state="ready", reason="succeeded")
 
     async def fake_reachability(*, start_if_absent: bool = False) -> dict[str, object]:
         del start_if_absent
@@ -1910,8 +1920,18 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
 
     monkeypatch.setattr(
         keyring_module.AutoUnlockPassphraseStore,
-        "create_for_initialization",
-        fake_create_for_initialization,
+        "slot_report",
+        fake_slot_report,
+    )
+    monkeypatch.setattr(
+        keyring_module.AutoUnlockPassphraseStore,
+        "stage_for_initialization",
+        fake_stage_for_initialization,
+    )
+    monkeypatch.setattr(
+        keyring_module.AutoUnlockPassphraseStore,
+        "promote_staged_initialization",
+        fake_promote,
     )
     monkeypatch.setattr(unlock_module, "initialize_passphrase_vault", fake_initialize)
     monkeypatch.setattr(binding_module, "prompt_provider_endpoint_binding", _skip_provider_binding)
@@ -1925,7 +1945,7 @@ def test_uninitialized_provider_setup_provisions_auto_unlock(
         )
     )
 
-    assert calls == ["create_for_initialization"]
+    assert calls == ["stage_for_initialization", "promote_staged_initialization"]
     assert loaded_env == [os.environ]
     assert supplied == [b"a" * 48]
     assert service["state"] == "ready"
@@ -1937,7 +1957,7 @@ def test_uninitialized_setup_refuses_preexisting_auto_unlock_entry(
 ) -> None:
     """RT-vault-secrets-1 / ADR-015: pre-existing scoped entry must block vault init.
 
-    Interactive setup must use create_for_initialization (like elevated bootstrap)
+    Interactive setup must use stage_for_initialization (like elevated bootstrap)
     and must never submit a pre-planted auto-unlock secret to vault_initialize.
     """
 
@@ -1965,6 +1985,9 @@ def test_uninitialized_setup_refuses_preexisting_auto_unlock_entry(
         def set_password(self, service: str, username: str, password: str) -> None:
             self.values[(service, username)] = password
 
+        def delete_password(self, service: str, username: str) -> None:
+            del self.values[(service, username)]
+
     backend = _AtomicBackend()
     store = keyring_module.AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
     store._backend_id = (  # pyright: ignore[reportPrivateUsage]
@@ -1977,7 +2000,7 @@ def test_uninitialized_setup_refuses_preexisting_auto_unlock_entry(
     )
     assert backend.values[("yoetz.auto-unlock.v1", username)] == encoded
     with pytest.raises(keyring_module.OSKeyringError) as elevated_exc:
-        store.create_for_initialization()
+        store.stage_for_initialization()
     assert elevated_exc.value.reason == "entry_exists"
 
     supplied: list[bytes] = []
@@ -2052,6 +2075,9 @@ def test_uninitialized_setup_stops_after_write_with_failed_readback(
         def set_password(self, service: str, username: str, password: str) -> None:
             del service, username
             self.written = password
+
+        def delete_password(self, service: str, username: str) -> None:
+            del service, username
 
     backend = _WriteThenUnreadable()
     store = keyring_module.AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)

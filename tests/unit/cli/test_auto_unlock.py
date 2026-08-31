@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,13 +31,43 @@ class _Client:
 
 
 class _Store:
-    def __init__(self, secret: bytearray | None, reason: str) -> None:
+    def __init__(
+        self,
+        secret: bytearray | None,
+        reason: str,
+        *,
+        staged_initialization: str = "absent",
+    ) -> None:
         self.secret = secret
         self.reason = reason
         self.saved: bytes | None = None
+        self.staged_initialization = staged_initialization
+        self.discarded = 0
 
     def load_with_reason(self) -> tuple[bytearray | None, str]:
         return self.secret, self.reason
+
+    def slot_report(self) -> dict[str, str]:
+        if self.reason == "auto_unlock_backend_unavailable":
+            return {
+                "active": "unavailable",
+                "staged_initialization": "unavailable",
+                "staged_rotation": "unavailable",
+            }
+        return {
+            "active": "present" if self.secret is not None else "absent",
+            "staged_initialization": self.staged_initialization,
+            "staged_rotation": "absent",
+        }
+
+    def discard_staged_initialization(self) -> None:
+        self.staged_initialization = "absent"
+        self.discarded += 1
+
+    @contextmanager
+    def staged_initialization_guard(self) -> Generator[None]:
+        self.guard_acquisitions = getattr(self, "guard_acquisitions", 0) + 1
+        yield
 
     def save(self, value: bytearray) -> None:
         self.saved = bytes(value)
@@ -97,10 +129,16 @@ async def test_auto_unlock_status_reports_service_verified_stale_without_secret(
     report = json.loads(capsys.readouterr().out)
     assert report == {
         "next_command": "yoetz service auto-unlock repair",
-        "schema": "yoetz.auto-unlock-status/1",
+        "schema": "yoetz.auto-unlock-status/2",
         "service_state": "locked",
         "service_state_reason": "auto_unlock_stale",
+        "slots": {
+            "active": "present",
+            "staged_initialization": "absent",
+            "staged_rotation": "absent",
+        },
         "state": "stale",
+        "vault_mode": "passphrase",
     }
     assert secret == bytearray(len(secret))
     assert client.closed
@@ -125,6 +163,126 @@ async def test_auto_unlock_status_prioritizes_service_rejection(
     report = json.loads(capsys.readouterr().out)
     assert report["state"] == "rejected"
     assert report["next_command"] == "yoetz service auto-unlock repair"
+
+
+@pytest.mark.anyio
+async def test_auto_unlock_status_reports_initialization_orphan_with_repair_path(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#511: a staged entry beside an uninitialized vault is a typed, repairable orphan."""
+
+    store = _Store(None, "auto_unlock_absent", staged_initialization="present")
+    client = _Client(state="locked", reason="none", vault_mode="uninitialized")
+    monkeypatch.setattr(module, "_auto_unlock_store", lambda: store)
+    monkeypatch.setattr(module, "build_service_client", lambda: _async_value(client))
+
+    assert (
+        await module._service_auto_unlock_status(  # pyright: ignore[reportPrivateUsage]
+            True
+        )
+        == 20
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["state"] == "initialization_orphaned"
+    assert report["slots"]["staged_initialization"] == "present"
+    assert report["next_command"] == "yoetz service auto-unlock repair"
+
+
+@pytest.mark.anyio
+async def test_auto_unlock_status_reports_unreconciled_staged_initialization(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#511: with a committed vault the staged entry waits for proof-based reconciliation."""
+
+    store = _Store(None, "auto_unlock_absent", staged_initialization="present")
+    client = _Client(state="locked", reason="passphrase_required", vault_mode="passphrase")
+    monkeypatch.setattr(module, "_auto_unlock_store", lambda: store)
+    monkeypatch.setattr(module, "build_service_client", lambda: _async_value(client))
+
+    assert (
+        await module._service_auto_unlock_status(  # pyright: ignore[reportPrivateUsage]
+            True
+        )
+        == 20
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["state"] == "initialization_unreconciled"
+    assert report["next_command"] == "yoetz service restart"
+
+
+@pytest.mark.anyio
+async def test_auto_unlock_status_distinguishes_pre_existing_unadoptable_entry(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#511: an active entry beside an uninitialized vault is named, not called provisioned."""
+
+    store = _Store(bytearray(b"a" * 48), "none")
+    client = _Client(state="locked", reason="none", vault_mode="uninitialized")
+    monkeypatch.setattr(module, "_auto_unlock_store", lambda: store)
+    monkeypatch.setattr(module, "build_service_client", lambda: _async_value(client))
+
+    assert (
+        await module._service_auto_unlock_status(  # pyright: ignore[reportPrivateUsage]
+            True
+        )
+        == 20
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["state"] == "pre_existing_unadoptable"
+    assert report["next_command"] is None
+
+
+@pytest.mark.anyio
+async def test_auto_unlock_repair_discards_initialization_orphan_with_proof(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#511: repair removes the orphan only because the service proved no envelope exists."""
+
+    store = _Store(None, "auto_unlock_absent", staged_initialization="present")
+    client = _Client(state="locked", reason="none", vault_mode="uninitialized")
+    monkeypatch.setattr(module, "_auto_unlock_store", lambda: store)
+    monkeypatch.setattr(module, "build_service_client", lambda: _async_value(client))
+
+    assert (
+        await module._service_auto_unlock_repair(  # pyright: ignore[reportPrivateUsage]
+            True
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["outcome"] == "initialization_orphan_cleared"
+    assert report["next_command"] == "yoetz consent prepare vault_initialize"
+    assert store.discarded == 1
+    assert store.guard_acquisitions == 1, "discard must happen under the exclusive guard"
+    assert client.closed
+
+
+@pytest.mark.anyio
+async def test_auto_unlock_repair_refuses_orphan_discard_when_reproof_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#511 review: the vault state is re-proven under the guard; a change refuses deletion."""
+
+    store = _Store(None, "auto_unlock_absent", staged_initialization="present")
+    first = _Client(state="locked", reason="none", vault_mode="uninitialized")
+    second = _Client(state="unlocking", reason="none", vault_mode="uninitialized")
+    clients = iter([first, second])
+    monkeypatch.setattr(module, "_auto_unlock_store", lambda: store)
+    monkeypatch.setattr(module, "build_service_client", lambda: _async_value(next(clients)))
+
+    assert (
+        await module._service_auto_unlock_repair(  # pyright: ignore[reportPrivateUsage]
+            True
+        )
+        == 20
+    )
+
+    assert "auto_unlock_repair_unproven" in capsys.readouterr().err
+    assert store.discarded == 0
 
 
 @pytest.mark.anyio

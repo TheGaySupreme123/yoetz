@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Mapping
+from contextlib import AbstractContextManager, ExitStack
 from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
 
@@ -60,7 +61,15 @@ __all__ = [
 
 
 class _AutoUnlockStore(Protocol):
-    def create_for_initialization(self) -> bytearray: ...
+    def staged_initialization_guard(self) -> AbstractContextManager[None]: ...
+
+    def stage_for_initialization(self) -> bytearray: ...
+
+    def promote_staged_initialization(self) -> None: ...
+
+    def discard_staged_initialization(self) -> None: ...
+
+    def slot_report(self) -> Mapping[str, str]: ...
 
     def load(self) -> bytearray | None: ...
 
@@ -356,42 +365,89 @@ def _auto_unlock_store() -> _AutoUnlockStore:
     return AutoUnlockPassphraseStore(bundle_root(_data_dir=config.storage.data_dir))
 
 
+async def _service_vault_state() -> tuple[str, str] | None:
+    """Return the live (service state, vault mode), or ``None`` when it cannot be proven."""
+
+    from yoetz.ports.control import ControlClientKind, ControlError
+    from yoetz.service.client import connect_service
+
+    try:
+        client = await connect_service(ControlClientKind.CLI, workspace_locator=None)
+        try:
+            status = await client.service_status()
+        finally:
+            await client.close()
+    except ControlError, OSError, TypeError, ValueError:
+        return None
+    return status.state.value, status.vault_mode
+
+
+async def _discard_provably_orphaned_staged_initialization(store: _AutoUnlockStore) -> None:
+    """Remove a staged-initialization entry only with proof no vault envelope needs it.
+
+    Must be called with the store's staged-initialization guard held, so no other local actor
+    can stage, commit, or promote between the status read and the delete. A locked service with
+    an uninitialized vault has no envelope (and no in-flight ceremony) the staged secret could
+    unlock, so the exact entry created by an earlier authorized attempt is deleted with verified
+    read-back. Any other or unprovable service state keeps the entry for proof-based restart
+    reconciliation; deleting it there could destroy the only copy of a committed vault's
+    passphrase.
+    """
+
+    if store.slot_report().get("staged_initialization") != "present":
+        return
+    if await _service_vault_state() == ("locked", "uninitialized"):
+        store.discard_staged_initialization()
+
+
 async def _complete_vault_initialize(
     console: TrustedForegroundConsole,
 ) -> dict[str, JsonValue]:
     from yoetz.adapters.keys.os_keyring import OSKeyringError
 
     target = EmptyVaultTarget(expected_mode="uninitialized")
+    store = _auto_unlock_store()
     generated: bytearray | None = None
+    staged = False
     try:
-        store = _auto_unlock_store()
         try:
-            generated = store.create_for_initialization()
-        except OSKeyringError as exc:
-            if exc.reason != "unsupported":
-                raise ElevatedBootstrapError(f"auto_unlock_{exc.reason}") from exc
-            # The backend was known unavailable before any write. The existing local-human
-            # passphrase ceremony remains the only permitted fallback.
-            result = await run_human_ceremony_on_terminal(
-                console,
-                HumanCeremonyKind.VAULT_INITIALIZE,
-                target,
-            )
-        else:
-            result = await run_human_ceremony_on_terminal(
-                console,
-                HumanCeremonyKind.VAULT_INITIALIZE,
-                target,
-                passphrase=generated,
-            )
-    except ConfidentialClientError as exc:
-        raise ElevatedBootstrapError(f"ceremony_{exc.reason}") from exc
-    except HumanCeremonyCliError as exc:
-        raise ElevatedBootstrapError(exc.reason) from exc
+            with ExitStack() as stack:
+                try:
+                    stack.enter_context(store.staged_initialization_guard())
+                    await _discard_provably_orphaned_staged_initialization(store)
+                    generated = store.stage_for_initialization()
+                except OSKeyringError as exc:
+                    if exc.reason != "unsupported":
+                        raise ElevatedBootstrapError(f"auto_unlock_{exc.reason}") from exc
+                    # The backend was known unavailable before any write. The existing
+                    # local-human passphrase ceremony remains the only permitted fallback.
+                    result = await run_human_ceremony_on_terminal(
+                        console,
+                        HumanCeremonyKind.VAULT_INITIALIZE,
+                        target,
+                    )
+                    return _validated_vault_success(result)
+                staged = True
+                result = await run_human_ceremony_on_terminal(
+                    console,
+                    HumanCeremonyKind.VAULT_INITIALIZE,
+                    target,
+                    passphrase=bytearray(generated),
+                )
+                validated = _validated_vault_success(result)
+                _promote_after_committed_initialization(store)
+        except ConfidentialClientError as exc:
+            raise ElevatedBootstrapError(f"ceremony_{exc.reason}") from exc
+        except HumanCeremonyCliError as exc:
+            raise ElevatedBootstrapError(exc.reason) from exc
+    except BaseException:
+        if staged:
+            await _cleanup_failed_staged_initialization(store)
+        raise
     finally:
         if generated is not None:
             overwrite_secret_buffer(generated)
-    return _validated_vault_success(result)
+    return validated
 
 
 async def _complete_vault_initialize_generated() -> dict[str, JsonValue]:
@@ -399,25 +455,70 @@ async def _complete_vault_initialize_generated() -> dict[str, JsonValue]:
 
     from yoetz.adapters.keys.os_keyring import OSKeyringError
 
+    store = _auto_unlock_store()
     generated: bytearray | None = None
+    staged = False
     try:
         try:
-            generated = _auto_unlock_store().create_for_initialization()
-        except OSKeyringError as exc:
-            raise ElevatedBootstrapError(f"auto_unlock_{exc.reason}") from exc
-        result = await run_human_ceremony(
-            HumanCeremonyKind.VAULT_INITIALIZE,
-            EmptyVaultTarget(expected_mode="uninitialized"),
-            passphrase=bytearray(generated),
-        )
-    except ConfidentialClientError as exc:
-        raise ElevatedBootstrapError(f"ceremony_{exc.reason}") from exc
-    except HumanCeremonyCliError as exc:
-        raise ElevatedBootstrapError(exc.reason) from exc
+            with ExitStack() as stack:
+                try:
+                    stack.enter_context(store.staged_initialization_guard())
+                    await _discard_provably_orphaned_staged_initialization(store)
+                    generated = store.stage_for_initialization()
+                except OSKeyringError as exc:
+                    raise ElevatedBootstrapError(f"auto_unlock_{exc.reason}") from exc
+                staged = True
+                result = await run_human_ceremony(
+                    HumanCeremonyKind.VAULT_INITIALIZE,
+                    EmptyVaultTarget(expected_mode="uninitialized"),
+                    passphrase=bytearray(generated),
+                )
+                validated = _validated_vault_success(result)
+                _promote_after_committed_initialization(store)
+        except ConfidentialClientError as exc:
+            raise ElevatedBootstrapError(f"ceremony_{exc.reason}") from exc
+        except HumanCeremonyCliError as exc:
+            raise ElevatedBootstrapError(exc.reason) from exc
+    except BaseException:
+        if staged:
+            await _cleanup_failed_staged_initialization(store)
+        raise
     finally:
         if generated is not None:
             overwrite_secret_buffer(generated)
-    return _validated_vault_success(result)
+    return validated
+
+
+async def _cleanup_failed_staged_initialization(store: _AutoUnlockStore) -> None:
+    """Best-effort failure atomicity for the same-attempt staged credential.
+
+    Runs only under an already-propagating ceremony failure, after the initialization guard was
+    released: re-acquire it, then discard the staged entry when the service proves the vault is
+    still uninitialized. Otherwise (ambiguous outcome, unreachable service, contended guard, or
+    discard failure) keep it — the slot is durable, typed in
+    ``yoetz service auto-unlock status``, and reconciled by proof at the next unlock or retry.
+    Never masks the original failure.
+    """
+
+    try:
+        with store.staged_initialization_guard():
+            await _discard_provably_orphaned_staged_initialization(store)
+    except Exception:
+        pass
+
+
+def _promote_after_committed_initialization(store: _AutoUnlockStore) -> None:
+    """Promote the staged credential after the validated ready result.
+
+    The vault has committed and activated, so a promotion failure must not fail the completed
+    operation: the staged entry remains the sole candidate that unlocks the envelope and restart
+    reconciliation promotes it by proof.
+    """
+
+    try:
+        store.promote_staged_initialization()
+    except Exception:
+        pass
 
 
 async def _complete_vault_passphrase_rotate_generated() -> dict[str, JsonValue]:
