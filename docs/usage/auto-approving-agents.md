@@ -51,6 +51,90 @@ denies or the approval expires, the agent may use a deterministic-only fallback 
 explicitly chooses it after seeing the semantic-review limitation. A later Yoetz
 `awaiting_human` result remains a separate Yoetz decision flow.
 
+## Letting an auto-review host admit the authorized check
+
+Claude Code auto mode, Codex `approvals_reviewer = "auto_review"`, and Cursor Auto-review each
+put a second model in front of tool calls. All three refuse the same shape — data leaving the
+machine to a destination the user did not name — and Yoetz's policy-route `check` is, by
+design, exactly that shape. The privacy ceremony where you named that destination is invisible
+to the host's reviewer, so without help every `semantic_required` check is held or refused.
+
+Host admission is the way to hand the host your decision. It is one previewed, digest-bound step
+per host and per repository that writes the host's *own* rule admitting exactly `check`:
+
+```text
+yoetz integrate claude admission preview --project-root . --claude-path ... --claude-config-root ... --cache-root ... --marketplace-root ...
+yoetz integrate codex  admission preview --project-root .
+yoetz integrate cursor admission preview --project-root . --cursor-config-root ...
+yoetz integrate <host> admission grant --project-root . --accept --preview-digest <digest>
+```
+
+The preview shows the exact file and entry, the observed route, and whether the repository's
+privacy grant permits external review. A grant is written only when all of these hold:
+
+- the host's registered Yoetz route is `policy` (a strict route is never admitted; `check` on
+  it still returns `blocked_by_policy` / `route_semantic_ceiling`);
+- the repository grant permits external review;
+- the host file carries no wider or conflicting rule for the same tool. A server-wide allow, a
+  wildcard, a deny rule, or a Codex server-level default is reported as `foreign` and never
+  edited or written beside;
+- the file could be read. An unreadable file is `unknown`, never treated as empty.
+
+Only `check` is ever admitted. Start, publish, respond, status, receipt, and guidance already
+pass every host's rules.
+
+What each host receives:
+
+- **Claude Code** — `permissions.allow: ["mcp__yoetz__check"]` for an external registration named
+  `yoetz`, or
+  `permissions.allow: ["mcp__plugin_yoetz_yoetz__check"]` for the plugin-owned route in the
+  repository's `.claude/settings.local.json`, which Claude Code resolves before its auto-mode
+  classifier. Pass `--checkpoint` to write `permissions.ask` instead, which keeps a human prompt
+  on every check that the classifier can never auto-approve. Granting the other mode later moves
+  the existing entry between `allow` and `ask`; only granting the mode already set is a no-op.
+  Claude Code holds the rules in this file until you trust the folder if the file is tracked in git.
+- **Codex** — `[mcp_servers.yoetz.tools.check] approval_mode = "approve"` (or the
+  `plugins."yoetz@yoetz".mcp_servers.yoetz` form for a plugin-managed route) in the project's
+  `.codex/config.toml`, which Codex loads only for a project you have trusted. The reviewer is
+  not invoked for that one tool; every other tool keeps its approval mode.
+- **Cursor** — `mcpAllowlist: ["yoetz:check"]` in the workspace's `.cursor/permissions.json`
+  for Auto-review, and `Mcp(yoetz:check)` (or `Mcp(plugin-yoetz-yoetz:check)` for a
+  plugin-bundled server) in `.cursor/cli.json` for the Agent CLI.
+
+The preview warns `host_config_not_compare_and_swap` for a mutation. Quit or pause settings
+editors and other processes that may rewrite these host files while applying the accepted preview.
+Yoetz rechecks the exact bytes immediately before each atomic replacement or deletion and verifies
+the result, but an ordinary host configuration file has no portable compare-and-swap operation
+that can exclude a non-cooperating process in the final filesystem syscall window.
+
+### The way out
+
+Every way in has a way out, and each is reported rather than silent:
+
+- `yoetz integrate <host> admission preview --action revoke --project-root .` then `revoke`
+  removes exactly the entry Yoetz wrote and nothing else in the file.
+- Committing a privacy policy that no longer permits external review removes the entries for
+  that repository in the same trusted ceremony.
+- Removing the host plugin, unregistering the Codex route, or re-registering a route as strict
+  removes the entry for the project named in that command.
+- A leftover entry — one whose grant no longer permits review, or whose Codex route is now
+  strict — is reported as `host_admission_drift` by `yoetz provider status`. That report reads
+  each host's project-scoped admission file at the repository root even when you launch the
+  command from a subdirectory.
+
+Tightening the machine-wide ceiling does not reach into every repository's host files; the drift
+report and the revoke command are how those are found and cleared.
+
+### What admission does not do
+
+Admission is host tool-call authorization. It does not prove a check dispatched, does not widen
+what Yoetz may disclose, and does not skip any privacy, provider, credential, or human-review
+gate; `check` still cannot widen policy and still stops at `awaiting_human` when Yoetz decides
+it should. Yoetz never ships a hook that approves its own tool calls, and never softens the
+`openWorldHint` a reviewer reads. When Claude Code auto mode denies a scoped `check` anyway,
+`yoetz observe status` records one payload-free `host_auto_review_denied` diagnostic so the hold
+is visible as what it is, not as a semantic result.
+
 ## Codex registration
 
 `yoetz setup run` and `yoetz integrate codex mcp preview` show the exact command, route profile, and

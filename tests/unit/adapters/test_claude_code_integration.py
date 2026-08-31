@@ -248,6 +248,9 @@ def test_native_projection_uses_shared_bytes_and_only_admitted_claude_components
     ]
     assert tuple(sorted(hooks)) == CLAUDE_CODE_HOOK_EVENTS
     assert "PermissionRequest" not in hooks
+    # The denial hook is scoped to the one tool a host reviewer holds (issue #467); it fires
+    # after the denial and can allow nothing.
+    assert hooks["PermissionDenied"][0]["matcher"] == ("^mcp__(yoetz|plugin_yoetz_yoetz)__check$")
     assert hooks["PostToolUse"][0]["matcher"] == (
         "^mcp__plugin_yoetz_yoetz__(start|publish_work|check|respond|status|receipt|read_guidance)$"
     )
@@ -827,6 +830,7 @@ def test_mcp_sources_preserve_precedence_and_report_dual_foreign_and_ambiguous(
         claude_config_root=config,
     )
     assert plugin_only.ownership_state is McpOwnershipState.PLUGIN
+    assert plugin_only.host_admission_supported is True
 
     (project / ".mcp.json").write_text(json.dumps(exact), encoding="utf-8")
     dual = observe_claude_code_mcp(
@@ -837,6 +841,7 @@ def test_mcp_sources_preserve_precedence_and_report_dual_foreign_and_ambiguous(
     assert dual.ownership_state is McpOwnershipState.DUAL
     assert dual.winning_source is ClaudeCodeMcpSource.PROJECT
     assert dual.route_profile is None
+    assert dual.host_admission_supported is False
 
     foreign = JsonObject({"args": ["-c", "foreign"], "command": "sh", "type": "stdio"})
     observed = observe_claude_code_mcp(
@@ -888,6 +893,42 @@ def test_mcp_ownership_detects_an_exact_yoetz_route_under_an_alias(tmp_path: Pat
     assert observed.ownership_state is McpOwnershipState.EXTERNAL
     assert observed.winning_source is ClaudeCodeMcpSource.PROJECT
     assert observed.route_profile == "strict"
+    assert observed.host_admission_supported is False
+
+
+def test_exact_yoetz_strict_route_stays_admission_supported(tmp_path: Path) -> None:
+    """Name-mappability is independent of profile: grant still refuses `route_not_policy`."""
+
+    plugin = tmp_path / "plugin"
+    project = tmp_path / "project"
+    config = tmp_path / "config"
+    plugin.mkdir()
+    project.mkdir()
+    config.mkdir()
+    (project / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "yoetz": {
+                        "args": ["mcp", "serve", "--semantic", "off"],
+                        "command": "yoetz",
+                        "type": "stdio",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    observed = observe_claude_code_mcp(
+        plugin_root=plugin,
+        project_root=project,
+        claude_config_root=config,
+    )
+
+    assert observed.ownership_state is McpOwnershipState.EXTERNAL
+    assert observed.route_profile == "strict"
+    assert observed.host_admission_supported is True
 
 
 def test_recovery_material_surfaces_in_status_and_refuses_preview(tmp_path: Path) -> None:

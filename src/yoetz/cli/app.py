@@ -127,6 +127,13 @@ integrate_plugin_app = typer.Typer(
     ),
     no_args_is_help=True,
 )
+integrate_admission_app = typer.Typer(
+    help=(
+        "Let a host's automatic tool-call reviewer admit the owner-authorized semantic check "
+        "(project-scoped, previewed, digest-bound, reversible)."
+    ),
+    no_args_is_help=True,
+)
 setup_app = typer.Typer(help="Guided first-run harness and provider setup.", no_args_is_help=True)
 service_app = typer.Typer(help="Manage the foreground local service.", no_args_is_help=True)
 auto_unlock_app = typer.Typer(
@@ -177,6 +184,7 @@ app.add_typer(integrate_app, name="integrate")
 integrate_app.add_typer(integrate_skill_app, name="skill")
 integrate_app.add_typer(integrate_mcp_app, name="mcp")
 integrate_app.add_typer(integrate_plugin_app, name="plugin")
+integrate_app.add_typer(integrate_admission_app, name="admission")
 app.add_typer(setup_app, name="setup")
 app.add_typer(service_app, name="service")
 service_app.add_typer(auto_unlock_app, name="auto-unlock")
@@ -1432,6 +1440,16 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
             typer.Option("--preview-digest", help="Exact preview digest to bind."),
         ] = None,
         route_profile: _ROUTE_PROFILE = None,
+        project_root: Annotated[
+            Path | None,
+            typer.Option(
+                "--project-root",
+                help=(
+                    "Trusted project whose Codex host-admission entry a strict registration "
+                    "or a removal also revokes."
+                ),
+            ),
+        ] = None,
         json_output: _JSON = False,
     ) -> None:
         harness = cast(str, context.find_root().find_object(str) or context.obj)
@@ -1447,6 +1465,7 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
                     preview_digest=preview_digest,
                     json_output=json_output,
                     route_profile=chosen_route,
+                    project_root=project_root,
                 )
             )
         )
@@ -1715,6 +1734,99 @@ for _plugin_action in _PLUGIN_COMMAND_HOSTS:
     integrate_plugin_app.command(_plugin_action, help=_plugin_command_help(_plugin_action))(
         _host_plugin_command(_plugin_action)
     )
+
+
+def _host_admission_command(command_name: str) -> Callable[..., None]:
+    def command(
+        context: typer.Context,
+        project_root: Annotated[
+            Path,
+            typer.Option("--project-root", help="Exact trusted project whose host files to edit."),
+        ],
+        requested_action: Annotated[
+            str | None,
+            typer.Option("--action", help="preview only: grant (default) or revoke."),
+        ] = None,
+        checkpoint: Annotated[
+            bool,
+            typer.Option(
+                "--checkpoint",
+                help=(
+                    "Claude Code only: write the permissions.ask human checkpoint instead of "
+                    "permissions.allow."
+                ),
+            ),
+        ] = False,
+        claude_path: Annotated[
+            Path | None,
+            typer.Option("--claude-path", help="Exact Claude Code executable (route check)."),
+        ] = None,
+        claude_config_root: Annotated[
+            Path | None,
+            typer.Option("--claude-config-root", help="Exact isolated Claude config root."),
+        ] = None,
+        cache_root: Annotated[
+            Path | None,
+            typer.Option("--cache-root", help="Exact Claude plugin cache root."),
+        ] = None,
+        marketplace_root: Annotated[
+            Path | None,
+            typer.Option("--marketplace-root", help="Exact managed private marketplace root."),
+        ] = None,
+        cursor_config_root: Annotated[
+            Path | None,
+            typer.Option(
+                "--cursor-config-root",
+                help="Exact isolated Cursor ~/.cursor configuration root (route check).",
+            ),
+        ] = None,
+        ownership_name: Annotated[
+            str,
+            typer.Option("--mcp-ownership", help="external-registration or plugin-managed"),
+        ] = "external-registration",
+        route_profile: Annotated[
+            str | None,
+            typer.Option("--route-profile", help="strict or policy for plugin-managed MCP."),
+        ] = None,
+        preview_digest: Annotated[
+            str | None,
+            typer.Option("--preview-digest", help="Exact digest returned by preview."),
+        ] = None,
+        accept: _ACCEPT = False,
+        json_output: _JSON = False,
+    ) -> None:
+        harness = cast(str, context.find_root().find_object(str) or context.obj)
+        module = importlib.import_module("yoetz.cli.host_admission")
+        operation = cast(
+            Callable[..., Awaitable[int]], getattr(module, "run_host_admission_command")
+        )
+        _finish(
+            run_async(
+                lambda: operation(
+                    command_name,
+                    harness=harness,
+                    project_root=project_root,
+                    action_name=requested_action,
+                    accept=accept,
+                    preview_digest=preview_digest,
+                    checkpoint=checkpoint,
+                    json_output=json_output,
+                    claude_path=claude_path,
+                    claude_config_root=claude_config_root,
+                    cache_root=cache_root,
+                    marketplace_root=marketplace_root,
+                    cursor_config_root=cursor_config_root,
+                    ownership_name=ownership_name,
+                    route_name=_validated_route_profile(route_profile),
+                )
+            )
+        )
+
+    return command
+
+
+for _admission_action in ("status", "preview", "grant", "revoke"):
+    integrate_admission_app.command(_admission_action)(_host_admission_command(_admission_action))
 
 
 @setup_app.command("run")
