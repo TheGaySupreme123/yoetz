@@ -115,9 +115,8 @@ expiry, cancellation, stale authority, or an incomplete ceremony remains a no di
 # Publishing a completion claim is an assertion, not a conclusion
 
 A published completion claim is the input to a check, not the output of one. It does not license
-telling the user the work is finished. Publish the claim and its evidence, run `check`, disposition
-findings, recheck after material change, an unreadable response, or a readable response to a finding
-not returned by the current check, take a `receipt`, and only then answer.
+telling the user the work is finished: answer only after `check`, finding disposition, any recheck
+the rules above require, and `receipt`.
 
 # When to stop retrying
 
@@ -196,7 +195,8 @@ This is an agent-attested trust model, not host-verified proof: Yoetz cannot ind
 authenticate the chat provenance, and a compromised agent could forge the assertion. Your source
 checks above are therefore load-bearing skill behavior. Target binding, expiry, single-use claim,
 repository commitment, machine-policy ceilings, vault reauthentication, and no-echo result rules
-remain runtime-enforced. JSONL: no chat source.
+remain runtime-enforced. For Codex JSONL import, follow its skill; never put source or excerpts in
+chat.
 
 `vault_initialize` and `vault_passphrase_rotate` use that same path; never handle or ask for a
 passphrase. Interrupted rotation: leave the staged entry and restart. Locked vaults keep the

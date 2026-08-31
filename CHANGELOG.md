@@ -14,7 +14,11 @@ reverse-chronological released versions.
   contradictory, no-op, or incompletely linked replacements before append; current checks,
   candidate findings, semantic review, and receipts evaluate the replacement while status/history
   retains the original claim. Additive event-draft/publish-work request schemas and control schema
-  2.4.0 carry the new event without changing released 1.0 schema bytes (issue #432).
+  2.4.0 carry the new event without changing released 1.0 schema bytes (issue #432). Carrying the
+  additive draft union raises two reviewed byte budgets: the `publish-work-request` presentation
+  ceiling from 32,000 to 34,000 encoded bytes, and the aggregate advertised-surface ceiling from
+  200,000 to 205,000 encoded bytes. Both are host context costs, not new egress, and the
+  instructions block itself stays inside its unchanged 20,000-byte bound.
 
 - Consented hook capture no longer stops at encrypted observation-store references. Eligible
   secret-scanned tool output, selected changed-file bytes, workspace diffs, and bounded inspection

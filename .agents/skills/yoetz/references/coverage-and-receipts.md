@@ -76,7 +76,8 @@ Forbidden after only a candidate read: “I checked and found nothing.”
 ## Effective claims and limitations
 
 `claim_recorded/1.1.0` separates admissible `supporting_refs` from partial/failed
-`limitation_refs`. A replacement names prior effective claim ids in `supersedes_claim_refs`.
+`limitation_refs`, which also accepts a relevant `unknown` result so that outcome still has a
+disclosure field. A replacement names prior effective claim ids in `supersedes_claim_refs`.
 Checks and receipts use only effective claims for current conclusions; superseded claims and their
 past findings remain visible as history. A result limits a claim only when it existed by that claim
 and its action overlaps the claim's declared obligation scope; unscoped records remain

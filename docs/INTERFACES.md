@@ -530,7 +530,11 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   kind, overlapping declared obligation scope, and the complete relevant limitation set. Replay
   rejects missing/already-replaced targets, disjoint scope, wrong result outcomes, irrelevant
   limitations, or incomplete linkage before append. A limiting result must predate the claim and
-  have an action whose obligation scope overlaps the claim; an unscoped side remains task-wide.
+  have an action whose obligation scope overlaps the claim; an unscoped side remains task-wide, and
+  a result whose action record is absent or tombstoned is task-wide relevant and linkable on the
+  same reading. `limitation_refs` requires every relevant `partial`/`failure` result and also
+  accepts a relevant `unknown` one, which is the only field a v1.1 claim has to disclose an
+  `unknown` limitation; naming it never reclassifies it as a typed partial or failure.
 - `plan_revised`: `plan_version`, `supersedes_plan_version`, `reason`, `summary`,
   `obligation_changes`, and optional `no_obligations_reason` using the same closed values. A
   revision restates the effective current declaration: omission clears an earlier reason, and a
@@ -937,11 +941,15 @@ single predicate deciding between the two, shared by the receipt and by compact 
   not clear an edge. Orphan action/result links remain their visible record plus a coverage gap and
   policy input, not a second contradiction family.
 - `effective_claim_ids`, owned by `kernel/claims.py`, removes only claims explicitly named by a
-  readable `claim_recorded/1.1.0.supersedes_claim_refs`. Deterministic current-claim rules,
-  semantic claim sections, and receipt current-claim selection consume that set. Projection and
-  status history retain both old and replacement records; finding resolution remains a later-check
-  transition and never deletion. `disputes_refs` and `decision_recorded.supersedes_event_id` are
-  not claim-supersession aliases.
+  `claim_recorded/1.1.0.supersedes_claim_refs`. The edge is durable, not payload-derived: applying
+  the replacement writes `superseded_by_claim_id` onto each target's `ClaimProjectionRecord` (the
+  snapshot key is emitted only when set, so pre-existing snapshots stay byte-identical), and
+  `effective_claim_ids` reads that field. Redacting the correcting event therefore cannot resurrect
+  its target as a current claim, and cannot free that target for a second correction. Deterministic
+  current-claim rules, semantic claim sections, and receipt current-claim selection consume that
+  set. Projection and status history retain both old and replacement records; finding resolution
+  remains a later-check transition and never deletion. `disputes_refs` and
+  `decision_recorded.supersedes_event_id` are not claim-supersession aliases.
 - `EvidenceObjectSource` is the frozen `(evidence_id, source_event_id)` pair. `ReplayIndex` is the
   frozen non-plaintext `(frontier, head_digest, payload_event_by_object,
   evidence_sources_by_object, redaction_root_by_object)` reverse index derived solely from the
