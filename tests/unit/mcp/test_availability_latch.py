@@ -11,9 +11,10 @@ parent's correlation with ``availability_inherited: true``, and only the sanctio
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -88,16 +89,27 @@ def _failure[ResultT: BaseModel](result_type: type[ResultT], request_id: str) ->
 
 
 class _FakeClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        connect_error: BaseException | None = None,
+        call_error: BaseException | None = None,
+    ) -> None:
         self.calls: list[str] = []
         self.closed = False
+        self.connect_error = connect_error
+        self.call_error = call_error
 
     async def connect(self) -> None:
+        if self.connect_error is not None:
+            raise self.connect_error
         return None
 
     async def _call[ResultT: BaseModel](
         self, name: str, request: PublicRequestModel, result_type: type[ResultT]
     ) -> ResultT:
+        if self.call_error is not None:
+            raise self.call_error
         self.calls.append(name)
         return _failure(result_type, request.request_id)
 
@@ -131,11 +143,17 @@ class _Harness:
         self.on_demand_failure: BaseException | None = None
         self.on_demand_client: _FakeClient | None = None
         self.quiet_client: _FakeClient | None = None
+        self.entered_on_demand = asyncio.Event()
+        self.release_on_demand = asyncio.Event()
+        self.stall_on_demand = False
         original = bridge.record_public_error_without_raising
 
         async def on_demand(_kind: object, *, workspace_locator: object = None) -> object:
             del workspace_locator
             self.on_demand.append("connect")
+            self.entered_on_demand.set()
+            if self.stall_on_demand:
+                await self.release_on_demand.wait()
             if self.on_demand_failure is not None:
                 raise self.on_demand_failure
             assert self.on_demand_client is not None
@@ -220,6 +238,264 @@ async def test_parent_terminal_start_is_inherited_by_three_delegates_without_any
     assert harness.on_demand == ["connect"]
     assert harness.recorded == ["service_incompatible"]
     assert harness.quiet == len(_DELEGATES)
+
+
+@pytest.mark.anyio
+async def test_concurrent_first_arrivals_share_one_on_demand_attempt_and_one_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Issue #476: N parallel first calls share one probe, one diagnostic, and N−1 inheritances."""
+
+    harness = _Harness(monkeypatch, tmp_path)
+    harness.on_demand_failure = ControlError("service_unavailable", retryable=True)
+    harness.stall_on_demand = True
+    runtime = bridge.build_bridge_runtime()
+    request_ids = (_PARENT, *_DELEGATES)
+
+    tasks = [
+        asyncio.create_task(bridge.dispatch_start(_start(request_id), runtime))
+        for request_id in request_ids
+    ]
+    await harness.entered_on_demand.wait()
+    assert harness.on_demand == ["connect"]
+    harness.release_on_demand.set()
+    results = [_error(result) for result in await asyncio.gather(*tasks)]
+
+    assert harness.on_demand == ["connect"]
+    assert harness.recorded == ["service_unavailable"]
+    assert harness.quiet == 0
+    correlations = {result["correlation_id"] for result in results}
+    assert len(correlations) == 1
+    first = [
+        result
+        for result in results
+        if "availability_inherited" not in cast(dict[str, object], result["safe_details"])
+    ]
+    inherited = [
+        result
+        for result in results
+        if cast(dict[str, object], result["safe_details"]).get("availability_inherited") is True
+    ]
+    assert len(first) == 1
+    assert len(inherited) == len(request_ids) - 1
+    winner_details = cast(dict[str, object], inherited[0]["safe_details"])
+    winner_request_id = winner_details["availability_request_id"]
+    assert winner_request_id in request_ids
+    for result in inherited:
+        details = cast(dict[str, object], result["safe_details"])
+        assert result["correlation_id"] == first[0]["correlation_id"]
+        assert result["retryable"] is True
+        assert details["availability"] == "terminal_unavailable"
+        assert details["availability_inherited"] is True
+        assert details["availability_request_id"] == winner_request_id
+        assert "no new diagnostic was recorded" in cast(str, result["message"])
+
+    harness.stall_on_demand = False
+    harness.on_demand_failure = None
+    harness.on_demand_client = _FakeClient()
+    assert type(winner_request_id) is str
+    replay = _error(await bridge.dispatch_start(_start(winner_request_id), runtime))
+    assert replay["code"] == "SESSION_CONFLICT"
+    assert harness.on_demand == ["connect", "connect"]
+
+
+@pytest.mark.anyio
+async def test_concurrent_same_request_id_inherits_before_later_replay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Concurrent duplicates share the first result; only a later replay probes again."""
+
+    harness = _Harness(monkeypatch, tmp_path)
+    harness.on_demand_failure = ControlError("service_unavailable", retryable=True)
+    harness.stall_on_demand = True
+    runtime = bridge.build_bridge_runtime()
+
+    tasks = [asyncio.create_task(bridge.dispatch_start(_start(_PARENT), runtime)) for _ in range(4)]
+    await harness.entered_on_demand.wait()
+    assert harness.on_demand == ["connect"]
+    harness.release_on_demand.set()
+    results = [_error(result) for result in await asyncio.gather(*tasks)]
+
+    assert harness.on_demand == ["connect"]
+    assert harness.recorded == ["service_unavailable"]
+    assert harness.quiet == 0
+    assert len({result["correlation_id"] for result in results}) == 1
+    inherited = [
+        result
+        for result in results
+        if cast(dict[str, object], result["safe_details"]).get("availability_inherited") is True
+    ]
+    assert len(inherited) == len(tasks) - 1
+
+    harness.stall_on_demand = False
+    harness.on_demand_failure = None
+    harness.on_demand_client = _FakeClient()
+    replay = _error(await bridge.dispatch_start(_start(_PARENT), runtime))
+    assert replay["code"] == "SESSION_CONFLICT"
+    assert harness.on_demand == ["connect", "connect"]
+
+
+@pytest.mark.anyio
+async def test_cancelled_first_attempt_releases_waiters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cancelling the probe owner must not strand the process-local availability gate."""
+
+    harness = _Harness(monkeypatch, tmp_path)
+    harness.stall_on_demand = True
+    runtime = bridge.build_bridge_runtime()
+
+    owner = asyncio.create_task(bridge.dispatch_start(_start(_PARENT), runtime))
+    await harness.entered_on_demand.wait()
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    assert runtime._slot.attempting is False  # pyright: ignore[reportPrivateUsage]
+    assert runtime._slot.attempt_finished is None  # pyright: ignore[reportPrivateUsage]
+    harness.stall_on_demand = False
+    harness.on_demand_client = _FakeClient()
+    fresh = _error(await bridge.dispatch_start(_start(_DELEGATES[0]), runtime))
+    assert fresh["code"] == "SESSION_CONFLICT"
+    assert harness.on_demand == ["connect", "connect"]
+
+
+@pytest.mark.anyio
+async def test_live_client_handshake_failure_shares_one_on_demand_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A live slot client that then fails handshake must not bypass the probe gate."""
+
+    harness = _Harness(monkeypatch, tmp_path)
+    harness.on_demand_failure = ControlError("service_unavailable", retryable=True)
+    harness.stall_on_demand = True
+    runtime = bridge.build_bridge_runtime()
+    runtime._slot.client = cast(  # pyright: ignore[reportPrivateUsage]
+        Any, _FakeClient(connect_error=ControlError("service_unavailable", retryable=True))
+    )
+    request_ids = (_PARENT, *_DELEGATES)
+
+    tasks = [
+        asyncio.create_task(bridge.dispatch_start(_start(request_id), runtime))
+        for request_id in request_ids
+    ]
+    await harness.entered_on_demand.wait()
+    assert harness.on_demand == ["connect"]
+    harness.release_on_demand.set()
+    results = [_error(result) for result in await asyncio.gather(*tasks)]
+
+    assert harness.on_demand == ["connect"]
+    assert harness.recorded == ["service_unavailable"]
+    inherited = [
+        result
+        for result in results
+        if cast(dict[str, object], result["safe_details"]).get("availability_inherited") is True
+    ]
+    assert len(inherited) == len(request_ids) - 1
+
+
+@pytest.mark.anyio
+async def test_live_client_invoke_failure_reconnect_shares_one_on_demand_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Reconnect after a live-client RPC availability error is one probe, not N."""
+
+    harness = _Harness(monkeypatch, tmp_path)
+    harness.on_demand_failure = ControlError("service_unavailable", retryable=True)
+    harness.stall_on_demand = True
+    runtime = bridge.build_bridge_runtime()
+    runtime._slot.client = cast(  # pyright: ignore[reportPrivateUsage]
+        Any, _FakeClient(call_error=ControlError("service_unavailable", retryable=True))
+    )
+    request_ids = (_PARENT, *_DELEGATES)
+
+    tasks = [
+        asyncio.create_task(bridge.dispatch_start(_start(request_id), runtime))
+        for request_id in request_ids
+    ]
+    await harness.entered_on_demand.wait()
+    assert harness.on_demand == ["connect"]
+    harness.release_on_demand.set()
+    results = [_error(result) for result in await asyncio.gather(*tasks)]
+
+    assert harness.on_demand == ["connect"]
+    assert harness.recorded == ["service_unavailable"]
+    inherited = [
+        result
+        for result in results
+        if cast(dict[str, object], result["safe_details"]).get("availability_inherited") is True
+    ]
+    assert len(inherited) == len(request_ids) - 1
+
+
+@pytest.mark.anyio
+async def test_invalid_publish_waits_for_in_flight_first_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Envelope-first recovery must not start a second on-demand probe during the first attempt."""
+
+    harness = _Harness(monkeypatch, tmp_path)
+    harness.on_demand_failure = ControlError("service_incompatible", retryable=True)
+    harness.stall_on_demand = True
+    runtime = bridge.build_bridge_runtime()
+
+    start_task = asyncio.create_task(bridge.dispatch_start(_start(_PARENT), runtime))
+    await harness.entered_on_demand.wait()
+    invalid = _status(_DELEGATES[0])
+    invalid.pop("view")
+    invalid.pop("limit")
+    invalid["expected_frontier"] = {"sequence": "0", "head_digest": "genesis"}
+    invalid["event_drafts"] = "not-a-list"
+    publish_task = asyncio.create_task(bridge.dispatch_publish_work(invalid, runtime))
+    harness.release_on_demand.set()
+
+    parent = _error(await start_task)
+    result = _error(await publish_task)
+    assert parent["code"] == "SERVICE_UNAVAILABLE"
+    assert result["code"] == "INVALID_REQUEST"
+    details = cast(dict[str, object], result["safe_details"])
+    assert details["reason_code"] == "operation_recovery_unavailable"
+    assert harness.on_demand == ["connect"]
+    assert harness.recorded.count("service_incompatible") == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("live_client_fails_during_call", [False, True])
+async def test_invalid_publish_recovery_releases_its_failed_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    live_client_fails_during_call: bool,
+) -> None:
+    """A non-latching recovery oracle must release both initial and reconnect failures."""
+
+    harness = _Harness(monkeypatch, tmp_path)
+    harness.on_demand_failure = ControlError("service_incompatible", retryable=True)
+    runtime = bridge.build_bridge_runtime()
+    if live_client_fails_during_call:
+        runtime._slot.client = cast(  # pyright: ignore[reportPrivateUsage]
+            Any, _FakeClient(call_error=ControlError("service_unavailable", retryable=True))
+        )
+
+    invalid = _status(_DELEGATES[0])
+    invalid.pop("view")
+    invalid.pop("limit")
+    invalid["expected_frontier"] = {"sequence": "0", "head_digest": "genesis"}
+    invalid["event_drafts"] = "not-a-list"
+    result = _error(await bridge.dispatch_publish_work(invalid, runtime))
+
+    assert result["code"] == "INVALID_REQUEST"
+    details = cast(dict[str, object], result["safe_details"])
+    assert details["reason_code"] == "operation_recovery_unavailable"
+    assert runtime._slot.attempting is False  # pyright: ignore[reportPrivateUsage]
+    assert runtime._slot.attempt_finished is None  # pyright: ignore[reportPrivateUsage]
+    assert harness.on_demand == ["connect"]
+    assert harness.recorded == ["invalid_request"]
+
+    harness.on_demand_failure = None
+    harness.on_demand_client = _FakeClient()
+    fresh = _error(await bridge.dispatch_start(_start(_DELEGATES[1]), runtime))
+    assert fresh["code"] == "SESSION_CONFLICT"
+    assert harness.on_demand == ["connect", "connect"]
 
 
 @pytest.mark.anyio

@@ -127,8 +127,10 @@ _DISCARD_CLIENT_REASONS: Final = _RECONNECT_REASONS | {"vault_locked"}
 # service holder), not one request. Once one call has reported such a failure, later calls under
 # a *new* request identity inherit that terminal state instead of re-probing, re-spawning, or
 # minting another diagnostic (issue #469: delegated Cursor workers each retried `start`). The
-# latch clears when the stamped service holder changes, when a quiet handshake succeeds for a
-# retryable class, or when the original request identity replays — the sanctioned continuation.
+# first probe is slot-scoped: concurrent arrivals before that result wait for it rather than each
+# minting a diagnostic (issue #476). The latch clears when the stamped service holder changes,
+# when a quiet handshake succeeds for a retryable class, or when the original request identity
+# replays — the sanctioned continuation.
 _AVAILABILITY_LATCH_REASONS: Final = frozenset(
     {
         "service_unavailable",
@@ -240,6 +242,10 @@ class _ClientSlot:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     client: ServiceClient | None = None
     availability: _AvailabilityLatch | None = None
+    # Concurrent first arrivals share one on-demand probe: the owner sets attempting, waiters
+    # park on attempt_finished, then re-check the completed latch (issue #476).
+    attempting: bool = False
+    attempt_finished: asyncio.Event | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,33 +314,76 @@ async def _discard_client(runtime: BridgeRuntime, client: ServiceClient) -> None
     await _close_client(client)
 
 
-async def ensure_service_client(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> ServiceClient:
-    """Return one live ordinary client, lazily connecting without starting the service."""
+async def ensure_service_client(
+    runtime: BridgeRuntime = BRIDGE_RUNTIME,
+    *,
+    request_id: str | None = None,
+    retain_availability_failure_for_latch: bool = False,
+) -> ServiceClient:
+    """Return one live ordinary client, lazily connecting without starting the service.
 
-    async with runtime._slot.lock:  # pyright: ignore[reportPrivateUsage]
-        existing = runtime._slot.client  # pyright: ignore[reportPrivateUsage]
-        if existing is not None:
-            try:
-                await existing.connect()
-            except Exception:
-                runtime._slot.client = None  # pyright: ignore[reportPrivateUsage]
-                await _close_client(existing)
-            else:
-                return existing
-        connected: ServiceClient | None = None
-        try:
-            connected = await connect_service_on_demand(
-                ControlClientKind.MCP_BRIDGE,
-                workspace_locator=runtime.workspace_locator,
-            )
-            await connected.connect()
-        except Exception:
-            runtime._slot.client = None  # pyright: ignore[reportPrivateUsage]
+    On-demand connect is slot-scoped: concurrent callers share one probe (issue #476), including
+    the path where a previously live client then fails its handshake and must reconnect.
+    Failures release the gate so the next caller cannot be stranded. The ordinary dispatch path
+    opts into retaining an availability failure only long enough for ``_latch_availability`` to
+    store the shared public result. The original request identity still replays through a latched
+    outage (issue #469).
+    """
+
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    keep_gate = False
+    try:
+        while True:
+            waiter: asyncio.Event | None = None
+            connected: ServiceClient | None = None
+            async with slot.lock:
+                if slot.availability is not None:
+                    latch = slot.availability
+                    if request_id is None or request_id != latch.request_id:
+                        raise ControlError(latch.reason, retryable=latch.retryable)
+                existing = slot.client
+                if existing is not None:
+                    try:
+                        await existing.connect()
+                    except Exception:
+                        slot.client = None
+                        await _close_client(existing)
+                    else:
+                        return existing
+                if slot.attempting:
+                    waiter = slot.attempt_finished
+                else:
+                    slot.attempting = True
+                    slot.attempt_finished = asyncio.Event()
+                    connected_attempt: ServiceClient | None = None
+                    try:
+                        connected_attempt = await connect_service_on_demand(
+                            ControlClientKind.MCP_BRIDGE,
+                            workspace_locator=runtime.workspace_locator,
+                        )
+                        await connected_attempt.connect()
+                    except BaseException as exc:
+                        slot.client = None
+                        if connected_attempt is not None:
+                            await _close_client(connected_attempt)
+                        keep_gate = (
+                            retain_availability_failure_for_latch
+                            and isinstance(exc, ControlError)
+                            and exc.reason in _AVAILABILITY_LATCH_REASONS
+                        )
+                        raise
+                    slot.client = connected_attempt
+                    connected = connected_attempt
             if connected is not None:
-                await _close_client(connected)
-            raise
-        runtime._slot.client = connected  # pyright: ignore[reportPrivateUsage]
-        return connected
+                await _finish_availability_attempt(runtime)
+                return connected
+            if waiter is None:
+                continue
+            await waiter.wait()
+    except BaseException:
+        if not keep_gate:
+            await _finish_availability_attempt(runtime)
+        raise
 
 
 async def close_bridge_runtime(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> None:
@@ -881,48 +930,67 @@ async def _latch_availability(
 ) -> types.CallToolResult:
     """Record a terminal availability result for this binding and return it with that fact."""
 
-    wire = _wire_error(result)
-    if wire is None:
-        return result
-    code_value = wire.get("code")
-    message = wire.get("message")
-    retryable = wire.get("retryable")
-    correlation_id = wire.get("correlation_id")
-    if (
-        type(code_value) is not str
-        or type(message) is not str
-        or type(retryable) is not bool
-        or type(correlation_id) is not str
-    ):
-        return result
     try:
-        code = PublicErrorCode(code_value)
-    except ValueError:
-        return result
-    details = _availability_details(
-        wire.get("safe_details"), runtime.host_profile, runtime.route_profile
-    )
-    latch = _AvailabilityLatch(
-        request_id,
-        error.reason,
-        code,
-        message,
-        retryable,
-        correlation_id,
-        details,
-        _holder_snapshot(),
-    )
-    async with runtime._slot.lock:  # pyright: ignore[reportPrivateUsage]
-        runtime._slot.availability = latch  # pyright: ignore[reportPrivateUsage]
-    return structured_error_result(
-        code,
-        message,
-        retryable=retryable,
-        request_id=request_id,
-        correlation_id=correlation_id,
-        safe_details=details,
-        host_profile=runtime.host_profile,
-    )
+        slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+        wire = _wire_error(result)
+        if wire is None:
+            return result
+        code_value = wire.get("code")
+        message = wire.get("message")
+        retryable = wire.get("retryable")
+        correlation_id = wire.get("correlation_id")
+        if (
+            type(code_value) is not str
+            or type(message) is not str
+            or type(retryable) is not bool
+            or type(correlation_id) is not str
+        ):
+            return result
+        try:
+            code = PublicErrorCode(code_value)
+        except ValueError:
+            return result
+        details = _availability_details(
+            wire.get("safe_details"), runtime.host_profile, runtime.route_profile
+        )
+        latch = _AvailabilityLatch(
+            request_id,
+            error.reason,
+            code,
+            message,
+            retryable,
+            correlation_id,
+            details,
+            _holder_snapshot(),
+        )
+        already = False
+        async with slot.lock:
+            existing = slot.availability
+            if (
+                existing is not None
+                and request_id is not None
+                and request_id == existing.request_id
+            ):
+                slot.availability = latch
+            elif existing is not None:
+                already = True
+            else:
+                slot.availability = latch
+        if already:
+            inherited = await _inherit_terminal_availability(runtime, request_id)
+            if inherited is not None:
+                return inherited
+        return structured_error_result(
+            code,
+            message,
+            retryable=retryable,
+            request_id=request_id,
+            correlation_id=correlation_id,
+            safe_details=details,
+            host_profile=runtime.host_profile,
+        )
+    finally:
+        await _finish_availability_attempt(runtime)
 
 
 async def _clear_availability(runtime: BridgeRuntime) -> None:
@@ -948,7 +1016,10 @@ async def _quiet_probe(runtime: BridgeRuntime) -> ServiceClient | None:
 
 
 async def _inherit_terminal_availability(
-    runtime: BridgeRuntime, request_id: str | None
+    runtime: BridgeRuntime,
+    request_id: str | None,
+    *,
+    concurrent_waiter: bool = False,
 ) -> types.CallToolResult | None:
     """Answer a new request identity from the latched availability result, or clear the latch.
 
@@ -963,20 +1034,21 @@ async def _inherit_terminal_availability(
         latch = slot.availability
         if latch is None:
             return None
-        if request_id is not None and request_id == latch.request_id:
-            return None
-        if _holder_snapshot() != latch.holder:
-            slot.availability = None
-            return None
-        if latch.retryable:
-            probe = await _quiet_probe(runtime)
-            if probe is not None:
-                stale = slot.client
-                slot.client = probe
-                slot.availability = None
-                if stale is not None and stale is not probe:
-                    await _close_client(stale)
+        if not concurrent_waiter:
+            if request_id is not None and request_id == latch.request_id:
                 return None
+            if _holder_snapshot() != latch.holder:
+                slot.availability = None
+                return None
+            if latch.retryable:
+                probe = await _quiet_probe(runtime)
+                if probe is not None:
+                    stale = slot.client
+                    slot.client = probe
+                    slot.availability = None
+                    if stale is not None and stale is not probe:
+                        await _close_client(stale)
+                    return None
         latch.inherited += 1
         details = dict(latch.safe_details)
         details["availability_inherited"] = True
@@ -993,12 +1065,63 @@ async def _inherit_terminal_availability(
         )
 
 
+async def _finish_availability_attempt(runtime: BridgeRuntime) -> None:
+    """Release the first-probe gate so waiters can inherit the completed latch or proceed."""
+
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    async with slot.lock:
+        slot.attempting = False
+        finished = slot.attempt_finished
+        slot.attempt_finished = None
+    if finished is not None:
+        finished.set()
+
+
+async def _prepare_availability(
+    runtime: BridgeRuntime, request_id: str | None
+) -> types.CallToolResult | None:
+    """Wait for an in-flight on-demand probe, then inherit a completed latch if one exists."""
+
+    return await _inherit_after_inflight_availability(runtime, request_id)
+
+
+async def _inherit_after_inflight_availability(
+    runtime: BridgeRuntime, request_id: str | None
+) -> types.CallToolResult | None:
+    """Wait for an in-flight first probe, then inherit a completed latch without claiming one.
+
+    Envelope-first publish recovery is an oracle read: it must not start a second on-demand
+    attempt while another tool call already owns the first probe.
+    """
+
+    slot = runtime._slot  # pyright: ignore[reportPrivateUsage]
+    waited = False
+    while True:
+        waiter: asyncio.Event | None = None
+        async with slot.lock:
+            if not slot.attempting:
+                break
+            waiter = slot.attempt_finished
+        if waiter is None:
+            break
+        waited = True
+        await waiter.wait()
+    return await _inherit_terminal_availability(runtime, request_id, concurrent_waiter=waited)
+
+
 async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
     runtime: BridgeRuntime,
     request: RequestT,
     invoke: Callable[[ServiceClient, RequestT], Awaitable[ResultT]],
+    request_id: str | None,
+    *,
+    retain_availability_failure_for_latch: bool = False,
 ) -> ResultT:
-    client = await ensure_service_client(runtime)
+    client = await ensure_service_client(
+        runtime,
+        request_id=request_id,
+        retain_availability_failure_for_latch=retain_availability_failure_for_latch,
+    )
     try:
         return await invoke(client, request)
     except ControlError as error:
@@ -1006,7 +1129,11 @@ async def _invoke_with_reconnect[RequestT: BaseModel, ResultT: BaseModel](
             await _discard_client(runtime, client)
         if not error.retryable or error.reason not in _RECONNECT_REASONS:
             raise
-        replacement = await ensure_service_client(runtime)
+        replacement = await ensure_service_client(
+            runtime,
+            request_id=request_id,
+            retain_availability_failure_for_latch=retain_availability_failure_for_latch,
+        )
         return await invoke(replacement, request)
 
 
@@ -1047,13 +1174,19 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
             correlation_id=correlation_id,
             host_profile=runtime.host_profile,
         )
-    inherited = await _inherit_terminal_availability(runtime, request_id)
+    inherited = await _prepare_availability(runtime, request_id)
     if inherited is not None:
         return inherited
     # Invoke first. Once this returns, a write may already be durable; response shaping must not
     # collapse that into a non-retryable INTERNAL_ERROR that steers agents away from same-id resume.
     try:
-        result = await _invoke_with_reconnect(runtime, request, invoke)
+        result = await _invoke_with_reconnect(
+            runtime,
+            request,
+            invoke,
+            request_id,
+            retain_availability_failure_for_latch=True,
+        )
     except PublicOperationError as exc:
         # Defense in depth: the ordinary client normally returns ok:false bodies, but if a
         # PublicOperationError escapes the service boundary, keep the exact public code.
@@ -1089,15 +1222,23 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
                 host_profile=runtime.host_profile,
             )
     except ControlError as exc:
-        failure = _control_error_result(
+        if exc.reason in _AVAILABILITY_LATCH_REASONS:
+            inherited_failure = await _inherit_terminal_availability(runtime, request_id)
+            if inherited_failure is not None:
+                return inherited_failure
+            failure = _control_error_result(
+                exc,
+                request_id,
+                operation,
+                host_profile=runtime.host_profile,
+            )
+            return await _latch_availability(runtime, request_id, exc, failure)
+        return _control_error_result(
             exc,
             request_id,
             operation,
             host_profile=runtime.host_profile,
         )
-        if exc.reason in _AVAILABILITY_LATCH_REASONS:
-            return await _latch_availability(runtime, request_id, exc, failure)
-        return failure
     except Exception as exc:
         correlation_id = record_unexpected_exception_without_raising(
             exc,
@@ -1298,11 +1439,11 @@ async def _publish_recovery_from_envelope(
         return _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
 
     try:
-        await ensure_service_client(runtime)
         status_result = await _invoke_with_reconnect(
             runtime,
             status_request,
             lambda service, request: service.status(request, deadline_ms=_WORKFLOW_RPC_DEADLINE_MS),
+            recovery_request_id,
         )
     except PublicOperationError as exc:
         # A nested public failure (session conflict, projection, etc.) does not prove the
@@ -1412,7 +1553,7 @@ async def dispatch_publish_work(
             # The recovery oracle is the service itself. Under a latched availability result a
             # new request identity must not reach it (no startup, supersede, or diagnostic); the
             # lookup is simply unavailable and the certain authoring error leads (#239, #469).
-            if await _inherit_terminal_availability(runtime, request_id) is not None:
+            if await _inherit_after_inflight_availability(runtime, request_id) is not None:
                 recovery = _PublishRecoveryOutcome(_PublishRecoveryKind.UNAVAILABLE)
             else:
                 recovery = await _publish_recovery_from_envelope(arguments, runtime, request_id)
