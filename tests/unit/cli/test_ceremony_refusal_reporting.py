@@ -165,6 +165,18 @@ def test_unmapped_tokens_have_no_remediation() -> None:
     assert remediation_message("authorize_failed") is None
 
 
+def test_vault_result_family_names_the_failed_approval_and_the_retry() -> None:
+    """Every bounded `vault_result_<reason>` projection shares one honest remediation."""
+
+    for reason in ("vault_result_throttle_record_exists", "vault_result_keyring_unavailable"):
+        message = remediation_message(reason)
+        assert message is not None, reason
+        assert "recorded as failed" in message, reason
+        assert "yoetz consent prepare" in message, reason
+    assert remediation_message("vault_result") is None
+    assert remediation_message("result_invalid") is not None
+
+
 def test_resource_count_remediation_names_the_owning_sync_script() -> None:
     message = remediation_message("resource_counts_invalid")
 

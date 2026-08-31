@@ -26,6 +26,7 @@ from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instan
 from yoetz.service.confidential_protocol import ProviderCredentialResult, VaultStateResult
 from yoetz.service.elevated_bootstrap import (
     ElevatedBootstrapError,
+    audit_path,
     consume_import_publication_authorization,
     load_import_publication_authorization,
     load_pending,
@@ -644,12 +645,14 @@ def test_review_result_rejects_unknown_or_unbounded_result_fields(tmp_path: Path
         elevated.prepare_elevated("vault_initialize")
         pending = load_pending(_state=tmp_path)
     assert pending is not None
-    with pytest.raises(ValidationError):
+    with pytest.raises(ElevatedBootstrapError) as exc:
         elevated._review_result(  # pyright: ignore[reportPrivateUsage]
             pending,
             outcome="completed",
             result={"provider_text": "unbounded"},
         )
+    assert exc.value.reason == "result_invalid"
+    assert "unbounded" not in str(exc.value)
 
 
 @pytest.mark.parametrize(
@@ -927,6 +930,188 @@ def test_agent_generated_rotation_uses_only_local_store_bytes_and_promotes() -> 
     assert result == {"state": "ready", "reason": "succeeded"}
     assert b"c" * 16 not in json.dumps(result).encode()
     assert b"r" * 16 not in json.dumps(result).encode()
+
+
+def _consumed_audit_events(tmp_path: Path) -> list[dict[str, Any]]:
+    lines = audit_path(_state=tmp_path).read_text("utf-8").splitlines()
+    events = [cast(dict[str, Any], json.loads(line)) for line in lines]
+    return [event for event in events if event["event"] == "review_consumed"]
+
+
+def test_agent_authorized_non_ready_vault_result_fails_before_approval(tmp_path: Path) -> None:
+    """Issue #510: a non-ready ceremony result must never leave an approved consent record."""
+
+    generated = bytearray(b"y" * 64)
+
+    class _Store:
+        def create_for_initialization(self) -> bytearray:
+            return generated
+
+    async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
+        return VaultStateResult("locked", "throttle_record_exists")
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            prepared = cast(dict[str, Any], elevated.prepare_elevated("vault_initialize"))
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            with (
+                patch("yoetz.cli.elevated._auto_unlock_store", return_value=_Store()),
+                patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
+            ):
+                with pytest.raises(ElevatedBootstrapError) as exc:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+            assert exc.value.reason == "vault_result_throttle_record_exists"
+            assert bytes(generated) == b"\x00" * 64
+            assert load_pending(_state=tmp_path) is None
+            consumed = _consumed_audit_events(tmp_path)
+            assert [event["outcome"] for event in consumed] == ["failed"]
+            assert consumed[0]["pending_id"] == pending.pending_id
+            assert consumed[0]["failure_reason"] == "vault_result_throttle_record_exists"
+            # Retry is explicit and exact: a fresh prepare rebinds the identical target, so
+            # nothing about the originally authorized target needs reconstructing.
+            reprepared = cast(dict[str, Any], elevated.prepare_elevated("vault_initialize"))
+            assert reprepared["pending"]["target_digest"] == prepared["pending"]["target_digest"]
+
+    anyio.run(run)
+
+
+def test_non_ready_rotation_result_never_promotes_staged_secret() -> None:
+    current = bytearray(b"c" * 64)
+    replacement = bytearray(b"r" * 64)
+
+    class _Store:
+        promoted = False
+
+        def load(self) -> bytearray:
+            return current
+
+        def stage_for_rotation(self) -> bytearray:
+            return replacement
+
+        def promote_staged_rotation(self) -> None:
+            self.promoted = True
+
+    store = _Store()
+
+    async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
+        return VaultStateResult("locked", "credential_invalid")
+
+    async def run() -> None:
+        with (
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
+            patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
+        ):
+            with pytest.raises(ElevatedBootstrapError) as exc:
+                await elevated._complete_vault_passphrase_rotate_generated()  # pyright: ignore[reportPrivateUsage]
+            assert exc.value.reason == "vault_result_credential_invalid"
+
+    anyio.run(run)
+    assert store.promoted is False, "a failed rewrap must leave the staged slot for restart"
+    assert bytes(current) == b"\x00" * 64
+    assert bytes(replacement) == b"\x00" * 64
+
+
+def test_schema_rejected_result_is_bounded_and_never_recorded_approved(tmp_path: Path) -> None:
+    """Result validation runs before the approval record exists, and stays a bounded token."""
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated("vault_initialize")
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            with patch(
+                "yoetz.cli.elevated._complete_vault_initialize_generated",
+                return_value={"state": "locked", "reason": "throttle_record_exists"},
+            ):
+                with pytest.raises(ElevatedBootstrapError) as exc:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+            assert exc.value.reason == "result_invalid"
+            assert load_pending(_state=tmp_path) is None
+            consumed = _consumed_audit_events(tmp_path)
+            assert [event["outcome"] for event in consumed] == ["failed"]
+            assert consumed[0]["failure_reason"] == "result_invalid"
+
+    anyio.run(run)
+
+
+def test_trusted_review_non_ready_vault_result_is_consumed_as_failed(tmp_path: Path) -> None:
+    generated = bytearray(b"t" * 64)
+
+    class _Store:
+        def create_for_initialization(self) -> bytearray:
+            return generated
+
+    async def ceremony(
+        _console: object, _kind: object, _target: object, **_kwargs: object
+    ) -> VaultStateResult:
+        return VaultStateResult("locked", "keyring_unavailable")
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated("vault_initialize")
+            with (
+                _patch_verified_presence(),
+                patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=_Console()),
+                patch("yoetz.cli.elevated._auto_unlock_store", return_value=_Store()),
+                patch(
+                    "yoetz.cli.elevated.run_human_ceremony_on_terminal",
+                    side_effect=ceremony,
+                ),
+            ):
+                with pytest.raises(ElevatedBootstrapError) as exc:
+                    await elevated.review_elevated()
+            assert exc.value.reason == "vault_result_keyring_unavailable"
+            assert load_pending(_state=tmp_path) is None
+            consumed = _consumed_audit_events(tmp_path)
+            assert [event["outcome"] for event in consumed] == ["failed"]
+            assert consumed[0]["failure_reason"] == "vault_result_keyring_unavailable"
+
+    anyio.run(run)
+
+
+def test_authorize_cli_projects_the_bounded_vault_failure_reason(tmp_path: Path) -> None:
+    generated = bytearray(b"q" * 64)
+
+    class _Store:
+        def create_for_initialization(self) -> bytearray:
+            return generated
+
+    async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
+        return VaultStateResult("locked", "throttle_record_exists")
+
+    with _patch_state(tmp_path):
+        elevated.prepare_elevated("vault_initialize")
+        pending = load_pending(_state=tmp_path)
+        assert pending is not None
+        with (
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=_Store()),
+            patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    "consent",
+                    "authorize",
+                    "--pending-id",
+                    pending.pending_id,
+                    "--operation",
+                    "vault_initialize",
+                    "--danger-digest",
+                    pending.danger_digest,
+                    "--target-digest",
+                    pending.target_digest,
+                    "--client-kind",
+                    "codex",
+                    "--decision",
+                    "approve",
+                    "--warning-acknowledged",
+                ],
+            )
+    assert result.exit_code == 2
+    assert "elevated_bootstrap: vault_result_throttle_record_exists" in result.stderr
+    assert "yoetz consent prepare" in result.stderr
+    assert "authorize_failed" not in result.stderr
 
 
 def test_trusted_review_displays_exact_provider_binding(tmp_path: Path) -> None:
