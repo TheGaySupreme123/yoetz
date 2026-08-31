@@ -374,6 +374,7 @@ class ProviderPosture:
     semantic_enabled: bool
     semantic_ready: bool
     readiness_determinable: bool
+    credential_authority: str | None = None
     transport_tested: bool = False
     blockers: tuple[tuple[str, str], ...] = ()
     # The Codex agent route is a separate verdict from installation readiness: a strict

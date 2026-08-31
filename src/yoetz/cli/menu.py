@@ -308,19 +308,81 @@ def _harness_menu() -> None:
 def _provider_menu() -> None:
     typer.echo("")
     typer.echo("LLM provider connection")
-    typer.echo("  Nonsecret endpoint binding is editable in config.toml (or option 1).")
-    typer.echo("  Credentials are typed only inside the confidential ceremony.")
-    typer.echo("  1  Choose provider and model (writes TOML)")
+    typer.echo("  API credentials and Codex-managed ChatGPT login are separate authorities.")
+    typer.echo("  1  OpenAI API / compatible API (choose provider and model)")
     typer.echo("  2  Add API key for the configured provider")
     typer.echo("  3  Replace API key for the configured provider")
+    typer.echo("  4  Codex with ChatGPT subscription (guided login)")
+    typer.echo("  5  Codex subscription status")
+    typer.echo("  6  Disconnect dedicated Codex home")
+    typer.echo("  7  Roll back Yoetz's Codex binding only")
     typer.echo("  b  Back")
-    choice = _ask(("1", "2", "3", _BACK))
+    choice = _ask(("1", "2", "3", "4", "5", "6", "7", _BACK))
     if choice == _BACK:
         return
     if choice == "1":
         from yoetz.cli.provider_binding import prompt_provider_endpoint_binding
 
-        prompt_provider_endpoint_binding()
+        selected = prompt_provider_endpoint_binding()
+        if selected == "codex_subscription":
+            typer.echo("Use menu option 4 to continue with Codex-managed sign-in.")
+        return
+    if choice in {"4", "5", "6", "7"}:
+        from yoetz.cli.codex_subscription import (
+            codex_subscription_disconnect,
+            codex_subscription_rollback,
+            codex_subscription_status,
+            prompt_codex_subscription_setup,
+        )
+
+        if choice == "4":
+
+            async def setup_subscription() -> object:
+                from yoetz.cli.codex_subscription import subscription_failure_reason
+                from yoetz.cli.setup import restart_service_for_semantic_composition
+
+                try:
+                    result = await prompt_codex_subscription_setup()
+                    await restart_service_for_semantic_composition()
+                    return result
+                except (OSError, TimeoutError, ValueError) as error:
+                    raise ValueError(subscription_failure_reason(error)) from error
+
+            _run_ceremony(setup_subscription)
+        elif choice == "5":
+            _run_ceremony(codex_subscription_status)
+        elif choice == "6":
+            if typer.confirm(
+                "Log out only the dedicated evaluator home and remove its binding?",
+                default=False,
+            ):
+
+                async def disconnect_subscription() -> object:
+                    from yoetz.cli.codex_subscription import subscription_failure_reason
+                    from yoetz.cli.setup import restart_service_for_semantic_composition
+
+                    try:
+                        result = await codex_subscription_disconnect()
+                        await restart_service_for_semantic_composition()
+                        return result
+                    except (OSError, TimeoutError, ValueError) as error:
+                        raise ValueError(subscription_failure_reason(error)) from error
+
+                _run_ceremony(disconnect_subscription)
+        else:
+
+            async def rollback_subscription() -> object:
+                from yoetz.cli.codex_subscription import subscription_failure_reason
+                from yoetz.cli.setup import restart_service_for_semantic_composition
+
+                try:
+                    result = codex_subscription_rollback()
+                    await restart_service_for_semantic_composition()
+                    return result
+                except (OSError, ValueError) as error:
+                    raise ValueError(subscription_failure_reason(error)) from error
+
+            _run_ceremony(rollback_subscription)
         return
     action: Literal["set", "rotate"] = "set" if choice == "2" else "rotate"
     from yoetz.config.load import load_config

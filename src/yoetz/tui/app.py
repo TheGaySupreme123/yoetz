@@ -1285,6 +1285,221 @@ class YoetzTui(App[int]):
             (f"Reason: {getattr(report, 'reason', 'privacy_setup_failed')}",),
         )
 
+    async def _command_codex_subscription(self, *, switch_account: bool = False) -> None:
+        executable_default, home_default, model_default, _effort_default = (
+            self.runtime.codex_subscription_defaults()
+        )
+        entries = (
+            TextEntryView(
+                name="codex-subscription-executable",
+                title="Codex with ChatGPT subscription",
+                label="Exact Codex executable",
+                initial=executable_default,
+                placeholder="/absolute/path/to/codex",
+            ),
+            TextEntryView(
+                name="codex-subscription-home",
+                title="Dedicated evaluator home",
+                label="Owner-private CODEX_HOME",
+                initial=home_default,
+                placeholder="/absolute/path/to/dedicated/home",
+            ),
+            TextEntryView(
+                name="codex-subscription-model",
+                title="Exact evaluator selection",
+                label="Model identifier",
+                initial=model_default,
+                placeholder="gpt-5.6-sol",
+            ),
+        )
+        values: list[str] = []
+        for entry in entries:
+            if await self.ask(entry) is None:
+                self.say(Level.OPTIONAL, "Codex subscription setup was cancelled.")
+                return
+            values.append(entry.value.strip())
+        effort = await self.ask(
+            SelectionView(
+                name="codex-subscription-reasoning",
+                title="Reasoning effort",
+                options=[
+                    Option(value, value, "Exact selection bound into every attempt.")
+                    for value in ("high", "low", "medium", "xhigh", "max", "ultra")
+                ],
+            )
+        )
+        if effort is None:
+            self.say(Level.OPTIONAL, "Codex subscription setup was cancelled.")
+            return
+        executable, codex_home, model = values
+        try:
+            preview = self.runtime.preview_codex_subscription(executable, codex_home, model, effort)
+        except RuntimeError_ as error:
+            self._report(error)
+            return
+        body = (
+            f"Runtime: {preview.get('executable_path')}",
+            f"Executable digest: {preview.get('executable_sha256')}",
+            f"Codex version: {preview.get('runtime_version')}",
+            f"Capability cell: {preview.get('capability_cell_sha256')}",
+            f"Cell evidence expires: {preview.get('capability_evidence_expires_at')}",
+            f"Dedicated CODEX_HOME: {preview.get('codex_home')}",
+            f"Model / reasoning: {model} / {effort}",
+            "Destination: OpenAI through Codex-managed ChatGPT authentication.",
+            "Data-use posture: unknown; your ChatGPT plan and terms apply.",
+            "Yoetz never receives the OAuth credential or the upstream OpenAI body.",
+            "Disconnect logs out only this dedicated home; rollback preserves it.",
+        )
+        if switch_account:
+            body = (
+                *body,
+                "This will log out the dedicated home first, then open Codex sign-in.",
+            )
+        confirmed = await self.ask(
+            ApprovalView(
+                name="codex-subscription-confirm",
+                title="Open Codex-managed ChatGPT sign-in?",
+                body=body,
+                approve_label="Continue to Codex sign-in",
+                decline_label="Cancel",
+                default_to_safe=True,
+            )
+        )
+        if confirmed != "approve":
+            self.say(Level.OPTIONAL, "Codex subscription setup was cancelled.")
+            return
+        try:
+            status = await self.hand_over_terminal(
+                lambda: self.runtime.setup_codex_subscription(
+                    executable, codex_home, model, effort, switch_account=switch_account
+                )
+            )
+        except SuspendNotSupported:
+            self.say(
+                Level.UNPROVEN,
+                "This terminal cannot open Codex sign-in",
+                (
+                    "Run this from your shell instead:",
+                    "yoetz provider codex-subscription setup --executable <absolute-path>",
+                ),
+            )
+            return
+        except RuntimeError_ as error:
+            self._report(error)
+            return
+        self.say(
+            Level.VERIFIED,
+            "Codex subscription binding is ready",
+            (
+                f"Auth mode: {status.get('auth_mode')}",
+                f"Plan: {status.get('plan_type') or 'not reported'}",
+                f"Model available: {status.get('model_available')}",
+                f"Process cleanup: {status.get('process_cleanup')}",
+            ),
+        )
+        try:
+            report = await self.hand_over_terminal(
+                lambda: self.runtime.run_privacy_setup("assisted_review", offer_recommended=True)
+            )
+        except (SuspendNotSupported, RuntimeError_) as error:
+            if isinstance(error, RuntimeError_):
+                self._report(error)
+            else:
+                self.say(
+                    Level.UNPROVEN,
+                    "The evaluator is bound, but privacy setup still needs review",
+                    ("Run 'yoetz privacy setup' from your shell.",),
+                )
+            return
+        if getattr(report, "outcome", "failed") not in {"configured", "unchanged"}:
+            self.say(
+                Level.BLOCKED,
+                "The evaluator is bound, but external review remains off",
+                (f"Privacy outcome: {getattr(report, 'outcome', 'failed')}",),
+            )
+            return
+        posture = await self.runtime.provider_posture()
+        self.say(Level.ACTIVE, "", render_provider_stored(posture, self.body_width))
+
+    async def _command_codex_subscription_status(self) -> None:
+        try:
+            status = await self.runtime.codex_subscription_status()
+        except RuntimeError_ as error:
+            self._report(error)
+            return
+        self.say(
+            Level.ACTIVE,
+            "Codex subscription status",
+            (
+                f"Auth mode: {status.get('auth_mode') or 'not signed in'}",
+                f"Plan: {status.get('plan_type') or 'not reported'}",
+                f"Model available: {status.get('model_available')}",
+                f"Process cleanup: {status.get('process_cleanup')}",
+            ),
+        )
+
+    async def _command_codex_subscription_disconnect(self) -> None:
+        confirmed = await self.ask(
+            ApprovalView(
+                name="codex-subscription-disconnect",
+                title="Log out the dedicated Codex home?",
+                body=(
+                    "Codex will log out only this evaluator home.",
+                    "Yoetz then removes the subscription binding and recomposes the service.",
+                ),
+                approve_label="Disconnect",
+                decline_label="Cancel",
+                default_to_safe=True,
+            )
+        )
+        if confirmed != "approve":
+            self.say(Level.OPTIONAL, "Codex subscription disconnect was cancelled.")
+            return
+        try:
+            status = await self.runtime.disconnect_codex_subscription()
+        except RuntimeError_ as error:
+            self._report(error)
+            return
+        self.say(
+            Level.VERIFIED,
+            "Codex subscription disconnected",
+            (
+                f"Binding removed: {status.get('binding_removed')}",
+                f"Process cleanup: {status.get('process_cleanup')}",
+            ),
+        )
+
+    async def _command_codex_subscription_rollback(self) -> None:
+        confirmed = await self.ask(
+            ApprovalView(
+                name="codex-subscription-rollback",
+                title="Remove only the Yoetz Codex binding?",
+                body=(
+                    "The dedicated Codex home and installation stay in place.",
+                    "The running service is recomposed so the old cell cannot dispatch.",
+                ),
+                approve_label="Roll back binding",
+                decline_label="Cancel",
+                default_to_safe=True,
+            )
+        )
+        if confirmed != "approve":
+            self.say(Level.OPTIONAL, "Codex subscription rollback was cancelled.")
+            return
+        try:
+            status = await self.runtime.rollback_codex_subscription()
+        except RuntimeError_ as error:
+            self._report(error)
+            return
+        self.say(
+            Level.VERIFIED,
+            "Codex subscription binding rolled back",
+            (
+                f"Binding removed: {status.get('binding_removed')}",
+                "Dedicated home and Codex installation were preserved.",
+            ),
+        )
+
     async def command_provider(self) -> None:
         options = self.runtime.provider_options()
         chosen = await self.ask(
@@ -1293,6 +1508,28 @@ class YoetzTui(App[int]):
                 title="Choose a provider for optional deeper review",
                 options=[
                     Option(option.choice, option.label, option.endpoint_text) for option in options
+                ]
+                + [
+                    Option(
+                        "codex_status",
+                        "Codex subscription status",
+                        "Structural account and model read; no task case.",
+                    ),
+                    Option(
+                        "codex_disconnect",
+                        "Disconnect dedicated Codex home",
+                        "Codex logout, then remove the Yoetz binding.",
+                    ),
+                    Option(
+                        "codex_rollback",
+                        "Roll back Yoetz Codex binding",
+                        "Remove the binding; preserve home and install.",
+                    ),
+                    Option(
+                        "codex_switch",
+                        "Switch Codex ChatGPT account",
+                        "Log out the dedicated home, then sign in again.",
+                    ),
                 ],
                 searchable=True,
                 hint="type to filter · enter to choose · esc to cancel",
@@ -1300,6 +1537,21 @@ class YoetzTui(App[int]):
         )
         if chosen is None:
             self.say(Level.OPTIONAL, "No provider was configured.")
+            return
+        if chosen == "codex_subscription":
+            await self._command_codex_subscription()
+            return
+        if chosen == "codex_status":
+            await self._command_codex_subscription_status()
+            return
+        if chosen == "codex_disconnect":
+            await self._command_codex_subscription_disconnect()
+            return
+        if chosen == "codex_rollback":
+            await self._command_codex_subscription_rollback()
+            return
+        if chosen == "codex_switch":
+            await self._command_codex_subscription(switch_account=True)
             return
         option = next(item for item in options if item.choice == chosen)
         origin: str | None = None

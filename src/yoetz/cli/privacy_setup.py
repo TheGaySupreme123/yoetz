@@ -646,14 +646,15 @@ def _configured_bindings() -> tuple[ProviderBinding | None, ProviderBinding | No
     from yoetz.config.load import load_config
 
     config = load_config({}, os.environ, None)
+    external_config = config.provider or config.external_runtime
     external = (
         None
-        if config.provider is None
+        if external_config is None
         else ProviderBinding(
-            config.provider.provider_id,
-            config.provider.model,
-            config.provider.endpoint_profile_id,
-            config.provider.endpoint_profile_version,
+            external_config.provider_id,
+            external_config.model,
+            external_config.endpoint_profile_id,
+            external_config.endpoint_profile_version,
             "external",
         )
     )

@@ -563,7 +563,14 @@ def render_provider_stored(posture: ProviderPosture, width: int) -> tuple[str, .
 
     lines = [
         _bullet(Level.VERIFIED, "Provider binding saved"),
-        _bullet(Level.VERIFIED, "API key stored securely"),
+        _bullet(
+            Level.VERIFIED,
+            (
+                "Codex-managed ChatGPT login is available"
+                if posture.credential_authority == "external_runtime_oauth"
+                else "API key stored securely"
+            ),
+        ),
     ]
     if posture.transport_tested:
         lines.append(_bullet(Level.VERIFIED, "Live provider connection responded"))

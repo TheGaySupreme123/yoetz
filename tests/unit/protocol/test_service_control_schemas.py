@@ -484,6 +484,51 @@ def test_v23_updates_only_the_status_operation_schema_refs() -> None:
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
 
 
+def test_v24_admits_only_the_new_provenance_bearing_workflow_results() -> None:
+    request_v23 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.3.0.schema.json").read_bytes()),
+    )
+    request_v24 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-request-2.4.0.schema.json").read_bytes()),
+    )
+    result_v23 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-result-2.3.0.schema.json").read_bytes()),
+    )
+    result_v24 = cast(
+        dict[str, Any],
+        strict_json_parse((_ROOT / "control-result-2.4.0.schema.json").read_bytes()),
+    )
+
+    request_v23.pop("$id")
+    request_v24.pop("$id")
+    result_v23.pop("$id")
+    result_v24.pop("$id")
+    assert request_v24 == request_v23
+
+    def restore_result_refs(value: object) -> None:
+        if isinstance(value, dict):
+            mapping = cast(dict[str, object], value)
+            for key, member in mapping.items():
+                if key == "$ref" and isinstance(member, str):
+                    member = member.replace("check-result-1.1.0", "check-result-1.0.0")
+                    member = member.replace("receipt-result-1.1.0", "receipt-result-1.0.0")
+                    mapping[key] = member.replace("status-result-1.2.0", "status-result-1.1.0")
+                else:
+                    restore_result_refs(member)
+        elif isinstance(value, list):
+            for member in cast(list[object], value):
+                restore_result_refs(member)
+
+    restore_result_refs(result_v24)
+    assert result_v24 == result_v23
+    for stem in ("control-hello", "control-hello-result", "control-request", "control-result"):
+        filename = f"{stem}-2.4.0.schema.json"
+        assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
+
+
 def test_control_request_and_result_unions_are_exact_and_disjoint() -> None:
     request_schema = _schema("control-request")
     result_schema = _schema("control-result")

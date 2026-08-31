@@ -742,7 +742,141 @@ class YoetzRuntime:
                 requires_origin=True,
             )
         )
+        options.append(
+            ProviderOption(
+                choice="codex_subscription",
+                label="Codex with ChatGPT subscription",
+                provider_id="openai-codex",
+                host="openai.com",
+                base_path_prefix=" through Codex-managed login",
+                default_model="gpt-5.6-sol",
+                api_style="Codex app-server v2 (stdio)",
+                endpoint_profile_id="codex-chatgpt-subscription",
+                endpoint_profile_version="1.0.0",
+            )
+        )
         return tuple(options)
+
+    def codex_subscription_defaults(self) -> tuple[str, str, str, str]:
+        """Return discovered nonsecret defaults; setup still digest-validates the exact binary."""
+
+        from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
+        from yoetz.cli.codex_subscription import default_codex_home
+
+        binaries = discover_codex_binaries()
+        executable = "" if not binaries else binaries[0].executable_path
+        return executable, str(default_codex_home()), "gpt-5.6-sol", "high"
+
+    def preview_codex_subscription(
+        self, executable: str, codex_home: str, model: str, reasoning_effort: str
+    ) -> Mapping[str, object]:
+        """Validate and render the exact subscription cell without logging in or writing state."""
+
+        from yoetz.cli.codex_subscription import codex_subscription_preview
+
+        try:
+            return codex_subscription_preview(
+                executable=Path(executable),
+                codex_home=Path(codex_home),
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
+        except (OSError, ValueError) as error:
+            from yoetz.cli.codex_subscription import subscription_failure_reason
+
+            raise RuntimeError_(
+                subscription_failure_reason(error),
+                "that Codex evaluator cell is not supported",
+            ) from None
+
+    async def setup_codex_subscription(
+        self,
+        executable: str,
+        codex_home: str,
+        model: str,
+        reasoning_effort: str,
+        *,
+        switch_account: bool = False,
+    ) -> Mapping[str, object]:
+        """Run Codex-owned login, then recompose the service around the exact binding."""
+
+        from yoetz.cli.codex_subscription import (
+            codex_subscription_setup,
+            subscription_failure_reason,
+        )
+        from yoetz.cli.setup import restart_service_for_semantic_composition
+
+        try:
+            result = await codex_subscription_setup(
+                executable=Path(executable),
+                codex_home=Path(codex_home),
+                model=model,
+                reasoning_effort=reasoning_effort,
+                login_mode="browser",
+                open_browser=True,
+                switch_account=switch_account,
+            )
+            await restart_service_for_semantic_composition()
+            return result
+        except (OSError, TimeoutError, ValueError) as error:
+            raise RuntimeError_(
+                subscription_failure_reason(error),
+                "Codex subscription setup did not complete",
+            ) from None
+
+    async def codex_subscription_status(self) -> Mapping[str, object]:
+        """Read structural Codex login/model state without sending a task case."""
+
+        from yoetz.cli.codex_subscription import (
+            codex_subscription_status,
+            subscription_failure_reason,
+        )
+
+        try:
+            return await codex_subscription_status()
+        except (OSError, TimeoutError, ValueError) as error:
+            raise RuntimeError_(
+                subscription_failure_reason(error),
+                "Codex subscription status could not be read",
+            ) from None
+
+    async def disconnect_codex_subscription(self) -> Mapping[str, object]:
+        """Log out the dedicated home, remove the binding, then recompose the service."""
+
+        from yoetz.cli.codex_subscription import (
+            codex_subscription_disconnect,
+            subscription_failure_reason,
+        )
+        from yoetz.cli.setup import restart_service_for_semantic_composition
+
+        try:
+            result = await codex_subscription_disconnect()
+            await restart_service_for_semantic_composition()
+            return result
+        except (OSError, TimeoutError, ValueError) as error:
+            raise RuntimeError_(
+                subscription_failure_reason(error),
+                "Codex subscription disconnect did not complete",
+            ) from None
+
+    async def rollback_codex_subscription(self) -> Mapping[str, object]:
+        """Remove only the Yoetz binding, then recompose so the old cell cannot dispatch."""
+
+        from yoetz.cli.codex_subscription import (
+            codex_subscription_rollback,
+            subscription_failure_reason,
+        )
+        from yoetz.cli.setup import restart_service_for_semantic_composition
+
+        try:
+            result = codex_subscription_rollback()
+            await restart_service_for_semantic_composition()
+            return result
+        except (OSError, ValueError) as error:
+            raise RuntimeError_(
+                subscription_failure_reason(error),
+                "Codex subscription rollback did not complete",
+            ) from None
 
     def save_provider_binding(
         self, option: ProviderOption, model: str, *, https_origin: str | None = None
@@ -791,6 +925,7 @@ class YoetzRuntime:
             provider_id=cast(str | None, endpoint_map.get("provider_id")),
             model=cast(str | None, endpoint_map.get("model")),
             endpoint_profile_id=cast(str | None, endpoint_map.get("endpoint_profile_id")),
+            credential_authority=cast(str | None, endpoint_map.get("credential_authority")),
             credential_connected=cast(bool | None, report.get("credential_connected")),
             llm_inference_enabled=cast(bool | None, report.get("llm_inference_enabled")),
             semantic_enabled=report.get("semantic_enabled") is True,

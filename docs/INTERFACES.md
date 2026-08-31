@@ -663,7 +663,8 @@ usage, cost, and failure facts; semantic-attempt ID; dispatch kind; exactly one 
 authorization or local-disclosure reservation; durable privacy-receipt ID; external request
 commitment when applicable; and the validated terminal status/reason pair. The exact Python fields
 and wire conversions are frozen in `domain/findings.md` and
-`semantic-provenance-1.0.0.schema.json`.
+`semantic-provenance-1.0.0.schema.json`; the append-only external-runtime extension is frozen in
+`semantic-provenance-1.1.0.schema.json` and `runtime-attempt-evidence-1.0.0.schema.json`.
 
 `policy_digest` and `privacy_policy_digest` on `ProviderAttemptProvenance` and
 `SemanticProvenance` are bound by the outbound gateway to the effective policy digest that
@@ -2384,6 +2385,21 @@ no-training claim.
 
 ### Semantic evaluation
 
+External semantic profiles declare one credential authority. `yoetz_vault_api_credential` means
+the ready service mints an attempt-bound vault handle for an exact HTTP provider profile.
+`external_runtime_oauth` means an exact vendor runtime owns login, refresh, storage, and upstream
+authentication; the gateway supplies only `ExternalRuntimeAuthority(dispatch_id,
+request_body_digest, request_commitment, service_generation, monotonic_deadline)`. The two
+authorities are mutually exclusive in configuration and no fallback exists between them.
+
+`codex-chatgpt-subscription@1` is the only v1 external-runtime profile. Its configuration is the
+closed `ExternalRuntimeProfileConfig`: exact absolute executable and dedicated-home paths;
+executable, app-server-schema, capability-cell, and isolated-config SHA-256 digests;
+runtime/source/capability identities; capability-evidence expiry; model; reasoning effort;
+timeout; and retry cap. It has no token, OAuth endpoint, generic provider URL, headers, or open
+options map. Expired capability evidence fails before child launch. `account/read`, model
+discovery, login, and logout are structural app-server operations and never a task-content probe.
+
 `SemanticEvaluatorPort.evaluate(case: ApprovedProviderCase, deadline: Deadline) -> SemanticResult`
 makes
 at most one physical provider request. `SemanticResult` is the closed union
@@ -2464,6 +2480,18 @@ registered in §7. Adapter provenance has no authorization/reservation/receipt I
 published. Final provenance adds exact attempt, dispatch-authority, receipt, commitment, status,
 and reason fields only after the terminal privacy receipt is durable; predispatch gaps use the
 status/reason pair with no provenance.
+
+For `dispatch_kind=external_runtime_oauth`, provenance additionally requires one
+`RuntimeAttemptEvidence` value. It contains only exact runtime/source/executable/protocol/
+capability-cell/capability-evidence-expiry/launcher/config,
+disclosed-case/instruction/output-schema/selection/final-output digests, model reasoning
+selection, optional safe thread/turn correlation, `chatgpt` auth mode, optional allowlisted plan
+type, disclosure/acknowledgement booleans, cleanup classification (`not_started` when no child
+existed), and
+the literal `upstream_body_observability=unavailable`. Email, credential paths/bytes, raw account
+or workspace IDs, prompt/reasoning/event/stderr text, and an asserted upstream body digest are
+forbidden. `turn_acknowledged=true` plus ambiguous transport or cleanup maps to
+`unavailable/outcome_unknown` and is not retriable.
 
 `semantic_required` means semantic success is required for a complete verdict, not required for
 returning already-computed local truth. Missing approved external/local capability, privacy block,

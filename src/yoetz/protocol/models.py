@@ -264,6 +264,7 @@ class SemanticReason(str, Enum):  # noqa: UP042 - exact public wire enum base
     RETRY_BUDGET_EXHAUSTED = "retry_budget_exhausted"
     AUDIT_RESERVATION_UNAVAILABLE = "audit_reservation_unavailable"
     RECEIPT_PERSISTENCE_UNKNOWN = "receipt_persistence_unknown"
+    OUTCOME_UNKNOWN = "outcome_unknown"
     DEADLINE_AUTHORITY_LOST = "deadline_authority_lost"
     LEASE_AUTHORITY_LOST = "lease_authority_lost"
     FRONTIER_CHANGED = "frontier_changed"
@@ -320,6 +321,7 @@ VALID_SEMANTIC_REASONS: Final[Mapping[SemanticStatus, frozenset[SemanticReason]]
                     SemanticReason.RETRY_BUDGET_EXHAUSTED,
                     SemanticReason.AUDIT_RESERVATION_UNAVAILABLE,
                     SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN,
+                    SemanticReason.OUTCOME_UNKNOWN,
                 }
             ),
             SemanticStatus.LATE: frozenset(
@@ -361,6 +363,7 @@ _REQUIRED_UNAVAILABLE_PROVENANCE_REASONS: Final[frozenset[SemanticReason]] = fro
         SemanticReason.TRANSPORT_UNAVAILABLE,
         SemanticReason.PROVIDER_RATE_LIMITED,
         SemanticReason.PROVIDER_QUOTA_EXHAUSTED,
+        SemanticReason.OUTCOME_UNKNOWN,
     }
 )
 _FORBIDDEN_UNAVAILABLE_PROVENANCE_REASONS: Final[frozenset[SemanticReason]] = frozenset(
@@ -1689,6 +1692,7 @@ _PUBLISH_SUMMARY_CATEGORY: Final[Mapping[tuple[str, str], DataCategory]] = Mappi
         ("claim_recorded", "1.0.0"): DataCategory.FINDING_SUMMARY,
         ("response_recorded", "1.0.0"): DataCategory.FINDING_SUMMARY,
         ("finding_recorded", "1.0.0"): DataCategory.FINDING_SUMMARY,
+        ("finding_recorded", "1.1.0"): DataCategory.FINDING_SUMMARY,
     }
 )
 _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
@@ -1698,6 +1702,7 @@ _PUBLISH_FIXED_SUMMARY: Final[Mapping[tuple[str, str], str]] = MappingProxyType(
         ("assignment_recorded", "1.0.0"): "assignment_recorded",
         ("redaction_recorded", "1.0.0"): "redaction_recorded",
         ("check_recorded", "1.0.0"): "check_recorded",
+        ("check_recorded", "1.1.0"): "check_recorded",
         ("receipt_recorded", "1.0.0"): "receipt_recorded",
     }
 )
@@ -3365,6 +3370,30 @@ _SEMANTIC_PROVENANCE_LEAVES: Final = (
     "provider_request_id",
     "reason",
     "request_commitment",
+    "runtime_evidence/app_server_schema_sha256",
+    "runtime_evidence/auth_mode",
+    "runtime_evidence/capability_cell_sha256",
+    "runtime_evidence/capability_evidence_expires_at",
+    "runtime_evidence/capability_profile",
+    "runtime_evidence/case_disclosed",
+    "runtime_evidence/credential_authority",
+    "runtime_evidence/disclosed_case_sha256",
+    "runtime_evidence/executable_sha256",
+    "runtime_evidence/final_output_sha256",
+    "runtime_evidence/instruction_sha256",
+    "runtime_evidence/isolated_config_sha256",
+    "runtime_evidence/launcher_sha256",
+    "runtime_evidence/output_schema_sha256",
+    "runtime_evidence/plan_type",
+    "runtime_evidence/process_cleanup",
+    "runtime_evidence/reasoning_effort",
+    "runtime_evidence/runtime_source_identity",
+    "runtime_evidence/runtime_version",
+    "runtime_evidence/selection_sha256",
+    "runtime_evidence/thread_id",
+    "runtime_evidence/turn_acknowledged",
+    "runtime_evidence/turn_id",
+    "runtime_evidence/upstream_body_observability",
     "sampling_params/max_output_tokens",
     "sampling_params/seed",
     "sampling_params/temperature",
@@ -4136,7 +4165,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 797:
+    if len(result) != 895:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

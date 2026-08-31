@@ -19,6 +19,7 @@ from types import MappingProxyType
 from typing import Final
 
 from yoetz.adapters.privacy.gateway import ExternalProviderFactory
+from yoetz.adapters.providers.codex_app_server import codex_factory_builders_from_config
 from yoetz.adapters.providers.data_use_catalog import data_use_record_for_endpoint
 from yoetz.adapters.providers.openai_chat_completions import (
     ChatCompletionsEvaluator,
@@ -36,11 +37,11 @@ from yoetz.adapters.providers.openai_responses_factory import (
 from yoetz.adapters.providers.openai_responses_factory import (
     external_factory_builders_from_config as responses_factory_builders_from_config,
 )
-from yoetz.config.models import ProviderProfileConfig
+from yoetz.config.models import ExternalRuntimeProfileConfig, ProviderProfileConfig
 from yoetz.domain.privacy import ApprovedOutboundCase, ProviderBinding
 from yoetz.ports.clock import ClockPort
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding, ProviderCredentialHandle
-from yoetz.ports.semantic import SemanticEvaluatorPort
+from yoetz.ports.semantic import ExternalRuntimeAuthority, SemanticEvaluatorPort
 
 __all__ = [
     "CHAT_COMPLETIONS_ENDPOINT_PROFILES",
@@ -127,6 +128,7 @@ class ChatCompletionsExternalFactory:
 
     profile: ChatCompletionsProfile
     clock: ClockPort
+    credential_authority: str = "yoetz_vault_api_credential"
 
     def __post_init__(self) -> None:
         self._last_rendered: RenderedChatCompletionsRequest | None = None
@@ -139,10 +141,12 @@ class ChatCompletionsExternalFactory:
     def build_evaluator(
         self,
         binding: ProviderAttemptAuthBinding,
-        credential: ProviderCredentialHandle,
+        credential: ProviderCredentialHandle | ExternalRuntimeAuthority,
         request_commitment: object,
     ) -> SemanticEvaluatorPort:
         del request_commitment
+        if type(credential) is not ProviderCredentialHandle:
+            raise ValueError("chat_completions_credential_authority_invalid")
         rendered = self._last_rendered
         if rendered is None or binding.request_body_digest != rendered.body_sha256:
             raise ValueError("chat_completions_factory_render_required")
@@ -158,10 +162,17 @@ class ChatCompletionsExternalFactory:
 
 
 def external_factory_builders_from_config(
-    provider: ProviderProfileConfig | None, *, clock: ClockPort
+    provider: ProviderProfileConfig | None,
+    external_runtime: ExternalRuntimeProfileConfig | None = None,
+    *,
+    clock: ClockPort,
 ) -> dict[ProviderBinding, object]:
     """Return the one runtime factory builder for a configured provider, or nothing."""
 
+    if provider is not None and external_runtime is not None:
+        raise ValueError("provider_authority_ambiguous")
+    if external_runtime is not None:
+        return codex_factory_builders_from_config(external_runtime, clock=clock)
     if provider is None:
         return {}
     if provider.endpoint_profile_id in RESPONSES_ENDPOINT_PROFILE_IDS:
