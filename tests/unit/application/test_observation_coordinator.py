@@ -813,6 +813,55 @@ def test_frontier_motion_same_task_rewind_discards_delivered_mark(tmp_path: Path
     )
 
 
+def test_frontier_motion_commit_mismatch_keeps_rewind_notice_queued(tmp_path: Path) -> None:
+    """A rewind queued between peek and commit must survive the mismatch commit."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    emitted_digest = "sha256:" + "c" * 64
+    rewound_digest = "sha256:" + "d" * 64
+    store.note_frontier_motion(
+        workspace,
+        "rewind-race-session",
+        from_sequence=220,
+        to_sequence=221,
+        head_digest=emitted_digest,
+        observation_record_count=1,
+        task_id="tsk-frontier-test",
+    )
+    peeked = store.peek_frontier_motion(workspace, "rewind-race-session")
+    assert peeked is not None
+    # The observed ledger rewinds to a new lineage after the hook peeked.
+    store.note_frontier_motion(
+        workspace,
+        "rewind-race-session",
+        from_sequence=0,
+        to_sequence=5,
+        head_digest=rewound_digest,
+        observation_record_count=5,
+        task_id="tsk-frontier-test",
+        lineage_frontier=Frontier(5, rewound_digest),
+    )
+    store.commit_frontier_motion_delivery(
+        workspace,
+        "rewind-race-session",
+        peeked.delivery_identity,
+        emitted_to_sequence=peeked.to_sequence,
+        emitted_task_id=peeked.task_id,
+        emitted_head_digest=peeked.head_digest,
+    )
+
+    reloaded = LocalObservationStore(_state=tmp_path)
+    queued = reloaded.peek_frontier_motion(workspace, "rewind-race-session")
+    assert queued is not None
+    assert (queued.from_sequence, queued.to_sequence, queued.observation_record_count) == (0, 5, 5)
+    assert queued.head_digest == rewound_digest
+    state_path = store._workspace_path(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "rewind-race-session" not in raw.get("frontier_motion_delivered", {})
+
+
 def test_frontier_motion_historical_replay_uses_actual_current_lineage(tmp_path: Path) -> None:
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
@@ -1093,6 +1142,46 @@ def test_frontier_motion_legacy_delivered_mark_fails_open(tmp_path: Path) -> Non
         task_id="tsk-frontier-test",
     )
     assert reloaded.peek_frontier_motion(workspace, "legacy-delivered") is not None
+
+
+def test_frontier_motion_legacy_notices_join_the_recency_clock_on_load(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    digest = "sha256:" + "e" * 64
+    for session in ("legacy-a", "legacy-b"):
+        store.note_frontier_motion(
+            workspace,
+            session,
+            from_sequence=4,
+            to_sequence=5,
+            head_digest=digest,
+            observation_record_count=1,
+            task_id="tsk-frontier-test",
+        )
+    state_path = store._workspace_path(workspace)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    for session in ("legacy-a", "legacy-b"):
+        del raw["frontier_motion_notices"][session]["recency_ordinal"]
+    del raw["frontier_motion_recency"]
+    state_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    reloaded = LocalObservationStore(_state=tmp_path)
+    reloaded.note_frontier_motion(
+        workspace,
+        "post-upgrade",
+        from_sequence=6,
+        to_sequence=7,
+        head_digest=digest,
+        observation_record_count=1,
+        task_id="tsk-frontier-test",
+    )
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    notices = saved["frontier_motion_notices"]
+    legacy_ordinals = {notices[session]["recency_ordinal"] for session in ("legacy-a", "legacy-b")}
+    assert 0 not in legacy_ordinals
+    assert len(legacy_ordinals) == 2
+    assert notices["post-upgrade"]["recency_ordinal"] > max(legacy_ordinals)
 
 
 def test_frontier_motion_notice_cap_preserves_lru_order_across_restart(tmp_path: Path) -> None:

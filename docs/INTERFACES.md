@@ -2983,7 +2983,10 @@ notices coalesce, and an advice-safe `PostToolUse` hook consumes the exact notic
 emitting its bounded agent context. If a later append merges into the pending notice between
 peek and commit, delivery identity no longer matches; commit still advances the delivered
 high-water to the peeked sequence/digest and clamps the merged remainder so the already-emitted
-range is not re-announced. This context is informational: it neither weakens
+range is not re-announced. If the queued same-task notice instead proves the emitted frontier was
+rewound away after the peek (a lower sequence, or the same sequence with a different digest),
+commit records no mark and leaves the rewind notice queued so the new lineage's prefix is still
+announced. This context is informational: it neither weakens
 exact-frontier checks nor expands the ADR-022 predicate that permits a cooperative publish to
 retain a stale frontier across observation-authored records.
 

@@ -1520,6 +1520,9 @@ class LocalObservationStore:
         Identity match removes that exact notice. A merge that races peek and commit
         changes identity; the peeked emitted frontier still advances high-water and
         clamps any same-task remainder so the emitted range is not re-announced.
+        A queued same-task notice below the emitted frontier proves the observed
+        lineage rewound after the peek: the emitted mark is not reinstalled and the
+        rewind notice stays queued so the new lineage's prefix is still announced.
         """
 
         with self._lock:
@@ -1538,6 +1541,20 @@ class LocalObservationStore:
                 try:
                     validate_sha256_digest(emitted_head_digest)
                 except ProtocolValueError:
+                    return
+                if (
+                    current is not None
+                    and current.task_id == emitted_task_id
+                    and _frontier_lineage_rewound(
+                        current_sequence=current.to_sequence,
+                        current_head_digest=current.head_digest,
+                        recorded_sequence=emitted_to_sequence,
+                        recorded_head_digest=emitted_head_digest,
+                    )
+                ):
+                    # A same-task rewind was queued between peek and commit.
+                    # Writing the emitted mark would clamp the rewind notice out
+                    # of existence and silently drop the new lineage's prefix.
                     return
                 assert state.frontier_motion_delivered is not None
                 delivered = state.frontier_motion_delivered
@@ -3730,7 +3747,7 @@ class LocalObservationStore:
                 *(mark.recency_ordinal for mark in frontier_motion_delivered.values()),
             ]
         )
-        return _WorkspaceState(
+        state = _WorkspaceState(
             consent=consent,
             session_workspaces=session_workspaces,
             cursors=cursors,
@@ -3790,6 +3807,14 @@ class LocalObservationStore:
             codex_session_bindings=bindings,
             storage_corrupt_sessions=storage_corrupt_sessions,
         )
+        if any(notice.recency_ordinal == 0 for notice in frontier_motion_notices.values()) or any(
+            mark.recency_ordinal == 0 for mark in frontier_motion_delivered.values()
+        ):
+            # Notices persisted before the LRU clock existed load with ordinal
+            # 0. Fold them into the clock once so they hold a real position
+            # instead of tying at zero until the next touch.
+            _renumber_frontier_motion_recency(state)
+        return state
 
 
 def workspace_commitment_for_path(path: str, *, _state: Path | None = None) -> str:
