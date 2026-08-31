@@ -156,6 +156,7 @@ _EXPECTED_SEMANTIC_STATUS_REASONS = {
         "retry_budget_exhausted",
         "audit_reservation_unavailable",
         "receipt_persistence_unknown",
+        "outcome_unknown",
     },
     "late": {"deadline_authority_lost", "lease_authority_lost"},
     "stale": {"frontier_changed", "dependency_changed"},
@@ -170,6 +171,7 @@ _REQUIRED_SEMANTIC_PROVENANCE_PAIRS = frozenset(
         ("unavailable", "transport_unavailable"),
         ("unavailable", "provider_rate_limited"),
         ("unavailable", "provider_quota_exhausted"),
+        ("unavailable", "outcome_unknown"),
     }
 )
 _OPTIONAL_SEMANTIC_PROVENANCE_PAIRS = frozenset({("failed", "coordinator_failure")})
@@ -304,9 +306,9 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
     ("versions", "versions_page"),
 )
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
-    ("check", None): 134,
+    ("check", None): 182,
     ("publish_work", None): 57,
-    ("receipt", None): 155,
+    ("receipt", None): 179,
     ("respond", None): 53,
     ("start", None): 65,
     ("status", None): 47,
@@ -315,7 +317,7 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("status", "candidate_findings"): 32,
     ("status", "compact"): 46,
     ("status", "evidence"): 18,
-    ("status", "findings"): 66,
+    ("status", "findings"): 90,
     ("status", "history"): 12,
     ("status", "obligations"): 29,
     ("status", "operation"): 24,
@@ -1819,6 +1821,7 @@ def test_semantic_provenance_partition_is_total_over_every_status_and_reason() -
         "transport_unavailable",
         "provider_rate_limited",
         "provider_quota_exhausted",
+        "outcome_unknown",
     }
     assert set(unavailable) == {
         reason.value for reason in models.VALID_SEMANTIC_REASONS[models.SemanticStatus.UNAVAILABLE]
@@ -1869,6 +1872,20 @@ def test_b1_prerequisite_event_and_receipt_schema_seams_are_exact() -> None:
     }
     validate_schema_instance("event-draft", "1.0.0", draft)
 
+    subscription_payload = dict(session_payload)
+    subscription_payload["profile"] = "codex-subscription"
+    validate_schema_instance("session-opened", "1.1.0", subscription_payload)
+    with pytest.raises(ProtocolValueError) as exc_info:
+        validate_schema_instance("session-opened", "1.0.0", subscription_payload)
+    _assert_reason(exc_info, "schema_instance_invalid")
+    subscription_draft = dict(draft)
+    subscription_draft["schema"] = {"name": "session_opened", "version": "1.1.0"}
+    subscription_draft["payload"] = subscription_payload
+    validate_schema_instance("event-draft", "1.1.0", subscription_draft)
+    with pytest.raises(ProtocolValueError) as exc_info:
+        validate_schema_instance("opaque-unknown-event-draft", "1.1.0", subscription_draft)
+    _assert_reason(exc_info, "schema_instance_invalid")
+
     accepted = _accepted_event_wire()
     accepted["evidence_refs"] = [result_id]
     validate_schema_instance("accepted-event", "1.0.0", accepted)
@@ -1912,7 +1929,10 @@ def test_check_recorded_schema_matches_final_semantic_provenance_identity() -> N
                 payload["semantic_provenance"] = _semantic_provenance_for(status, reason)
             else:
                 payload.pop("semantic_provenance", None)
-            validate_schema_instance("check-recorded", "1.0.0", payload)
+            try:
+                validate_schema_instance("check-recorded", "1.1.0", payload)
+            except ProtocolValueError as exc:
+                raise AssertionError(f"check-recorded 1.1 rejected {pair!r}") from exc
 
             if pair in _REQUIRED_SEMANTIC_PROVENANCE_PAIRS:
                 payload.pop("semantic_provenance")
@@ -2165,7 +2185,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 781
+    assert len(derived_patterns) == 877
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -2174,7 +2194,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 797
+    assert len(rules) == 895
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2183,7 +2203,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 781
+    assert len(registry_patterns) == 877
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)
@@ -2195,7 +2215,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
         for rule in rules
         if rule.method == "publish_work" and rule.segments == publish_summary_segments
     )
-    assert len(publish_summary_rules) == 17
+    assert len(publish_summary_rules) == 19
     assert all(rule.status_view is None for rule in publish_summary_rules)
 
     expected_publish = _expected_publish_summary_rules(models)
@@ -2461,7 +2481,9 @@ def _derived_result_success_patterns(
     derived: set[tuple[str, str | None, tuple[str, ...]]] = set()
 
     for method, schema_name in _RESULT_SCHEMA_BY_METHOD_FOR_TEST:
-        document = catalog.by_name_version[(schema_name, "1.0.0")]
+        document = catalog.by_name_version[
+            (schema_name, catalog.request_result_versions[schema_name])
+        ]
         patterns = _walk_schema_leaf_patterns(
             catalog,
             document,
@@ -2499,7 +2521,9 @@ def _derived_result_success_patterns(
             )
             derived.update((method, None, pattern) for pattern in awaiting_patterns)
 
-    status_document = catalog.by_name_version[("status-result", "1.1.0")]
+    status_document = catalog.by_name_version[
+        ("status-result", catalog.request_result_versions["status-result"])
+    ]
     status_success = _schema_success_definition(status_document)
     status_properties = dict(_schema_mapping(status_success.get("properties")))
     if status_properties.pop("page", None) is None:
@@ -2650,10 +2674,12 @@ def _expected_publish_summary_rules(models: Any) -> dict[object, object]:
         ("action_recorded", "1.0.0"): models.DataCategory.COMMAND_METADATA,
         ("assignment_recorded", "1.0.0"): "public_structural",
         ("check_recorded", "1.0.0"): "public_structural",
+        ("check_recorded", "1.1.0"): "public_structural",
         ("claim_recorded", "1.0.0"): models.DataCategory.FINDING_SUMMARY,
         ("decision_recorded", "1.0.0"): models.DataCategory.DECISION_EXCERPT,
         ("evidence_recorded", "1.0.0"): models.DataCategory.EVIDENCE_EXCERPT,
         ("finding_recorded", "1.0.0"): models.DataCategory.FINDING_SUMMARY,
+        ("finding_recorded", "1.1.0"): models.DataCategory.FINDING_SUMMARY,
         ("obligation_published", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
         ("plan_published", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
         ("plan_revised", "1.0.0"): models.DataCategory.TASK_DESCRIPTION,
@@ -2753,7 +2779,7 @@ def test_schema_catalog_reports_complete_registry() -> None:
     assert SCHEMA_NAMESPACE == "https://schemas.yoetz.dev/0.1/"
     assert SCHEMA_MANIFEST_SCHEMA == "yoetz.schema-manifest/1.0.0"
     assert SCHEMA_MANIFEST_VERSION == "1.0.0"
-    assert SCHEMA_MEMBER_COUNT == 101
+    assert SCHEMA_MEMBER_COUNT == 117
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -2837,7 +2863,7 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     root = resources.files("yoetz").joinpath("resources", "schemas")
     manifest_bytes = root.joinpath("manifest.json").read_bytes()
     assert catalog.manifest_digest == f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 2_962
+    assert sum(_count_refs(document.json_schema) for document in catalog.documents) == 3_644
 
 
 def test_schema_name_derivation_and_version_maps_are_exact() -> None:
@@ -2846,14 +2872,18 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
     event_versions = event_schema_versions(catalog)
     assert request_versions is catalog.request_result_versions
     assert event_versions is catalog.event_schema_versions
-    assert len(request_versions) == 40
+    assert len(request_versions) == 41
     assert len(event_versions) == 16
     assert tuple(request_versions) == tuple(sorted(request_versions, key=str.encode))
     assert tuple(event_versions) == tuple(sorted(event_versions, key=str.encode))
-    assert set(request_versions.values()) == {"1.0.0", "1.1.0", "2.3.0", "5.0.0"}
-    assert set(event_versions.values()) == {"1.0.0", "1.2.0"}
+    assert set(request_versions.values()) == {"1.0.0", "1.1.0", "1.2.0", "2.4.0", "5.0.0"}
+    assert set(event_versions.values()) == {"1.0.0", "1.1.0", "1.2.0"}
     assert event_versions["action_recorded"] == "1.0.0"
     assert event_versions["evidence_recorded"] == "1.2.0"
+    assert event_versions["check_recorded"] == "1.1.0"
+    assert event_versions["finding_recorded"] == "1.1.0"
+    assert event_versions["session_opened"] == "1.1.0"
+    assert event_versions["session_resumed"] == "1.1.0"
     assert "accepted_event" not in event_versions
     assert "event_draft" not in event_versions
     assert "opaque_unknown_event_draft" not in event_versions

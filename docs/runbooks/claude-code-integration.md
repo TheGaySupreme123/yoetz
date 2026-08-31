@@ -299,3 +299,13 @@ scope, settings state, component inventory, enabled state, loaded root and sessi
 owner/source/runtime, scoped model call, hook consent/evidence, semantic/provider attempt and privacy
 receipt, and final workflow receipt as separate cells. Never summarize those cells as one “plugin
 works” flag.
+
+## Codex subscription evaluator from Claude Code
+
+A Claude Code policy route may request the same service-owned
+`codex-chatgpt-subscription@1` semantic evaluator. Claude never receives the Codex OAuth credential,
+dedicated home, app-server handle, or tool authority, and Claude activation/model use is not proof
+that the evaluator ran. A strict Claude route must produce `route_semantic_ceiling` with zero Codex
+child launch. Use the [subscription evaluator runbook](codex-subscription-evaluator.md) and record
+Claude host activation, semantic attempt/runtime evidence, privacy receipt, corrective influence,
+and workflow receipt as separate claims.

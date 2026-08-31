@@ -129,6 +129,13 @@ Sensitive and confidential content is off. The never-send set remains absolute. 
 packet built from the ledger, not a handle on your repository — composition passes bundled provider
 adapters no repository, storage, environment, or transcript handles.
 
+The Codex subscription evaluator follows the same policy and receives the same approved packet.
+The difference is credential and transport authority: Codex owns ChatGPT login and internally
+constructs the upstream OpenAI body, while Yoetz passes the packet to one exact app-server over
+stdio. The receipt commits to the packet and exact runtime cell and says
+`upstream_body_observability=unavailable`. It does not claim to know Codex's upstream body. Login,
+plan, or model availability never substitutes for repository privacy approval.
+
 For the first grant, the trusted screen may show both a machine-ceiling change and insertion of the
 repository row. One authority digest binds the complete preview and one atomic CAS commits both or
 neither. An eligible upgrade carry-forward is labeled separately: it preserves the machine bytes,
@@ -164,6 +171,10 @@ in one approved repository have distinct authorizations, credential handles, dis
 semantic provenance, and terminal privacy receipts, and a second repository is shown blocked.
 Router downstream/fallback grants and issue #141's foreground disclosure continuation remain
 separate work.
+
+For an `external_runtime_oauth` profile, the equivalent attempt identity is the secret-free
+runtime authority plus exact runtime evidence, not a vault credential handle. Post-acknowledgement
+ambiguity is terminal `outcome_unknown`; it does not mint a replacement attempt.
 
 When you are auditing a run rather than the installation, the
 [semantic dogfood runbook](../runbooks/semantic-dogfood.md) gives the preflight and the provenance

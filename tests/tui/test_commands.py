@@ -318,6 +318,10 @@ async def test_the_provider_picker_is_searchable_over_the_reviewed_presets(
         assert view.view_name == "provider"
         labels = [option.label for option in view.options]  # type: ignore[attr-defined]
         assert "OpenAI" in labels
+        assert "Codex subscription status" in labels
+        assert "Disconnect dedicated Codex home" in labels
+        assert "Roll back Yoetz Codex binding" in labels
+        assert "Switch Codex ChatGPT account" in labels
         view.filter("anthro")  # type: ignore[attr-defined]
         assert [option.label for option in view.options] == ["Anthropic"]  # type: ignore[attr-defined]
 
@@ -438,6 +442,76 @@ async def test_provider_setup_never_requests_a_key_without_an_exact_repository_g
         text = transcript(app)
         assert "Provider binding saved, without repository authority" in text
         assert "no API key was requested" in text
+
+
+async def test_provider_exposes_codex_status_disconnect_and_rollback(
+    make_app: MakeApp,
+) -> None:
+    runtime = FakeRuntime()
+    app = make_app(runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/provider")
+        view = app.open_view
+        assert view is not None
+        view.filter("status")  # type: ignore[attr-defined]
+        await pilot.press("enter")
+        await pilot.pause()
+        text = transcript(app)
+        assert runtime.subscription_actions == ["status"]
+        assert "Codex subscription status" in text
+        assert "Auth mode: chatgpt" in text
+
+        await run_command(pilot, app, "/provider")
+        view = app.open_view
+        assert view is not None
+        view.filter("disconnect")  # type: ignore[attr-defined]
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("up")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert runtime.subscription_actions == ["status", "disconnect"]
+        assert "Codex subscription disconnected" in transcript(app)
+
+        await run_command(pilot, app, "/provider")
+        view = app.open_view
+        assert view is not None
+        view.filter("roll back")  # type: ignore[attr-defined]
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("up")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert runtime.subscription_actions == ["status", "disconnect", "rollback"]
+        assert "Codex subscription binding rolled back" in transcript(app)
+
+
+async def test_provider_can_switch_the_codex_account(make_app: MakeApp) -> None:
+    runtime = FakeRuntime()
+    app = make_app(runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/provider")
+        view = app.open_view
+        assert view is not None
+        view.filter("switch")  # type: ignore[attr-defined]
+        await pilot.press("enter")
+        await pilot.pause()
+        for _ in range(4):
+            await pilot.press("enter")
+            await pilot.pause()
+        view = app.open_view
+        assert view is not None
+        body = " ".join(getattr(view, "body", ()) or getattr(view, "_body", ()))
+        assert "log out the dedicated home first" in body.casefold()
+        await pilot.press("up")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert runtime.subscription_actions == ["switch"]
 
 
 # ---------------------------------------------------------------------------

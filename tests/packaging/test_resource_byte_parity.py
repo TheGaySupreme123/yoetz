@@ -85,6 +85,7 @@ def test_manifest_matches_the_single_reviewed_count_and_closed_kind_set() -> Non
         "guidance",
         "json_schema",
         "migration",
+        "runtime_config",
         "runtime_support",
         "skill",
     }

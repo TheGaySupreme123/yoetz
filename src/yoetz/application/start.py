@@ -16,7 +16,7 @@ from yoetz.application.unit_of_work import (
     run_prepared_append,
 )
 from yoetz.domain.events import (
-    SCHEMA_VERSION,
+    SESSION_EVENT_SCHEMA_VERSION,
     EventDraft,
     EventSchema,
     RuntimeProfile,
@@ -420,7 +420,7 @@ async def _lifecycle_append(
             external_ref=request.external_ref,
             workspace_ref=request.workspace_ref,
         )
-        schema = EventSchema("session_opened", SCHEMA_VERSION)
+        schema = EventSchema("session_opened", SESSION_EVENT_SCHEMA_VERSION)
     else:
         payload = SessionResumedPayload(
             client_kind=request.client.kind,
@@ -429,7 +429,7 @@ async def _lifecycle_append(
             profile=app.profile,
             resumed_frontier=current,
         )
-        schema = EventSchema("session_resumed", SCHEMA_VERSION)
+        schema = EventSchema("session_resumed", SESSION_EVENT_SCHEMA_VERSION)
     payload_bytes = canonical_encode(encode_payload(payload))
     metadata = ObjectMetadata(
         ObjectKind.EVENT_PAYLOAD,

@@ -23,6 +23,10 @@ from yoetz.adapters.objects.encrypted_files import EncryptedFilesObjectStore
 from yoetz.adapters.privacy.catalog import CatalogPrivacyAudit, CatalogPrivacyPolicyStore
 from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
+from yoetz.adapters.providers.codex_app_server import (
+    CodexAppServerProfile,
+    codex_binding_from_config,
+)
 from yoetz.adapters.providers.factory import external_factory_builders_from_config
 from yoetz.adapters.providers.local_model import InstalledLocalModelProfileRegistry
 from yoetz.adapters.providers.openai_responses_factory import provider_binding_from_config
@@ -80,7 +84,7 @@ from yoetz.application.service import (
     ServiceReadyContext,
     VerificationPolicy,
 )
-from yoetz.config.models import YoetzConfig
+from yoetz.config.models import ExternalRuntimeProfileConfig, YoetzConfig
 from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundle
 from yoetz.config.privacy import safe_privacy_bootstrap, seed_policy_if_absent
 from yoetz.domain.events import RuntimeProfile
@@ -186,6 +190,7 @@ __all__ = [
     "build_runtime_adapter_factories",
     "open_ready_catalog",
     "provide_service_ready_context",
+    "subscription_runtime_structurally_ready",
 ]
 
 _CATALOG_NAME = "catalog.sqlite3"
@@ -1286,7 +1291,9 @@ async def build_privacy_coordinator(
         service_generation=service_generation,
     )
     builders = external_factory_builders_from_config(
-        None if config is None else config.provider, clock=clock
+        None if config is None else config.provider,
+        None if config is None else config.external_runtime,
+        clock=clock,
     )
 
     async def repository_authority_is_current(
@@ -1524,7 +1531,10 @@ def _provider_provenance(
 
     if result.privacy_receipt_id is None:
         return None
-    if result.dispatch_kind is SemanticDispatchKind.EXTERNAL:
+    if result.dispatch_kind in {
+        SemanticDispatchKind.EXTERNAL,
+        SemanticDispatchKind.EXTERNAL_RUNTIME_OAUTH,
+    }:
         if result.authorization_id is None or result.request_commitment is None:
             return None
         egress_authorization_id = result.authorization_id
@@ -1563,6 +1573,7 @@ def _provider_provenance(
         egress_authorization_id=egress_authorization_id,
         local_disclosure_reservation_id=local_disclosure_reservation_id,
         request_commitment=request_commitment,
+        runtime_evidence=attempt.runtime_evidence,
     )
 
 
@@ -1589,7 +1600,14 @@ def _map_provider_outcome(
     elif type(provider) is SemanticResultUnavailable:
         status = SemanticStatus.UNAVAILABLE
         failure_class = provider.provenance.failure_class
-        if failure_class is SemanticFailureClass.RATE_LIMITED:
+        runtime = provider.provenance.runtime_evidence
+        if (
+            runtime is not None
+            and runtime.turn_acknowledged
+            and failure_class is SemanticFailureClass.TRANSPORT
+        ):
+            reason = SemanticReason.OUTCOME_UNKNOWN
+        elif failure_class is SemanticFailureClass.RATE_LIMITED:
             reason = SemanticReason.PROVIDER_RATE_LIMITED
         elif failure_class is SemanticFailureClass.QUOTA_EXHAUSTED:
             reason = SemanticReason.PROVIDER_QUOTA_EXHAUSTED
@@ -2277,6 +2295,22 @@ def _policy_packs(manifest: Mapping[str, CanonicalJsonValue]) -> tuple[str, ...]
     return tuple(cast(list[str], values))
 
 
+def subscription_runtime_structurally_ready(runtime: object) -> bool:
+    """READY fact for Codex OAuth: exact binding, digest, and dedicated home.
+
+    Login and model availability stay inside the evaluate() child. A READY snapshot
+    must not spawn a preflight app-server process group.
+    """
+
+    if type(runtime) is not ExternalRuntimeProfileConfig:
+        return False
+    try:
+        CodexAppServerProfile.from_config(runtime).verify_local_binding()
+    except (OSError, TypeError, ValueError):  # fmt: skip
+        return False
+    return True
+
+
 async def provide_service_ready_context(
     service_generation: int,
     vault_generation: int,
@@ -2324,12 +2358,14 @@ async def provide_service_ready_context(
         tuple[str, ...], tuple(getattr(gateway, "connected_provider_ids", lambda: ())())
     )
     semantic_configured = config.verification.semantic != "disabled"
-    provider_endpoint_bound = config.provider is not None
+    provider_endpoint_bound = config.provider is not None or config.external_runtime is not None
     # Preserve the composition-time snapshot for readiness/status, but resolve the configured
     # binding again for every check so a later registry activation can take effect immediately.
     candidate_binding: ProviderBinding | None = None
     if config.provider is not None:
         candidate_binding = provider_binding_from_config(config.provider)
+    elif config.external_runtime is not None:
+        candidate_binding = codex_binding_from_config(config.external_runtime)
 
     def binding_not_connected(_binding: ProviderBinding) -> bool:
         return False
@@ -2337,6 +2373,8 @@ async def provide_service_ready_context(
     async def configured_provider_credential_present() -> bool:
         if candidate_binding is None:
             return False
+        if config.external_runtime is not None:
+            return subscription_runtime_structurally_ready(config.external_runtime)
         credential_binding = provider_credential_profile_binding(
             candidate_binding.provider_id,
             candidate_binding.model_id,
@@ -2478,7 +2516,7 @@ async def provide_service_ready_context(
     elif not provider_endpoint_bound:
         semantic_evaluator = _semantic_provider_unbound
     else:
-        provider_cfg = config.provider
+        provider_cfg = config.provider or config.external_runtime
         semantic_evaluator = _privacy_gated_semantic_evaluator(
             cast(PrivacyCoordinator, privacy),
             clock,

@@ -20,6 +20,7 @@ from yoetz.domain.findings import (
     CostFields,
     FindingKind,
     FindingOrigin,
+    RuntimeAttemptEvidence,
     SamplingParams,
     SemanticFailureClass,
     SemanticProvenance,
@@ -72,6 +73,8 @@ __all__ = [
     "Deadline",
     "ExcerptDigestProvenance",
     "ProviderAttemptProvenance",
+    "ExternalRuntimeAuthority",
+    "RuntimeAttemptEvidence",
     "ReviewAssessment",
     "ReviewAssessmentSkipped",
     "ReviewOmission",
@@ -1238,6 +1241,30 @@ def _valid_pattern(
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalRuntimeAuthority:
+    """Secret-free one-attempt authority for a vendor-owned OAuth runtime."""
+
+    dispatch_id: str
+    request_body_digest: str
+    request_commitment: str
+    service_generation: int
+    monotonic_deadline: float
+
+    def __post_init__(self) -> None:
+        validate_id(IdKind.EGRESS_DISPATCH, self.dispatch_id)
+        validate_sha256_digest(self.request_body_digest)
+        validate_commitment(self.request_commitment)
+        if type(self.service_generation) is not int or self.service_generation < 1:
+            raise ProtocolValueError("invalid_external_runtime_authority")
+        if (
+            type(self.monotonic_deadline) is not float
+            or not math.isfinite(self.monotonic_deadline)
+            or self.monotonic_deadline < 0.0
+        ):
+            raise ProtocolValueError("invalid_external_runtime_authority")
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderAttemptProvenance:
     provider: str
     endpoint_profile_id: str
@@ -1256,6 +1283,7 @@ class ProviderAttemptProvenance:
     cost_fields: CostFields | None = None
     failure_class: SemanticFailureClass | None = None
     request_commitment: str | None = None
+    runtime_evidence: RuntimeAttemptEvidence | None = None
 
     def __post_init__(self) -> None:
         if not _valid_pattern(self.provider, _IDENTITY_PATTERN, 128):
@@ -1299,6 +1327,11 @@ class ProviderAttemptProvenance:
             raise ProtocolValueError("invalid_semantic_failure_class")
         if self.request_commitment is not None:
             validate_commitment(self.request_commitment)
+        if (
+            self.runtime_evidence is not None
+            and type(self.runtime_evidence) is not RuntimeAttemptEvidence
+        ):
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
 
 
 def _validate_result_provenance(

@@ -5,7 +5,8 @@ bundle-scoped passphrase auto-unlock through an allowlisted platform credential 
 v0.1 specification work; independent security review remains required before the first non-alpha
 release (maintainer decision, 2026-08-19), and no public surface claims a reviewed boundary.
 Amended 2026-08-23 by ADR-024 for installation-vault recovery, zero-secret agent handoff, and
-platform-native prompt cells.
+platform-native prompt cells; amended 2026-08-30 by issue #404 for exact external-evaluator
+process authority.
 **Related:** ADR-001 owns single-writer lifecycle; ADR-004 owns cryptography and recovery; ADR-006
 and the privacy protocol own outbound data authorization.
 
@@ -415,3 +416,25 @@ crash recovery.
 Automatic pristine keyring initialization is therefore an artifact-gated convenience, not a
 keyring-only default. Any future admin secret, additional platform presence adapter, or migration
 that changes the resolved F-010 authority model requires an explicit ADR amendment.
+
+## External evaluator process amendment (2026-08-30, issue #404)
+
+The ready service may launch an exact network-capable evaluator only as part of an already-admitted
+privacy-gateway dispatch. For the Codex subscription cell, the digest-bound Codex app-server is a
+small trusted-local-computing-base component for protocol transport, OAuth custody, and process
+isolation; its model output and provider remain untrusted content. This authority does not extend to
+CLI, MCP, TUI, repository, or agent processes.
+
+Each dispatch gets one fresh session/process group and an empty owner-private working directory
+under the dedicated evaluator home. The service supplies a scrubbed allowlist environment, exact
+argv, strict configuration and deny overrides; it passes no vault handle, API key, proxy,
+repository path, inherited session, or agent context. It accepts no child request for a tool or
+user action. Timeout or failure interrupts the exact turn when possible, terminates only the group
+it spawned, escalates to a group kill when necessary, and verifies group disappearance. A valid
+answer without verified cleanup is not success.
+
+Login/status/logout are separate content-free structural operations. Codex owns its dedicated
+home's credential file. Yoetz may create the exact nonsecret config and retain the home path, but
+must not read, parse, hash, copy, export, log, or place credential bytes in the vault. Rollback
+removes only the Yoetz binding; disconnect first requires Codex to confirm logout and otherwise
+fails honestly.

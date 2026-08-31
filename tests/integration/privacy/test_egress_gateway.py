@@ -35,7 +35,7 @@ from yoetz.adapters.providers.local_model import (
 )
 from yoetz.adapters.providers.openai_responses_factory import provider_binding_from_config
 from yoetz.config.write import anthropic_provider
-from yoetz.domain.findings import SamplingParams, SemanticFailureClass
+from yoetz.domain.findings import RuntimeAttemptEvidence, SamplingParams, SemanticFailureClass
 from yoetz.domain.privacy import (
     ApprovedLocalDisclosureCase,
     ApprovedOutboundCase,
@@ -68,6 +68,7 @@ from yoetz.ports.privacy import (
 from yoetz.ports.secret_memory import ProviderAttemptAuthBinding
 from yoetz.ports.semantic import (
     Deadline,
+    ExternalRuntimeAuthority,
     ProviderAttemptProvenance,
     SemanticJudgment,
     SemanticResult,
@@ -1453,6 +1454,106 @@ def test_evaluator_exception_yields_transport_failed_without_reusable_authorizat
     # though the second attempt's transport is never actually invoked.
     assert len(minter.mint_calls) == 2
     assert factory.built == []  # the raising factory never registers a built evaluator list
+
+
+def test_external_runtime_authority_never_mints_a_vault_credential_and_records_unknown() -> None:
+    clock = _Clock()
+    audit = _FullPrivacyAudit()
+    minter = _CredentialMinter()
+    runtime_evidence = RuntimeAttemptEvidence(
+        credential_authority="external_runtime_oauth",
+        runtime_version="0.150.1",
+        runtime_source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+        executable_sha256=_DIGEST,
+        app_server_schema_sha256=_DIGEST,
+        capability_cell_sha256=_DIGEST,
+        capability_profile="codex-evaluator/0.150.1/v1",
+        capability_evidence_expires_at="2026-11-30T00:00:00Z",
+        launcher_sha256=_DIGEST,
+        isolated_config_sha256=_DIGEST,
+        disclosed_case_sha256=_DIGEST,
+        instruction_sha256=_DIGEST,
+        output_schema_sha256=_DIGEST,
+        selection_sha256=_DIGEST,
+        upstream_body_observability="unavailable",
+        auth_mode="chatgpt",
+        plan_type="plus",
+        reasoning_effort="high",
+        thread_id="019a0000-0000-7000-8000-000000000001",
+        turn_id="019a0000-0000-7000-8000-000000000002",
+        final_output_sha256=None,
+        case_disclosed=True,
+        turn_acknowledged=True,
+        process_cleanup="terminated",
+    )
+
+    class RuntimeFactory:
+        credential_authority = "external_runtime_oauth"
+
+        def render(self, case: ApprovedOutboundCase) -> bytes:
+            return case.payload
+
+        def build_evaluator(
+            self, binding: object, credential: object, request_commitment: object
+        ) -> object:
+            del binding, request_commitment
+            assert type(credential) is ExternalRuntimeAuthority
+
+            class Evaluator:
+                async def evaluate(self, case: object, deadline: object) -> SemanticResult:
+                    del case, deadline
+                    return SemanticResultUnavailable(
+                        replace(
+                            _provenance(
+                                SemanticStatus.UNAVAILABLE,
+                                policy_digest=_DIGEST,
+                                failure_class=SemanticFailureClass.TRANSPORT,
+                            ),
+                            runtime_evidence=runtime_evidence,
+                        )
+                    )
+
+            return Evaluator()
+
+    gateway = _gateway(
+        audit=audit,
+        clock=clock,
+        credential_minter=minter,
+        external_factory=RuntimeFactory(),
+    )
+    policy = _policy(external_enabled=True, local_enabled=False)
+    effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
+    human = _human_authority(available=True)
+
+    async def run() -> SemanticResult:
+        await _reconcile_repository(gateway, effective, human)
+        authorization = _authorization(
+            authorization_id="aut_60000000-0000-4000-8000-000000000092",
+            policy_digest=policy.policy_digest,
+            service_generation=human.service_generation,
+        )
+        audit.seed_authorized(authorization)
+        payload = canonical_encode({"note": "hello"})
+        return await gateway.dispatch_external_semantic(
+            _case(
+                case_id="cas_60000000-0000-4000-8000-000000000093",
+                authorization=authorization,
+                payload=payload,
+            ),
+            authorization,
+            _deadline(clock),
+        )
+
+    result = asyncio.run(run())
+
+    assert type(result) is SemanticResultUnavailable
+    assert minter.mint_calls == []
+    assert len(audit.egress_receipts) == 1
+    _, receipt = audit.egress_receipts[0]
+    assert receipt.outcome is PrivacyOutcome.TRANSPORT_FAILED
+    assert receipt.safe_failure_reason is PrivacyReason.OUTCOME_UNKNOWN
+    assert receipt.counts.request_body_bytes is not None
+    assert receipt.counts.request_body_bytes > 0
 
 
 def test_bundled_chat_completions_binding_reconciles_without_factory_unavailable() -> None:

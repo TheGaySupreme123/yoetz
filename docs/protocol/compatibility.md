@@ -192,7 +192,7 @@ Claude Desktop local/SSH, Desktop remote, web/cloud, synced plugins, managed/use
 Agent SDK, and noninteractive/headless behavior are separate unpopulated cells. Claude Code is not
 claimed to consume Agent Plugins 1.0.0.
 
-Local-control schema `2.3.0` is the current append-only service-control wire. Peers must
+Local-control schema `2.4.0` is the current append-only service-control wire. Peers must
 match the schema-manifest digest; no source is inferred across versions. Because every resource
 change moves that digest, an upgraded installation cannot talk to the previous installation's
 still-running service, and an older CLI cannot talk to a newer still-running service: a
