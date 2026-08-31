@@ -48,8 +48,16 @@ def test_forward_migrate_0001_to_0002_then_observation_ingest() -> None:
     )
 
     report = run_migrations(bundle, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
-    assert report.applied_versions == ("0002", "0003", "0004", "0005", "0006", "0007")
-    assert bundle.execute("PRAGMA user_version").fetchone() == (7,)
+    assert report.applied_versions == (
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+        "0007",
+        "0008",
+    )
+    assert bundle.execute("PRAGMA user_version").fetchone() == (8,)
     for table in (
         "observation_consent",
         "observation_cursors",
@@ -99,7 +107,7 @@ def test_forward_migrate_0001_to_0002_then_observation_ingest() -> None:
 def test_fresh_initialize_includes_0002_and_reads_empty_observation() -> None:
     bundle = apsw.Connection(":memory:")
     initialize_bundle(bundle, {"task_id": "fresh", "owner_generation": "1"})
-    assert bundle.execute("PRAGMA user_version").fetchone() == (7,)
+    assert bundle.execute("PRAGMA user_version").fetchone() == (8,)
     store = SqliteObservationStore(bundle)
     import asyncio
 

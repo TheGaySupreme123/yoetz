@@ -1,9 +1,10 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-08-30 for issue #331 (frontier-motion recovery across rewinds and
-restarts, decision 11); 2026-08-29 for issue #445 (standing-grant parks are not an observation
-barrier); 2026-08-27 for issue #418 rollout replay repairs; 2026-08-18 for the
+**Amended:** 2026-08-30 for issue #302 (captured observation ledger evidence) and issue #331
+(frontier-motion recovery across rewinds and restarts, decision 11); 2026-08-29 for
+issue #445 (standing-grant parks are not an observation barrier); 2026-08-27 for issue #418 rollout
+replay repairs; 2026-08-18 for the
 maintainer-directed issue #346 incident repairs #350, #351, and
 #352 (decisions 12–14); 2026-08-18 for maintainer-authored issues #320 and #326 and issue #322
 (delivered frontier-motion high-water); 2026-08-16 for maintainer-approved issue #224; 2026-08-14
@@ -14,7 +15,7 @@ for moderator-approved issue #244 and the reopened issue #216 recurrence.
 `src/yoetz/kernel/policies/observation_advice.py`, `src/yoetz/service/ready_composition.py`, and
 `src/yoetz/adapters/integrations/observation_local.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
-issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #320, #322, #326, #331, and #445.
+issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #302, #320, #322, #326, #331, and #445.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -217,6 +218,20 @@ unsupported claims and unbounded duplicate findings.
     because doing so could permanently lose the authoritative correction; a repaired or rebuilt
     projection lets the same row replay and finish idempotently.
 
+16. `obs-ledger/1.4.0` carries trusted observation-content manifests into ledger materialization.
+    A manifest binds the encrypted object envelope plus the SHA-256 digest and byte count of its
+    secret-scanned inner content. Only tool output, selected changed-file bytes, and workspace diff
+    are eligible; the resulting `evidence_recorded/1.2.0` event uses `observation_captured`,
+    `immutable_snapshot`, `bounded_excerpt`, and mirrors the object in `artifact_refs`. A linked
+    result cites the new evidence; a routine read with eligible retained content is no longer
+    coalesced away. Durable inspection facts and bounded excerpts use a separate idempotent
+    snapshot operation and separate evidence records, so their provenance is not borrowed from a
+    tool envelope. Missing, deleted, or legacy-unbound content weakens to
+    `content_capture_unavailable`; policy-excluded retained kinds use `content_unselected`;
+    redaction remains visible as `content_redacted`; and bounded inspection prefixes retain
+    `truncated_payload`. Replays check current 1.4 identities and the 1.3/1.2 legacy operation
+    identities before staging, preserving append-only upgrade behavior.
+
 ## Security and privacy consequences
 
 The observation writer id is derivable from public task/session identifiers, but derivation grants
@@ -237,7 +252,9 @@ outbox rather than weakening verdict binding. Observation can contribute evidenc
 advice without impersonating the agent or minting the same standing finding indefinitely. Routine
 reads retain their local observation evidence without producing an unbounded task-ledger trail, and
 cooperative writers learn about meaningful observation-authored frontier motion before their next
-state-sensitive operation. Observation-advice policy `0.1.2` applies the condition-scoped identity
+state-sensitive operation. Captured objects contribute immutable byte identity without being
+upgraded to validation, reproduction, or disclosure authority. Observation-advice policy `0.1.2`
+applies the condition-scoped identity
 to new materialization (`0.1.1` first introduced it; `0.1.2` rebased the standing
 `provider_not_ready` condition onto per-build structural machine facts for issue #265). Historical duplicate findings remain append-only evidence; this change does
 not erase or rewrite an existing task ledger.
