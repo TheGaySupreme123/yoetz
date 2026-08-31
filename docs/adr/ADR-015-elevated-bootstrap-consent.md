@@ -2,7 +2,9 @@
 
 **Status:** Amended 2026-07-31; amended 2026-08-09 for agent-attested chat authorize
 (issue #164); amended 2026-08-18 for atomic concurrent review claims (issue #344); amended
-2026-08-25 to name Codex marketplace/MCP removal as outside this OS-presence lane (issue #419).
+2026-08-25 to name Codex marketplace/MCP removal as outside this OS-presence lane (issue #419);
+amended 2026-08-31 for helper-generated agent-authorized vault initialization and masked terminal
+input (issues #490 and #491).
 Superseded in scope by ADR-016 for the general non-default consent catalog. Console `yoetz consent
 review` remains fail-closed until a verified OS-presence adapter is installed; allowlisted
 first-party agents may use `yoetz consent authorize` for exact prepared operations that advertise
@@ -20,12 +22,13 @@ authority independent of argv, environment, stdin, MCP, agent JSON, and caller b
 #164 also deliberately accepts a weaker opt-in path: an allowlisted agent may assert that the user
 explicitly instructed the exact action in the current chat. That assertion is bounded and
 single-use, but Yoetz cannot independently authenticate its chat provenance. Vault initialization
-still must not accept an agent-selected passphrase.
+still must not accept an agent-selected passphrase; an authorized agent may ask the Yoetz helper to
+generate and store one locally without any secret-bearing agent channel.
 
 ## Decisions
 
-1. **Implemented bootstrap operations.** `vault_initialize`, `provider_credential_set`,
-   `provider_credential_rotate`, and `repository_privacy_grant` use this lane. It is not a
+1. **Implemented bootstrap operations.** `vault_initialize`, `vault_passphrase_rotate`,
+   `provider_credential_set`, `provider_credential_rotate`, and `repository_privacy_grant` use this lane. It is not a
    vault-unlock API, recovery API, or standing elevation mode.
 
    **Amendment (2026-08-25, issue #419).** Codex marketplace/plugin removal
@@ -63,8 +66,13 @@ still must not accept an agent-selected passphrase.
    danger digest, and target digest and fail-closes before claim on mismatch. Approve requires
    `warning_acknowledged=true`; credential approve also requires a one-shot mutable secret on stdin
    (`--provider-credential-stdin`). Bytes enter the existing YZS1/vault path and never appear in
-   pending, catalog, result, log, error, or agent projection. `vault_initialize` remains
-   console/helper-only. Trusted CLI/TUI remains the stronger recommended path.
+   pending, catalog, result, log, error, or agent projection. For `vault_initialize`, agent-chat
+   approval carries no secret: the helper generates the passphrase inside the local process,
+   round-trips it through the scoped credential store, submits a mutable copy through YZS1, and
+   returns only structural vault state. `vault_passphrase_rotate` likewise carries no secret:
+   the helper locally loads the active scoped secret, stages a generated replacement, completes
+   reauthentication and rewrap, and then promotes the replacement. Trusted CLI/TUI remains the
+   stronger recommended path.
 
 4. **Single-shot state.** Atomically creating the no-clobber hard-link review marker is the
    linearization point that transfers ownership from pending state to one reviewer. The winner
@@ -80,30 +88,42 @@ still must not accept an agent-selected passphrase.
    directly through the existing confidential ceremony. No agent- or caller-selected
    initialization passphrase is accepted. A pre-existing scoped entry, even when valid, blocks
    initialization rather than becoming the vault secret. Generated mutable buffers are overwritten
-   best-effort.
+   best-effort. An exact prepared `vault_initialize` may advertise agent-chat authorization; the
+   agent supplies only the digest-bound attestation, never secret bytes or randomness.
 
 6. **Credential-store failures.** A backend known to be unavailable before any write may offer the
    existing manual human-passphrase ceremony on the same trusted console. An ambiguous write,
    failed read-back, any existing entry, or mismatch stops before vault initialization.
 
+   Rotation writes a distinct staged credential before changing the envelope. Successful rewrap
+   promotes it to active. If completion is ambiguous, the staged value is retained: daemon startup
+   tries active and staged in order, promotes the one that authenticates the envelope, and discards
+   a stale stage only after active succeeds. Agents never see either candidate.
+
 7. **Provider credentials.** Set and rotate use the same trusted review and confidential ceremony.
    Credential bytes never enter the pending record, catalog, result, log, error, or agent
    projection.
 
-8. **Console is not authority.** On macOS/Linux, the boundary opens `/dev/tty`, requires matching terminal
-   identities for standard input/error, requires the current foreground process group, and uses
-   no-echo reads. On Windows it opens `CONIN$`/`CONOUT$`, validates real console handles and current
-   process attachment, and reads through Win32 console APIs with echo disabled. It never falls back
-   to redirected standard streams. It is a presentation and secret-ingress boundary only. Absence
-   or ambiguity returns `trusted_console_required`; presence still grants no authority.
+8. **Console is not authority.** On macOS/Linux, the boundary opens `/dev/tty`, requires matching
+   terminal identities for standard input/error, requires the current foreground process group,
+   disables raw secret echo, and writes one `*` mask marker per accepted input unit. On Windows it
+   opens `CONIN$`/`CONOUT$`, validates real console handles and current-process attachment, disables
+   raw secret echo, and writes the same mask feedback through Win32 console APIs. Backspace removes
+   one marker. This intentionally reveals secret length to the local terminal observer but never
+   content. It never falls back to redirected standard streams. It is a presentation and
+   secret-ingress boundary only. Absence or ambiguity returns `trusted_console_required`; presence
+   still grants no authority.
 
 ## Consequences
 
-Until a production `UserPresencePort` is capability-tested and wired, elevated review cannot
-initialize a vault or mutate provider credentials. The explicit manual
-`service initialize-passphrase` ceremony remains available. Existing vault data,
-vault mode, installation identity, and auto-unlock credentials are not migrated or rewrapped.
-Later restarts continue through the existing scoped auto-unlock path. The Windows console adapter
+Until a production `UserPresencePort` is capability-tested and wired, trusted-console elevated
+review remains unavailable. Exact prepared operations that advertise agent-chat authorization,
+including helper-generated `vault_initialize`, remain available through the explicit current-chat
+attestation lane. The same is true for `vault_passphrase_rotate`; the manual
+`service initialize-passphrase` and `service rotate-passphrase` ceremonies remain available.
+Rotation retains existing vault data, vault mode, and installation identity while replacing only
+the authenticated envelope and scoped auto-unlock credential. Later restarts continue through the
+reconciled scoped auto-unlock path. The Windows console adapter
 does not imply support for the full Windows service transport, peer authentication, packaging, or
 release surface.
 

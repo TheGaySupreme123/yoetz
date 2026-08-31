@@ -65,8 +65,9 @@ mismatched, the service performs no keyring/vault write and remains `uninitializ
 bounded `human_authority_unavailable` setup-required status. If the keyring itself is unavailable
 or unusable, it likewise remains uninitialized/locked with its bounded keyring reason. A local
 human may explicitly choose `service initialize-passphrase`, which uses a distinct
-`vault_initialize` confidential purpose; neither branch silently falls back. The helper confirms
-the passphrase twice locally but transmits one one-shot secret. The service accepts it only after
+`vault_initialize` confidential purpose; neither branch silently falls back. The helper states the
+16–1024 UTF-8 byte contract, masks accepted input with `*`, re-prompts invalid or mismatched input,
+confirms the passphrase twice locally, and transmits one one-shot secret. The service accepts it only after
 re-proving no committed installation identity/catalog/mode, vault ciphertext/sentinel, or ambiguous
 staging state, then allocating a fresh installation ID. A successful keyring query that somehow
 finds a correlated entry for that exact new identity blocks; a locked/unavailable backend is
@@ -130,6 +131,15 @@ envelope alone to the logged-in user's protected credential store. It does not w
 policy, provider activation, or any egress authorization. A delete-only `disable` would make a
 fresh generated-passphrase vault unrecoverable, so disable remains unavailable until an atomic
 credential-store deletion plus human-passphrase rewrap ceremony is specified and implemented.
+
+**2026-08-31 rotation amendment.** `service rotate-passphrase` reauthenticates with the current
+passphrase, collects and confirms a replacement through the masked trusted console, and stages the
+replacement under a distinct scoped credential-store account before atomically rewrapping the
+unchanged IVK. Exact prepared `vault_passphrase_rotate` agent authorization performs the same
+transition using a locally loaded active secret and locally generated replacement; neither secret
+crosses the agent boundary. Successful completion promotes the staged entry. After an ambiguous
+interruption, service startup tries active and staged candidates, promotes the one that
+authenticates the envelope, and discards a stale stage only after active succeeds.
 
 Keyring usability is not action-bound human authorization. Under the resolved F-010 decision,
 the first-install gate above prevents a new immutable keyring-mode choice when no verified
@@ -208,11 +218,13 @@ Initialize is available only for a pristine uninitialized installation and accep
 after the helper's local two-entry match; unlock is available only for an already committed locked
 passphrase vault. Their handles are not interchangeable. The pure confidential protocol maps the
 wire purpose to one one-shot `SecretHandle(SecretPurpose.vault_unlock)` consumed by the trusted
-unlock coordinator; ordinary clients cannot construct it. The helper must prove a same-user,
-foreground trusted console. On macOS/Linux it reads directly from `/dev/tty` in no-echo mode,
+unlock coordinator; ordinary clients cannot construct it. The manual helper must prove a same-user,
+foreground trusted console. On macOS/Linux it reads directly from `/dev/tty` with raw secret echo disabled,
 requires stdin and stderr to be TTYs for the same user-visible terminal, and requires the process
 to be in the foreground process group. On Windows it opens `CONIN$`/`CONOUT$`, requires real
-console handles and current-process attachment, and reads through no-echo Win32 console APIs.
+console handles and current-process attachment, and reads with raw secret echo disabled through
+Win32 console APIs. Both adapters write only `*` mask markers and backspace erasure; this exposes
+entered length to a local terminal observer but not secret content.
 Terminal ownership alone is not user-identity evidence. The helper rejects redirection, pipes,
 environment/config/argument input, and noninteractive execution; establishes a
 separately typed peer-authenticated connection; and erase mutable buffers best-effort after the
@@ -225,7 +237,10 @@ open or pending claim. Initialization accepts only its helper-generated,
 credential-store-verified passphrase; provider secrets are entered inside the confidential
 ceremony. **Amendment (issue #164, 2026-08-09):** after an explicit current-chat instruction, an
 allowlisted first-party agent may run `yoetz consent authorize` for exact prepared
-`provider_credential_set|rotate` (and `repository_privacy_grant`) without the trusted console. The
+`vault_initialize`, `vault_passphrase_rotate`, `provider_credential_set|rotate`, and
+`repository_privacy_grant` without the
+trusted console. Vault initialization generates and credential-store-verifies its secret wholly
+inside Yoetz; the agent supplies no secret material. The
 agent assertion binds the pending digests but is not independently authenticated by Yoetz; a
 compromised agent can forge it. One-shot provider credential bytes may enter the same YZS1 ingress
 from authorize stdin after warning acknowledgement and are overwritten best-effort. Provider
@@ -268,7 +283,8 @@ itself a Yoetz support claim:
 - Python's `getpass` documentation permits a warning followed by input from `sys.stdin` when
   echo-free input is unavailable ([Python documentation](https://docs.python.org/3/library/getpass.html)).
   That fallback violates this trust boundary. The confidential helper therefore opens `/dev/tty`
-  itself, verifies the foreground controlling terminal, enables no-echo input, and fails closed if
+  itself, verifies the foreground controlling terminal, disables raw echo while rendering only
+  length-revealing `*` mask feedback, and fails closed if
   any part of that ceremony is unavailable; it never delegates fallback selection to `getpass`.
 
 These sources justify the architecture and its required probes, not broad statements such as

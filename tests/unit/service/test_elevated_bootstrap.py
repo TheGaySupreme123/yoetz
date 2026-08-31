@@ -69,6 +69,10 @@ def test_catalog_is_review_only_and_agent_safe() -> None:
     assert catalog["rules"]["compromised_agent_can_forge_attestation"] is True
     by_name = {item["operation"]: item for item in catalog["operations"]}
     assert by_name["vault_initialize"]["implemented"] is True
+    assert by_name["vault_initialize"]["agent_chat_authorize_allowed"] is True
+    assert by_name["vault_passphrase_rotate"]["implemented"] is True
+    assert by_name["vault_passphrase_rotate"]["risk_class"] == "secret_reauth"
+    assert by_name["vault_passphrase_rotate"]["agent_chat_authorize_allowed"] is True
     assert by_name["provider_credential_rotate"]["implemented"] is True
     assert by_name["provider_credential_set"]["agent_chat_authorize_allowed"] is True
     assert by_name["repository_privacy_grant"]["requires_grant_binding"] is True
@@ -100,7 +104,7 @@ def test_prepare_projection_contains_only_agent_safe_review_fields(tmp_path: Pat
     }
     assert projection["schema"] == "yoetz.consent.pending-agent/4"
     assert projection["review_command"] == ["yoetz", "consent", "review"]
-    assert projection["authorize_command"] is None
+    assert projection["authorize_command"] == ["yoetz", "consent", "authorize"]
     assert projection["repository_privacy_recipe"] is None
     assert pending.expires_at_unix - pending.created_at_unix == 15 * 60
     stored = json.loads(

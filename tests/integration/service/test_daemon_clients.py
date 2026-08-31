@@ -1558,6 +1558,19 @@ def _patch_auto_unlock_store(
                 return None, reason
             return bytearray(secret), reason
 
+        def load_candidates_with_reason(
+            self,
+        ) -> tuple[tuple[tuple[bytearray, bool], ...], str]:
+            if secret is None:
+                return (), reason
+            return ((bytearray(secret), False),), reason
+
+        def promote_staged_rotation(self) -> None:
+            return None
+
+        def discard_staged_rotation(self) -> None:
+            return None
+
     def _factory(_bundle: Path) -> _Store:
         return _Store()
 

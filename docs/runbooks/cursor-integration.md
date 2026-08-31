@@ -298,6 +298,10 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 
 ## Troubleshooting
 
+Cursor is not an allowlisted `yoetz consent authorize` attestation client in v0.1. It may show the
+agent-safe pending status and direct the user to a supported Codex attestation or local trusted
+command, but it must not emulate `vault_initialize` or `vault_passphrase_rotate` authorization.
+
 | Symptom | Interpretation |
 |---|---|
 | Skill appears but plugin identity is absent | fallback discovery; not a plugin pass |

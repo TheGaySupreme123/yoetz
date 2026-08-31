@@ -24,6 +24,7 @@ from yoetz.service.confidential_protocol import (
     ConfidentialSecretPurpose,
     DecisionAction,
     DecisionRequiredPhase,
+    EmptyVaultTarget,
     HumanCeremonyBinding,
     HumanCeremonyKind,
     HumanPhase,
@@ -140,6 +141,14 @@ class _HumanEffects(Protocol):
         proof: HumanAuthorizationProof,
         now_monotonic: float,
     ) -> ProviderCredentialResult: ...
+
+    async def rotate_vault_passphrase(
+        self,
+        target: EmptyVaultTarget,
+        secret: SecretHandle,
+        proof: HumanAuthorizationProof,
+        now_monotonic: float,
+    ) -> VaultStateResult: ...
 
     async def decide_privacy(
         self,
@@ -424,6 +433,18 @@ class HumanControlService:
                         session, ConfidentialSecretPurpose.VAULT_REWRAP
                     )
                 if purpose is ConfidentialSecretPurpose.VAULT_REWRAP:
+                    if session.request.ceremony_kind is HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE:
+                        target = cast(EmptyVaultTarget, session.request.target)
+                        proof = session.proof
+                        if proof is None:
+                            raise HumanControlError("reauthentication_unavailable")
+                        session.proof = None
+                        return self._finish_after_secret(
+                            session,
+                            await self._effects.rotate_vault_passphrase(
+                                target, secret, proof, self._sample_monotonic()
+                            ),
+                        )
                     target = cast(InstallationRecoveryTarget, session.request.target)
                     recovery_secret = session.installation_recovery_secret
                     recovery_effects = cast(_InstallationRecoveryEffects, self._effects)
@@ -495,6 +516,10 @@ class HumanControlService:
                 }:
                     challenge = self._require_unlock_challenge(session)
                     session.proof = await self._unlock.complete_reauthentication(challenge, secret)
+                    if session.request.ceremony_kind is HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE:
+                        return self._advance_to_secret_after_secret(
+                            session, ConfidentialSecretPurpose.VAULT_REWRAP
+                        )
                     if session.request.ceremony_kind is HumanCeremonyKind.INSTALLATION_RECOVERY:
                         target = cast(InstallationRecoveryTarget, session.request.target)
                         if target.operation == "revoke":
@@ -562,6 +587,8 @@ class HumanControlService:
                 target_digest=session.binding.target_digest
             )
             return self._secret_phase(session, ConfidentialSecretPurpose.VAULT_UNLOCK)
+        if kind is HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE:
+            return self._authorization_phase()
         if kind is HumanCeremonyKind.KEYRING_RETRY:
             return KeyringRetryPhase()
         if kind is HumanCeremonyKind.PORTABLE_RECOVERY:
@@ -670,6 +697,8 @@ class HumanControlService:
             HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE,
         }:
             return self._advance_to_secret(session, ConfidentialSecretPurpose.PROVIDER_CREDENTIAL)
+        if session.request.ceremony_kind is HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE:
+            return self._advance_to_secret(session, ConfidentialSecretPurpose.VAULT_REWRAP)
         if session.request.ceremony_kind is HumanCeremonyKind.INSTALLATION_RECOVERY:
             target = cast(InstallationRecoveryTarget, session.request.target)
             if target.operation == "revoke":
@@ -908,6 +937,10 @@ class HumanControlService:
             ),
             HumanCeremonyKind.INSTALLATION_RECOVERY: (
                 "installation_recovery_change",
+                SecretPurpose.SECURITY_REAUTHENTICATION,
+            ),
+            HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE: (
+                "vault_passphrase_rotate",
                 SecretPurpose.SECURITY_REAUTHENTICATION,
             ),
         }

@@ -162,8 +162,17 @@ This is an agent-attested trust model, not host-verified proof. Yoetz cannot ind
 authenticate the chat provenance, and a compromised agent could forge the assertion; faithfully
 checking the instruction source is therefore part of this skill's safety contract. Exact target
 binding, expiry, single-use consumption, repository commitment, policy ceilings, vault
-reauthentication, and presence-only results remain runtime-enforced. `vault_initialize` never
-permits agent-chat authorization or an agent-selected vault secret.
+reauthentication, and presence-only results remain runtime-enforced. For an exact prepared
+`vault_initialize`, an explicit current-chat user instruction may authorize Yoetz to generate and
+store the secret locally. The agent must never generate, request, receive, or transmit that secret;
+it relays only the pending ID, operation, danger digest, target digest, decision, and warning
+acknowledgement. The manual `yoetz service initialize-passphrase` alternative masks input with `*`,
+requires 16–1024 UTF-8 bytes without control characters, and re-prompts invalid or mismatched input.
+For exact prepared `vault_passphrase_rotate`, relay only the same structural consent fields. Yoetz
+loads the current secret and stages/generates the replacement locally; the agent must never ask for,
+receive, generate, or transmit either value. On an ambiguous failure, preserve the staged entry and
+direct the user to restart the service for candidate reconciliation. The local-human alternative is
+`yoetz service rotate-passphrase`, using the same masked and re-prompting console input.
 
 ## When a check is waiting on a local decision
 

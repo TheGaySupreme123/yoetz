@@ -155,6 +155,8 @@ from yoetz.service.confidential_protocol import (
     ServerErrorEnvelope,
     ServerResultEnvelope,
     VaultInitializePreview,
+    VaultPassphraseRotatePreview,
+    VaultStateResult,
     VaultUnlockPreview,
     decode_human_frame,
     encode_human_frame,
@@ -1795,11 +1797,9 @@ class ServiceDaemon:
             self._auto_unlock_reason = "auto_unlock_backend_unavailable"
             return False
 
-        def _load_scoped_entry() -> tuple[bytearray | None, str]:
-            return AutoUnlockPassphraseStore(bundle).load_with_reason()
-
-        auto_passphrase, load_reason = await asyncio.to_thread(_load_scoped_entry)
-        if auto_passphrase is None:
+        store = AutoUnlockPassphraseStore(bundle)
+        candidates, load_reason = await asyncio.to_thread(store.load_candidates_with_reason)
+        if not candidates:
             reason = (
                 load_reason
                 if load_reason in {"auto_unlock_backend_unavailable", "auto_unlock_rejected"}
@@ -1814,10 +1814,23 @@ class ServiceDaemon:
             )
             return False
         try:
-            handle = cast(LocalSecretMemory, memory).capture(
-                SecretPurpose.VAULT_UNLOCK, auto_passphrase
-            )
-            await vault.unlock(handle)
+            accepted_staged: bool | None = None
+            for auto_passphrase, is_staged in candidates:
+                try:
+                    handle = cast(LocalSecretMemory, memory).capture(
+                        SecretPurpose.VAULT_UNLOCK, auto_passphrase
+                    )
+                    await vault.unlock(handle)
+                except VaultError:
+                    continue
+                accepted_staged = is_staged
+                break
+            if accepted_staged is None:
+                raise VaultError("unlock_wrong")
+            if accepted_staged:
+                await asyncio.to_thread(store.promote_staged_rotation)
+            elif any(staged for _value, staged in candidates):
+                await asyncio.to_thread(store.discard_staged_rotation)
         except VaultError:
             self._state_reason = "auto_unlock_stale"
             self._auto_unlock_reason = "auto_unlock_stale"
@@ -1837,8 +1850,9 @@ class ServiceDaemon:
             )
             return False
         finally:
-            for index in range(len(auto_passphrase)):
-                auto_passphrase[index] = 0
+            for candidate, _is_staged in candidates:
+                for index in range(len(candidate)):
+                    candidate[index] = 0
         if not vault.ready:
             self._state_reason = "unlock_failed"
             return False
@@ -2212,6 +2226,22 @@ class _InstallationStateStore:
             ):
                 return
             raise
+
+    def replace_passphrase_envelope(self, envelope: VaultRootEnvelope) -> None:
+        """Atomically replace only the passphrase envelope while retaining installation identity."""
+
+        if type(envelope) is not VaultRootEnvelope:
+            raise RuntimeError("installation_passphrase_envelope_invalid")
+        current = self.load()
+        if current is None or current.vault_mode is not VaultMode.PASSPHRASE:
+            raise RuntimeError("installation_passphrase_envelope_invalid")
+        replacement = _InstallationState(
+            current.installation_id,
+            VaultMode.PASSPHRASE,
+            envelope,
+            current.mode_binding_digest,
+        )
+        _write_private_atomic(self._path, self._encode(replacement))
 
     @staticmethod
     def _write_recovery_marker_journal(
@@ -2607,6 +2637,10 @@ class _LockedHumanEffects:
                 return VaultInitializePreview(), digest, None
             if request.ceremony_kind is HumanCeremonyKind.VAULT_UNLOCK:
                 return VaultUnlockPreview(), digest, None
+            if request.ceremony_kind is HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE:
+                if not self._vault.ready or mode != "passphrase":
+                    raise HumanControlError("state_forbidden")
+                return VaultPassphraseRotatePreview(), digest, None
             if request.ceremony_kind is HumanCeremonyKind.KEYRING_RETRY:
                 operation = "pristine_create" if mode == "uninitialized" else "existing_load"
                 return KeyringRetryPreview(operation), digest, None
@@ -3130,6 +3164,25 @@ class _LockedHumanEffects:
             raise HumanControlError("secret_rejected")
         return ProviderCredentialResult(target.action, generation, "stored")
 
+    async def rotate_vault_passphrase(
+        self,
+        target: EmptyVaultTarget,
+        secret: SecretHandle,
+        proof: HumanAuthorizationProof,
+        now_monotonic: float,
+    ) -> VaultStateResult:
+        target_digest = canonical_digest(human_target_json(target))
+        proof.consume(
+            "vault_passphrase_rotate",
+            target_digest,
+            self._lifecycle.instance.generation,
+            self._vault.generation,
+            None,
+            now_monotonic,
+        )
+        await self._vault.rewrap_passphrase(secret)
+        return VaultStateResult("ready", "succeeded")
+
     async def _provider_credential_refused(
         self, target: ProviderCredentialTarget, binding: object
     ) -> bool:
@@ -3605,6 +3658,7 @@ async def _production_composition(
             ),
             publish_mode=marker_store.publish,
             replace_mode=marker_store.replace_after_recovery,
+            replace_passphrase=marker_store.replace_passphrase_envelope,
             replace_root=marker_store.replace_after_root_rotation,
             snapshot_recovery_admission=recovery_sets.admits_clean_restore,
         )
@@ -3626,22 +3680,35 @@ async def _production_composition(
             record = throttle.open_for_restart()
             if record.installation_id != installation_id:
                 raise RuntimeError("installation_throttle_binding_invalid")
-            auto_passphrase, load_reason = AutoUnlockPassphraseStore(
-                paths.bundle
-            ).load_with_reason()
-            if auto_passphrase is not None:
+            auto_unlock_store = AutoUnlockPassphraseStore(paths.bundle)
+            candidates, load_reason = auto_unlock_store.load_candidates_with_reason()
+            if candidates:
                 try:
-                    handle = secret_memory.capture(SecretPurpose.VAULT_UNLOCK, auto_passphrase)
-                    await vault.unlock(handle)
-                except VaultError:
-                    auto_unlock_result = "failed"
-                    auto_unlock_reason = "auto_unlock_stale"
+                    accepted_staged: bool | None = None
+                    for auto_passphrase, is_staged in candidates:
+                        try:
+                            handle = secret_memory.capture(
+                                SecretPurpose.VAULT_UNLOCK, auto_passphrase
+                            )
+                            await vault.unlock(handle)
+                        except VaultError:
+                            continue
+                        accepted_staged = is_staged
+                        break
+                    if accepted_staged is None:
+                        auto_unlock_result = "failed"
+                        auto_unlock_reason = "auto_unlock_stale"
+                    elif accepted_staged:
+                        auto_unlock_store.promote_staged_rotation()
+                    elif any(staged for _value, staged in candidates):
+                        auto_unlock_store.discard_staged_rotation()
                 except Exception:
                     auto_unlock_result = "failed"
                     auto_unlock_reason = "auto_unlock_rejected"
                 finally:
-                    for index in range(len(auto_passphrase)):
-                        auto_passphrase[index] = 0
+                    for candidate, _is_staged in candidates:
+                        for index in range(len(candidate)):
+                            candidate[index] = 0
             else:
                 auto_unlock_result = (
                     "skipped"
