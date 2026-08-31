@@ -141,11 +141,15 @@ class _PosixConsoleAdapter:
             if hidden:
                 original = termios.tcgetattr(self.fd)
                 changed = original.copy()
-                changed[3] = cast(int, changed[3]) & ~termios.ECHO
+                # Read one byte at a time so the user receives immediate masked feedback.
+                # ISIG remains enabled, so Ctrl-C retains its ordinary cancellation behavior.
+                changed[3] = cast(int, changed[3]) & ~(termios.ECHO | termios.ICANON)
                 termios.tcsetattr(self.fd, termios.TCSADRAIN, changed)
             self.write(prompt)
             while used < len(storage):
-                view = memoryview(storage)[used:]
+                view = (
+                    memoryview(storage)[used : used + 1] if hidden else memoryview(storage)[used:]
+                )
                 try:
                     count = os.readv(self.fd, [view])
                 except KeyboardInterrupt as exc:
@@ -156,9 +160,32 @@ class _PosixConsoleAdapter:
                     view.release()
                 if count <= 0:
                     raise TrustedConsoleError("eof")
+                if hidden:
+                    received = storage[used]
+                    if received in {10, 13}:
+                        break
+                    if received in {8, 127}:
+                        storage[used] = 0
+                        if used > 0:
+                            used -= 1
+                            storage[used] = 0
+                            self.write("\b \b")
+                        continue
+                    used += 1
+                    self.write("*")
+                    continue
                 used += count
                 if storage[used - 1] == 10:
                     break
+            if hidden:
+                if used == 0:
+                    raise TrustedConsoleError("empty_input")
+                if used > maximum:
+                    raise TrustedConsoleError("input_invalid")
+                for index in range(used, len(storage)):
+                    storage[index] = 0
+                del storage[used:]
+                return storage
             if used == 0 or storage[used - 1] != 10:
                 raise TrustedConsoleError("input_invalid")
             if used == 1:
@@ -194,7 +221,9 @@ class _WindowsConsoleApi(Protocol):
 
     def write_secret(self, handle: int, value: memoryview) -> None: ...
 
-    def read_line(self, handle: int, maximum: int, *, hidden: bool) -> bytearray: ...
+    def read_line(
+        self, input_handle: int, output_handle: int, maximum: int, *, hidden: bool
+    ) -> bytearray: ...
 
     def close(self, handle: int) -> None: ...
 
@@ -388,29 +417,34 @@ class _CtypesWindowsConsoleApi:
         finally:
             ctypes.memset(ctypes.addressof(wide), 0, ctypes.sizeof(wide))
 
-    def read_line(self, handle: int, maximum: int, *, hidden: bool) -> bytearray:
+    def read_line(
+        self, input_handle: int, output_handle: int, maximum: int, *, hidden: bool
+    ) -> bytearray:
         original = ctypes.c_uint32()
-        if not self._kernel32.GetConsoleMode(handle, ctypes.byref(original)):
+        if not self._kernel32.GetConsoleMode(input_handle, ctypes.byref(original)):
             raise TrustedConsoleError(_TRUST_FAILURE)
         changed = int(original.value) | self._ENABLE_LINE_INPUT
         if hidden:
-            changed &= ~self._ENABLE_ECHO_INPUT
-        if not self._kernel32.SetConsoleMode(handle, changed):
+            changed &= ~(self._ENABLE_ECHO_INPUT | self._ENABLE_LINE_INPUT)
+        if not self._kernel32.SetConsoleMode(input_handle, changed):
             raise TrustedConsoleError(_TRUST_FAILURE)
         buffer = ctypes.create_unicode_buffer(maximum + 2)
         read = ctypes.c_uint32()
         try:
-            if not self._kernel32.ReadConsoleW(
-                handle,
-                buffer,
-                maximum + 1,
-                ctypes.byref(read),
-                None,
-            ):
-                raise TrustedConsoleError("eof")
-            used = int(read.value)
-            while used > 0 and buffer[used - 1] in {"\r", "\n"}:
-                used -= 1
+            if hidden:
+                used = self._read_masked_line(input_handle, output_handle, buffer, maximum)
+            else:
+                if not self._kernel32.ReadConsoleW(
+                    input_handle,
+                    buffer,
+                    maximum + 1,
+                    ctypes.byref(read),
+                    None,
+                ):
+                    raise TrustedConsoleError("eof")
+                used = int(read.value)
+                while used > 0 and buffer[used - 1] in {"\r", "\n"}:
+                    used -= 1
             if used <= 0:
                 raise TrustedConsoleError("empty_input")
             encoded_size = int(
@@ -448,10 +482,53 @@ class _CtypesWindowsConsoleApi:
         finally:
             ctypes.memset(ctypes.addressof(buffer), 0, ctypes.sizeof(buffer))
             if (
-                not self._kernel32.SetConsoleMode(handle, int(original.value))
+                not self._kernel32.SetConsoleMode(input_handle, int(original.value))
                 and sys.exc_info()[0] is None
             ):
                 raise TrustedConsoleError("interrupted")
+
+    def _read_masked_line(
+        self,
+        input_handle: int,
+        output_handle: int,
+        buffer: ctypes.Array[ctypes.c_wchar],
+        maximum: int,
+    ) -> int:
+        """Read no-echo console characters and render only length-revealing mask markers."""
+
+        unit = ctypes.create_unicode_buffer(2)
+        read = ctypes.c_uint32()
+        used = 0
+        try:
+            while used <= maximum:
+                unit[0] = "\0"
+                if not self._kernel32.ReadConsoleW(
+                    input_handle,
+                    unit,
+                    1,
+                    ctypes.byref(read),
+                    None,
+                ):
+                    raise TrustedConsoleError("eof")
+                if int(read.value) != 1:
+                    raise TrustedConsoleError("eof")
+                value = unit[0]
+                if value in {"\r", "\n"}:
+                    return used
+                if value in {"\b", "\x7f"}:
+                    if used > 0:
+                        used -= 1
+                        buffer[used] = "\0"
+                        self.write(output_handle, "\b \b")
+                    continue
+                if used == maximum:
+                    raise TrustedConsoleError("input_invalid")
+                buffer[used] = value
+                used += 1
+                self.write(output_handle, "*")
+            raise TrustedConsoleError("input_invalid")
+        finally:
+            ctypes.memset(ctypes.addressof(unit), 0, ctypes.sizeof(unit))
 
     def close(self, handle: int) -> None:
         self._kernel32.CloseHandle(handle)
@@ -520,7 +597,7 @@ class _WindowsConsoleAdapter:
         if not self._input or not self._output:
             raise TrustedConsoleError(_TRUST_FAILURE)
         self.write(prompt)
-        encoded = self._api.read_line(self._input, maximum, hidden=hidden)
+        encoded = self._api.read_line(self._input, self._output, maximum, hidden=hidden)
         if hidden:
             self.write("\n")
         if not encoded:
