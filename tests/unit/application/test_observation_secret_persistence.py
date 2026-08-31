@@ -29,6 +29,14 @@ from yoetz.application.observation_coordinator import (
     build_inspection_excerpt_manifest,
 )
 from yoetz.application.observation_verification import ObservationVerificationJob
+from yoetz.domain.observation import (
+    ObservationContentChunk,
+    ObservationContentKind,
+    ObservationCursor,
+    ObservationEnvelope,
+    ObservationSource,
+)
+from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.observability.privacy import PersistenceScanResult
 from yoetz.ports.check_sandbox import CheckSandboxLaunch, CheckSandboxStatus
 from yoetz.ports.objects import ObjectMetadata, ObjectRef, ObjectSource
@@ -71,6 +79,7 @@ class _Clock:
 class _CapturingObjects:
     def __init__(self) -> None:
         self.payloads: list[bytes] = []
+        self.refs: dict[str, ObjectRef] = {}
 
     async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> ObjectMetadata:
         assert source.data is not None
@@ -79,7 +88,7 @@ class _CapturingObjects:
 
     async def finalize(self, staged: ObjectMetadata) -> ObjectRef:
         payload = self.payloads[-1]
-        return ObjectRef(
+        ref = ObjectRef(
             PREFIX_BY_KIND[IdKind.OBJECT] + str(uuid.uuid4()),
             len(payload),
             _COMMITMENT,
@@ -88,6 +97,13 @@ class _CapturingObjects:
             "slot1",
             staged,
         )
+        self.refs[ref.object_id] = ref
+        return ref
+
+    async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef:
+        ref = self.refs[object_id]
+        assert ref.envelope_digest == envelope_digest
+        return ref
 
 
 def _artifact(relative_path: str, excerpt: bytes) -> InspectedArtifact:
@@ -116,11 +132,113 @@ def _coordinator(tmp_path: Path, objects: _CapturingObjects) -> ObservationCoord
     )
 
 
+def _observation_envelope(*, refs: tuple[str, ...] = ()) -> ObservationEnvelope:
+    return ObservationEnvelope(
+        session_commitment=_COMMITMENT,
+        event_kind="PostToolUse",
+        source_identity="hook:issue-302",
+        source=ObservationSource.CODEX_HOOK,
+        cursor=ObservationCursor(1, 0, 1, _COMMITMENT, "codex-obs-hook/1.0.0"),
+        receipt_time=Timestamp("2026-08-30T00:00:00.000Z"),
+        structural_payload=JsonObject({"correlation_id": "call-302", "tool_name": "shell"}),
+        content_object_refs=refs,
+        gap_codes=(),
+    )
+
+
+@pytest.mark.anyio
+async def test_observation_capture_binds_inner_bytes_and_deleted_object_weakens(
+    tmp_path: Path,
+) -> None:
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    envelope = _observation_envelope()
+    content = b"captured command output\n"
+    chunk = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        "call-302",
+        _COMMITMENT,
+        "text/plain",
+        0,
+        1,
+        content,
+    )
+
+    manifests, redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(chunk,),
+    )
+    assert redacted is False
+    assert unavailable is False
+    assert len(manifests) == 1
+    assert manifests[0].content_digest == "sha256:" + hashlib.sha256(content).hexdigest()
+    assert manifests[0].content_bytes == len(content)
+
+    objects.refs.pop(manifests[0].object_id)
+    recovered, redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=_observation_envelope(refs=(manifests[0].object_id,)),
+        chunks=(),
+    )
+    assert recovered == ()
+    assert redacted is False
+    assert unavailable is True
+
+
+@pytest.mark.anyio
+async def test_observation_capture_secret_scans_before_digest_binding(tmp_path: Path) -> None:
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    chunk = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        "call-302",
+        _COMMITMENT,
+        "text/plain",
+        0,
+        1,
+        b"prefix " + _SECRET,
+    )
+
+    manifests, redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=_observation_envelope(),
+        chunks=(chunk,),
+    )
+    assert redacted is True
+    assert unavailable is False
+    assert len(manifests) == 1
+    captured_envelope = objects.payloads[0]
+    assert _SECRET not in captured_envelope
+    captured_inner = base64.b64decode(json.loads(captured_envelope)["content_b64"])
+    assert _SECRET not in captured_inner
+    assert manifests[0].redacted is True
+    assert manifests[0].content_digest == ("sha256:" + hashlib.sha256(captured_inner).hexdigest())
+
+
 def test_changed_file_prefix_canary_persists_only_redaction_metadata() -> None:
     secret_file = _artifact("src/env.py", b"export " + _SECRET + b"\nprint(1)\n")
     clean_file = _artifact("src/ok.py", b"print('hello-advice')\n")
-    encoded, unavailable = build_inspection_excerpt_manifest((secret_file, clean_file))
+    encoded, unavailable, redacted, truncated = build_inspection_excerpt_manifest(
+        (secret_file, clean_file)
+    )
     assert unavailable is False
+    assert redacted is True
+    assert truncated is False
     assert encoded is not None
     parsed = json.loads(encoded)
     artifacts = parsed["artifacts"]
@@ -137,12 +255,14 @@ def test_changed_file_prefix_canary_persists_only_redaction_metadata() -> None:
 
 def test_changed_file_canary_withholds_excerpt_object() -> None:
     canary = b"unique-inspect-canary-\x00-secret"
-    encoded, unavailable = build_inspection_excerpt_manifest(
+    encoded, unavailable, redacted, truncated = build_inspection_excerpt_manifest(
         (_artifact("notes.txt", b"prefix " + canary),),
         canaries=(canary,),
     )
     assert encoded is None
     assert unavailable is True
+    assert redacted is False
+    assert truncated is False
 
 
 def test_changed_file_scanner_failure_stores_no_excerpt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,18 +274,22 @@ def test_changed_file_scanner_failure_stores_no_excerpt(monkeypatch: pytest.Monk
         "yoetz.application.observation_coordinator.prepare_persisted_plaintext",
         _withhold,
     )
-    encoded, unavailable = build_inspection_excerpt_manifest(
+    encoded, unavailable, redacted, truncated = build_inspection_excerpt_manifest(
         (_artifact("notes.txt", b"ordinary excerpt bytes"),)
     )
     assert encoded is None
     assert unavailable is True
+    assert redacted is False
+    assert truncated is False
 
 
 def test_azure_and_token_prefixes_are_classified_before_encoding() -> None:
-    encoded, unavailable = build_inspection_excerpt_manifest(
+    encoded, unavailable, redacted, truncated = build_inspection_excerpt_manifest(
         (_artifact("a.env", _AZURE + b"\n"), _artifact("b.env", _TOKEN + b"\n"))
     )
     assert unavailable is False
+    assert redacted is True
+    assert truncated is False
     assert encoded is not None
     assert _AZURE not in encoded
     assert _TOKEN not in encoded
@@ -227,8 +351,18 @@ async def test_approved_check_persistence_path_redacts_compound_secrets(
     decoded = base64.b64decode(parsed["content_b64"])
     assert b"[REDACTED]" in decoded
     assert parsed["redacted"] is True
-    rows = db.execute("SELECT redacted, content_kind FROM observation_content_manifests").fetchall()
-    assert rows == [(1, "approved_check_output")]
+    rows = db.execute(
+        "SELECT redacted,content_kind,content_digest,content_bytes "
+        "FROM observation_content_manifests"
+    ).fetchall()
+    assert rows == [
+        (
+            1,
+            "approved_check_output",
+            "sha256:" + hashlib.sha256(decoded).hexdigest(),
+            len(decoded),
+        )
+    ]
 
 
 @pytest.mark.anyio

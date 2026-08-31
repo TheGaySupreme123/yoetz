@@ -238,6 +238,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         "application/json",
         True,
     ),
+    (
+        "fixtures/canonical/OBS-001-captured-evidence.case.json",
+        "canonical_vector",
+        "application/vnd.yoetz.fixture-case+json",
+        True,
+    ),
     ("guidance/agent-instructions.md", "guidance", "text/markdown", True),
     ("guidance/coverage-and-receipts.md", "guidance", "text/markdown", True),
     ("guidance/publication-policy.md", "guidance", "text/markdown", True),
@@ -250,6 +256,7 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ("migrations/bundle/0005.sql", "migration", "application/sql", True),
     ("migrations/bundle/0006.sql", "migration", "application/sql", True),
     ("migrations/bundle/0007.sql", "migration", "application/sql", True),
+    ("migrations/bundle/0008.sql", "migration", "application/sql", True),
     ("migrations/catalog/0001.sql", "migration", "application/sql", True),
     ("migrations/catalog/0002.sql", "migration", "application/sql", True),
     ("migrations/catalog/0003.sql", "migration", "application/sql", True),
@@ -485,6 +492,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/events/evidence-recorded-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/evidence-recorded-1.2.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -728,6 +741,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/privacy/outbound-case-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/privacy/outbound-case-1.1.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

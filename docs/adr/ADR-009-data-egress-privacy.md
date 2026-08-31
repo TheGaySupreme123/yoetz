@@ -369,6 +369,15 @@ case → single-use authorization → bounded gateway → bound sink/provider �
     the existing privacy gateway. Observation, trust, verification management, and local advice
     diagnostics are local control, not network-egress channels and not additional MCP tools.
 
+    **Revised 2026-08-30 (issue #302).** Secret-scanned and encrypted observation bytes may be
+    materialized as ledger evidence only for the narrow ADR-020 eligibility set. That records byte
+    identity, retention, redaction, and observation provenance; it does not authorize disclosure.
+    Materialization never opens captured objects for semantic review. Any later description or
+    typed digest metadata selected for a semantic case still traverses this ADR's independent
+    classification, policy, minimization, secret scan, authorization, and receipt path. Raw
+    captured bytes remain unavailable to that path unless a separately designed, consented reader
+    is added. Observation intake therefore cannot become implicit local or network egress.
+
 17. **Repository authority migration is bounded narrowing, not package consent:** package upgrades
     preserve accepted machine-policy bytes. Catalog migration records only the pre-upgrade legacy
     route frontier and bounded entitlements; it does not infer repository identity from

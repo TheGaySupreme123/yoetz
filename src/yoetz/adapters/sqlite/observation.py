@@ -11,12 +11,15 @@ import apsw
 from yoetz.domain.observation import (
     AdviceSnapshot,
     ObservationContentChunk,
+    ObservationContentKind,
+    ObservationContentManifest,
     ObservationControlCommand,
     ObservationCursor,
     ObservationEnvelope,
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestResult,
+    ObservationInspectionSnapshot,
     ObservationLifecycle,
     ObservationRevokeCommand,
     ObservationSource,
@@ -420,8 +423,14 @@ class SqliteObservationStore:
         subject_state_digest: str,
         changed_paths_digest: str,
         relative_paths: tuple[str, ...],
-        facts_object_id: str | None,
-        excerpt_object_id: str | None,
+        facts_ref: ObjectRef | None,
+        facts_content_digest: str | None,
+        facts_content_bytes: int | None,
+        excerpt_ref: ObjectRef | None,
+        excerpt_content_digest: str | None,
+        excerpt_content_bytes: int | None,
+        excerpt_redacted: bool,
+        excerpt_truncated: bool,
         recorded_at: Timestamp,
     ) -> None:
         snapshot_id = (
@@ -439,6 +448,10 @@ class SqliteObservationStore:
         paths_blob = canonical_encode(JsonObject({"relative_paths": list(relative_paths)}))
         try:
             with self._db:
+                if facts_ref is not None:
+                    self._inventory_object(facts_ref)
+                if excerpt_ref is not None:
+                    self._inventory_object(excerpt_ref)
                 self._db.execute(
                     "UPDATE observation_inspection_snapshots SET is_current=0 "
                     "WHERE workspace_commitment=? AND yoetz_session_id=? AND is_current=1",
@@ -448,13 +461,21 @@ class SqliteObservationStore:
                     "INSERT INTO observation_inspection_snapshots("
                     "snapshot_id, workspace_commitment, yoetz_session_id, subject_state_digest, "
                     "changed_paths_digest, relative_paths_json, facts_object_id, "
-                    "excerpt_object_id, is_current, recorded_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,1,?) "
+                    "excerpt_object_id, is_current, recorded_at, facts_content_digest, "
+                    "facts_content_bytes, excerpt_content_digest, excerpt_content_bytes,"
+                    "excerpt_redacted,excerpt_truncated) "
+                    "VALUES(?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?) "
                     "ON CONFLICT(workspace_commitment, yoetz_session_id, subject_state_digest) "
                     "DO UPDATE SET changed_paths_digest=excluded.changed_paths_digest, "
                     "relative_paths_json=excluded.relative_paths_json, "
                     "facts_object_id=excluded.facts_object_id, "
                     "excerpt_object_id=excluded.excerpt_object_id, "
+                    "facts_content_digest=excluded.facts_content_digest, "
+                    "facts_content_bytes=excluded.facts_content_bytes, "
+                    "excerpt_content_digest=excluded.excerpt_content_digest, "
+                    "excerpt_content_bytes=excluded.excerpt_content_bytes, "
+                    "excerpt_redacted=excluded.excerpt_redacted, "
+                    "excerpt_truncated=excluded.excerpt_truncated, "
                     "is_current=1, recorded_at=excluded.recorded_at",
                     (
                         snapshot_id,
@@ -463,13 +484,58 @@ class SqliteObservationStore:
                         subject_state_digest,
                         changed_paths_digest,
                         paths_blob,
-                        facts_object_id,
-                        excerpt_object_id,
+                        None if facts_ref is None else facts_ref.object_id,
+                        None if excerpt_ref is None else excerpt_ref.object_id,
                         recorded_at.wire,
+                        facts_content_digest,
+                        facts_content_bytes,
+                        excerpt_content_digest,
+                        excerpt_content_bytes,
+                        int(excerpt_redacted),
+                        int(excerpt_truncated),
                     ),
                 )
         except Exception:
             return
+
+    def load_inspection_snapshot(
+        self,
+        *,
+        workspace: str,
+        yoetz_session_id: str,
+        subject_state_digest: str,
+    ) -> ObservationInspectionSnapshot | None:
+        row = self._db.execute(
+            "SELECT snapshot_id,yoetz_session_id,subject_state_digest,changed_paths_digest,"
+            "facts_object_id,facts_content_digest,facts_content_bytes,excerpt_object_id,"
+            "excerpt_content_digest,excerpt_content_bytes,excerpt_redacted,excerpt_truncated,"
+            "recorded_at "
+            "FROM observation_inspection_snapshots WHERE workspace_commitment=? "
+            "AND yoetz_session_id=? AND subject_state_digest=? AND is_current=1",
+            (workspace, yoetz_session_id, subject_state_digest),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return ObservationInspectionSnapshot(
+                snapshot_id=cast(str, row[0]),
+                yoetz_session_id=cast(str, row[1]),
+                subject_state_digest=cast(str, row[2]),
+                changed_paths_digest=cast(str, row[3]),
+                facts_object_id=cast(str | None, row[4]),
+                facts_content_digest=cast(str | None, row[5]),
+                facts_content_bytes=cast(int | None, row[6]),
+                excerpt_object_id=cast(str | None, row[7]),
+                excerpt_content_digest=cast(str | None, row[8]),
+                excerpt_content_bytes=cast(int | None, row[9]),
+                excerpt_redacted=bool(row[10]),
+                excerpt_truncated=bool(row[11]),
+                recorded_at=Timestamp(cast(str, row[12])),
+            )
+        except Exception:
+            # Pre-0008 snapshots legitimately lack digest bindings. They remain weak history and
+            # are replaced by the next current inspection rather than upgraded by inference.
+            return None
 
     def load_latest_advice_snapshot(self) -> AdviceSnapshot | None:
         """Deprecated: prefer load_advice_snapshot_for_session / workspace_for_yoetz_session."""
@@ -565,6 +631,8 @@ class SqliteObservationStore:
         logical_identity: str,
         chunk: ObservationContentChunk,
         ref: ObjectRef,
+        content_digest: str,
+        content_bytes: int,
         recorded_at: Timestamp,
     ) -> None:
         if type(chunk) is not ObservationContentChunk or type(recorded_at) is not Timestamp:
@@ -573,16 +641,37 @@ class SqliteObservationStore:
                 "Observation content manifest is invalid.",
                 retryable=False,
             )
+        try:
+            descriptor = ObservationContentManifest(
+                object_id=ref.object_id,
+                envelope_digest=ref.envelope_digest,
+                content_kind=chunk.content_kind,
+                part_index=chunk.part_index,
+                part_count=chunk.part_count,
+                redacted=chunk.redacted,
+                content_digest=content_digest,
+                content_bytes=content_bytes,
+            )
+        except Exception as exc:
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation content manifest is invalid.",
+                retryable=False,
+            ) from exc
         with self._db:
             self._inventory_object(ref)
             self._db.execute(
                 "INSERT INTO observation_content_manifests("
                 "object_id,workspace_commitment,logical_identity,content_kind,"
                 "correlation_identity,source_commitment,media_type,part_index,part_count,"
-                "plaintext_size,content_commitment,redacted,recorded_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "plaintext_size,content_commitment,redacted,recorded_at,content_digest,"
+                "content_bytes) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(workspace_commitment,logical_identity,content_kind,"
-                "correlation_identity,source_commitment,part_index) DO NOTHING",
+                "correlation_identity,source_commitment,part_index) DO UPDATE SET "
+                "content_digest=COALESCE(observation_content_manifests.content_digest,"
+                "excluded.content_digest),content_bytes=COALESCE("
+                "observation_content_manifests.content_bytes,excluded.content_bytes)",
                 (
                     ref.object_id,
                     workspace,
@@ -597,10 +686,13 @@ class SqliteObservationStore:
                     ref.commitment,
                     int(chunk.redacted),
                     recorded_at.wire,
+                    descriptor.content_digest,
+                    descriptor.content_bytes,
                 ),
             )
             row = self._db.execute(
-                "SELECT object_id,part_count,content_commitment,redacted "
+                "SELECT object_id,part_count,content_commitment,redacted,content_digest,"
+                "content_bytes "
                 "FROM observation_content_manifests "
                 "WHERE workspace_commitment=? AND logical_identity=? AND content_kind=? "
                 "AND correlation_identity=? AND source_commitment=? AND part_index=?",
@@ -613,7 +705,14 @@ class SqliteObservationStore:
                     chunk.part_index,
                 ),
             ).fetchone()
-            if row != (ref.object_id, chunk.part_count, ref.commitment, int(chunk.redacted)):
+            if row != (
+                ref.object_id,
+                chunk.part_count,
+                ref.commitment,
+                int(chunk.redacted),
+                descriptor.content_digest,
+                descriptor.content_bytes,
+            ):
                 raise _error(
                     PublicErrorCode.STORAGE_CORRUPT,
                     "Observation content manifest conflicts.",
@@ -641,6 +740,36 @@ class SqliteObservationStore:
             ),
         ).fetchone()
         return cast(str, row[0]) if row is not None and type(row[0]) is str else None
+
+    def load_content_manifest(self, object_id: str) -> ObservationContentManifest | None:
+        row = self._db.execute(
+            "SELECT manifests.object_id,objects.envelope_digest,manifests.content_kind,"
+            "manifests.part_index,manifests.part_count,manifests.redacted,"
+            "manifests.content_digest,manifests.content_bytes "
+            "FROM observation_content_manifests AS manifests "
+            "JOIN objects ON objects.object_id=manifests.object_id "
+            "WHERE manifests.object_id=?",
+            (object_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return ObservationContentManifest(
+                object_id=cast(str, row[0]),
+                envelope_digest=cast(str, row[1]),
+                content_kind=ObservationContentKind(cast(str, row[2])),
+                part_index=cast(int, row[3]),
+                part_count=cast(int, row[4]),
+                redacted=bool(row[5]),
+                content_digest=cast(str | None, row[6]),
+                content_bytes=cast(int | None, row[7]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation content manifest is invalid.",
+                retryable=False,
+            ) from exc
 
     def bind_workspace_locator(
         self,
