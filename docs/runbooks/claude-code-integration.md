@@ -146,6 +146,11 @@ The skill name is `/yoetz:yoetz`. The MCP server is `plugin:yoetz:yoetz`, and ca
 
 ## Hooks and observation
 
+Claude Code remains structural-only for issue #302: the scoped hook path discards raw prompt,
+result, transcript, path, and error content before storage and therefore cannot mint
+`observation_captured` evidence. Any future content-bearing profile is a separate capability and
+privacy decision with its own fixture and consent proof.
+
 Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
 therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
 the native hook/observation paths below.

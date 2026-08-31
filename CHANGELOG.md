@@ -6,6 +6,17 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Added
+
+- Consented hook capture no longer stops at encrypted observation-store references. Eligible
+  secret-scanned tool output, selected changed-file bytes, workspace diffs, and bounded inspection
+  snapshots now materialize as immutable ledger evidence with exact object, digest, byte-count,
+  redaction/truncation limitations, and `observation_captured` provenance. Additive
+  `evidence_recorded/1.2.0`, `event-draft/1.1.0`, `opaque-unknown-event-draft/1.1.0`, and
+  `outbound-case/1.1.0` contracts keep their prior versions frozen; migration 0008 leaves legacy
+  rows readable but weak when no inner-content binding exists. Capture remains distinct from
+  verification, reproduction, and egress authority (issue #302).
+
 ### Fixed
 
 - Frontier-motion delivery marks now retain the announced head digest and are compared with the

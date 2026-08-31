@@ -2,7 +2,9 @@
 
 **Status:** Accepted (2026-08-09), acknowledged in
 [issue #131](https://github.com/TheGaySupreme123/yoetz/issues/131). Decision 7 amended
-(2026-08-10) for [issue #176](https://github.com/TheGaySupreme123/yoetz/issues/176).
+(2026-08-10) for [issue #176](https://github.com/TheGaySupreme123/yoetz/issues/176); decisions
+9–12 added (2026-08-30) for
+[issue #302](https://github.com/TheGaySupreme123/yoetz/issues/302).
 **Implemented by:** `src/yoetz/domain/events.py`, `src/yoetz/application/publish_work.py`,
 `src/yoetz/application/observation_coordinator.py`, `src/yoetz/kernel/deterministic_checks.py`,
 `src/yoetz/application/semantic_case.py`, and the public event schemas and guidance.
@@ -68,18 +70,51 @@ ordinary cooperative publication cannot claim.
    still never treated as the digested bytes. A digest-bound record without a description, and
    legacy provenance, behave exactly as before.
 
-8. **No storage migration or projection-version bump is required.** The new binding lives inside
+8. **No storage migration or projection-version bump was required for v1.1.** The new binding lives inside
    the existing encrypted event payload and current projection payload handle. Replay already
    preserves the exact schema version. `evidence_recorded/1.0.0` is frozen byte-for-byte and remains
-   supported; new producers use 1.1. The version manifest advertises 1.1 as the current evidence
-   schema while the complete dispatch table accepts both versions.
+   supported; non-observation digest producers introduced here use 1.1.
+
+9. **Observation capture uses additive `evidence_recorded/1.2.0`.** Version 1.2 adds only the
+   `observation_captured` digest provenance. Versions 1.0 and 1.1 remain byte-frozen and exact
+   readable. The complete dispatch table accepts all three versions; the version manifest advertises
+   1.2 as current. `outbound-case/1.1.0` adds the same provenance to typed excerpt metadata without
+   changing frozen outbound-case v1.0 bytes. Released `event-draft/1.0.0` and
+   `opaque-unknown-event-draft/1.0.0` remain byte-frozen; their additive `1.1.0` successors carry
+   the exact evidence 1.2 pair and unknown-pair exclusion.
+
+10. **The service, not an object reference, establishes capture.** `observation_captured` requires
+    the exact observation coordinator author (`harness` + `harness_observed`) on `hook_observed`, a
+    retained encrypted object, a digest and byte count of the secret-scanned inner bytes, and
+    `immutable_snapshot` strength. Ordinary `publish_work`, trusted import, and an arbitrary
+    `content_object_refs` value cannot mint it. Capture proves byte retention and identity; it never
+    means `artifact_verified` or `independently_reproduced` and never proves that tool output is true.
+
+11. **Eligibility is narrow and weakening is explicit.** Hook materialization admits only captured
+    tool output, selected changed-file content, and workspace-diff content. Inspection facts and
+    bounded excerpts materialize as their own evidence records. Visible messages, tool input,
+    workspace locators, unsupported visible payloads, and approved-check output retain their
+    existing paths and do not silently become captured ledger evidence. Missing descriptors,
+    pre-migration rows without plaintext digest bindings, withheld or unavailable objects, and
+    deleted objects, and scanner failure add `content_capture_unavailable`; deliberately
+    ineligible retained content adds `content_unselected`; redacted retained bytes add
+    `content_redacted`; and bounded inspection prefixes add `truncated_payload`. Excluded content
+    never borrows a stronger eligible label.
+
+12. **Retention is not disclosure authority.** Observation materialization records generic
+    structural descriptions and typed digest provenance; it does not open or copy captured object
+    bytes into semantic review. A later semantic selection can carry those bounded facts and
+    descriptions only through ADR-009's independent classification, minimization, authorization,
+    and egress path. Migration 0008 adds nullable digest/byte bindings to observation manifests and
+    inspection snapshots plus durable inspection redaction/truncation flags. Existing NULL rows
+    stay weak history and are never upgraded by inference.
 
 ## Consequences
 
 Yoetz can reject a typed kind/subject contradiction at publication without pretending it inspected
 the bytes. Receipts and deterministic findings retain exact limitations for digest-only, withheld,
-redacted, and legacy evidence. Capability-owned approved-check/import provenance stays unavailable
-to cooperative callers.
+redacted, and legacy evidence. Capability-owned approved-check/import/observation provenance stays
+unavailable to cooperative callers.
 
 The subject taxonomy is intentionally finite. Adding a new byte class requires a reviewed protocol
 change rather than a caller-defined string. Historical evidence may still be useful as weak context,

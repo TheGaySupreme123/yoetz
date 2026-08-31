@@ -355,7 +355,7 @@ The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
 `config/* -> config`, `version/* -> version_manifest`, and
 `common/*|operations/*|findings/*|receipts/*|privacy/*|service/* -> request_result`. The manifest
 records both typed values and the catalog re-derives each from its own map. These prefixes exhaust
-the 53 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
+the 96 v0.1 schema artifacts; no `support_manifest` kind or support-manifest schema exists.
 
 ## 5. Coverage (`protocol/coverage.py`)
 
@@ -468,9 +468,9 @@ are sufficient to rebuild the pure reverse `ReplayIndex` after payload deletion 
 content, paths, URLs, or human redaction text.
 
 The supported payload dispatch map is keyed by the complete `EventSchema`. All sixteen families
-decode at `1.0.0`; `evidence_recorded/1.1.0` is also exact-known. Every other syntactically valid
-pair is preserved as `UnknownEvent`. A malformed payload for an exact supported pair is invalid and
-never falls back to opaque handling.
+decode at `1.0.0`; `evidence_recorded/1.1.0` and `evidence_recorded/1.2.0` are also exact-known.
+Every other syntactically valid pair is preserved as `UnknownEvent`. A malformed payload for an
+exact supported pair is invalid and never falls back to opaque handling.
 
 Both ledger-record variants carry the complete accepted-envelope fields. `UnknownEvent` replaces
 the typed handle with `JsonValue | None` and adds `canonical_payload_digest` plus the fixed
@@ -499,12 +499,16 @@ Key payload fields (minimum; full shapes in `src/yoetz/domain/events.py`):
   `unknown`), optional `exit_status`, `subject_state`, `evidence_refs`.
 - `evidence_recorded`: `evidence_id`, `strength` (mirrors `EvidenceImmutability`), `reference`
   (mutable ref) and/or `captured_object_id` + `content_digest`, `observed_at`, `evidence_kind`.
-  New digest-bearing records use schema `1.1.0` and require `digest_binding` with closed `subject`,
+  New digest-bearing records require `digest_binding` with closed `subject`,
   `content_availability`, `byte_count`, and `provenance`. Kind/subject compatibility is closed;
-  `test_result` cannot bind `source_diff`. Ordinary publication can assert only
-  `caller_asserted`; approved-check and import provenance are reserved to their authenticated
-  channels. Schema `1.0.0` stays exact-readable and an untyped legacy digest remains unknown rather
-  than inheriting a subject from prose.
+  `test_result` cannot bind `source_diff`. Schema `1.1.0` admits `caller_asserted`,
+  `approved_check`, and `import_observed`; additive schema `1.2.0` also admits
+  `observation_captured`. Ordinary publication can assert only `caller_asserted`; approved-check,
+  import, and observation provenance are reserved to their authenticated authors/channels.
+  `observation_captured` requires the observation coordinator (`harness_observed` on
+  `hook_observed`) and never means verified or independently reproduced. Schemas `1.0.0` and
+  `1.1.0` remain exact-readable; an untyped legacy digest remains unknown rather than inheriting a
+  subject from prose.
 - `claim_recorded`: `claim_id`, `claim_kind` (`completion`|`material`), `statement`,
   `supporting_refs` (evidence/result/obligation IDs), optional `subject_state`.
   Citing a `failure` or `partial` result on a completion claim's `supporting_refs` is
@@ -2686,7 +2690,9 @@ Ledger materialization uses ADR-022's derived harness writer identity:
 `observation`, and admission unions that id with writers from completed starts without fabricating a
 start operation. Observation-derived lifecycle records are evidence under that writer, not claims
 on the cooperative agent's behalf. Materialization emits `evidence_recorded` unless the structural
-payload itself carries an explicitly admitted `claim_kind`.
+payload itself carries an explicitly admitted `claim_kind`. Mapping `obs-ledger/1.4.0` additionally
+materializes trusted eligible capture manifests as `evidence_recorded/1.2.0`; legacy 1.3/1.2
+operation identities remain replay-only upgrade candidates.
 
 Shared closed types:
 
@@ -2700,6 +2706,13 @@ Shared closed types:
   `content_kind`, correlation identity, source commitment, media type, part index/count, redaction
   flag, and bytes. At most 16 chunks and 700,000 aggregate input bytes keep the request below the
   ordinary 1 MiB control-frame cap; each assembled encrypted object remains below 4 MiB.
+- `ObservationContentManifest` — trusted-local binding from an encrypted captured-object envelope
+  to the SHA-256 digest and byte count of its secret-scanned inner bytes. A row created before
+  migration 0008 has NULL bindings and cannot earn capture provenance by inference.
+- `ObservationInspectionSnapshot` — one current subject-state/changed-path selection with optional
+  independently encrypted facts and bounded-excerpt objects, each carrying its own inner-content
+  digest and byte count. Durable redaction/truncation flags preserve weakening without reopening
+  the object.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
   mapping version. Codex session-stream cursors use `codex-obs-stream/1.2.0` (rollout JSONL
   grammar). Cursors are crash-stable and generation-fenced. A private HMAC of the source
@@ -2823,6 +2836,14 @@ Independent verification support (local control, not MCP):
   output digest/byte count and encrypted output-object identity, subject state before/after, and
   freshness. It uses `evidence_recorded/1.1.0` with `approved_check` provenance; no cooperative
   request can mint that provenance.
+- Eligible observation capture is narrower than retention: tool output, selected changed-file
+  bytes, and workspace-diff bytes become `observation_captured` immutable evidence. Visible
+  messages, tool input, locators, unsupported visible payloads, and approved-check output do not.
+  Inspection fact/excerpt objects materialize through their own idempotent evidence operation.
+  Missing, deleted, or pre-0008 bindings add `content_capture_unavailable`; deliberately excluded
+  retained kinds add `content_unselected`; retained redacted bytes add `content_redacted`; and a
+  bounded inspection prefix adds `truncated_payload`. Capture never upgrades to
+  `artifact_verified` or `independently_reproduced`.
 - `ObservationVerificationSupervisor` — ready-lifecycle background owner that wakes on enqueue,
   discovers pending work at startup, drains one serialized check per workspace through the
   enforcing sandbox, reclaims expired leases, and stops before vault/runtime closure. Hook ingest
@@ -2880,8 +2901,8 @@ materialization mapping version and exact draft-role tuple, so phases of one hos
 different materializations (for example pre-action versus paired action/result) cannot collide,
 while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
 The claim stores the source-independent materialization version, never the hook/stream cursor
-version (issue #309). Before staging under `obs-ledger/1.3.0`, upgrade replay checks the current and
-legacy observation writers for committed `1.3.0` and `1.2.0` operations; a `1.2.0` hit repairs its
+version (issue #309). Before staging under `obs-ledger/1.4.0`, upgrade replay checks the current and
+legacy observation writers for committed `1.4.0`, `1.3.0`, and `1.2.0` operations; a legacy hit repairs its
 claim with the original mapping version. Because a replayed `1.2.0` operation may be a pre-upgrade
 hook operation whose result is `UNKNOWN`, it still enters the correction path: the committed result
 is consulted through the replayed operation's accepted event ids (its `1.2.0` record identities
@@ -3021,8 +3042,10 @@ Existing v0.1 ledger/object/import data remains readable without rewrite. Migrat
 encrypted observation-content/workspace-binding references, logical identity claims, exact-digest
 trust, verification jobs/leases/results, and advice history/delivery state in addition to `0002`
 consent/cursor/dedup/current-advice state. Migration `0004` owns inspection snapshots,
-workspace→Yoetz-session routing, and session-scoped current advice without rewriting `0003`. Neither
-adds a plaintext content column.
+workspace→Yoetz-session routing, and session-scoped current advice without rewriting `0003`.
+Migration `0008` adds nullable inner-content digest and byte-count bindings to content manifests
+and inspection snapshots plus inspection redaction/truncation flags. NULL historical rows stay
+readable but weak. None adds a plaintext content column.
 
 ### Maintenance
 

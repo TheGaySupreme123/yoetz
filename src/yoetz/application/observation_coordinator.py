@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -41,6 +42,7 @@ from yoetz.application.observation_materialize import (
     approved_check_author,
     canonical_logical_identity,
     materialize_observation_envelope,
+    materialize_observation_inspection_snapshot,
     materialize_observation_outcome_correction,
     media_type_for_schema,
     observation_author,
@@ -61,7 +63,7 @@ from yoetz.application.observation_verification import (
 )
 from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
 from yoetz.domain.events import (
-    EVIDENCE_SCHEMA_VERSION,
+    EVIDENCE_TYPED_SCHEMA_VERSION,
     ActionKind,
     ActionRecordedPayload,
     EventDraft,
@@ -89,12 +91,14 @@ from yoetz.domain.observation import (
     AdviceItem,
     ObservationContentChunk,
     ObservationContentKind,
+    ObservationContentManifest,
     ObservationControlCommand,
     ObservationEnvelope,
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestRequest,
     ObservationIngestResult,
+    ObservationInspectionSnapshot,
     ObservationRevokeCommand,
     ObservationStatus,
     ObservationStatusQuery,
@@ -231,16 +235,19 @@ def build_inspection_excerpt_manifest(
     artifacts: Sequence[InspectedArtifact],
     *,
     canaries: tuple[bytes, ...] = (),
-) -> tuple[bytes | None, bool]:
+) -> tuple[bytes | None, bool, bool, bool]:
     """Scan changed-file excerpts before base64 encoding.
 
-    Returns ``(canonical_bytes, capture_unavailable)``. Secret matches persist
-    only path/digest/finding-kind metadata. A scanner failure or canary match
-    stores no excerpt object.
+    Returns ``(canonical_bytes, capture_unavailable, redacted, truncated)``. Secret matches
+    persist only path/digest/finding-kind metadata. A scanner failure or canary match stores no
+    excerpt object. Redaction and truncation remain explicit coverage limitations without
+    requiring a later consumer to reopen captured bytes.
     """
 
     parts: list[JsonObject] = []
     capture_unavailable = False
+    redacted = False
+    truncated = False
     seen = 0
     for item in artifacts:
         if type(item) is not InspectedArtifact:
@@ -251,17 +258,22 @@ def build_inspection_excerpt_manifest(
         if not item.excerpt:
             continue
         prefix = item.excerpt[:_MAX_INSPECT_EXCERPT_PREFIX_BYTES]
+        item_truncated = item.excerpt_truncated or len(item.excerpt) > len(prefix)
+        truncated = truncated or item_truncated
         scan = prepare_persisted_plaintext(prefix, canaries=canaries)
         if not scan.persist:
             capture_unavailable = True
             break
         if scan.redacted:
+            redacted = True
             parts.append(
                 JsonObject(
                     {
                         "path": item.relative_path,
                         "digest": item.content_digest,
                         "redacted": True,
+                        "excerpt_truncated": item_truncated,
+                        "byte_length": item.byte_length,
                         "finding_kinds": list(scan.finding_kinds),
                     }
                 )
@@ -273,17 +285,21 @@ def build_inspection_excerpt_manifest(
                     "path": item.relative_path,
                     "digest": item.content_digest,
                     "redacted": False,
+                    "excerpt_truncated": item_truncated,
+                    "byte_length": item.byte_length,
                     "excerpt_b64": base64.b64encode(scan.content).decode("ascii"),
                 }
             )
         )
     if capture_unavailable:
-        return None, True
+        return None, True, redacted, truncated
     if not parts:
-        return None, False
+        return None, False, redacted, truncated
     return (
         canonical_encode(JsonObject({"format": _INSPECT_EXCERPT_FORMAT, "artifacts": parts})),
         False,
+        redacted,
+        truncated,
     )
 
 
@@ -572,7 +588,11 @@ class ObservationCoordinator:
                 store = self._observation_store(runtime)
                 store.grant_consent(workspace, consent.granted_at)
                 store.bind_session(workspace, request.envelope.session_commitment)
-                captured_refs, content_redacted = await self._capture_content(
+                (
+                    captured_content,
+                    content_redacted,
+                    content_unavailable,
+                ) = await self._capture_content(
                     runtime,
                     store,
                     workspace=workspace,
@@ -582,11 +602,16 @@ class ObservationCoordinator:
                 gaps = set(request.envelope.gap_codes)
                 if content_redacted:
                     gaps.add(ObservationGapCode.CONTENT_REDACTED.value)
+                if content_unavailable:
+                    gaps.add(ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value)
                 envelope = replace(
                     request.envelope,
                     content_object_refs=tuple(
                         sorted(
-                            {*request.envelope.content_object_refs, *captured_refs},
+                            {
+                                *request.envelope.content_object_refs,
+                                *(item.object_id for item in captured_content),
+                            },
                             key=str.encode,
                         )
                     ),
@@ -603,7 +628,11 @@ class ObservationCoordinator:
                 # failed, so re-run the idempotent materialize/append to repair it.
                 # If any step raises, the broad guard below turns it into a
                 # retryable rejection so the outbox keeps the entry pending.
-                batch = materialize_observation_envelope(envelope, task_id=runtime.task_id)
+                batch = materialize_observation_envelope(
+                    envelope,
+                    task_id=runtime.task_id,
+                    captured_content=captured_content,
+                )
                 if batch.skip_reason is None and batch.drafts:
                     stage = "ledger_append"
                     claim = await self._append_materialized(
@@ -821,6 +850,7 @@ class ObservationCoordinator:
                     workspace,
                     store,
                     envelope,
+                    codex_session_id=codex_session_id,
                     legacy_writer_id=mapping.yoetz_writer_id,
                 )
                 stage = "advice"
@@ -1111,6 +1141,99 @@ class ObservationCoordinator:
         append_result = await run_prepared_append(runtime.ledger, mutation)
         return operation_id, digest, append_result, MATERIALIZATION_MAPPING_VERSION
 
+    async def _append_inspection_snapshot(
+        self,
+        runtime: TaskRuntime,
+        snapshot: ObservationInspectionSnapshot,
+    ) -> AppendResult | None:
+        """Append one idempotent harness-owned inspection evidence batch."""
+
+        writer_id = runtime.writer_id
+        if writer_id is None:
+            return None
+        batch = materialize_observation_inspection_snapshot(snapshot, task_id=runtime.task_id)
+        if batch.skip_reason is not None or not batch.drafts:
+            return None
+        operation_digest = canonical_digest(
+            JsonObject(
+                {
+                    "format": "yoetz.observation-inspection-ledger-materialization/1",
+                    "snapshot_id": snapshot.snapshot_id,
+                    "subject_state_digest": snapshot.subject_state_digest,
+                    "changed_paths_digest": snapshot.changed_paths_digest,
+                    "facts_object_id": snapshot.facts_object_id,
+                    "facts_content_digest": snapshot.facts_content_digest,
+                    "excerpt_object_id": snapshot.excerpt_object_id,
+                    "excerpt_content_digest": snapshot.excerpt_content_digest,
+                    "task_id": runtime.task_id,
+                    "session_id": runtime.session_id,
+                    "writer_id": writer_id,
+                }
+            )
+        )
+        operation_id = self._stable_operation_id(operation_digest)
+        existing = await runtime.ledger.lookup_operation(writer_id, operation_id)
+        if existing is not None:
+            return _append_result_from_committed(existing)
+
+        author = observation_author()
+        refs: list[ObjectRef] = []
+        entries: list[AppendEntry] = []
+        for item in batch.drafts:
+            commitment = await runtime.objects.commitment_for(
+                item.payload_bytes, ObjectKind.EVENT_PAYLOAD
+            )
+            metadata = ObjectMetadata(
+                ObjectKind.EVENT_PAYLOAD,
+                media_type_for_schema(item.draft.schema.name),
+                runtime.task_id,
+                self.clock.now_utc(),
+            )
+            staged = await runtime.objects.stage(
+                ObjectSource(data=item.payload_bytes, declared_size=len(item.payload_bytes)),
+                metadata,
+            )
+            if staged.commitment != commitment:
+                raise PublicOperationError(
+                    PublicErrorCode.STORAGE_CORRUPT,
+                    "Observation inspection payload commitment mismatch.",
+                    retryable=False,
+                )
+            ref = await runtime.objects.finalize(staged)
+            refs.append(ref)
+            entries.append(
+                AppendEntry(
+                    item.draft,
+                    author,
+                    ref,
+                    commitment,
+                    metadata.media_type,
+                    ref.plaintext_size,
+                    batch.channel,
+                    batch.coverage,
+                    item.projection_status,
+                )
+            )
+        command = AppendCommand(
+            runtime.task_id,
+            runtime.session_id,
+            writer_id,
+            operation_id,
+            OperationKind.PUBLISH_WORK,
+            operation_digest,
+            None,
+            tuple(entries),
+        )
+        mutation = PreparedMutation(
+            command.writer_id,
+            command.operation_id,
+            command.request_digest,
+            command.expected_frontier,
+            tuple(refs),
+            command,
+        )
+        return await run_prepared_append(runtime.ledger, mutation)
+
     async def _materialize_approved_check(
         self,
         runtime: TaskRuntime,
@@ -1289,7 +1412,7 @@ class ObservationCoordinator:
             ),
             EventDraft(
                 evidence_event,
-                EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION),
+                EventSchema("evidence_recorded", EVIDENCE_TYPED_SCHEMA_VERSION),
                 occurred_at,
                 (action_event,),
                 evidence_payload,
@@ -1378,14 +1501,13 @@ class ObservationCoordinator:
         workspace: str,
         envelope: ObservationEnvelope,
         chunks: tuple[ObservationContentChunk, ...],
-    ) -> tuple[tuple[str, ...], bool]:
+    ) -> tuple[tuple[ObservationContentManifest, ...], bool, bool]:
         """Assemble encrypted captured-content chunk objects before SQLite references them."""
 
-        if not chunks:
-            return (), False
         logical_identity = canonical_logical_identity(envelope)
-        object_ids: set[str] = set()
+        manifests: dict[str, ObservationContentManifest] = {}
         any_redacted = False
+        any_unavailable = False
         for chunk in chunks:
             existing = store.content_manifest_object_id(
                 workspace=workspace,
@@ -1393,12 +1515,29 @@ class ObservationCoordinator:
                 chunk=chunk,
             )
             if existing is not None:
-                object_ids.add(existing)
-                any_redacted = any_redacted or chunk.redacted
-                continue
+                loaded = store.load_content_manifest(existing)
+                if loaded is not None and loaded.content_digest is not None:
+                    try:
+                        await runtime.objects.resolve_verified(
+                            loaded.object_id, loaded.envelope_digest
+                        )
+                    except Exception:
+                        any_unavailable = True
+                        await self._local(
+                            partial(
+                                self.local.note_coverage_gap,
+                                workspace,
+                                ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                            )
+                        )
+                        continue
+                    manifests[loaded.object_id] = loaded
+                    any_redacted = any_redacted or loaded.redacted
+                    continue
             scan = prepare_persisted_plaintext(chunk.content)
             if not scan.persist:
-                any_redacted = True
+                any_redacted = any_redacted or scan.redacted
+                any_unavailable = True
                 await self._local(
                     partial(
                         self.local.note_coverage_gap,
@@ -1415,7 +1554,7 @@ class ObservationCoordinator:
                 content=safe_content,
                 redacted=chunk.redacted or detected,
             )
-            manifest = canonical_encode(
+            manifest_bytes = canonical_encode(
                 JsonObject(
                     {
                         "format": "yoetz.observation-content/1",
@@ -1430,22 +1569,51 @@ class ObservationCoordinator:
                     }
                 )
             )
-            metadata = ObjectMetadata(
-                ObjectKind.CAPTURED_CONTENT,
-                "application/vnd.yoetz.observation-content+json",
-                runtime.task_id,
-                self.clock.now_utc(),
-            )
-            staged = await runtime.objects.stage(
-                ObjectSource(data=manifest, declared_size=len(manifest)),
-                metadata,
-            )
-            ref = await runtime.objects.finalize(staged)
+            if existing is None:
+                metadata = ObjectMetadata(
+                    ObjectKind.CAPTURED_CONTENT,
+                    "application/vnd.yoetz.observation-content+json",
+                    runtime.task_id,
+                    self.clock.now_utc(),
+                )
+                staged = await runtime.objects.stage(
+                    ObjectSource(data=manifest_bytes, declared_size=len(manifest_bytes)),
+                    metadata,
+                )
+                ref = await runtime.objects.finalize(staged)
+            else:
+                loaded = store.load_content_manifest(existing)
+                if loaded is None:
+                    any_unavailable = True
+                    await self._local(
+                        partial(
+                            self.local.note_coverage_gap,
+                            workspace,
+                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                        )
+                    )
+                    continue
+                try:
+                    ref = await runtime.objects.resolve_verified(
+                        loaded.object_id, loaded.envelope_digest
+                    )
+                except Exception:
+                    any_unavailable = True
+                    await self._local(
+                        partial(
+                            self.local.note_coverage_gap,
+                            workspace,
+                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                        )
+                    )
+                    continue
             store.record_content_manifest(
                 workspace=workspace,
                 logical_identity=logical_identity,
                 chunk=stored_chunk,
                 ref=ref,
+                content_digest="sha256:" + hashlib.sha256(safe_content).hexdigest(),
+                content_bytes=len(safe_content),
                 recorded_at=timestamp_from_datetime(self.clock.now_utc()),
             )
             if stored_chunk.content_kind is ObservationContentKind.WORKSPACE_LOCATOR:
@@ -1454,8 +1622,46 @@ class ObservationCoordinator:
                     locator_ref=ref,
                     bound_at=timestamp_from_datetime(self.clock.now_utc()),
                 )
-            object_ids.add(ref.object_id)
-        return tuple(sorted(object_ids, key=str.encode)), any_redacted
+            loaded = store.load_content_manifest(ref.object_id)
+            if loaded is None or loaded.content_digest is None:
+                any_unavailable = True
+                await self._local(
+                    partial(
+                        self.local.note_coverage_gap,
+                        workspace,
+                        ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                    )
+                )
+                continue
+            manifests[loaded.object_id] = loaded
+
+        # A duplicate ingest can arrive with durable object refs but without ephemeral chunks.
+        # Recover only refs whose trusted manifest row exists; arbitrary caller-supplied object
+        # ids never become observation-captured evidence.
+        for ref in envelope.content_object_refs:
+            if not ref.startswith("obj_") or ref in manifests:
+                continue
+            loaded = store.load_content_manifest(ref)
+            if loaded is not None:
+                try:
+                    await runtime.objects.resolve_verified(loaded.object_id, loaded.envelope_digest)
+                except Exception:
+                    any_unavailable = True
+                    await self._local(
+                        partial(
+                            self.local.note_coverage_gap,
+                            workspace,
+                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                        )
+                    )
+                    continue
+                manifests[loaded.object_id] = loaded
+                any_redacted = any_redacted or loaded.redacted
+        return (
+            tuple(sorted(manifests.values(), key=lambda item: item.object_id.encode())),
+            any_redacted,
+            any_unavailable,
+        )
 
     async def _enqueue_verification(
         self,
@@ -1464,6 +1670,7 @@ class ObservationCoordinator:
         store: TaskObservationPort,
         envelope: ObservationEnvelope,
         *,
+        codex_session_id: str | None = None,
         legacy_writer_id: str | None = None,
     ) -> None:
         """Capture subject state, enqueue durable work, wake the supervisor.
@@ -1477,6 +1684,7 @@ class ObservationCoordinator:
             workspace,
             store,
             envelope,
+            codex_session_id=codex_session_id,
             legacy_writer_id=legacy_writer_id,
         )
         if worker is None:
@@ -1539,6 +1747,7 @@ class ObservationCoordinator:
         store: TaskObservationPort,
         envelope: ObservationEnvelope,
         *,
+        codex_session_id: str | None = None,
         legacy_writer_id: str | None = None,
     ) -> ObservationVerificationWorker | None:
         """Build a worker and enqueue if subject state changed; never run checks here."""
@@ -1674,7 +1883,7 @@ class ObservationCoordinator:
             previous_subject_state_digest=store.latest_verification_subject_digest(workspace),
             subject_state_digest=current_digest,
         )
-        # Persist inspection snapshot + session route when schema-4 helpers exist.
+        # Persist inspection snapshot + session route when their durable helpers exist.
         route_recorder = getattr(store, "record_workspace_session_route", None)
         if callable(route_recorder):
             route_recorder(
@@ -1686,11 +1895,28 @@ class ObservationCoordinator:
                 bound_at=now,
             )
         inspect_recorder = getattr(store, "record_inspection_snapshot", None)
-        if callable(inspect_recorder):
+        inspect_loader = getattr(store, "load_inspection_snapshot", None)
+        inspection_snapshot: ObservationInspectionSnapshot | None = None
+        if callable(inspect_loader):
+            inspection_snapshot = cast(
+                ObservationInspectionSnapshot | None,
+                inspect_loader(
+                    workspace=workspace,
+                    yoetz_session_id=runtime.session_id,
+                    subject_state_digest=current_digest,
+                ),
+            )
+        if inspection_snapshot is None and callable(inspect_recorder):
             relative_paths: tuple[str, ...] = ()
             changed_digest = current_digest
-            facts_object_id: str | None = None
-            excerpt_object_id: str | None = None
+            facts_ref: ObjectRef | None = None
+            facts_content_digest: str | None = None
+            facts_content_bytes: int | None = None
+            excerpt_ref: ObjectRef | None = None
+            excerpt_content_digest: str | None = None
+            excerpt_content_bytes: int | None = None
+            excerpt_redacted = False
+            excerpt_truncated = False
             try:
                 relative_paths = list_changed_relative_paths(handle)
                 changed_digest = canonical_digest(
@@ -1714,11 +1940,15 @@ class ObservationCoordinator:
                         )
                     )
                     facts_ref = await self._encrypt_captured_content(runtime, fact_bytes)
-                    facts_object_id = facts_ref.object_id
+                    facts_content_digest = "sha256:" + hashlib.sha256(fact_bytes).hexdigest()
+                    facts_content_bytes = len(fact_bytes)
                 if orchestration.inspect is not None and orchestration.inspect.artifacts:
-                    excerpt_bytes, excerpt_unavailable = build_inspection_excerpt_manifest(
-                        orchestration.inspect.artifacts
-                    )
+                    (
+                        excerpt_bytes,
+                        excerpt_unavailable,
+                        excerpt_redacted,
+                        excerpt_truncated,
+                    ) = build_inspection_excerpt_manifest(orchestration.inspect.artifacts)
                     if excerpt_unavailable:
                         await self._local(
                             partial(
@@ -1729,7 +1959,10 @@ class ObservationCoordinator:
                         )
                     elif excerpt_bytes is not None:
                         excerpt_ref = await self._encrypt_captured_content(runtime, excerpt_bytes)
-                        excerpt_object_id = excerpt_ref.object_id
+                        excerpt_content_digest = (
+                            "sha256:" + hashlib.sha256(excerpt_bytes).hexdigest()
+                        )
+                        excerpt_content_bytes = len(excerpt_bytes)
             except Exception:
                 await self._local(
                     partial(
@@ -1745,10 +1978,48 @@ class ObservationCoordinator:
                 subject_state_digest=current_digest,
                 changed_paths_digest=changed_digest,
                 relative_paths=relative_paths,
-                facts_object_id=facts_object_id,
-                excerpt_object_id=excerpt_object_id,
+                facts_ref=facts_ref,
+                facts_content_digest=facts_content_digest,
+                facts_content_bytes=facts_content_bytes,
+                excerpt_ref=excerpt_ref,
+                excerpt_content_digest=excerpt_content_digest,
+                excerpt_content_bytes=excerpt_content_bytes,
+                excerpt_redacted=excerpt_redacted,
+                excerpt_truncated=excerpt_truncated,
                 recorded_at=now,
             )
+            if callable(inspect_loader):
+                inspection_snapshot = cast(
+                    ObservationInspectionSnapshot | None,
+                    inspect_loader(
+                        workspace=workspace,
+                        yoetz_session_id=runtime.session_id,
+                        subject_state_digest=current_digest,
+                    ),
+                )
+        if inspection_snapshot is None:
+            await self._local(
+                partial(
+                    self.local.note_coverage_gap,
+                    workspace,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
+            )
+        if inspection_snapshot is not None:
+            inspection_result = await self._append_inspection_snapshot(runtime, inspection_snapshot)
+            if inspection_result is not None and codex_session_id is not None:
+                await self._local(
+                    partial(
+                        self.local.note_frontier_motion,
+                        workspace,
+                        codex_session_id,
+                        from_sequence=inspection_result.subject_frontier.sequence,
+                        to_sequence=inspection_result.result_frontier.sequence,
+                        head_digest=inspection_result.result_frontier.head_digest,
+                        observation_record_count=len(inspection_result.accepted),
+                        task_id=runtime.task_id,
+                    )
+                )
         return worker
 
     async def _rebuild_verification_worker(
@@ -1899,6 +2170,8 @@ class ObservationCoordinator:
             logical_identity=f"verification:{job.job_id}",
             chunk=chunk,
             ref=ref,
+            content_digest="sha256:" + hashlib.sha256(scan.content).hexdigest(),
+            content_bytes=len(scan.content),
             recorded_at=timestamp_from_datetime(self.clock.now_utc()),
         )
         return ref.object_id
@@ -1973,6 +2246,7 @@ class ObservationCoordinator:
                     runtime,
                     envelopes,
                     snapshot,
+                    store=store,
                     legacy_writer_id=legacy_writer_id,
                 )
             now = timestamp_from_datetime(self.clock.now_utc())
@@ -2032,14 +2306,33 @@ class ObservationCoordinator:
                 await cast(Awaitable[None], result)
 
     def _materialized_event_refs(
-        self, task_id: str, envelope: ObservationEnvelope
+        self,
+        task_id: str,
+        envelope: ObservationEnvelope,
+        store: TaskObservationPort | None,
     ) -> tuple[str, ...]:
         key = (task_id, canonical_digest(observation_envelope_to_json(envelope)))
         cached = self._advice_event_ref_cache.pop(key, None)
         if cached is not None:
             self._advice_event_ref_cache[key] = cached
             return cached
-        batch = materialize_observation_envelope(envelope, task_id=task_id)
+        manifest_loader = getattr(store, "load_content_manifest", None)
+        recovered: list[ObservationContentManifest] = []
+        if callable(manifest_loader):
+            for ref in envelope.content_object_refs:
+                manifest = cast(ObservationContentManifest | None, manifest_loader(ref))
+                if manifest is not None:
+                    recovered.append(manifest)
+        captured_content = tuple(recovered)
+        batch = (
+            materialize_observation_envelope(
+                envelope,
+                task_id=task_id,
+                captured_content=captured_content,
+            )
+            if captured_content
+            else materialize_observation_envelope(envelope, task_id=task_id)
+        )
         refs = tuple(str(item.draft.event_id) for item in batch.drafts)
         self._advice_event_ref_cache[key] = refs
         while len(self._advice_event_ref_cache) > 4096:
@@ -2052,6 +2345,7 @@ class ObservationCoordinator:
         envelopes: tuple[ObservationEnvelope, ...],
         snapshot: object,
         *,
+        store: TaskObservationPort | None = None,
         legacy_writer_id: str | None = None,
     ) -> None:
         from yoetz.domain.observation import AdviceSnapshot
@@ -2086,7 +2380,7 @@ class ObservationCoordinator:
         refs_by_source: dict[str, set[str]] = {}
         for envelope in envelopes:
             refs_by_source.setdefault(envelope.source_identity, set()).update(
-                self._materialized_event_refs(runtime.task_id, envelope)
+                self._materialized_event_refs(runtime.task_id, envelope, store)
             )
         known_event_ids: set[str] = set()
         lifecycle_ref: str | None = None

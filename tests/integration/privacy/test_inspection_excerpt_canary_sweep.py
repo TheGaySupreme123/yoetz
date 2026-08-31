@@ -157,10 +157,12 @@ def test_inspection_snapshot_plaintext_and_ciphertext_stay_canary_free(tmp_path:
     initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
     store = SqliteObservationStore(db)
 
-    encoded, unavailable = build_inspection_excerpt_manifest(
+    encoded, unavailable, redacted, truncated = build_inspection_excerpt_manifest(
         (_artifact("src/env.py", b"export " + _SECRET + b"\n"),)
     )
     assert unavailable is False
+    assert redacted is True
+    assert truncated is False
     assert encoded is not None
     assert _SECRET not in encoded
     assert b"wJalrXUtnFEMI" not in encoded
@@ -184,10 +186,27 @@ def test_inspection_snapshot_plaintext_and_ciphertext_stay_canary_free(tmp_path:
         subject_state_digest=_DIGEST,
         changed_paths_digest=_DIGEST,
         relative_paths=("src/env.py",),
-        facts_object_id=None,
-        excerpt_object_id=ref.object_id,
+        facts_ref=None,
+        facts_content_digest=None,
+        facts_content_bytes=None,
+        excerpt_ref=ref,
+        excerpt_content_digest="sha256:" + hashlib.sha256(encoded).hexdigest(),
+        excerpt_content_bytes=len(encoded),
+        excerpt_redacted=redacted,
+        excerpt_truncated=truncated,
         recorded_at=Timestamp("2026-03-04T05:06:07.000Z"),
     )
+    snapshot = store.load_inspection_snapshot(
+        workspace=_WORKSPACE,
+        yoetz_session_id=_SESSION,
+        subject_state_digest=_DIGEST,
+    )
+    assert snapshot is not None
+    assert snapshot.excerpt_object_id == ref.object_id
+    assert snapshot.excerpt_content_digest == "sha256:" + hashlib.sha256(encoded).hexdigest()
+    assert snapshot.excerpt_content_bytes == len(encoded)
+    assert snapshot.excerpt_redacted is True
+    assert snapshot.excerpt_truncated is False
 
     surfaces = {
         "catalog_db": Path(tmp_path / "task.sqlite").read_bytes(),

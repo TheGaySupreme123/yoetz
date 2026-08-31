@@ -217,6 +217,11 @@ and keep each support claim bounded by its actual proof facets.
 
 ## Hooks and observation
 
+Cursor remains structural-only for issue #302: its native hooks retain digests and allowlisted
+outcome metadata but no captured content object, so they do not mint `observation_captured`
+evidence. Adding Cursor content capture requires a separately acknowledged capability/privacy
+expansion and exact host fixtures.
+
 Cursor has no `codex exec --json` import surface. Issue #301's bounded import authorization makes
 no Cursor adapter change; Cursor evidence continues through cooperative MCP and native
 hook/observation paths.

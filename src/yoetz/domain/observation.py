@@ -19,6 +19,8 @@ from yoetz.domain.values import (
     JsonValue,
     Timestamp,
     finding_id,
+    object_id,
+    session_id,
     timestamp_from_string,
     validate_commitment,
     validate_sha256_digest,
@@ -36,6 +38,7 @@ __all__ = [
     "OBSERVATION_WORKSPACE_DOMAIN",
     "ObservationControlCommand",
     "ObservationContentChunk",
+    "ObservationContentManifest",
     "ObservationContentKind",
     "ObservationCursor",
     "ObservationEnvelope",
@@ -44,6 +47,7 @@ __all__ = [
     "ObservationIngestRequest",
     "ObservationIngestResult",
     "ObservationLifecycle",
+    "ObservationInspectionSnapshot",
     "ObservationRevokeCommand",
     "ObservationSource",
     "ObservationStatus",
@@ -216,6 +220,7 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     OBSERVATION_STORAGE_CORRUPT = "observation_storage_corrupt"
     QUARANTINE_DETAIL_EVICTED = "quarantine_detail_evicted"
     CONTENT_CAPTURE_UNAVAILABLE = "content_capture_unavailable"
+    CONTENT_UNSELECTED = "content_unselected"
     CONTENT_REDACTED = "content_redacted"
     POLICY_UNTRUSTED = "policy_untrusted"
     VERIFICATION_STALE = "verification_stale"
@@ -549,6 +554,89 @@ class ObservationContentChunk:
         )
 
     __str__ = __repr__
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationContentManifest:
+    """Trusted-local descriptor for one encrypted observation-content object.
+
+    ``content_digest`` and ``content_bytes`` describe the secret-scanned bytes inside the
+    encrypted manifest, not the encrypted envelope or its structural wrapper. Historical rows
+    created before that binding was stored leave both values ``None`` and cannot earn captured
+    evidence provenance until the service re-observes and backfills them.
+    """
+
+    object_id: str
+    envelope_digest: str
+    content_kind: ObservationContentKind
+    part_index: int
+    part_count: int
+    redacted: bool
+    content_digest: str | None = None
+    content_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "object_id", object_id(self.object_id))
+        validate_sha256_digest(self.envelope_digest)
+        if type(self.content_kind) is not ObservationContentKind:
+            raise _invalid("invalid_event_enum")
+        object.__setattr__(self, "part_index", _nonnegative(self.part_index, maximum=15))
+        object.__setattr__(self, "part_count", _positive(self.part_count, maximum=16))
+        if self.part_index >= self.part_count or type(self.redacted) is not bool:
+            raise _invalid()
+        if (self.content_digest is None) != (self.content_bytes is None):
+            raise _invalid()
+        if self.content_digest is not None:
+            validate_sha256_digest(self.content_digest)
+            object.__setattr__(
+                self,
+                "content_bytes",
+                _positive(self.content_bytes, maximum=_MAX_CONTENT_CHUNK_BYTES),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationInspectionSnapshot:
+    """Immutable object bindings for one current changed-path inspection snapshot."""
+
+    snapshot_id: str
+    yoetz_session_id: str
+    subject_state_digest: str
+    changed_paths_digest: str
+    facts_object_id: str | None
+    facts_content_digest: str | None
+    facts_content_bytes: int | None
+    excerpt_object_id: str | None
+    excerpt_content_digest: str | None
+    excerpt_content_bytes: int | None
+    excerpt_redacted: bool
+    excerpt_truncated: bool
+    recorded_at: Timestamp
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "snapshot_id", _token(self.snapshot_id))
+        object.__setattr__(self, "yoetz_session_id", session_id(self.yoetz_session_id))
+        validate_sha256_digest(self.subject_state_digest)
+        validate_sha256_digest(self.changed_paths_digest)
+        if type(self.recorded_at) is not Timestamp:
+            raise _invalid("invalid_timestamp")
+        if type(self.excerpt_redacted) is not bool or type(self.excerpt_truncated) is not bool:
+            raise _invalid()
+        if self.excerpt_object_id is None and (self.excerpt_redacted or self.excerpt_truncated):
+            raise _invalid()
+        for object_value, digest_value, byte_value in (
+            (self.facts_object_id, self.facts_content_digest, self.facts_content_bytes),
+            (self.excerpt_object_id, self.excerpt_content_digest, self.excerpt_content_bytes),
+        ):
+            if (object_value is None, digest_value is None, byte_value is None) not in {
+                (True, True, True),
+                (False, False, False),
+            }:
+                raise _invalid()
+            if object_value is not None:
+                object_id(object_value)
+                validate_sha256_digest(cast(str, digest_value))
+                _positive(byte_value, maximum=4_194_304)
 
 
 def _content_chunks(value: object) -> tuple[ObservationContentChunk, ...]:
