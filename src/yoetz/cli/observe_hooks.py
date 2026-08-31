@@ -2019,6 +2019,7 @@ def handle_observe(
                         pending_frontier_notice.delivery_identity,
                         emitted_to_sequence=pending_frontier_notice.to_sequence,
                         emitted_task_id=pending_frontier_notice.task_id,
+                        emitted_head_digest=pending_frontier_notice.head_digest,
                     )
         # Advice selection, the lease, the stdout write itself and both delivery
         # commits sit past the 'drain' window; a blocked host pipe or a
@@ -2086,6 +2087,31 @@ def _claude_capability_profile_id(claude_version: object) -> str:
     return _CLAUDE_VERSION_TO_PROFILE.get(token, _CLAUDE_UNTESTED_PROFILE_ID)
 
 
+_CLAUDE_CHECK_TOOL_NAMES: Final = frozenset({"mcp__yoetz__check", "mcp__plugin_yoetz_yoetz__check"})
+
+
+def _record_claude_permission_denied(
+    payload: Mapping[str, JsonValue], *, _state: Path | None
+) -> None:
+    """Record that a host reviewer held a scoped semantic ``check`` (issue #467).
+
+    ``source`` is Claude Code's closed origin token (``auto_mode`` | ``permission_rule`` |
+    ``hook``). An absent source is attributed to auto mode, the only reviewer that produces a
+    ``classifier_denied`` / ``no_verdict`` reason. Any other tool name is ignored: the rendered
+    matcher is scoped to ``check`` and this ingress must not widen it.
+    """
+
+    if payload.get("tool_name") not in _CLAUDE_CHECK_TOOL_NAMES:
+        return
+    source = payload.get("source")
+    reason = (
+        "host_permission_rule_denied"
+        if source in {"permission_rule", "hook"}
+        else "host_auto_review_denied"
+    )
+    record_hook_diagnostic(reason, "PermissionDenied", _state=_state)
+
+
 def handle_claude_observe(
     *,
     event_name: str | None,
@@ -2122,6 +2148,12 @@ def handle_claude_observe(
     try:
         payload = read_hook_payload(stdin_bytes)
         raw_event = event_name or payload.get("hook_event_name")
+        if raw_event == "PermissionDenied":
+            # Not an observation of work: the host refused the call before Yoetz saw it. Retain
+            # only a closed reason token; tool input, reason prose, cwd, and ids are discarded.
+            _record_claude_permission_denied(payload, _state=_state)
+            hook_io.stdout_json({}, stdout)
+            return 0
         if type(raw_event) is not str or raw_event not in event_map:
             hook_io.stdout_json({}, stdout)
             return 0

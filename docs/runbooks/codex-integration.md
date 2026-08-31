@@ -126,6 +126,64 @@ digest-bound confirmation, preserve entries already observed as foreign, and ver
 state by re-reading it. A "registered" result still never implies Codex will successfully connect
 at runtime.
 
+## Auto review and host admission
+
+Under `approval_mode = auto` (the default), Codex needs approval for an MCP call iff
+`destructiveHint == true`, else never for `readOnlyHint`, else
+`destructive.unwrap_or(true) || open_world.unwrap_or(true)` (`codex-rs/core/src/mcp_tool_call.rs`).
+Applied to Yoetz's frozen descriptors, only the policy-route `check` (`openWorldHint: true`)
+needs approval; with `approvals_reviewer = "auto_review"` that approval goes to the guardian,
+whose bundled policy requires authorization for sensitive egress to name payload and destination
+"from trusted user content" — no descriptor wording can satisfy it. `approval_mode = "approve"`
+for one tool means the reviewer is never invoked for it; `prompt` forces it every time.
+
+Host admission (issue #467) writes the per-tool override into the trusted project's
+`.codex/config.toml`, which Codex loads only when the project is trusted, deep-merges over the
+user-level `[mcp_servers.yoetz]` (`codex-rs/config/src/merge.rs`), and which cannot carry
+provider or credential keys (`mcp_servers` is not on the project-layer denylist):
+
+```toml
+[mcp_servers.yoetz.tools.check]
+approval_mode = "approve"
+```
+
+or, for a plugin-managed route, `[plugins."yoetz@yoetz".mcp_servers.yoetz.tools.check]`. The
+form follows the exclusively observed owner (`yoetz provider status --json`
+`mcp_route.ownership_state`):
+
+```text
+yoetz integrate codex admission preview --project-root <project> --json
+yoetz integrate codex admission grant --project-root <project> --accept --preview-digest <digest>
+```
+
+A strict registered route, a missing or non-permitting grant, or an unreadable service refuses
+before any write. A same-name table that is not byte-exact (another `approval_mode`, an extra
+key) or a server-level `default_tools_approval_mode` is `foreign`: reported, never edited.
+An exact table for only the inactive owner does not make the active owner present; grant adds the
+applicable table instead of returning a false no-op. Removal strips every exact generated owner
+form; a config that held nothing else is deleted.
+
+A mutating preview warns `host_config_not_compare_and_swap`; keep Codex and other settings writers
+quiescent during apply. Yoetz rechecks the exact preimage immediately before mutation and verifies
+the result, but an ordinary file cannot exclude a non-cooperating same-UID writer in the final
+syscall window.
+
+Reverse: `integrate codex mcp install --route-profile strict --project-root <project>` and
+`integrate codex mcp remove --project-root <project>` sweep the project's entry and report
+`admission_cleanup` (the registration is global and the admission is project-scoped, so without
+`--project-root` nothing is swept and `provider status` reports `host_admission_drift` — that
+report walks from the launch directory to the repository root, so a subdirectory cwd does not
+read as `absent`);
+`integrate codex plugin remove` sweeps it for the bound project; a privacy commit that stops
+external review sweeps it in the ceremony. The sweep still runs when MCP install/remove is already
+a no-op, because the route state and the project admission state are independent.
+
+Codex exposes no typed denial signal for a guardian refusal: its `PermissionRequest` hook fires
+before the decision and may allow, so it is not a denial. A held check is visible only as the
+#187 pause/approval flow in the transcript. This is a documented gap, not a Yoetz diagnostic.
+The 2026-08-30 source read is not a live cell; the `auto_review` acceptance cell in issue #467
+remains to be run.
+
 ## Upgrading Yoetz under a running service
 
 The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz
@@ -142,7 +200,10 @@ yoetz service restart
 
 `yoetz service status` names the incompatible holder's pid, version, and manifest digest. Other
 hosts' sessions still running the previous build's bridge are refused after the switch until they
-restart; that is the intended outcome of an upgrade, not a defect.
+restart; that is the intended outcome of an upgrade, not a defect. The cooperative MCP bridge
+latches that availability failure for the process and serializes the first on-demand attempt so
+concurrent tool calls share one diagnostic (issues #469, #476); that behaviour is shared across
+hosts that use this bridge, not Codex-specific.
 
 The accepted setup path composes four separately reported layers in order: it installs the project
 skill at `.agents/skills/yoetz`, installs managed structural plugin/hook sources at

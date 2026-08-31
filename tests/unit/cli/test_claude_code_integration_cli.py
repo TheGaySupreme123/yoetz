@@ -142,3 +142,50 @@ def test_claude_cli_export_writes_a_plugin_dir_root_without_host_state(tmp_path:
 
     missing = CliRunner().invoke(app, ["integrate", "claude", "plugin", "export", "--json"])
     assert missing.exit_code == 2
+
+
+def test_a_strict_re_render_preview_discloses_the_host_admission_it_would_revoke(
+    tmp_path: Path,
+) -> None:
+    """A strict route is a reverse transition for host admission (issue #467)."""
+
+    project = tmp_path / "project"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.local.json").write_text(
+        json.dumps({"permissions": {"allow": ["mcp__plugin_yoetz_yoetz__check"]}}),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    preview = runner.invoke(
+        app,
+        _args(
+            tmp_path,
+            "preview",
+            "--action",
+            "install",
+            "--request-id",
+            "req_10000000-0000-4000-8000-000000000041",
+        ),
+    )
+    assert preview.exit_code == 0, preview.output
+    value = json.loads(preview.stdout)
+    assert value["mcp_route_profile"] == "strict"
+    assert value["admission_cleanup"] == {
+        "host": "claude",
+        "state": "present",
+        "surfaces": [".claude/settings.local.json"],
+    }
+    # Disclosure is read-only: the preview itself removes nothing.
+    assert (project / ".claude" / "settings.local.json").exists()
+
+    policy = runner.invoke(
+        app,
+        [
+            *[
+                argument if argument != "strict" else "policy"
+                for argument in _args(tmp_path, "preview", "--action", "install")
+            ]
+        ],
+    )
+    assert policy.exit_code == 0, policy.output
+    assert json.loads(policy.stdout)["admission_cleanup"] is None

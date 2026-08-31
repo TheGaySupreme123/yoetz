@@ -20,7 +20,9 @@
         "external_semantic_dispatch_only",
         "not_a_general_network_sandbox",
         "host_and_unrelated_processes_out_of_scope",
-        "registration_does_not_prove_activation"
+        "registration_does_not_prove_activation",
+        "host_admission_is_host_authorization_not_dispatch_proof",
+        "host_config_not_compare_and_swap"
       ],
       "surfaces": [
         "SECURITY.md",
@@ -33,7 +35,8 @@
       "tests": [
         "tests/conformance/honesty/test_strict_local_zero_egress.py",
         "tests/conformance/surfaces/test_mcp_contract_matrix.py",
-        "tests/subprocess/test_mcp_initialize_and_tools.py"
+        "tests/subprocess/test_mcp_initialize_and_tools.py",
+        "tests/unit/adapters/test_host_admission.py"
       ],
       "evidence_kinds": [
         "conformance_test",

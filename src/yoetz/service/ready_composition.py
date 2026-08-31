@@ -2131,7 +2131,25 @@ def _privacy_gated_semantic_evaluator(
                     scope=scope,
                     provider_binding=provider,
                 )
-                result = await privacy.evaluate_semantic(candidate, attempt_deadline)
+                wait = await runtime.ledger.load_disclosure_wait(
+                    handle.writer_id, handle.operation_id
+                )
+                if (
+                    wait is not None
+                    and wait.job_id == handle.job_id
+                    and wait.attempt_id == handle.attempt_id
+                    and wait.state == "awaiting"
+                ):
+                    # Exact replay after a trusted local decision resumes the already-prepared
+                    # proposal. Starting the semantic pipeline again would mint a replacement
+                    # proposal and could never observe the decision bound to this attempt.
+                    result = await privacy.resume(
+                        handle.provider_request_id,
+                        semantic_case.case_digest,
+                        attempt_deadline,
+                    )
+                else:
+                    result = await privacy.evaluate_semantic(candidate, attempt_deadline)
                 return _map_egress_to_final(
                     result,
                     ids,
