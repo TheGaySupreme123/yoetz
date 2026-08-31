@@ -338,11 +338,15 @@ def _provider_menu() -> None:
         if choice == "4":
 
             async def setup_subscription() -> object:
+                from yoetz.cli.codex_subscription import subscription_failure_reason
                 from yoetz.cli.setup import restart_service_for_semantic_composition
 
-                result = await prompt_codex_subscription_setup()
-                await restart_service_for_semantic_composition()
-                return result
+                try:
+                    result = await prompt_codex_subscription_setup()
+                    await restart_service_for_semantic_composition()
+                    return result
+                except (OSError, TimeoutError, ValueError) as error:
+                    raise ValueError(subscription_failure_reason(error)) from error
 
             _run_ceremony(setup_subscription)
         elif choice == "5":
@@ -352,9 +356,33 @@ def _provider_menu() -> None:
                 "Log out only the dedicated evaluator home and remove its binding?",
                 default=False,
             ):
-                _run_ceremony(codex_subscription_disconnect)
+
+                async def disconnect_subscription() -> object:
+                    from yoetz.cli.codex_subscription import subscription_failure_reason
+                    from yoetz.cli.setup import restart_service_for_semantic_composition
+
+                    try:
+                        result = await codex_subscription_disconnect()
+                        await restart_service_for_semantic_composition()
+                        return result
+                    except (OSError, TimeoutError, ValueError) as error:
+                        raise ValueError(subscription_failure_reason(error)) from error
+
+                _run_ceremony(disconnect_subscription)
         else:
-            _show(codex_subscription_rollback())
+
+            async def rollback_subscription() -> object:
+                from yoetz.cli.codex_subscription import subscription_failure_reason
+                from yoetz.cli.setup import restart_service_for_semantic_composition
+
+                try:
+                    result = codex_subscription_rollback()
+                    await restart_service_for_semantic_composition()
+                    return result
+                except (OSError, ValueError) as error:
+                    raise ValueError(subscription_failure_reason(error)) from error
+
+            _run_ceremony(rollback_subscription)
         return
     action: Literal["set", "rotate"] = "set" if choice == "2" else "rotate"
     from yoetz.config.load import load_config

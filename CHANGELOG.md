@@ -18,6 +18,14 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Codex subscription setup, disconnect, and rollback now recompose the local service on the CLI,
+  prompt-loop menu, and `/provider` surfaces so a running daemon cannot keep dispatching after the
+  binding changes. `/provider` also exposes subscription status, disconnect, rollback, and optional
+  account switch. READY composition treats the exact binding, digest, and dedicated home as
+  credential presence and no longer spawns a preflight Codex app-server; `account/read` and
+  `model/list` stay inside `evaluate()`. Subscription CLI failures map `OSError` /
+  `FileNotFoundError` to closed tokens instead of echoing native text (PR #480 review).
+
 - The native Cursor plugin's plugin-owned `mcp.json` now launches the exact Yoetz executable the
   plugin's hooks bind (the `/2` marker launcher) instead of a bare `yoetz` that Cursor's sanitized
   desktop PATH could resolve to an older ambient installation. `yoetz integrate cursor plugin

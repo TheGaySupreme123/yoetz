@@ -186,7 +186,9 @@ system does not have.
 - **No bounded provider probe exists.** The local service exposes no live provider test, so
   `/provider` reports that a connection test is unavailable rather than reporting a pass. The
   `provider_transport_tested` layer is consequently never verified in this build. This is the
-  intended failure mode: a test that cannot run is not a test that succeeded.
+  intended failure mode: a test that cannot run is not a test that succeeded. `/provider` does
+  expose Codex subscription status, disconnect, rollback, and optional account switch, and
+  recomposes the service after a binding mutation.
 - **Privacy widening is selected here and authorized only in the trusted terminal.** `/privacy`
   shows the current posture and the one recommended policy — Private without current eligible
   exact-route evidence, Assisted review with it — together with what accepting it costs, then offers exactly

@@ -44,9 +44,16 @@ yoetz provider codex-subscription rollback
 Setup resolves the selected npm wrapper to its exact native binary and refuses every unknown
 digest. Before Codex login it shows the runtime, destination, model/reasoning selection, dedicated
 home, unknown plan-specific data-use posture, privacy implication, and reverse commands. Browser
-and device-code login are the only accepted methods. Disconnect asks Codex to log out and removes
-the Yoetz binding only after structural confirmation; rollback never logs out or deletes the home
-or installation.
+and device-code login are the only accepted methods. Guided setup, the prompt-loop menu, and
+`/provider` can log out the dedicated home first when switching accounts. Disconnect asks Codex to
+log out and removes the Yoetz binding only after structural confirmation; rollback never logs out
+or deletes the home or installation. CLI, menu, and `/provider` recompose the local service after
+setup, disconnect, or rollback so a running daemon cannot keep dispatching the previous cell.
+
+Service READY composition does not spawn a Codex app-server to prove login. The READY credential
+fact is the exact binding, executable digest, isolated config, and dedicated home. `account/read`
+and `model/list` run inside the same `evaluate()` child that will disclose the case, or from
+`yoetz provider codex-subscription status`.
 
 ## Isolation contract
 

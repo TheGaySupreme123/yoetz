@@ -411,6 +411,26 @@ def _bounded_failure_line(reason: str, *, prefix: str | None = None) -> str:
     return head if remediation is None else f"{head}: {remediation}"
 
 
+def _codex_subscription_cli_failure(error: BaseException) -> None:
+    from yoetz.cli.codex_subscription import subscription_failure_reason
+
+    _stderr(_bounded_failure_line(subscription_failure_reason(error), prefix="codex_subscription"))
+
+
+async def _codex_subscription_mutate[T](operation: Callable[[], Awaitable[T]]) -> T:
+    """Apply a subscription mutation, then recompose so a running service cannot keep the old cell."""
+
+    from yoetz.cli.setup import restart_service_for_semantic_composition
+
+    result = await operation()
+    await restart_service_for_semantic_composition()
+    return result
+
+
+async def _noop_subscription_recompose() -> None:
+    return None
+
+
 def _elevated_failure(error: Exception) -> int:
     """Report one bounded elevated-bootstrap failure with its exact next step."""
 
@@ -2516,20 +2536,22 @@ def provider_codex_subscription_setup(
                 _finish(20)
                 return
         payload = run_async(
-            lambda: codex_subscription_setup(
-                executable=executable,
-                codex_home=destination,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                login_mode="device_code" if device_code else "browser",
-                open_browser=open_browser,
-                switch_account=switch_account,
+            lambda: _codex_subscription_mutate(
+                lambda: codex_subscription_setup(
+                    executable=executable,
+                    codex_home=destination,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    login_mode="device_code" if device_code else "browser",
+                    open_browser=open_browser,
+                    switch_account=switch_account,
+                )
             )
         )
         _human_or_json(cast(Mapping[str, JsonValue], payload), json_output=json_output)
         _finish(0)
     except (OSError, TimeoutError, ValueError) as error:
-        _stderr(_bounded_failure_line(str(error), prefix="codex_subscription"))
+        _codex_subscription_cli_failure(error)
         _finish(20)
 
 
@@ -2544,7 +2566,7 @@ def provider_codex_subscription_status(json_output: _JSON = False) -> None:
         _human_or_json(cast(Mapping[str, JsonValue], payload), json_output=json_output)
         _finish(0 if payload.get("model_available") is True else 20)
     except (OSError, TimeoutError, ValueError) as error:
-        _stderr(_bounded_failure_line(str(error), prefix="codex_subscription"))
+        _codex_subscription_cli_failure(error)
         _finish(20)
 
 
@@ -2568,11 +2590,11 @@ def provider_codex_subscription_disconnect(
         _finish(20)
         return
     try:
-        payload = run_async(codex_subscription_disconnect)
+        payload = run_async(lambda: _codex_subscription_mutate(codex_subscription_disconnect))
         _human_or_json(cast(Mapping[str, JsonValue], payload), json_output=json_output)
         _finish(0)
     except (OSError, TimeoutError, ValueError) as error:
-        _stderr(_bounded_failure_line(str(error), prefix="codex_subscription"))
+        _codex_subscription_cli_failure(error)
         _finish(20)
 
 
@@ -2583,10 +2605,16 @@ def provider_codex_subscription_rollback(json_output: _JSON = False) -> None:
     from yoetz.cli.codex_subscription import codex_subscription_rollback
 
     try:
-        _human_or_json(codex_subscription_rollback(), json_output=json_output)
+        payload = codex_subscription_rollback()
+
+        async def recompose() -> None:
+            await _codex_subscription_mutate(_noop_subscription_recompose)
+
+        run_async(recompose)
+        _human_or_json(payload, json_output=json_output)
         _finish(0)
     except (OSError, ValueError) as error:
-        _stderr(_bounded_failure_line(str(error), prefix="codex_subscription"))
+        _codex_subscription_cli_failure(error)
         _finish(20)
 
 

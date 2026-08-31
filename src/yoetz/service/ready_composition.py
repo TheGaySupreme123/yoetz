@@ -25,7 +25,6 @@ from yoetz.adapters.privacy.gateway import PolicyEnforcingOutboundGateway
 from yoetz.adapters.privacy.local_enforcer import LocalPrivacyEnforcer
 from yoetz.adapters.providers.codex_app_server import (
     CodexAppServerProfile,
-    codex_account_status,
     codex_binding_from_config,
 )
 from yoetz.adapters.providers.factory import external_factory_builders_from_config
@@ -85,7 +84,7 @@ from yoetz.application.service import (
     ServiceReadyContext,
     VerificationPolicy,
 )
-from yoetz.config.models import YoetzConfig
+from yoetz.config.models import ExternalRuntimeProfileConfig, YoetzConfig
 from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundle
 from yoetz.config.privacy import safe_privacy_bootstrap, seed_policy_if_absent
 from yoetz.domain.events import RuntimeProfile
@@ -191,6 +190,7 @@ __all__ = [
     "build_runtime_adapter_factories",
     "open_ready_catalog",
     "provide_service_ready_context",
+    "subscription_runtime_structurally_ready",
 ]
 
 _CATALOG_NAME = "catalog.sqlite3"
@@ -2288,6 +2288,22 @@ def _policy_packs(manifest: Mapping[str, CanonicalJsonValue]) -> tuple[str, ...]
     return tuple(cast(list[str], values))
 
 
+def subscription_runtime_structurally_ready(runtime: object) -> bool:
+    """READY fact for Codex OAuth: exact binding, digest, and dedicated home.
+
+    Login and model availability stay inside the evaluate() child. A READY snapshot
+    must not spawn a preflight app-server process group.
+    """
+
+    if type(runtime) is not ExternalRuntimeProfileConfig:
+        return False
+    try:
+        CodexAppServerProfile.from_config(runtime).verify_local_binding()
+    except OSError, TypeError, ValueError:
+        return False
+    return True
+
+
 async def provide_service_ready_context(
     service_generation: int,
     vault_generation: int,
@@ -2351,17 +2367,7 @@ async def provide_service_ready_context(
         if candidate_binding is None:
             return False
         if config.external_runtime is not None:
-            try:
-                profile = CodexAppServerProfile.from_config(config.external_runtime)
-                profile.verify_local_binding()
-                status = await codex_account_status(profile)
-            except Exception:
-                return False
-            return (
-                status.auth_mode == "chatgpt"
-                and status.model_available
-                and status.cleanup != "failed"
-            )
+            return subscription_runtime_structurally_ready(config.external_runtime)
         credential_binding = provider_credential_profile_binding(
             candidate_binding.provider_id,
             candidate_binding.model_id,

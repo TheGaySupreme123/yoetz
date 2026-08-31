@@ -121,6 +121,10 @@ _PROVIDER_SETUP_DIRECT_REASONS: Final = frozenset(
         "service_not_ready",
         "stored_result_recovered",
         "trusted_console_required",
+        "codex_runtime_not_found",
+        "codex_runtime_unavailable",
+        "codex_subscription_timeout",
+        "codex_subscription_failed",
     }
 )
 
@@ -1855,9 +1859,13 @@ async def _interactive_provider_setup(
         try:
             status = await prompt_codex_subscription_setup()
         except (OSError, TimeoutError, ValueError) as error:
+            from yoetz.cli.codex_subscription import subscription_failure_reason
+
             provider_report["binding"] = "failed"
             provider_report["credential"] = "external_runtime_oauth"
-            provider_report["credential_reason"] = _allowlisted_provider_setup_reason(str(error))
+            provider_report["credential_reason"] = _allowlisted_provider_setup_reason(
+                subscription_failure_reason(error)
+            )
             wipe_auto_passphrase()
             return _provider_setup_result(service, provider_report)
         provider_report.update(

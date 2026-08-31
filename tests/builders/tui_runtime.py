@@ -147,6 +147,7 @@ class FakeRuntime:
     applied_codex_homes: list[Path] = field(default_factory=lambda: [])
     ceremonies: list[str] = field(default_factory=lambda: [])
     bindings: list[tuple[str, str]] = field(default_factory=lambda: [])
+    subscription_actions: list[str] = field(default_factory=lambda: [])
     checks: list[tuple[str, CheckMode]] = field(default_factory=lambda: [])
     opened: list[str] = field(default_factory=lambda: [])
 
@@ -328,6 +329,61 @@ class FakeRuntime:
                 readiness_determinable=True,
             )
         return self.credential_result
+
+    def codex_subscription_defaults(self) -> tuple[str, str, str, str]:
+        return "/opt/codex/codex", "/var/lib/yoetz/codex-home", "gpt-5.6-sol", "high"
+
+    def preview_codex_subscription(
+        self, executable: str, codex_home: str, model: str, reasoning_effort: str
+    ) -> dict[str, object]:
+        return {
+            "executable_path": executable,
+            "executable_sha256": "sha256:" + "a" * 64,
+            "runtime_version": "0.150.1",
+            "capability_cell_sha256": "sha256:" + "b" * 64,
+            "capability_evidence_expires_at": "2026-11-30T00:00:00Z",
+            "codex_home": codex_home,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+        }
+
+    async def setup_codex_subscription(
+        self,
+        executable: str,
+        codex_home: str,
+        model: str,
+        reasoning_effort: str,
+        *,
+        switch_account: bool = False,
+    ) -> dict[str, object]:
+        action = "switch" if switch_account else "setup"
+        self.subscription_actions.append(action)
+        self.ceremonies.append(f"codex_subscription:{action}")
+        return {
+            "auth_mode": "chatgpt",
+            "plan_type": "plus",
+            "model_available": True,
+            "process_cleanup": "terminated",
+        }
+
+    async def codex_subscription_status(self) -> dict[str, object]:
+        self.subscription_actions.append("status")
+        return {
+            "auth_mode": "chatgpt",
+            "plan_type": "plus",
+            "model_available": True,
+            "process_cleanup": "terminated",
+        }
+
+    async def disconnect_codex_subscription(self) -> dict[str, object]:
+        self.subscription_actions.append("disconnect")
+        self.ceremonies.append("codex_subscription:disconnect")
+        return {"binding_removed": True, "process_cleanup": "terminated"}
+
+    async def rollback_codex_subscription(self) -> dict[str, object]:
+        self.subscription_actions.append("rollback")
+        self.ceremonies.append("codex_subscription:rollback")
+        return {"binding_removed": True, "codex_installation_preserved": True}
 
     async def initialize_passphrase_vault(self) -> None:
         self.ceremonies.append("initialize_vault")

@@ -756,14 +756,28 @@ class YoetzRuntime:
                 reasoning_effort=reasoning_effort,
             )
         except (OSError, ValueError) as error:
-            raise RuntimeError_(str(error), "that Codex evaluator cell is not supported") from None
+            from yoetz.cli.codex_subscription import subscription_failure_reason
+
+            raise RuntimeError_(
+                subscription_failure_reason(error),
+                "that Codex evaluator cell is not supported",
+            ) from None
 
     async def setup_codex_subscription(
-        self, executable: str, codex_home: str, model: str, reasoning_effort: str
+        self,
+        executable: str,
+        codex_home: str,
+        model: str,
+        reasoning_effort: str,
+        *,
+        switch_account: bool = False,
     ) -> Mapping[str, object]:
-        """Run Codex-owned browser login, then recompose the service around the exact binding."""
+        """Run Codex-owned login, then recompose the service around the exact binding."""
 
-        from yoetz.cli.codex_subscription import codex_subscription_setup
+        from yoetz.cli.codex_subscription import (
+            codex_subscription_setup,
+            subscription_failure_reason,
+        )
         from yoetz.cli.setup import restart_service_for_semantic_composition
 
         try:
@@ -774,12 +788,69 @@ class YoetzRuntime:
                 reasoning_effort=reasoning_effort,
                 login_mode="browser",
                 open_browser=True,
-                switch_account=False,
+                switch_account=switch_account,
             )
             await restart_service_for_semantic_composition()
             return result
         except (OSError, TimeoutError, ValueError) as error:
-            raise RuntimeError_(str(error), "Codex subscription setup did not complete") from None
+            raise RuntimeError_(
+                subscription_failure_reason(error),
+                "Codex subscription setup did not complete",
+            ) from None
+
+    async def codex_subscription_status(self) -> Mapping[str, object]:
+        """Read structural Codex login/model state without sending a task case."""
+
+        from yoetz.cli.codex_subscription import (
+            codex_subscription_status,
+            subscription_failure_reason,
+        )
+
+        try:
+            return await codex_subscription_status()
+        except (OSError, TimeoutError, ValueError) as error:
+            raise RuntimeError_(
+                subscription_failure_reason(error),
+                "Codex subscription status could not be read",
+            ) from None
+
+    async def disconnect_codex_subscription(self) -> Mapping[str, object]:
+        """Log out the dedicated home, remove the binding, then recompose the service."""
+
+        from yoetz.cli.codex_subscription import (
+            codex_subscription_disconnect,
+            subscription_failure_reason,
+        )
+        from yoetz.cli.setup import restart_service_for_semantic_composition
+
+        try:
+            result = await codex_subscription_disconnect()
+            await restart_service_for_semantic_composition()
+            return result
+        except (OSError, TimeoutError, ValueError) as error:
+            raise RuntimeError_(
+                subscription_failure_reason(error),
+                "Codex subscription disconnect did not complete",
+            ) from None
+
+    async def rollback_codex_subscription(self) -> Mapping[str, object]:
+        """Remove only the Yoetz binding, then recompose so the old cell cannot dispatch."""
+
+        from yoetz.cli.codex_subscription import (
+            codex_subscription_rollback,
+            subscription_failure_reason,
+        )
+        from yoetz.cli.setup import restart_service_for_semantic_composition
+
+        try:
+            result = codex_subscription_rollback()
+            await restart_service_for_semantic_composition()
+            return result
+        except (OSError, ValueError) as error:
+            raise RuntimeError_(
+                subscription_failure_reason(error),
+                "Codex subscription rollback did not complete",
+            ) from None
 
     def save_provider_binding(
         self, option: ProviderOption, model: str, *, https_origin: str | None = None

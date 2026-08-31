@@ -499,8 +499,9 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
         "notes": (
             "semantic_ready is structural readiness only; it does not prove live provider dispatch.",
             "credential_connected reports the configured provider's credential, not any provider.",
-            "For external_runtime_oauth it means Codex structurally reported ChatGPT login; "
-            "Yoetz never reads the credential.",
+            "For external_runtime_oauth, READY credential presence is the exact binding, digest, "
+            "and dedicated home; ChatGPT login and model availability are proven inside evaluate() "
+            "or by 'yoetz provider codex-subscription status'. Yoetz never reads the credential.",
             "A credential for a different provider than the bound endpoint does not count.",
             "unknown means the service could not be read, not that the step is incomplete.",
             "agent_route_semantic_ready describes one exclusively observed Codex MCP owner; "

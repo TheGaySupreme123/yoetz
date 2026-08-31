@@ -209,6 +209,7 @@ class _Runtime:
         )
         self.predisclosure_event = predisclosure_event
         self.sent: list[dict[str, object]] = []
+        self.methods: list[str] = []
         self.events: list[dict[str, object]] = [
             {
                 "method": "item/completed",
@@ -241,6 +242,7 @@ class _Runtime:
         self, request_id: int, method: str, params: object, timeout: float
     ) -> dict[str, object]:
         del request_id, params, timeout
+        self.methods.append(method)
         if method == "initialize":
             return {
                 "codexHome": str(self.profile.codex_home),
@@ -320,9 +322,11 @@ async def _evaluate(
 async def test_success_records_weaker_runtime_boundary_without_identity_or_transcript(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result = await _evaluate(monkeypatch, _Runtime(_profile()))
+    runtime = _Runtime(_profile())
+    result = await _evaluate(monkeypatch, runtime)
 
     assert type(result) is SemanticResultSuccess
+    assert runtime.methods[:3] == ["initialize", "account/read", "model/list"]
     evidence = result.provenance.runtime_evidence
     assert evidence is not None
     assert evidence.credential_authority == "external_runtime_oauth"

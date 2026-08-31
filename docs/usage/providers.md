@@ -54,7 +54,8 @@ capability-cell identity digest and evidence expiry, strict configuration digest
 effort, and dedicated owner-private `CODEX_HOME` are bound in nonsecret config and rechecked before
 every attempt. Expired capability evidence fails before a child starts. A shell alias, neighboring
 version, moved binary, modified evaluator config, API key, proxy variable, or ambient Codex home is
-not a fallback.
+not a fallback. Guided first-run, the prompt-loop provider menu, and `/provider` can log out the
+dedicated home first when you choose to switch ChatGPT accounts.
 
 Read structural state without sending a task case:
 
@@ -70,10 +71,11 @@ yoetz provider codex-subscription disconnect --accept  # Codex logout, then remo
 yoetz provider codex-subscription rollback             # remove binding; preserve home/install
 ```
 
-The subscription endpoint has unknown data-use posture, so Yoetz does not mark it as the Assisted
-recommendation. You may still explicitly approve a bounded external-review policy. Login, plan
-name, and model listing are readiness facts—not privacy consent and not proof that a semantic turn
-ran. See the [exact evaluator runbook](../runbooks/codex-subscription-evaluator.md).
+Setup, disconnect, and rollback recompose the local service afterwards. The subscription endpoint
+has unknown data-use posture, so Yoetz does not mark it as the Assisted recommendation. You may
+still explicitly approve a bounded external-review policy. Login, plan name, and model listing are
+readiness facts collected by status or by the evaluate child—not privacy consent and not proof that
+a semantic turn ran. See the [exact evaluator runbook](../runbooks/codex-subscription-evaluator.md).
 
 ## Interactive model choices
 
@@ -177,9 +179,11 @@ credential_authority = "external_runtime_oauth"
 ```
 
 You can edit API-provider `config.toml` bindings by hand. `/provider` writes the same API binding
-or drives the digest-checked Codex subscription setup; it always shows the destination and privacy
-posture before asking for an API key or opening Codex login. Storing either binding does not switch
-external review on.
+or drives the digest-checked Codex subscription setup, status, disconnect, rollback, and optional
+account switch; it always shows the destination and privacy posture before asking for an API key or
+opening Codex login. Storing either binding does not switch external review on. After a
+subscription setup, disconnect, or rollback, Yoetz recomposes the local service so a running
+daemon cannot keep dispatching the previous cell.
 
 ## Readiness (`yoetz provider status`)
 
@@ -196,17 +200,19 @@ separate verdict describes the Codex agent route.
 1. the local service is running and unlocked
 2. `verification.semantic` is not `disabled`
 3. a provider endpoint is bound in `config.toml`
-4. **the bound provider's** authority is connected: a matching vault API credential, or a
-   structurally ready Codex-managed ChatGPT login for `external_runtime_oauth`
+4. **the bound provider's** authority is connected: a matching vault API credential, or — for a
+   Codex subscription — the exact digest-bound executable, isolated config, and dedicated home
 5. the machine privacy ceiling enables the `llm_inference` channel
 6. the repository derived from the trusted current session has an exact granted row beneath that
    ceiling
 
 Condition 4 is per-provider and per-authority, not "any credential". If you rebind from one API
 preset to another, the old vault credential does not carry over. If you switch to the subscription
-profile, no vault credential carries over at all: the exact dedicated Codex home must report
-`authMode=chatgpt` and the configured model/reasoning cell. Failure stays
-`credential_unavailable`, never a misleading ready state.
+profile, no vault credential carries over at all: READY composition treats the exact binding,
+digest, and dedicated home as credential presence and does not spawn a Codex process to prove
+login. ChatGPT `authMode` and the configured model/reasoning cell are proven later, inside the
+same `evaluate()` child that will send the case, or by `yoetz provider codex-subscription status`.
+Failure stays `credential_unavailable`, never a misleading ready state.
 
 Conditions 4 and 5 are independent. Closing only one moves the failure without making semantic
 review work — the check reason changes, the outcome does not.

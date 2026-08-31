@@ -177,14 +177,18 @@ confirmation.
 
 Choose a preset — OpenAI, Fireworks AI, Anthropic, Google Gemini, OpenRouter, Vercel AI Gateway,
 or a custom OpenAI-compatible HTTPS endpoint — or choose **Codex with ChatGPT subscription**.
-Yoetz shows the endpoint/runtime and privacy posture before asking for an API key or opening Codex
-login, and states plainly that storing a binding does not switch external review on.
+The same command also offers Codex subscription **status**, **disconnect**, **rollback**, and
+**switch account**. Yoetz shows the endpoint/runtime and privacy posture before asking for an API
+key or opening Codex login, and states plainly that storing a binding does not switch external
+review on.
 
 API-provider keys are entered through the secure prompt described under *Secrets* below. For a
 subscription, `/provider` asks for the exact Codex executable, dedicated evaluator home, model, and
 reasoning effort; validates the supported digest-bound cell; shows destination, plan/terms notice,
-privacy boundary, disconnect, and rollback; then suspends the UI for Codex's browser flow. OAuth
-credentials never pass through a widget or Yoetz vault.
+privacy boundary, disconnect, rollback, and optional account switch; then suspends the UI for
+Codex's browser flow. OAuth credentials never pass through a widget or Yoetz vault. After setup,
+disconnect, or rollback, the local service is recomposed so a running daemon cannot keep the old
+cell.
 
 Afterwards Yoetz reports what it actually knows:
 

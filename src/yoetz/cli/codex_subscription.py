@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import re
 import sys
 import tomllib
 import webbrowser
@@ -47,6 +48,7 @@ __all__ = [
     "default_codex_home",
     "prompt_codex_subscription_setup",
     "resolve_supported_codex_executable",
+    "subscription_failure_reason",
 ]
 
 _DARWIN_ARM64_EXECUTABLE_SHA256: Final = (
@@ -54,6 +56,7 @@ _DARWIN_ARM64_EXECUTABLE_SHA256: Final = (
 )
 _DARWIN_ARM64_SOURCE_IDENTITY: Final = "openai-codex-npm-darwin-arm64-0.150.1"
 _SUPPORTED_REASONING: Final = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
+_CLOSED_FAILURE_TOKEN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
 def _sha256_file(path: Path) -> str:
@@ -64,24 +67,50 @@ def _sha256_file(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def subscription_failure_reason(error: BaseException) -> str:
+    """Map subscription CLI failures to one closed token; never echo native OS text."""
+
+    if isinstance(error, FileNotFoundError):
+        return "codex_runtime_not_found"
+    if isinstance(error, TimeoutError):
+        return "codex_subscription_timeout"
+    if isinstance(error, OSError):
+        return "codex_runtime_unavailable"
+    if isinstance(error, ValueError):
+        token = str(error)
+        if _CLOSED_FAILURE_TOKEN.fullmatch(token) is not None:
+            return token
+    return "codex_subscription_failed"
+
+
 def resolve_supported_codex_executable(selected: Path) -> tuple[Path, str, str]:
     """Resolve only the selected npm distribution to its exact native executable."""
 
-    resolved = selected.expanduser().resolve(strict=True)
+    try:
+        resolved = selected.expanduser().resolve(strict=True)
+    except FileNotFoundError as error:
+        raise ValueError("codex_runtime_not_found") from error
+    except OSError as error:
+        raise ValueError("codex_runtime_unavailable") from error
     if resolved.name == "codex.js" and resolved.parent.name == "bin":
         package_root = resolved.parent.parent
         if sys.platform != "darwin" or platform.machine() != "arm64":
             raise ValueError("codex_runtime_platform_unsupported")
-        resolved = (
-            package_root
-            / "node_modules"
-            / "@openai"
-            / "codex-darwin-arm64"
-            / "vendor"
-            / "aarch64-apple-darwin"
-            / "bin"
-            / "codex"
-        ).resolve(strict=True)
+        try:
+            resolved = (
+                package_root
+                / "node_modules"
+                / "@openai"
+                / "codex-darwin-arm64"
+                / "vendor"
+                / "aarch64-apple-darwin"
+                / "bin"
+                / "codex"
+            ).resolve(strict=True)
+        except FileNotFoundError as error:
+            raise ValueError("codex_runtime_not_found") from error
+        except OSError as error:
+            raise ValueError("codex_runtime_unavailable") from error
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise ValueError("codex_runtime_executable_invalid")
     digest = _sha256_file(resolved)
@@ -293,6 +322,10 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
     typer.echo(f"  rollback only: {preview['rollback_command']}")
     if not typer.confirm("Continue to Codex sign-in?", default=False):
         raise ValueError("cancelled")
+    switch_account = typer.confirm(
+        "Log out the dedicated home first (switch ChatGPT account)?",
+        default=False,
+    )
     return await codex_subscription_setup(
         executable=executable,
         codex_home=codex_home,
@@ -300,7 +333,7 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
         reasoning_effort=reasoning_effort,
         login_mode=cast(Literal["browser", "device_code"], login_choice),
         open_browser=login_choice == "browser",
-        switch_account=False,
+        switch_account=switch_account,
     )
 
 
