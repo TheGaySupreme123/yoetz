@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,26 @@ from yoetz.adapters.providers.codex_app_server import (
 from yoetz.cli import codex_subscription as module
 from yoetz.config.models import ExternalRuntimeProfileConfig, YoetzConfig
 from yoetz.config.write import codex_subscription_runtime
+
+
+@pytest.fixture(autouse=True)
+def _ambient_config_environment(  # pyright: ignore[reportUnusedFunction]
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Resolve the default evaluator home from an empty configuration, not the ambient one.
+
+    ``default_codex_home`` reads the process environment through the strict loader, which
+    refuses every unknown ``YOETZ_``-prefixed variable. The CI unit job exports
+    ``YOETZ_DENY_NETWORK=1`` for the whole job and a developer machine carries its own
+    ``config.toml``; neither is configuration resolution under test here, so every case in this
+    module starts from no ``YOETZ_`` variables and a config path that does not exist.
+    """
+
+    for name in tuple(os.environ):
+        if name.startswith("YOETZ_"):
+            monkeypatch.delenv(name)
+    absent = tmp_path_factory.mktemp("config") / "absent.toml"
+    monkeypatch.setenv("YOETZ_CONFIG", str(absent))
 
 
 def _binding(executable: Path, home: Path):
