@@ -324,6 +324,101 @@ def test_observation_capture_provenance_is_additive_only() -> None:
     assert '"1.2.0"' in json.dumps(opaque_1_1)
 
 
+# The released 2.1.0 version report is frozen: `scripts/generate_schemas.py` reloads its bytes
+# from disk instead of re-deriving them, so an accidental revert of the file would be re-pinned
+# into `schemas/manifest.json` without any generator or digest check noticing. These are the exact
+# released cardinalities and versions; only the live 2.2.0 report tracks the current inventory.
+_FROZEN_VERSION_MANIFEST_2_1_COUNTS: Mapping[str, str] = MappingProxyType(
+    {
+        "canonical_vectors": "10",
+        "guidance_resources": "5",
+        "migrations": "11",
+        "runtime_config_resources": "1",
+        "runtime_support_resources": "1",
+        "schema_resources": "120",
+        "skill_resources": "12",
+        "total": "160",
+    }
+)
+_FROZEN_VERSION_MANIFEST_2_1_EVENTS: Mapping[str, str] = MappingProxyType(
+    {
+        "check_recorded": "1.1.0",
+        "claim_recorded": "1.0.0",
+        "evidence_recorded": "1.2.0",
+        "finding_recorded": "1.1.0",
+        "session_opened": "1.1.0",
+        "session_resumed": "1.1.0",
+    }
+)
+_FROZEN_VERSION_MANIFEST_2_1_REQUESTS: Mapping[str, str] = MappingProxyType(
+    {
+        "catalog": "5.0.0",
+        "outbound-case": "1.1.0",
+        "pending-agent": "5.0.0",
+        "prepare-result": "5.0.0",
+        "publish-work-request": "1.0.0",
+        "review-result": "5.0.0",
+        "status": "5.0.0",
+    }
+)
+
+
+def _version_manifest_document(version: str) -> dict[str, Any]:
+    return _load_manifest(
+        (_ROOT_SCHEMA_DIR / f"version/version-manifest-{version}.schema.json").read_bytes()
+    )
+
+
+def _version_manifest_consts(document: dict[str, Any], definition: str) -> dict[str, str]:
+    properties = cast(dict[str, dict[str, str]], document["$defs"][definition]["properties"])
+    return {name: entry["const"] for name, entry in properties.items()}
+
+
+def test_released_version_manifest_2_1_stays_frozen_at_its_released_snapshot() -> None:
+    document = _version_manifest_document("2.1.0")
+
+    assert document["properties"]["schema_version"]["const"] == "2.1.0"
+    counts = _version_manifest_consts(document, "resource_counts")
+    assert counts == dict(_FROZEN_VERSION_MANIFEST_2_1_COUNTS)
+    total = int(counts["total"])
+    resources_property = cast(dict[str, Any], document["properties"]["resources"])
+    assert resources_property["maxItems"] == total
+    assert resources_property["oneOf"] == [
+        {"maxItems": 0},
+        {"maxItems": total, "minItems": total},
+    ]
+    events = _version_manifest_consts(document, "event_schema_versions")
+    for name, version in _FROZEN_VERSION_MANIFEST_2_1_EVENTS.items():
+        assert events[name] == version
+    requests = _version_manifest_consts(document, "request_result_schema_versions")
+    for name, version in _FROZEN_VERSION_MANIFEST_2_1_REQUESTS.items():
+        assert requests[name] == version
+
+    root_bytes = (_ROOT_SCHEMA_DIR / "version/version-manifest-2.1.0.schema.json").read_bytes()
+    packaged = _PACKAGE_SCHEMA_DIR.joinpath("version/version-manifest-2.1.0.schema.json")
+    assert root_bytes == packaged.read_bytes()
+
+
+def test_live_version_manifest_2_2_tracks_the_current_inventory() -> None:
+    from yoetz.version import REVIEWED_RESOURCE_COUNT
+
+    document = _version_manifest_document("2.2.0")
+
+    assert document["properties"]["schema_version"]["const"] == "2.2.0"
+    counts = _version_manifest_consts(document, "resource_counts")
+    assert int(counts["total"]) == REVIEWED_RESOURCE_COUNT
+    assert sum(int(count) for name, count in counts.items() if name != "total") == int(
+        counts["total"]
+    )
+    assert int(counts["schema_resources"]) > int(
+        _FROZEN_VERSION_MANIFEST_2_1_COUNTS["schema_resources"]
+    )
+    events = _version_manifest_consts(document, "event_schema_versions")
+    assert events["claim_recorded"] == "1.1.0"
+    requests = _version_manifest_consts(document, "request_result_schema_versions")
+    assert requests["publish-work-request"] == "1.1.0"
+
+
 def test_schema_documents_are_frozen_when_catalog_available() -> None:
     schemas = _schema_module()
     catalog = schemas.load_schema_catalog()
