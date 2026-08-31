@@ -2299,7 +2299,7 @@ def subscription_runtime_structurally_ready(runtime: object) -> bool:
         return False
     try:
         CodexAppServerProfile.from_config(runtime).verify_local_binding()
-    except OSError, TypeError, ValueError:
+    except (OSError, TypeError, ValueError):  # fmt: skip
         return False
     return True
 
