@@ -596,15 +596,20 @@ def _apply_claim(
     event: AcceptedEvent,
 ) -> None:
     key = _locator_id(event, claim_id)
+    # A v1.0 claim id may be re-published, and an unreadable payload tombstones the row in place.
+    # Neither undoes a correction that already replaced this claim, so the revision edge is carried
+    # across every rewrite of the row rather than derived from the row being written.
+    existing_supersession = (
+        None if (existing := claims.get(key)) is None else existing.superseded_by_claim_id
+    )
     if event.payload is None:
-        existing = claims.get(key)
         claims[key] = ClaimProjectionRecord(
             payload=None,
             payload_digest=event.projection_locator.canonical_payload_digest,
             redacted=True,
             source_event_id=event.event_id,
             source_frontier=event.ledger.ingestion_sequence,
-            superseded_by_claim_id=(None if existing is None else existing.superseded_by_claim_id),
+            superseded_by_claim_id=existing_supersession,
         )
         return
     payload = cast(ClaimRecordedPayload, event.payload)
@@ -719,6 +724,7 @@ def _apply_claim(
         redacted=False,
         source_event_id=event.event_id,
         source_frontier=event.ledger.ingestion_sequence,
+        superseded_by_claim_id=existing_supersession,
     )
 
 

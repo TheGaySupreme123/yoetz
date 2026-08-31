@@ -1349,7 +1349,14 @@ async def test_claim_replacement_must_change_effective_meaning() -> None:
     assert "replacement_must_change_effective_claim" in rejected.value.message
 
 
-async def test_claim_replacement_rejects_unreadable_limitation_scope() -> None:
+async def test_claim_replacement_links_a_limitation_whose_action_is_unrecorded() -> None:
+    """A result with no readable action scope is task-wide relevant, so it must be linkable.
+
+    Relevance treats an absent or tombstoned action conservatively as task-wide, which makes
+    `limitation_refs_complete` demand the result. Rejecting the very same reference from
+    `limitation_refs` left no recordable completion claim at all (ADR-025 decision 3).
+    """
+
     app, _objects = _composition()
     result_ref = "res_00000000-0000-4000-8000-000000000751"
     old_claim = "clm_00000000-0000-4000-8000-000000000751"
@@ -1389,15 +1396,40 @@ async def test_claim_replacement_rejects_unreadable_limitation_scope() -> None:
     )
     wire = replacement.model_dump(mode="json", by_alias=True, exclude_none=True)
     wire["dry_run"] = True
+    preview = await execute_publish_work(
+        cast(Application, app), PublishWorkRequestModel.model_validate(wire)
+    )
+    assert preview.ok is True
+    assert preview.outcome == "dry_run"
+
+    silent = _request(
+        request_tail=754,
+        event_drafts=(
+            _claim_revision_draft(
+                754,
+                claim_tail=753,
+                version="1.1.0",
+                supporting_refs=[],
+                limitation_refs=[],
+                supersedes_claim_refs=[old_claim],
+            ),
+        ),
+        expected_frontier={
+            "sequence": str(accepted.result_frontier.sequence),
+            "head_digest": accepted.result_frontier.head_digest,
+        },
+    )
+    silent_wire = silent.model_dump(mode="json", by_alias=True, exclude_none=True)
+    silent_wire["dry_run"] = True
     with pytest.raises(PublicOperationError) as rejected:
         await execute_publish_work(
-            cast(Application, app), PublishWorkRequestModel.model_validate(wire)
+            cast(Application, app), PublishWorkRequestModel.model_validate(silent_wire)
         )
     assert rejected.value.safe_details == {
         "reason_code": "claim_revision_mismatch",
         "field": "/event_drafts/0/payload/limitation_refs",
     }
-    assert "limitation_refs_must_be_relevant_non_success_results" in rejected.value.message
+    assert "limitation_refs_complete" in rejected.value.message
 
 
 async def test_no_obligations_reason_conflict_is_identical_on_dry_run_and_publish() -> None:

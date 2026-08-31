@@ -422,3 +422,41 @@ def test_a_redacted_replacement_does_not_free_its_target_for_a_second_correction
             )
         )
     assert caught.value.invariant == "superseded_claim_must_be_effective"
+
+
+def test_republishing_a_superseded_v1_claim_id_does_not_make_it_current_again() -> None:
+    """A v1.0 claim id may be re-published; that never undoes an applied correction."""
+
+    chain = _chain(
+        (_ACTION_SCHEMA, _action(1)),
+        (_RESULT_SCHEMA, _result(1, ResultOutcome.SUCCESS)),
+        (
+            _CLAIM_V1_SCHEMA,
+            ClaimRecordedPayload(
+                claim_id=_clm(0),
+                claim_kind=ClaimKind.COMPLETION,
+                statement="Everything in scope is complete.",
+                supporting_refs=(_res(1),),
+                obligation_refs=(_OBLIGATION,),
+            ),
+        ),
+        (
+            _CLAIM_V1_1_SCHEMA,
+            _completion(
+                1, supersedes=(_clm(0),), statement="Narrowed once.", supporting=(_res(1),)
+            ),
+        ),
+        (
+            _CLAIM_V1_SCHEMA,
+            ClaimRecordedPayload(
+                claim_id=_clm(0),
+                claim_kind=ClaimKind.COMPLETION,
+                statement="Restated after the correction.",
+                supporting_refs=(_res(1),),
+                obligation_refs=(_OBLIGATION,),
+            ),
+        ),
+    )
+    state = replay(chain)
+    assert state.claims[_clm(0)].superseded_by_claim_id == _clm(1)
+    assert effective_claim_ids(state) == frozenset({_clm(1)})

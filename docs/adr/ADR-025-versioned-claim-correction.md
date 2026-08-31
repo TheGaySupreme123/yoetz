@@ -78,6 +78,14 @@ Append-only history must remain intact, so mutation or erasure is not an accepta
    available to history and historical finding projection. A qualifying recheck can mark findings
    against superseded claims resolved; it does not delete them.
 
+   The edge that set produces is durable, not payload-derived. Applying a replacement writes
+   `superseded_by_claim_id` onto each target's `ClaimProjectionRecord`, and every later rewrite of
+   that row — an unreadable payload, a redaction tombstone, a re-published v1.0 claim id — carries
+   it forward. Reading the edge from the replacement's live `supersedes_claim_refs` instead would
+   let a `redaction_recorded` against the correcting event resurrect its target as a second current
+   claim and free it for another correction. The snapshot key is emitted only when set, so
+   snapshots of tasks without a correction stay byte-identical.
+
 6. **Existing neighboring fields do not change meaning.** `disputes_refs` continues to record an
    explicit unresolved contradiction. `decision_recorded.supersedes_event_id` continues to
    supersede decision history only. Neither is inferred as claim replacement.
