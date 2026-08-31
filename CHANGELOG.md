@@ -8,6 +8,14 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Frontier-motion delivery marks now retain the announced head digest and are compared with the
+  routed ledger's actual current frontier. A same-task restore below the delivered high-water (or
+  a different digest at the same sequence) discards the stale mark and announces the rewound
+  lineage, while an old completed-operation replay is still suppressed when the live ledger has
+  not rewound. Notice and delivered-mark caps persist LRU ordinals across restarts, refresh active
+  marks, and evict ended sessions before the least-recently-used live entry; legacy marks without
+  lineage identity fail open to a duplicate announcement (issue #331, consolidating #332/#333).
+
 - The native Cursor plugin's plugin-owned `mcp.json` now launches the exact Yoetz executable the
   plugin's hooks bind (the `/2` marker launcher) instead of a bare `yoetz` that Cursor's sanitized
   desktop PATH could resolve to an older ambient installation. `yoetz integrate cursor plugin

@@ -2019,6 +2019,7 @@ def handle_observe(
                         pending_frontier_notice.delivery_identity,
                         emitted_to_sequence=pending_frontier_notice.to_sequence,
                         emitted_task_id=pending_frontier_notice.task_id,
+                        emitted_head_digest=pending_frontier_notice.head_digest,
                     )
         # Advice selection, the lease, the stdout write itself and both delivery
         # commits sit past the 'drain' window; a blocked host pipe or a

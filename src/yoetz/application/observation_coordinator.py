@@ -640,17 +640,11 @@ class ObservationCoordinator:
                         )
                         stage = "ledger_append"
                         if append_result is not None:
-                            await self._local(
-                                partial(
-                                    self.local.note_frontier_motion,
-                                    workspace,
-                                    codex_session_id,
-                                    from_sequence=append_result.subject_frontier.sequence,
-                                    to_sequence=append_result.result_frontier.sequence,
-                                    head_digest=append_result.result_frontier.head_digest,
-                                    observation_record_count=len(append_result.accepted),
-                                    task_id=runtime.task_id,
-                                )
+                            await self._note_frontier_motion(
+                                runtime,
+                                workspace,
+                                codex_session_id,
+                                append_result,
                             )
                         correction = materialize_observation_outcome_correction(
                             envelope,
@@ -814,25 +808,11 @@ class ObservationCoordinator:
                                         ),
                                     )
                                     if correction_result is not None:
-                                        await self._local(
-                                            partial(
-                                                self.local.note_frontier_motion,
-                                                workspace,
-                                                codex_session_id,
-                                                from_sequence=(
-                                                    correction_result.subject_frontier.sequence
-                                                ),
-                                                to_sequence=(
-                                                    correction_result.result_frontier.sequence
-                                                ),
-                                                head_digest=(
-                                                    correction_result.result_frontier.head_digest
-                                                ),
-                                                observation_record_count=len(
-                                                    correction_result.accepted
-                                                ),
-                                                task_id=runtime.task_id,
-                                            )
+                                        await self._note_frontier_motion(
+                                            runtime,
+                                            workspace,
+                                            codex_session_id,
+                                            correction_result,
                                         )
 
                 stage = "verification"
@@ -982,6 +962,36 @@ class ObservationCoordinator:
                         RuntimeCapability.WRITE,
                     }
                 ),
+            )
+        )
+
+    async def _note_frontier_motion(
+        self,
+        runtime: TaskRuntime,
+        workspace: str,
+        codex_session_id: str,
+        append_result: AppendResult,
+    ) -> None:
+        """Bind reconstructed append motion to the routed ledger's current lineage."""
+
+        # A newly accepted append result is the routed head at its commit. A
+        # completed-operation replay carries its historical result frontier,
+        # so only that recovery path needs a fresh read to distinguish replay
+        # from a same-task restore.
+        lineage_frontier = append_result.result_frontier
+        if append_result.outcome == "replayed":
+            lineage_frontier = await runtime.ledger.load_frontier()
+        await self._local(
+            partial(
+                self.local.note_frontier_motion,
+                workspace,
+                codex_session_id,
+                from_sequence=append_result.subject_frontier.sequence,
+                to_sequence=append_result.result_frontier.sequence,
+                head_digest=append_result.result_frontier.head_digest,
+                observation_record_count=len(append_result.accepted),
+                task_id=runtime.task_id,
+                lineage_frontier=lineage_frontier,
             )
         )
 
