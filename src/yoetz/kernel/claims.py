@@ -7,7 +7,7 @@ from yoetz.domain.events import (
     ClaimRecordedPayloadV1_1,
 )
 from yoetz.domain.values import ClaimId, ObligationId, ResultId
-from yoetz.kernel.projections import ProjectionRecord, ProjectionState
+from yoetz.kernel.projections import ClaimProjectionRecord, ProjectionState
 
 __all__ = [
     "claim_discloses_result",
@@ -17,19 +17,23 @@ __all__ = [
 ]
 
 type ClaimPayload = ClaimRecordedPayload | ClaimRecordedPayloadV1_1
-type ClaimRecord = ProjectionRecord[ClaimPayload]
+type ClaimRecord = ClaimProjectionRecord
 
 
 def effective_claim_ids(projection: ProjectionState) -> frozenset[ClaimId]:
-    """Return claims not explicitly replaced by a readable v1.1 claim."""
+    """Return claims not explicitly replaced by a v1.1 correction.
 
-    superseded = {
-        target
-        for record in projection.claims.values()
-        if type(record.payload) is ClaimRecordedPayloadV1_1
-        for target in record.payload.supersedes_claim_refs
-    }
-    return frozenset(claim for claim in projection.claims if claim not in superseded)
+    The edge is read from the durable ``superseded_by_claim_id`` the projection records on the
+    target, not from the replacement's live ``supersedes_claim_refs``: redacting the middle of a
+    C0 <- C1 <- C2 chain tombstones C1's payload, and a payload-derived reading would resurrect C0
+    as a second current claim beside C2.
+    """
+
+    return frozenset(
+        claim
+        for claim, record in projection.claims.items()
+        if record.superseded_by_claim_id is None
+    )
 
 
 def effective_claim_items(

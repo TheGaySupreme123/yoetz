@@ -8,6 +8,7 @@ from builders.policy_cases import (
     BASE_COVERAGE,
     FRONTIER,
     act,
+    claim_record,
     clm,
     evd,
     evidence_record,
@@ -240,7 +241,10 @@ def test_versioned_replacement_is_effective_and_keeps_partial_result_as_limitati
             res(1): record(_result(1, 1, ResultOutcome.SUCCESS), 3),
             res(2): record(_result(2, 2, ResultOutcome.PARTIAL), 4),
         },
-        claims={clm(1): record(old, 5), clm(2): record(replacement, 6)},
+        claims={
+            clm(1): claim_record(old, 5, superseded_by_claim_id=clm(2)),
+            clm(2): record(replacement, 6),
+        },
     )
     kinds = _kinds(case)
     assert FindingKind.FAILED_WORK_OMITTED not in kinds

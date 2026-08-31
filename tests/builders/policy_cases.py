@@ -9,6 +9,7 @@ from yoetz.domain.events import (
     ActionRecordedPayload,
     AssignmentRecordedPayload,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
     EventPayload,
     EvidenceRecordedPayload,
     ObligationChangeKind,
@@ -44,6 +45,7 @@ from yoetz.kernel.deterministic_checks import (
     FindingBasisRef,
 )
 from yoetz.kernel.projections import (
+    ClaimProjectionRecord,
     ContradictionKey,
     ContradictionRecord,
     DecisionProjectionRecord,
@@ -111,18 +113,45 @@ def record(payload: Finding, number: int) -> FindingProjectionRecord: ...
 
 
 @overload
+def record(
+    payload: ClaimRecordedPayload | ClaimRecordedPayloadV1_1, number: int
+) -> ClaimProjectionRecord: ...
+
+
+@overload
 def record[T](payload: T, number: int) -> ProjectionRecord[T]: ...
 
 
 def record[T](payload: T, number: int) -> ProjectionRecord[T]:
     if type(payload) is Finding:
         return cast(ProjectionRecord[T], finding_record(payload, number))
+    if type(payload) in {ClaimRecordedPayload, ClaimRecordedPayloadV1_1}:
+        return cast(
+            ProjectionRecord[T],
+            claim_record(cast(ClaimRecordedPayload | ClaimRecordedPayloadV1_1, payload), number),
+        )
     return ProjectionRecord(
         payload=payload,
         payload_digest=canonical_digest(encode_payload(cast(EventPayload, payload))),
         redacted=False,
         source_event_id=evt(number),
         source_frontier=number,
+    )
+
+
+def claim_record(
+    payload: ClaimRecordedPayload | ClaimRecordedPayloadV1_1,
+    number: int,
+    *,
+    superseded_by_claim_id: ClaimId | None = None,
+) -> ClaimProjectionRecord:
+    return ClaimProjectionRecord(
+        payload=payload,
+        payload_digest=canonical_digest(encode_payload(payload)),
+        redacted=False,
+        source_event_id=evt(number),
+        source_frontier=number,
+        superseded_by_claim_id=superseded_by_claim_id,
     )
 
 
@@ -191,7 +220,7 @@ def make_case(
     actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]] | None = None,
     results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]] | None = None,
     evidence: Mapping[EvidenceId, EvidenceProjectionRecord] | None = None,
-    claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload]] | None = None,
+    claims: Mapping[ClaimId, ClaimProjectionRecord] | None = None,
     findings: Mapping[FindingId, FindingProjectionRecord] | None = None,
     responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]] | None = None,
     contradictions: Mapping[ContradictionKey, ContradictionRecord] | None = None,

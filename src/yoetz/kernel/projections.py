@@ -70,6 +70,7 @@ __all__ = [
     "PROJECTION_GENERATION",
     "PROJECTION_VERSION",
     "ContradictionKey",
+    "ClaimProjectionRecord",
     "ContradictionRecord",
     "DecisionProjectionRecord",
     "EvidenceProjectionRecord",
@@ -337,6 +338,38 @@ class FindingProjectionRecord(ProjectionRecord[Finding]):
 
 
 @dataclass(frozen=True, slots=True)
+class ClaimProjectionRecord(ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1]):
+    """One recorded claim plus the durable revision edge that replaced it.
+
+    ``superseded_by_claim_id`` names the later ``claim_recorded/1.1.0`` claim that declared this
+    claim in ``supersedes_claim_refs``. It is recorded on the target when the replacement is
+    applied, so supersession survives a later ``redaction_recorded`` that tombstones the
+    replacement's payload: deriving the edge from live payloads would resurrect the middle of a
+    correction chain as a current claim (ADR-025 decision 2 keeps replaced claims out of the
+    effective set). It is ``None`` while the claim is effective.
+    """
+
+    superseded_by_claim_id: ClaimId | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.payload is not None and type(self.payload) not in {
+            ClaimRecordedPayload,
+            ClaimRecordedPayloadV1_1,
+        }:
+            raise _invalid()
+        if self.superseded_by_claim_id is not None:
+            try:
+                object.__setattr__(
+                    self,
+                    "superseded_by_claim_id",
+                    claim_id(self.superseded_by_claim_id),
+                )
+            except ValueError as exc:
+                raise _invalid() from exc
+
+
+@dataclass(frozen=True, slots=True)
 class EvidenceProjectionRecord(ProjectionRecord[EvidenceRecordedPayload]):
     object_available: bool = True
     redacted_object_id: ObjectId | None = None
@@ -452,7 +485,7 @@ class ProjectionState:
     actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]]
     results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]]
     evidence: Mapping[EvidenceId, EvidenceProjectionRecord]
-    claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1]]
+    claims: Mapping[ClaimId, ClaimProjectionRecord]
     contradictions: Mapping[ContradictionKey, ContradictionRecord]
     findings: Mapping[FindingId, FindingProjectionRecord]
     responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]]
@@ -538,7 +571,7 @@ class ProjectionState:
         claims = self._copy_mapping(
             self.claims,
             claim_id,
-            ProjectionRecord,
+            ClaimProjectionRecord,
             (ClaimRecordedPayload, ClaimRecordedPayloadV1_1),
             "claim_id",
         )
@@ -734,6 +767,11 @@ def _record_snapshot(record: _ProjectionRecordLike) -> dict[str, JsonValue]:
             if record.plan_change_reason is not None:
                 result["plan_change_reason"] = record.plan_change_reason
             result["superseded_by_obligation_ids"] = list(record.superseded_by_obligation_ids)
+    elif type(record) is ClaimProjectionRecord:
+        # Emitted only when set, so every snapshot of a task without a claim correction stays
+        # byte-identical to the generation-1 shape frozen before versioned claim correction.
+        if record.superseded_by_claim_id is not None:
+            result["superseded_by_claim_id"] = record.superseded_by_claim_id
     elif type(record) is DecisionProjectionRecord:
         if record.superseded_by_event_id is not None:
             result["superseded_by_event_id"] = record.superseded_by_event_id
@@ -981,6 +1019,8 @@ def _record_from_snapshot(
                 "superseded_by_obligation_ids",
             }
         )
+    elif collection == "claims":
+        optional = frozenset({"superseded_by_claim_id"})
     elif collection == "decisions":
         optional = frozenset({"superseded_by_event_id"})
     elif collection == "evidence":
@@ -1040,6 +1080,17 @@ def _record_from_snapshot(
                 tuple[ObligationId, ...],
                 _snapshot_array(raw_replacements),
             ),
+        )
+    if collection == "claims":
+        if "superseded_by_claim_id" in source and source["superseded_by_claim_id"] is None:
+            raise _invalid()
+        return ClaimProjectionRecord(
+            payload=cast(ClaimRecordedPayload | ClaimRecordedPayloadV1_1 | None, payload),
+            payload_digest=payload_digest,
+            redacted=redacted,
+            source_event_id=source_event_id,
+            source_frontier=source_frontier,
+            superseded_by_claim_id=cast(ClaimId | None, source.get("superseded_by_claim_id")),
         )
     if collection == "decisions":
         if "superseded_by_event_id" in source and source["superseded_by_event_id"] is None:
@@ -1207,10 +1258,7 @@ def projection_from_snapshot(value: JsonValue) -> ProjectionState:
                 _record_map_from_snapshot(source["evidence"], collection="evidence"),
             ),
             claims=cast(
-                Mapping[
-                    ClaimId,
-                    ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1],
-                ],
+                Mapping[ClaimId, ClaimProjectionRecord],
                 _record_map_from_snapshot(source["claims"], collection="claims"),
             ),
             contradictions=_contradictions_from_snapshot(source["contradictions"]),

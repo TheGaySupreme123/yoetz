@@ -7,8 +7,6 @@ from typing import Final, cast
 
 from yoetz.domain.events import (
     ClaimKind,
-    ClaimRecordedPayload,
-    ClaimRecordedPayloadV1_1,
     ObligationChangeKind,
     ObligationStatus,
     ResponseDisposition,
@@ -44,7 +42,7 @@ from yoetz.kernel.policies.response_support import (
     RESEARCH_REJECTION_PRESENT_FACT,
     response_support_admissible,
 )
-from yoetz.kernel.projections import ProjectionRecord
+from yoetz.kernel.projections import ClaimProjectionRecord
 from yoetz.protocol.coverage import PublicationChannel
 
 __all__ = [
@@ -262,11 +260,10 @@ def _observation_outcome_unavailable(case: DeterministicCase, ref: FindingBasisR
 
 def _limiting_refs(
     case: DeterministicCase,
-    claim_record: ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1],
+    claim_record: ClaimProjectionRecord,
 ) -> tuple[FindingBasisRef, ...]:
     if claim_record.payload is None:
         return ()
-    claim = claim_record.payload
     limitations: set[FindingBasisRef] = set()
     for result_id, record in case.projection.results.items():
         if (
@@ -281,17 +278,13 @@ def _limiting_refs(
             and result_is_relevant_to_claim(case.projection, claim_record, result_id)
         ):
             limitations.add(result_id)
-    linked = {
-        *claim.supporting_refs,
-        *claim.obligation_refs,
-        *(claim.limitation_refs if type(claim) is ClaimRecordedPayloadV1_1 else ()),
-    }
+    # A material coverage gap on an obligation, result, or evidence record is a task-level
+    # honesty fact about the recorded account, not a claim-scoped result relevance question.
+    # ADR-025 bounds which *results* a claim must disclose; it does not bound this scan, and
+    # restricting it to refs the claim already links made uncited evidence with a material gap
+    # (for example a redacted object) stop producing MATERIAL_LIMITATION_OMITTED entirely.
     for ref, coverage in case.coverage_by_ref.items():
-        if (
-            ref.startswith(("obl_", "res_", "evd_"))
-            and ref in linked
-            and _MATERIAL_GAPS & set(coverage.known_gaps)
-        ):
+        if ref.startswith(("obl_", "res_", "evd_")) and _MATERIAL_GAPS & set(coverage.known_gaps):
             limitations.add(ref)
     return _refs(limitations)
 

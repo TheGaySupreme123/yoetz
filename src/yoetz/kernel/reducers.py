@@ -61,6 +61,7 @@ from yoetz.kernel.finding_resolution import (
 )
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
+    ClaimProjectionRecord,
     ContradictionKey,
     ContradictionRecord,
     DecisionProjectionRecord,
@@ -89,6 +90,12 @@ __all__ = [
 ]
 
 _MAX_SQLITE_SIGNED_INTEGER: Final = 2**63 - 1
+# A v1.1 completion claim must disclose every relevant typed non-success result. An `unknown`
+# outcome is not upgraded into a typed partial or failure (ADR-025 decision 3), so it is never
+# required -- but it is limiting to the deterministic limitation policy, so `limitation_refs` also
+# accepts it as the disclosure channel a v1.1 claim would otherwise have none of.
+_TYPED_LIMITING_OUTCOMES: Final = frozenset({ResultOutcome.FAILURE, ResultOutcome.PARTIAL})
+_DISCLOSABLE_LIMITING_OUTCOMES: Final = _TYPED_LIMITING_OUTCOMES | {ResultOutcome.UNKNOWN}
 _MATERIAL_FAMILIES: Final = frozenset(
     {
         "action_recorded",
@@ -565,32 +572,40 @@ def _limitation_scope_is_authorable(
     *,
     claim_frontier: int,
 ) -> bool:
-    """Require readable action scope for a limitation a caller wants to link."""
+    """Accept exactly the limitations relevance already treats as in scope.
 
-    if result_record.payload is None:
-        return False
-    action = actions.get(result_record.payload.action_id)
-    return (
-        action is not None
-        and action.payload is not None
-        and _result_is_relevant_to_claim(
-            payload,
-            result_record,
-            actions,
-            claim_frontier=claim_frontier,
-        )
+    An earlier draft additionally required a readable action record, which contradicted the
+    conservative task-wide relevance above: redacting an action (or a result whose action id was
+    never recorded) made the result relevant -- so ``limitation_refs_complete`` demanded it -- while
+    rejecting it from ``limitation_refs``, leaving no recordable completion claim at all. The two
+    predicates must agree for the append-only repair path of ADR-025 to stay authorable.
+    """
+
+    return _result_is_relevant_to_claim(
+        payload,
+        result_record,
+        actions,
+        claim_frontier=claim_frontier,
     )
 
 
 def _apply_claim(
-    claims: dict[ClaimId, ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1]],
+    claims: dict[ClaimId, ClaimProjectionRecord],
     actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]],
     results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]],
     event: AcceptedEvent,
 ) -> None:
     key = _locator_id(event, claim_id)
     if event.payload is None:
-        claims[key] = _tombstone(event, ClaimRecordedPayload)
+        existing = claims.get(key)
+        claims[key] = ClaimProjectionRecord(
+            payload=None,
+            payload_digest=event.projection_locator.canonical_payload_digest,
+            redacted=True,
+            source_event_id=event.event_id,
+            source_frontier=event.ledger.ingestion_sequence,
+            superseded_by_claim_id=(None if existing is None else existing.superseded_by_claim_id),
+        )
         return
     payload = cast(ClaimRecordedPayload, event.payload)
     if type(payload) is ClaimRecordedPayloadV1_1:
@@ -618,11 +633,11 @@ def _apply_claim(
                 "supporting_refs_must_exclude_limitations",
                 event.event_id,
             )
-        relevant = frozenset(
+        required = frozenset(
             result_id_value
             for result_id_value, record in results.items()
             if record.payload is not None
-            and record.payload.outcome in {ResultOutcome.FAILURE, ResultOutcome.PARTIAL}
+            and record.payload.outcome in _TYPED_LIMITING_OUTCOMES
             and _result_is_relevant_to_claim(
                 payload,
                 record,
@@ -634,7 +649,7 @@ def _apply_claim(
         if any(
             (record := results.get(result_ref)) is None
             or record.payload is None
-            or record.payload.outcome not in {ResultOutcome.FAILURE, ResultOutcome.PARTIAL}
+            or record.payload.outcome not in _DISCLOSABLE_LIMITING_OUTCOMES
             or not _limitation_scope_is_authorable(
                 payload,
                 record,
@@ -648,19 +663,13 @@ def _apply_claim(
                 "limitation_refs_must_be_relevant_non_success_results",
                 event.event_id,
             )
-        if payload.claim_kind is ClaimKind.COMPLETION and supplied != relevant:
+        if payload.claim_kind is ClaimKind.COMPLETION and not required <= supplied:
             raise ClaimRevisionMismatch(
                 "limitation_refs",
                 "limitation_refs_complete",
                 event.event_id,
             )
         if payload.supersedes_claim_refs:
-            already_superseded = {
-                target
-                for record in claims.values()
-                if type(record.payload) is ClaimRecordedPayloadV1_1
-                for target in record.payload.supersedes_claim_refs
-            }
             for target in payload.supersedes_claim_refs:
                 prior = claims.get(target)
                 if prior is None or prior.payload is None:
@@ -669,7 +678,7 @@ def _apply_claim(
                         "superseded_claim_must_exist",
                         event.event_id,
                     )
-                if target in already_superseded:
+                if prior.superseded_by_claim_id is not None:
                     raise ClaimRevisionMismatch(
                         "supersedes_claim_refs",
                         "superseded_claim_must_be_effective",
@@ -698,7 +707,19 @@ def _apply_claim(
                         "replacement_must_change_effective_claim",
                         event.event_id,
                     )
-    claims[key] = _projection_record(event, payload)
+            # Record the revision edge on each target now. Deriving it later from the
+            # replacement's live payload would resurrect a superseded claim once a
+            # redaction_recorded tombstones that payload; the edge is set by the same ordered
+            # replay on every path, so it stays deterministic.
+            for target in payload.supersedes_claim_refs:
+                claims[target] = replace(claims[target], superseded_by_claim_id=key)
+    claims[key] = ClaimProjectionRecord(
+        payload=payload,
+        payload_digest=event.projection_locator.canonical_payload_digest,
+        redacted=False,
+        source_event_id=event.event_id,
+        source_frontier=event.ledger.ingestion_sequence,
+    )
 
 
 def _redact_current_records(
@@ -710,7 +731,7 @@ def _redact_current_records(
     actions: dict[ActionId, ProjectionRecord[ActionRecordedPayload]],
     results: dict[ResultId, ProjectionRecord[ResultRecordedPayload]],
     evidence: dict[EvidenceId, EvidenceProjectionRecord],
-    claims: dict[ClaimId, ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1]],
+    claims: dict[ClaimId, ClaimProjectionRecord],
     findings: dict[FindingId, FindingProjectionRecord],
     responses: dict[FindingId, ProjectionRecord[ResponseRecordedPayload]],
 ) -> None:
@@ -751,7 +772,7 @@ def _recompute_secondary_effects(
     plans: dict[int, PlanProjectionRecord],
     obligations: dict[ObligationId, ObligationProjectionRecord],
     decisions: dict[EventId, DecisionProjectionRecord],
-    claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1]],
+    claims: Mapping[ClaimId, ClaimProjectionRecord],
 ) -> dict[ContradictionKey, ContradictionRecord]:
     for key, record in tuple(plans.items()):
         plans[key] = replace(record, superseded_by_plan_version=None)
@@ -856,7 +877,7 @@ def _recompute_missing_gaps(
     actions: Mapping[ActionId, ProjectionRecord[ActionRecordedPayload]],
     results: Mapping[ResultId, ProjectionRecord[ResultRecordedPayload]],
     evidence: Mapping[EvidenceId, EvidenceProjectionRecord],
-    claims: Mapping[ClaimId, ProjectionRecord[ClaimRecordedPayload | ClaimRecordedPayloadV1_1]],
+    claims: Mapping[ClaimId, ClaimProjectionRecord],
     findings: Mapping[FindingId, FindingProjectionRecord],
     responses: Mapping[FindingId, ProjectionRecord[ResponseRecordedPayload]],
 ) -> tuple[str, ...]:

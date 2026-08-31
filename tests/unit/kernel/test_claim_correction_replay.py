@@ -1,0 +1,424 @@
+"""Replay invariants for append-only claim correction (ADR-025, issue #432).
+
+Every case here drives the same pure `replay()` path the dry-run, memory append, and SQLite append
+share, so an append these vectors reject is an append no surface can record.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from yoetz.domain.events import (
+    AcceptedEvent,
+    ActionKind,
+    ActionRecordedPayload,
+    ClaimKind,
+    ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
+    ClaimRevisionMismatch,
+    EventPayload,
+    EventSchema,
+    LedgerChain,
+    LedgerRecord,
+    PayloadRef,
+    ProjectionLocator,
+    RedactionMethod,
+    RedactionReasonCategory,
+    RedactionRecordedPayload,
+    RedactionState,
+    ResultOutcome,
+    ResultRecordedPayload,
+    WriterChain,
+    encode_payload,
+    media_type_for,
+)
+from yoetz.domain.values import (
+    Actor,
+    ActorType,
+    ClaimId,
+    EventId,
+    ObligationId,
+    ResultId,
+    action_id,
+    actor_id,
+    claim_id,
+    event_id,
+    object_id,
+    obligation_id,
+    request_id,
+    result_id,
+    session_id,
+    task_id,
+    timestamp_from_string,
+    writer_id,
+)
+from yoetz.kernel.claims import effective_claim_ids
+from yoetz.kernel.reducers import replay
+from yoetz.protocol.canonical import canonical_digest, canonical_encode, entry_digest
+from yoetz.protocol.coverage import (
+    AuthorshipAssurance,
+    PublicationChannel,
+    coverage_for_channel,
+    coverage_to_json,
+)
+
+_TASK = task_id("tsk_00000000-0000-4000-8000-000000000001")
+_SESSION = session_id("ses_00000000-0000-4000-8000-000000000001")
+_WRITER = writer_id("wri_00000000-0000-4000-8000-000000000001")
+_OPERATION = request_id("req_00000000-0000-4000-8000-000000000001")
+_AUTHOR = Actor(
+    actor_id("agt_claim_correction"),
+    ActorType.LOGICAL_AGENT,
+    AuthorshipAssurance.SELF_ASSERTED,
+)
+_NOW = timestamp_from_string("2026-08-30T00:00:00.000Z")
+_OBLIGATION = obligation_id("obl_00000000-0000-4000-8000-000000000001")
+_MISSING_ACTION = action_id("act_00000000-0000-4000-8000-0000000009ff")
+
+
+def _act(number: int) -> str:
+    return f"act_00000000-0000-4000-8000-{number:012d}"
+
+
+def _res(number: int) -> ResultId:
+    return result_id(f"res_00000000-0000-4000-8000-{number:012d}")
+
+
+def _clm(number: int) -> ClaimId:
+    return claim_id(f"clm_00000000-0000-4000-8000-{number:012d}")
+
+
+def _evt(sequence: int) -> EventId:
+    return event_id(f"evt_00000000-0000-4000-8000-{sequence:012d}")
+
+
+def _logical_key(schema: EventSchema, payload: EventPayload) -> str | None:
+    if schema.name == "action_recorded":
+        return str(payload.action_id)  # type: ignore[attr-defined]
+    if schema.name == "result_recorded":
+        return str(payload.result_id)  # type: ignore[attr-defined]
+    if schema.name == "claim_recorded":
+        return str(payload.claim_id)  # type: ignore[attr-defined]
+    return None
+
+
+def _accepted(
+    sequence: int,
+    schema: EventSchema,
+    payload: EventPayload,
+    previous: str,
+) -> AcceptedEvent:
+    encoded = canonical_encode(encode_payload(payload))
+    targets: tuple[EventId, ...] = ()
+    if type(payload) is RedactionRecordedPayload:
+        targets = payload.target_event_ids
+    identifier = _evt(sequence)
+    object_reference = object_id(f"obj_00000000-0000-4000-8000-{sequence:012d}")
+    commitment = "hmac-sha256:" + f"{sequence:064x}"
+    media = media_type_for(schema.name)
+    # The digest preimage carries exactly the structural fields the domain record serializes, so
+    # build it once here rather than constructing a record with a placeholder digest.
+    preimage = {
+        "protocol": "yoetz.event",
+        "protocol_version": "0.1",
+        "event_id": identifier,
+        "task_id": _TASK,
+        "session_id": _SESSION,
+        "schema": {"name": schema.name, "version": schema.version},
+        "author": {
+            "actor_id": _AUTHOR.actor_id,
+            "actor_type": _AUTHOR.actor_type.value,
+            "assurance": _AUTHOR.assurance.value,
+        },
+        "writer": {
+            "writer_id": _WRITER,
+            "sequence": str(sequence),
+            "previous_entry_digest": previous,
+        },
+        "ledger": {
+            "ingestion_sequence": str(sequence),
+            "previous_entry_digest": previous,
+            "accepted_at": _NOW.wire,
+        },
+        "operation_id": _OPERATION,
+        "occurred_at": _NOW.wire,
+        "causal_parents": (),
+        "publication_channel": PublicationChannel.LOCAL_CLI.value,
+        "coverage": coverage_to_json(coverage_for_channel(PublicationChannel.LOCAL_CLI)),
+        "payload_ref": {
+            "object_id": object_reference,
+            "media_type": media,
+            "plaintext_size": len(encoded),
+            "commitment": commitment,
+            "encryption_format": "yoetz-object/1",
+        },
+        "redaction": "present",
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+    return AcceptedEvent(
+        event_id=identifier,
+        task_id=_TASK,
+        session_id=_SESSION,
+        schema=schema,
+        author=_AUTHOR,
+        writer=WriterChain(_WRITER, sequence, previous),
+        ledger=LedgerChain(sequence, previous, _NOW),
+        operation_id=_OPERATION,
+        occurred_at=_NOW,
+        causal_parents=(),
+        publication_channel=PublicationChannel.LOCAL_CLI,
+        coverage=coverage_for_channel(PublicationChannel.LOCAL_CLI),
+        payload_ref=PayloadRef(object_reference, media, len(encoded), commitment),
+        redaction=RedactionState.PRESENT,
+        artifact_refs=(),
+        evidence_refs=(),
+        entry_digest=entry_digest(preimage),
+        payload=payload,
+        projection_locator=ProjectionLocator(
+            schema=schema,
+            logical_key=_logical_key(schema, payload),
+            canonical_payload_digest=canonical_digest(encode_payload(payload)),
+            redaction_target_event_ids=targets,
+            redaction_target_object_ids=(),
+        ),
+    )
+
+
+def _chain(*payloads: tuple[EventSchema, EventPayload]) -> tuple[LedgerRecord, ...]:
+    records: list[LedgerRecord] = []
+    previous = "genesis"
+    for sequence, (schema, payload) in enumerate(payloads, 1):
+        record = _accepted(sequence, schema, payload, previous)
+        records.append(record)
+        previous = record.entry_digest
+    return tuple(records)
+
+
+def _extend(
+    records: tuple[LedgerRecord, ...],
+    *payloads: tuple[EventSchema, EventPayload],
+) -> tuple[LedgerRecord, ...]:
+    extended = list(records)
+    previous = extended[-1].entry_digest
+    for offset, (schema, payload) in enumerate(payloads, 1):
+        record = _accepted(len(extended) + 1, schema, payload, previous)
+        del offset
+        extended.append(record)
+        previous = record.entry_digest
+    return tuple(extended)
+
+
+_ACTION_SCHEMA = EventSchema("action_recorded", "1.0.0")
+_RESULT_SCHEMA = EventSchema("result_recorded", "1.0.0")
+_CLAIM_V1_SCHEMA = EventSchema("claim_recorded", "1.0.0")
+_CLAIM_V1_1_SCHEMA = EventSchema("claim_recorded", "1.1.0")
+_REDACTION_SCHEMA = EventSchema("redaction_recorded", "1.0.0")
+
+
+def _action(
+    number: int, obligations: tuple[ObligationId, ...] = (_OBLIGATION,)
+) -> ActionRecordedPayload:
+    return ActionRecordedPayload(
+        action_id=action_id(_act(number)),
+        action_kind=ActionKind.OTHER,
+        description="Attempt the bounded work.",
+        obligation_refs=obligations,
+    )
+
+
+def _result(
+    number: int,
+    outcome: ResultOutcome,
+    *,
+    action: str | None = None,
+) -> ResultRecordedPayload:
+    return ResultRecordedPayload(
+        result_id=_res(number),
+        action_id=action_id(action if action is not None else _act(number)),
+        outcome=outcome,
+        summary="Recorded outcome.",
+    )
+
+
+def _redaction(*targets: EventId) -> RedactionRecordedPayload:
+    return RedactionRecordedPayload(
+        target_event_ids=targets,
+        target_object_ids=(),
+        method=RedactionMethod.LOGICAL_REDACTION,
+        reason_category=RedactionReasonCategory.SECRET,
+        authority=actor_id("agt_claim_correction"),
+        remaining_gap="One event payload is no longer readable.",
+    )
+
+
+def _completion(
+    number: int,
+    *,
+    limitations: tuple[ResultId, ...] = (),
+    supersedes: tuple[ClaimId, ...] = (),
+    statement: str = "The bounded scope is complete.",
+    supporting: tuple[ResultId, ...] = (),
+) -> ClaimRecordedPayloadV1_1:
+    return ClaimRecordedPayloadV1_1(
+        claim_id=_clm(number),
+        claim_kind=ClaimKind.COMPLETION,
+        statement=statement,
+        supporting_refs=supporting,
+        obligation_refs=(_OBLIGATION,),
+        limitation_refs=limitations,
+        supersedes_claim_refs=supersedes,
+    )
+
+
+def test_unknown_result_has_a_disclosure_channel_and_is_never_required() -> None:
+    """#432: an `unknown` outcome must be nameable in limitation_refs.
+
+    `claim_discloses_result` consults only `limitation_refs` for v1.1, and the limitation policy
+    treats a relevant `unknown` result as limiting. Rejecting it from `limitation_refs` therefore
+    left `material_limitation_omitted` permanently unresolvable, which is the trap #432 removes.
+    An `unknown` outcome is still never *required* -- ADR-025 does not upgrade it into a typed
+    partial or failure.
+    """
+
+    prefix = (
+        (_ACTION_SCHEMA, _action(1)),
+        (_RESULT_SCHEMA, _result(1, ResultOutcome.UNKNOWN)),
+    )
+    disclosed = replay(
+        _chain(*prefix, (_CLAIM_V1_1_SCHEMA, _completion(1, limitations=(_res(1),))))
+    )
+    assert effective_claim_ids(disclosed) == frozenset({_clm(1)})
+
+    silent = replay(_chain(*prefix, (_CLAIM_V1_1_SCHEMA, _completion(1))))
+    assert effective_claim_ids(silent) == frozenset({_clm(1)})
+
+
+def test_success_results_are_still_rejected_from_limitation_refs() -> None:
+    with pytest.raises(ClaimRevisionMismatch) as caught:
+        replay(
+            _chain(
+                (_ACTION_SCHEMA, _action(1)),
+                (_RESULT_SCHEMA, _result(1, ResultOutcome.SUCCESS)),
+                (_CLAIM_V1_1_SCHEMA, _completion(1, limitations=(_res(1),))),
+            )
+        )
+    assert caught.value.invariant == "limitation_refs_must_be_relevant_non_success_results"
+
+
+def test_partial_result_with_a_tombstoned_action_stays_recordable() -> None:
+    """A redacted action must not make every completion claim unrecordable.
+
+    Relevance treats a result whose action record is unreadable as conservatively task-wide, so
+    `limitation_refs_complete` demands it. An authorability rule that additionally required a
+    readable action rejected the very same reference, leaving neither `limitation_refs=[res]` nor
+    `limitation_refs=[]` acceptable.
+    """
+
+    events = _chain(
+        (_ACTION_SCHEMA, _action(1)),
+        (_RESULT_SCHEMA, _result(1, ResultOutcome.PARTIAL)),
+        (_REDACTION_SCHEMA, _redaction(_evt(1))),
+        (_CLAIM_V1_1_SCHEMA, _completion(1, limitations=(_res(1),))),
+    )
+    state = replay(events)
+    assert state.actions[action_id(_act(1))].payload is None
+    assert effective_claim_ids(state) == frozenset({_clm(1)})
+
+    with pytest.raises(ClaimRevisionMismatch) as caught:
+        replay(_extend(events[:3], (_CLAIM_V1_1_SCHEMA, _completion(1))))
+    assert caught.value.invariant == "limitation_refs_complete"
+
+
+def test_partial_result_with_no_recorded_action_stays_recordable() -> None:
+    state = replay(
+        _chain(
+            (_RESULT_SCHEMA, _result(1, ResultOutcome.PARTIAL, action=str(_MISSING_ACTION))),
+            (_CLAIM_V1_1_SCHEMA, _completion(1, limitations=(_res(1),))),
+        )
+    )
+    assert _MISSING_ACTION not in state.actions
+    assert effective_claim_ids(state) == frozenset({_clm(1)})
+
+
+def test_supersession_survives_redacting_the_correcting_claim() -> None:
+    """C0 <- C1 <- C2, then redact C1: C0 must not come back as a current claim.
+
+    The revision edge is recorded on the target at ingestion. Deriving it from the replacement's
+    live `supersedes_claim_refs` instead resurrected C0 the moment a redaction tombstoned C1's
+    payload, putting two contradictory completion claims in the effective set.
+    """
+
+    chain = _chain(
+        (_ACTION_SCHEMA, _action(1)),
+        (_RESULT_SCHEMA, _result(1, ResultOutcome.SUCCESS)),
+        (
+            _CLAIM_V1_SCHEMA,
+            ClaimRecordedPayload(
+                claim_id=_clm(0),
+                claim_kind=ClaimKind.COMPLETION,
+                statement="Everything in scope is complete.",
+                supporting_refs=(_res(1),),
+                obligation_refs=(_OBLIGATION,),
+            ),
+        ),
+        (
+            _CLAIM_V1_1_SCHEMA,
+            _completion(
+                1,
+                supersedes=(_clm(0),),
+                statement="Complete, with the integration caveat named.",
+                supporting=(_res(1),),
+            ),
+        ),
+        (
+            _CLAIM_V1_1_SCHEMA,
+            _completion(
+                2,
+                supersedes=(_clm(1),),
+                statement="Complete for the narrowed scope only.",
+            ),
+        ),
+    )
+    before = replay(chain)
+    assert effective_claim_ids(before) == frozenset({_clm(2)})
+
+    after = replay(_extend(chain, (_REDACTION_SCHEMA, _redaction(_evt(4)))))
+    assert after.claims[_clm(1)].payload is None
+    assert after.claims[_clm(0)].superseded_by_claim_id == _clm(1)
+    assert effective_claim_ids(after) == frozenset({_clm(2)})
+
+
+def test_a_redacted_replacement_does_not_free_its_target_for_a_second_correction() -> None:
+    chain = _chain(
+        (_ACTION_SCHEMA, _action(1)),
+        (_RESULT_SCHEMA, _result(1, ResultOutcome.SUCCESS)),
+        (
+            _CLAIM_V1_SCHEMA,
+            ClaimRecordedPayload(
+                claim_id=_clm(0),
+                claim_kind=ClaimKind.COMPLETION,
+                statement="Everything in scope is complete.",
+                supporting_refs=(_res(1),),
+                obligation_refs=(_OBLIGATION,),
+            ),
+        ),
+        (
+            _CLAIM_V1_1_SCHEMA,
+            _completion(
+                1, supersedes=(_clm(0),), statement="Narrowed once.", supporting=(_res(1),)
+            ),
+        ),
+        (_REDACTION_SCHEMA, _redaction(_evt(4))),
+    )
+    with pytest.raises(ClaimRevisionMismatch) as caught:
+        replay(
+            _extend(
+                chain,
+                (
+                    _CLAIM_V1_1_SCHEMA,
+                    _completion(2, supersedes=(_clm(0),), statement="Narrowed twice."),
+                ),
+            )
+        )
+    assert caught.value.invariant == "superseded_claim_must_be_effective"
