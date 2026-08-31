@@ -75,6 +75,31 @@ async def test_service_client_uses_ui_kind_and_runtime_cwd(
     assert observed == [(ControlClientKind.UI, WorkspaceLocator(str(tmp_path)))]
 
 
+async def test_provider_posture_reads_at_the_repository_root_not_the_launch_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #478 review: host admission files live at the repository root, so a subdirectory
+    launch must hand the resolved root, not the launch directory, to the status report."""
+
+    from yoetz.cli import provider_status
+
+    (tmp_path / ".git").mkdir()
+    subdirectory = tmp_path / "src" / "nested"
+    subdirectory.mkdir(parents=True)
+    observed: list[Path | None] = []
+
+    async def report(*, workspace_locator: Path | None = None) -> dict[str, object]:
+        observed.append(workspace_locator)
+        return {}
+
+    monkeypatch.setattr(provider_status, "provider_status_report", report)
+    runtime = YoetzRuntime(cwd=subdirectory)
+
+    await runtime.provider_posture()
+
+    assert observed == [tmp_path]
+
+
 def test_work_detail_preserves_unknown_open_obligation_count(tmp_path: Path) -> None:
     runtime = YoetzRuntime(cwd=tmp_path)
     session = _WorkSession(
