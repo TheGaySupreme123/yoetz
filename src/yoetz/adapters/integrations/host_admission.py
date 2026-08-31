@@ -750,21 +750,48 @@ def _files_after(
 
     def editable(surface: str) -> bool:
         # Revoke touches only a surface that carries an exact Yoetz entry; grant touches only
-        # an absent one. A foreign or unknown surface is never edited.
+        # an absent one — except the Claude allow<->ask mode change below. A foreign or unknown
+        # surface is never edited.
         state = by_surface[surface].state
         if add:
             return state is HostAdmissionState.ABSENT
         return state is HostAdmissionState.PRESENT
 
     if host == "claude":
-        if editable(_CLAUDE_SURFACE):
+        # A grant whose exact entry already sits in the other Claude list is a mode change
+        # (`allow` <-> `ask`), not a no-op: leaving the other mode in place would silently keep
+        # the behavior the owner just asked to change. Only the requested mode already set stays
+        # a no-op. The observation reports `foreign` when both lists carry the entry, so a
+        # present entry names exactly one current mode in its detail.
+        current = by_surface[_CLAUDE_SURFACE]
+        requested_mode = "ask" if checkpoint else "allow"
+        mode_change = (
+            add
+            and current.state is HostAdmissionState.PRESENT
+            and current.detail in {"allow", "ask"}
+            and current.detail != requested_mode
+        )
+        if editable(_CLAUDE_SURFACE) or mode_change:
             claude_entries = _claude_check_entries(owner)
             before = _read(root / _CLAUDE_SURFACE)
             if add:
+                source = before
+                if mode_change:
+                    removed = _json_with_list_entry(
+                        before,
+                        container_key="permissions",
+                        list_key="allow" if requested_mode == "ask" else "ask",
+                        entry=sorted(claude_entries)[0],
+                        add=False,
+                        remove_entries=claude_entries,
+                    )
+                    if removed is not None:
+                        # Emptied-to-no-file removal reads as an absent file for the re-add.
+                        source = _Read(None if removed == b"" else removed, None)
                 after = _json_with_list_entry(
-                    before,
+                    source,
                     container_key="permissions",
-                    list_key="ask" if checkpoint else "allow",
+                    list_key=requested_mode,
                     entry=sorted(claude_entries)[0],
                     add=True,
                     remove_entries=claude_entries,

@@ -207,6 +207,95 @@ def test_claude_checkpoint_writes_the_ask_rule_and_revoke_finds_it(tmp_path: Pat
     assert _revoke("claude", tmp_path).state_after is HostAdmissionState.ABSENT
 
 
+def test_claude_grant_moves_the_entry_between_allow_and_ask_instead_of_a_silent_noop(
+    tmp_path: Path,
+) -> None:
+    """PR #478 review: `grant` after `grant --checkpoint` (or the reverse) is a mode change."""
+
+    settings = tmp_path / ".claude" / "settings.local.json"
+    _grant("claude", tmp_path)
+    assert observe_host_admission("claude", tmp_path).entries[0].detail == "allow"
+
+    to_ask = _grant("claude", tmp_path, checkpoint=True)
+    assert to_ask.action is HostAdmissionAction.GRANT
+    assert to_ask.surfaces_changed == (".claude/settings.local.json",)
+    assert json.loads(settings.read_text(encoding="utf-8")) == {
+        "permissions": {"ask": [CLAUDE_CHECK_TOOL_NAME]}
+    }
+    assert observe_host_admission("claude", tmp_path).entries[0].detail == "ask"
+
+    back_to_allow = _grant("claude", tmp_path)
+    assert back_to_allow.action is HostAdmissionAction.GRANT
+    assert json.loads(settings.read_text(encoding="utf-8")) == {
+        "permissions": {"allow": [CLAUDE_CHECK_TOOL_NAME]}
+    }
+    assert observe_host_admission("claude", tmp_path).entries[0].detail == "allow"
+
+
+def test_claude_same_mode_grant_stays_a_noop_and_a_mode_change_preserves_owner_rules(
+    tmp_path: Path,
+) -> None:
+    settings = tmp_path / ".claude" / "settings.local.json"
+    settings.parent.mkdir()
+    settings.write_text(
+        json.dumps(
+            {
+                "permissions": {"allow": ["Bash(git status)"], "ask": ["WebFetch"]},
+                "env": {"FOO": "1"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _grant("claude", tmp_path, checkpoint=True)
+
+    same_mode = preview_host_admission(
+        "claude",
+        tmp_path,
+        HostAdmissionAction.GRANT,
+        route_profile="policy",
+        grant_permits=True,
+        owner="plugin",
+        checkpoint=True,
+    )
+    assert same_mode.action is HostAdmissionAction.NOOP
+    assert same_mode.files_after == {}
+
+    moved = _grant("claude", tmp_path)
+    assert moved.action is HostAdmissionAction.GRANT
+    assert json.loads(settings.read_text(encoding="utf-8")) == {
+        "permissions": {
+            "allow": ["Bash(git status)", CLAUDE_CHECK_TOOL_NAME],
+            "ask": ["WebFetch"],
+        },
+        "env": {"FOO": "1"},
+    }
+
+
+def test_claude_mode_change_apply_refuses_a_file_changed_after_preview(tmp_path: Path) -> None:
+    """The mode change rides the same digest-bound preimage recheck as any other write."""
+
+    settings = tmp_path / ".claude" / "settings.local.json"
+    _grant("claude", tmp_path)
+    preview = preview_host_admission(
+        "claude",
+        tmp_path,
+        HostAdmissionAction.GRANT,
+        route_profile="policy",
+        grant_permits=True,
+        owner="plugin",
+        checkpoint=True,
+    )
+    assert preview.action is HostAdmissionAction.GRANT
+    settings.write_text(json.dumps({"permissions": {"allow": ["Bash(ls)"]}}), encoding="utf-8")
+
+    with pytest.raises(HostAdmissionError) as failure:
+        apply_host_admission(preview, tmp_path, accepted_preview_digest=preview.preview_digest)
+    assert failure.value.reason is HostAdmissionReason.PREVIEW_STALE
+    assert json.loads(settings.read_text(encoding="utf-8")) == {
+        "permissions": {"allow": ["Bash(ls)"]}
+    }
+
+
 @pytest.mark.parametrize(
     ("permissions", "detail"),
     [

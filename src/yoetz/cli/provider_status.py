@@ -247,6 +247,24 @@ async def mcp_route_observation(
     }
 
 
+def _admission_repository_root(workspace_locator: Path | None) -> Path:
+    """Resolve the locator to the repository root that owns the host admission files.
+
+    The hosts honor their project-scoped admission files at the repository root
+    (``.claude/settings.local.json``, ``.codex/config.toml``, ``.cursor/*``), so an observation
+    started in a subdirectory must walk up to that root or it reports ``absent`` for files it
+    never looked at. The result is absolute — the adapter refuses a relative root as
+    ``TARGET_UNSAFE`` — and the final symlink is deliberately not resolved: a symlinked root
+    must keep reading as ``unknown`` rather than silently observing the symlink's target.
+    """
+
+    start = Path.cwd() if workspace_locator is None else workspace_locator.absolute()
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return start
+
+
 def host_admission_observation(
     workspace_locator: Path | None = None,
     *,
@@ -254,9 +272,10 @@ def host_admission_observation(
 ) -> dict[str, JsonValue]:
     """Report each host's project-scoped admission entry for ``check`` without inferring intent.
 
-    Reads only the three hosts' own files under the workspace (issue #467). An unreadable file
-    is ``unknown``, never ``absent``: the report must not tell an operator that a host holds no
-    admission when it simply could not read the host's rule file.
+    Reads only the three hosts' own files under the repository root resolved from the workspace
+    locator (issue #467). An unreadable file is ``unknown``, never ``absent``: the report must
+    not tell an operator that a host holds no admission when it simply could not read the host's
+    rule file.
     """
 
     from yoetz.adapters.integrations.host_admission import (
@@ -265,7 +284,7 @@ def host_admission_observation(
         observe_host_admission,
     )
 
-    root = Path.cwd() if workspace_locator is None else workspace_locator
+    root = _admission_repository_root(workspace_locator)
     owner = codex_owner if codex_owner in {"external", "plugin"} else None
     report: dict[str, JsonValue] = {}
     for host in ADMISSION_HOSTS:

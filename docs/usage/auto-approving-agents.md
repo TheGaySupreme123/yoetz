@@ -90,8 +90,9 @@ What each host receives:
   `permissions.allow: ["mcp__plugin_yoetz_yoetz__check"]` for the plugin-owned route in the
   repository's `.claude/settings.local.json`, which Claude Code resolves before its auto-mode
   classifier. Pass `--checkpoint` to write `permissions.ask` instead, which keeps a human prompt
-  on every check that the classifier can never auto-approve. Claude Code holds the rules in this
-  file until you trust the folder if the file is tracked in git.
+  on every check that the classifier can never auto-approve. Granting the other mode later moves
+  the existing entry between `allow` and `ask`; only granting the mode already set is a no-op.
+  Claude Code holds the rules in this file until you trust the folder if the file is tracked in git.
 - **Codex** — `[mcp_servers.yoetz.tools.check] approval_mode = "approve"` (or the
   `plugins."yoetz@yoetz".mcp_servers.yoetz` form for a plugin-managed route) in the project's
   `.codex/config.toml`, which Codex loads only for a project you have trusted. The reviewer is
@@ -117,7 +118,9 @@ Every way in has a way out, and each is reported rather than silent:
 - Removing the host plugin, unregistering the Codex route, or re-registering a route as strict
   removes the entry for the project named in that command.
 - A leftover entry — one whose grant no longer permits review, or whose Codex route is now
-  strict — is reported as `host_admission_drift` by `yoetz provider status`.
+  strict — is reported as `host_admission_drift` by `yoetz provider status`. That report reads
+  each host's project-scoped admission file at the repository root even when you launch the
+  command from a subdirectory.
 
 Tightening the machine-wide ceiling does not reach into every repository's host files; the drift
 report and the revoke command are how those are found and cleared.

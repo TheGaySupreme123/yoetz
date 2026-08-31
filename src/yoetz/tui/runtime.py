@@ -763,7 +763,9 @@ class YoetzRuntime:
     async def provider_posture(self) -> ProviderPosture:
         from yoetz.cli.provider_status import provider_status_report
 
-        report = await provider_status_report(workspace_locator=self._cwd)
+        # The repository root, not the launch directory: host admission files live at the
+        # root, and a subdirectory launch must not report them absent (issue #478 review).
+        report = await provider_status_report(workspace_locator=self.project_root())
         endpoint_map = _mapping(report.get("endpoint"))
         blockers: list[tuple[str, str]] = []
         raw_blockers = report.get("blockers")

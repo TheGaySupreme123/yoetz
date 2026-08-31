@@ -1214,6 +1214,10 @@ def observe_claude_code_mcp(
         cast(Literal["strict", "policy"], profile),
         present,
         True,
+        # Name-mappability only, deliberately independent of the route profile: it says whether
+        # the observed server key maps to the fixed permission-rule names admission can write
+        # (docs/INTERFACES.md). The policy-route requirement is enforced separately at grant,
+        # which refuses `route_not_policy` for any non-policy route (host_admission.py).
         name == "yoetz" and source is not ClaudeCodeMcpSource.CLAUDE_AI_CONNECTOR,
     )
 

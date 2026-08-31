@@ -171,7 +171,9 @@ syscall window.
 Reverse: `integrate codex mcp install --route-profile strict --project-root <project>` and
 `integrate codex mcp remove --project-root <project>` sweep the project's entry and report
 `admission_cleanup` (the registration is global and the admission is project-scoped, so without
-`--project-root` nothing is swept and `provider status` reports `host_admission_drift`);
+`--project-root` nothing is swept and `provider status` reports `host_admission_drift` — that
+report walks from the launch directory to the repository root, so a subdirectory cwd does not
+read as `absent`);
 `integrate codex plugin remove` sweeps it for the bound project; a privacy commit that stops
 external review sweeps it in the ceremony. The sweep still runs when MCP install/remove is already
 a no-op, because the route state and the project admission state are independent.

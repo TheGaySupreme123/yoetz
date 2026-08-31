@@ -159,7 +159,9 @@ operation reports `write_failed` rather than claiming a transaction-wide rollbac
 
 Reverse: `admission revoke`; `plugin remove` and an install/replace onto the strict route sweep
 the entry when `--project-root` is given and report `admission_cleanup`; a privacy commit that
-stops external review sweeps it; `provider status` reports `host_admission_drift`. Cursor
+stops external review sweeps it; `provider status` reports `host_admission_drift`. That report
+walks from the launch directory to the repository root, so a subdirectory cwd does not read as
+`absent`. Cursor
 publishes no hook for a classifier denial, so a held check is visible only through the #187
 pause/approval flow; that gap is documented, not diagnosed.
 

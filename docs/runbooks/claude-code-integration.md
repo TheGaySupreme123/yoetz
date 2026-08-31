@@ -226,7 +226,10 @@ yoetz integrate claude admission grant --project-root "$PROJECT_ROOT" ... --acce
 The Claude roots are what the route observation needs (`status` on the plugin); without them
 the route is unread and a grant refuses with `host_admission_route_unobserved`. A strict route
 refuses with `route_not_policy`; a grant that does not permit review with
-`grant_not_permitting`; a service that cannot be read with `grant_unverifiable`. A wider rule
+`grant_not_permitting`; a service that cannot be read with `grant_unverifiable`. A grant whose
+exact entry already sits in the other list is a mode change — `grant` after `grant --checkpoint`
+(or the reverse) moves the entry between `allow` and `ask` under the same digest-bound preview;
+only re-granting the mode already set is a `noop`. A wider rule
 (`mcp__plugin_yoetz_yoetz__*`, `mcp__plugin_yoetz_yoetz`), a deny rule, or the tool in both
 `allow` and `ask` is `foreign` and never edited. A mutating preview warns
 `host_config_not_compare_and_swap`; keep Claude and other settings writers quiescent during apply.
@@ -238,7 +241,8 @@ rules until the folder is trusted; Yoetz itself refuses to edit through the syml
 Reverse: `admission revoke` removes both exact owner forms; `plugin remove` and a `plugin
 install|update` onto the strict route sweep it for `--project-root` and report
 `admission_cleanup`; a privacy commit that stops external review sweeps it; a leftover entry
-shows as `host_admission_drift` in `provider status`.
+shows as `host_admission_drift` in `provider status`. That report walks from the launch
+directory to the repository root, so a subdirectory cwd does not read as `absent`.
 
 The rendered `hooks/hooks.json` carries a sixth hook, `PermissionDenied`, matched to exactly the
 external and plugin-owned `check` names. It fires after auto mode (or a rule or another hook)

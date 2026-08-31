@@ -896,6 +896,41 @@ def test_mcp_ownership_detects_an_exact_yoetz_route_under_an_alias(tmp_path: Pat
     assert observed.host_admission_supported is False
 
 
+def test_exact_yoetz_strict_route_stays_admission_supported(tmp_path: Path) -> None:
+    """Name-mappability is independent of profile: grant still refuses `route_not_policy`."""
+
+    plugin = tmp_path / "plugin"
+    project = tmp_path / "project"
+    config = tmp_path / "config"
+    plugin.mkdir()
+    project.mkdir()
+    config.mkdir()
+    (project / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "yoetz": {
+                        "args": ["mcp", "serve", "--semantic", "off"],
+                        "command": "yoetz",
+                        "type": "stdio",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    observed = observe_claude_code_mcp(
+        plugin_root=plugin,
+        project_root=project,
+        claude_config_root=config,
+    )
+
+    assert observed.ownership_state is McpOwnershipState.EXTERNAL
+    assert observed.route_profile == "strict"
+    assert observed.host_admission_supported is True
+
+
 def test_recovery_material_surfaces_in_status_and_refuses_preview(tmp_path: Path) -> None:
     from yoetz.adapters.integrations import claude_code_integration as module
 
