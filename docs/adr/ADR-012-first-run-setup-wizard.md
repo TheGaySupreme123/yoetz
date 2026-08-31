@@ -352,6 +352,25 @@ availability, structured-output interoperability, provider data use, or E-007 ca
    quiescence; a later MCP tool call may start a generation-fenced successor. A locked successor
    remains locked and still requires local-human unlock.
 
+9. **Maintainer-authorized start-first initialization continuation (2026-08-31 amendment, issue
+   #512).** The installed agent workflow requires `start` before substantive work and treats
+   non-retryable errors as terminal, so a pristine install answering that first `start` with a
+   bare non-retryable `VAULT_LOCKED` contradicted the workflow it shipped with (the 2026-08-31
+   issue #334 dogfood stopped exactly there). When a workflow call fails with non-retryable
+   `vault_locked` and one bounded fresh-handshake probe proves
+   `state=locked,vault_mode=uninitialized`, the MCP bridge attaches the typed
+   `vault_initialization_required` continuation to the public error: closed-literal
+   `prepare_command`/`review_command`/`authorize_command` tokens, the pending TTL, and the
+   original request id as `replay_request_id`. The continuation routes into the unchanged
+   ADR-015 consent ceremony — exact user decision, helper-generated secret, no agent-visible
+   secret bytes, agent-chat attestation only per ADR-015 decision 5/ADR-016 decision 5 — and
+   ends with one exact replay of the original `start` request identity, which is idempotent by
+   construction because the failed call reserved nothing. Hard locks, recovery states, probe
+   failures, and every initialized-vault outcome keep their existing answers; the Cursor host
+   profile omits `authorize_command`. `yoetz setup run` remains the human-first path this ADR
+   defined; the continuation is the agent-flow bridge to the same ceremonies, never a new
+   authority.
+
 ## Consequences
 
 ### Cursor local selection amendment (2026-08-22, issue #153)

@@ -645,6 +645,12 @@ class ServiceClient(ControlClientPort):
 
         self._ensure_live()
 
+    @property
+    def hello_service_status(self) -> ServiceStatus | None:
+        """The service-status snapshot this session's hello-result carried at connect time."""
+
+        return self._session.service_status
+
     async def _send(self, request: ControlCallRequest | ControlCancelRequest) -> None:
         validate_request(request)
         async with self._write_lock:

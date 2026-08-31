@@ -226,10 +226,12 @@ PROTOCOL_REASON_CODES: frozenset[str] = frozenset(_PROTOCOL_REASON_CODE_VALUES)
 
 SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "actual_version",
+    "authorize_command",
     "availability",
     "availability_inherited",
     "availability_request_id",
     "component",
+    "continuation",
     "count",
     "expected_version",
     "field",
@@ -238,10 +240,14 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "limit",
     "method",
     "operation",
+    "pending_ttl_seconds",
     "phase",
+    "prepare_command",
     "quarantine_code",
     "reason_code",
+    "replay_request_id",
     "retry_after_ms",
+    "review_command",
     "route_profile",
     "schema_name",
     "sequence",
@@ -253,15 +259,24 @@ SAFE_DETAIL_KEYS: tuple[str, ...] = (
     "writer_id",
 )
 
-_INTEGER_DETAIL_KEYS = frozenset({"count", "limit", "retry_after_ms", "sequence"})
+_INTEGER_DETAIL_KEYS = frozenset(
+    {"count", "limit", "pending_ttl_seconds", "retry_after_ms", "sequence"}
+)
 _BOOLEAN_DETAIL_KEYS = frozenset({"availability_inherited"})
 # Closed token sets for the MCP bridge's host-binding availability facts (issue #469). The
 # binding identity is the bridge's host and route profile; `availability` names the one latched
 # state a later request identity may inherit.
+# `continuation` and the exact command literals are the typed initialization-required handoff
+# (issue #512): every value is a repository constant, so nothing caller-derived can ride these
+# keys onto the wire.
 _TOKEN_DETAIL_VALUES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
+        "authorize_command": frozenset({"yoetz consent authorize"}),
         "availability": frozenset({"terminal_unavailable"}),
+        "continuation": frozenset({"vault_initialization_required"}),
         "host_profile": frozenset({"generic", "cursor"}),
+        "prepare_command": frozenset({"yoetz consent prepare vault_initialize"}),
+        "review_command": frozenset({"yoetz consent review"}),
         "route_profile": frozenset({"policy", "strict"}),
     }
 )
@@ -286,12 +301,14 @@ _CORRELATION_ID_PATTERN = re.compile(
     r"^err_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.ASCII,
 )
+_REQUEST_ID_DETAIL_PATTERN = re.compile(
+    r"^req_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.ASCII,
+)
 _PROTOCOL_ID_DETAIL_PATTERNS: Mapping[str, re.Pattern[str]] = MappingProxyType(
     {
-        "availability_request_id": re.compile(
-            r"^req_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-            re.ASCII,
-        ),
+        "availability_request_id": _REQUEST_ID_DETAIL_PATTERN,
+        "replay_request_id": _REQUEST_ID_DETAIL_PATTERN,
         "session_id": re.compile(
             r"^ses_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
             re.ASCII,

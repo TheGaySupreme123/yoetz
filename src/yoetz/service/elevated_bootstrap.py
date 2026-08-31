@@ -29,6 +29,7 @@ from yoetz.config.paths import ensure_owner_only_dir, state_dir
 from yoetz.domain.values import ProtocolValueError, validate_commitment, validate_sha256_digest
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.consent import (
+    CONSENT_PENDING_TTL_SECONDS,
     AgentSafePendingModel,
     ConsentCatalogModel,
     ConsentStatusModel,
@@ -89,7 +90,7 @@ _SCHEMA: Final = "yoetz.elevated-bootstrap.pending/3"
 _LEGACY_SCHEMAS: Final = frozenset(
     {"yoetz.elevated-bootstrap.pending/1", "yoetz.elevated-bootstrap.pending/2"}
 )
-_TTL_SECONDS: Final = 15 * 60
+_TTL_SECONDS: Final = CONSENT_PENDING_TTL_SECONDS
 _PENDING_NAME: Final = "elevated-bootstrap-pending.json"
 _REVIEW_NAME: Final = "elevated-bootstrap-reviewing.json"
 _REVIEW_LOCK_NAME: Final = ".elevated-bootstrap.lock"

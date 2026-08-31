@@ -189,6 +189,11 @@ class ControlSession:
         default=ProjectionRenderMode.MACHINE_READABLE, repr=False, compare=False
     )
     output_is_controlling_tty: bool = field(default=False, repr=False, compare=False)
+    # The service-status snapshot the hello-result carried at handshake time. Client sessions
+    # retain it so a caller can name the structural state (for example an uninitialized vault,
+    # issue #512) without a follow-up method the peer may forbid; it is connect-time data, never
+    # a live read.
+    service_status: ServiceStatus | None = field(default=None, repr=False, compare=False)
     _active: dict[str, _PendingCall] = field(
         default_factory=_new_pending_calls, init=False, repr=False, compare=False
     )
@@ -199,6 +204,8 @@ class ControlSession:
             raise ValueError("control_protocol_version_invalid")
         if type(self.client_kind) is not ControlClientKind:
             raise TypeError("control_client_kind_invalid")
+        if self.service_status is not None and type(self.service_status) is not ServiceStatus:
+            raise TypeError("service_status_invalid")
         if (
             self.repository_privacy_context is not None
             and type(self.repository_privacy_context) is not RepositoryPrivacyContext
@@ -804,6 +811,7 @@ async def client_handshake(
             connection_nonce=nonce,
             projection_render_mode=projection_render_mode,
             output_is_controlling_tty=output_is_controlling_tty,
+            service_status=status,
         )
     except BaseException as exc:
         if isinstance(exc, asyncio.CancelledError):

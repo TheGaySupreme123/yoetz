@@ -514,10 +514,12 @@ def test_operation_error_exception_value_contract() -> None:
 def test_safe_details_allowlist_and_types_are_exact() -> None:
     expected_keys = (
         "actual_version",
+        "authorize_command",
         "availability",
         "availability_inherited",
         "availability_request_id",
         "component",
+        "continuation",
         "count",
         "expected_version",
         "field",
@@ -526,10 +528,14 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
         "limit",
         "method",
         "operation",
+        "pending_ttl_seconds",
         "phase",
+        "prepare_command",
         "quarantine_code",
         "reason_code",
+        "replay_request_id",
         "retry_after_ms",
+        "review_command",
         "route_profile",
         "schema_name",
         "sequence",
@@ -576,12 +582,14 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
     accepted = normalize_safe_details(
         {
             "actual_version": "1.0.0+local",
+            "authorize_command": "yoetz consent authorize",
             "availability": "terminal_unavailable",
             "availability_inherited": True,
             "availability_request_id": "req_00000000-0000-4000-8000-000000000001",
             "host_profile": "cursor",
             "route_profile": "policy",
             "component": _SafeEnum.READY,
+            "continuation": "vault_initialization_required",
             "count": 0,
             "expected_version": "V2-rc.1",
             "field": "/payload/~0/~1//",
@@ -589,10 +597,14 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
             "limit": 9_007_199_254_740_991,
             "method": _SafeEnum.READY,
             "operation": _SafeEnum.READY,
+            "pending_ttl_seconds": 900,
             "phase": _SafeEnum.READY,
+            "prepare_command": "yoetz consent prepare vault_initialize",
             "quarantine_code": "operation_lease_shape_invalid",
             "reason_code": "invalid_digest",
+            "replay_request_id": "req_00000000-0000-4000-8000-000000000001",
             "retry_after_ms": 1,
+            "review_command": "yoetz consent review",
             "schema_name": "accepted-event",
             "sequence": 5,
             "session_id": "ses_00000000-0000-4000-8000-000000000001",
@@ -621,7 +633,7 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
         "1",
         _IntegerSubclass(1),
     )
-    for integer_key in ("count", "limit", "retry_after_ms", "sequence"):
+    for integer_key in ("count", "limit", "pending_ttl_seconds", "retry_after_ms", "sequence"):
         for rejected in rejected_values:
             assert not normalize_safe_details({integer_key: rejected})
     # head_digest is a frontier recovery field: accept genesis and exact sha256, nothing else.
@@ -687,6 +699,46 @@ def test_safe_details_allowlist_and_types_are_exact() -> None:
         "schema_name": _StringSubclass("accepted-event"),
     }
     for key, value in subclass_details.items():
+        assert not normalize_safe_details({key: value})
+
+
+def test_initialization_continuation_details_are_closed_literals() -> None:
+    """Issue #512: the initialization-required continuation admits only repository constants.
+
+    Every command an agent is told to run rides an exact-literal token set, so no caller- or
+    service-derived string can steer an agent toward a different command through these keys.
+    """
+
+    accepted = normalize_safe_details(
+        {
+            "authorize_command": "yoetz consent authorize",
+            "continuation": "vault_initialization_required",
+            "pending_ttl_seconds": 900,
+            "prepare_command": "yoetz consent prepare vault_initialize",
+            "replay_request_id": "req_00000000-0000-4000-8000-000000000001",
+            "review_command": "yoetz consent review",
+        }
+    )
+    assert dict(accepted) == {
+        "authorize_command": "yoetz consent authorize",
+        "continuation": "vault_initialization_required",
+        "pending_ttl_seconds": 900,
+        "prepare_command": "yoetz consent prepare vault_initialize",
+        "replay_request_id": "req_00000000-0000-4000-8000-000000000001",
+        "review_command": "yoetz consent review",
+    }
+    hostile = (
+        ("continuation", "vault_unlock_required"),
+        ("continuation", "vault_initialization_required "),
+        ("prepare_command", "yoetz consent prepare vault_passphrase_rotate"),
+        ("prepare_command", "rm -rf /; yoetz consent prepare vault_initialize"),
+        ("review_command", "yoetz consent review --yolo"),
+        ("authorize_command", "yoetz consent authorize --warning-acknowledged"),
+        ("replay_request_id", "ses_00000000-0000-4000-8000-000000000001"),
+        ("replay_request_id", "req_not_a_uuid"),
+        ("pending_ttl_seconds", "900"),
+    )
+    for key, value in hostile:
         assert not normalize_safe_details({key: value})
 
 

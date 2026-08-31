@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Self, cast
+from typing import Annotated, Final, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 __all__ = [
+    "CONSENT_PENDING_TTL_SECONDS",
     "AgentSafePendingModel",
     "ConsentCatalogModel",
     "ConsentCatalogOperationModel",
@@ -16,6 +17,11 @@ __all__ = [
     "ImportPublicationPreviewModel",
     "RepositoryPrivacyRecipe",
 ]
+
+# The one prepared-pending lifetime (docs/INTERFACES.md): every prepared consent action expires
+# exactly this many seconds after prepare. Shared here so agent-facing surfaces can state the
+# bound without importing the trusted pending store.
+CONSENT_PENDING_TTL_SECONDS: Final = 15 * 60
 
 type ConsentOperation = Literal[
     "vault_initialize",

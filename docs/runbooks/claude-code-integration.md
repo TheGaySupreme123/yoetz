@@ -195,7 +195,9 @@ same pass. A failed attempt records its cause as a payload-free `hook_diagnostic
 `privacy_authority_required`, `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`,
 or `storage_corrupt`) and the session keeps an observation-only binding; turn-boundary events retry
 under the bounded budget. An explicit cooperative MCP `start` bound from its exact `PostToolUse`
-result remains the recovery path, not a substitute proof that natural auto-attach works.
+result remains the recovery path, not a substitute proof that natural auto-attach works. For
+`vault_locked` on a never-initialized install, that explicit `start` returns the typed
+`vault_initialization_required` continuation (see the proof checklist) rather than a dead end.
 
 The shared `observe status` CLI maps an unsafe state/lock path to `storage_unsafe`, bounded
 open/permission/read-only/missing-parent/lock-acquisition failures to `storage_unavailable`, and
@@ -299,6 +301,15 @@ tree; interrupted stage/rollback material surfaces in status as `recovery_requir
 Claude Code is not an allowlisted `yoetz consent authorize` attestation client in v0.1. It may show
 the agent-safe pending status and direct the user to a supported Codex attestation or local trusted
 command, but it must not emulate `vault_initialize` or `vault_passphrase_rotate` authorization.
+
+First-run start continuation (issue #512): on a never-initialized install, the agent's first MCP
+`start` returns non-retryable `VAULT_LOCKED` carrying
+`safe_details.continuation: vault_initialization_required`. The Claude Code flow is trusted-local:
+run `yoetz consent prepare vault_initialize`, show the returned danger text to the user, direct
+them to run `yoetz consent review` on a local terminal (the `authorize_command` the generic
+profile advertises is valid only for an allowlisted agent-chat client, which Claude Code is not),
+wait for the ceremony's terminal result, then replay the exact original `start` request ID and
+body once. On denial or expiry the agent states the boundary and continues without Yoetz.
 
 Record source/render/marketplace/cache/executable digests, exact Claude version/OS/architecture,
 scope, settings state, component inventory, enabled state, loaded root and session boundary, MCP
