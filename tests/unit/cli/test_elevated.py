@@ -811,13 +811,53 @@ def test_forged_approval_arguments_fail_before_mutation(
         assert load_pending(_state=tmp_path) is not None
 
 
+class _StagedInitStore:
+    """Fake staged-initialization keyring lifecycle (#511) for elevated-flow tests."""
+
+    def __init__(self, generated: bytearray, *, staged_leftover: bool = False) -> None:
+        self._generated = generated
+        self.active = False
+        self.staged = staged_leftover
+        self.promoted = False
+        self.discarded = 0
+        self.staged_calls = 0
+
+    def slot_report(self) -> dict[str, str]:
+        return {
+            "active": "present" if self.active else "absent",
+            "staged_initialization": "present" if self.staged else "absent",
+            "staged_rotation": "absent",
+        }
+
+    def stage_for_initialization(self) -> bytearray:
+        from yoetz.adapters.keys.os_keyring import OSKeyringError
+
+        if self.active:
+            raise OSKeyringError("entry_exists")
+        if self.staged:
+            raise OSKeyringError("staged_entry_exists")
+        self.staged = True
+        self.staged_calls += 1
+        return self._generated
+
+    def promote_staged_initialization(self) -> None:
+        from yoetz.adapters.keys.os_keyring import OSKeyringError
+
+        if not self.staged:
+            raise OSKeyringError("missing")
+        self.staged = False
+        self.active = True
+        self.promoted = True
+
+    def discard_staged_initialization(self) -> None:
+        self.staged = False
+        self.discarded += 1
+
+
 def test_generated_initialization_secret_is_submitted_then_overwritten() -> None:
     generated = bytearray(b"g" * 64)
     observed: list[bytes] = []
-
-    class _Store:
-        def create_for_initialization(self) -> bytearray:
-            return generated
+    store = _StagedInitStore(generated)
 
     async def ceremony(
         _console: object,
@@ -831,7 +871,7 @@ def test_generated_initialization_secret_is_submitted_then_overwritten() -> None
 
     async def run() -> dict[str, object]:
         with (
-            patch("yoetz.cli.elevated._auto_unlock_store", return_value=_Store()),
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
             patch(
                 "yoetz.cli.elevated.run_human_ceremony_on_terminal",
                 side_effect=ceremony,
@@ -848,15 +888,14 @@ def test_generated_initialization_secret_is_submitted_then_overwritten() -> None
     assert observed == [b"g" * 64]
     assert bytes(generated) == b"\x00" * 64
     assert result == {"state": "ready", "reason": "succeeded"}
+    assert store.promoted is True
+    assert store.discarded == 0
 
 
 def test_agent_generated_initialization_secret_never_enters_agent_result() -> None:
     generated = bytearray(b"z" * 64)
     observed: list[bytes] = []
-
-    class _Store:
-        def create_for_initialization(self) -> bytearray:
-            return generated
+    store = _StagedInitStore(generated)
 
     async def ceremony(
         _kind: object,
@@ -869,7 +908,7 @@ def test_agent_generated_initialization_secret_never_enters_agent_result() -> No
 
     async def run() -> dict[str, object]:
         with (
-            patch("yoetz.cli.elevated._auto_unlock_store", return_value=_Store()),
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
             patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
         ):
             return cast(
@@ -882,6 +921,137 @@ def test_agent_generated_initialization_secret_never_enters_agent_result() -> No
     assert bytes(generated) == b"\x00" * 64
     assert result == {"state": "ready", "reason": "succeeded"}
     assert b"z" * 16 not in json.dumps(result).encode()
+    assert store.promoted is True
+
+
+def test_ambiguous_initialize_outcome_keeps_staged_credential(tmp_path: Path) -> None:
+    """#511: without proof the vault is uninitialized, the staged entry must survive."""
+
+    generated = bytearray(b"m" * 64)
+    store = _StagedInitStore(generated)
+
+    async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
+        return VaultStateResult("locked", "initialization_ambiguous")
+
+    async def unprovable() -> str | None:
+        return None
+
+    async def run() -> None:
+        with (
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
+            patch("yoetz.cli.elevated._service_vault_mode", side_effect=unprovable),
+            patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
+        ):
+            with pytest.raises(ElevatedBootstrapError) as exc:
+                await elevated._complete_vault_initialize_generated()  # pyright: ignore[reportPrivateUsage]
+        assert exc.value.reason == "vault_result_initialization_ambiguous"
+
+    anyio.run(run)
+    assert store.discarded == 0, "an ambiguous outcome must never delete the staged credential"
+    assert store.staged is True
+    assert bytes(generated) == b"\x00" * 64
+
+
+def test_retry_reconciles_orphaned_staged_credential_before_staging() -> None:
+    """#511: a leftover staged entry with a provably uninitialized vault never blocks retry."""
+
+    generated = bytearray(b"n" * 64)
+    store = _StagedInitStore(generated, staged_leftover=True)
+
+    async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
+        return VaultStateResult("ready", "succeeded")
+
+    async def uninitialized() -> str | None:
+        return "uninitialized"
+
+    async def run() -> dict[str, object]:
+        with (
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
+            patch("yoetz.cli.elevated._service_vault_mode", side_effect=uninitialized),
+            patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
+        ):
+            return cast(
+                dict[str, object],
+                await elevated._complete_vault_initialize_generated(),  # pyright: ignore[reportPrivateUsage]
+            )
+
+    result = anyio.run(run)
+    assert result == {"state": "ready", "reason": "succeeded"}
+    assert store.discarded == 1
+    assert store.staged_calls == 1
+    assert store.promoted is True
+
+
+def test_unprovable_staged_leftover_fails_closed_without_entry_exists() -> None:
+    """#511: an unreconcilable staged entry gets its own bounded reason, never a blind delete."""
+
+    generated = bytearray(b"p" * 64)
+    store = _StagedInitStore(generated, staged_leftover=True)
+
+    async def committed() -> str | None:
+        return "passphrase"
+
+    async def run() -> None:
+        with (
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
+            patch("yoetz.cli.elevated._service_vault_mode", side_effect=committed),
+        ):
+            with pytest.raises(ElevatedBootstrapError) as exc:
+                await elevated._complete_vault_initialize_generated()  # pyright: ignore[reportPrivateUsage]
+        assert exc.value.reason == "auto_unlock_staged_entry_exists"
+
+    anyio.run(run)
+    assert store.discarded == 0
+    assert store.staged is True
+
+
+def test_pre_existing_active_entry_is_still_refused() -> None:
+    """#111 preserved: an active entry that predates initialization is never adopted."""
+
+    generated = bytearray(b"x" * 64)
+    store = _StagedInitStore(generated)
+    store.active = True
+
+    async def run() -> None:
+        with patch("yoetz.cli.elevated._auto_unlock_store", return_value=store):
+            with pytest.raises(ElevatedBootstrapError) as exc:
+                await elevated._complete_vault_initialize_generated()  # pyright: ignore[reportPrivateUsage]
+        assert exc.value.reason == "auto_unlock_entry_exists"
+
+    anyio.run(run)
+    assert store.discarded == 0
+
+
+def test_promotion_failure_after_committed_initialization_still_succeeds() -> None:
+    """#511: the vault committed and activated; a keyring promotion failure must not fail it."""
+
+    from yoetz.adapters.keys.os_keyring import OSKeyringError
+
+    generated = bytearray(b"w" * 64)
+    store = _StagedInitStore(generated)
+
+    def failing_promote() -> None:
+        raise OSKeyringError("ambiguous_write")
+
+    store.promote_staged_initialization = failing_promote  # type: ignore[method-assign]
+
+    async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
+        return VaultStateResult("ready", "succeeded")
+
+    async def run() -> dict[str, object]:
+        with (
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
+            patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
+        ):
+            return cast(
+                dict[str, object],
+                await elevated._complete_vault_initialize_generated(),  # pyright: ignore[reportPrivateUsage]
+            )
+
+    result = anyio.run(run)
+    assert result == {"state": "ready", "reason": "succeeded"}
+    assert store.staged is True, "the staged entry stays for proof-based restart promotion"
+    assert store.discarded == 0
 
 
 def test_agent_generated_rotation_uses_only_local_store_bytes_and_promotes() -> None:
@@ -942,13 +1112,13 @@ def test_agent_authorized_non_ready_vault_result_fails_before_approval(tmp_path:
     """Issue #510: a non-ready ceremony result must never leave an approved consent record."""
 
     generated = bytearray(b"y" * 64)
-
-    class _Store:
-        def create_for_initialization(self) -> bytearray:
-            return generated
+    store = _StagedInitStore(generated)
 
     async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
         return VaultStateResult("locked", "throttle_record_exists")
+
+    async def uninitialized() -> str | None:
+        return "uninitialized"
 
     async def run() -> None:
         with _patch_state(tmp_path):
@@ -956,13 +1126,18 @@ def test_agent_authorized_non_ready_vault_result_fails_before_approval(tmp_path:
             pending = load_pending(_state=tmp_path)
             assert pending is not None
             with (
-                patch("yoetz.cli.elevated._auto_unlock_store", return_value=_Store()),
+                patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
+                patch("yoetz.cli.elevated._service_vault_mode", side_effect=uninitialized),
                 patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
             ):
                 with pytest.raises(ElevatedBootstrapError) as exc:
                     await elevated.authorize_elevated(_chat_attestation(pending))
             assert exc.value.reason == "vault_result_throttle_record_exists"
             assert bytes(generated) == b"\x00" * 64
+            # #511: the same-attempt staged credential is removed once the service proves the
+            # vault is still uninitialized, so retry never hits auto_unlock_entry_exists.
+            assert store.discarded == 1
+            assert store.promoted is False
             assert load_pending(_state=tmp_path) is None
             consumed = _consumed_audit_events(tmp_path)
             assert [event["outcome"] for event in consumed] == ["failed"]
@@ -1037,15 +1212,15 @@ def test_schema_rejected_result_is_bounded_and_never_recorded_approved(tmp_path:
 
 def test_trusted_review_non_ready_vault_result_is_consumed_as_failed(tmp_path: Path) -> None:
     generated = bytearray(b"t" * 64)
-
-    class _Store:
-        def create_for_initialization(self) -> bytearray:
-            return generated
+    store = _StagedInitStore(generated)
 
     async def ceremony(
         _console: object, _kind: object, _target: object, **_kwargs: object
     ) -> VaultStateResult:
         return VaultStateResult("locked", "keyring_unavailable")
+
+    async def uninitialized() -> str | None:
+        return "uninitialized"
 
     async def run() -> None:
         with _patch_state(tmp_path):
@@ -1053,7 +1228,8 @@ def test_trusted_review_non_ready_vault_result_is_consumed_as_failed(tmp_path: P
             with (
                 _patch_verified_presence(),
                 patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=_Console()),
-                patch("yoetz.cli.elevated._auto_unlock_store", return_value=_Store()),
+                patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
+                patch("yoetz.cli.elevated._service_vault_mode", side_effect=uninitialized),
                 patch(
                     "yoetz.cli.elevated.run_human_ceremony_on_terminal",
                     side_effect=ceremony,
@@ -1066,26 +1242,29 @@ def test_trusted_review_non_ready_vault_result_is_consumed_as_failed(tmp_path: P
             consumed = _consumed_audit_events(tmp_path)
             assert [event["outcome"] for event in consumed] == ["failed"]
             assert consumed[0]["failure_reason"] == "vault_result_keyring_unavailable"
+            assert store.discarded == 1
+            assert store.promoted is False
 
     anyio.run(run)
 
 
 def test_authorize_cli_projects_the_bounded_vault_failure_reason(tmp_path: Path) -> None:
     generated = bytearray(b"q" * 64)
-
-    class _Store:
-        def create_for_initialization(self) -> bytearray:
-            return generated
+    store = _StagedInitStore(generated)
 
     async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
         return VaultStateResult("locked", "throttle_record_exists")
+
+    async def uninitialized() -> str | None:
+        return "uninitialized"
 
     with _patch_state(tmp_path):
         elevated.prepare_elevated("vault_initialize")
         pending = load_pending(_state=tmp_path)
         assert pending is not None
         with (
-            patch("yoetz.cli.elevated._auto_unlock_store", return_value=_Store()),
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
+            patch("yoetz.cli.elevated._service_vault_mode", side_effect=uninitialized),
             patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
         ):
             result = CliRunner().invoke(

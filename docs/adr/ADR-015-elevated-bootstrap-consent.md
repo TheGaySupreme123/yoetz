@@ -74,7 +74,15 @@ generate and store one locally without any secret-bearing agent channel.
    pending, catalog, result, log, error, or agent projection. For `vault_initialize`, agent-chat
    approval carries no secret: the helper generates the passphrase inside the local process,
    round-trips it through the scoped credential store, submits a mutable copy through YZS1, and
-   returns only structural vault state. `vault_passphrase_rotate` likewise carries no secret:
+   returns only structural vault state. **Staged initialization amendment (2026-08-31, issue
+   #511).** The helper writes the generated passphrase to a bundle-scoped staged-initialization
+   slot, never the active entry, and promotes it to the active slot only after the
+   schema-validated ready result. On a failed ceremony it removes exactly the same-attempt staged
+   entry, with verified read-back, only when the live service proves the vault is still
+   uninitialized; any unprovable outcome retains the entry as a typed orphan that
+   `yoetz service auto-unlock status` names and that restart reconciliation resolves by
+   cryptographic proof against the vault envelope, so a failed attempt never strands the
+   credential or blocks retry with `entry_exists`. `vault_passphrase_rotate` likewise carries no secret:
    the helper locally loads the active scoped secret, stages a generated replacement, completes
    reauthentication and rewrap, and then promotes the replacement. Trusted CLI/TUI remains the
    stronger recommended path.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import inspect
 from pathlib import Path
@@ -120,11 +121,87 @@ def test_initialization_refuses_preexisting_auto_unlock_entry(
 
     monkeypatch.setattr(keyring_module, "_overwrite", observe_overwrite)
     with pytest.raises(OSKeyringError) as exc:
-        store.create_for_initialization()
+        store.stage_for_initialization()
 
     assert exc.value.reason == "entry_exists"
     assert backend.values == original_entry
     assert wiped and set(wiped[-1]) <= {0}
+
+
+def test_staged_initialization_promotes_only_after_explicit_promotion(tmp_path: Path) -> None:
+    """#511: staging never touches the active slot; promotion is a separate verified step."""
+
+    backend = _AtomicBackend()
+    store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    generated = store.stage_for_initialization()
+    assert 32 <= len(generated) <= 128
+    assert store.load() is None, "the active slot must stay empty until promotion"
+    assert store.slot_report() == {
+        "active": "absent",
+        "staged_initialization": "present",
+        "staged_rotation": "absent",
+    }
+
+    store.promote_staged_initialization()
+    assert store.load() == generated
+    assert store.slot_report() == {
+        "active": "present",
+        "staged_initialization": "absent",
+        "staged_rotation": "absent",
+    }
+    assert all("staged-initialization" not in account for _service, account in backend.values)
+
+
+def test_staged_initialization_discard_removes_exactly_the_staged_entry(tmp_path: Path) -> None:
+    backend = _AtomicBackend()
+    store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    store.stage_for_initialization()
+    store.discard_staged_initialization()
+
+    assert backend.values == {}
+    assert store.slot_report() == {
+        "active": "absent",
+        "staged_initialization": "absent",
+        "staged_rotation": "absent",
+    }
+
+
+def test_staged_initialization_leftover_refuses_a_second_staging(tmp_path: Path) -> None:
+    """#511: an unreconciled staged entry is never silently overwritten or adopted."""
+
+    backend = _AtomicBackend()
+    store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    first = store.stage_for_initialization()
+    with pytest.raises(OSKeyringError) as exc:
+        store.stage_for_initialization()
+
+    assert exc.value.reason == "staged_entry_exists"
+    staged_key = (
+        "yoetz.auto-unlock.v1",
+        store._staged_init_username,  # pyright: ignore[reportPrivateUsage]
+    )
+    encoded = backend.values[staged_key]
+    assert base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)) == bytes(first)
+
+
+def test_staged_initialization_is_a_restart_unlock_candidate(tmp_path: Path) -> None:
+    backend = _AtomicBackend()
+    store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    generated = store.stage_for_initialization()
+    candidates, reason = store.load_candidates_with_reason()
+
+    assert reason == "none"
+    assert [(bytes(value), slot) for value, slot in candidates] == [
+        (bytes(generated), "staged_initialization")
+    ]
 
 
 def test_auto_unlock_rotation_stages_recovers_and_promotes_without_secret_output(
@@ -138,9 +215,9 @@ def test_auto_unlock_rotation_stages_recovers_and_promotes_without_secret_output
 
     candidates, reason = store.load_candidates_with_reason()
     assert reason == "none"
-    assert [(bytes(value), is_staged) for value, is_staged in candidates] == [
-        (bytes(active), False),
-        (bytes(staged), True),
+    assert [(bytes(value), slot) for value, slot in candidates] == [
+        (bytes(active), "active"),
+        (bytes(staged), "staged_rotation"),
     ]
 
     store.promote_staged_rotation()
@@ -148,7 +225,7 @@ def test_auto_unlock_rotation_stages_recovers_and_promotes_without_secret_output
     recovered, recovered_reason = store.load_candidates_with_reason()
     assert loaded == staged
     assert recovered_reason == "none"
-    assert [(bytes(value), is_staged) for value, is_staged in recovered] == [(bytes(staged), False)]
+    assert [(bytes(value), slot) for value, slot in recovered] == [(bytes(staged), "active")]
     assert all("staged-rotation" not in account for _service, account in backend.values)
 
 
@@ -177,9 +254,9 @@ def test_auto_unlock_rotation_can_stage_an_exact_user_selected_value(tmp_path: P
     candidates, reason = store.load_candidates_with_reason()
 
     assert reason == "none"
-    assert [(bytes(value), is_staged) for value, is_staged in candidates] == [
-        (bytes(active), False),
-        (bytes(selected), True),
+    assert [(bytes(value), slot) for value, slot in candidates] == [
+        (bytes(active), "active"),
+        (bytes(selected), "staged_rotation"),
     ]
 
 

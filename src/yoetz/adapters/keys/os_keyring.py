@@ -69,6 +69,7 @@ _ERRORS: Final = frozenset(
         "human_authority_unavailable",
         "authority_mismatch",
         "entry_exists",
+        "staged_entry_exists",
         "entry_invalid",
         "correlation_mismatch",
         "migration_not_proven",
@@ -192,11 +193,18 @@ class AutoUnlockPassphraseStore:
 
     The keyring username is a digest of the absolute service bundle path, so independent Yoetz
     data roots never share an auto-unlock secret and the filesystem path is not disclosed to the
-    credential-store label. Fresh setup generates the value; trusted-TTY repair may store an
+    credential-store label. Fresh setup generates the value into a staged-initialization slot and
+    promotes it only after the vault ceremony proves success; trusted-TTY repair may store an
     existing passphrase only after the caller proves it unlocks the current vault envelope.
     """
 
-    __slots__ = ("_backend", "_backend_id", "_staged_username", "_username")
+    __slots__ = (
+        "_backend",
+        "_backend_id",
+        "_staged_init_username",
+        "_staged_username",
+        "_username",
+    )
 
     def __init__(self, bundle_path: object, *, backend: object | None = None) -> None:
         if not isinstance(bundle_path, Path) or not bundle_path.is_absolute():
@@ -206,6 +214,7 @@ class AutoUnlockPassphraseStore:
         encoded = os.fsencode(os.path.abspath(bundle_path))
         self._username = "bundle-" + hashlib.sha256(encoded).hexdigest()
         self._staged_username = self._username + "-staged-rotation"
+        self._staged_init_username = self._username + "-staged-initialization"
 
     @property
     def entry_identity(self) -> tuple[str, str]:
@@ -238,26 +247,37 @@ class AutoUnlockPassphraseStore:
 
     def load_candidates_with_reason(
         self,
-    ) -> tuple[tuple[tuple[bytearray, bool], ...], str]:
-        """Load active then crash-recovery staged candidates without exposing either value."""
+    ) -> tuple[tuple[tuple[bytearray, str], ...], str]:
+        """Load active then crash-recovery staged candidates without exposing any value.
+
+        Each candidate is tagged with its slot (``active``, ``staged_rotation``, or
+        ``staged_initialization``) so restart reconciliation can promote or discard exactly the
+        entry that cryptographic proof selected. Staged values identical to an earlier candidate
+        are dropped from the result but never deleted here.
+        """
 
         if not self.available:
             return (), "auto_unlock_backend_unavailable"
-        active, active_reason = self._load_username(self._username)
-        staged, staged_reason = self._load_username(self._staged_username)
-        candidates: list[tuple[bytearray, bool]] = []
-        if active is not None:
-            candidates.append((active, False))
-        if staged is not None:
-            if active is not None and hmac.compare_digest(active, staged):
-                _overwrite(staged)
-            else:
-                candidates.append((staged, True))
+        candidates: list[tuple[bytearray, str]] = []
+        reasons: list[str] = []
+        for username, slot in (
+            (self._username, "active"),
+            (self._staged_username, "staged_rotation"),
+            (self._staged_init_username, "staged_initialization"),
+        ):
+            value, reason = self._load_username(username)
+            reasons.append(reason)
+            if value is None:
+                continue
+            if any(hmac.compare_digest(existing, value) for existing, _slot in candidates):
+                _overwrite(value)
+                continue
+            candidates.append((value, slot))
         if candidates:
             return tuple(candidates), "none"
-        if active_reason == "auto_unlock_rejected" or staged_reason == "auto_unlock_rejected":
+        if "auto_unlock_rejected" in reasons:
             return (), "auto_unlock_rejected"
-        return (), active_reason
+        return (), reasons[0]
 
     def _load_username(self, username: str) -> tuple[bytearray | None, str]:
         try:
@@ -295,14 +315,71 @@ class AutoUnlockPassphraseStore:
             return existing
         return self._create_after_absent(load_reason)
 
-    def create_for_initialization(self) -> bytearray:
-        """Create a fresh secret; never initialize a vault from a pre-existing entry."""
+    def stage_for_initialization(self) -> bytearray:
+        """Create a fresh secret in the staged-initialization slot; never adopt an entry.
 
-        existing, load_reason = self.load_with_reason()
-        if existing is not None:
-            _overwrite(existing)
+        The active slot refuses any pre-existing entry (``entry_exists``): adopting one would
+        make an already known value the vault root passphrase. A leftover staged-initialization
+        entry (``staged_entry_exists``) belongs to an earlier authorized attempt whose outcome is
+        not yet reconciled; the caller must discard it with proof or let restart reconciliation
+        resolve it before staging again.
+        """
+
+        if not callable(getattr(self._backend, "delete_password", None)):
+            raise OSKeyringError("unsupported")
+        active, active_reason = self.load_with_reason()
+        if active is not None:
+            _overwrite(active)
             raise OSKeyringError("entry_exists")
-        return self._create_after_absent(load_reason)
+        if active_reason == "auto_unlock_backend_unavailable":
+            raise OSKeyringError("unsupported")
+        if active_reason != "auto_unlock_absent":
+            raise OSKeyringError("entry_invalid")
+        staged, staged_reason = self._load_username(self._staged_init_username)
+        if staged is not None:
+            _overwrite(staged)
+            raise OSKeyringError("staged_entry_exists")
+        return self._create_at(self._staged_init_username, staged_reason)
+
+    def promote_staged_initialization(self) -> None:
+        """Publish the proven staged-initialization secret as active, then clear the slot."""
+
+        value, reason = self._load_username(self._staged_init_username)
+        if value is None:
+            raise OSKeyringError("missing" if reason == "auto_unlock_absent" else "entry_invalid")
+        try:
+            self._save_at(self._username, value)
+            self._discard_slot(self._staged_init_username)
+        finally:
+            _overwrite(value)
+
+    def discard_staged_initialization(self) -> None:
+        """Remove a staged-initialization entry after proof that no vault envelope needs it."""
+
+        self._discard_slot(self._staged_init_username)
+
+    def slot_report(self) -> dict[str, str]:
+        """Report each slot as present/absent/invalid without exposing credential material."""
+
+        if not self.available:
+            return {
+                "active": "unavailable",
+                "staged_initialization": "unavailable",
+                "staged_rotation": "unavailable",
+            }
+        report: dict[str, str] = {}
+        for username, slot in (
+            (self._username, "active"),
+            (self._staged_init_username, "staged_initialization"),
+            (self._staged_username, "staged_rotation"),
+        ):
+            value, reason = self._load_username(username)
+            if value is not None:
+                _overwrite(value)
+                report[slot] = "present"
+            else:
+                report[slot] = "absent" if reason == "auto_unlock_absent" else "invalid"
+        return report
 
     def _create_after_absent(self, load_reason: str) -> bytearray:
         return self._create_at(self._username, load_reason)
@@ -351,19 +428,19 @@ class AutoUnlockPassphraseStore:
             raise OSKeyringError("missing" if reason == "auto_unlock_absent" else "entry_invalid")
         try:
             self._save_at(self._username, value)
-            self._delete_staged()
+            self._discard_slot(self._staged_username)
         finally:
             _overwrite(value)
 
     def discard_staged_rotation(self) -> None:
         """Remove a staged candidate after the vault proved it did not switch."""
 
-        self._delete_staged()
+        self._discard_slot(self._staged_username)
 
-    def _delete_staged(self) -> None:
+    def _discard_slot(self, username: str) -> None:
         if not callable(getattr(self._backend, "delete_password", None)):
             raise OSKeyringError("unsupported")
-        existing, reason = self._load_username(self._staged_username)
+        existing, reason = self._load_username(username)
         if existing is not None:
             _overwrite(existing)
         elif reason == "auto_unlock_absent":
@@ -372,11 +449,11 @@ class AutoUnlockPassphraseStore:
             raise OSKeyringError("entry_invalid")
         try:
             cast(AnyKeyringBackend, self._backend).delete_password(
-                _AUTO_UNLOCK_SERVICE_NAME, self._staged_username
+                _AUTO_UNLOCK_SERVICE_NAME, username
             )
         except Exception:
             raise OSKeyringError("ambiguous_write") from None
-        remaining, remaining_reason = self._load_username(self._staged_username)
+        remaining, remaining_reason = self._load_username(username)
         if remaining is not None:
             _overwrite(remaining)
             raise OSKeyringError("unverified")

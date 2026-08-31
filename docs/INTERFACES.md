@@ -1919,17 +1919,24 @@ reveals credential or policy state.
 
 `AutoUnlockPassphraseStore` is a trusted-service/setup adapter, not an ordinary control port. Its
 credential-store service name is `yoetz.auto-unlock.v1`; its account identity is
-`bundle-<sha256(os.fsencode(abspath(bundle_root)))>`. It accepts only exact vault-passphrase bytes,
-base64url-encodes them for the allowlisted platform backend, verifies writes by round trip, and
-returns only bounded structural load reasons. Setup, boot, and trusted-TTY repair overwrite mutable
-buffers best-effort. Setup and repair resolve the bundle through the same effective configuration
-and environment inputs as daemon startup. Setup falls back to a human-chosen passphrase only for a
-platform-store failure guaranteed to occur before any write. If a write may have committed but
-cannot be read back exactly, setup stops before vault initialization and requires recovery of
-platform-store access; it never initializes a different manual secret beside the ambiguous entry.
-No MCP method, ordinary control body, config value, environment value, argv value, stdin path, or
-log field can carry the secret. Deletion is not exposed until it can be atomically coupled to a
-human-known passphrase rewrap, so generated-passphrase installations cannot be stranded.
+`bundle-<sha256(os.fsencode(abspath(bundle_root)))>` for the active slot, with sibling
+`-staged-rotation` and `-staged-initialization` accounts for the two staged slots. It accepts only
+exact vault-passphrase bytes, base64url-encodes them for the allowlisted platform backend, verifies
+writes by round trip, and returns only bounded structural load reasons. Setup, boot, and
+trusted-TTY repair overwrite mutable buffers best-effort. Setup and repair resolve the bundle
+through the same effective configuration and environment inputs as daemon startup. Setup falls back
+to a human-chosen passphrase only for a platform-store failure guaranteed to occur before any
+write. If a write may have committed but cannot be read back exactly, setup stops before vault
+initialization and requires recovery of platform-store access; it never initializes a different
+manual secret beside the ambiguous entry. Generated initialization (issue #511) stages its fresh
+secret in the staged-initialization slot, never the active entry, and promotes it only after the
+validated ready result; restart unlock tries active then staged candidates and promotes or
+discards each strictly by proof against the vault envelope. No MCP method, ordinary control body,
+config value, environment value, argv value, stdin path, or log field can carry the secret.
+Active-slot deletion is not exposed until it can be atomically coupled to a human-known passphrase
+rewrap; a staged slot is deleted, with verified read-back, only after proof that no vault envelope
+depends on it (the accepting unlock disproved it, or the live service reports the vault
+uninitialized), so generated-passphrase installations cannot be stranded.
 
 `SecretMemoryPort` exposes `capability`, `capture`, `allocate`, and `close` over opaque one-shot
 `SecretHandle` values. `SecretPurpose` is exactly `vault_initialize`, `vault_unlock`,
@@ -2150,8 +2157,14 @@ with audit outcome `failed` and a bounded `failure_reason`, prints
 and leaves no durable claim of approval, so failed execution stays distinguishable from denial,
 expiry, and completion. Retry is one new `yoetz consent prepare`, which rebinds the identical
 target digest for vault operations. A failed generated rotation never promotes the staged
-scoped-credential replacement; startup reconciliation still owns the staged slot. Recovery of a
-generated auto-unlock credential left behind by a failed initialization is owned by issue #511.
+scoped-credential replacement; startup reconciliation still owns the staged slot. A failed
+generated initialization likewise never leaves the credential in the active slot (issue #511): the
+same-attempt staged entry is removed with proof when the vault is still uninitialized, or retained
+as a typed orphan that `yoetz service auto-unlock status` distinguishes
+(`initialization_orphaned`, `initialization_unreconciled`, `pre_existing_unadoptable`),
+`yoetz service auto-unlock repair` clears under the same proof, and restart reconciliation
+resolves by proof, so retry never fails on `auto_unlock_entry_exists` from an abandoned
+same-attempt entry.
 
 The current public JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
 `review-result`, and `status`, each at version `5.0.0` under `schemas/consent/`; frozen versions
