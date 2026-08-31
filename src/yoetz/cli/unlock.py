@@ -52,6 +52,7 @@ from yoetz.service.confidential_protocol import (
     SecretRequiredPhase,
     SelectAuthorizationSourceAction,
     VaultInitializePreview,
+    VaultPassphraseRotatePreview,
     VaultStateResult,
     VaultUnlockPreview,
     human_target_json,
@@ -77,6 +78,7 @@ __all__ = [
     "read_vault_passphrase_for_auto_unlock",
     "retry_keyring",
     "rotate_provider_credential",
+    "rotate_vault_passphrase",
     "run_human_ceremony",
     "run_human_ceremony_on_terminal",
     "set_provider_credential",
@@ -97,6 +99,8 @@ _FIXED_ERROR_REASONS: Final = frozenset(
         "trusted_console_required",
     }
 )
+_PASSPHRASE_PROMPT_SUFFIX: Final = " (16-1024 UTF-8 bytes; no control characters): "
+_IGNORABLE_ROTATION_STAGE_REASONS: Final = frozenset({"missing", "unsupported"})
 
 
 class HumanCeremonyCliError(Exception):
@@ -238,6 +242,12 @@ class _CeremonyTerminal(Protocol):
     def read_secret(self, prompt: str, maximum: int) -> bytearray: ...
 
 
+class _RotationStore(Protocol):
+    def stage_value_for_rotation(self, value: bytearray) -> None: ...
+
+    def promote_staged_rotation(self) -> None: ...
+
+
 class _SuppliedSecretTerminal:
     """Non-prompting facade used only when every possible secret was supplied."""
 
@@ -277,6 +287,8 @@ def _verify_preview(
     valid = False
     if kind is HumanCeremonyKind.VAULT_INITIALIZE:
         valid = type(preview) is VaultInitializePreview
+    elif kind is HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE:
+        valid = type(preview) is VaultPassphraseRotatePreview
     elif kind is HumanCeremonyKind.VAULT_UNLOCK:
         valid = type(preview) is VaultUnlockPreview
     elif kind is HumanCeremonyKind.KEYRING_RETRY:
@@ -621,6 +633,8 @@ def _render_preview(terminal: _CeremonyTerminal, preview: HumanPreview) -> None:
     terminal.write("Yoetz trusted foreground ceremony\n")
     if type(preview) is VaultInitializePreview:
         terminal.write("Action: initialize passphrase vault (irreversible mode selection)\n")
+    elif type(preview) is VaultPassphraseRotatePreview:
+        terminal.write("Action: rotate passphrase vault credentials\n")
     elif type(preview) is VaultUnlockPreview:
         terminal.write("Action: unlock passphrase vault\n")
     elif type(preview) is KeyringRetryPreview:
@@ -717,6 +731,28 @@ def _needs_confirmation(
     )
 
 
+def _passphrase_prompt(stem: str) -> str:
+    """Prompt stem plus the shared length/control-character contract suffix."""
+
+    return f"{stem}{_PASSPHRASE_PROMPT_SUFFIX}"
+
+
+def _raise_for_rotation_stage_error(exc: Exception) -> None:
+    """Map a staged-keyring write failure without calling the user's input invalid.
+
+    Missing or unsupported backends cannot hold a stage; other keyring failures are
+    ceremony-result problems, not a malformed passphrase.
+    """
+
+    from yoetz.adapters.keys.os_keyring import OSKeyringError
+
+    if type(exc) is not OSKeyringError:
+        raise HumanCeremonyCliError("result_invalid") from exc
+    if exc.reason in _IGNORABLE_ROTATION_STAGE_REASONS:
+        return
+    raise HumanCeremonyCliError("result_invalid") from exc
+
+
 def _read_secret(
     terminal: _CeremonyTerminal,
     kind: HumanCeremonyKind,
@@ -724,36 +760,62 @@ def _read_secret(
     purpose: ConfidentialSecretPurpose,
 ) -> bytearray:
     maximum = 8_192 if purpose is ConfidentialSecretPurpose.PROVIDER_CREDENTIAL else 1_024
+    is_passphrase = purpose is not ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
     label = (
         "Provider credential: "
         if purpose is ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
-        else "Recovery code or passphrase: "
-        if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
-        else "New vault passphrase: "
-        if purpose is ConfidentialSecretPurpose.VAULT_REWRAP
-        else "Passphrase: "
-    )
-    first = terminal.read_secret(label, maximum)
-    try:
-        _validate_secret(first, purpose)
-        if not _needs_confirmation(kind, target, purpose):
-            return first
-        confirmation = terminal.read_secret(
-            "Confirm recovery passphrase: "
+        else _passphrase_prompt(
+            "Recovery code or passphrase"
             if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
-            else "Confirm passphrase: ",
-            maximum,
+            else "New vault passphrase"
+            if purpose is ConfidentialSecretPurpose.VAULT_REWRAP
+            else "Passphrase"
         )
+    )
+    while True:
+        first = terminal.read_secret(label, maximum)
+        accepted = False
         try:
-            _validate_secret(confirmation, purpose)
-            if not hmac.compare_digest(first, confirmation):
-                raise HumanCeremonyCliError("confirmation_mismatch")
+            try:
+                _validate_secret(first, purpose)
+            except HumanCeremonyCliError:
+                if not is_passphrase:
+                    raise
+                terminal.write(
+                    "Passphrase must be 16-1024 UTF-8 bytes with no control characters. "
+                    "Try again.\n"
+                )
+                continue
+            if not _needs_confirmation(kind, target, purpose):
+                accepted = True
+                return first
+            confirmation = terminal.read_secret(
+                _passphrase_prompt(
+                    "Confirm recovery passphrase"
+                    if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
+                    else "Confirm passphrase"
+                ),
+                maximum,
+            )
+            try:
+                try:
+                    _validate_secret(confirmation, purpose)
+                except HumanCeremonyCliError:
+                    terminal.write(
+                        "Passphrase must be 16-1024 UTF-8 bytes with no control characters. "
+                        "Try again.\n"
+                    )
+                    continue
+                if not hmac.compare_digest(first, confirmation):
+                    terminal.write("Passphrases did not match. Try again.\n")
+                    continue
+                accepted = True
+                return first
+            finally:
+                overwrite_secret_buffer(confirmation)
         finally:
-            overwrite_secret_buffer(confirmation)
-        return first
-    except BaseException:
-        overwrite_secret_buffer(first)
-        raise
+            if not accepted:
+                overwrite_secret_buffer(first)
 
 
 async def _send_secret(
@@ -770,7 +832,11 @@ async def _send_secret(
 
 
 def _expected_result_type(kind: HumanCeremonyKind) -> type[HumanResult]:
-    if kind in {HumanCeremonyKind.VAULT_INITIALIZE, HumanCeremonyKind.VAULT_UNLOCK}:
+    if kind in {
+        HumanCeremonyKind.VAULT_INITIALIZE,
+        HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE,
+        HumanCeremonyKind.VAULT_UNLOCK,
+    }:
         return VaultStateResult
     if kind is HumanCeremonyKind.KEYRING_RETRY:
         return KeyringRetryResult
@@ -811,8 +877,13 @@ async def _drive_session(
     vault_rewrap_secret: bytearray | None = None,
 ) -> tuple[HumanResult, Literal["approve", "deny"] | None]:
     decision: Literal["approve", "deny"] | None = None
+    rotation_store: _RotationStore | None = None
+    rotation_staged = False
     for _ in range(8):
         if type(current) is _expected_result_type(kind):
+            if rotation_staged:
+                assert rotation_store is not None
+                rotation_store.promote_staged_rotation()
             return cast(HumanResult, current), decision
         if type(current) is SecretRequiredPhase:
             purpose = current.binding.purpose
@@ -865,6 +936,27 @@ async def _drive_session(
                 terminal.write("\n")
             else:
                 secret_buffer = _read_secret(terminal, kind, target, purpose)
+            if (
+                kind is HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE
+                and purpose is ConfidentialSecretPurpose.VAULT_REWRAP
+                and supplied is None
+            ):
+                # Persist the exact user-selected replacement before the envelope switches.
+                # If the ceremony becomes ambiguous, daemon restart tries active and staged
+                # candidates and reconciles the one that authenticates the envelope.
+                from yoetz.adapters.keys.os_keyring import AutoUnlockPassphraseStore, OSKeyringError
+                from yoetz.config.load import load_config
+                from yoetz.config.paths import bundle_root
+
+                config = load_config({}, os.environ, None)
+                store = AutoUnlockPassphraseStore(bundle_root(_data_dir=config.storage.data_dir))
+                try:
+                    store.stage_value_for_rotation(secret_buffer)
+                except OSKeyringError as exc:
+                    _raise_for_rotation_stage_error(exc)
+                else:
+                    rotation_store = store
+                    rotation_staged = True
             await _send_secret(session, current, secret_buffer)
         elif type(current) is AuthorizationRequiredPhase:
             authorization_source: Literal["os_user_presence", "secret_reauthentication"]
@@ -936,7 +1028,7 @@ def _validate_supplied_secrets(
     provider_reauthentication: bytearray | None,
     installation_recovery_secret: bytearray | None,
     vault_rewrap_secret: bytearray | None,
-) -> tuple[bool, bool, bool]:
+) -> tuple[bool, bool, bool, bool]:
     if type(kind) is not HumanCeremonyKind:
         raise TypeError("human_ceremony_kind_invalid")
     provider_kind = kind in {
@@ -947,13 +1039,14 @@ def _validate_supplied_secrets(
         HumanCeremonyKind.VAULT_INITIALIZE,
         HumanCeremonyKind.VAULT_UNLOCK,
     }
+    passphrase_rotation_kind = kind is HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE
     recovery_kind = kind is HumanCeremonyKind.INSTALLATION_RECOVERY
     if (
         (provider_credential is not None and not provider_kind)
         or (provider_reauthentication is not None and not provider_kind)
-        or (passphrase is not None and not passphrase_kind)
+        or (passphrase is not None and not (passphrase_kind or passphrase_rotation_kind))
         or (installation_recovery_secret is not None and not recovery_kind)
-        or (vault_rewrap_secret is not None and not recovery_kind)
+        or (vault_rewrap_secret is not None and not (recovery_kind or passphrase_rotation_kind))
     ):
         for supplied in (
             provider_credential,
@@ -965,7 +1058,7 @@ def _validate_supplied_secrets(
             if supplied is not None:
                 overwrite_secret_buffer(supplied)
         raise ValueError("provider_credential_target_invalid")
-    return provider_kind, passphrase_kind, recovery_kind
+    return provider_kind, passphrase_kind, recovery_kind, passphrase_rotation_kind
 
 
 async def run_human_ceremony(
@@ -979,18 +1072,20 @@ async def run_human_ceremony(
 ) -> HumanResult:
     """Run one exact foreground YZH1/YZS1 ceremony and return structural state only."""
 
-    provider_kind, passphrase_kind, recovery_kind = _validate_supplied_secrets(
-        kind,
-        provider_credential,
-        passphrase,
-        provider_reauthentication,
-        installation_recovery_secret,
-        vault_rewrap_secret,
+    provider_kind, passphrase_kind, recovery_kind, passphrase_rotation_kind = (
+        _validate_supplied_secrets(
+            kind,
+            provider_credential,
+            passphrase,
+            provider_reauthentication,
+            installation_recovery_secret,
+            vault_rewrap_secret,
+        )
     )
     fully_supplied = (
-        passphrase is not None
-        if passphrase_kind
-        else (
+        (passphrase_kind and passphrase is not None)
+        or (passphrase_rotation_kind and passphrase is not None and vault_rewrap_secret is not None)
+        or (
             recovery_kind
             and type(target) is InstallationRecoveryTarget
             and (
@@ -1101,6 +1196,21 @@ async def initialize_passphrase_vault(passphrase: bytearray | None = None) -> Va
         HumanCeremonyKind.VAULT_INITIALIZE,
         EmptyVaultTarget(expected_mode="uninitialized"),
         passphrase=passphrase,
+    )
+    return cast(VaultStateResult, result)
+
+
+async def rotate_vault_passphrase(
+    passphrase: bytearray | None = None,
+    replacement: bytearray | None = None,
+) -> VaultStateResult:
+    """Reauthenticate and atomically rewrap the vault under a new passphrase."""
+
+    result = await run_human_ceremony(
+        HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE,
+        EmptyVaultTarget(expected_mode="passphrase"),
+        passphrase=passphrase,
+        vault_rewrap_secret=replacement,
     )
     return cast(VaultStateResult, result)
 

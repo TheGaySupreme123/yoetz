@@ -65,6 +65,12 @@ _SECRET_PURPOSES_BY_KIND: Final[
     Mapping[HumanCeremonyKind, frozenset[ConfidentialSecretPurpose]]
 ] = {
     HumanCeremonyKind.VAULT_INITIALIZE: frozenset({ConfidentialSecretPurpose.VAULT_INITIALIZE}),
+    HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE: frozenset(
+        {
+            ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION,
+            ConfidentialSecretPurpose.VAULT_REWRAP,
+        }
+    ),
     HumanCeremonyKind.VAULT_UNLOCK: frozenset({ConfidentialSecretPurpose.VAULT_UNLOCK}),
     HumanCeremonyKind.KEYRING_RETRY: frozenset[ConfidentialSecretPurpose](),
     HumanCeremonyKind.PORTABLE_RECOVERY: frozenset({ConfidentialSecretPurpose.PORTABLE_RECOVERY}),

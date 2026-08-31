@@ -50,6 +50,7 @@ from yoetz.service.confidential_protocol import (
     ServerPhaseEnvelope,
     ServerResultEnvelope,
     VaultInitializePreview,
+    VaultPassphraseRotatePreview,
     VaultStateResult,
     decode_human_frame,
     decode_secret_header,
@@ -153,6 +154,10 @@ def test_client_open_has_literal_reviewed_golden_bytes() -> None:
     ("kind", "target"),
     [
         (HumanCeremonyKind.VAULT_INITIALIZE, EmptyVaultTarget()),
+        (
+            HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE,
+            EmptyVaultTarget(expected_mode="passphrase"),
+        ),
         (HumanCeremonyKind.VAULT_UNLOCK, EmptyVaultTarget(expected_mode="passphrase")),
         (HumanCeremonyKind.KEYRING_RETRY, EmptyVaultTarget(expected_mode="os_keyring")),
         (
@@ -187,7 +192,7 @@ def test_client_open_has_literal_reviewed_golden_bytes() -> None:
         ),
     ],
 )
-def test_all_ten_open_targets_are_closed_and_round_trip(
+def test_all_open_targets_are_closed_and_round_trip(
     kind: HumanCeremonyKind,
     target: object,
 ) -> None:
@@ -345,6 +350,29 @@ def test_opened_binding_and_terminal_close_round_trip() -> None:
     assert decode_human_frame(encode_human_frame(opened)) == opened
     close = ServerCloseEnvelope("1" * 64, 2, "completed")
     assert decode_human_frame(encode_human_frame(close)) == close
+
+
+def test_vault_passphrase_rotation_preview_is_structural_and_round_trips() -> None:
+    ceremony = HumanCeremonyBinding(
+        1,
+        "1" * 64,
+        "0" * 64,
+        HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE,
+        _SERVICE_ID,
+        3,
+        4,
+        None,
+        _DIGEST_A,
+        60_000,
+    )
+    opened = ServerOpenedEnvelope(
+        "1" * 64,
+        1,
+        ceremony,
+        VaultPassphraseRotatePreview(),
+        AuthorizationRequiredPhase(("secret_reauthentication",)),
+    )
+    assert decode_human_frame(encode_human_frame(opened)) == opened
 
 
 @pytest.mark.parametrize(

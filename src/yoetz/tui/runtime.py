@@ -1003,6 +1003,14 @@ class YoetzRuntime:
         except HumanCeremonyCliError as error:
             raise RuntimeError_(error.reason, "the vault could not be initialized")
 
+    async def rotate_vault_passphrase(self) -> None:
+        from yoetz.cli.unlock import HumanCeremonyCliError, rotate_vault_passphrase
+
+        try:
+            await rotate_vault_passphrase()
+        except HumanCeremonyCliError as error:
+            raise RuntimeError_(error.reason, "the passphrase could not be changed")
+
     async def initialize_system_keyring(self) -> None:
         from yoetz.cli.unlock import HumanCeremonyCliError, retry_keyring
 

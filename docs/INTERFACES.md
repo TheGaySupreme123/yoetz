@@ -1973,7 +1973,7 @@ receive or retain the real credential; HTTP/TLS internals may copy header bytes,
 zero-copy claim is made.
 
 Pure `service/confidential_protocol.py` owns both closed client-safe wire contracts. YZH1 is the
-multi-phase structural channel with `HUMAN_PROTOCOL_MAGIC`, version/cap, exact ten
+multi-phase structural channel with `HUMAN_PROTOCOL_MAGIC`, version/cap, exact eleven
 `HumanCeremonyKind` values, `HumanOpenTarget`/`HumanPreview`/`HumanAction`/`HumanPhase`/
 `HumanResult` unions, ceremony/decision bindings, eight correlated envelope types, bounded errors,
 and terminal close. YZS1 is the one-secret binary channel with `SECRET_PROTOCOL_MAGIC`, version/
@@ -1990,7 +1990,7 @@ Every serialized YZH1 ceremony/decision binding and YZS1 `SecretIngressBinding` 
 `CEREMONY_EXPIRY_SECONDS * 1000`; no float is serialized. Expiry comparison converts the current
 monotonic sample with the same floor rule.
 
-`HumanCeremonyKind` is exactly `vault_initialize`, `vault_unlock`, `keyring_retry`,
+`HumanCeremonyKind` is exactly `vault_initialize`, `vault_passphrase_rotate`, `vault_unlock`, `keyring_retry`,
 `portable_recovery`, `installation_recovery`, `provider_credential_set`, `provider_credential_rotate`,
 `privacy_policy_decision`, `privacy_disclosure_decision`, and `idle_relock_policy_change`.
 `CEREMONY_EXPIRY_SECONDS = 300` is the one YZH1/YZS1 challenge/binding expiry. It bounds a whole
@@ -2057,9 +2057,12 @@ no server-side `edit` action. Idle-policy secret reauthentication uses only wire
 `ConfidentialSecretClient`; it imports only the pure protocol and connect-only local transport.
 `cli/trusted_console.py` owns the `TrustedForegroundConsole` boundary and `cli/unlock.py` owns the
 confidential ceremony driver. On macOS/Linux the console opens `/dev/tty`, matches the standard
-input/error terminal identity, verifies the foreground process group, and performs no-echo reads.
-On Windows it opens `CONIN$`/`CONOUT$`, validates real console handles and current-process
-attachment, and performs no-echo reads through Win32 console APIs. It never falls back to
+input/error terminal identity, verifies the foreground process group, disables raw secret echo,
+and writes one `*` mask marker per accepted input unit. On Windows it opens
+`CONIN$`/`CONOUT$`, validates real console handles and current-process attachment, disables raw
+secret echo, and writes the same mask feedback through Win32 console APIs. Backspace removes one
+marker. The mask intentionally reveals entered length to a local terminal observer, never content.
+It never falls back to
 redirected standard streams. These channels are absent from
 `ControlClientPort`, ordinary CLI/MCP import graphs and schemas, argv, environment, config, stdin,
 logs, traces, transcripts, and LLM context. These console properties protect secret ingress but
@@ -2087,11 +2090,12 @@ process, argv, environment, stdin, MCP, JSON, or caller boolean can authorize co
 `client_kind`, `instruction_source=explicit_current_chat_user`, exact
 pending/operation/danger/target digests, decision, and `warning_acknowledged` for approve).
 Yoetz treats the assertion as authority but cannot independently authenticate its chat provenance;
-a compromised agent can forge it. Implemented agent-chat operations are
-`provider_credential_set`, `provider_credential_rotate`, `repository_privacy_grant`, and the
-service-prepared `import_publication`. Credential
-approve may read one secret from stdin (`--provider-credential-stdin`); results are presence-only
-and never echo secret bytes. Vault initialization stays helper/console-only. This lane does not
+a compromised agent can forge it. Implemented agent-chat operations are `vault_initialize`,
+`vault_passphrase_rotate`, `provider_credential_set`, `provider_credential_rotate`,
+`repository_privacy_grant`, and the service-prepared `import_publication`.
+Credential approve may read one secret from stdin (`--provider-credential-stdin`); results are
+presence-only and never echo secret bytes. Vault initialization accepts no caller secret: the local
+helper generates and scoped-credential-store-verifies it before confidential submission. This lane does not
 unlock an already-locked vault. The six MCP tools (ADR-011) are unchanged; authorize is local
 CLI control.
 
@@ -2114,8 +2118,17 @@ and cannot widen policy. Keyring mode without measured presence has no passphras
 stored policy/credentials. No decision JSON, reusable token, proof, preview, or secret returns to
 ordinary CLI/MCP/stdout.
 This ready-local behavior applies only to already committed keyring mode. On pristine
-uninitialized state, missing presence evidence blocks keyring creation and leaves explicit
-passphrase initialization as a separate local-human choice.
+uninitialized state, missing presence evidence blocks immutable keyring-mode creation. Explicit
+manual passphrase initialization and exact agent-authorized helper-generated passphrase
+initialization remain separate choices.
+
+Passphrase rotation is the `vault_passphrase_rotate` ceremony over an
+`EmptyVaultTarget(expected_mode=passphrase)`. It consumes a security-reauthentication secret and a
+distinct `vault_rewrap` replacement, keeps the IVK and vault records unchanged, and atomically
+replaces only the authenticated envelope. Manual rotation stages the user-selected replacement;
+agent-authorized rotation stages a locally generated replacement. Startup reconciliation tries
+the active and staged scoped credential entries and retains only the candidate that authenticates
+the committed envelope.
 
 ### Privacy policy, disclosure, and outbound gateway
 

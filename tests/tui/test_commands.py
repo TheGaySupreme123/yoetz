@@ -649,7 +649,32 @@ async def test_service_shows_state_and_offers_lifecycle_actions(
         view = app.open_view
         assert view is not None
         labels = [option.label for option in view.options]  # type: ignore[attr-defined]
-        assert labels == ["Unlock", "Set up a passphrase", "Lock now", "Stop the service"]
+        assert labels == [
+            "Unlock",
+            "Set up a passphrase",
+            "Change the passphrase",
+            "Lock now",
+            "Stop the service",
+        ]
+
+
+async def test_service_rotate_uses_the_same_confidential_handoff(
+    make_app: MakeApp,
+) -> None:
+    runtime = FakeRuntime()
+    app = make_app(runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/service")
+        await pilot.press("down", "down", "enter")  # Change the passphrase
+        await pilot.pause()
+        view = app.open_view
+        assert view is not None
+        assert view.view_name == "confidential"
+        assert view.title_text == "Change your Yoetz passphrase"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert runtime.ceremonies == ["rotate_vault_passphrase"]
 
 
 # ---------------------------------------------------------------------------

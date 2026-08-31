@@ -84,7 +84,9 @@ line above the active one:
    planned file count.
 5. **Installation activity**, step by step. A step is only reported as done once its postcondition
    was checked.
-6. **Secure storage** — system keyring, or a Yoetz passphrase.
+6. **Secure storage** — system keyring, or a Yoetz passphrase entered on the trusted terminal
+   (masked, re-prompted, 16–1024 UTF-8 bytes). Change it later with `/service` or
+   `yoetz service rotate-passphrase`.
 7. **Review mode** — Local only, or Add semantic review.
 8. **Semantic setup, when selected** — an explicit choice between OpenAI API / compatible API and
    Codex with ChatGPT subscription, followed by the matching secure API-key or Codex-owned login
@@ -224,8 +226,11 @@ coverage, open findings, limitations, whether deeper review contributed, freshne
 
 ### `/service` and `/doctor`
 
-`/service` shows state and offers unlock, passphrase setup, lock, and stop. Stopping asks for
-confirmation with the cursor on *no*.
+`/service` shows state and offers unlock, passphrase setup, change passphrase, lock, and stop.
+Stopping asks for confirmation with the cursor on *no*. Change passphrase uses the same trusted
+terminal handoff as first-time setup: input is masked with `*`, the helper states the 16–1024
+UTF-8 byte contract, and it re-prompts after invalid or mismatched input. The shell equivalent is
+`yoetz service rotate-passphrase`.
 
 `/doctor` runs bounded read-only checks across runtime, package version, discovery, registration,
 managed files, hooks, consent, policy digest, service reachability, vault, provider, and privacy,
@@ -240,8 +245,9 @@ Yoetz never accepts a secret through this window.
 
 When a credential or passphrase is needed, the interface explains what is about to happen and asks
 for explicit consent. On approval it **suspends itself** and hands the terminal to the existing
-confidential ceremony, which opens the controlling terminal directly and turns off echo. What you
-type there goes straight into the local vault.
+confidential ceremony, which opens the controlling terminal directly, turns off echo, and masks
+accepted input with `*`. Invalid or mismatched passphrases are overwritten and re-prompted; they
+are not accepted. What you type there goes straight into the local vault.
 
 No secret byte can reach the transcript, the interface's state, a log, a config file, an event
 payload, MCP context, or a screenshot — because no secret byte ever enters this process's UI at

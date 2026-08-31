@@ -388,6 +388,9 @@ class FakeRuntime:
     async def initialize_passphrase_vault(self) -> None:
         self.ceremonies.append("initialize_vault")
 
+    async def rotate_vault_passphrase(self) -> None:
+        self.ceremonies.append("rotate_vault_passphrase")
+
     async def initialize_system_keyring(self) -> None:
         self.ceremonies.append("initialize_keyring")
 

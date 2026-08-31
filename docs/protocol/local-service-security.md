@@ -62,10 +62,28 @@ with its own bounded keyring reason. **Neither branch silently falls back to the
 
 A local human may instead explicitly run `service initialize-passphrase`. The helper confirms the
 new passphrase twice locally but transmits exactly one one-shot `vault_initialize` secret to the
-service, which accepts it only after re-proving that no installation identity, catalog, mode,
-ciphertext, sentinel, or ambiguous staging state already exists. A committed passphrase-backed vault
-never probes or falls back to the keyring at startup; foreign or stale keyring entries are ignored,
-not deleted. Later unlock of an existing passphrase vault uses the distinct `vault_unlock` purpose.
+service. The trusted prompt states the 16–1024 UTF-8 byte, no-control-character contract and
+shows `*` mask feedback while raw echo remains disabled. Backspace removes a mask marker; this
+reveals entered length to the local terminal but not content. It re-prompts after invalid input or
+a confirmation mismatch, overwriting every rejected buffer before
+the next attempt. The service accepts the secret only after re-proving that no installation
+identity, catalog, mode, ciphertext, sentinel, or ambiguous staging state already exists. A
+committed passphrase-backed vault never probes or falls back to the keyring at startup; foreign or
+stale keyring entries are ignored, not deleted. Later unlock of an existing passphrase vault uses
+the distinct `vault_unlock` purpose.
+An allowlisted first-party agent acting on an explicit current-chat instruction may instead prepare
+and authorize `vault_initialize`. That path carries only the bounded attestation: Yoetz generates
+the high-entropy passphrase locally, verifies its scoped credential-store round trip, submits a
+mutable copy through confidential ingress, wipes process buffers, and returns structural state.
+No secret or caller-selected randomness crosses chat, MCP, argv, environment, config, or logs.
+
+A ready passphrase vault can be changed with `service rotate-passphrase`: the current passphrase
+reauthenticates the exact action, and the replacement is masked, confirmed, validated, and staged
+in the scoped credential store before the service atomically rewraps the unchanged IVK. An
+allowlisted agent with an exact prepared `vault_passphrase_rotate` authorization can request the
+same transition without receiving either secret; Yoetz loads the current value and generates the
+staged replacement locally. After success it promotes the stage. After an ambiguous interruption,
+startup tries active and staged and keeps only the candidate that authenticates the envelope.
 **Initialization is never available as a reset or recovery path for an existing vault** — an
 existing-vault user experiencing a missing keyring entry, a wrong passphrase, or a tamper failure
 is never told to run initialization; that failure routes to

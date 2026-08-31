@@ -461,7 +461,7 @@ def test_agent_chat_attestation_mismatch_does_not_consume_pending(
     anyio.run(run)
 
 
-def test_agent_chat_authorize_rejects_vault_and_missing_or_forbidden_credential(
+def test_agent_chat_authorize_initializes_vault_and_rejects_missing_or_forbidden_credential(
     tmp_path: Path,
 ) -> None:
     async def run() -> None:
@@ -470,10 +470,16 @@ def test_agent_chat_authorize_rejects_vault_and_missing_or_forbidden_credential(
             elevated.prepare_elevated("vault_initialize")
             vault_pending = load_pending(_state=vault_state)
             assert vault_pending is not None
-            with pytest.raises(ElevatedBootstrapError) as vault_error:
-                await elevated.authorize_elevated(_chat_attestation(vault_pending))
-            assert vault_error.value.reason == "chat_user_operation_forbidden"
-            assert load_pending(_state=vault_state) == vault_pending
+            with patch(
+                "yoetz.cli.elevated._complete_vault_initialize_generated",
+                return_value={"state": "ready", "reason": "succeeded"},
+            ) as initialize:
+                vault_result = await elevated.authorize_elevated(_chat_attestation(vault_pending))
+            initialize.assert_awaited_once_with()
+            assert vault_result["authority_channel"] == "agent_attested_chat_instruction"
+            assert vault_result["result"] == {"state": "ready", "reason": "succeeded"}
+            validate_schema_instance("review-result", "5.0.0", vault_result)
+            assert load_pending(_state=vault_state) is None
 
         credential_state = tmp_path / "credential"
         with _patch_state(credential_state):
@@ -839,6 +845,88 @@ def test_generated_initialization_secret_is_submitted_then_overwritten() -> None
     assert observed == [b"g" * 64]
     assert bytes(generated) == b"\x00" * 64
     assert result == {"state": "ready", "reason": "succeeded"}
+
+
+def test_agent_generated_initialization_secret_never_enters_agent_result() -> None:
+    generated = bytearray(b"z" * 64)
+    observed: list[bytes] = []
+
+    class _Store:
+        def create_for_initialization(self) -> bytearray:
+            return generated
+
+    async def ceremony(
+        _kind: object,
+        _target: object,
+        **kwargs: object,
+    ) -> VaultStateResult:
+        supplied = cast(bytearray, kwargs["passphrase"])
+        observed.append(bytes(supplied))
+        return VaultStateResult("ready", "succeeded")
+
+    async def run() -> dict[str, object]:
+        with (
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=_Store()),
+            patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
+        ):
+            return cast(
+                dict[str, object],
+                await elevated._complete_vault_initialize_generated(),  # pyright: ignore[reportPrivateUsage]
+            )
+
+    result = anyio.run(run)
+    assert observed == [b"z" * 64]
+    assert bytes(generated) == b"\x00" * 64
+    assert result == {"state": "ready", "reason": "succeeded"}
+    assert b"z" * 16 not in json.dumps(result).encode()
+
+
+def test_agent_generated_rotation_uses_only_local_store_bytes_and_promotes() -> None:
+    current = bytearray(b"c" * 64)
+    replacement = bytearray(b"r" * 64)
+    observed: list[tuple[bytes, bytes]] = []
+
+    class _Store:
+        promoted = False
+
+        def load(self) -> bytearray:
+            return current
+
+        def stage_for_rotation(self) -> bytearray:
+            return replacement
+
+        def promote_staged_rotation(self) -> None:
+            self.promoted = True
+
+    store = _Store()
+
+    async def ceremony(_kind: object, _target: object, **kwargs: object) -> VaultStateResult:
+        observed.append(
+            (
+                bytes(cast(bytearray, kwargs["passphrase"])),
+                bytes(cast(bytearray, kwargs["vault_rewrap_secret"])),
+            )
+        )
+        return VaultStateResult("ready", "succeeded")
+
+    async def run() -> dict[str, object]:
+        with (
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
+            patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
+        ):
+            return cast(
+                dict[str, object],
+                await elevated._complete_vault_passphrase_rotate_generated(),  # pyright: ignore[reportPrivateUsage]
+            )
+
+    result = anyio.run(run)
+    assert observed == [(b"c" * 64, b"r" * 64)]
+    assert store.promoted is True
+    assert bytes(current) == b"\x00" * 64
+    assert bytes(replacement) == b"\x00" * 64
+    assert result == {"state": "ready", "reason": "succeeded"}
+    assert b"c" * 16 not in json.dumps(result).encode()
+    assert b"r" * 16 not in json.dumps(result).encode()
 
 
 def test_trusted_review_displays_exact_provider_binding(tmp_path: Path) -> None:
