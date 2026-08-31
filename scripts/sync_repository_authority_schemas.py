@@ -422,6 +422,21 @@ def _claim_v24_request() -> dict[str, Any]:
     return generated
 
 
+def _semantic_provenance_v24_result() -> dict[str, Any]:
+    generated = _with_id("control-result", "2.4.0", _status_v23_result())
+    for old, new in (
+        ("check-result-1.0.0", "check-result-1.1.0"),
+        ("receipt-result-1.0.0", "receipt-result-1.1.0"),
+        ("status-result-1.1.0", "status-result-1.2.0"),
+    ):
+        _replace_schema_ref(
+            generated,
+            f"https://schemas.yoetz.dev/0.1/operations/{old}.schema.json",
+            f"https://schemas.yoetz.dev/0.1/operations/{new}.schema.json",
+        )
+    return generated
+
+
 def _documents() -> dict[Path, bytes]:
     documents = {
         ("control-hello", "2.0.0"): _hello(),
@@ -461,7 +476,7 @@ def _documents() -> dict[Path, bytes]:
             _with_id("control-hello-result", "2.0.0", _load("control-hello-result")),
         ),
         ("control-request", "2.4.0"): _claim_v24_request(),
-        ("control-result", "2.4.0"): _with_id("control-result", "2.4.0", _status_v23_result()),
+        ("control-result", "2.4.0"): _semantic_provenance_v24_result(),
     }
     return {
         _SERVICE / f"{name}-{version}.schema.json": canonical_encode(document)

@@ -35,6 +35,19 @@ def test_unreviewed_route_never_inherits_another_provider_posture() -> None:
     )
 
 
+def test_codex_subscription_has_explicit_unknown_plan_specific_posture() -> None:
+    record = data_use_record_for_endpoint("codex-chatgpt-subscription")
+
+    assert record.profile.data_use_profile_id == "codex-chatgpt-subscription-unverified"
+    assert record.profile.customer_content_training == "unknown"
+    assert record.profile.retention == "unknown"
+    assert record.official_source_urls
+    assert "upstream OpenAI request" in " ".join(record.caveats)
+    assert not endpoint_profile_data_use_recommendation_eligible(
+        "codex-chatgpt-subscription", now=datetime(2026, 8, 30, tzinfo=UTC)
+    )
+
+
 def test_fireworks_store_false_and_xai_direct_routes_are_recommendation_eligible() -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
 
@@ -55,6 +68,7 @@ def test_all_exposed_ambiguous_routes_have_explicit_conservative_records() -> No
         "openrouter-openai-chat-completions",
         "vercel-ai-gateway-openai-responses",
         "owner-declared-openai-responses",
+        "codex-chatgpt-subscription",
     ):
         record = data_use_record_for_endpoint(endpoint_profile_id)
         assert record.endpoint_profile_id == endpoint_profile_id

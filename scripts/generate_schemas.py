@@ -667,6 +667,368 @@ def _opaque_unknown_event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonV
     return document
 
 
+def _load_versioned_template(
+    entry: _RegistryEntry,
+    source_relative_path: str,
+    *,
+    replacements: Mapping[str, str] = {},
+) -> dict[str, JsonValue]:
+    """Copy one reviewed predecessor into a new append-only schema version."""
+
+    source = Path(__file__).resolve().parent.parent / "schemas" / source_relative_path
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "versioned_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+
+    def rewrite(value: JsonValue) -> JsonValue:
+        if isinstance(value, str):
+            result = value
+            for before, after in replacements.items():
+                result = result.replace(before, after)
+            return result
+        if isinstance(value, list):
+            return cast(JsonValue, [rewrite(item) for item in value])
+        if isinstance(value, dict):
+            return cast(JsonValue, {key: rewrite(item) for key, item in value.items()})
+        return value
+
+    copied = cast(dict[str, JsonValue], rewrite(document))
+    copied["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    title = copied.get("title")
+    if isinstance(title, str):
+        copied["title"] = title.rsplit(" ", 1)[0] + f" {entry.schema_version}"
+    return copied
+
+
+def _runtime_attempt_evidence_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    digest = {
+        "maxLength": 71,
+        "minLength": 71,
+        "pattern": "^sha256:[0-9a-f]{64}$",
+        "type": "string",
+    }
+    correlation = {
+        "maxLength": 256,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        "type": "string",
+    }
+    required = [
+        "app_server_schema_sha256",
+        "capability_cell_sha256",
+        "capability_evidence_expires_at",
+        "capability_profile",
+        "case_disclosed",
+        "credential_authority",
+        "disclosed_case_sha256",
+        "executable_sha256",
+        "instruction_sha256",
+        "isolated_config_sha256",
+        "launcher_sha256",
+        "output_schema_sha256",
+        "process_cleanup",
+        "reasoning_effort",
+        "runtime_source_identity",
+        "runtime_version",
+        "selection_sha256",
+        "turn_acknowledged",
+        "upstream_body_observability",
+    ]
+    properties: dict[str, JsonValue] = {
+        name: dict(digest)
+        for name in (
+            "app_server_schema_sha256",
+            "capability_cell_sha256",
+            "disclosed_case_sha256",
+            "executable_sha256",
+            "final_output_sha256",
+            "instruction_sha256",
+            "isolated_config_sha256",
+            "launcher_sha256",
+            "output_schema_sha256",
+            "selection_sha256",
+        )
+    }
+    properties.update(
+        {
+            "auth_mode": {"const": "chatgpt", "type": "string"},
+            "capability_profile": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$",
+                "type": "string",
+            },
+            "capability_evidence_expires_at": {
+                "maxLength": 20,
+                "minLength": 20,
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+                "type": "string",
+            },
+            "case_disclosed": {"type": "boolean"},
+            "credential_authority": {
+                "const": "external_runtime_oauth",
+                "type": "string",
+            },
+            "plan_type": {
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+                "type": "string",
+            },
+            "process_cleanup": {
+                "enum": ["failed", "killed", "not_started", "terminated"],
+                "type": "string",
+            },
+            "reasoning_effort": {
+                "enum": ["high", "low", "max", "medium", "ultra", "xhigh"],
+                "type": "string",
+            },
+            "runtime_source_identity": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$",
+                "type": "string",
+            },
+            "runtime_version": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[0-9A-Za-z][0-9A-Za-z._+-]*$",
+                "type": "string",
+            },
+            "thread_id": dict(correlation),
+            "turn_acknowledged": {"type": "boolean"},
+            "turn_id": dict(correlation),
+            "upstream_body_observability": {
+                "const": "unavailable",
+                "type": "string",
+            },
+        }
+    )
+    return {
+        "$id": SCHEMA_NAMESPACE + entry.relative_path,
+        "$schema": _DRAFT_2020_12,
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {
+                    "properties": {"turn_acknowledged": {"const": True}},
+                    "required": ["turn_acknowledged"],
+                },
+                "then": {
+                    "properties": {"case_disclosed": {"const": True}},
+                    "required": ["thread_id", "turn_id"],
+                },
+            }
+        ],
+        "properties": properties,
+        "required": required,
+        "title": f"Yoetz runtime attempt evidence {entry.schema_version}",
+        "type": "object",
+    }
+
+
+def _semantic_provenance_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    document = _load_versioned_template(
+        entry,
+        "findings/semantic-provenance-1.0.0.schema.json",
+    )
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    unavailable = cast(dict[str, JsonValue], definitions["status_unavailable"])
+    unavailable_reason = cast(
+        dict[str, JsonValue], cast(dict[str, JsonValue], unavailable["properties"])["reason"]
+    )
+    reasons = cast(list[JsonValue], unavailable_reason["enum"])
+    if "outcome_unknown" not in reasons:
+        reasons.append("outcome_unknown")
+        reasons.sort(key=cast(Callable[[JsonValue], bytes], lambda item: str(item).encode()))
+    semantic_reason = cast(dict[str, JsonValue], definitions["semantic_reason"])
+    all_reasons = cast(list[JsonValue], semantic_reason["enum"])
+    if "outcome_unknown" not in all_reasons:
+        all_reasons.append("outcome_unknown")
+        all_reasons.sort(key=cast(Callable[[JsonValue], bytes], lambda item: str(item).encode()))
+    properties = cast(dict[str, JsonValue], document["properties"])
+    dispatch = cast(dict[str, JsonValue], properties["dispatch_kind"])
+    dispatch["enum"] = ["external", "external_runtime_oauth", "local_model"]
+    properties["runtime_evidence"] = {
+        "$ref": (f"{SCHEMA_NAMESPACE}findings/runtime-attempt-evidence-1.0.0.schema.json")
+    }
+    rules = cast(list[JsonValue], document["allOf"])
+    rules[0] = {
+        "oneOf": [
+            {
+                "not": {
+                    "anyOf": [
+                        {"required": ["local_disclosure_reservation_id"]},
+                        {"required": ["runtime_evidence"]},
+                    ]
+                },
+                "properties": {"dispatch_kind": {"const": "external"}},
+                "required": [
+                    "dispatch_kind",
+                    "egress_authorization_id",
+                    "request_commitment",
+                ],
+            },
+            {
+                "not": {"required": ["local_disclosure_reservation_id"]},
+                "properties": {"dispatch_kind": {"const": "external_runtime_oauth"}},
+                "required": [
+                    "dispatch_kind",
+                    "egress_authorization_id",
+                    "request_commitment",
+                    "runtime_evidence",
+                ],
+            },
+            {
+                "not": {
+                    "anyOf": [
+                        {"required": ["egress_authorization_id"]},
+                        {"required": ["request_commitment"]},
+                        {"required": ["runtime_evidence"]},
+                    ]
+                },
+                "properties": {"dispatch_kind": {"const": "local_model"}},
+                "required": ["dispatch_kind", "local_disclosure_reservation_id"],
+            },
+        ]
+    }
+    return document
+
+
+def _check_result_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    document = _load_versioned_template(
+        entry,
+        "operations/check-result-1.0.0.schema.json",
+        replacements={"semantic-provenance-1.0.0": "semantic-provenance-1.1.0"},
+    )
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    binding = cast(dict[str, JsonValue], definitions["semantic_binding"])
+    branches = cast(list[JsonValue], binding["oneOf"])
+    template = next(
+        cast(dict[str, JsonValue], item)
+        for item in branches
+        if isinstance(item, dict) and '"transport_unavailable"' in json.dumps(item)
+    )
+    unknown = cast(dict[str, JsonValue], json.loads(json.dumps(template)))
+    props = cast(dict[str, JsonValue], unknown["properties"])
+    cast(dict[str, JsonValue], props["semantic_reason"])["const"] = "outcome_unknown"
+    provenance = cast(dict[str, JsonValue], props["semantic_provenance"])
+    constraint = cast(dict[str, JsonValue], cast(list[JsonValue], provenance["allOf"])[1])
+    constraint_props = cast(dict[str, JsonValue], constraint["properties"])
+    cast(dict[str, JsonValue], constraint_props["reason"])["const"] = "outcome_unknown"
+    branches.append(unknown)
+    success = cast(dict[str, JsonValue], definitions["success"])
+    success_props = cast(dict[str, JsonValue], success["properties"])
+    reason_enum = cast(
+        list[JsonValue], cast(dict[str, JsonValue], success_props["semantic_reason"])["enum"]
+    )
+    reason_enum.append("outcome_unknown")
+    reason_enum.sort(key=cast(Callable[[JsonValue], bytes], lambda item: str(item).encode()))
+    return document
+
+
+def _check_recorded_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    document = _load_versioned_template(
+        entry,
+        "events/check-recorded-1.0.0.schema.json",
+        replacements={"semantic-provenance-1.0.0": "semantic-provenance-1.1.0"},
+    )
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    binding = cast(dict[str, JsonValue], definitions["semantic_binding"])
+    branches = cast(list[JsonValue], binding["oneOf"])
+    template = next(
+        cast(dict[str, JsonValue], item)
+        for item in branches
+        if isinstance(item, dict) and '"transport_unavailable"' in json.dumps(item)
+    )
+    unknown = cast(dict[str, JsonValue], json.loads(json.dumps(template)))
+    props = cast(dict[str, JsonValue], unknown["properties"])
+    cast(dict[str, JsonValue], props["semantic_reason"])["const"] = "outcome_unknown"
+    provenance = cast(dict[str, JsonValue], props["semantic_provenance"])
+    constraint = cast(dict[str, JsonValue], cast(list[JsonValue], provenance["allOf"])[1])
+    constraint_props = cast(dict[str, JsonValue], constraint["properties"])
+    cast(dict[str, JsonValue], constraint_props["reason"])["const"] = "outcome_unknown"
+    branches.append(unknown)
+    properties = cast(dict[str, JsonValue], document["properties"])
+    reason_enum = cast(
+        list[JsonValue], cast(dict[str, JsonValue], properties["semantic_reason"])["enum"]
+    )
+    reason_enum.append("outcome_unknown")
+    reason_enum.sort(key=cast(Callable[[JsonValue], bytes], lambda item: str(item).encode()))
+    return document
+
+
+def _simple_versioned_schema(
+    entry: _RegistryEntry, source: str, replacements: Mapping[str, str]
+) -> dict[str, JsonValue]:
+    return _load_versioned_template(entry, source, replacements=replacements)
+
+
+def _event_draft_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    document = _event_draft_schema(entry)
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    branches = cast(list[JsonValue], document["oneOf"])
+    for family in (
+        "check_recorded",
+        "finding_recorded",
+        "session_opened",
+        "session_resumed",
+    ):
+        definition_name = f"schema_identity_{family}_1_1"
+        alias_name = f"{family}_1_1_schema"
+        definitions[definition_name] = {
+            "additionalProperties": False,
+            "properties": {"name": {"const": family}, "version": {"const": "1.1.0"}},
+            "required": ["name", "version"],
+            "type": "object",
+        }
+        definitions[alias_name] = {"$ref": f"#/$defs/{definition_name}"}
+        legacy_path = f"events/{family.replace('_', '-')}-1.0.0.schema.json"
+        new_path = f"events/{family.replace('_', '-')}-1.1.0.schema.json"
+        legacy_index = next(
+            index
+            for index, item in enumerate(branches)
+            if isinstance(item, dict) and legacy_path in json.dumps(item)
+        )
+        branches.insert(
+            legacy_index + 1,
+            {
+                "properties": {
+                    "payload": {"$ref": SCHEMA_NAMESPACE + new_path},
+                    "schema": {"$ref": f"#/$defs/{alias_name}"},
+                },
+                "required": ["schema", "payload"],
+            },
+        )
+    return document
+
+
+def _opaque_unknown_event_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    document = _opaque_unknown_event_draft_schema(entry)
+    definitions = cast(dict[str, JsonValue], document["$defs"])
+    unknown = cast(dict[str, JsonValue], definitions["unknown_event_schema"])
+    exclusion = cast(dict[str, JsonValue], unknown["not"])
+    values = cast(list[JsonValue], exclusion["anyOf"])
+    for family in (
+        "check_recorded",
+        "finding_recorded",
+        "session_opened",
+        "session_resumed",
+    ):
+        values.append(
+            {
+                "additionalProperties": False,
+                "properties": {"name": {"const": family}, "version": {"const": "1.1.0"}},
+                "required": ["name", "version"],
+                "type": "object",
+            }
+        )
+    return document
+
+
 def _publish_work_request_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Derive v1.1 authoring from frozen v1.0 and select the v1.1 draft union."""
 
@@ -1567,6 +1929,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.config.models", fromlist=["YoetzConfig"]).YoetzConfig,
     ),
     _RegistryEntry(
+        "config/yoetz-config-1.1.0.schema.json",
+        "yoetz-config",
+        "1.1.0",
+        "config",
+        "configuration",
+        lambda: __import__("yoetz.config.models", fromlist=["YoetzConfig"]).YoetzConfig,
+    ),
+    _RegistryEntry(
         "consent/catalog-2.0.0.schema.json",
         "catalog",
         "2.0.0",
@@ -1801,6 +2171,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/check-recorded-1.1.0.schema.json",
+        "check-recorded",
+        "1.1.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["CheckRecordedPayload"]
+            ).CheckRecordedPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/claim-recorded-1.0.0.schema.json",
         "claim-recorded",
         "1.0.0",
@@ -1892,6 +2274,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "events/finding-recorded-1.0.0.schema.json",
         "finding-recorded",
         "1.0.0",
+        "event",
+        "event-payload",
+        lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
+    ),
+    _RegistryEntry(
+        "events/finding-recorded-1.1.0.schema.json",
+        "finding-recorded",
+        "1.1.0",
         "event",
         "event-payload",
         lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
@@ -2007,9 +2397,33 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/session-opened-1.1.0.schema.json",
+        "session-opened",
+        "1.1.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["SessionOpenedPayload"]
+            ).SessionOpenedPayload
+        ),
+    ),
+    _RegistryEntry(
         "events/session-resumed-1.0.0.schema.json",
         "session-resumed",
         "1.0.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["SessionResumedPayload"]
+            ).SessionResumedPayload
+        ),
+    ),
+    _RegistryEntry(
+        "events/session-resumed-1.1.0.schema.json",
+        "session-resumed",
+        "1.1.0",
         "event",
         "event-payload",
         lambda: (
@@ -2027,6 +2441,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
     ),
     _RegistryEntry(
+        "findings/finding-1.1.0.schema.json",
+        "finding",
+        "1.1.0",
+        "request_result",
+        "finding",
+        lambda: __import__("yoetz.domain.findings", fromlist=["Finding"]).Finding,
+    ),
+    _RegistryEntry(
         "findings/semantic-provenance-1.0.0.schema.json",
         "semantic-provenance",
         "1.0.0",
@@ -2034,6 +2456,28 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "semantic-provenance",
         lambda: (
             __import__("yoetz.domain.findings", fromlist=["SemanticProvenance"]).SemanticProvenance
+        ),
+    ),
+    _RegistryEntry(
+        "findings/semantic-provenance-1.1.0.schema.json",
+        "semantic-provenance",
+        "1.1.0",
+        "request_result",
+        "semantic-provenance",
+        lambda: (
+            __import__("yoetz.domain.findings", fromlist=["SemanticProvenance"]).SemanticProvenance
+        ),
+    ),
+    _RegistryEntry(
+        "findings/runtime-attempt-evidence-1.0.0.schema.json",
+        "runtime-attempt-evidence",
+        "1.0.0",
+        "request_result",
+        "semantic-provenance",
+        lambda: (
+            __import__(
+                "yoetz.domain.findings", fromlist=["RuntimeAttemptEvidence"]
+            ).RuntimeAttemptEvidence
         ),
     ),
     _RegistryEntry(
@@ -2062,6 +2506,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "operations/check-result-1.0.0.schema.json",
         "check-result",
         "1.0.0",
+        "request_result",
+        "MCP output",
+        lambda: __import__("yoetz.protocol.models", fromlist=["CheckResultModel"]).CheckResultModel,
+    ),
+    _RegistryEntry(
+        "operations/check-result-1.1.0.schema.json",
+        "check-result",
+        "1.1.0",
         "request_result",
         "MCP output",
         lambda: __import__("yoetz.protocol.models", fromlist=["CheckResultModel"]).CheckResultModel,
@@ -2149,6 +2601,16 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "operations/receipt-result-1.1.0.schema.json",
+        "receipt-result",
+        "1.1.0",
+        "request_result",
+        "MCP output",
+        lambda: (
+            __import__("yoetz.protocol.models", fromlist=["ReceiptResultModel"]).ReceiptResultModel
+        ),
+    ),
+    _RegistryEntry(
         "operations/respond-request-1.0.0.schema.json",
         "respond-request",
         "1.0.0",
@@ -2229,6 +2691,16 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "operations/status-result-1.2.0.schema.json",
+        "status-result",
+        "1.2.0",
+        "request_result",
+        "MCP output",
+        lambda: (
+            __import__("yoetz.protocol.models", fromlist=["StatusResultModel"]).StatusResultModel
+        ),
+    ),
+    _RegistryEntry(
         "privacy/egress-receipt-1.0.0.schema.json",
         "egress-receipt",
         "1.0.0",
@@ -2280,6 +2752,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "receipts/receipt-document-1.0.0.schema.json",
         "receipt-document",
         "1.0.0",
+        "request_result",
+        "receipt-document",
+        lambda: __import__("yoetz.domain.receipts", fromlist=["ReceiptDocument"]).ReceiptDocument,
+    ),
+    _RegistryEntry(
+        "receipts/receipt-document-1.1.0.schema.json",
+        "receipt-document",
+        "1.1.0",
         "request_result",
         "receipt-document",
         lambda: __import__("yoetz.domain.receipts", fromlist=["ReceiptDocument"]).ReceiptDocument,
@@ -2718,6 +3198,16 @@ def build_schema_documents(
 
         assert entry.loader is not None  # narrowed by the pending-check above
         if entry.relative_path in {
+            "config/yoetz-config-1.0.0.schema.json",
+            "events/check-recorded-1.0.0.schema.json",
+            "events/finding-recorded-1.0.0.schema.json",
+            "findings/finding-1.0.0.schema.json",
+            "findings/semantic-provenance-1.0.0.schema.json",
+            "operations/check-result-1.0.0.schema.json",
+            "operations/receipt-result-1.0.0.schema.json",
+        }:
+            normalized = _frozen_schema(entry)
+        elif entry.relative_path in {
             "events/plan-published-1.0.0.schema.json",
             "events/plan-revised-1.0.0.schema.json",
         }:
@@ -2725,7 +3215,15 @@ def build_schema_documents(
         elif entry.relative_path == "events/event-draft-1.0.0.schema.json":
             normalized = _frozen_schema(entry)
         elif entry.relative_path == "events/event-draft-1.1.0.schema.json":
-            normalized = _event_draft_schema(entry)
+            normalized = _event_draft_v1_1_schema(entry)
+        elif entry.relative_path == "events/check-recorded-1.1.0.schema.json":
+            normalized = _check_recorded_v1_1_schema(entry)
+        elif entry.relative_path == "events/finding-recorded-1.1.0.schema.json":
+            normalized = _simple_versioned_schema(
+                entry,
+                "events/finding-recorded-1.0.0.schema.json",
+                {"finding-1.0.0": "finding-1.1.0"},
+            )
         elif entry.relative_path in {
             "events/evidence-recorded-1.1.0.schema.json",
             "events/evidence-recorded-1.2.0.schema.json",
@@ -2738,9 +3236,27 @@ def build_schema_documents(
         elif entry.relative_path == "events/opaque-unknown-event-draft-1.0.0.schema.json":
             normalized = _frozen_schema(entry)
         elif entry.relative_path == "events/opaque-unknown-event-draft-1.1.0.schema.json":
-            normalized = _opaque_unknown_event_draft_schema(entry)
+            normalized = _opaque_unknown_event_v1_1_schema(entry)
         elif entry.relative_path == "operations/publish-work-request-1.1.0.schema.json":
             normalized = _publish_work_request_schema(entry)
+        elif entry.relative_path == "findings/runtime-attempt-evidence-1.0.0.schema.json":
+            normalized = _runtime_attempt_evidence_schema(entry)
+        elif entry.relative_path == "findings/semantic-provenance-1.1.0.schema.json":
+            normalized = _semantic_provenance_v1_1_schema(entry)
+        elif entry.relative_path == "findings/finding-1.1.0.schema.json":
+            normalized = _simple_versioned_schema(
+                entry,
+                "findings/finding-1.0.0.schema.json",
+                {"semantic-provenance-1.0.0": "semantic-provenance-1.1.0"},
+            )
+        elif entry.relative_path == "operations/check-result-1.1.0.schema.json":
+            normalized = _check_result_v1_1_schema(entry)
+        elif entry.relative_path == "operations/receipt-result-1.1.0.schema.json":
+            normalized = _simple_versioned_schema(
+                entry,
+                "operations/receipt-result-1.0.0.schema.json",
+                {"receipt-document-1.0.0": "receipt-document-1.1.0"},
+            )
         elif entry.relative_path == "operations/start-result-1.0.0.schema.json":
             normalized = _start_result_schema(entry)
         elif entry.relative_path == "operations/read-guidance-result-1.0.0.schema.json":
@@ -2761,8 +3277,23 @@ def build_schema_documents(
             "operations/status-result-1.1.0.schema.json",
         }:
             normalized = _status_result_schema(entry)
+        elif entry.relative_path == "operations/status-result-1.2.0.schema.json":
+            normalized = _simple_versioned_schema(
+                entry,
+                "operations/status-result-1.1.0.schema.json",
+                {"semantic-provenance-1.0.0": "semantic-provenance-1.1.0"},
+            )
         elif entry.relative_path == "receipts/receipt-document-1.0.0.schema.json":
             normalized = _receipt_document_schema(entry)
+        elif entry.relative_path == "receipts/receipt-document-1.1.0.schema.json":
+            normalized = _simple_versioned_schema(
+                entry,
+                "receipts/receipt-document-1.0.0.schema.json",
+                {
+                    "finding-1.0.0": "finding-1.1.0",
+                    "semantic-provenance-1.0.0": "semantic-provenance-1.1.0",
+                },
+            )
         elif entry.relative_path in {
             "version/version-manifest-2.0.0.schema.json",
             "version/version-manifest-2.1.0.schema.json",

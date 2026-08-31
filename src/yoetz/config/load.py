@@ -72,13 +72,17 @@ _INTEGER_LEAVES: Final = frozenset(
     }
 )
 _PATH_LEAVES: Final = frozenset({("storage", "data_dir")})
-_PROFILES: Final = frozenset({"strict-local", "local-openai", "test-fake", "release-probe"})
+_PROFILES: Final = frozenset(
+    {"strict-local", "local-openai", "codex-subscription", "test-fake", "release-probe"}
+)
 _LOG_LEVELS: Final = frozenset({"debug", "info", "warning", "error"})
 
 
 @dataclass(frozen=True, slots=True)
 class MinimalConfig:
-    profile: Literal["strict-local", "local-openai", "test-fake", "release-probe"]
+    profile: Literal[
+        "strict-local", "local-openai", "codex-subscription", "test-fake", "release-probe"
+    ]
     data_dir: Path | None
     log_level: Literal["debug", "info", "warning", "error"]
     config_path_used: Path | None
@@ -344,7 +348,14 @@ def parse_minimal_safe_config(
 
     return MinimalConfig(
         profile=cast(
-            Literal["strict-local", "local-openai", "test-fake", "release-probe"], profile
+            Literal[
+                "strict-local",
+                "local-openai",
+                "codex-subscription",
+                "test-fake",
+                "release-probe",
+            ],
+            profile,
         ),
         data_dir=data_dir,
         log_level=cast(Literal["debug", "info", "warning", "error"], log_level),

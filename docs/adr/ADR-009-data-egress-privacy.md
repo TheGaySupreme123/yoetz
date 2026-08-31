@@ -1,6 +1,6 @@
 # ADR-009 — Central privacy, disclosure, and data-egress control
 
-**Status:** Working decision revised 2026-07-17. Ratification requires an independent
+**Status:** Working decision revised 2026-08-30 for issue #404 vendor-runtime egress. Ratification requires an independent
 privacy/security review plus executable no-bypass, never-send, approval-resume, and zero-egress
 evidence.
 **Implemented by:** `src/yoetz/domain/privacy.py`,
@@ -506,3 +506,26 @@ remain out of scope for this decision.
 ADR-011 capability evidence additionally proves structural capture is read-only, bounded,
 network-free, path/content withholding, fail-closed on ambiguity, and incapable of strengthening
 publication/authorship/artifact-observation coverage.
+
+## Vendor-runtime egress amendment (2026-08-30, issue #404)
+
+`external_runtime_oauth` is still external task-content egress. Child-process transport does not
+bypass classification, minimization, never-send scanning, composed machine/repository/task/request
+policy, optional exact human review, one-use authorization, or the terminal privacy receipt. The
+strict route and an unapproved repository both stop before runtime factory construction or child
+launch.
+
+Codex composes its upstream OpenAI request internally, so the gateway commitment covers the exact
+final disclosed Yoetz case bytes at the boundary Yoetz controls. The terminal semantic provenance
+adds the exact runtime/launcher/config/instruction/schema/selection/output commitments and states
+`upstream_body_observability=unavailable`. Neither the case digest nor its HMAC may be labeled an
+upstream request-body digest. Receipt counts are zero when structural readiness fails before case
+disclosure, even if a content-free account/model probe launched.
+
+The external runtime receives a secret-free attempt authority, never a vault credential handle.
+Once `turn/start` is acknowledged, any ambiguous transport/crash/restart result or unverified
+process-group cleanup closes as `transport_failed/outcome_unknown`; its authorization remains
+consumed and a fresh attempt is forbidden. Pre-acknowledgement retries are capped by ADR-006 and
+each is a separate authorization, dispatch, process, and receipt. Runtime evidence retains no
+credential path or bytes, email, raw account/workspace identity, prompt transcript, reasoning,
+stderr, or event log.

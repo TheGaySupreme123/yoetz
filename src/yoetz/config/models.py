@@ -17,11 +17,14 @@ from yoetz.domain.privacy import ProviderDataUseProfile
 from yoetz.protocol.models import MAX_FINDINGS_DEFAULT, MAX_FINDINGS_LIMIT
 
 __all__ = [
+    "CODEX_SUBSCRIPTION_ENDPOINT_PROFILE_ID",
+    "CODEX_SUBSCRIPTION_PROVIDER_ID",
     "OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID",
     "OWNER_DECLARED_ENDPOINT_PROFILE_ID",
     "OWNER_DECLARED_PROVIDER_ID",
     "PROFILE_CAPABILITIES",
     "ConfigError",
+    "ExternalRuntimeProfileConfig",
     "LocalModelProfileConfig",
     "LoggingConfig",
     "NetworkPolicy",
@@ -39,6 +42,8 @@ __all__ = [
 ]
 
 OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID: Final = "openai-responses"
+CODEX_SUBSCRIPTION_ENDPOINT_PROFILE_ID: Final = "codex-chatgpt-subscription"
+CODEX_SUBSCRIPTION_PROVIDER_ID: Final = "openai-codex"
 OWNER_DECLARED_ENDPOINT_PROFILE_ID: Final = "owner-declared-openai-responses"
 OWNER_DECLARED_PROVIDER_ID: Final = "openai-compatible"
 
@@ -75,6 +80,9 @@ _CONFIG_ERROR_REASONS: Final = frozenset(
         "config_value_invalid",
         "durability_unsupported",
         "external_profile_forbids_local_model",
+        "external_runtime_forbids_local_model",
+        "external_runtime_forbids_provider",
+        "external_runtime_required_for_semantic",
         "https_origin_invalid",
         "local_model_locator_forbidden",
         "max_findings_out_of_range",
@@ -388,6 +396,93 @@ class ProviderProfileConfig(StrictConfigModel):
         return self
 
 
+class ExternalRuntimeProfileConfig(StrictConfigModel):
+    """Exact nonsecret binding for a vendor-owned OAuth evaluator runtime.
+
+    Paths are retained only as local service configuration.  Credential bytes remain owned by the
+    selected runtime and never cross this model or any Yoetz secret/configuration surface.
+    """
+
+    provider_id: Literal["openai-codex"]
+    endpoint_profile_id: Literal["codex-chatgpt-subscription"]
+    endpoint_profile_version: Literal["1.0.0"]
+    credential_authority: Literal["external_runtime_oauth"]
+    executable_path: str
+    executable_sha256: str
+    runtime_version: str
+    source_identity: str
+    app_server_schema_sha256: str
+    capability_cell_sha256: str
+    isolated_config_sha256: str
+    capability_profile: str
+    capability_evidence_expires_at: Literal["2026-11-30T00:00:00Z"]
+    codex_home: str
+    model: str
+    reasoning_effort: str
+    timeout_seconds: int = Field(default=120, ge=1, le=300)
+    max_retries: int = Field(default=2, ge=0, le=2)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_raw(cls, value: object) -> object:
+        _scan_secret_keys(value)
+        allowed = frozenset(
+            {
+                "provider_id",
+                "endpoint_profile_id",
+                "endpoint_profile_version",
+                "credential_authority",
+                "executable_path",
+                "executable_sha256",
+                "runtime_version",
+                "source_identity",
+                "app_server_schema_sha256",
+                "capability_cell_sha256",
+                "isolated_config_sha256",
+                "capability_profile",
+                "capability_evidence_expires_at",
+                "codex_home",
+                "model",
+                "reasoning_effort",
+                "timeout_seconds",
+                "max_retries",
+            }
+        )
+        _reject_unknown(value, allowed)
+        source = _mapping(value)
+        for key in (
+            "provider_id",
+            "endpoint_profile_id",
+            "endpoint_profile_version",
+            "credential_authority",
+            "runtime_version",
+            "source_identity",
+            "capability_profile",
+            "capability_evidence_expires_at",
+            "model",
+            "reasoning_effort",
+        ):
+            if key in source:
+                _validate_identifier(source[key])
+        for key in (
+            "executable_sha256",
+            "app_server_schema_sha256",
+            "capability_cell_sha256",
+            "isolated_config_sha256",
+        ):
+            digest = source.get(key)
+            if type(digest) is not str or _DIGEST.fullmatch(digest) is None:
+                raise ConfigError("config_value_invalid", safe_name=key)
+        for key in ("executable_path", "codex_home"):
+            raw = source.get(key)
+            if type(raw) is not str or not raw or "\x00" in raw:
+                raise ConfigError("config_value_invalid", safe_name=key)
+            path = Path(raw)
+            if not path.is_absolute() or ".." in path.parts or str(path) != raw:
+                raise ConfigError("config_value_invalid", safe_name=key)
+        return value
+
+
 class LocalModelProfileConfig(StrictConfigModel):
     profile_id: str
     profile_version: str
@@ -466,6 +561,9 @@ PROFILE_CAPABILITIES: Final[Mapping[str, ProfileCapabilities]] = MappingProxyTyp
         "local-openai": ProfileCapabilities(
             NetworkPolicy.CANDIDATE_EXTERNAL, SemanticPolicy.OPTIONAL_EXTERNAL
         ),
+        "codex-subscription": ProfileCapabilities(
+            NetworkPolicy.CANDIDATE_EXTERNAL, SemanticPolicy.OPTIONAL_EXTERNAL
+        ),
         "test-fake": ProfileCapabilities(NetworkPolicy.DENIED, SemanticPolicy.SCRIPTED_FAKE),
         "release-probe": ProfileCapabilities(
             NetworkPolicy.EXPLICIT_PER_PROBE, SemanticPolicy.NO_IMPLICIT_MODEL
@@ -480,13 +578,20 @@ from yoetz.config.privacy import PrivacyBootstrapConfig  # noqa: E402
 
 class YoetzConfig(StrictConfigModel):
     schema_version: Literal["1"] = "1"
-    profile: Literal["strict-local", "local-openai", "test-fake", "release-probe"] = "strict-local"
+    profile: Literal[
+        "strict-local",
+        "local-openai",
+        "codex-subscription",
+        "test-fake",
+        "release-probe",
+    ] = "strict-local"
     storage: StorageConfig = Field(default_factory=StorageConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
     observation: ObservationConfig = Field(default_factory=ObservationConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     privacy: PrivacyBootstrapConfig = Field(default_factory=PrivacyBootstrapConfig)
     provider: ProviderProfileConfig | None = None
+    external_runtime: ExternalRuntimeProfileConfig | None = None
     local_model: LocalModelProfileConfig | None = None
 
     @model_validator(mode="before")
@@ -502,6 +607,7 @@ class YoetzConfig(StrictConfigModel):
                 "logging",
                 "privacy",
                 "provider",
+                "external_runtime",
                 "local_model",
             }
         )
@@ -509,7 +615,7 @@ class YoetzConfig(StrictConfigModel):
         source = _mapping(value)
         if "schema_version" in source and source["schema_version"] != "1":
             raise ConfigError("config_schema_unsupported")
-        for section in ("provider", "local_model", "privacy"):
+        for section in ("provider", "external_runtime", "local_model", "privacy"):
             raw_section = source.get(section)
             if isinstance(raw_section, Mapping):
                 _scan_secret_keys(cast(Mapping[object, object], raw_section))
@@ -517,7 +623,9 @@ class YoetzConfig(StrictConfigModel):
 
     @model_validator(mode="after")
     def _validate_profile(self) -> YoetzConfig:
-        if self.profile == "strict-local" and self.provider is not None:
+        if self.profile == "strict-local" and (
+            self.provider is not None or self.external_runtime is not None
+        ):
             raise ConfigError("strict_local_forbids_provider")
         if self.profile == "local-openai" and self.local_model is not None:
             raise ConfigError("external_profile_forbids_local_model")
@@ -525,6 +633,18 @@ class YoetzConfig(StrictConfigModel):
             raise ConfigError("test_fake_forbids_provider")
         if self.profile == "test-fake" and self.local_model is not None:
             raise ConfigError("test_fake_forbids_local_model")
+        if self.profile != "codex-subscription" and self.external_runtime is not None:
+            raise ConfigError("external_runtime_forbids_provider")
+        if self.profile == "codex-subscription" and self.provider is not None:
+            raise ConfigError("external_runtime_forbids_provider")
+        if self.profile == "codex-subscription" and self.local_model is not None:
+            raise ConfigError("external_runtime_forbids_local_model")
+        if (
+            self.profile == "codex-subscription"
+            and self.verification.semantic != "disabled"
+            and self.external_runtime is None
+        ):
+            raise ConfigError("external_runtime_required_for_semantic")
         if (
             self.profile == "local-openai"
             and self.verification.semantic != "disabled"

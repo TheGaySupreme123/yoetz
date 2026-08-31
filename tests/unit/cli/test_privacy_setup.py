@@ -17,7 +17,8 @@ from yoetz.cli.privacy_setup import (
     PrivacySetupAnswers,
     build_candidate_policy,
 )
-from yoetz.config.models import OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID
+from yoetz.config.models import OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID, YoetzConfig
+from yoetz.config.write import codex_subscription_runtime
 from yoetz.domain.privacy import (
     AuthorizationScopeKind,
     DataClass,
@@ -68,6 +69,45 @@ def _answers(**overrides: object) -> PrivacySetupAnswers:
     }
     values.update(overrides)
     return PrivacySetupAnswers(**values)  # type: ignore[arg-type]
+
+
+def test_configured_bindings_accepts_the_exact_external_runtime_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yoetz.cli.privacy_setup as module
+    import yoetz.config.load as config_load
+
+    runtime = codex_subscription_runtime(
+        executable_path="/opt/codex/0.150.1/codex",
+        executable_sha256="sha256:" + "a" * 64,
+        runtime_version="0.150.1",
+        source_identity="openai-codex-npm-darwin-arm64-0.150.1",
+        app_server_schema_sha256="sha256:" + "b" * 64,
+        capability_cell_sha256="sha256:" + "d" * 64,
+        isolated_config_sha256="sha256:" + "c" * 64,
+        capability_profile="codex-evaluator/0.150.1/v1",
+        capability_evidence_expires_at="2026-11-30T00:00:00Z",
+        codex_home="/var/lib/yoetz/codex-0.150.1",
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
+    )
+    config = YoetzConfig(profile="codex-subscription", external_runtime=runtime)
+
+    def load_runtime_config(*_args: object, **_kwargs: object) -> YoetzConfig:
+        return config
+
+    monkeypatch.setattr(config_load, "load_config", load_runtime_config)
+
+    external, local = module._configured_bindings()  # pyright: ignore[reportPrivateUsage]
+
+    assert local is None
+    assert external == ProviderBinding(
+        "openai-codex",
+        "gpt-5.6-sol",
+        "codex-chatgpt-subscription",
+        "1.0.0",
+        "external",
+    )
 
 
 def test_assisted_review_is_bound_to_one_provider_and_bounded_categories() -> None:

@@ -63,6 +63,12 @@ endpoint, scope mismatch, expired authorization, or policy version mismatch deni
 provider adapter is even constructed. A missing or mismatched exact repository grant additionally
 denies before credential-handle minting, authorization, or dispatch.
 
+The external binding also selects one mutually exclusive credential authority. HTTP profiles use
+`yoetz_vault_api_credential`. `codex-chatgpt-subscription@1` uses
+`external_runtime_oauth`: an exact Codex app-server owns ChatGPT OAuth and receives a secret-free
+attempt authority. It has no API-key, OAuth-token, generic-endpoint, proxy, or ambient-home
+fallback. Its content-free account/model readiness checks do not grant privacy authority.
+
 `credential-probe` is a distinct `llm_inference` purpose, not an implication of enabling semantic
 review. During provider-credential setup, the local human separately decides whether one fixed,
 content-free request may verify the just-stored credential. The policy preview and its widening
@@ -179,6 +185,16 @@ dispatch and fabricates no receipt identity. Receipts record provider/model/endp
 policy version/digest, authorization scope, approved/blocked categories, byte/token counts,
 redaction counts, consent source, outcome/reason, and a keyed commitment to the exact final request
 body bytes — never plaintext content or the provider's response.
+
+For `external_runtime_oauth`, “request body” at this boundary means the exact disclosed Yoetz case
+bytes passed through app-server stdin. Codex constructs the upstream OpenAI body beyond Yoetz's
+observable boundary. Runtime provenance therefore commits separately to the disclosed case,
+instruction, output schema, executable/protocol/capability/launcher/config, model/reasoning
+selection, safe correlation, output digest, and process cleanup, and requires
+`upstream_body_observability=unavailable`. It never substitutes the case digest for an upstream
+body digest. A pre-disclosure structural failure records zero disclosed items/bytes; a post-turn-
+acknowledgement ambiguity records `transport_failed/outcome_unknown` and consumes the one-use
+authorization without retry.
 
 Content-bearing v0.1 disclosure proposals are encrypted as `ObjectKind.privacy_audit` objects in
 their owning task bundle; taskless channel-unavailable decisions and machine policy diffs are

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from yoetz.config.models import (
     PROFILE_CAPABILITIES,
     ConfigError,
+    ExternalRuntimeProfileConfig,
     LocalModelProfileConfig,
     LoggingConfig,
     NetworkPolicy,
@@ -67,6 +68,27 @@ def _local_model() -> LocalModelProfileConfig:
         protocol_version="1.0.0",
         judgment_schema_version="1.0.0",
         capability_digest=_DIGEST,
+    )
+
+
+def _external_runtime() -> ExternalRuntimeProfileConfig:
+    return ExternalRuntimeProfileConfig(
+        provider_id="openai-codex",
+        endpoint_profile_id="codex-chatgpt-subscription",
+        endpoint_profile_version="1.0.0",
+        credential_authority="external_runtime_oauth",
+        executable_path="/Applications/Codex.app/Contents/Resources/codex",
+        executable_sha256=_DIGEST,
+        runtime_version="0.150.1",
+        source_identity="openai-codex-darwin-arm64-0.150.1",
+        app_server_schema_sha256=_DIGEST,
+        capability_cell_sha256=_DIGEST,
+        isolated_config_sha256=_DIGEST,
+        capability_profile="codex-evaluator/0.150.1/v1",
+        capability_evidence_expires_at="2026-11-30T00:00:00Z",
+        codex_home="/opt/Yoetz Tools/codex-home",
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
     )
 
 
@@ -150,6 +172,7 @@ def test_profile_capability_matrix_is_closed() -> None:
     assert PROFILE_CAPABILITIES["strict-local"].network is NetworkPolicy.DENIED
     assert PROFILE_CAPABILITIES["strict-local"].semantic is SemanticPolicy.OPTIONAL_LOCAL_MODEL
     assert PROFILE_CAPABILITIES["local-openai"].network is NetworkPolicy.CANDIDATE_EXTERNAL
+    assert PROFILE_CAPABILITIES["codex-subscription"].network is NetworkPolicy.CANDIDATE_EXTERNAL
     assert PROFILE_CAPABILITIES["test-fake"].semantic is SemanticPolicy.SCRIPTED_FAKE
     assert PROFILE_CAPABILITIES["release-probe"].network is NetworkPolicy.EXPLICIT_PER_PROBE
 
@@ -194,6 +217,18 @@ def test_profile_capability_matrix_is_closed() -> None:
             lambda: YoetzConfig(profile="local-openai"),
             "provider_required_for_semantic",
         ),
+        (
+            lambda: YoetzConfig(profile="codex-subscription"),
+            "external_runtime_required_for_semantic",
+        ),
+        (
+            lambda: YoetzConfig(
+                profile="codex-subscription",
+                provider=_provider(),
+                external_runtime=_external_runtime(),
+            ),
+            "external_runtime_forbids_provider",
+        ),
     ],
 )
 def test_reason_coded_validation(factory: object, reason: str) -> None:
@@ -207,6 +242,11 @@ def test_reason_coded_validation(factory: object, reason: str) -> None:
 def test_profiles_accept_only_their_exact_structural_sink() -> None:
     assert YoetzConfig(profile="strict-local", local_model=_local_model()).local_model is not None
     assert YoetzConfig(profile="local-openai", provider=_provider()).provider is not None
+    runtime = YoetzConfig(
+        profile="codex-subscription", external_runtime=_external_runtime()
+    ).external_runtime
+    assert runtime is not None
+    assert runtime.credential_authority == "external_runtime_oauth"
     assert (
         YoetzConfig(
             profile="local-openai",
@@ -237,6 +277,13 @@ def test_unknown_secret_and_local_locator_keys_fail_before_values_escape() -> No
     assert secret.value.reason_code == "secret_in_config"
     assert secret.value.safe_name == "api_key"
     assert "must-not-appear" not in repr(secret.value)
+
+    runtime = _external_runtime().model_dump()
+    runtime["oauth_token"] = "must-not-appear"
+    with pytest.raises(ConfigError) as runtime_secret:
+        ExternalRuntimeProfileConfig.model_validate(runtime, strict=True)
+    assert runtime_secret.value.reason_code == "secret_in_config"
+    assert "must-not-appear" not in repr(runtime_secret.value)
 
     local = _local_model().model_dump()
     local["socket_path"] = "/private/content.sock"

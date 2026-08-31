@@ -131,9 +131,63 @@ _VERCEL_SOURCES: Final = (
     "https://vercel.com/docs/ai-gateway/models-and-providers/provider-options",
     "https://vercel.com/docs/ai-gateway/byok",
 )
+_CODEX_SUBSCRIPTION_SOURCES: Final = (
+    "https://help.openai.com/en/articles/11369540-codex-in-chatgpt",
+    "https://openai.com/policies/terms-of-use/",
+    "https://openai.com/policies/privacy-policy/",
+)
+_CODEX_SUBSCRIPTION_CAVEATS: Final = (
+    "The exact ChatGPT plan, workspace controls, regional terms, and retention posture are not "
+    "proven by login or a returned plan label.",
+    "Codex constructs the upstream OpenAI request internally; Yoetz observes only the disclosed "
+    "case at the local app-server boundary.",
+)
+_CODEX_SUBSCRIPTION_REVIEWED_AT: Final = datetime(2026, 8, 30, tzinfo=UTC)
+_CODEX_SUBSCRIPTION_EXPIRES_AT: Final = datetime(2026, 11, 30, tzinfo=UTC)
+
+
+def _codex_subscription_record() -> ProviderDataUseRecord:
+    route = (
+        "ChatGPT-authenticated Codex app-server subscription route; plan-specific data controls "
+        "and terms remain unverified, so v1 keeps an unknown posture."
+    )
+    profile_id = "codex-chatgpt-subscription-unverified"
+    profile = ProviderDataUseProfile(
+        data_use_profile_id=profile_id,
+        data_use_profile_version="2026.08.30",
+        customer_content_training="unknown",
+        retention="unknown",
+        retention_days_ceiling=None,
+        provider_human_access="unknown",
+        reviewed_at=_CODEX_SUBSCRIPTION_REVIEWED_AT,
+        expires_at=_CODEX_SUBSCRIPTION_EXPIRES_AT,
+        evidence_digest=canonical_digest(
+            {
+                "profile": profile_id,
+                "reviewed_at": _CODEX_SUBSCRIPTION_REVIEWED_AT.isoformat(),
+                "expires_at": _CODEX_SUBSCRIPTION_EXPIRES_AT.isoformat(),
+                "customer_content_training": "unknown",
+                "retention": "unknown",
+                "retention_days_ceiling": None,
+                "provider_human_access": "unknown",
+                "route_qualifier": route,
+                "caveats": list(_CODEX_SUBSCRIPTION_CAVEATS),
+                "sources": list(_CODEX_SUBSCRIPTION_SOURCES),
+            }
+        ),
+    )
+    return ProviderDataUseRecord(
+        endpoint_profile_id="codex-chatgpt-subscription",
+        route_qualifier=route,
+        official_source_urls=_CODEX_SUBSCRIPTION_SOURCES,
+        caveats=_CODEX_SUBSCRIPTION_CAVEATS,
+        profile=profile,
+    )
+
 
 _CATALOG: Final = MappingProxyType(
     {
+        "codex-chatgpt-subscription": _codex_subscription_record(),
         "openai-responses": _record(
             "openai-responses",
             "openai-api-responses",

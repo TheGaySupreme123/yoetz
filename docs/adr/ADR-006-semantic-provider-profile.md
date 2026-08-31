@@ -1,6 +1,6 @@
 # ADR-006 — Semantic provider profiles behind the privacy gateway
 
-**Status:** Working decision revised 2026-08-29 (issue #348 bounded repair retry). Ratification requires the privacy/egress gates in
+**Status:** Working decision revised 2026-08-30 (issue #404 external-runtime authority). Ratification requires the privacy/egress gates in
 ADR-009 plus recorded capability fixtures against every advertised provider/model/endpoint profile.
 **Implemented by:** `src/yoetz/ports/semantic.py`,
 `src/yoetz/ports/privacy.py`, `src/yoetz/application/egress.py`,
@@ -231,3 +231,33 @@ is called outside every SQLite transaction.
 Post-validation rejects invented IDs, out-of-case quotes, coverage upgrades, deterministic-status
 claims, challenges without a material discrepancy or requested next step, and stale frontiers.
 Rejected output never projects a finding.
+
+## Codex subscription-runtime amendment (2026-08-30, issue #404)
+
+External semantic authentication has two mutually exclusive authorities. Existing HTTP profiles
+use `yoetz_vault_api_credential`. The exact `codex-chatgpt-subscription@1` profile uses
+`external_runtime_oauth`: one selected OpenAI Codex app-server owns ChatGPT login, refresh,
+credential storage, model discovery, and the upstream OpenAI request. Yoetz never reads or imports
+that credential and there is no API-key or generic-endpoint fallback.
+
+The initial closed compatibility cell is Codex npm `0.150.1` on macOS arm64, app-server v2 over
+stdio JSONL, with an exact native executable digest, protocol-schema digest, digest-bound isolated
+configuration, model, reasoning effort, and `codex-evaluator/0.150.1/v1` capability identity. A
+capability-cell identity digest and evidence expiry are bound separately; an expired cell cannot
+launch a child. A neighboring version, changed binary/config, absent ChatGPT login, unavailable
+exact model/reasoning cell, or unproved isolation fails before case disclosure. This cell has
+unknown data-use posture and receives no Assisted recommendation badge.
+
+The gateway issues a secret-free, dispatch-bound `ExternalRuntimeAuthority` instead of minting a
+vault handle. The runtime may receive only the already-approved canonical case through stdin. Its
+`RuntimeAttemptEvidence` commits to the disclosed case, instruction, output schema, launcher,
+configuration, executable, protocol, capability, model/reasoning selection, safe correlation,
+terminal output digest, and process cleanup. It explicitly records
+`upstream_body_observability=unavailable`; the disclosed-case commitment must never be described as
+the upstream OpenAI body.
+
+Retries remain within the durable attempt budget. A pre-`turn/start`-acknowledgement transient may
+receive a fresh one-use authorization and exact retry. After acknowledgement, transport ambiguity
+or unconfirmed process-group cleanup is terminal `unavailable/outcome_unknown` and is never
+automatically retried. Schema-valid model output remains advisory and follows the unchanged
+post-validation/finding path.

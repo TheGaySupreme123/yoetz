@@ -15,6 +15,7 @@ from yoetz.domain.findings import (
     CheckVerdict,
     Finding,
     ResponseDisposition,
+    SemanticDispatchKind,
     SemanticProvenance,
     WaiverScope,
     finding_from_json,
@@ -160,6 +161,7 @@ __all__ = [
     "ResultOutcome",
     "ResultRecordedPayload",
     "RuntimeProfile",
+    "SESSION_EVENT_SCHEMA_VERSION",
     "SessionOpenedPayload",
     "SessionResumedPayload",
     "UnknownEvent",
@@ -184,6 +186,8 @@ EVIDENCE_SCHEMA_VERSIONS: Final = (
     EVIDENCE_SCHEMA_VERSION,
 )
 CLAIM_SCHEMA_VERSION: Final = "1.1.0"
+SEMANTIC_EVENT_SCHEMA_VERSION: Final = "1.1.0"
+SESSION_EVENT_SCHEMA_VERSION: Final = "1.1.0"
 MAX_TEXT_BYTES: Final = 8_192
 MAX_REASON_BYTES: Final = 4_096
 MAX_LABEL_BYTES: Final = 256
@@ -229,6 +233,7 @@ EVENT_FAMILIES: Final = (
 class RuntimeProfile(str, Enum):  # noqa: UP042 - exact wire enum base
     STRICT_LOCAL = "strict-local"
     LOCAL_OPENAI = "local-openai"
+    CODEX_SUBSCRIPTION = "codex-subscription"
     TEST_FAKE = "test-fake"
     RELEASE_PROBE = "release-probe"
 
@@ -631,10 +636,15 @@ class PayloadRef:
 def _locator_key_kind(schema: EventSchema) -> str:
     if schema.name not in EVENT_FAMILIES:
         return "none"
-    if schema.version != SCHEMA_VERSION and not (
+    additive = (
         schema == EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION)
         or (schema.name == "evidence_recorded" and schema.version in EVIDENCE_SCHEMA_VERSIONS)
-    ):
+        or (
+            schema.name in {"check_recorded", "finding_recorded"}
+            and schema.version == SEMANTIC_EVENT_SCHEMA_VERSION
+        )
+    )
+    if schema.version != SCHEMA_VERSION and not additive:
         return "none"
     schema_name = schema.name
     if schema_name in {"plan_published", "plan_revised"}:
@@ -1706,7 +1716,9 @@ type EventPayload = (
 PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyType(
     {
         EventSchema("session_opened", SCHEMA_VERSION): SessionOpenedPayload,
+        EventSchema("session_opened", SESSION_EVENT_SCHEMA_VERSION): SessionOpenedPayload,
         EventSchema("session_resumed", SCHEMA_VERSION): SessionResumedPayload,
+        EventSchema("session_resumed", SESSION_EVENT_SCHEMA_VERSION): SessionResumedPayload,
         EventSchema("plan_published", SCHEMA_VERSION): PlanPublishedPayload,
         EventSchema("obligation_published", SCHEMA_VERSION): ObligationPublishedPayload,
         EventSchema("assignment_recorded", SCHEMA_VERSION): AssignmentRecordedPayload,
@@ -1721,9 +1733,11 @@ PAYLOAD_TYPES: Final[Mapping[EventSchema, type[EventPayload]]] = MappingProxyTyp
         EventSchema("claim_recorded", CLAIM_SCHEMA_VERSION): ClaimRecordedPayloadV1_1,
         EventSchema("plan_revised", SCHEMA_VERSION): PlanRevisedPayload,
         EventSchema("finding_recorded", SCHEMA_VERSION): Finding,
+        EventSchema("finding_recorded", SEMANTIC_EVENT_SCHEMA_VERSION): Finding,
         EventSchema("response_recorded", SCHEMA_VERSION): ResponseRecordedPayload,
         EventSchema("redaction_recorded", SCHEMA_VERSION): RedactionRecordedPayload,
         EventSchema("check_recorded", SCHEMA_VERSION): CheckRecordedPayload,
+        EventSchema("check_recorded", SEMANTIC_EVENT_SCHEMA_VERSION): CheckRecordedPayload,
         EventSchema("receipt_recorded", SCHEMA_VERSION): ReceiptRecordedPayload,
     }
 )
@@ -2084,7 +2098,9 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         raise ProtocolValueError("unknown_event_schema")
     frozen = freeze_json(payload)
     if schema.name == "finding_recorded":
-        return finding_from_json(frozen)
+        finding = finding_from_json(frozen)
+        _validate_event_schema_payload(schema, finding)
+        return finding
     required, optional = _PAYLOAD_SHAPES[schema.name]
     if schema.name == "evidence_recorded" and schema.version != SCHEMA_VERSION:
         optional = frozenset({*optional, "digest_binding"})
@@ -2093,9 +2109,13 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
     source = _closed_object(frozen, required=required, optional=optional)
 
     if schema.name == "session_opened":
-        return _decode_session_opened(source)
+        opened = _decode_session_opened(source)
+        _validate_event_schema_payload(schema, opened)
+        return opened
     if schema.name == "session_resumed":
-        return _decode_session_resumed(source)
+        resumed = _decode_session_resumed(source)
+        _validate_event_schema_payload(schema, resumed)
+        return resumed
     if schema.name == "plan_published":
         exclusions = _optional(source, "scope_exclusions")
         no_obligations_reason = _optional(source, "no_obligations_reason")
@@ -2346,7 +2366,7 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
         )
     if schema.name == "check_recorded":
         provenance_value = _optional(source, "semantic_provenance")
-        return CheckRecordedPayload(
+        check = CheckRecordedPayload(
             mode=_enum_from_json(_field(source, "mode"), CheckMode),
             policies=tuple(
                 _decode_policy_version(item) for item in _array(_field(source, "policies"))
@@ -2374,6 +2394,8 @@ def decode_payload(schema: EventSchema, payload: JsonValue) -> EventPayload:
                 else semantic_provenance_from_json(provenance_value)
             ),
         )
+        _validate_event_schema_payload(schema, check)
+        return check
     if schema.name == "receipt_recorded":
         return ReceiptRecordedPayload(
             receipt_id=receipt_id(_field(source, "receipt_id")),
@@ -2694,10 +2716,26 @@ def _expected_payload_type(schema: EventSchema) -> type[EventPayload] | None:
     return PAYLOAD_TYPES.get(schema)
 
 
-def _validate_evidence_schema_payload(
+def _validate_event_schema_payload(
     schema: EventSchema,
     payload: EventPayload | None,
 ) -> None:
+    if schema.version == SCHEMA_VERSION:
+        profile: RuntimeProfile | None = None
+        if type(payload) is SessionOpenedPayload:
+            profile = payload.profile
+        elif type(payload) is SessionResumedPayload:
+            profile = payload.profile
+        provenance: SemanticProvenance | None = None
+        if type(payload) is Finding:
+            provenance = payload.provenance
+        elif type(payload) is CheckRecordedPayload:
+            provenance = payload.semantic_provenance
+        if profile is RuntimeProfile.CODEX_SUBSCRIPTION or (
+            provenance is not None
+            and provenance.dispatch_kind is SemanticDispatchKind.EXTERNAL_RUNTIME_OAUTH
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
     if type(payload) is not EvidenceRecordedPayload:
         return
     evidence = payload
@@ -2821,7 +2859,7 @@ class EventDraft:
         if type(self.payload) is not payload_type:
             raise ProtocolValueError("invalid_event_value_type")
         typed_payload = cast(EventPayload, self.payload)
-        _validate_evidence_schema_payload(self.schema, typed_payload)
+        _validate_event_schema_payload(self.schema, typed_payload)
         _validate_envelope_ref_mirrors(
             self.schema,
             typed_payload,
@@ -2970,7 +3008,7 @@ class AcceptedEvent:
         if self.redaction is not RedactionState.PRESENT and self.payload is not None:
             raise ProtocolValueError("payload_redaction_mismatch")
         typed_payload = self.payload
-        _validate_evidence_schema_payload(self.schema, typed_payload)
+        _validate_event_schema_payload(self.schema, typed_payload)
         _validate_projection_locator(
             self.schema,
             self.event_id,

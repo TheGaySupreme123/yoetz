@@ -25,7 +25,23 @@ reverse-chronological released versions.
   rows readable but weak when no inner-content binding exists. Capture remains distinct from
   verification, reproduction, and egress authority (issue #302).
 
+- An exact Codex npm `0.150.1` macOS-arm64 app-server profile can perform ordinary privacy-gated
+  semantic review with a ChatGPT subscription. Codex remains the OAuth credential authority;
+  guided setup, structural status, account switch/logout, disconnect, and binding-only rollback
+  expose no token to Yoetz. Every attempt binds the executable/protocol/config/capability/model/
+  reasoning cell, runs one no-tool ephemeral stdio turn from an empty cwd, verifies process-group
+  cleanup, and records disclosed-case/runtime evidence with upstream-body observability explicitly
+  unavailable. API-key profiles remain separate and unchanged (issue #404).
+
 ### Fixed
+
+- Codex subscription setup, disconnect, and rollback now recompose the local service on the CLI,
+  prompt-loop menu, and `/provider` surfaces so a running daemon cannot keep dispatching after the
+  binding changes. `/provider` also exposes subscription status, disconnect, rollback, and optional
+  account switch. READY composition treats the exact binding, digest, and dedicated home as
+  credential presence and no longer spawns a preflight Codex app-server; `account/read` and
+  `model/list` stay inside `evaluate()`. Subscription CLI failures map `OSError` /
+  `FileNotFoundError` to closed tokens instead of echoing native text (PR #480 review).
 
 - Frontier-motion delivery marks now retain the announced head digest and are compared with the
   routed ledger's actual current frontier. A same-task restore below the delivered high-water (or

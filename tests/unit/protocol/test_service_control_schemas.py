@@ -484,7 +484,7 @@ def test_v23_updates_only_the_status_operation_schema_refs() -> None:
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
 
 
-def test_v24_updates_only_the_publish_operation_schema_ref() -> None:
+def test_v24_updates_only_the_publish_request_and_provenance_result_refs() -> None:
     request_v23 = cast(
         dict[str, Any],
         strict_json_parse((_ROOT / "control-request-2.3.0.schema.json").read_bytes()),
@@ -509,31 +509,40 @@ def test_v24_updates_only_the_publish_operation_schema_ref() -> None:
     assert "publish-work-request-1.0.0.schema.json" in str(request_v23)
     assert "publish-work-request-1.1.0.schema.json" in str(request_v24)
 
-    def restore_publish_version(value: object) -> None:
+    def restore_refs(value: object, replacements: tuple[tuple[str, str], ...]) -> None:
         if isinstance(value, dict):
             mapping = cast(dict[str, object], value)
             for key, member in mapping.items():
                 if key == "$ref" and isinstance(member, str):
-                    mapping[key] = member.replace(
-                        "publish-work-request-1.1.0", "publish-work-request-1.0.0"
-                    )
+                    for new_ref, old_ref in replacements:
+                        member = member.replace(new_ref, old_ref)
+                    mapping[key] = member
                 else:
-                    restore_publish_version(member)
+                    restore_refs(member, replacements)
         elif isinstance(value, list):
             for member in cast(list[object], value):
-                restore_publish_version(member)
+                restore_refs(member, replacements)
 
-    restore_publish_version(request_v24)
+    restore_refs(
+        request_v24,
+        (("publish-work-request-1.1.0", "publish-work-request-1.0.0"),),
+    )
     assert request_v24 == request_v23
+    restore_refs(
+        result_v24,
+        (
+            ("check-result-1.1.0", "check-result-1.0.0"),
+            ("receipt-result-1.1.0", "receipt-result-1.0.0"),
+            ("status-result-1.2.0", "status-result-1.1.0"),
+        ),
+    )
     assert result_v24 == result_v23
     assert old_request_id.endswith("control-request-2.3.0.schema.json")
     assert new_request_id.endswith("control-request-2.4.0.schema.json")
     assert old_result_id.endswith("control-result-2.3.0.schema.json")
     assert new_result_id.endswith("control-result-2.4.0.schema.json")
-    for filename in (
-        "control-request-2.4.0.schema.json",
-        "control-result-2.4.0.schema.json",
-    ):
+    for stem in ("control-hello", "control-hello-result", "control-request", "control-result"):
+        filename = f"{stem}-2.4.0.schema.json"
         assert (_ROOT / filename).read_bytes() == _PACKAGE_ROOT.joinpath(filename).read_bytes()
 
 

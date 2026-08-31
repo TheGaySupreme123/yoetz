@@ -24,6 +24,8 @@ from yoetz.config.models import (
 from yoetz.config.write import (
     PROVIDER_PRESETS,
     anthropic_provider,
+    clear_external_runtime_binding,
+    codex_subscription_runtime,
     fireworks_provider,
     google_gemini_provider,
     grok_provider,
@@ -33,6 +35,7 @@ from yoetz.config.write import (
     provider_preset,
     render_config_toml,
     vercel_ai_gateway_provider,
+    write_external_runtime_binding,
     write_provider_binding,
 )
 
@@ -152,6 +155,39 @@ def test_toml_round_trip_official_and_owner_declared(tmp_path: Path) -> None:
     assert loaded2.provider.owner_declared_endpoint is not None
     assert loaded2.provider.owner_declared_endpoint.https_origin == ("https://llm.example.com:8443")
     assert render_config_toml(loaded2) == text
+
+
+def test_codex_subscription_round_trip_and_rollback_keep_only_nonsecret_binding(
+    tmp_path: Path,
+) -> None:
+    runtime = codex_subscription_runtime(
+        executable_path="/Applications/Codex.app/Contents/Resources/codex",
+        executable_sha256=_DIGEST,
+        runtime_version="0.150.1",
+        source_identity="openai-codex-darwin-arm64-0.150.1",
+        app_server_schema_sha256=_DIGEST,
+        capability_cell_sha256=_DIGEST,
+        isolated_config_sha256=_DIGEST,
+        capability_profile="codex-evaluator/0.150.1/v1",
+        capability_evidence_expires_at="2026-11-30T00:00:00Z",
+        codex_home="/opt/Yoetz Tools/codex-home",
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
+    )
+    path = write_external_runtime_binding(runtime, path=tmp_path / "codex.toml")
+    text = path.read_text()
+    loaded = YoetzConfig.model_validate(tomllib.loads(text), strict=True)
+
+    assert loaded.profile == "codex-subscription"
+    assert loaded.external_runtime == runtime
+    assert loaded.provider is None
+    assert "oauth_token" not in text
+    assert "api_key" not in text
+
+    clear_external_runtime_binding(path=path, base=loaded)
+    rolled_back = YoetzConfig.model_validate(tomllib.loads(path.read_text()), strict=True)
+    assert rolled_back.profile == "strict-local"
+    assert rolled_back.external_runtime is None
 
 
 def test_apply_provider_endpoint_choice_writes_binding(tmp_path: Path) -> None:

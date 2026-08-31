@@ -24,8 +24,8 @@ _MANIFEST_PATH = "manifest.json"
 _SCHEMA_NAMESPACE = "https://schemas.yoetz.dev/0.1/"
 _EXPECTED_SCHEMA_MANIFEST_SCHEMA = "yoetz.schema-manifest/1.0.0"
 _EXPECTED_SCHEMA_MANIFEST_VERSION = "1.0.0"
-_EXPECTED_MEMBER_COUNT = 108
-_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 40
+_EXPECTED_MEMBER_COUNT = 120
+_EXPECTED_REQUEST_RESULT_VERSION_COUNT = 41
 _EXPECTED_EVENT_VERSION_COUNT = 16
 
 
@@ -193,6 +193,8 @@ def test_schema_registry_is_complete() -> None:
                 "consent/review-result-3.0.0.schema.json",
                 "consent/status-3.0.0.schema.json",
             }
+            else "2.4.0"
+            if path.endswith("-2.4.0.schema.json")
             else "2.3.0"
             if path.endswith("-2.3.0.schema.json")
             else "2.4.0"
@@ -210,17 +212,29 @@ def test_schema_registry_is_complete() -> None:
             else "1.2.0"
             if path == "events/evidence-recorded-1.2.0.schema.json"
             else (
-                "1.1.0"
+                "1.2.0"
+                if path == "operations/status-result-1.2.0.schema.json"
+                else "1.1.0"
                 if path
                 in {
+                    "config/yoetz-config-1.1.0.schema.json",
+                    "events/check-recorded-1.1.0.schema.json",
                     "events/claim-recorded-1.1.0.schema.json",
                     "events/event-draft-1.1.0.schema.json",
                     "events/evidence-recorded-1.1.0.schema.json",
+                    "events/finding-recorded-1.1.0.schema.json",
                     "events/opaque-unknown-event-draft-1.1.0.schema.json",
+                    "events/session-opened-1.1.0.schema.json",
+                    "events/session-resumed-1.1.0.schema.json",
+                    "findings/finding-1.1.0.schema.json",
+                    "findings/semantic-provenance-1.1.0.schema.json",
+                    "operations/check-result-1.1.0.schema.json",
                     "operations/publish-work-request-1.1.0.schema.json",
+                    "operations/receipt-result-1.1.0.schema.json",
                     "operations/status-request-1.1.0.schema.json",
                     "operations/status-result-1.1.0.schema.json",
                     "privacy/outbound-case-1.1.0.schema.json",
+                    "receipts/receipt-document-1.1.0.schema.json",
                 }
                 else "1.0.0"
             )

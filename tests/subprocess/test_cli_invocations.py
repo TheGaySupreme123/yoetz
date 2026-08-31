@@ -71,6 +71,13 @@ def test_exact_integration_and_confidential_command_shapes() -> None:
     )
     assert runner.invoke(cli.app, ["service", "idle-relock", "059"]).exit_code == 2
     assert runner.invoke(cli.app, ["provider", "credential", "set", "--help"]).exit_code == 0
+    for operation in ("setup", "status", "disconnect", "rollback"):
+        assert (
+            runner.invoke(
+                cli.app, ["provider", "codex-subscription", operation, "--help"]
+            ).exit_code
+            == 0
+        )
     assert runner.invoke(cli.app, ["privacy", "receipts", "list", "--help"]).exit_code == 0
 
 
