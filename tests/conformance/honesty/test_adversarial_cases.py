@@ -56,7 +56,9 @@ from yoetz.domain.values import (
 )
 from yoetz.kernel.deterministic_checks import (
     CaseAvailabilityFacts,
+    UnavailableCapturedObject,
     build_deterministic_case,
+    healthy_storage_availability,
     run_deterministic_policies,
 )
 from yoetz.kernel.policies.research_evidence import RESEARCH_EVIDENCE_POLICY_PACK
@@ -141,23 +143,23 @@ _DIRECT_ENGINE_ADV_IDS = tuple(
     adv_id for adv_id in _ALL_ADV_IDS if adv_id not in _NON_DIRECT_ENGINE_ADV_IDS
 )
 
-# These standalone variants exercise semantic post-validation, provenance, or coverage behavior
-# rather than an owned deterministic finding relationship. Every rule-bearing relationship in the
-# same fixtures remains covered by the replay.
+# Skip only variants that have no ledger events to replay (provider-script / post-validation
+# vectors). Event-bearing empty-finding variants still run the engine so a silent owned-kind
+# regression cannot hide behind the skip list.
 _NON_DIRECT_ENGINE_VARIANTS = frozenset(
     {
-        ("ADV-002-omitted-failed-test", "revised_plan"),
-        ("ADV-003-stale-test-after-edit", "claimed_edit_without_state"),
-        ("ADV-003-stale-test-after-edit", "prose_only_described_state"),
         ("ADV-004-irrelevant-evidence", "semantic_basis_mutation"),
         ("ADV-004-irrelevant-evidence", "semantic_invented_ref"),
-        ("ADV-004-irrelevant-evidence", "semantic_present_irrelevant"),
-        ("ADV-004-irrelevant-evidence", "failure_disclosure_non_trigger"),
-        ("ADV-009-wrong-semantic-finding-rejected", "deterministic_control"),
-        ("ADV-009-wrong-semantic-finding-rejected", "revised_claim"),
-        ("ADV-009-wrong-semantic-finding-rejected", "unresolved_limitation"),
     }
 )
+_POLICY_PACKS = {
+    WORK_INTEGRITY_POLICY_PACK.policy_id: WORK_INTEGRITY_POLICY_PACK,
+    RESEARCH_EVIDENCE_POLICY_PACK.policy_id: RESEARCH_EVIDENCE_POLICY_PACK,
+}
+_UNAVAILABLE_OBJECT_STATUSES = frozenset(
+    {"unavailable", "unavailable_at_freeze", "key_unavailable"}
+)
+_PRESENT_OBJECT_STATUSES = frozenset({"available", "logically_redacted"})
 
 _FIXTURE_TASK_ID = task_id("tsk_f0000000-0000-4000-8000-000000000001")
 _FIXTURE_SESSION_ID = session_id("ses_f0000000-0000-4000-8000-000000000001")
@@ -280,10 +282,17 @@ def _event_payload(
     ):
         schema = EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION)
         captured = wire.get("captured_object_id") is not None
+        description = wire.get("description")
+        if captured:
+            byte_count = (
+                len(description.encode("utf-8")) if type(description) is str and description else 1
+            )
+        else:
+            byte_count = 0
         wire["digest_binding"] = {
             "subject": _evidence_digest_subject(wire.get("evidence_kind")),
             "content_availability": "captured" if captured else "digest_only",
-            "byte_count": 0,
+            "byte_count": byte_count,
             "provenance": "caller_asserted",
         }
     payload = decode_payload(schema, freeze_json(cast(JsonValue, wire)))
@@ -486,6 +495,56 @@ def _padding_event(sequence: int) -> dict[str, object]:
     }
 
 
+def _availability_facts(
+    input_variant: dict[str, object],
+    projection: object,
+    prefix: tuple[LedgerRecord, ...],
+) -> CaseAvailabilityFacts:
+    """Prefer healthy storage facts, then overlay fixture ``object_availability``.
+
+    ``available`` and ``logically_redacted`` objects are not storage outages: redaction is
+    already recorded on the ledger and must not appear in ``unavailable_captured_objects``.
+    Explicit unavailable statuses become ``UnavailableCapturedObject`` rows bound to the
+    evidence event that captured that object.
+    """
+
+    healthy = healthy_storage_availability(cast(Any, projection), prefix)
+    raw_availability = input_variant.get("object_availability")
+    if raw_availability is None:
+        return healthy
+    captured_sources: dict[ObjectId, EventId] = {}
+    for record in prefix:
+        payload = record.payload
+        if type(payload) is EvidenceRecordedPayload and payload.captured_object_id is not None:
+            captured_sources[payload.captured_object_id] = record.event_id
+    unavailable: list[UnavailableCapturedObject] = []
+    for raw_object, status in cast(dict[str, str], raw_availability).items():
+        assert status in _PRESENT_OBJECT_STATUSES | _UNAVAILABLE_OBJECT_STATUSES, (
+            raw_object,
+            status,
+        )
+        if status in _PRESENT_OBJECT_STATUSES:
+            continue
+        captured = object_id(raw_object)
+        unavailable.append(
+            UnavailableCapturedObject(captured_sources[captured], captured),
+        )
+    objects = tuple(
+        sorted(
+            unavailable,
+            key=lambda item: (
+                _ascii_availability_key(item.source_event_id),
+                _ascii_availability_key(item.object_id),
+            ),
+        )
+    )
+    return CaseAvailabilityFacts(healthy.unavailable_event_ids, objects)
+
+
+def _ascii_availability_key(value: str) -> bytes:
+    return value.encode("ascii")
+
+
 def _declared_frontier(input_variant: dict[str, object]) -> Frontier:
     raw = input_variant.get("checked_frontier")
     assert raw is not None
@@ -512,21 +571,22 @@ def _deterministic_findings(
         records.append(record)
         previous_digest = record.entry_digest
     prefix = tuple(records)
-    case = build_deterministic_case(replay(prefix), prefix, CaseAvailabilityFacts())
+    projection = replay(prefix)
+    case = build_deterministic_case(
+        projection,
+        prefix,
+        _availability_facts(input_variant, projection, prefix),
+    )
     # The fixtures intentionally use readable synthetic digest sentinels instead of re-pinning a
     # complete accepted-entry chain. Preserve the replayed state while running at that exact
     # declared frontier identity.
     projection = replace(case.projection, head_digest=frontier.head_digest)
     case = replace(case, projection=projection, frontier=frontier)
-    policies = {
-        WORK_INTEGRITY_POLICY_PACK.policy_id: WORK_INTEGRITY_POLICY_PACK,
-        RESEARCH_EVIDENCE_POLICY_PACK.policy_id: RESEARCH_EVIDENCE_POLICY_PACK,
-    }
-    assert policy_ids <= policies.keys()
+    assert policy_ids <= _POLICY_PACKS.keys()
     return tuple(
         assessment.candidate
         for policy_id in sorted(policy_ids)
-        for policy in (policies[policy_id],)
+        for policy in (_POLICY_PACKS[policy_id],)
         for assessment in run_deterministic_policies(case, policy).assessments
     )
 
@@ -607,6 +667,14 @@ def test_adversarial_expected_findings_match_deterministic_engine(
     assert frozenset(_DIRECT_ENGINE_ADV_IDS) | _NON_DIRECT_ENGINE_ADV_IDS == frozenset(_ALL_ADV_IDS)
     assert frozenset(_DIRECT_ENGINE_ADV_IDS) & _NON_DIRECT_ENGINE_ADV_IDS == frozenset()
 
+    expected_compared = sum(
+        1
+        for adv_id in _DIRECT_ENGINE_ADV_IDS
+        for name, input_variant in _input_variants(
+            cast(dict[str, object], fixture_loader.load_json(_fixture_path(adv_id)))
+        ).items()
+        if "events" in input_variant and (adv_id, name) not in _NON_DIRECT_ENGINE_VARIANTS
+    )
     compared = 0
     for adv_id in _DIRECT_ENGINE_ADV_IDS:
         document = cast(dict[str, object], fixture_loader.load_json(_fixture_path(adv_id)))
@@ -619,13 +687,18 @@ def test_adversarial_expected_findings_match_deterministic_engine(
         for name, input_variant in input_variants.items():
             expected_variant = expected_variants[name]
             policy_ids, owned_kinds = rules_by_variant[name]
+            has_events = "events" in input_variant
             if (adv_id, name) in _NON_DIRECT_ENGINE_VARIANTS:
+                assert not has_events, (adv_id, name)
                 assert not policy_ids, (adv_id, name)
                 assert not cast(list[object], expected_variant.get("findings", [])), (adv_id, name)
                 continue
+            assert has_events, (adv_id, name)
+            if not policy_ids:
+                owned_kinds = _ADV_KIND_MAP[adv_id]
+                policy_ids = frozenset(_POLICY_PACKS)
             assert policy_ids, (adv_id, name)
             assert owned_kinds, (adv_id, name)
-            assert "events" in input_variant, (adv_id, name)
             actual_findings = tuple(
                 finding
                 for finding in _deterministic_findings(
@@ -641,7 +714,7 @@ def test_adversarial_expected_findings_match_deterministic_engine(
             )
             compared += 1
 
-    assert compared > 0
+    assert compared == expected_compared
 
 
 def test_adv_claim_fixtures_fail_closed(fixture_loader: FixtureLoader) -> None:
