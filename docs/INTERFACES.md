@@ -584,6 +584,13 @@ unavailable reconciliation capability, or activation/reconciliation failure is t
 `blocked_by_policy/scope_not_authorized`, with no provider construction, job, attempt, dispatch, or
 trusted-approval instruction. Neither suspension branch is committed as a terminal result.
 
+Bundle restart recovery reconstructs the pending check operation, semantic job, physical attempt,
+and disclosure wait as one resumable state. Restoring only the wait marker is insufficient: the
+attempt coordinator would have no job to reclaim and could not preserve the approved provider
+request identity. A denial, expiry, stale-authority result, or cancellation terminalizes the job
+and attempt first, then resolves the one-use wait; a crash between those writes recovers the
+terminal job and finishes the wait cleanup without dispatching or minting a replacement attempt.
+
 The agent-facing handoff preserves that state distinction. Both a missing standing repository grant
 and a one-use `confirm_every_request` decision are nonterminal `awaiting_human` continuations bound
 to the exact original check request id. The continuation kind distinguishes them: repository setup
@@ -1701,9 +1708,16 @@ about its host binding (this bridge process, its route profile, and the fixed en
 one request. The first such failure is returned with `safe_details.availability =
 "terminal_unavailable"`, `host_profile`, and `route_profile` beside the existing `reason_code`, and
 is latched in the bridge's private client slot together with the request id, the public error, its
-correlation id, and the advisory singleton-holder stamp observed at that moment. Every later call
-under a *different* request id — any tool, any delegate sharing the MCP process — is answered from
-that latch: same public code, same `correlation_id`, same `retryable`, the same `safe_details` plus
+correlation id, and the advisory singleton-holder stamp observed at that moment. Concurrent first
+arrivals before that result share one on-demand attempt: a slot-scoped in-flight gate parks later
+calls until the first probe completes, then they inherit that completed latch without a quiet
+probe. This includes a concurrent duplicate of the winning request id; only a replay that arrives
+after the first attempt has completed takes the sanctioned repair path (issue #476).
+The same in-flight gate covers a previously live client that then fails its handshake or
+reconnects after an availability `ControlError`, so that path also produces one on-demand attempt.
+Every later call under a *different* request id — any tool, any delegate sharing the MCP process —
+is answered from that latch: same public code, same `correlation_id`, same `retryable`, the same
+`safe_details` plus
 `availability_inherited: true` and `availability_request_id` (the original id), and a message
 suffix stating that no new diagnostic was recorded; no spawn, supersede, or diagnostic occurs.
 Three continuations clear the latch: the original request id replays (the sanctioned repair-then-
@@ -2053,8 +2067,8 @@ authorization signals.
 
 Elevated consent (`service/elevated_bootstrap.py`, CLI `yoetz consent` /
 `yoetz elevated-bootstrap`) is a separate owner-only pending-file lane outside
-`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/4`) and creates
-digest-bound pending records (`yoetz.elevated-bootstrap.pending/2`). The v3 agent-safe projection
+`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/5`) and creates
+digest-bound pending records (`yoetz.elevated-bootstrap.pending/3`). The agent-safe projection
 contains only operation, risk class, bounded danger text, exact digests, expiry, pending ID, an
 exact bounded repository recipe when applicable, the fixed `["yoetz","consent","review"]`
 command, and an authorize command only for operations that permit agent-chat authorization. A
@@ -2073,15 +2087,16 @@ process, argv, environment, stdin, MCP, JSON, or caller boolean can authorize co
 pending/operation/danger/target digests, decision, and `warning_acknowledged` for approve).
 Yoetz treats the assertion as authority but cannot independently authenticate its chat provenance;
 a compromised agent can forge it. Implemented agent-chat operations are
-`provider_credential_set`, `provider_credential_rotate`, and `repository_privacy_grant`. Credential
+`provider_credential_set`, `provider_credential_rotate`, `repository_privacy_grant`, and the
+service-prepared `import_publication`. Credential
 approve may read one secret from stdin (`--provider-credential-stdin`); results are presence-only
 and never echo secret bytes. Vault initialization stays helper/console-only. This lane does not
 unlock an already-locked vault. The six MCP tools (ADR-011) are unchanged; authorize is local
 CLI control.
 
 The current public JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
-`review-result`, and `status`, each at version `4.0.0` under `schemas/consent/`; frozen versions
-`2.0.0` and `3.0.0` remain shipped for compatibility. The current version report is
+`review-result`, and `status`, each at version `5.0.0` under `schemas/consent/`; frozen versions
+`2.0.0` through `4.0.0` remain shipped for compatibility. The current version report is
 `version/version-manifest-2.0.0.schema.json`; its released `1.0.0` predecessor remains byte-frozen.
 `yoetz.chat-user-attestation/1` is version 1.0.0.
 `review_only` irreversible
@@ -2558,6 +2573,7 @@ stored in the START result object/catalog.
 - `reserve_or_resume(command: ImportCommand, source: CapturedImportSource) -> ImportAllocation`;
 - `prepare_plan(allocation) -> PreparedImportPlan`;
 - `publish_plan(allocation, plan) -> ImportAllocation`;
+- `release_lease_for_authorization(allocation) -> None` (prepared, unpublished plans only);
 - `next_batch(allocation) -> ImportBatchSelection` (refreshed allocation plus batch or `None`);
 - `record_batch(allocation, batch, result: AppendResult) -> ImportAllocation`;
 - `prepare_report(allocation, report: EncryptedImportReportRef) -> ImportAllocation`;
@@ -2599,6 +2615,26 @@ encrypted canonical `ImportReport`; `publish_report` verifies its `AppendResult`
 completion. `status` returns only bounded structural pending/terminal counts, source-identity
 digest, phase, and report evidence locator. `check` and `receipt` return retryable
 `OPERATION_PENDING` while an import for that session is pending; public `status` discloses it.
+
+Publication is not admitted merely because a request has importer-shaped client metadata. The
+first call captures the exact source, prepares and durably stores encrypted batch-plan objects,
+creates one `import_publication` pending consent with a content-free
+`yoetz.import-publication-preview/1`, releases the import lease, and returns non-retryable
+`PRIVACY_AUTHORITY_REQUIRED`. The preview binds the source identity, capture-manifest commitment,
+plan digest, task/session/writer, capability profile digest and version, mapping version,
+structural bounds, and fixed source/line/excerpt/batch limits. It explicitly says complete
+transcript inclusion, reasoning inclusion, and reviewer-egress widening are false.
+
+Approval creates an owner-only internal authorization record, never a bearer value or CLI/MCP
+argument. Replaying the same import request reacquires its lease and activates the grant only in
+that execution context. Before each append the importer binds admission to the next persisted
+batch or report request ID and its exact ordered event IDs; ordinary `publish_work` additionally
+checks the bound session/writer and the fixed importer actor/client/channel metadata, and admits
+that publication only once. The record stays available across restart until terminal import
+completion, then is consumed. Denial creates no record. Any source, manifest, plan, target,
+profile/version, mapping-version, or limit change produces another target digest and cannot reuse
+the decision. This is a local intake permission and does not authorize semantic-review or other
+egress.
 
 Importer publication identity is permanently reserved in both directions: the publishing
 writer/request pair and the source/ordinal pair are unique. Ordinals `0..batch_count-1` name
@@ -3367,7 +3403,8 @@ observation store are intentionally left in place.
 The implemented artifact operation is exactly `plugin_artifact_apply`. Its prepare target is the
 portable preview digest, which already binds target identity, current-state digest, action,
 format/schema/renderer versions, intended and current MCP ownership, optional route profile, exact
-route bytes through the artifact inventory/digest, and the complete sorted future inventory.
+route bytes through the artifact inventory/digest, the exact rollback digest when present, and the
+complete sorted future inventory.
 It is `review_only`, never agent-chat-authorizable, and its one pending review is consumed before
 one install/replace/remove attempt. Same-request replay returns the stored process result; after
 restart or an ambiguous filesystem outcome the caller must reconcile through `status_artifact`,
@@ -3389,8 +3426,12 @@ The #150 artifact wire-neutral domain shapes are closed:
   the adapter consumes the corresponding injected authority port, and the default adapter denies
   both channels.
 - `PluginArtifactPreview` carries request ID, action, state before, current `McpOwnershipState`, target-identity digest,
-  current-state digest, artifact digest, preview digest, the complete `PortablePluginPlan`, and
-  sorted structural warnings. It carries no raw target path or member contents.
+  current-state digest, artifact digest, the exact canonical-native rollback digest when migration
+  would preserve or removal would restore one, preview digest, the complete `PortablePluginPlan`,
+  and sorted structural warnings. The preview digest binds the rollback digest, so the consumed
+  authority target binds those exact bytes; a missing or changed rollback is stale and refuses
+  before mutation. Apply revalidates the bound preview after authority consumption and before its
+  first filesystem mutation. It carries no raw target path or member contents.
   For plugin-managed mode that owner state must be composed from plugin and external/global
   observations by the caller; the neutral artifact adapter cannot infer the latter from tree
   absence, so its uncomposed default is `ambiguous` and refuses preview.
@@ -3407,6 +3448,10 @@ The `yoetz.portable-plugin-install/1` marker contains only schema, format profil
 renderer versions, exact MCP ownership and optional route profile, artifact digest, complete sorted managed-file rows
 (`relative_path`, `size`, `sha256`), and its canonical marker digest. It contains no project path,
 user value, timestamp, credential, secret reference, transcript, host-activation claim, or receipt.
+The native rollback candidate must additionally byte-match the current canonical
+`render_plugin_install_tree(codex_version=None)` projection, including its native marker's adapter,
+harness, scope, and Yoetz version identity. A marker-consistent prior or fabricated native tree is
+not a rollback candidate and remains preserved as `modified` or `recovery_required`.
 
 ### Cursor local harness contract (issue #153)
 
@@ -3803,6 +3848,9 @@ facade and are never MCP tools.
   `CODEX_JSONL_MAPPING_VERSION`, `CODEX_OPAQUE_SCHEMA`, `SUPPORTED_CODEX_PROFILES`,
   `CodexCapabilityProfile`, and the `profile_for_codex_version`/`parse_codex_jsonl`/
   `plan_codex_mapping`/`materialize_codex_mapping`/`sanitize_codex_argv` pipeline.
+- `adapters/importers/codex_plan.py`: production composition of that pure mapping pipeline with
+  identifier allocation, encrypted batch-plan objects, canonical plan-manifest identity, and
+  exact plan re-read for crash-safe SQLite resume.
 - `adapters/integrations/codex_skill.py`: implements the trusted-project `IntegrationsPort`.
 - `adapters/memory/`: reference `LedgerPort`/`StartCatalogPort`/`ObjectStorePort`/`ImporterPort`
   implementations used by conformance. Start routing exports `MemoryStartCatalogAdapter`,
