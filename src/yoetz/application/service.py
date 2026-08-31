@@ -45,6 +45,7 @@ from yoetz.ports.control import (
 )
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
+from yoetz.ports.importer import ImportAllocation
 from yoetz.ports.ledger import CheckAwaitingHuman, CheckCommitResult, FrozenCase
 from yoetz.ports.publish_response_catalog import (
     PublishResponseCatalogPort,
@@ -266,6 +267,7 @@ from yoetz.application.import_review import (  # noqa: E402
     ReviewRequest,
     execute_import_codex_jsonl,
     execute_review,
+    import_request_from_control,
 )
 from yoetz.application.publish_work import (  # noqa: E402
     PublishWorkInternalResult,
@@ -956,7 +958,15 @@ class Application:
         await self._require_repository_route(request, repository_privacy_context)
         return await execute_receipt(self, request)  # pyright: ignore[reportArgumentType]
 
-    async def import_codex_jsonl(self, request: ImportCodexJsonlRequest) -> ImportReportInternal:
+    async def import_codex_jsonl(
+        self,
+        request: ImportCodexJsonlRequest | Mapping[str, object],
+        *,
+        repository_privacy_context: RepositoryPrivacyContext | None = None,
+    ) -> ImportReportInternal:
+        if type(request) is not ImportCodexJsonlRequest:
+            request = import_request_from_control(request)
+        await self._require_repository_route(request, repository_privacy_context)
         return await execute_import_codex_jsonl(
             self,  # pyright: ignore[reportArgumentType]
             request,
@@ -1109,6 +1119,49 @@ class Application:
 
     def authorizes_import_publication(self, request: object) -> bool:
         return self.import_publication_authorizer(request)
+
+    def activate_import_publication(self, allocation: ImportAllocation) -> object:
+        activate = getattr(self.import_publication_authorizer, "activate", None)
+        if not callable(activate):
+            raise PublicOperationError(
+                PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED,
+                "This exact import plan requires user authorization.",
+                False,
+                safe_details={"reason_code": "import_publication_authority_required"},
+            )
+        return cast(Callable[[ImportAllocation], object], activate)(allocation)
+
+    def deactivate_import_publication(self, token: object, *, completed: bool) -> None:
+        deactivate = getattr(self.import_publication_authorizer, "deactivate", None)
+        if not callable(deactivate):
+            return
+        cast(Callable[..., None], deactivate)(token, completed=completed)
+
+    def bind_import_publication(
+        self,
+        token: object,
+        *,
+        request_id: str,
+        event_ids: tuple[str, ...],
+    ) -> None:
+        bind = getattr(self.import_publication_authorizer, "bind", None)
+        if not callable(bind):
+            raise PublicOperationError(
+                PublicErrorCode.PRIVACY_AUTHORITY_REQUIRED,
+                "This exact import publication is not authorized.",
+                False,
+                safe_details={"reason_code": "import_publication_authority_required"},
+            )
+        cast(Callable[..., None], bind)(
+            token,
+            request_id=request_id,
+            event_ids=event_ids,
+        )
+
+    def reconcile_completed_import_publication(self, allocation: ImportAllocation) -> None:
+        reconcile = getattr(self.import_publication_authorizer, "reconcile_completed", None)
+        if callable(reconcile):
+            cast(Callable[[ImportAllocation], None], reconcile)(allocation)
 
     def receipt_versions_for(self, runtime: TaskRuntime) -> ReceiptVersionSlice:
         return self.receipt_version_resolver(runtime)

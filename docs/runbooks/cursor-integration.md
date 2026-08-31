@@ -151,7 +151,9 @@ bridge process. The bridge latches the first availability failure of that bindin
 `peer_untrusted`): the parent's error carries `safe_details.availability: terminal_unavailable`
 with `host_profile`/`route_profile`, and every later call under a new `request_id` — any tool,
 any worker — returns the same `correlation_id` with `availability_inherited: true` and mints no
-new diagnostic, startup, or supersede. It clears when the original `request_id` replays after the
+new diagnostic, startup, or supersede. Parallel first calls (ordinary host behaviour) share that
+same single attempt: they do not each mint a diagnostic before the latch exists (issue #476). The
+latch clears when the original `request_id` replays after the
 named repair, when `yoetz service run|restart|stop` changes the stamped holder, or (retryable
 classes only) when one quiet handshake succeeds. The skill tells the coordinator to carry a
 bounded `yoetz_availability` block into each assignment and tells delegates that inherit it to
@@ -174,6 +176,10 @@ independent final result row. Until that work lands, use only the IDE/CLI implem
 and keep each support claim bounded by its actual proof facets.
 
 ## Hooks and observation
+
+Cursor has no `codex exec --json` import surface. Issue #301's bounded import authorization makes
+no Cursor adapter change; Cursor evidence continues through cooperative MCP and native
+hook/observation paths.
 
 The native IDE plugin advertises only `sessionStart`, `sessionEnd`, `afterMCPExecution`,
 `afterFileEdit`, and `stop` for the pinned local profile. It intentionally excludes

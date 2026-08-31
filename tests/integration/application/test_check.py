@@ -51,11 +51,12 @@ from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
 )
-from yoetz.domain.values import Frontier
+from yoetz.domain.values import Frontier, disclosure_continuation
 from yoetz.kernel import deterministic_checks as deterministic_checks_module
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.ids import IdPort
 from yoetz.ports.ledger import (
+    CheckAwaitingHuman,
     CheckCommitResult,
     CheckPhase,
     CheckPolicyExecution,
@@ -658,6 +659,61 @@ async def test_check_replay_skips_policy_ids_and_second_commit() -> None:
     assert replayed is first
     assert app.id_source.count == allocated
     assert app.ledger.commit_count == 1
+
+
+@pytest.mark.anyio
+async def test_awaiting_human_replay_commits_only_after_a_terminal_decision() -> None:
+    app = _App(semantic=True)
+    objects = cast(MemoryObjects, cast(_Runtime, app.runtime).task.objects)
+    prior = ObjectRef(
+        "obj_30000000-0000-4000-8000-00000000aaaa",
+        1,
+        "hmac-sha256:" + "a" * 64,
+        "sha256:" + "b" * 64,
+        "yoetz-object/1",
+        "bmk-1",
+        ObjectMetadata(
+            ObjectKind.CHECK_RESUME,
+            "application/vnd.yoetz.check-resume+json",
+            _TASK,
+            datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+    )
+    objects._refs[prior.object_id] = prior  # pyright: ignore[reportPrivateUsage]
+    objects._data[prior.object_id] = b"{}"  # pyright: ignore[reportPrivateUsage]
+    app.semantic_result = FinalSemanticEvaluation(
+        SemanticStatus.AWAITING_HUMAN,
+        SemanticReason.HUMAN_APPROVAL_REQUIRED,
+        continuation=disclosure_continuation(
+            pending_id="ppr_30000000-0000-4000-8000-000000000009",
+            expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+            request_id=_REQUEST,
+        ),
+    )
+
+    suspended = await _execute_check_commit(app, _request("semantic_if_configured"))
+
+    assert type(suspended) is CheckAwaitingHuman
+    assert app.ledger.commit_count == 0
+    assert app.ledger.operation is not None
+    assert app.ledger.operation.state is OperationState.PENDING
+    assert app.ledger.operation.phase is CheckPhase.SEMANTIC_WAIT
+
+    app.semantic_result = FinalSemanticEvaluation(
+        SemanticStatus.HUMAN_DENIED,
+        SemanticReason.HUMAN_DENIED,
+    )
+    committed = await _execute_check_commit(app, _request("semantic_if_configured"))
+
+    assert type(committed) is CheckCommitResult
+    assert committed.semantic_status is SemanticStatus.HUMAN_DENIED
+    assert committed.semantic_reason is SemanticReason.HUMAN_DENIED
+    assert app.ledger.commit_count == 1
+    assert app.ledger.phase_transitions == [
+        (CheckPhase.RESERVED, CheckPhase.LOCAL_READY),
+        (CheckPhase.LOCAL_READY, CheckPhase.SEMANTIC_WAIT),
+        (CheckPhase.SEMANTIC_WAIT, CheckPhase.READY_TO_FINALIZE),
+    ]
 
 
 @pytest.mark.anyio

@@ -165,6 +165,21 @@ binding, expiry, single-use consumption, repository commitment, policy ceilings,
 reauthentication, and presence-only results remain runtime-enforced. `vault_initialize` never
 permits agent-chat authorization or an agent-selected vault secret.
 
+For bounded Codex JSONL import, never prepare `import_publication` directly. Submit the exact
+`yoetz import` request once so Yoetz can encrypt the source and durably fix its publication plan.
+On `PRIVACY_AUTHORITY_REQUIRED`, stop import retries, read `yoetz consent status`, and show only
+the pending danger text, operation, danger and target digests, and structural
+`import_publication_preview`. Never paste or summarize transcript lines, raw JSONL, reasoning, or
+excerpts in chat. Explain that the chat relay is agent-attested rather than independent proof and
+recommend trusted local review when available.
+
+Only an explicit current-chat approve or deny instruction for that exact displayed pending import
+authorizes the relay. Send the exact pending fields through `yoetz consent authorize`; approve
+uses warning acknowledgement. Denial publishes nothing. After approval, replay the identical
+import body and request ID. Never add an approval token/field, mint another request ID, or reuse the
+decision for a changed source, manifest, task/session/writer, profile/version, mapping, plan,
+semantic check, or reviewer egress.
+
 ## When a check is waiting on a local decision
 
 If a check returns `semantic_status: awaiting_human` with `semantic_reason:

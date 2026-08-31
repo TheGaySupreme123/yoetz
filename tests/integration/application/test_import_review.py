@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import AsyncIterator
 from typing import cast
 
@@ -28,6 +29,7 @@ from yoetz.application.import_review import (
     ImportReportInternal,
     ReviewRequest,
     execute_import_codex_jsonl,
+    import_request_from_control,
 )
 from yoetz.domain.values import Frontier, Timestamp, request_id, session_id, writer_id
 from yoetz.ports.clock import ClockPort
@@ -153,6 +155,35 @@ async def test_codex_jsonl_import_preserves_source_and_quarantine() -> None:
 
     with pytest.raises(PublicOperationError) as caught:
         await execute_import_codex_jsonl(cast(Application, _App()), crafted)
+    assert caught.value.code is PublicErrorCode.INVALID_REQUEST
+
+
+async def test_control_import_body_decodes_to_the_typed_bounded_source() -> None:
+    source = b'{"type":"turn.started"}\n'
+    request = import_request_from_control(
+        {
+            "schema_version": "1.0.0",
+            "codex_capability_profile_id": "codex-exec-jsonl/0.139.0/v1",
+            "codex_version": "0.139.0",
+            "exit_status": 0,
+            "mapping_version": CODEX_JSONL_MAPPING_VERSION,
+            "request_id": ids.request_id("import-control"),
+            "session_id": ids.session_id("import-control"),
+            "source_bytes_base64": base64.b64encode(source).decode("ascii"),
+            "source_encoding": "base64",
+            "source_kind": "stdin",
+            "stderr_captured_bytes": 0,
+            "stderr_present": False,
+            "stderr_truncated": False,
+            "writer_id": ids.writer_id("import-control"),
+        }
+    )
+    assert request.source.declared_size == len(source)
+    assert b"".join([chunk async for chunk in request.source]) == source
+    await request.source.close()
+
+    with pytest.raises(PublicOperationError) as caught:
+        import_request_from_control({"source_encoding": "base64", "source_bytes_base64": "***"})
     assert caught.value.code is PublicErrorCode.INVALID_REQUEST
 
 

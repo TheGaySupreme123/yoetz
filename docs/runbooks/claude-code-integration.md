@@ -105,7 +105,10 @@ yoetz service restart
 
 `yoetz service status` names the incompatible holder's pid, version, and manifest digest. Other
 hosts' sessions still running the previous build's bridge are refused after the switch until they
-restart; that is the intended outcome of an upgrade, not a defect.
+restart; that is the intended outcome of an upgrade, not a defect. The cooperative MCP bridge
+latches that availability failure for the process and serializes the first on-demand attempt so
+concurrent tool calls share one diagnostic (issues #469, #476); that behaviour is shared across
+hosts that use this bridge, not Claude-Code-specific.
 
 ## Static and host validation
 
@@ -142,6 +145,10 @@ The skill name is `/yoetz:yoetz`. The MCP server is `plugin:yoetz:yoetz`, and ca
 `start`/`status` call through that scoped name; a list/details/MCP handshake alone is insufficient.
 
 ## Hooks and observation
+
+Claude Code has no `codex exec --json` import surface. Issue #301's bounded import authorization
+therefore makes no Claude adapter change; Claude evidence continues through cooperative MCP and
+the native hook/observation paths below.
 
 The native hook profile emits only `SessionStart`, scoped-Yoetz `PostToolUse`, scoped-Yoetz
 `PostToolUseFailure`, `Stop`, and `SessionEnd`. A bare MCP matcher is a negative control. Hooks call

@@ -107,13 +107,14 @@ def _install_recovery_oracle(
 
     seen: list[object] = []
 
-    async def ensure(_runtime: object = bridge.BRIDGE_RUNTIME) -> object:
+    async def ensure(_runtime: object = bridge.BRIDGE_RUNTIME, **_kwargs: object) -> object:
         return object()
 
     async def invoke(
         _runtime: object,
         request: object,
         _call: Callable[[object, object], Awaitable[object]],
+        _request_id: object = None,
     ) -> object:
         seen.append(request)
         if raise_on_status is not None:
