@@ -2049,8 +2049,8 @@ authorization signals.
 
 Elevated consent (`service/elevated_bootstrap.py`, CLI `yoetz consent` /
 `yoetz elevated-bootstrap`) is a separate owner-only pending-file lane outside
-`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/4`) and creates
-digest-bound pending records (`yoetz.elevated-bootstrap.pending/2`). The v3 agent-safe projection
+`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/5`) and creates
+digest-bound pending records (`yoetz.elevated-bootstrap.pending/3`). The agent-safe projection
 contains only operation, risk class, bounded danger text, exact digests, expiry, pending ID, an
 exact bounded repository recipe when applicable, the fixed `["yoetz","consent","review"]`
 command, and an authorize command only for operations that permit agent-chat authorization. A
@@ -2069,15 +2069,16 @@ process, argv, environment, stdin, MCP, JSON, or caller boolean can authorize co
 pending/operation/danger/target digests, decision, and `warning_acknowledged` for approve).
 Yoetz treats the assertion as authority but cannot independently authenticate its chat provenance;
 a compromised agent can forge it. Implemented agent-chat operations are
-`provider_credential_set`, `provider_credential_rotate`, and `repository_privacy_grant`. Credential
+`provider_credential_set`, `provider_credential_rotate`, `repository_privacy_grant`, and the
+service-prepared `import_publication`. Credential
 approve may read one secret from stdin (`--provider-credential-stdin`); results are presence-only
 and never echo secret bytes. Vault initialization stays helper/console-only. This lane does not
 unlock an already-locked vault. The six MCP tools (ADR-011) are unchanged; authorize is local
 CLI control.
 
 The current public JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
-`review-result`, and `status`, each at version `4.0.0` under `schemas/consent/`; frozen versions
-`2.0.0` and `3.0.0` remain shipped for compatibility. The current version report is
+`review-result`, and `status`, each at version `5.0.0` under `schemas/consent/`; frozen versions
+`2.0.0` through `4.0.0` remain shipped for compatibility. The current version report is
 `version/version-manifest-2.0.0.schema.json`; its released `1.0.0` predecessor remains byte-frozen.
 `yoetz.chat-user-attestation/1` is version 1.0.0.
 `review_only` irreversible
@@ -2554,6 +2555,7 @@ stored in the START result object/catalog.
 - `reserve_or_resume(command: ImportCommand, source: CapturedImportSource) -> ImportAllocation`;
 - `prepare_plan(allocation) -> PreparedImportPlan`;
 - `publish_plan(allocation, plan) -> ImportAllocation`;
+- `release_lease_for_authorization(allocation) -> None` (prepared, unpublished plans only);
 - `next_batch(allocation) -> ImportBatchSelection` (refreshed allocation plus batch or `None`);
 - `record_batch(allocation, batch, result: AppendResult) -> ImportAllocation`;
 - `prepare_report(allocation, report: EncryptedImportReportRef) -> ImportAllocation`;
@@ -2595,6 +2597,26 @@ encrypted canonical `ImportReport`; `publish_report` verifies its `AppendResult`
 completion. `status` returns only bounded structural pending/terminal counts, source-identity
 digest, phase, and report evidence locator. `check` and `receipt` return retryable
 `OPERATION_PENDING` while an import for that session is pending; public `status` discloses it.
+
+Publication is not admitted merely because a request has importer-shaped client metadata. The
+first call captures the exact source, prepares and durably stores encrypted batch-plan objects,
+creates one `import_publication` pending consent with a content-free
+`yoetz.import-publication-preview/1`, releases the import lease, and returns non-retryable
+`PRIVACY_AUTHORITY_REQUIRED`. The preview binds the source identity, capture-manifest commitment,
+plan digest, task/session/writer, capability profile digest and version, mapping version,
+structural bounds, and fixed source/line/excerpt/batch limits. It explicitly says complete
+transcript inclusion, reasoning inclusion, and reviewer-egress widening are false.
+
+Approval creates an owner-only internal authorization record, never a bearer value or CLI/MCP
+argument. Replaying the same import request reacquires its lease and activates the grant only in
+that execution context. Before each append the importer binds admission to the next persisted
+batch or report request ID and its exact ordered event IDs; ordinary `publish_work` additionally
+checks the bound session/writer and the fixed importer actor/client/channel metadata, and admits
+that publication only once. The record stays available across restart until terminal import
+completion, then is consumed. Denial creates no record. Any source, manifest, plan, target,
+profile/version, mapping-version, or limit change produces another target digest and cannot reuse
+the decision. This is a local intake permission and does not authorize semantic-review or other
+egress.
 
 Importer publication identity is permanently reserved in both directions: the publishing
 writer/request pair and the source/ordinal pair are unique. Ordinals `0..batch_count-1` name
@@ -3780,6 +3802,9 @@ facade and are never MCP tools.
   `CODEX_JSONL_MAPPING_VERSION`, `CODEX_OPAQUE_SCHEMA`, `SUPPORTED_CODEX_PROFILES`,
   `CodexCapabilityProfile`, and the `profile_for_codex_version`/`parse_codex_jsonl`/
   `plan_codex_mapping`/`materialize_codex_mapping`/`sanitize_codex_argv` pipeline.
+- `adapters/importers/codex_plan.py`: production composition of that pure mapping pipeline with
+  identifier allocation, encrypted batch-plan objects, canonical plan-manifest identity, and
+  exact plan re-read for crash-safe SQLite resume.
 - `adapters/integrations/codex_skill.py`: implements the trusted-project `IntegrationsPort`.
 - `adapters/memory/`: reference `LedgerPort`/`StartCatalogPort`/`ObjectStorePort`/`ImporterPort`
   implementations used by conformance. Start routing exports `MemoryStartCatalogAdapter`,
