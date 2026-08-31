@@ -105,6 +105,40 @@ independent Yoetz skill remains loadable. Preview binds the full `mcp.json` byte
 inventory/artifact digests and also binds the observed `McpOwnershipState`; changed ownership
 makes apply stale or conflicting before mutation.
 
+**Amended 2026-08-30 — host admission is the fourth route-bound surface (issue #467).** Every
+supported host now ships a model-based automatic tool-call reviewer (Claude Code auto mode, Codex
+`approvals_reviewer = "auto_review"`, Cursor Auto-review), and each refuses the policy-route
+`check` on the same criterion — data to a destination the user did not name — because the owner's
+`yoetz --privacy` authorization is invisible to it. Decision 5 stands: annotations stay honest and
+`openWorldHint` is never softened to slip past a reviewer. The mirror image of the strict ceiling
+is added instead: the owner's trusted decision, never the agent and never a self-approving hook,
+tells the host to admit the call. `yoetz integrate <host> admission preview|grant|revoke|status`
+writes each host's *own* project-scoped admission entry for exactly `check` — Claude Code
+`permissions.allow` (or `ask`) in `.claude/settings.local.json`, using
+`mcp__yoetz__check` for an external registration or
+`mcp__plugin_yoetz_yoetz__check` for the plugin-owned route; Codex
+`[mcp_servers.yoetz.tools.check] approval_mode = "approve"` (or the `plugins."yoetz@yoetz"`
+form) in `.codex/config.toml`, Cursor `mcpAllowlist` in `.cursor/permissions.json` plus
+`Mcp(...)` in `.cursor/cli.json` — only through a previewed, digest-bound step that binds the
+exact file bytes, only on an observed `policy` route, only when the repository grant permits
+external review, and never over a foreign (wider, conflicting, or non-exact) entry; an unreadable
+host file is `unknown`, never `absent`. Apply rechecks the exact preimage immediately before each
+atomic file mutation and verifies the resulting admission state. Ordinary host files provide no
+compare-and-swap primitive against a non-cooperating same-UID writer in the final syscall window,
+so the preview warns `host_config_not_compare_and_swap` and the owner must keep host configuration
+writers quiescent during apply. Every reverse transition — grant revoke in the privacy
+ceremony, strict re-registration, unregistration, and host uninstall for the named project —
+removes exactly the entry Yoetz wrote, and `yoetz provider status` reports a leftover entry as
+`host_admission_drift` beside `host_admission` per host (`absent|present|partial|foreign|unknown`).
+Admission is host tool-call authorization: it proves no dispatch, widens no policy, and bypasses
+no privacy, disclosure, credential, or human-review gate. Yoetz records a Claude Code
+`PermissionDenied` on a scoped `check` as a payload-free `host_auto_review_denied` diagnostic;
+Codex and Cursor expose no typed denial and that gap is documented. Rejected: shipping a
+`PermissionRequest` / `beforeMCPExecution` hook that approves Yoetz's own tool (inverts the
+authority this ADR keeps with the host), widening admission to the other tools (they need none),
+customizing a host's reviewer policy on the user's behalf, and relaying "the user authorized this"
+through the agent (the prompt-injection shape #187 forbids).
+
 ## Alternatives considered
 
 **Infer the route from current policy for each call.** Rejected: the host would be approving a

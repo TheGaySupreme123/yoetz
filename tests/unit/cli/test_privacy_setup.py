@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -1287,3 +1288,77 @@ def test_informed_assisted_override_discloses_unknown_facts_and_guard_off(
     assert "Assisted recommendation eligible now: no" in out
     assert "runtime evidence guard is OFF" in out
     assert "informed standing authorization" in out
+
+
+def _admit_claude(project: Path) -> Path:
+    settings = project / ".claude" / "settings.local.json"
+    settings.parent.mkdir(exist_ok=True)
+    settings.write_text(
+        json.dumps({"permissions": {"allow": ["mcp__plugin_yoetz_yoetz__check"]}}),
+        encoding="utf-8",
+    )
+    return settings
+
+
+@pytest.mark.anyio
+async def test_a_commit_that_stops_external_review_removes_the_host_admission_yoetz_wrote(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Grant revoke is a reverse transition for host admission (issue #467).
+
+    The host rule is derived from the grant; when the trusted ceremony withdraws the grant, the
+    same ceremony removes exactly the entry Yoetz wrote and says so.
+    """
+
+    import yoetz.cli.privacy_setup as module
+
+    answers = _answers()
+    assisted = module.build_candidate_policy(local_only_policy(), answers, now=datetime.now(UTC))
+    _install_setup_stubs(
+        monkeypatch,
+        current=assisted,
+        confirmations=iter((True,)),
+        prompts=[],
+        external=answers.external_provider,
+        grant_state="granted",
+    )
+    printed = _stub_route(monkeypatch, {"registered_profile": "policy", "observed": True})
+    settings = _admit_claude(tmp_path)
+    foreign = tmp_path / ".cursor" / "permissions.json"
+    foreign.parent.mkdir()
+    foreign.write_text(json.dumps({"mcpAllowlist": ["yoetz:*"]}), encoding="utf-8")
+
+    report = await module.run_privacy_setup(recipe_hint="private", workspace_locator=tmp_path)
+
+    assert report.outcome == "configured"
+    assert not settings.exists()
+    assert json.loads(foreign.read_text(encoding="utf-8")) == {"mcpAllowlist": ["yoetz:*"]}
+    assert any("admission removed" in line and "claude" in line for line in printed)
+    assert not any("cursor" in line for line in printed)
+
+
+@pytest.mark.anyio
+async def test_a_widening_commit_names_hosts_that_will_still_hold_every_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import yoetz.cli.privacy_setup as module
+
+    _install_setup_stubs(
+        monkeypatch,
+        current=local_only_policy(),
+        confirmations=iter((True,)),
+        prompts=[],
+        external=_answers().external_provider,
+    )
+    printed = _stub_route(monkeypatch, {"registered_profile": "policy", "observed": True})
+    _admit_claude(tmp_path)
+
+    report = await module.run_privacy_setup(offer_recommended=True, workspace_locator=tmp_path)
+
+    assert report.outcome == "configured"
+    note = next(line for line in printed if "no host auto-review admission" in line)
+    assert "codex, cursor" in note
+    assert "claude" not in note
+    assert any("yoetz integrate <host> admission preview" in line for line in printed)
+    # A widening never removes anything.
+    assert (tmp_path / ".claude" / "settings.local.json").exists()

@@ -2780,12 +2780,18 @@ async def integrate_mcp(
     preview_digest: str | None,
     json_output: bool,
     route_profile: Literal["policy", "strict"] | None = None,
+    project_root: Path | None = None,
 ) -> int:
     """Client-local MCP status, registration, and unregistration commands.
 
     ``route_profile`` is the explicit route input. When absent, an existing
     yoetz-owned registration keeps its observed profile (#389); only a fresh
     registration falls back to the structural configuration derivation.
+
+    ``project_root`` names the trusted project whose Codex host-admission entry
+    (issue #467) a strict registration or an unregistration also revokes. The
+    registration is global and the admission is project-scoped, so without an
+    explicit root nothing is swept and ``provider status`` reports the drift.
     """
 
     if harness != "codex" or action not in {
@@ -2824,6 +2830,7 @@ async def integrate_mcp(
                 _emit(
                     {
                         "action": preview.action.value,
+                        "admission_cleanup": _admission_cleanup_preview(project_root),
                         "harness": harness,
                         "preview_digest": preview.preview_digest,
                         "route_profile": preview.route_profile,
@@ -2850,6 +2857,7 @@ async def integrate_mcp(
                 _emit(
                     {
                         "action": "noop",
+                        "admission_cleanup": _admission_reverse_sweep(project_root),
                         "harness": harness,
                         "state_after": preview.state_before.value,
                         "state_before": preview.state_before.value,
@@ -2868,6 +2876,7 @@ async def integrate_mcp(
             _emit(
                 {
                     "action": result.action.value,
+                    "admission_cleanup": _admission_reverse_sweep(project_root),
                     "harness": harness,
                     "state_after": result.state_after.value,
                     "state_before": result.state_before.value,
@@ -2899,6 +2908,11 @@ async def integrate_mcp(
             _emit(
                 {
                     "action": preview.action.value,
+                    "admission_cleanup": (
+                        _admission_cleanup_preview(project_root)
+                        if preview.route_profile == "strict"
+                        else None
+                    ),
                     "harness": harness,
                     "preview_digest": preview.preview_digest,
                     "route_profile": preview.route_profile,
@@ -2924,6 +2938,11 @@ async def integrate_mcp(
             _emit(
                 {
                     "action": "noop",
+                    "admission_cleanup": (
+                        _admission_reverse_sweep(project_root)
+                        if preview.route_profile == "strict"
+                        else None
+                    ),
                     "harness": harness,
                     "state_after": preview.state_before.value,
                     "state_before": preview.state_before.value,
@@ -2944,6 +2963,11 @@ async def integrate_mcp(
     _emit(
         {
             "action": result.action.value,
+            "admission_cleanup": (
+                _admission_reverse_sweep(project_root)
+                if preview.route_profile == "strict"
+                else None
+            ),
             "harness": harness,
             "state_after": result.state_after.value,
             "state_before": result.state_before.value,
@@ -2951,3 +2975,19 @@ async def integrate_mcp(
         json_output=json_output,
     )
     return 0
+
+
+def _admission_cleanup_preview(project_root: Path | None) -> JsonValue:
+    if project_root is None:
+        return None
+    from yoetz.cli.host_admission import admission_cleanup_preview
+
+    return admission_cleanup_preview("codex", project_root)
+
+
+def _admission_reverse_sweep(project_root: Path | None) -> JsonValue:
+    if project_root is None:
+        return None
+    from yoetz.cli.host_admission import reverse_sweep
+
+    return reverse_sweep("codex", project_root)

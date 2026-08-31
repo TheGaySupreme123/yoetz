@@ -15,6 +15,7 @@ from yoetz.adapters.integrations.codex_marketplace import (
     preview_removal,
     skill_tree_state,
 )
+from yoetz.cli.host_admission import admission_cleanup_preview, reverse_sweep
 from yoetz.cli.setup import (
     _choose_binary,  # pyright: ignore[reportPrivateUsage]
     _UsageExit,  # pyright: ignore[reportPrivateUsage]
@@ -140,7 +141,17 @@ def run_codex_plugin_command(
                 codex_home=codex_home,
                 purge_cache=purge_cache,
             )
-            _emit(_preview_body(preview), json_output=json_output)
+            _emit(
+                {
+                    **_preview_body(preview),
+                    # Removal is a reverse transition for the project's Codex host-admission
+                    # entry (issue #467); disclose what the sweep would touch.
+                    "admission_cleanup": admission_cleanup_preview(
+                        "codex", Path(target.project_root)
+                    ),
+                },
+                json_output=json_output,
+            )
             return 0
         if not accept or preview_digest is None:
             sys.stderr.write("codex_plugin_exact_preview_acceptance_required\n")
@@ -163,6 +174,7 @@ def run_codex_plugin_command(
         return 20 if error.reason.value not in {"remove_refused", "preview_stale"} else 2
     _emit(
         {
+            "admission_cleanup": reverse_sweep("codex", Path(target.project_root)),
             "outcome": result.outcome.value,
             "purge_cache": result.purge_cache,
             "skill_tree": result.skill_tree_state,

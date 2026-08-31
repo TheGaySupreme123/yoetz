@@ -26,6 +26,7 @@ from yoetz.adapters.integrations.portable_plugin import (
     ArtifactUserPresencePort,
     ElevatedPortableArtifactReview,
 )
+from yoetz.cli.host_admission import admission_cleanup_preview, reverse_sweep
 from yoetz.domain.values import RequestId, request_id
 from yoetz.ports.plugin_artifacts import (
     ArtifactAuthority,
@@ -36,7 +37,11 @@ from yoetz.ports.plugin_artifacts import (
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.protocol.ids import IdKind, new_id
 
-__all__ = ["run_claude_code_plugin_command", "run_claude_code_plugin_export"]
+__all__ = [
+    "plugin_artifact",
+    "run_claude_code_plugin_command",
+    "run_claude_code_plugin_export",
+]
 
 
 def _artifact_authority(
@@ -82,7 +87,7 @@ def _operation_exit_code(state: PluginOperationState) -> int:
     return 1
 
 
-def _artifact(
+def plugin_artifact(
     ownership_name: str, route_name: str | None, *, development_enabled: bool = False
 ) -> ClaudeCodePluginArtifact:
     ownerships = {
@@ -125,7 +130,9 @@ def run_claude_code_plugin_export(
     """
 
     try:
-        artifact = _artifact(ownership_name, route_profile, development_enabled=development_enabled)
+        artifact = plugin_artifact(
+            ownership_name, route_profile, development_enabled=development_enabled
+        )
         written = export_claude_code_plugin(artifact, output_root)
         _emit(
             {
@@ -167,6 +174,7 @@ def _status_body(status: ClaudeCodePluginStatus) -> dict[str, object]:
         "marketplace_registered": status.marketplace_registered,
         "marker_valid": status.marker_valid,
         "mcp": {
+            "host_admission_supported": status.mcp_observation.host_admission_supported,
             "observed": status.mcp_observation.observed,
             "ownership_state": status.mcp_observation.ownership_state.value,
             "present_sources": [item.value for item in status.mcp_observation.present_sources],
@@ -234,7 +242,7 @@ def run_claude_code_plugin_command(
             str(executable),
             identity,
         )
-        artifact = _artifact(ownership_name, route_profile)
+        artifact = plugin_artifact(ownership_name, route_profile)
         status = status_claude_code_plugin(target, artifact)
         if command == "status":
             _emit(_status_body(status), json_output=json_output)
@@ -250,10 +258,21 @@ def run_claude_code_plugin_command(
             raise ValueError("claude_code_plugin_action_invalid") from exc
         request = _request(request_value)
         preview = preview_claude_code_plugin(request, target, action, artifact)
+        # A host uninstall and a re-render onto the strict route are reverse transitions for
+        # the project's host-admission entry (issue #467): the sweep is disclosed in the
+        # preview and reported in the result, and removes only the exact entry Yoetz wrote.
+        reverse_admission = action is ClaudeCodePluginAction.REMOVE or (
+            action in {ClaudeCodePluginAction.INSTALL, ClaudeCodePluginAction.UPDATE}
+            and artifact.plan.mcp_route_profile == "strict"
+        )
+        project = Path(target.project_root)
         if command == "preview":
             _emit(
                 {
                     "action": preview.action.value,
+                    "admission_cleanup": (
+                        admission_cleanup_preview("claude", project) if reverse_admission else None
+                    ),
                     "artifact_digest": preview.artifact_digest,
                     "authorization": {
                         "operation": "plugin_artifact_apply",
@@ -306,6 +325,12 @@ def run_claude_code_plugin_command(
         _emit(
             {
                 "action": result.action.value,
+                "admission_cleanup": (
+                    reverse_sweep("claude", project)
+                    if reverse_admission
+                    and result.operation_state is PluginOperationState.COMPLETED
+                    else None
+                ),
                 "artifact_digest": result.artifact_digest,
                 "changed_files": list(result.changed_files),
                 "enabled": result.enabled,

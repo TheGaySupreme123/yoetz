@@ -31,6 +31,11 @@ from yoetz.adapters.integrations.codex_skill import (
     inspect_destination,
     load_packaged_skill_source,
 )
+from yoetz.adapters.integrations.toml_tables import (
+    append_table_block,
+    exact_table_span,
+    strip_exact_table,
+)
 from yoetz.ports.integrations import (
     IntegrationError,
     IntegrationReason,
@@ -1529,24 +1534,13 @@ def _validate_add_result(
     return installed
 
 
-def _append_config_block(raw: bytes, block: str) -> bytes:
-    if not block:
-        return raw
-    prefix = raw
-    if prefix and not prefix.endswith(b"\n"):
-        prefix += b"\n"
-    if prefix:
-        prefix += b"\n"
-    return prefix + block.encode("utf-8")
-
-
 def _activated_config_bytes(raw: bytes, config: Mapping[str, object], project: Path) -> bytes:
     configured, enabled, foreign = _config_state(config, project)
     if foreign:
         raise _error(IntegrationReason.DESTINATION_CONFLICT)
     if configured and enabled:
         return raw
-    merged = _append_config_block(raw, _activation_block(project, config))
+    merged = append_table_block(raw, _activation_block(project, config))
     try:
         tomllib.loads(merged.decode("utf-8"))
     except tomllib.TOMLDecodeError as exc:
@@ -1728,66 +1722,6 @@ def skill_tree_state(target: IntegrationTarget) -> str:
     return inspect_destination(target, load_packaged_skill_source()).state.value
 
 
-_TOML_TABLE_HEADER_RE: Final = re.compile(rb"[ \t]*\[\[?[^\r\n\]]+\]\]?[ \t]*(?:#[^\r\n]*)?")
-
-
-def _exact_table_span(raw: bytes, table: str) -> tuple[int, int] | None:
-    """Return the whole byte span only when one TOML table is exact.
-
-    Matching a generated prefix is insufficient: an owner-added key would then
-    survive removal at the parent scope. Blank separator lines are outside the
-    table identity, but comments and fields before the next header are not.
-    """
-
-    expected = table.encode("utf-8")
-    header = expected.splitlines(keepends=True)[0]
-    lines = raw.splitlines(keepends=True)
-    offsets: list[int] = []
-    offset = 0
-    for line in lines:
-        if line == header:
-            offsets.append(offset)
-        offset += len(line)
-    if len(offsets) != 1:
-        return None
-    start = offsets[0]
-    end = len(raw)
-    offset = 0
-    seen = False
-    for line in lines:
-        if offset == start:
-            seen = True
-        elif seen and _TOML_TABLE_HEADER_RE.fullmatch(line.rstrip(b"\r\n")):
-            end = offset
-            break
-        offset += len(line)
-    candidate = raw[start:end].rstrip(b"\r\n") + b"\n"
-    if candidate != expected:
-        return None
-    return start, end
-
-
-def _strip_exact_table(raw: bytes, table: str) -> bytes:
-    span = _exact_table_span(raw, table)
-    if span is None:
-        return raw
-    start, _end = span
-    table_bytes = table.encode("utf-8")
-    before = raw[:start]
-    after = raw[start + len(table_bytes) :]
-    # Activation inserts exactly one separator newline before its first block
-    # and between generated blocks. Remove only that adjacent byte; never
-    # normalize blank lines elsewhere in owner-authored TOML.
-    if before.endswith(b"\n\n"):
-        before = before[:-1]
-    merged = before + after
-    if merged in {b"", b"\n"}:
-        return b""
-    if not merged.endswith(b"\n"):
-        merged += b"\n"
-    return merged
-
-
 def _config_table_plan(
     raw: bytes, config: Mapping[str, object], project: Path
 ) -> tuple[bool, bool, bytes]:
@@ -1810,7 +1744,7 @@ def _config_table_plan(
     plugin_owned = (
         isinstance(plugin, Mapping)
         and dict(cast(Mapping[str, object], plugin)) == {"enabled": True}
-        and _exact_table_span(raw, _PLUGIN_TABLE) is not None
+        and exact_table_span(raw, _PLUGIN_TABLE) is not None
     )
     if plugin_present and not plugin_owned:
         _refuse_conflict("config_plugin")
@@ -1822,15 +1756,15 @@ def _config_table_plan(
         isinstance(marketplace, Mapping)
         and dict(cast(Mapping[str, object], marketplace))
         == {"source_type": "local", "source": str(project)}
-        and _exact_table_span(raw, marketplace_table) is not None
+        and exact_table_span(raw, marketplace_table) is not None
     )
     if marketplace_present and not marketplace_owned:
         _refuse_conflict("config_marketplace")
     after = raw
     if plugin_owned:
-        after = _strip_exact_table(after, _PLUGIN_TABLE)
+        after = strip_exact_table(after, _PLUGIN_TABLE)
     if marketplace_owned:
-        after = _strip_exact_table(after, marketplace_table)
+        after = strip_exact_table(after, marketplace_table)
     if after != raw:
         try:
             parsed = tomllib.loads(after.decode("utf-8") if after else "")

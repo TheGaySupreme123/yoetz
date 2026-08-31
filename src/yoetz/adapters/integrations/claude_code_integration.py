@@ -93,6 +93,7 @@ CLAUDE_CODE_MINIMUM_VERSION: Final = "2.1.233"
 CLAUDE_CODE_NATIVE_PROFILE_ID: Final = "claude-code-cli-local-project-2.1.241"
 CLAUDE_CODE_HOOK_MAPPING_VERSION: Final = "claude-code-hooks-2.1.241-v1"
 CLAUDE_CODE_HOOK_EVENTS: Final = (
+    "PermissionDenied",
     "PostToolUse",
     "PostToolUseFailure",
     "SessionEnd",
@@ -128,7 +129,7 @@ _MARKER_SCHEMA: Final = "yoetz.claude-code-marketplace-install/2"
 _LEGACY_MARKER_SCHEMAS: Final = frozenset({"yoetz.claude-code-marketplace-install/1"})
 _EXPORT_MARKER_NAME: Final = ".yoetz-claude-plugin-export.json"
 _EXPORT_MARKER_SCHEMA: Final = "yoetz.claude-code-plugin-export/1"
-_RENDERER_VERSION: Final = "claude-code-plugin/0.2.0"
+_RENDERER_VERSION: Final = "claude-code-plugin/0.3.0"
 _STAGE_PREFIX: Final = ".yoetz-claude-marketplace-stage-"
 _ROLLBACK_NAME: Final = ".yoetz-claude-marketplace-rollback"
 _MAX_FILE_BYTES: Final = 262_144
@@ -149,6 +150,10 @@ _GUIDANCE_NAMES: Final = (
 _YOETZ_SCOPED_TOOL_MATCHER: Final = (
     "^mcp__plugin_yoetz_yoetz__(" + "|".join(YOETZ_WORKFLOW_TOOL_NAMES) + ")$"
 )
+# Only the semantic ``check`` is routed through a host's automatic reviewer (issue #467); the
+# denial hook is scoped to its external and plugin-owned callable names so a held check is the only
+# thing it can ever report.
+_YOETZ_CHECK_TOOL_MATCHER: Final = "^mcp__(yoetz|plugin_yoetz_yoetz)__check$"
 _VERSION_RE: Final = re.compile(r"^(\d+)\.(\d+)\.(\d+)$", re.ASCII)
 
 
@@ -278,13 +283,18 @@ class ClaudeCodeMcpObservation:
     route_profile: Literal["strict", "policy"] | None
     present_sources: tuple[ClaudeCodeMcpSource, ...]
     observed: bool
+    host_admission_supported: bool
 
     def __post_init__(self) -> None:
         if type(self.ownership_state) is not McpOwnershipState:
             raise ValueError("claude_code_mcp_observation_invalid")
         if self.winning_source is not None and type(self.winning_source) is not ClaudeCodeMcpSource:
             raise ValueError("claude_code_mcp_observation_invalid")
-        if self.route_profile not in {None, "strict", "policy"} or type(self.observed) is not bool:
+        if (
+            self.route_profile not in {None, "strict", "policy"}
+            or type(self.observed) is not bool
+            or type(self.host_admission_supported) is not bool
+        ):
             raise ValueError("claude_code_mcp_observation_invalid")
         if type(self.present_sources) is not tuple or any(
             type(item) is not ClaudeCodeMcpSource for item in self.present_sources
@@ -299,6 +309,12 @@ class ClaudeCodeMcpObservation:
         if (
             self.ownership_state not in {McpOwnershipState.EXTERNAL, McpOwnershipState.PLUGIN}
             and self.route_profile is not None
+        ):
+            raise ValueError("claude_code_mcp_observation_invalid")
+        if self.host_admission_supported and (
+            not self.observed
+            or self.ownership_state not in {McpOwnershipState.EXTERNAL, McpOwnershipState.PLUGIN}
+            or self.route_profile is None
         ):
             raise ValueError("claude_code_mcp_observation_invalid")
 
@@ -641,6 +657,12 @@ def _hooks_json(yoetz_launcher: tuple[str, ...]) -> bytes:
         return {"command": f"{command} --event {event}", "timeout": 3, "type": "command"}
 
     hooks: dict[str, JsonValue] = {
+        # Fires when auto mode (or a rule or another hook) denies the call, after the denial;
+        # it cannot allow anything. Yoetz records one payload-free typed diagnostic so
+        # ``observe status`` can say the host held a check (issue #467).
+        "PermissionDenied": [
+            {"hooks": [hook("PermissionDenied")], "matcher": _YOETZ_CHECK_TOOL_MATCHER}
+        ],
         "PostToolUse": [{"hooks": [hook("PostToolUse")], "matcher": _YOETZ_SCOPED_TOOL_MATCHER}],
         "PostToolUseFailure": [
             {"hooks": [hook("PostToolUseFailure")], "matcher": _YOETZ_SCOPED_TOOL_MATCHER}
@@ -1027,34 +1049,35 @@ def _host_state_digest(target: ClaudeCodePluginTarget) -> str:
 
 def _config_entry(
     raw: object, yoetz_launcher: tuple[str, ...] | None = None
-) -> tuple[Mapping[str, JsonValue] | None, bool]:
+) -> tuple[str | None, Mapping[str, JsonValue] | None, bool]:
     if raw is None:
-        return None, True
+        return None, None, True
     if not isinstance(raw, Mapping):
-        return None, False
+        return None, None, False
     config = cast(Mapping[str, JsonValue], raw)
     servers = config.get("mcpServers")
     if servers is None:
-        return None, True
+        return None, None, True
     if not isinstance(servers, Mapping):
-        return None, False
+        return None, None, False
     typed_servers = cast(Mapping[str, JsonValue], servers)
-    relevant: list[Mapping[str, JsonValue]] = []
+    relevant: list[tuple[str, Mapping[str, JsonValue]]] = []
     for name, raw_entry in typed_servers.items():
         if name == "yoetz":
             if not isinstance(raw_entry, Mapping):
-                return None, False
-            relevant.append(cast(Mapping[str, JsonValue], raw_entry))
+                return None, None, False
+            relevant.append((name, cast(Mapping[str, JsonValue], raw_entry)))
         elif (
             isinstance(raw_entry, Mapping)
             and _route_profile(cast(Mapping[str, JsonValue], raw_entry), yoetz_launcher) is not None
         ):
-            relevant.append(cast(Mapping[str, JsonValue], raw_entry))
+            relevant.append((name, cast(Mapping[str, JsonValue], raw_entry)))
     if not relevant:
-        return None, True
+        return None, None, True
     if len(relevant) != 1:
-        return None, False
-    return relevant[0], True
+        return None, None, False
+    name, entry = relevant[0]
+    return name, entry, True
 
 
 def _route_profile(
@@ -1106,7 +1129,7 @@ def observe_claude_code_mcp(
     exact ``mcp serve`` arguments are Yoetz routes just like a bare ``yoetz`` console script.
     """
 
-    candidates: list[tuple[ClaudeCodeMcpSource, Mapping[str, JsonValue]]] = []
+    candidates: list[tuple[ClaudeCodeMcpSource, str | None, Mapping[str, JsonValue]]] = []
     uncertain: list[ClaudeCodeMcpSource] = []
     config, config_observed = _json_file(claude_config_root / ".claude.json")
     if not config_observed:
@@ -1114,34 +1137,34 @@ def observe_claude_code_mcp(
     elif config is not None:
         projects = config.get("projects")
         local_raw = projects.get(str(project_root)) if isinstance(projects, Mapping) else None
-        local_entry, local_observed = _config_entry(local_raw, yoetz_launcher)
+        local_name, local_entry, local_observed = _config_entry(local_raw, yoetz_launcher)
         if not local_observed:
             uncertain.append(ClaudeCodeMcpSource.LOCAL)
         elif local_entry is not None:
-            candidates.append((ClaudeCodeMcpSource.LOCAL, local_entry))
-        user_entry, user_observed = _config_entry(config, yoetz_launcher)
+            candidates.append((ClaudeCodeMcpSource.LOCAL, local_name, local_entry))
+        user_name, user_entry, user_observed = _config_entry(config, yoetz_launcher)
         if not user_observed:
             uncertain.append(ClaudeCodeMcpSource.USER)
         elif user_entry is not None:
-            candidates.append((ClaudeCodeMcpSource.USER, user_entry))
+            candidates.append((ClaudeCodeMcpSource.USER, user_name, user_entry))
     project, project_observed = _json_file(project_root / ".mcp.json")
-    project_entry, project_shape_observed = _config_entry(project, yoetz_launcher)
+    project_name, project_entry, project_shape_observed = _config_entry(project, yoetz_launcher)
     if not project_observed or not project_shape_observed:
         uncertain.append(ClaudeCodeMcpSource.PROJECT)
     elif project_entry is not None:
-        candidates.append((ClaudeCodeMcpSource.PROJECT, project_entry))
+        candidates.append((ClaudeCodeMcpSource.PROJECT, project_name, project_entry))
     plugin, plugin_observed = _json_file(plugin_root / ".mcp.json")
-    plugin_entry, plugin_shape_observed = _config_entry(plugin, yoetz_launcher)
+    plugin_name, plugin_entry, plugin_shape_observed = _config_entry(plugin, yoetz_launcher)
     if not plugin_observed or not plugin_shape_observed:
         uncertain.append(ClaudeCodeMcpSource.PLUGIN)
     elif plugin_entry is not None:
-        candidates.append((ClaudeCodeMcpSource.PLUGIN, plugin_entry))
+        candidates.append((ClaudeCodeMcpSource.PLUGIN, plugin_name, plugin_entry))
     if connector_entry is not None:
-        candidates.append((ClaudeCodeMcpSource.CLAUDE_AI_CONNECTOR, connector_entry))
+        candidates.append((ClaudeCodeMcpSource.CLAUDE_AI_CONNECTOR, None, connector_entry))
     order = {source: index for index, source in enumerate(ClaudeCodeMcpSource)}
     candidates.sort(key=lambda item: order[item[0]])
     if uncertain:
-        present = tuple(source for source, _entry in candidates)
+        present = tuple(source for source, _name, _entry in candidates)
         combined = tuple(
             sorted(
                 set((*present, *uncertain)),
@@ -1154,27 +1177,34 @@ def observe_claude_code_mcp(
             None,
             combined,
             False,
+            False,
         )
     if not candidates:
-        return ClaudeCodeMcpObservation(McpOwnershipState.ABSENT, None, None, (), True)
-    profiles = [(source, _route_profile(entry, yoetz_launcher)) for source, entry in candidates]
-    present = tuple(source for source, _profile in profiles)
-    if any(profile is None for _source, profile in profiles):
-        source = next(source for source, profile in profiles if profile is None)
-        return ClaudeCodeMcpObservation(McpOwnershipState.FOREIGN, source, None, present, True)
+        return ClaudeCodeMcpObservation(McpOwnershipState.ABSENT, None, None, (), True, False)
+    profiles = [
+        (source, name, _route_profile(entry, yoetz_launcher)) for source, name, entry in candidates
+    ]
+    present = tuple(source for source, _name, _profile in profiles)
+    if any(profile is None for _source, _name, profile in profiles):
+        source = next(source for source, _name, profile in profiles if profile is None)
+        return ClaudeCodeMcpObservation(
+            McpOwnershipState.FOREIGN, source, None, present, True, False
+        )
     plugin_profiles = [
-        profile for source, profile in profiles if source is ClaudeCodeMcpSource.PLUGIN
+        profile for source, _name, profile in profiles if source is ClaudeCodeMcpSource.PLUGIN
     ]
     external_profiles = [
-        profile for source, profile in profiles if source is not ClaudeCodeMcpSource.PLUGIN
+        profile for source, _name, profile in profiles if source is not ClaudeCodeMcpSource.PLUGIN
     ]
     if plugin_profiles and external_profiles:
-        return ClaudeCodeMcpObservation(McpOwnershipState.DUAL, present[0], None, present, True)
+        return ClaudeCodeMcpObservation(
+            McpOwnershipState.DUAL, present[0], None, present, True, False
+        )
     if len(profiles) > 1:
         return ClaudeCodeMcpObservation(
-            McpOwnershipState.AMBIGUOUS, present[0], None, present, True
+            McpOwnershipState.AMBIGUOUS, present[0], None, present, True, False
         )
-    source, profile = profiles[0]
+    source, name, profile = profiles[0]
     assert profile is not None
     return ClaudeCodeMcpObservation(
         McpOwnershipState.PLUGIN
@@ -1184,6 +1214,11 @@ def observe_claude_code_mcp(
         cast(Literal["strict", "policy"], profile),
         present,
         True,
+        # Name-mappability only, deliberately independent of the route profile: it says whether
+        # the observed server key maps to the fixed permission-rule names admission can write
+        # (docs/INTERFACES.md). The policy-route requirement is enforced separately at grant,
+        # which refuses `route_not_policy` for any non-policy route (host_admission.py).
+        name == "yoetz" and source is not ClaudeCodeMcpSource.CLAUDE_AI_CONNECTOR,
     )
 
 
