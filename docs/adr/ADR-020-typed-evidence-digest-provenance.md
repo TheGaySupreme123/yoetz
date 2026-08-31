@@ -79,7 +79,9 @@ ordinary cooperative publication cannot claim.
    `observation_captured` digest provenance. Versions 1.0 and 1.1 remain byte-frozen and exact
    readable. The complete dispatch table accepts all three versions; the version manifest advertises
    1.2 as current. `outbound-case/1.1.0` adds the same provenance to typed excerpt metadata without
-   changing frozen outbound-case v1.0 bytes.
+   changing frozen outbound-case v1.0 bytes. Released `event-draft/1.0.0` and
+   `opaque-unknown-event-draft/1.0.0` remain byte-frozen; their additive `1.1.0` successors carry
+   the exact evidence 1.2 pair and unknown-pair exclusion.
 
 10. **The service, not an object reference, establishes capture.** `observation_captured` requires
     the exact observation coordinator author (`harness` + `harness_observed`) on `hook_observed`, a

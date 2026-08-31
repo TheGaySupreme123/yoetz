@@ -247,16 +247,22 @@ def _version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
-def _frozen_version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Preserve the released v2.0 version report while newer reports append."""
+def _frozen_schema(
+    entry: _RegistryEntry, *, error_reason: str = "frozen_schema_template_invalid"
+) -> dict[str, JsonValue]:
+    """Load a released schema byte model without deriving a replacement shape."""
 
     source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
     try:
         return cast(dict[str, JsonValue], json.loads(source.read_bytes()))
     except (OSError, TypeError, json.JSONDecodeError) as exc:
-        raise SchemaGenerationError(
-            "version_schema_template_invalid", entries=(entry.relative_path,)
-        ) from exc
+        raise SchemaGenerationError(error_reason, entries=(entry.relative_path,)) from exc
+
+
+def _frozen_version_manifest_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Preserve the released v2.0 version report while newer reports append."""
+
+    return _frozen_schema(entry, error_reason="version_schema_template_invalid")
 
 
 def _evidence_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
@@ -451,7 +457,7 @@ def _evidence_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
 def _event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Add exact post-v1.0 evidence pairs to the reviewed draft structural union."""
 
-    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    source = Path(__file__).resolve().parent.parent / "schemas/events/event-draft-1.0.0.schema.json"
     try:
         document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
         definitions = cast(dict[str, JsonValue], document["$defs"])
@@ -461,6 +467,7 @@ def _event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "event_draft_schema_template_invalid", entries=(entry.relative_path,)
         ) from exc
 
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     branches[:] = [
         item
         for item in branches
@@ -513,13 +520,27 @@ def _event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
                 "required": ["schema", "payload"],
             },
         )
+    opaque_ref = "https://schemas.yoetz.dev/0.1/events/opaque-unknown-event-draft-1.0.0.schema.json"
+    for branch in branches:
+        if isinstance(branch, dict) and branch.get("$ref") == opaque_ref:
+            branch["$ref"] = (
+                "https://schemas.yoetz.dev/0.1/events/opaque-unknown-event-draft-1.1.0.schema.json"
+            )
+            break
+    else:
+        raise SchemaGenerationError(
+            "event_draft_schema_template_invalid", entries=(entry.relative_path,)
+        )
     return document
 
 
 def _opaque_unknown_event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     """Exclude every exact-known pair, including additive evidence versions."""
 
-    source = Path(__file__).resolve().parent.parent / "schemas" / entry.relative_path
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas/events/opaque-unknown-event-draft-1.0.0.schema.json"
+    )
     try:
         document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
         definitions = cast(dict[str, JsonValue], document["$defs"])
@@ -530,6 +551,7 @@ def _opaque_unknown_event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonV
             "opaque_unknown_event_schema_template_invalid", entries=(entry.relative_path,)
         ) from exc
 
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
     legacy = current_not
     if "anyOf" in current_not:
         values = cast(list[JsonValue], current_not["anyOf"])
@@ -1658,6 +1680,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         lambda: __import__("yoetz.domain.events", fromlist=["EventDraft"]).EventDraft,
     ),
     _RegistryEntry(
+        "events/event-draft-1.1.0.schema.json",
+        "event-draft",
+        "1.1.0",
+        "event",
+        "event-envelope",
+        lambda: __import__("yoetz.domain.events", fromlist=["EventDraft"]).EventDraft,
+    ),
+    _RegistryEntry(
         "events/evidence-recorded-1.0.0.schema.json",
         "evidence-recorded",
         "1.0.0",
@@ -1717,6 +1747,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "events/opaque-unknown-event-draft-1.0.0.schema.json",
         "opaque-unknown-event-draft",
         "1.0.0",
+        "event",
+        "event-envelope",
+        lambda: __import__("yoetz.domain.events", fromlist=["UnknownEvent"]).UnknownEvent,
+    ),
+    _RegistryEntry(
+        "events/opaque-unknown-event-draft-1.1.0.schema.json",
+        "opaque-unknown-event-draft",
+        "1.1.0",
         "event",
         "event-envelope",
         lambda: __import__("yoetz.domain.events", fromlist=["UnknownEvent"]).UnknownEvent,
@@ -2468,6 +2506,8 @@ def build_schema_documents(
         }:
             normalized = _plan_payload_schema(entry)
         elif entry.relative_path == "events/event-draft-1.0.0.schema.json":
+            normalized = _frozen_schema(entry)
+        elif entry.relative_path == "events/event-draft-1.1.0.schema.json":
             normalized = _event_draft_schema(entry)
         elif entry.relative_path in {
             "events/evidence-recorded-1.1.0.schema.json",
@@ -2477,6 +2517,8 @@ def build_schema_documents(
         elif entry.relative_path == "events/response-recorded-1.0.0.schema.json":
             normalized = _response_recorded_schema(entry)
         elif entry.relative_path == "events/opaque-unknown-event-draft-1.0.0.schema.json":
+            normalized = _frozen_schema(entry)
+        elif entry.relative_path == "events/opaque-unknown-event-draft-1.1.0.schema.json":
             normalized = _opaque_unknown_event_draft_schema(entry)
         elif entry.relative_path == "operations/start-result-1.0.0.schema.json":
             normalized = _start_result_schema(entry)

@@ -437,6 +437,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/events/event-draft-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/events/evidence-recorded-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -468,6 +474,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/events/opaque-unknown-event-draft-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/events/opaque-unknown-event-draft-1.1.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
