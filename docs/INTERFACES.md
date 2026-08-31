@@ -3373,7 +3373,8 @@ observation store are intentionally left in place.
 The implemented artifact operation is exactly `plugin_artifact_apply`. Its prepare target is the
 portable preview digest, which already binds target identity, current-state digest, action,
 format/schema/renderer versions, intended and current MCP ownership, optional route profile, exact
-route bytes through the artifact inventory/digest, and the complete sorted future inventory.
+route bytes through the artifact inventory/digest, the exact rollback digest when present, and the
+complete sorted future inventory.
 It is `review_only`, never agent-chat-authorizable, and its one pending review is consumed before
 one install/replace/remove attempt. Same-request replay returns the stored process result; after
 restart or an ambiguous filesystem outcome the caller must reconcile through `status_artifact`,
@@ -3395,8 +3396,12 @@ The #150 artifact wire-neutral domain shapes are closed:
   the adapter consumes the corresponding injected authority port, and the default adapter denies
   both channels.
 - `PluginArtifactPreview` carries request ID, action, state before, current `McpOwnershipState`, target-identity digest,
-  current-state digest, artifact digest, preview digest, the complete `PortablePluginPlan`, and
-  sorted structural warnings. It carries no raw target path or member contents.
+  current-state digest, artifact digest, the exact canonical-native rollback digest when migration
+  would preserve or removal would restore one, preview digest, the complete `PortablePluginPlan`,
+  and sorted structural warnings. The preview digest binds the rollback digest, so the consumed
+  authority target binds those exact bytes; a missing or changed rollback is stale and refuses
+  before mutation. Apply revalidates the bound preview after authority consumption and before its
+  first filesystem mutation. It carries no raw target path or member contents.
   For plugin-managed mode that owner state must be composed from plugin and external/global
   observations by the caller; the neutral artifact adapter cannot infer the latter from tree
   absence, so its uncomposed default is `ambiguous` and refuses preview.
@@ -3413,6 +3418,10 @@ The `yoetz.portable-plugin-install/1` marker contains only schema, format profil
 renderer versions, exact MCP ownership and optional route profile, artifact digest, complete sorted managed-file rows
 (`relative_path`, `size`, `sha256`), and its canonical marker digest. It contains no project path,
 user value, timestamp, credential, secret reference, transcript, host-activation claim, or receipt.
+The native rollback candidate must additionally byte-match the current canonical
+`render_plugin_install_tree(codex_version=None)` projection, including its native marker's adapter,
+harness, scope, and Yoetz version identity. A marker-consistent prior or fabricated native tree is
+not a rollback candidate and remains preserved as `modified` or `recovery_required`.
 
 ### Cursor local harness contract (issue #153)
 

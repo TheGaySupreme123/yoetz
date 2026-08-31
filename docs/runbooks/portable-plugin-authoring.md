@@ -53,8 +53,11 @@ delivery, MCP runtime, observation, semantic dispatch, or workflow closure.
 
 The preview digest binds the trusted target identity, current-state digest, requested action,
 format/schema/renderer versions, complete sorted member inventory, selected MCP ownership,
-optional strict/policy profile, complete route bytes, and current `McpOwnershipState`. Apply rejects
-stale previews or changed ownership before mutation.
+optional strict/policy profile, complete route bytes, current `McpOwnershipState`, and the exact
+native rollback digest when migration would preserve or removal would restore one. The consumed
+authority target therefore binds those exact rollback bytes. Apply rejects stale previews,
+missing or changed rollback bytes, or changed ownership before mutation. It repeats the preview
+validation after authority consumption so a change during review cannot reach the swap.
 
 Before a plugin-managed preview, inspect both native/global registration and the project plugin
 root. Proceed only from exclusive `absent` or already exact `plugin` ownership. `external`, `dual`,
@@ -66,8 +69,10 @@ absence.
 
 Codex uses the existing `.agents/plugins/yoetz` root. Migration is a whole-directory swap between
 marker-identified native and portable trees; files are never merged. A preserved exact native tree
-is restored when the portable tree is removed. Modified, partial, unmanaged, foreign, unsafe, or
-ambiguous trees are preserved and refused. Stage or rollback remnants produce
+is restored when the portable tree is removed. Native rollback admission requires byte equality
+with the canonical native renderer and its exact adapter/harness/scope/Yoetz version marker;
+marker and inventory self-consistency alone is insufficient. Modified, partial, stale, unmanaged,
+foreign, unsafe, or ambiguous trees are preserved and refused. Stage or rollback remnants produce
 `recovery_required`; status reports them and never deletes or chooses between them.
 Removing or rolling back a plugin never removes Yoetz data, vault keys, credentials, privacy
 grants, provider bindings, or foreign host configuration.
