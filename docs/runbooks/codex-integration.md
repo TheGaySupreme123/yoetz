@@ -481,6 +481,12 @@ reviewer egress.
 
 ## 11. Security, privacy, and prohibited actions
 
+Codex is the v0.1 allowlisted first-party client for exact current-chat consent attestation.
+For `vault_initialize` and `vault_passphrase_rotate`, it relays only the prepared pending ID,
+operation, danger digest, target digest, decision, and warning acknowledgement. Yoetz generates,
+loads, stages, and submits vault secrets inside the local helper; Codex must never request or
+receive them. An ambiguous rotation preserves its staged entry for service-restart reconciliation.
+
 Never paste modified skill content, repository content, paths, Codex configuration, a transcript, a
 prompt, a key, an environment variable, or a raw exception into public support. Share only versions,
 state, source/installed/preview digests, the bounded reason token, and file-state names.

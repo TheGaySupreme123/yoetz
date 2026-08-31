@@ -196,7 +196,7 @@ class AutoUnlockPassphraseStore:
     existing passphrase only after the caller proves it unlocks the current vault envelope.
     """
 
-    __slots__ = ("_backend", "_backend_id", "_username")
+    __slots__ = ("_backend", "_backend_id", "_staged_username", "_username")
 
     def __init__(self, bundle_path: object, *, backend: object | None = None) -> None:
         if not isinstance(bundle_path, Path) or not bundle_path.is_absolute():
@@ -205,6 +205,7 @@ class AutoUnlockPassphraseStore:
         self._backend_id = f"{type(self._backend).__module__}.{type(self._backend).__qualname__}"
         encoded = os.fsencode(os.path.abspath(bundle_path))
         self._username = "bundle-" + hashlib.sha256(encoded).hexdigest()
+        self._staged_username = self._username + "-staged-rotation"
 
     @property
     def entry_identity(self) -> tuple[str, str]:
@@ -233,9 +234,35 @@ class AutoUnlockPassphraseStore:
 
         if not self.available:
             return None, "auto_unlock_backend_unavailable"
+        return self._load_username(self._username)
+
+    def load_candidates_with_reason(
+        self,
+    ) -> tuple[tuple[tuple[bytearray, bool], ...], str]:
+        """Load active then crash-recovery staged candidates without exposing either value."""
+
+        if not self.available:
+            return (), "auto_unlock_backend_unavailable"
+        active, active_reason = self._load_username(self._username)
+        staged, staged_reason = self._load_username(self._staged_username)
+        candidates: list[tuple[bytearray, bool]] = []
+        if active is not None:
+            candidates.append((active, False))
+        if staged is not None:
+            if active is not None and hmac.compare_digest(active, staged):
+                _overwrite(staged)
+            else:
+                candidates.append((staged, True))
+        if candidates:
+            return tuple(candidates), "none"
+        if active_reason == "auto_unlock_rejected" or staged_reason == "auto_unlock_rejected":
+            return (), "auto_unlock_rejected"
+        return (), active_reason
+
+    def _load_username(self, username: str) -> tuple[bytearray | None, str]:
         try:
             encoded = cast(AnyKeyringBackend, self._backend).get_password(
-                _AUTO_UNLOCK_SERVICE_NAME, self._username
+                _AUTO_UNLOCK_SERVICE_NAME, username
             )
         except Exception:
             return None, "auto_unlock_rejected"
@@ -278,6 +305,85 @@ class AutoUnlockPassphraseStore:
         return self._create_after_absent(load_reason)
 
     def _create_after_absent(self, load_reason: str) -> bytearray:
+        return self._create_at(self._username, load_reason)
+
+    def stage_for_rotation(self) -> bytearray:
+        """Persist one distinct candidate before the vault envelope switches to it."""
+
+        if not callable(getattr(self._backend, "delete_password", None)):
+            raise OSKeyringError("unsupported")
+        active, active_reason = self.load_with_reason()
+        if active is None:
+            raise OSKeyringError(
+                "missing" if active_reason == "auto_unlock_absent" else "entry_invalid"
+            )
+        _overwrite(active)
+        staged, staged_reason = self._load_username(self._staged_username)
+        if staged is not None:
+            _overwrite(staged)
+            raise OSKeyringError("entry_exists")
+        return self._create_at(self._staged_username, staged_reason)
+
+    def stage_value_for_rotation(self, value: bytearray) -> None:
+        """Persist a user-selected replacement before the vault envelope switches to it."""
+
+        if not callable(getattr(self._backend, "delete_password", None)):
+            raise OSKeyringError("unsupported")
+        active, active_reason = self.load_with_reason()
+        if active is None:
+            raise OSKeyringError(
+                "missing" if active_reason == "auto_unlock_absent" else "entry_invalid"
+            )
+        _overwrite(active)
+        staged, staged_reason = self._load_username(self._staged_username)
+        if staged is not None:
+            _overwrite(staged)
+            raise OSKeyringError("entry_exists")
+        if staged_reason != "auto_unlock_absent":
+            raise OSKeyringError("entry_invalid")
+        self._save_at(self._staged_username, value)
+
+    def promote_staged_rotation(self) -> None:
+        """Publish a proven staged secret as active, then remove the recovery slot."""
+
+        value, reason = self._load_username(self._staged_username)
+        if value is None:
+            raise OSKeyringError("missing" if reason == "auto_unlock_absent" else "entry_invalid")
+        try:
+            self._save_at(self._username, value)
+            self._delete_staged()
+        finally:
+            _overwrite(value)
+
+    def discard_staged_rotation(self) -> None:
+        """Remove a staged candidate after the vault proved it did not switch."""
+
+        self._delete_staged()
+
+    def _delete_staged(self) -> None:
+        if not callable(getattr(self._backend, "delete_password", None)):
+            raise OSKeyringError("unsupported")
+        existing, reason = self._load_username(self._staged_username)
+        if existing is not None:
+            _overwrite(existing)
+        elif reason == "auto_unlock_absent":
+            return
+        else:
+            raise OSKeyringError("entry_invalid")
+        try:
+            cast(AnyKeyringBackend, self._backend).delete_password(
+                _AUTO_UNLOCK_SERVICE_NAME, self._staged_username
+            )
+        except Exception:
+            raise OSKeyringError("ambiguous_write") from None
+        remaining, remaining_reason = self._load_username(self._staged_username)
+        if remaining is not None:
+            _overwrite(remaining)
+            raise OSKeyringError("unverified")
+        if remaining_reason != "auto_unlock_absent":
+            raise OSKeyringError("readback_failed")
+
+    def _create_at(self, username: str, load_reason: str) -> bytearray:
         if load_reason == "auto_unlock_backend_unavailable":
             raise OSKeyringError("unsupported")
         if load_reason != "auto_unlock_absent":
@@ -286,13 +392,13 @@ class AutoUnlockPassphraseStore:
         encoded = base64.urlsafe_b64encode(generated).rstrip(b"=").decode("ascii")
         try:
             backend = cast(AnyKeyringBackend, self._backend)
-            backend.set_password(_AUTO_UNLOCK_SERVICE_NAME, self._username, encoded)
+            backend.set_password(_AUTO_UNLOCK_SERVICE_NAME, username, encoded)
         except Exception:
             _overwrite(generated)
             # A backend exception cannot prove whether the write committed.
             raise OSKeyringError("ambiguous_write") from None
         try:
-            verified = backend.get_password(_AUTO_UNLOCK_SERVICE_NAME, self._username)
+            verified = backend.get_password(_AUTO_UNLOCK_SERVICE_NAME, username)
         except Exception:
             _overwrite(generated)
             raise OSKeyringError("readback_failed") from None
@@ -304,6 +410,9 @@ class AutoUnlockPassphraseStore:
     def save(self, value: bytearray) -> None:
         """Replace the scoped entry after the caller proved the same secret unlocks the vault."""
 
+        self._save_at(self._username, value)
+
+    def _save_at(self, username: str, value: bytearray) -> None:
         if not self.available:
             raise OSKeyringError("unsupported")
         try:
@@ -313,11 +422,11 @@ class AutoUnlockPassphraseStore:
         encoded = base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
         try:
             backend = cast(AnyKeyringBackend, self._backend)
-            backend.set_password(_AUTO_UNLOCK_SERVICE_NAME, self._username, encoded)
+            backend.set_password(_AUTO_UNLOCK_SERVICE_NAME, username, encoded)
         except Exception:
             raise OSKeyringError("ambiguous_write") from None
         try:
-            verified = backend.get_password(_AUTO_UNLOCK_SERVICE_NAME, self._username)
+            verified = backend.get_password(_AUTO_UNLOCK_SERVICE_NAME, username)
         except Exception:
             raise OSKeyringError("readback_failed") from None
         if verified != encoded:
@@ -328,6 +437,8 @@ class AnyKeyringBackend(Protocol):
     def get_password(self, service: str, username: str) -> str | None: ...
 
     def set_password(self, service: str, username: str, password: str) -> None: ...
+
+    def delete_password(self, service: str, username: str) -> None: ...
 
 
 class OSVaultRootKeySource:

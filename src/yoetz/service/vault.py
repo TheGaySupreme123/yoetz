@@ -320,6 +320,7 @@ class VaultService:
         pristine_state_digest: str | None = None,
         publish_mode: Callable[[VaultMode, VaultRootEnvelope | None, str], None] | None = None,
         replace_mode: Callable[[VaultMode, VaultRootEnvelope, str, int], None] | None = None,
+        replace_passphrase: Callable[[VaultRootEnvelope], None] | None = None,
         replace_root: Callable[
             [VaultMode, VaultRootEnvelope, str, int, Path, Literal["rotate", "revoke"]],
             None,
@@ -353,6 +354,7 @@ class VaultService:
         self._pristine_state_digest = pristine_state_digest
         self._publish_mode = publish_mode
         self._replace_mode = replace_mode
+        self._replace_passphrase = replace_passphrase
         self._replace_root = replace_root
         self._snapshot_recovery_admission = snapshot_recovery_admission
         self._pending_recovery: (
@@ -674,6 +676,35 @@ class VaultService:
             self._vault_generation += 1
             self._state = VaultState.LOCKED
             self._reason = "vault_locked"
+            return self.status
+
+    async def rewrap_passphrase(self, rewrap_secret: SecretHandle) -> VaultStatus:
+        """Atomically replace only the ready vault's passphrase envelope around the same IVK."""
+
+        if rewrap_secret.purpose is not SecretPurpose.VAULT_REWRAP:
+            raise VaultError("secret_purpose_mismatch")
+        async with self._mutex:
+            store, _generation = self._ready_store()
+            if self._mode is not VaultMode.PASSPHRASE or self._root_envelope is None:
+                raise VaultError("initialization_forbidden")
+            replace_passphrase = self._replace_passphrase
+            if replace_passphrase is None:
+                raise VaultError("initialization_forbidden")
+            root = store.installation_recovery_root().consume(
+                SecretConsumer.VAULT_ROOT, lambda view: bytearray(view)
+            )
+            try:
+                envelope = rewrap_vault_root_envelope(
+                    self._root_handle(bytearray(root)),
+                    rewrap_secret,
+                    installation_id=self._installation_id,
+                )
+                replace_passphrase(envelope)
+                self._root_envelope = envelope
+            except (OSError, RuntimeError, SecretMemoryError, VaultPassphraseError) as exc:
+                raise VaultError("vault_tampered") from exc
+            finally:
+                _overwrite(root)
             return self.status
 
     async def close(self) -> None:
@@ -1401,6 +1432,7 @@ class VaultService:
             "privacy_policy_widen": SecretPurpose.PRIVACY_REAUTHENTICATION,
             "idle_relock_policy_change": SecretPurpose.SECURITY_REAUTHENTICATION,
             "installation_recovery_change": SecretPurpose.SECURITY_REAUTHENTICATION,
+            "vault_passphrase_rotate": SecretPurpose.SECURITY_REAUTHENTICATION,
         }.get(challenge.purpose)
         if (
             expected is None

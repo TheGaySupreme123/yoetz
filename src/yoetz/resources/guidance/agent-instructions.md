@@ -198,9 +198,9 @@ checks above are therefore load-bearing skill behavior. Target binding, expiry, 
 repository commitment, machine-policy ceilings, vault reauthentication, and no-echo result rules
 remain runtime-enforced. JSONL: no chat source.
 
-`vault_initialize` never permits agent-chat authorization or an agent-selected vault secret. The
-explicit manual `yoetz service initialize-passphrase` ceremony remains separate. Locked vaults
-still need the ordinary local-human unlock ceremony. No `--yolo`.
+`vault_initialize` and `vault_passphrase_rotate` use that same path; never handle or ask for a
+passphrase. Interrupted rotation: leave the staged entry and restart. Locked vaults keep the
+human unlock ceremony. No `--yolo`.
 
 # Recommended defaults remain user decisions
 

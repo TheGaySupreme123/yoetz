@@ -938,6 +938,7 @@ class UnlockCoordinator:
                 "privacy_policy_widen": SecretPurpose.PRIVACY_REAUTHENTICATION,
                 "idle_relock_policy_change": SecretPurpose.SECURITY_REAUTHENTICATION,
                 "installation_recovery_change": SecretPurpose.SECURITY_REAUTHENTICATION,
+                "vault_passphrase_rotate": SecretPurpose.SECURITY_REAUTHENTICATION,
             }
             if allowed.get(purpose) is not secret_purpose:
                 raise UnlockError("secret_purpose_mismatch")

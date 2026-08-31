@@ -19,6 +19,7 @@ __all__ = [
 
 type ConsentOperation = Literal[
     "vault_initialize",
+    "vault_passphrase_rotate",
     "provider_credential_set",
     "provider_credential_rotate",
     "repository_privacy_grant",
@@ -218,13 +219,21 @@ class ConsentReviewResultModel(_ClosedModel):
                         "operation": {
                             "enum": [
                                 "vault_initialize",
+                                "vault_passphrase_rotate",
                                 "provider_credential_set",
                                 "provider_credential_rotate",
                                 "repository_privacy_grant",
                                 "import_publication",
                             ]
                         },
-                        "risk_class": {"enum": ["privacy_widen", "secret_ingress", "review_only"]},
+                        "risk_class": {
+                            "enum": [
+                                "privacy_widen",
+                                "secret_ingress",
+                                "secret_reauth",
+                                "review_only",
+                            ]
+                        },
                         "outcome": {"const": "denied"},
                         "result": {
                             "type": "object",
@@ -237,6 +246,21 @@ class ConsentReviewResultModel(_ClosedModel):
                     "properties": {
                         "operation": {"const": "vault_initialize"},
                         "risk_class": {"const": "secret_ingress"},
+                        "outcome": {"const": "completed"},
+                        "result": {
+                            "type": "object",
+                            "properties": {
+                                "state": {"const": "ready"},
+                                "reason": {"const": "succeeded"},
+                            },
+                            "required": ["state", "reason"],
+                        },
+                    }
+                },
+                {
+                    "properties": {
+                        "operation": {"const": "vault_passphrase_rotate"},
+                        "risk_class": {"const": "secret_reauth"},
                         "outcome": {"const": "completed"},
                         "result": {
                             "type": "object",
@@ -323,7 +347,26 @@ class ConsentReviewResultModel(_ClosedModel):
                     "then": {
                         "properties": {
                             "risk_class": {"const": "secret_ingress"},
-                            "authority_channel": {"const": "trusted_console_presence"},
+                            "authority_channel": {
+                                "enum": [
+                                    "trusted_console_presence",
+                                    "agent_attested_chat_instruction",
+                                ]
+                            },
+                        }
+                    },
+                },
+                {
+                    "if": {"properties": {"operation": {"const": "vault_passphrase_rotate"}}},
+                    "then": {
+                        "properties": {
+                            "risk_class": {"const": "secret_reauth"},
+                            "authority_channel": {
+                                "enum": [
+                                    "trusted_console_presence",
+                                    "agent_attested_chat_instruction",
+                                ]
+                            },
                         }
                     },
                 },
@@ -396,6 +439,7 @@ class ConsentReviewResultModel(_ClosedModel):
     def _bind_result_to_operation_and_outcome(self) -> Self:
         if self.operation not in {
             "vault_initialize",
+            "vault_passphrase_rotate",
             "provider_credential_set",
             "provider_credential_rotate",
             "repository_privacy_grant",
@@ -405,10 +449,13 @@ class ConsentReviewResultModel(_ClosedModel):
         expected_risk = {
             "repository_privacy_grant": "privacy_widen",
             "import_publication": "review_only",
+            "vault_passphrase_rotate": "secret_reauth",
         }.get(self.operation, "secret_ingress")
         if self.risk_class != expected_risk:
             raise ValueError("review_risk_class_mismatch")
         if self.authority_channel == "agent_attested_chat_instruction" and self.operation not in {
+            "vault_initialize",
+            "vault_passphrase_rotate",
             "provider_credential_set",
             "provider_credential_rotate",
             "repository_privacy_grant",
@@ -424,7 +471,7 @@ class ConsentReviewResultModel(_ClosedModel):
             if type(self.result) is not ConsentDeniedResultModel:
                 raise ValueError("review_result_outcome_mismatch")
             return self
-        if self.operation == "vault_initialize":
+        if self.operation in {"vault_initialize", "vault_passphrase_rotate"}:
             if type(self.result) is not ConsentVaultInitializedResultModel:
                 raise ValueError("review_result_operation_mismatch")
             return self

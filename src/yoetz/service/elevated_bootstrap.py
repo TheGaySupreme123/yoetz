@@ -70,6 +70,7 @@ RiskClass = Literal[
 
 ElevatedOperation = Literal[
     "vault_initialize",
+    "vault_passphrase_rotate",
     "provider_credential_set",
     "provider_credential_rotate",
     "repository_privacy_grant",
@@ -139,14 +140,33 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
         danger_text=(
             "DANGER — vault initialize. Creates this installation's encrypted vault and stores a "
             "helper-generated auto-unlock secret in the scoped platform credential store. Review "
-            "requires independent action-bound OS user presence; a foreground console alone is "
-            "never authorization. Chat-user authorize cannot supply the vault root secret."
+            "may use independent action-bound OS user presence or an explicit current-chat "
+            "instruction relayed by an allowlisted first-party agent. The helper generates and "
+            "submits the secret locally; neither the agent nor chat may supply or receive it."
         ),
         requires_provider_binding=False,
         requires_grant_binding=False,
         requires_target_digest_arg=False,
         implemented=True,
-        agent_chat_authorize_allowed=False,
+        agent_chat_authorize_allowed=True,
+    ),
+    ConsentOperationSpec(
+        operation="vault_passphrase_rotate",
+        risk_class="secret_reauth",
+        summary="Rotate the passphrase vault with a helper-generated local secret.",
+        danger_text=(
+            "DANGER — vault passphrase rotate. Reauthenticates the ready vault and atomically "
+            "replaces its passphrase envelope. After an explicit current-chat instruction, the "
+            "trusted helper stages a random replacement in the scoped platform credential store "
+            "and submits both secrets locally. Neither the agent nor chat may supply or receive "
+            "either secret. A staged entry is retained across an ambiguous interruption so "
+            "service restart can reconcile it safely."
+        ),
+        requires_provider_binding=False,
+        requires_grant_binding=False,
+        requires_target_digest_arg=False,
+        implemented=True,
+        agent_chat_authorize_allowed=True,
     ),
     ConsentOperationSpec(
         operation="provider_credential_set",

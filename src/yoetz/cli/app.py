@@ -2400,6 +2400,15 @@ def service_initialize_passphrase(json_output: _JSON = False) -> None:
     )
 
 
+@service_app.command("rotate-passphrase")
+def service_rotate_passphrase(json_output: _JSON = False) -> None:
+    """Reauthenticate and replace the vault passphrase from the trusted terminal."""
+
+    _finish(
+        run_async(lambda: _trusted_call(_unlock_operation("rotate_vault_passphrase"), json_output))
+    )
+
+
 def _idle_relock_target(raw: str) -> int | str:
     if raw == "disabled":
         return raw

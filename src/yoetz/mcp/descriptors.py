@@ -24,6 +24,7 @@ from yoetz.protocol.schemas import (
 __all__ = [
     "ADVERTISED_SURFACE_BUDGET",
     "INITIALIZE_GUIDANCE_URIS",
+    "ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS",
     "ORDINARY_MCP_PUBLISH_EVENT_FAMILIES",
     "PRESENTATION_INPUT_SCHEMA_BUDGETS",
     "SERVER_INSTRUCTIONS_BUDGET",
@@ -73,6 +74,9 @@ _BOUNDARY_TERMS: Final = re.compile(
 
 # Mirrors application/publish_work ordinary cooperative_mcp|local_cli admission. Advertised
 # publish_work schemas project to this set; catalog admission schemas remain authoritative.
+# Presentation keeps ordinary families through schema 1.1.0. Additive ``evidence_recorded/1.2.0``
+# (``observation_captured``) is authored only by the observation coordinator, not MCP/CLI publish.
+ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS: Final[frozenset[str]] = frozenset({"1.0.0", "1.1.0"})
 ORDINARY_MCP_PUBLISH_EVENT_FAMILIES: Final[frozenset[str]] = frozenset(
     {
         "plan_published",
@@ -611,22 +615,11 @@ def _strip_schema_metadata(value: Mapping[str, JsonValue]) -> dict[str, JsonValu
     }
 
 
-def _event_family_from_draft_branch(branch: Mapping[str, JsonValue]) -> str | None:
+def _event_identity_from_payload_ref(branch: Mapping[str, JsonValue]) -> tuple[str, str] | None:
     properties = branch.get("properties")
     if not isinstance(properties, Mapping):
         return None
-    props = cast(Mapping[str, JsonValue], properties)
-    schema_node = props.get("schema")
-    if isinstance(schema_node, Mapping):
-        schema_map = cast(Mapping[str, JsonValue], schema_node)
-        nested_props = schema_map.get("properties")
-        if isinstance(nested_props, Mapping):
-            name_node = cast(Mapping[str, JsonValue], nested_props).get("name")
-            if isinstance(name_node, Mapping):
-                const_name = cast(Mapping[str, JsonValue], name_node).get("const")
-                if type(const_name) is str:
-                    return const_name
-    payload = props.get("payload")
+    payload = cast(Mapping[str, JsonValue], properties).get("payload")
     if not isinstance(payload, Mapping):
         return None
     ref = cast(Mapping[str, JsonValue], payload).get("$ref")
@@ -642,8 +635,39 @@ def _event_family_from_draft_branch(branch: Mapping[str, JsonValue]) -> str | No
         slug = stem[:delimiter]
         version = stem[delimiter + 1 :]
         if slug and SCHEMA_VERSION_PATTERN.fullmatch(version) is not None:
-            return slug.replace("-", "_")
+            return slug.replace("-", "_"), version
     return None
+
+
+def _event_identity_from_schema_consts(branch: Mapping[str, JsonValue]) -> tuple[str, str] | None:
+    properties = branch.get("properties")
+    if not isinstance(properties, Mapping):
+        return None
+    schema_node = cast(Mapping[str, JsonValue], properties).get("schema")
+    if not isinstance(schema_node, Mapping):
+        return None
+    nested_props = cast(Mapping[str, JsonValue], schema_node).get("properties")
+    if not isinstance(nested_props, Mapping):
+        return None
+    typed_props = cast(Mapping[str, JsonValue], nested_props)
+    name_node = typed_props.get("name")
+    version_node = typed_props.get("version")
+    if not isinstance(name_node, Mapping) or not isinstance(version_node, Mapping):
+        return None
+    const_name = cast(Mapping[str, JsonValue], name_node).get("const")
+    const_version = cast(Mapping[str, JsonValue], version_node).get("const")
+    if type(const_name) is str and type(const_version) is str:
+        return const_name, const_version
+    return None
+
+
+def _event_identity_from_draft_branch(branch: Mapping[str, JsonValue]) -> tuple[str, str] | None:
+    return _event_identity_from_schema_consts(branch) or _event_identity_from_payload_ref(branch)
+
+
+def _event_family_from_draft_branch(branch: Mapping[str, JsonValue]) -> str | None:
+    identity = _event_identity_from_draft_branch(branch)
+    return None if identity is None else identity[0]
 
 
 def _project_event_draft_for_ordinary_mcp(
@@ -662,8 +686,14 @@ def _project_event_draft_for_ordinary_mcp(
         ref = branch_map.get("$ref")
         if type(ref) is str and ref.partition("#")[0] == _OPAQUE_EVENT_DRAFT_SCHEMA_ID:
             continue
-        family = _event_family_from_draft_branch(branch_map)
-        if family in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES:
+        identity = _event_identity_from_draft_branch(branch_map)
+        if identity is None:
+            continue
+        family, version = identity
+        if (
+            family in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
+            and version in ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS
+        ):
             kept.append(_mutable_json(branch_map))
             kept_families.add(family)
     if kept_families != set(ORDINARY_MCP_PUBLISH_EVENT_FAMILIES):
