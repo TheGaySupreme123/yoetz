@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass, replace
 from typing import Final, Literal, Protocol, cast
 
-from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
+from yoetz.application.unit_of_work import (
+    PreparedMutation,
+    PreSubmissionCancelled,
+    run_prepared_append,
+)
 from yoetz.domain.events import (
     CheckRecordedPayload,
     EventDraft,
@@ -64,7 +69,13 @@ from yoetz.ports.ledger import (
     OperationRecord,
     OperationState,
 )
-from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
+from yoetz.ports.objects import (
+    ObjectKind,
+    ObjectMetadata,
+    ObjectRef,
+    ObjectSource,
+    StagedObject,
+)
 from yoetz.ports.runtime import BundleRuntimePort, RouteAccess, RouteCommand, TaskRuntime
 from yoetz.protocol.canonical import (
     JsonValue,
@@ -305,17 +316,33 @@ async def _read_object(
     return data
 
 
-async def _persist_object(
+async def _stage_object(
     runtime: TaskRuntime,
     source: ObjectSource,
     metadata: ObjectMetadata,
     *,
     request_id: str | None = None,
-) -> ObjectRef:
-    """Stage and finalize one receipt object before the ledger append."""
-
+) -> StagedObject:
     try:
-        staged = await runtime.objects.stage(source, metadata)
+        return await runtime.objects.stage(source, metadata)
+    except OSError as exc:
+        raise _classified_storage_error(
+            PublicErrorCode.STORAGE_UNSAFE,
+            "Receipt object storage is unavailable.",
+            exc,
+            retryable=True,
+            request_id=request_id,
+            operation="receipt_object_persist",
+        ) from exc
+
+
+async def _finalize_object(
+    runtime: TaskRuntime,
+    staged: StagedObject,
+    *,
+    request_id: str | None = None,
+) -> ObjectRef:
+    try:
         return await runtime.objects.finalize(staged)
     except OSError as exc:
         raise _classified_storage_error(
@@ -326,6 +353,76 @@ async def _persist_object(
             request_id=request_id,
             operation="receipt_object_persist",
         ) from exc
+
+
+async def _abandon_preappend_objects(
+    runtime: TaskRuntime,
+    staged_objects: tuple[StagedObject, ...],
+    *,
+    request_id: str,
+) -> None:
+    """Best-effort cleanup for exact stages whose refs were never submitted to the ledger."""
+
+    async def abandon_all() -> None:
+        for staged in reversed(staged_objects):
+            try:
+                await runtime.objects.abandon(staged)
+            except Exception as exc:
+                # Cleanup must not replace the classified persist failure the caller needs to
+                # retry. This exact object remains eligible for delayed generation-fenced GC.
+                record_classified_exception_without_raising(
+                    exc,
+                    component="application.receipt",
+                    operation="receipt_object_abandon_failed",
+                    request_id=request_id,
+                )
+
+    pending = abandon_all()
+    try:
+        cleanup = asyncio.create_task(pending)
+    except RuntimeError as exc:
+        # A closing loop cannot host the cleanup task at all. Closing the un-started coroutine
+        # keeps it from becoming an unawaited warning, and the caller still gets its classified
+        # persist failure; the exact objects stay eligible for generation-fenced GC.
+        pending.close()
+        record_classified_exception_without_raising(
+            exc,
+            component="application.receipt",
+            operation="receipt_object_abandon_failed",
+            request_id=request_id,
+        )
+        return
+    current = asyncio.current_task()
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError as exc:
+            # ``shield`` reports two different facts with one exception type: a cancellation
+            # requested against this task, and the cleanup task itself ending cancelled. Only the
+            # first defers to the caller. The second is a cleanup failure, recorded below, and
+            # must never become the error the caller sees in place of its classified persist
+            # failure.
+            if cancellation is None and current is not None and current.cancelling():
+                cancellation = exc
+        if cleanup.done():
+            break
+    try:
+        # Retrieve the definite cleanup outcome so a failed task never becomes an unobserved
+        # exception, but never let it replace the classified public error the caller needs to
+        # retry. ``abandon_all`` already absorbs ``Exception``; this guards the BaseException
+        # escapes (a cancellation raised inside an adapter, interpreter shutdown) the same way
+        # ``unit_of_work._await_definite`` guards its own commit task.
+        cleanup.result()
+    except BaseException as exc:
+        record_classified_exception_without_raising(
+            exc,
+            component="application.receipt",
+            operation="receipt_object_abandon_failed",
+            request_id=request_id,
+        )
+    if cancellation is not None:
+        raise cancellation
 
 
 async def _preflight(
@@ -712,81 +809,99 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
         document_json = cast(JsonValue, receipt_document_to_json(document))
         document_bytes = canonical_encode(document_json)
         digest = canonical_digest(document_json)
-        receipt_ref = await _persist_object(
-            runtime,
-            ObjectSource(data=document_bytes, declared_size=len(document_bytes)),
-            ObjectMetadata(ObjectKind.RECEIPT, _RECEIPT_MEDIA_TYPE, runtime.task_id, now),
-            request_id=request.request_id,
-        )
-        payload = ReceiptRecordedPayload(
-            document.receipt_id,
-            frontier,
-            digest,
-            object_id(receipt_ref.object_id),
-            document.conclusion,
-            request.redaction_profile,
-        )
-        draft = EventDraft(
-            event_id(app.ids.new(IdKind.EVENT)),
-            EventSchema("receipt_recorded", "1.0.0"),
-            timestamp_from_datetime(now),
-            (),
-            payload,
-            (object_id(receipt_ref.object_id),),
-            (),
-        )
-        payload_bytes = canonical_encode(encode_payload(payload))
-        payload_metadata = ObjectMetadata(
-            ObjectKind.EVENT_PAYLOAD,
-            media_type_for("receipt_recorded"),
-            runtime.task_id,
-            now,
-        )
-        payload_ref = await _persist_object(
-            runtime,
-            ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)),
-            payload_metadata,
-            request_id=request.request_id,
-        )
-        coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
-        command = AppendCommand(
-            runtime.task_id,
-            runtime.session_id,
-            cast(str, runtime.writer_id),
-            request.request_id,
-            OperationKind.RECEIPT,
-            logical_digest,
-            frontier.sequence,
-            (
-                AppendEntry(
-                    draft,
-                    Actor(
-                        actor_id("yoetz.engine"),
-                        ActorType.YOETZ_ENGINE,
-                        coverage.authorship_assurance,
+        staged_objects: tuple[StagedObject, ...] = ()
+        try:
+            receipt_staged = await _stage_object(
+                runtime,
+                ObjectSource(data=document_bytes, declared_size=len(document_bytes)),
+                ObjectMetadata(ObjectKind.RECEIPT, _RECEIPT_MEDIA_TYPE, runtime.task_id, now),
+                request_id=request.request_id,
+            )
+            staged_objects = (receipt_staged,)
+            receipt_ref = await _finalize_object(
+                runtime, receipt_staged, request_id=request.request_id
+            )
+            payload = ReceiptRecordedPayload(
+                document.receipt_id,
+                frontier,
+                digest,
+                object_id(receipt_ref.object_id),
+                document.conclusion,
+                request.redaction_profile,
+            )
+            draft = EventDraft(
+                event_id(app.ids.new(IdKind.EVENT)),
+                EventSchema("receipt_recorded", "1.0.0"),
+                timestamp_from_datetime(now),
+                (),
+                payload,
+                (object_id(receipt_ref.object_id),),
+                (),
+            )
+            payload_bytes = canonical_encode(encode_payload(payload))
+            payload_metadata = ObjectMetadata(
+                ObjectKind.EVENT_PAYLOAD,
+                media_type_for("receipt_recorded"),
+                runtime.task_id,
+                now,
+            )
+            payload_staged = await _stage_object(
+                runtime,
+                ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)),
+                payload_metadata,
+                request_id=request.request_id,
+            )
+            staged_objects = (receipt_staged, payload_staged)
+            payload_ref = await _finalize_object(
+                runtime, payload_staged, request_id=request.request_id
+            )
+            coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
+            command = AppendCommand(
+                runtime.task_id,
+                runtime.session_id,
+                cast(str, runtime.writer_id),
+                request.request_id,
+                OperationKind.RECEIPT,
+                logical_digest,
+                frontier.sequence,
+                (
+                    AppendEntry(
+                        draft,
+                        Actor(
+                            actor_id("yoetz.engine"),
+                            ActorType.YOETZ_ENGINE,
+                            coverage.authorship_assurance,
+                        ),
+                        payload_ref,
+                        payload_ref.commitment,
+                        payload_metadata.media_type,
+                        payload_ref.plaintext_size,
+                        PublicationChannel.ENGINE_DERIVED,
+                        coverage,
+                        "projected",
                     ),
-                    payload_ref,
-                    payload_ref.commitment,
-                    payload_metadata.media_type,
-                    payload_ref.plaintext_size,
-                    PublicationChannel.ENGINE_DERIVED,
-                    coverage,
-                    "projected",
                 ),
-            ),
-            receipt_ref,
-        )
-        result = await run_prepared_append(
-            runtime.ledger,
-            PreparedMutation(
+                receipt_ref,
+            )
+            prepared = PreparedMutation(
                 cast(str, runtime.writer_id),
                 request.request_id,
                 logical_digest,
                 frontier.sequence,
                 (payload_ref, receipt_ref),
                 command,
-            ),
-        )
+            )
+        except BaseException:
+            await _abandon_preappend_objects(runtime, staged_objects, request_id=request.request_id)
+            raise
+        try:
+            result = await run_prepared_append(runtime.ledger, prepared)
+        except PreSubmissionCancelled:
+            # The commit boundary refused the mutation before the ledger coroutine was ever
+            # started, so no durable write can reference either object. Every other failure or
+            # cancellation from here on leaves an ambiguous commit outcome and must not abandon.
+            await _abandon_preappend_objects(runtime, staged_objects, request_id=request.request_id)
+            raise
         return _internal_result(request, document, receipt_ref, digest, result.result_frontier)
     except ProtocolValueError as exc:
         raise _error(PublicErrorCode.INVALID_REQUEST, "The receipt request is invalid.") from exc

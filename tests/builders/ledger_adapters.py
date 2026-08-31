@@ -92,6 +92,10 @@ class MemoryObjects:
         self._refs[ref.object_id] = ref
         return ref
 
+    async def abandon(self, staged: StagedObject) -> None:
+        self._data.pop(staged.object_id, None)
+        self._refs.pop(staged.object_id, None)
+
     async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef:
         ref = self._refs[object_id]
         if ref.envelope_digest != envelope_digest:
