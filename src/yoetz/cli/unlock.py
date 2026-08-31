@@ -724,6 +724,7 @@ def _read_secret(
     purpose: ConfidentialSecretPurpose,
 ) -> bytearray:
     maximum = 8_192 if purpose is ConfidentialSecretPurpose.PROVIDER_CREDENTIAL else 1_024
+    is_passphrase = purpose is not ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
     label = (
         "Provider credential: "
         if purpose is ConfidentialSecretPurpose.PROVIDER_CREDENTIAL
@@ -733,27 +734,50 @@ def _read_secret(
         if purpose is ConfidentialSecretPurpose.VAULT_REWRAP
         else "Passphrase: "
     )
-    first = terminal.read_secret(label, maximum)
-    try:
-        _validate_secret(first, purpose)
-        if not _needs_confirmation(kind, target, purpose):
-            return first
-        confirmation = terminal.read_secret(
-            "Confirm recovery passphrase: "
-            if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
-            else "Confirm passphrase: ",
-            maximum,
-        )
+    if is_passphrase:
+        label = f"{label[:-2]} (16-1024 UTF-8 bytes; no control characters): "
+    while True:
+        first = terminal.read_secret(label, maximum)
+        accepted = False
         try:
-            _validate_secret(confirmation, purpose)
-            if not hmac.compare_digest(first, confirmation):
-                raise HumanCeremonyCliError("confirmation_mismatch")
+            try:
+                _validate_secret(first, purpose)
+            except HumanCeremonyCliError:
+                if not is_passphrase:
+                    raise
+                terminal.write(
+                    "Passphrase must be 16-1024 UTF-8 bytes with no control characters. "
+                    "Try again.\n"
+                )
+                continue
+            if not _needs_confirmation(kind, target, purpose):
+                accepted = True
+                return first
+            confirmation = terminal.read_secret(
+                "Confirm recovery passphrase: "
+                if purpose is ConfidentialSecretPurpose.INSTALLATION_RECOVERY
+                else "Confirm passphrase: ",
+                maximum,
+            )
+            try:
+                try:
+                    _validate_secret(confirmation, purpose)
+                except HumanCeremonyCliError:
+                    terminal.write(
+                        "Passphrase must be 16-1024 UTF-8 bytes with no control characters. "
+                        "Try again.\n"
+                    )
+                    continue
+                if not hmac.compare_digest(first, confirmation):
+                    terminal.write("Passphrases did not match. Try again.\n")
+                    continue
+                accepted = True
+                return first
+            finally:
+                overwrite_secret_buffer(confirmation)
         finally:
-            overwrite_secret_buffer(confirmation)
-        return first
-    except BaseException:
-        overwrite_secret_buffer(first)
-        raise
+            if not accepted:
+                overwrite_secret_buffer(first)
 
 
 async def _send_secret(

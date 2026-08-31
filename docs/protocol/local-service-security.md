@@ -62,10 +62,13 @@ with its own bounded keyring reason. **Neither branch silently falls back to the
 
 A local human may instead explicitly run `service initialize-passphrase`. The helper confirms the
 new passphrase twice locally but transmits exactly one one-shot `vault_initialize` secret to the
-service, which accepts it only after re-proving that no installation identity, catalog, mode,
-ciphertext, sentinel, or ambiguous staging state already exists. A committed passphrase-backed vault
-never probes or falls back to the keyring at startup; foreign or stale keyring entries are ignored,
-not deleted. Later unlock of an existing passphrase vault uses the distinct `vault_unlock` purpose.
+service. The trusted prompt states the 16–1024 UTF-8 byte, no-control-character contract and
+re-prompts after invalid input or a confirmation mismatch, overwriting every rejected buffer before
+the next attempt. The service accepts the secret only after re-proving that no installation
+identity, catalog, mode, ciphertext, sentinel, or ambiguous staging state already exists. A
+committed passphrase-backed vault never probes or falls back to the keyring at startup; foreign or
+stale keyring entries are ignored, not deleted. Later unlock of an existing passphrase vault uses
+the distinct `vault_unlock` purpose.
 **Initialization is never available as a reset or recovery path for an existing vault** — an
 existing-vault user experiencing a missing keyring entry, a wrong passphrase, or a tamper failure
 is never told to run initialization; that failure routes to
