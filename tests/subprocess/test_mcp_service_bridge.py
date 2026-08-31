@@ -532,7 +532,10 @@ async def test_locked_error_is_structured_and_resources_never_connect(
     assert result.structuredContent["error"]["code"] == "VAULT_LOCKED"
     assert "unlock" not in {tool.name for tool in await bridge.list_tools()}
     assert locked.closed is True
-    assert runtime._slot.client is None  # pyright: ignore[reportPrivateUsage]
+    # The failing client is discarded; the bounded initialization probe (issue #512) then
+    # reconnects, finds no structural hello status on this peer, and leaves its live client in
+    # the slot for the next dispatch instead of a dead binding.
+    assert runtime._slot.client is unlocked  # pyright: ignore[reportPrivateUsage]
 
     after_unlock = await bridge.dispatch_start(_requests()["start"], runtime)
     assert after_unlock.isError is True

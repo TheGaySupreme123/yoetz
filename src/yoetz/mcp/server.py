@@ -57,8 +57,9 @@ from yoetz.observability.logging import (
     record_public_error_without_raising,
     record_unexpected_exception_without_raising,
 )
-from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
+from yoetz.ports.control import ControlClientKind, ControlError, ServiceState, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.consent import CONSENT_PENDING_TTL_SECONDS
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.ids import IdKind, new_id, safe_request_id_from
 from yoetz.protocol.models import (
@@ -157,6 +158,15 @@ _RESPONSE_PROJECTION_FAILED_MESSAGE: Final = (
     "Retry with the same request_id to load the stored result."
 )
 _RESPONSE_PROJECTION_FAILED_DETAILS: Final = {"reason_code": "response_projection_failed"}
+# Issue #512: when the vault has never been initialized, the natural start-first flow must hand
+# the agent a typed initialization-required continuation instead of an ordinary terminal dead
+# end. Every value below is a repository literal mirrored by the closed token sets in
+# ``yoetz.protocol.errors``; the prepared pending from `yoetz consent prepare` then carries the
+# exact danger text, danger digest, expiry, and decision commands the user's decision binds to.
+_VAULT_INITIALIZATION_CONTINUATION: Final = "vault_initialization_required"
+_VAULT_INITIALIZE_PREPARE_COMMAND: Final = "yoetz consent prepare vault_initialize"
+_CONSENT_REVIEW_COMMAND: Final = "yoetz consent review"
+_CONSENT_AUTHORIZE_COMMAND: Final = "yoetz consent authorize"
 # A read never appended, so there is no stored result and no operation record to replay against.
 # Telling the caller to reuse the request_id would send it after a recovery that cannot exist.
 _READ_PROJECTION_FAILED_MESSAGE: Final = (
@@ -560,12 +570,77 @@ def _control_public_error_result(
     )
 
 
+async def _vault_initialization_continuation(
+    runtime: BridgeRuntime, request_id: str | None
+) -> dict[str, object] | None:
+    """Return the typed initialization-required continuation, or None when it does not apply.
+
+    A non-retryable ``vault_locked`` covers both a hard lock (existing unlock/recovery paths own
+    it) and a never-initialized vault (issue #512: the start-first flow dead-ended). The failing
+    client was already discarded (`_DISCARD_CLIENT_REASONS`), so the reconnect below performs a
+    fresh handshake whose hello-result carries the current structural service status — the one
+    surface an ordinary bridge peer is allowed. Any failure here degrades to the plain hard-lock
+    error rather than asserting an initialization state this bridge could not read.
+    """
+
+    try:
+        client = await ensure_service_client(runtime, request_id=request_id)
+        status = client.hello_service_status
+        applies = (
+            status is not None
+            and status.state is ServiceState.LOCKED
+            and status.vault_mode == "uninitialized"
+        )
+    except Exception:
+        return None
+    if not applies:
+        return None
+    details: dict[str, object] = {
+        "continuation": _VAULT_INITIALIZATION_CONTINUATION,
+        "pending_ttl_seconds": CONSENT_PENDING_TTL_SECONDS,
+        "prepare_command": _VAULT_INITIALIZE_PREPARE_COMMAND,
+        "review_command": _CONSENT_REVIEW_COMMAND,
+    }
+    # Cursor is never an agent-chat attestation client, and the bridge knows that binding
+    # positively. The generic profile serves both the allowlisted first-party client and hosts
+    # that are not; the message states the allowlist condition and the host runbooks own the
+    # split, exactly as they do for the consent catalog's own authorize_command.
+    if runtime.host_profile != "cursor":
+        details["authorize_command"] = _CONSENT_AUTHORIZE_COMMAND
+    if request_id is not None:
+        details["replay_request_id"] = request_id
+    return details
+
+
+def _vault_initialization_required_message(include_authorize: bool) -> str:
+    authorize_clause = (
+        "If the user gave an exact approval in the current chat and this host is an allowlisted "
+        "first-party attestation client, relay that exact pending decision with "
+        "`yoetz consent authorize` and the warning acknowledged; otherwise direct"
+        if include_authorize
+        else "Direct"
+    )
+    return (
+        "The local service vault is uninitialized: first-run initialization must complete before "
+        "any Yoetz task can start. This is a bounded initialization-required continuation "
+        "(safe_details.continuation), not an ordinary terminal error. Run "
+        "`yoetz consent prepare vault_initialize`, show the returned danger text to the user, "
+        "and wait for their exact decision; if a pending consent action already exists, read it "
+        "with `yoetz consent status` instead of preparing another. Yoetz generates and stores "
+        "the initialization secret locally; never request, receive, or transmit a secret or "
+        f"recovery material. {authorize_clause} the user to run `yoetz consent review` on a "
+        "local terminal. After initialization reports ready, replay this exact request_id and "
+        "body once to start the task. On denial or expiry, continue without Yoetz."
+    )
+
+
 def _control_error_result(
     error: ControlError,
     request_id: str | None,
     operation: str,
     *,
     host_profile: Literal["generic", "cursor"] = "generic",
+    vault_initialization_details: Mapping[str, object] | None = None,
 ) -> types.CallToolResult:
     # Prefer the service-minted diagnostic id when present so the agent-facing public error
     # resolves the same durable sink record the daemon already wrote. Never mint a second id for
@@ -575,6 +650,20 @@ def _control_error_result(
         # failure (heals on a later attempt) from a hard lock or missing setup (needs a
         # trusted ceremony). Asserting the terminal cause for a transient one told agents
         # to abandon evidence and receipts that a single retry would have recorded (#276).
+        if not error.retryable and vault_initialization_details is not None:
+            return _control_public_error_result(
+                error,
+                request_id,
+                operation,
+                code=PublicErrorCode.VAULT_LOCKED,
+                message=_vault_initialization_required_message(
+                    "authorize_command" in vault_initialization_details
+                ),
+                retryable=False,
+                host_profile=host_profile,
+                safe_details=vault_initialization_details,
+                diagnostic_reason="vault_initialization_required",
+            )
         if error.retryable:
             message = (
                 "The local service vault is soft-locked or a transient unlock attempt just "
@@ -1233,11 +1322,17 @@ async def _dispatch[RequestT: BaseModel, ResultT: BaseModel](
                 host_profile=runtime.host_profile,
             )
             return await _latch_availability(runtime, request_id, exc, failure)
+        vault_initialization_details: dict[str, object] | None = None
+        if exc.reason == "vault_locked" and not exc.retryable:
+            vault_initialization_details = await _vault_initialization_continuation(
+                runtime, request_id
+            )
         return _control_error_result(
             exc,
             request_id,
             operation,
             host_profile=runtime.host_profile,
+            vault_initialization_details=vault_initialization_details,
         )
     except Exception as exc:
         correlation_id = record_unexpected_exception_without_raising(

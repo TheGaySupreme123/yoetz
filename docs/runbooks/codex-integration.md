@@ -476,7 +476,7 @@ reviewer egress.
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |
 | Trigger absent or failed | Use the manual re-grounding procedure; never edit hook configuration through this integration. |
 | `observe status` shows no envelopes for a session | Read `hook_diagnostics.reasons`: `workspace_unresolvable` means the hook's `--workspace` locator could not be canonicalized; `workspace_unconsented` means the session's Git root carries no active consent (a session started in a subdirectory canonicalizes to the same root as the consent, so grant consent at the repository root); `paused` means consent is paused. A successful ingest records no diagnostic, so read `recent_count` together with the envelopes: no new envelopes and a zero `recent_count` means the hooks never reached the ingress or the runtime gate is disabled, not that a binding drop occurred. |
-| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`; read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (the session bound consent without a canonical locator, so no paired request was legal), `auto_attach_request_invalid` (an authoring defect in the request — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path. |
+| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`; read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (the session bound consent without a canonical locator, so no paired request was legal), `auto_attach_request_invalid` (an authoring defect in the request — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
 | `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
 
 ## 11. Security, privacy, and prohibited actions
@@ -486,6 +486,17 @@ For `vault_initialize` and `vault_passphrase_rotate`, it relays only the prepare
 operation, danger digest, target digest, decision, and warning acknowledgement. Yoetz generates,
 loads, stages, and submits vault secrets inside the local helper; Codex must never request or
 receive them. An ambiguous rotation preserves its staged entry for service-restart reconciliation.
+
+First-run start continuation (issue #512): on a never-initialized install, the agent's first MCP
+`start` returns non-retryable `VAULT_LOCKED` carrying
+`safe_details.continuation: vault_initialization_required` with exact-literal `prepare_command`,
+`review_command`, `authorize_command`, the pending TTL, and `replay_request_id`. The Codex flow
+is: run `yoetz consent prepare vault_initialize`, show the returned danger text and digests in
+chat, wait for the user's explicit current-chat approve or deny, relay exactly that decision via
+`yoetz consent authorize` with `--warning-acknowledged` (agent attestation is not independent
+proof), then replay the exact original `start` request ID and body once. Denial, expiry, and
+every ceremony failure remain their distinct bounded outcomes; a hard-locked initialized vault
+never carries this continuation and keeps the unlock/recovery paths.
 
 Never paste modified skill content, repository content, paths, Codex configuration, a transcript, a
 prompt, a key, an environment variable, or a raw exception into public support. Share only versions,

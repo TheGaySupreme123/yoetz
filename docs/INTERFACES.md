@@ -88,7 +88,13 @@ Allowlisted `safe_details` keys include structural recovery fields such as `reas
 `task_id`/`session_id`/`writer_id` selectors, and the MCP bridge's host-binding availability
 facts (`availability` = `terminal_unavailable`, boolean `availability_inherited`, validated
 `availability_request_id`, and the closed `host_profile`/`route_profile` tokens; see the
-availability latch under the local-control section). `SESSION_NOT_FOUND` with
+availability latch under the local-control section). The initialization-required continuation
+(issue #512) adds `continuation` (only `vault_initialization_required`), the exact-literal
+command tokens `prepare_command` (`yoetz consent prepare vault_initialize`), `review_command`
+(`yoetz consent review`), and `authorize_command` (`yoetz consent authorize`), integer
+`pending_ttl_seconds`, and validated `replay_request_id`; every command value is a closed
+repository literal, so no caller- or service-derived string can steer an agent through these
+keys. `SESSION_NOT_FOUND` with
 `reason_code: session_superseded` carries the current binding for a retired session. The separate
 `workspace_task_exists` conflict deliberately carries no task selector or count: possession of a
 workspace reference alone is not authority to discover or attach another task. For MCP
@@ -1916,6 +1922,23 @@ confidential unlock ceremony without a TTY prompt when the entry is present.
 rendered as setup required; and `state=ready,vault_mode=os_keyring` for an existing vault whose
 local workflows are admitted but external-provider capability is absent. Neither combination
 reveals credential or policy state.
+
+A never-initialized vault is not a dead end for the start-first agent flow (issue #512). When a
+workflow call fails with non-retryable `vault_locked`, the MCP bridge performs one bounded
+fresh-handshake probe — the hello-result already carries the structural `ServiceStatus`, the one
+surface an ordinary bridge peer is allowed — and, only when that snapshot proves
+`state=locked,vault_mode=uninitialized`, attaches the typed `vault_initialization_required`
+continuation to the public `VAULT_LOCKED` error (`safe_details` keys under the public-error
+section). The continuation is a bounded handoff, not a retry license: the caller follows the
+carried prepare command into the ordinary ADR-015 consent ceremony (the prepared pending carries
+the exact danger text, danger digest, target digest, expiry, and decision commands the user's
+decision binds to), and after the ceremony reports a terminal result replays the exact original
+`request_id` and body once — idempotent by construction, because the failed call reserved
+nothing. Denial, expiry, unavailable user presence, unsupported keyring, an existing credential,
+ambiguous initialization, and service replacement keep their distinct bounded outcomes from the
+consent and staged-credential contracts. A probe failure, any other vault state, and every
+initialized-vault lock keep the existing unlock/recovery answer unchanged; the Cursor host
+profile omits `authorize_command`, since that binding is never an agent-chat attestation client.
 
 `AutoUnlockPassphraseStore` is a trusted-service/setup adapter, not an ordinary control port. Its
 credential-store service name is `yoetz.auto-unlock.v1`; its account identity is

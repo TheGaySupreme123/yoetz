@@ -602,7 +602,9 @@ async def test_per_request_failures_never_latch_the_binding(
     again = _error(await bridge.dispatch_start(_start(_DELEGATES[0]), runtime))
     assert again["code"] == "VAULT_LOCKED"
     assert again["correlation_id"] != locked["correlation_id"]
-    assert harness.on_demand == ["connect", "connect"]
+    # Each locked dispatch performs its on-demand connect plus one bounded initialization-probe
+    # reconnect (issue #512); neither attempt latches the binding.
+    assert harness.on_demand == ["connect", "connect", "connect", "connect"]
 
 
 @pytest.mark.anyio

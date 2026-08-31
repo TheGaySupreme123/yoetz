@@ -282,7 +282,9 @@ a failed attempt records its typed cause (`auto_attach_workspace_unbound`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
 `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
 same diagnostics file, and the session keeps an observation-only binding until a retry or an
-explicit `start` maps it.
+explicit `start` maps it. For `vault_locked` on a never-initialized install, that explicit
+`start` returns the typed `vault_initialization_required` continuation (see Troubleshooting)
+rather than a dead end.
 
 The host-neutral `observe status` boundary also keeps storage layers distinct: unsafe state/lock
 paths report `storage_unsafe`, bounded open/permission/read-only/missing-parent/lock-acquisition
@@ -359,6 +361,16 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 Cursor is not an allowlisted `yoetz consent authorize` attestation client in v0.1. It may show the
 agent-safe pending status and direct the user to a supported Codex attestation or local trusted
 command, but it must not emulate `vault_initialize` or `vault_passphrase_rotate` authorization.
+
+First-run start continuation (issue #512): on a never-initialized install, the agent's first MCP
+`start` returns non-retryable `VAULT_LOCKED` carrying
+`safe_details.continuation: vault_initialization_required`. The `--host cursor` bridge profile
+omits `authorize_command` entirely, so the continuation is trusted-local by construction: the
+agent runs `yoetz consent prepare vault_initialize`, shows the returned danger text, directs the
+user to run `yoetz consent review` on a local terminal, waits for the ceremony's terminal result,
+then replays the exact original `start` request ID and body once. On denial or expiry the agent
+states the boundary and continues without Yoetz. This supersedes the bare `VAULT_LOCKED` dead end
+the 2026-08-29 measurement above recorded for a locked cell.
 
 | Symptom | Interpretation |
 |---|---|
