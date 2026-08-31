@@ -57,6 +57,8 @@ from yoetz.service.confidential_protocol import (
     SelectAuthorizationSourceAction,
     ServerPhaseEnvelope,
     ServerResultEnvelope,
+    VaultPassphraseRotatePreview,
+    VaultStateResult,
     VaultUnlockPreview,
 )
 from yoetz.service.human_control import HumanControlError, HumanControlService
@@ -266,6 +268,8 @@ class _Effects:
     async def prepare(self, request: ClientOpenEnvelope) -> tuple[HumanPreview, str, int | None]:
         if request.ceremony_kind is HumanCeremonyKind.VAULT_UNLOCK:
             return VaultUnlockPreview(), TARGET_DIGEST, None
+        if request.ceremony_kind is HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE:
+            return VaultPassphraseRotatePreview(), TARGET_DIGEST, None
         if request.ceremony_kind is HumanCeremonyKind.KEYRING_RETRY:
             return KeyringRetryPreview("existing_load"), TARGET_DIGEST, None
         if request.ceremony_kind is HumanCeremonyKind.PROVIDER_CREDENTIAL_SET:
@@ -386,6 +390,19 @@ class _Effects:
         proof.consume("provider_credential_set", TARGET_DIGEST, 7, 3, None, now_monotonic)
         self.proofs.append(proof)
         return ProviderCredentialResult(target.action, 1, "stored")
+
+    async def rotate_vault_passphrase(
+        self,
+        target: EmptyVaultTarget,
+        secret: SecretHandle,
+        proof: HumanAuthorizationProof,
+        now_monotonic: float,
+    ) -> VaultStateResult:
+        assert target.expected_mode == "passphrase"
+        secret.consume(SecretConsumer.VAULT_REWRAPPER, bytes)
+        proof.consume("vault_passphrase_rotate", TARGET_DIGEST, 7, 3, None, now_monotonic)
+        self.proofs.append(proof)
+        return VaultStateResult("ready", "succeeded")
 
     async def decide_privacy(
         self,
@@ -722,6 +739,56 @@ async def test_installation_rotation_and_revoke_use_distinct_new_passphrase_fram
             ConfidentialSecretPurpose.VAULT_REWRAP,
         ]
     )
+
+
+@pytest.mark.anyio
+async def test_vault_passphrase_rotation_reauthenticates_then_rewraps(tmp_path: Path) -> None:
+    memory = LocalSecretMemory()
+    reauth = memory.capture(
+        SecretPurpose.SECURITY_REAUTHENTICATION,
+        bytearray(b"current correct horse battery"),
+    )
+    replacement = memory.capture(
+        SecretPurpose.VAULT_REWRAP,
+        bytearray(b"replacement correct horse battery"),
+    )
+    service, _, _, _, effects = _service(
+        tmp_path, mode="passphrase", ready=True, handles=[reauth, replacement]
+    )
+    opened = await service.open_ceremony(
+        ClientOpenEnvelope(
+            "6" * 64,
+            HumanCeremonyKind.VAULT_PASSPHRASE_ROTATE,
+            EmptyVaultTarget(expected_mode="passphrase"),
+        )
+    )
+    assert type(opened.preview) is VaultPassphraseRotatePreview
+    assert type(opened.phase) is AuthorizationRequiredPhase
+    first = await service.submit_action(
+        ClientActionEnvelope(
+            opened.ceremony_id,
+            2,
+            SelectAuthorizationSourceAction("secret_reauthentication"),
+        )
+    )
+    assert type(first) is ServerPhaseEnvelope
+    assert cast(SecretRequiredPhase, first.phase).binding.purpose is (
+        ConfidentialSecretPurpose.SECURITY_REAUTHENTICATION
+    )
+    second = await service.secret_completed(opened.ceremony_id)
+    assert type(second) is ServerPhaseEnvelope
+    assert cast(SecretRequiredPhase, second.phase).binding.purpose is (
+        ConfidentialSecretPurpose.VAULT_REWRAP
+    )
+    assert (
+        cast(SecretRequiredPhase, first.phase).binding.secret_challenge
+        != cast(SecretRequiredPhase, second.phase).binding.secret_challenge
+    )
+    result = await service.secret_completed(opened.ceremony_id)
+    assert type(result) is ServerResultEnvelope
+    assert result.result == VaultStateResult("ready", "succeeded")
+    assert len(effects.proofs) == 1
+    memory.close()
 
 
 @pytest.mark.anyio

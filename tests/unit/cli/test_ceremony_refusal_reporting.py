@@ -116,6 +116,28 @@ def test_genuine_input_errors_still_report_invalid_request(
     assert code == exit_code_for(PublicErrorCode.INVALID_REQUEST)
 
 
+def test_rotation_stage_failures_are_not_input_invalid() -> None:
+    from yoetz.adapters.keys.os_keyring import OSKeyringError
+    from yoetz.cli.unlock import _raise_for_rotation_stage_error
+
+    _raise_for_rotation_stage_error(OSKeyringError("missing"))
+    _raise_for_rotation_stage_error(OSKeyringError("unsupported"))
+    with pytest.raises(HumanCeremonyCliError) as captured:
+        _raise_for_rotation_stage_error(OSKeyringError("locked"))
+    assert captured.value.reason == "result_invalid"
+
+
+def test_result_invalid_is_internal_not_malformed_input(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = _trusted_exception_failure(HumanCeremonyCliError("result_invalid"))
+
+    assert "internal_error: the confidential ceremony could not be completed" in (
+        capsys.readouterr().err
+    )
+    assert code == exit_code_for(PublicErrorCode.INTERNAL_ERROR)
+
+
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [

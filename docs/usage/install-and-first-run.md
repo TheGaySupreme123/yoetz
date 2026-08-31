@@ -53,7 +53,10 @@ Setup is a linear path inside the interface, each finished step collapsing into 
    bound to the exact preview and policy digests that were displayed: if either has moved, the
    apply refuses as stale rather than proceeding.
 5. **Installation activity**, with each step reported only once its postcondition was checked.
-6. **Secure storage** — the system keyring, or a Yoetz passphrase.
+6. **Secure storage** — the system keyring, or a Yoetz passphrase. A passphrase is entered on the
+   trusted terminal: input is masked with `*`, must be 16–1024 UTF-8 bytes with no control
+   characters, and the helper re-prompts after invalid or mismatched input. Later changes use
+   `yoetz service rotate-passphrase` (or **Change the passphrase** under `/service`).
 7. **Review mode** — finish in complete local-only mode, or configure semantic review.
 8. **Semantic setup, when selected** — provider/model, hidden API-key entry, then one exact
    recommended privacy policy. **Assisted review** is recommended only for an exact provider route
@@ -154,7 +157,10 @@ yoetz provider credential set      # provision the API credential through the te
 
 `yoetz service run` runs in the foreground on purpose when invoked directly — you choose the
 supervisor (launchd, systemd, a terminal). Interactive setup may use the bounded on-demand launcher.
-Related: `yoetz service status`, `lock`, `unlock`, `idle-relock`, `stop`.
+Related: `yoetz service status`, `lock`, `unlock`, `initialize-passphrase`,
+`rotate-passphrase`, `idle-relock`, `stop`. Passphrase setup and rotation mask input with `*` and
+re-prompt invalid or mismatched values; they never accept a secret through a flag, pipe, or the
+full-screen window.
 
 ## What a fresh installation does not do
 

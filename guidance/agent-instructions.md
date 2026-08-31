@@ -194,9 +194,9 @@ remain runtime-enforced.
 
 For Codex JSONL import, follow its skill; never put source/excerpts in chat.
 
-`vault_initialize` never permits agent-chat authorization or an agent-selected vault secret. The
-explicit manual `yoetz service initialize-passphrase` ceremony remains separate. Locked vaults
-still need the ordinary local-human unlock ceremony. No `--yolo`.
+`vault_initialize` and `vault_passphrase_rotate` use that same path; never handle or ask for a
+passphrase. Interrupted rotation: leave the staged entry and restart. Locked vaults keep the
+human unlock ceremony. No `--yolo`.
 
 # Recommended defaults remain user decisions
 

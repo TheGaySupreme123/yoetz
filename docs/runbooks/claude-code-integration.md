@@ -290,6 +290,10 @@ tree; interrupted stage/rollback material surfaces in status as `recovery_requir
 
 ## Proof checklist
 
+Claude Code is not an allowlisted `yoetz consent authorize` attestation client in v0.1. It may show
+the agent-safe pending status and direct the user to a supported Codex attestation or local trusted
+command, but it must not emulate `vault_initialize` or `vault_passphrase_rotate` authorization.
+
 Record source/render/marketplace/cache/executable digests, exact Claude version/OS/architecture,
 scope, settings state, component inventory, enabled state, loaded root and session boundary, MCP
 owner/source/runtime, scoped model call, hook consent/evidence, semantic/provider attempt and privacy
