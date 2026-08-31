@@ -1,8 +1,8 @@
 """Honesty conformance: adversarial fixtures never let Yoetz overclaim capability or coverage.
 
-Grounded entirely in the reviewed ``fixtures/adversarial/ADV-*.case.json`` corpus and the exhaustive
-mapping frozen in ``fixtures/README.md``: every registered ``FindingKind`` is owned by exactly one
-of the seven mapped adversarial cases, each mapped case carries a genuine trigger, an in-fixture
+Grounded entirely in the reviewed ``fixtures/adversarial/ADV-*.case.json`` corpus and its
+``owns_requirements`` declarations: every registered ``FindingKind`` is owned by exactly one of the
+seven mapped adversarial cases, each mapped case carries a genuine trigger, an in-fixture
 remediation/closest-non-trigger pairing that clears the finding, and every finding object inside the
 corpus round-trips through the real domain codec (``finding_from_json``) -- proving the fixtures
 describe structurally admissible, policy-bound findings rather than free-form prose.
@@ -10,16 +10,77 @@ describe structurally admissible, policy-bound findings rather than free-form pr
 
 from __future__ import annotations
 
-from typing import cast
+from dataclasses import replace
+from typing import Any, cast
 
 from fixture_loader import FixtureLoader, JsonValue
-from yoetz.domain.findings import Finding, FindingKind, finding_from_json
-from yoetz.domain.values import freeze_json
+from yoetz.domain.events import (
+    EVIDENCE_SCHEMA_VERSION,
+    AcceptedEvent,
+    EventPayload,
+    EventSchema,
+    EvidenceRecordedPayload,
+    LedgerChain,
+    LedgerRecord,
+    PayloadRef,
+    ProjectionLocator,
+    RedactionRecordedPayload,
+    RedactionState,
+    ResponseRecordedPayload,
+    ResultRecordedPayload,
+    UnknownEvent,
+    WriterChain,
+    decode_payload,
+    encode_payload,
+    media_type_for,
+)
+from yoetz.domain.findings import CandidateFinding, Finding, FindingKind, finding_from_json
+from yoetz.domain.values import (
+    Actor,
+    ActorType,
+    EventId,
+    EvidenceId,
+    Frontier,
+    ObjectId,
+    ResultId,
+    actor_id,
+    event_id,
+    freeze_json,
+    frontier_from_json,
+    object_id,
+    request_id,
+    session_id,
+    task_id,
+    timestamp_from_string,
+    writer_id,
+)
+from yoetz.kernel.deterministic_checks import (
+    CaseAvailabilityFacts,
+    UnavailableCapturedObject,
+    build_deterministic_case,
+    healthy_storage_availability,
+    run_deterministic_policies,
+)
+from yoetz.kernel.policies.research_evidence import RESEARCH_EVIDENCE_POLICY_PACK
+from yoetz.kernel.policies.work_integrity import WORK_INTEGRITY_POLICY_PACK
+from yoetz.kernel.reducers import replay
+from yoetz.protocol.canonical import canonical_digest, canonical_encode, entry_digest
+from yoetz.protocol.coverage import (
+    ArtifactObservation,
+    AuthorshipAssurance,
+    CheckType,
+    Coverage,
+    EvidenceImmutability,
+    LedgerFreshness,
+    PublicationChannel,
+    coverage_to_json,
+)
 
-# The exhaustive public policy-rule mapping frozen in fixtures/README.md. Every one of the 14 registered FindingKind values is owned by exactly
-# one of these seven adversarial cases; ADV-005/007/010/011 exist but are deliberately excluded from
-# this mapping (they exercise plan-revision honesty, crash/retry idempotency, and cross-channel
-# import comparison -- not a new FindingKind of their own).
+# The exhaustive public policy-rule mapping frozen by the fixture ``owns_requirements`` fields.
+# Every one of the 14 registered FindingKind values is owned by exactly one of these seven
+# adversarial cases; ADV-005/007/010/011 exist but are deliberately excluded from this mapping (they
+# exercise plan-revision honesty, crash/retry idempotency, cross-channel import comparison, and
+# completion-scope coverage -- not a new FindingKind of their own).
 _ADV_KIND_MAP: dict[str, frozenset[FindingKind]] = {
     "ADV-001-abandoned-obligation": frozenset(
         {
@@ -67,6 +128,53 @@ _ALL_ADV_IDS = (
     "ADV-011-empty-completion-scope",
 )
 
+# ADV-007 exercises write idempotency at the ledger adapter boundary, ADV-010 first maps a Codex
+# JSONL import before comparing channels, and ADV-011 owns coverage/readiness outcomes rather than a
+# FindingKind. Every other case is eligible for replay below; keeping the exclusion set explicit
+# prevents a newly added ADV case from silently escaping classification.
+_NON_DIRECT_ENGINE_ADV_IDS = frozenset(
+    {
+        "ADV-007-crash-retry-duplicate",
+        "ADV-010-import-detects-missing-publication",
+        "ADV-011-empty-completion-scope",
+    }
+)
+_DIRECT_ENGINE_ADV_IDS = tuple(
+    adv_id for adv_id in _ALL_ADV_IDS if adv_id not in _NON_DIRECT_ENGINE_ADV_IDS
+)
+
+# Skip only variants that have no ledger events to replay (provider-script / post-validation
+# vectors). Event-bearing empty-finding variants still run the engine so a silent owned-kind
+# regression cannot hide behind the skip list.
+_NON_DIRECT_ENGINE_VARIANTS = frozenset(
+    {
+        ("ADV-004-irrelevant-evidence", "semantic_basis_mutation"),
+        ("ADV-004-irrelevant-evidence", "semantic_invented_ref"),
+    }
+)
+_POLICY_PACKS = {
+    WORK_INTEGRITY_POLICY_PACK.policy_id: WORK_INTEGRITY_POLICY_PACK,
+    RESEARCH_EVIDENCE_POLICY_PACK.policy_id: RESEARCH_EVIDENCE_POLICY_PACK,
+}
+_UNAVAILABLE_OBJECT_STATUSES = frozenset(
+    {"unavailable", "unavailable_at_freeze", "key_unavailable"}
+)
+_PRESENT_OBJECT_STATUSES = frozenset({"available", "logically_redacted"})
+
+_FIXTURE_TASK_ID = task_id("tsk_f0000000-0000-4000-8000-000000000001")
+_FIXTURE_SESSION_ID = session_id("ses_f0000000-0000-4000-8000-000000000001")
+_FIXTURE_WRITER_ID = writer_id("wri_f0000000-0000-4000-8000-000000000001")
+_FIXTURE_COVERAGE = Coverage(
+    publication_channels=(PublicationChannel.COOPERATIVE_MCP,),
+    authorship_assurance=AuthorshipAssurance.SELF_ASSERTED,
+    artifact_observation=ArtifactObservation.CONTENT_CAPTURED,
+    evidence_immutability=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+    ledger_freshness=LedgerFreshness.CURRENT,
+    check_types=(CheckType.NONE,),
+    known_gaps=(),
+)
+_FINDING_EXPECTATION_KEYS = ("kind", "subject_refs", "summary", "detail", "priority")
+
 
 def _fixture_path(adv_id: str) -> str:
     return f"adversarial/{adv_id}.case.json"
@@ -84,6 +192,423 @@ def _variants(expected: dict[str, object]) -> dict[str, dict[str, object]]:
 
 def _relationships(expected: dict[str, object]) -> list[dict[str, str]]:
     return cast(list[dict[str, str]], expected["relationships"])
+
+
+def _input_variants(document: dict[str, object]) -> dict[str, dict[str, object]]:
+    raw_input = cast(dict[str, object], document["input"])
+    raw_variants = cast(dict[str, object], raw_input["variants"])
+    return {name: cast(dict[str, object], value) for name, value in raw_variants.items()}
+
+
+def _expected_rules_by_variant(
+    expected: dict[str, object],
+) -> dict[str, tuple[frozenset[str], frozenset[FindingKind]]]:
+    """Bind each counterexample/remediation component to the rules that fixture owns.
+
+    A full policy pack can report other independently owned concerns in the same synthetic event
+    prefix. The relationship graph is the fixture's explicit boundary: findings anywhere in one
+    connected component select the exact policy packs and finding kinds compared for every trigger
+    and non-trigger in that component.
+    """
+
+    variants = _variants(expected)
+    neighbors = {name: set[str]() for name in variants}
+    for relationship in _relationships(expected):
+        left = relationship["from"]
+        right = relationship["to"]
+        neighbors[left].add(right)
+        neighbors[right].add(left)
+
+    result: dict[str, tuple[frozenset[str], frozenset[FindingKind]]] = {}
+    remaining = set(variants)
+    while remaining:
+        seed = min(remaining)
+        component: set[str] = set()
+        pending = [seed]
+        while pending:
+            name = pending.pop()
+            if name in component:
+                continue
+            component.add(name)
+            pending.extend(neighbors[name] - component)
+        remaining -= component
+        policy_ids = frozenset(
+            cast(str, finding["policy_id"])
+            for name in component
+            for finding in cast(list[dict[str, object]], variants[name].get("findings", []))
+        )
+        kinds = frozenset(
+            FindingKind(cast(str, finding["kind"]))
+            for name in component
+            for finding in cast(list[dict[str, object]], variants[name].get("findings", []))
+        )
+        for name in component:
+            result[name] = (policy_ids, kinds)
+    return result
+
+
+def _event_schema(raw: dict[str, object]) -> EventSchema:
+    schema = raw.get("schema")
+    if schema is not None:
+        wire = cast(dict[str, object], schema)
+        return EventSchema(cast(str, wire["name"]), cast(str, wire["version"]))
+    return EventSchema(cast(str, raw["family"]), "1.0.0")
+
+
+def _evidence_digest_subject(kind: object) -> str:
+    return {
+        "artifact": "artifact_bytes",
+        "command_output": "command_stdout",
+        "research_source": "bounded_excerpt",
+        "test_result": "test_report",
+    }.get(cast(str, kind), "bounded_excerpt")
+
+
+def _event_payload(
+    raw: dict[str, object], schema: EventSchema
+) -> tuple[EventSchema, EventPayload | None]:
+    raw_payload = raw.get("payload")
+    if raw_payload is None:
+        return schema, None
+    wire = dict(cast(dict[str, JsonValue], raw_payload))
+
+    # The ADV corpus predates evidence-recorded/1.1.0 and uses its captured object plus digest as
+    # shorthand for a content-captured immutable snapshot. Upgrade that shorthand at the fixture
+    # adapter boundary so the current engine sees the same declared evidence semantics instead of
+    # treating these intentionally synthetic vectors as legacy digest-only production records.
+    if (
+        schema == EventSchema("evidence_recorded", "1.0.0")
+        and wire.get("content_digest") is not None
+    ):
+        schema = EventSchema("evidence_recorded", EVIDENCE_SCHEMA_VERSION)
+        captured = wire.get("captured_object_id") is not None
+        description = wire.get("description")
+        if captured:
+            byte_count = (
+                len(description.encode("utf-8")) if type(description) is str and description else 1
+            )
+        else:
+            byte_count = 0
+        wire["digest_binding"] = {
+            "subject": _evidence_digest_subject(wire.get("evidence_kind")),
+            "content_availability": "captured" if captured else "digest_only",
+            "byte_count": byte_count,
+            "provenance": "caller_asserted",
+        }
+    payload = decode_payload(schema, freeze_json(cast(JsonValue, wire)))
+    return schema, payload
+
+
+def _logical_key(schema: EventSchema, payload: EventPayload | None, event: str) -> str | None:
+    if payload is None:
+        return None
+    wire = cast(dict[str, JsonValue], encode_payload(cast(Any, payload)))
+    if schema.name in {"plan_published", "plan_revised"}:
+        return str(wire["plan_version"])
+    if schema.name == "obligation_published":
+        return cast(str, wire["obligation_id"])
+    if schema.name in {"assignment_recorded", "decision_recorded", "check_recorded"}:
+        return event
+    key_by_family = {
+        "action_recorded": "action_id",
+        "result_recorded": "result_id",
+        "evidence_recorded": "evidence_id",
+        "claim_recorded": "claim_id",
+        "finding_recorded": "finding_id",
+        "response_recorded": "finding_id",
+    }
+    field = key_by_family.get(schema.name)
+    return None if field is None else cast(str, wire[field])
+
+
+def _record_refs(
+    raw: dict[str, object], payload: EventPayload | None
+) -> tuple[tuple[ObjectId, ...], tuple[EvidenceId | ResultId, ...]]:
+    artifact_refs = tuple(
+        object_id(value) for value in cast(list[str], raw.get("artifact_refs", []))
+    )
+    evidence_refs = cast(
+        tuple[EvidenceId | ResultId, ...],
+        tuple(cast(list[str], raw.get("evidence_refs", []))),
+    )
+    if type(payload) is EvidenceRecordedPayload:
+        artifact_refs = () if payload.captured_object_id is None else (payload.captured_object_id,)
+    elif type(payload) is RedactionRecordedPayload:
+        artifact_refs = payload.target_object_ids
+    if type(payload) is ResultRecordedPayload:
+        evidence_refs = payload.evidence_refs
+    elif type(payload) is ResponseRecordedPayload:
+        evidence_refs = payload.evidence_refs
+    return artifact_refs, evidence_refs
+
+
+def _fixture_record(
+    raw: dict[str, object],
+    *,
+    sequence: int,
+    previous_entry_digest: str,
+) -> LedgerRecord:
+    event = event_id(raw["event_id"])
+    schema, payload = _event_payload(raw, _event_schema(raw))
+    occurred_at = timestamp_from_string(
+        cast(str, raw.get("occurred_at", "2026-01-01T00:00:00.000Z"))
+    )
+    actor = Actor(
+        actor_id(raw.get("actor_id", "agt.fixture.main")),
+        ActorType.LOGICAL_AGENT,
+        AuthorshipAssurance.SELF_ASSERTED,
+    )
+    writer = WriterChain(_FIXTURE_WRITER_ID, sequence, previous_entry_digest)
+    ledger = LedgerChain(sequence, previous_entry_digest, occurred_at)
+    operation = request_id(f"req_f0000000-0000-4000-8000-{sequence:012x}")
+    payload_object = object_id(f"obj_f0000000-0000-4000-8000-{sequence:012x}")
+    artifact_refs, evidence_refs = _record_refs(raw, payload)
+    payload_digest = (
+        cast(str, raw["canonical_payload_digest"])
+        if payload is None
+        else canonical_digest(encode_payload(cast(Any, payload)))
+    )
+    payload_size = (
+        0 if payload is None else len(canonical_encode(encode_payload(cast(Any, payload))))
+    )
+    payload_ref = PayloadRef(
+        object_id=payload_object,
+        media_type=media_type_for(schema.name),
+        plaintext_size=payload_size,
+        commitment=f"hmac-sha256:{sequence:064x}",
+    )
+    event_targets: tuple[EventId, ...] = ()
+    object_targets: tuple[ObjectId, ...] = ()
+    if type(payload) is RedactionRecordedPayload:
+        event_targets = payload.target_event_ids
+        object_targets = payload.target_object_ids
+    locator = ProjectionLocator(
+        schema=schema,
+        logical_key=_logical_key(schema, payload, event),
+        canonical_payload_digest=payload_digest,
+        redaction_target_event_ids=event_targets,
+        redaction_target_object_ids=object_targets,
+    )
+    causal_parents = tuple(
+        event_id(value) for value in cast(list[str], raw.get("causal_parents", []))
+    )
+    channel = PublicationChannel(cast(str, raw.get("publication_channel", "cooperative_mcp")))
+    coverage = replace(_FIXTURE_COVERAGE, publication_channels=(channel,))
+    preimage = {
+        "protocol": "yoetz.event",
+        "protocol_version": "0.1",
+        "event_id": event,
+        "task_id": _FIXTURE_TASK_ID,
+        "session_id": _FIXTURE_SESSION_ID,
+        "schema": {"name": schema.name, "version": schema.version},
+        "author": {
+            "actor_id": actor.actor_id,
+            "actor_type": actor.actor_type.value,
+            "assurance": actor.assurance.value,
+        },
+        "writer": {
+            "writer_id": writer.writer_id,
+            "sequence": str(writer.sequence),
+            "previous_entry_digest": writer.previous_entry_digest,
+        },
+        "ledger": {
+            "ingestion_sequence": str(ledger.ingestion_sequence),
+            "previous_entry_digest": ledger.previous_entry_digest,
+            "accepted_at": ledger.accepted_at.wire,
+        },
+        "operation_id": operation,
+        "occurred_at": occurred_at.wire,
+        "causal_parents": list(causal_parents),
+        "publication_channel": channel.value,
+        "coverage": coverage_to_json(coverage),
+        "payload_ref": {
+            "object_id": payload_ref.object_id,
+            "media_type": payload_ref.media_type,
+            "plaintext_size": payload_ref.plaintext_size,
+            "commitment": payload_ref.commitment,
+            "encryption_format": payload_ref.encryption_format,
+        },
+        "redaction": RedactionState.PRESENT.value,
+        "artifact_refs": list(artifact_refs),
+        "evidence_refs": list(evidence_refs),
+    }
+    record_digest = entry_digest(cast(Any, preimage))
+    if payload is None:
+        return UnknownEvent(
+            event_id=event,
+            task_id=_FIXTURE_TASK_ID,
+            session_id=_FIXTURE_SESSION_ID,
+            schema=schema,
+            author=actor,
+            writer=writer,
+            ledger=ledger,
+            operation_id=operation,
+            occurred_at=occurred_at,
+            causal_parents=causal_parents,
+            publication_channel=channel,
+            coverage=coverage,
+            payload_ref=payload_ref,
+            redaction=RedactionState.PRESENT,
+            artifact_refs=artifact_refs,
+            evidence_refs=evidence_refs,
+            entry_digest=record_digest,
+            payload=None,
+            projection_locator=locator,
+            canonical_payload_digest=payload_digest,
+        )
+    return AcceptedEvent(
+        event_id=event,
+        task_id=_FIXTURE_TASK_ID,
+        session_id=_FIXTURE_SESSION_ID,
+        schema=schema,
+        author=actor,
+        writer=writer,
+        ledger=ledger,
+        operation_id=operation,
+        occurred_at=occurred_at,
+        causal_parents=causal_parents,
+        publication_channel=channel,
+        coverage=coverage,
+        payload_ref=payload_ref,
+        redaction=RedactionState.PRESENT,
+        artifact_refs=artifact_refs,
+        evidence_refs=evidence_refs,
+        entry_digest=record_digest,
+        payload=payload,
+        projection_locator=locator,
+    )
+
+
+def _padding_event(sequence: int) -> dict[str, object]:
+    return {
+        "event_id": f"evt_f0000000-0000-4000-8000-{sequence:012x}",
+        "family": "session_opened",
+        "occurred_at": "2026-01-01T00:00:00.000Z",
+        "publication_channel": "cooperative_mcp",
+        "payload": {
+            "task_title": "Adversarial fixture prefix",
+            "client_kind": "cooperative_agent",
+            "client_version": "fixture-1",
+            "integration": "cooperative_mcp",
+            "profile": "test-fake",
+        },
+    }
+
+
+def _availability_facts(
+    input_variant: dict[str, object],
+    projection: object,
+    prefix: tuple[LedgerRecord, ...],
+) -> CaseAvailabilityFacts:
+    """Prefer healthy storage facts, then overlay fixture ``object_availability``.
+
+    ``available`` and ``logically_redacted`` objects are not storage outages: redaction is
+    already recorded on the ledger and must not appear in ``unavailable_captured_objects``.
+    Explicit unavailable statuses become ``UnavailableCapturedObject`` rows bound to the
+    evidence event that captured that object.
+    """
+
+    healthy = healthy_storage_availability(cast(Any, projection), prefix)
+    raw_availability = input_variant.get("object_availability")
+    if raw_availability is None:
+        return healthy
+    captured_sources: dict[ObjectId, EventId] = {}
+    for record in prefix:
+        payload = record.payload
+        if type(payload) is EvidenceRecordedPayload and payload.captured_object_id is not None:
+            captured_sources[payload.captured_object_id] = record.event_id
+    unavailable: list[UnavailableCapturedObject] = []
+    for raw_object, status in cast(dict[str, str], raw_availability).items():
+        assert status in _PRESENT_OBJECT_STATUSES | _UNAVAILABLE_OBJECT_STATUSES, (
+            raw_object,
+            status,
+        )
+        if status in _PRESENT_OBJECT_STATUSES:
+            continue
+        captured = object_id(raw_object)
+        unavailable.append(
+            UnavailableCapturedObject(captured_sources[captured], captured),
+        )
+    objects = tuple(
+        sorted(
+            unavailable,
+            key=lambda item: (
+                _ascii_availability_key(item.source_event_id),
+                _ascii_availability_key(item.object_id),
+            ),
+        )
+    )
+    return CaseAvailabilityFacts(healthy.unavailable_event_ids, objects)
+
+
+def _ascii_availability_key(value: str) -> bytes:
+    return value.encode("ascii")
+
+
+def _declared_frontier(input_variant: dict[str, object]) -> Frontier:
+    raw = input_variant.get("checked_frontier")
+    assert raw is not None
+    return frontier_from_json(freeze_json(cast(JsonValue, raw)))
+
+
+def _deterministic_findings(
+    input_variant: dict[str, object],
+    policy_ids: frozenset[str],
+) -> tuple[CandidateFinding, ...]:
+    raw_events = cast(list[dict[str, object]], input_variant["events"])
+    frontier = _declared_frontier(input_variant)
+    padding_count = frontier.sequence - len(raw_events)
+    assert padding_count >= 0
+    rows = [*(_padding_event(index) for index in range(1, padding_count + 1)), *raw_events]
+    records: list[LedgerRecord] = []
+    previous_digest = "genesis"
+    for sequence, row in enumerate(rows, start=1):
+        record = _fixture_record(
+            row,
+            sequence=sequence,
+            previous_entry_digest=previous_digest,
+        )
+        records.append(record)
+        previous_digest = record.entry_digest
+    prefix = tuple(records)
+    projection = replay(prefix)
+    case = build_deterministic_case(
+        projection,
+        prefix,
+        _availability_facts(input_variant, projection, prefix),
+    )
+    # The fixtures intentionally use readable synthetic digest sentinels instead of re-pinning a
+    # complete accepted-entry chain. Preserve the replayed state while running at that exact
+    # declared frontier identity.
+    projection = replace(case.projection, head_digest=frontier.head_digest)
+    case = replace(case, projection=projection, frontier=frontier)
+    assert policy_ids <= _POLICY_PACKS.keys()
+    return tuple(
+        assessment.candidate
+        for policy_id in sorted(policy_ids)
+        for policy in (_POLICY_PACKS[policy_id],)
+        for assessment in run_deterministic_policies(case, policy).assessments
+    )
+
+
+def _finding_expectation(value: CandidateFinding | dict[str, object]) -> dict[str, JsonValue]:
+    if isinstance(value, CandidateFinding):
+        return {
+            "kind": value.kind.value,
+            "subject_refs": list(value.subject_refs),
+            "summary": value.summary,
+            "detail": value.detail,
+            "priority": value.priority,
+        }
+    return {key: cast(JsonValue, value[key]) for key in _FINDING_EXPECTATION_KEYS}
+
+
+def _finding_set_bytes(
+    values: tuple[CandidateFinding, ...] | list[dict[str, object]],
+) -> tuple[bytes, ...]:
+    return tuple(
+        sorted(canonical_encode(cast(Any, _finding_expectation(value))) for value in values)
+    )
 
 
 def _finding_kinds(variant: dict[str, object]) -> frozenset[FindingKind]:
@@ -132,6 +657,64 @@ def _decode_findings(variant: dict[str, object]) -> tuple[Finding, ...]:
         wire = {key: value for key, value in raw.items() if key in _FINDING_WIRE_KEYS}
         findings.append(finding_from_json(freeze_json(cast(JsonValue, wire))))
     return tuple(findings)
+
+
+def test_adversarial_expected_findings_match_deterministic_engine(
+    fixture_loader: FixtureLoader,
+) -> None:
+    """Every owned rule relationship pins exact current-engine finding bytes."""
+
+    assert frozenset(_DIRECT_ENGINE_ADV_IDS) | _NON_DIRECT_ENGINE_ADV_IDS == frozenset(_ALL_ADV_IDS)
+    assert frozenset(_DIRECT_ENGINE_ADV_IDS) & _NON_DIRECT_ENGINE_ADV_IDS == frozenset()
+
+    expected_compared = sum(
+        1
+        for adv_id in _DIRECT_ENGINE_ADV_IDS
+        for name, input_variant in _input_variants(
+            cast(dict[str, object], fixture_loader.load_json(_fixture_path(adv_id)))
+        ).items()
+        if "events" in input_variant and (adv_id, name) not in _NON_DIRECT_ENGINE_VARIANTS
+    )
+    compared = 0
+    for adv_id in _DIRECT_ENGINE_ADV_IDS:
+        document = cast(dict[str, object], fixture_loader.load_json(_fixture_path(adv_id)))
+        input_variants = _input_variants(document)
+        expected = cast(dict[str, object], document["expected"])
+        expected_variants = _variants(expected)
+        rules_by_variant = _expected_rules_by_variant(expected)
+        assert input_variants.keys() == expected_variants.keys(), adv_id
+
+        for name, input_variant in input_variants.items():
+            expected_variant = expected_variants[name]
+            policy_ids, owned_kinds = rules_by_variant[name]
+            has_events = "events" in input_variant
+            if (adv_id, name) in _NON_DIRECT_ENGINE_VARIANTS:
+                assert not has_events, (adv_id, name)
+                assert not policy_ids, (adv_id, name)
+                assert not cast(list[object], expected_variant.get("findings", [])), (adv_id, name)
+                continue
+            assert has_events, (adv_id, name)
+            if not policy_ids:
+                owned_kinds = _ADV_KIND_MAP[adv_id]
+                policy_ids = frozenset(_POLICY_PACKS)
+            assert policy_ids, (adv_id, name)
+            assert owned_kinds, (adv_id, name)
+            actual_findings = tuple(
+                finding
+                for finding in _deterministic_findings(
+                    input_variant,
+                    policy_ids,
+                )
+                if finding.kind in owned_kinds
+            )
+            expected_findings = cast(list[dict[str, object]], expected_variant.get("findings", []))
+            assert _finding_set_bytes(actual_findings) == _finding_set_bytes(expected_findings), (
+                adv_id,
+                name,
+            )
+            compared += 1
+
+    assert compared == expected_compared
 
 
 def test_adv_claim_fixtures_fail_closed(fixture_loader: FixtureLoader) -> None:
