@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+import json
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,11 +13,19 @@ from typing import cast
 import pytest
 
 from yoetz.application.receipt import (  # noqa: SLF001
-    _persist_object,  # pyright: ignore[reportPrivateUsage]
+    _abandon_preappend_objects,  # pyright: ignore[reportPrivateUsage]
+    _finalize_object,  # pyright: ignore[reportPrivateUsage]
     _read_object,  # pyright: ignore[reportPrivateUsage]
+    _stage_object,  # pyright: ignore[reportPrivateUsage]
 )
-from yoetz.observability.diagnostics import lookup_diagnostic_records
-from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
+from yoetz.observability.diagnostics import diagnostic_log_path, lookup_diagnostic_records
+from yoetz.ports.objects import (
+    ObjectKind,
+    ObjectMetadata,
+    ObjectRef,
+    ObjectSource,
+    StagedObject,
+)
 from yoetz.ports.runtime import TaskRuntime
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 
@@ -178,7 +188,7 @@ async def test_persist_object_maps_stage_oserror_to_retryable_storage_unsafe(
         raise AssertionError("finalize must not run after stage failure")
 
     with pytest.raises(PublicOperationError) as caught:
-        await _persist_object(
+        await _stage_object(
             _runtime_with_store(stage=stage, finalize=finalize),
             ObjectSource(data=b"{}", declared_size=2),
             _receipt_ref().metadata,
@@ -205,11 +215,21 @@ async def test_persist_object_maps_finalize_oserror_to_retryable_storage_unsafe(
     async def finalize(_staged: object) -> ObjectRef:
         raise OSError("object_destination_collision")
 
+    ref = _receipt_ref()
+    staged = StagedObject(
+        ref.object_id,
+        ref.plaintext_size,
+        ref.commitment,
+        ref.envelope_digest,
+        ref.encryption_format,
+        ref.key_slot,
+        ref.metadata,
+        object(),
+    )
     with pytest.raises(PublicOperationError) as caught:
-        await _persist_object(
+        await _finalize_object(
             _runtime_with_store(stage=stage, finalize=finalize),
-            ObjectSource(data=b"{}", declared_size=2),
-            _receipt_ref().metadata,
+            staged,
             request_id=_REQUEST_ID,
         )
     _assert_classified(
@@ -222,3 +242,121 @@ async def test_persist_object_maps_finalize_oserror_to_retryable_storage_unsafe(
         root=_diagnostic_dir,
     )
     assert "object_destination_collision" not in caught.value.message
+
+
+async def test_abandon_finishes_every_stage_before_repeated_cancellation_propagates() -> None:
+    first_ref = _receipt_ref()
+    first = StagedObject(
+        first_ref.object_id,
+        first_ref.plaintext_size,
+        first_ref.commitment,
+        first_ref.envelope_digest,
+        first_ref.encryption_format,
+        first_ref.key_slot,
+        first_ref.metadata,
+        object(),
+    )
+    second = StagedObject(
+        "obj_ffffffff-0000-4000-8000-000000000002",
+        first.plaintext_size,
+        first.commitment,
+        first.envelope_digest,
+        first.encryption_format,
+        first.key_slot,
+        first.metadata,
+        object(),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    abandoned: list[str] = []
+
+    async def abandon(staged: StagedObject) -> None:
+        abandoned.append(staged.object_id)
+        if len(abandoned) == 1:
+            started.set()
+            await release.wait()
+
+    runtime = cast(TaskRuntime, SimpleNamespace(objects=SimpleNamespace(abandon=abandon)))
+    cleanup = asyncio.create_task(
+        _abandon_preappend_objects(runtime, (first, second), request_id=_REQUEST_ID)
+    )
+    await started.wait()
+    cleanup.cancel()
+    cleanup.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup
+    assert abandoned == [second.object_id, first.object_id]
+
+
+def _staged(object_id: str) -> StagedObject:
+    ref = _receipt_ref()
+    return StagedObject(
+        object_id,
+        ref.plaintext_size,
+        ref.commitment,
+        ref.envelope_digest,
+        ref.encryption_format,
+        ref.key_slot,
+        ref.metadata,
+        object(),
+    )
+
+
+def _abandon_diagnostics(root: Path) -> tuple[Mapping[str, object], ...]:
+    path = diagnostic_log_path(root=root)
+    if not path.is_file():
+        return ()
+    records: list[Mapping[str, object]] = []
+    for raw in path.read_bytes().splitlines():
+        if not raw.strip():
+            continue
+        parsed: object = json.loads(raw.decode("ascii"))
+        assert type(parsed) is dict
+        source = cast(Mapping[str, object], parsed)
+        if source.get("operation") == "receipt_object_abandon_failed":
+            records.append(source)
+    return tuple(records)
+
+
+async def test_abandon_never_replaces_the_caller_error_with_a_base_exception(
+    _diagnostic_dir: Path,
+) -> None:
+    """A cleanup escape stays a diagnostic; the caller keeps its classified retryable error."""
+
+    staged = _staged("obj_ffffffff-0000-4000-8000-000000000003")
+
+    async def abandon(_staged: StagedObject) -> None:
+        raise asyncio.CancelledError
+
+    runtime = cast(TaskRuntime, SimpleNamespace(objects=SimpleNamespace(abandon=abandon)))
+    # No raise: the caller's ``raise`` after cleanup must be the one that reaches the client.
+    await _abandon_preappend_objects(runtime, (staged,), request_id=_REQUEST_ID)
+    assert len(_abandon_diagnostics(_diagnostic_dir)) == 1
+
+
+async def test_abandon_records_a_diagnostic_when_the_cleanup_task_cannot_start(
+    _diagnostic_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A closing loop refuses ``create_task`` outside the cleanup task entirely."""
+
+    staged = _staged("obj_ffffffff-0000-4000-8000-000000000004")
+    abandoned: list[str] = []
+
+    async def abandon(staged_object: StagedObject) -> None:
+        abandoned.append(staged_object.object_id)
+
+    def refuse_task(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("Event loop is closed")
+
+    runtime = cast(TaskRuntime, SimpleNamespace(objects=SimpleNamespace(abandon=abandon)))
+    monkeypatch.setattr(asyncio, "create_task", refuse_task)
+    # This path never suspends, so the patched factory is restored before the loop needs it again.
+    await _abandon_preappend_objects(runtime, (staged,), request_id=_REQUEST_ID)
+    monkeypatch.undo()
+
+    assert abandoned == []
+    records = _abandon_diagnostics(_diagnostic_dir)
+    assert len(records) == 1
+    assert records[0]["reason"] == "exception_runtime_error"

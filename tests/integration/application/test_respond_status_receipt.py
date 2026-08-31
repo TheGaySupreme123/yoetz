@@ -4,7 +4,8 @@ frozen frontier, all driven through the real ``Application`` facade and the memo
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import asyncio
+from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Literal, cast
 
@@ -81,7 +82,14 @@ from yoetz.mcp.summaries import summary_for_status
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import AppendCommand, AppendEntry, CheckCommitResult, OperationKind
-from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource
+from yoetz.ports.objects import (
+    ObjectKind,
+    ObjectMetadata,
+    ObjectRef,
+    ObjectRootSnapshot,
+    ObjectSource,
+    StagedObject,
+)
 from yoetz.ports.publish_response_catalog import PublishResponseCatalogPort
 from yoetz.ports.runtime import BundleProvisionCommand, BundleRuntimePort, RouteCommand, TaskRuntime
 from yoetz.ports.semantic import SamplingParams, SemanticJudgment
@@ -125,6 +133,68 @@ _POLICY_PACKS = ("research-evidence/0.1.0", "work-integrity/0.1.0")
 class _IdleImporter:
     async def status(self, session: str) -> ImportStatusSnapshot:
         return ImportStatusSnapshot(session_id(session), 0, 0, (), ())
+
+
+class _FailSecondPersistObjects(MemoryObjects):
+    """Fault wrapper that keeps the shared backing store visible to the ledger and retry."""
+
+    def __init__(
+        self,
+        delegate: MemoryObjects,
+        fault_at: Literal["stage", "finalize", "cancel_after_finalize"],
+    ) -> None:
+        self._delegate = delegate
+        self._fault_at = fault_at
+        self.stage_calls = 0
+        self.finalize_calls = 0
+        self.abandoned_ids: list[str] = []
+        self._failed = False
+
+    def refs_for_kind(self, kind: ObjectKind) -> tuple[ObjectRef, ...]:
+        return self._delegate.refs_for_kind(kind)
+
+    async def commitment_for(self, data: bytes, kind: ObjectKind) -> str:
+        return await self._delegate.commitment_for(data, kind)
+
+    async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> StagedObject:
+        self.stage_calls += 1
+        if self._fault_at == "stage" and self.stage_calls == 2 and not self._failed:
+            self._failed = True
+            raise OSError("simulated_second_stage_failure")
+        return await self._delegate.stage(source, metadata)
+
+    async def finalize(self, staged: StagedObject) -> ObjectRef:
+        self.finalize_calls += 1
+        if self._fault_at == "finalize" and self.finalize_calls == 2 and not self._failed:
+            self._failed = True
+            raise OSError("simulated_second_finalize_failure")
+        result = await self._delegate.finalize(staged)
+        if (
+            self._fault_at == "cancel_after_finalize"
+            and self.finalize_calls == 2
+            and not self._failed
+        ):
+            # Both exact objects are now finalized and nothing has been submitted. Requesting
+            # cancellation here reaches the commit boundary through the synchronous append/mutation
+            # construction, with no suspension point in between.
+            self._failed = True
+            current = asyncio.current_task()
+            assert current is not None
+            current.cancel()
+        return result
+
+    async def abandon(self, staged: StagedObject) -> None:
+        self.abandoned_ids.append(staged.object_id)
+        await self._delegate.abandon(staged)
+
+    async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef:
+        return await self._delegate.resolve_verified(object_id, envelope_digest)
+
+    def open_verified(self, ref: ObjectRef) -> AsyncIterator[bytes]:
+        return self._delegate.open_verified(ref)
+
+    async def sweep_orphans(self, root_snapshot: ObjectRootSnapshot, now: datetime) -> int:
+        return await self._delegate.sweep_orphans(root_snapshot, now)
 
 
 class _WorkflowRuntime(MemoryStartRuntime):
@@ -718,6 +788,98 @@ async def test_receipt_matches_check_and_response_state() -> None:
     assert replayed.receipt_digest == receipt.receipt_digest
     assert replayed.conclusion == receipt.conclusion
     assert replayed.result_frontier == receipt.result_frontier
+
+
+@pytest.mark.parametrize(
+    ("fault_at", "expected_abandoned"),
+    (("stage", 1), ("finalize", 2)),
+)
+async def test_second_object_failure_abandons_stages_then_same_request_retries(
+    fault_at: Literal["stage", "finalize"], expected_abandoned: int
+) -> None:
+    """Issue #339: a pre-append payload failure leaves no finalized receipt per retry."""
+
+    app, runtime, _ = _build_app(seed_offset=33)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=5100)
+    ledger, backing_objects = runtime.resources[started.task_id]
+    faulting_objects = _FailSecondPersistObjects(backing_objects, fault_at)
+    runtime.resources[started.task_id] = (ledger, faulting_objects)
+    receipt_refs_before = backing_objects.refs_for_kind(ObjectKind.RECEIPT)
+    payload_refs_before = backing_objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD)
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 5110)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    request = ReceiptRequest.model_validate(receipt_wire)
+
+    with pytest.raises(PublicOperationError) as caught:
+        await app.receipt(request)
+    assert caught.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert caught.value.retryable is True
+    assert len(faulting_objects.abandoned_ids) == expected_abandoned
+    assert len(set(faulting_objects.abandoned_ids)) == expected_abandoned
+    assert backing_objects.refs_for_kind(ObjectKind.RECEIPT) == receipt_refs_before
+    assert backing_objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD) == payload_refs_before
+    assert await ledger.lookup_operation(started.writer_id, request.request_id) is None
+
+    retried = await app.receipt(request)
+    assert len(backing_objects.refs_for_kind(ObjectKind.RECEIPT)) == len(receipt_refs_before) + 1
+    assert (
+        len(backing_objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD)) == len(payload_refs_before) + 1
+    )
+    replayed = await app.receipt(request)
+    assert replayed.receipt_id == retried.receipt_id
+    assert replayed.receipt_object_id == retried.receipt_object_id
+    assert replayed.result_frontier == retried.result_frontier
+
+
+async def test_cancellation_refused_at_the_commit_boundary_abandons_both_stages() -> None:
+    """Issue #339: pre-submission cancellation must not leave two finalized orphans."""
+
+    app, runtime, _ = _build_app(seed_offset=41)
+    started, checked, _obligation = await _bootstrap_finding(app, seed=5300)
+    ledger, backing_objects = runtime.resources[started.task_id]
+    faulting_objects = _FailSecondPersistObjects(backing_objects, "cancel_after_finalize")
+    runtime.resources[started.task_id] = (ledger, faulting_objects)
+    receipt_refs_before = backing_objects.refs_for_kind(ObjectKind.RECEIPT)
+    payload_refs_before = backing_objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD)
+    receipt_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 5310)),
+        "task_id": started.task_id,
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(checked.result_frontier),
+        "format": "json",
+        "include": "standard",
+        "redaction_profile": "full_local",
+    }
+    request = ReceiptRequest.model_validate(receipt_wire)
+
+    # The cancellation is requested from inside the receipt task, so the test task stays live.
+    receipt_task = asyncio.create_task(app.receipt(request))
+    with pytest.raises(asyncio.CancelledError):
+        await receipt_task
+
+    assert faulting_objects.finalize_calls == 2
+    assert len(faulting_objects.abandoned_ids) == 2
+    assert len(set(faulting_objects.abandoned_ids)) == 2
+    assert backing_objects.refs_for_kind(ObjectKind.RECEIPT) == receipt_refs_before
+    assert backing_objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD) == payload_refs_before
+    assert await ledger.lookup_operation(started.writer_id, request.request_id) is None
+
+    retried = await app.receipt(request)
+    assert len(backing_objects.refs_for_kind(ObjectKind.RECEIPT)) == len(receipt_refs_before) + 1
+    assert (
+        len(backing_objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD)) == len(payload_refs_before) + 1
+    )
+    replayed = await app.receipt(request)
+    assert replayed.receipt_object_id == retried.receipt_object_id
 
 
 async def test_reviewer_challenge_response_paths_use_existing_protocol() -> None:

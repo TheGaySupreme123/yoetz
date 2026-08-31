@@ -135,6 +135,7 @@ class _MemoryRecord:
     frame: bytes
     recorded_at: datetime
     finalized: ObjectRef | None = None
+    abandoned: bool = False
 
 
 class MemoryObjectStore:
@@ -207,6 +208,8 @@ class MemoryObjectStore:
     async def finalize(self, staged: StagedObject) -> ObjectRef:
         with self._lock:
             record = self._record_for(staged)
+            if record.abandoned:
+                raise ValueError("abandoned_staged_object")
             if record.finalized is not None:
                 return record.finalized
             if staged.object_id in self._durable:
@@ -215,6 +218,26 @@ class MemoryObjectStore:
             record.finalized = result
             self._durable[staged.object_id] = record
             return result
+
+    async def abandon(self, staged: StagedObject) -> None:
+        """Forget one caller-owned stage that has not been admitted to a durable root."""
+
+        with self._lock:
+            record = self._record_for(staged)
+            if record.abandoned:
+                return
+            durable = self._durable.get(staged.object_id)
+            if durable is not None and durable is not record:
+                raise ValueError("object_destination_collision")
+            self._durable.pop(staged.object_id, None)
+            self._allocated_ids.discard(staged.object_id)
+            # Parity with the file store, which unlinks both the temp and the final path: the
+            # staged bytes go too, not only the durable admission. The record itself stays so a
+            # repeat abandon is idempotent and a later finalize still fails closed, mirroring the
+            # file store's retained ``_StageState``; the orphan sweep never revisits it.
+            record.frame = b""
+            record.finalized = None
+            record.abandoned = True
 
     async def _open_verified_bytes(self, ref: ObjectRef) -> bytes:
         if type(ref) is not ObjectRef or ref.key_slot != self._keys.key_slot:
@@ -290,7 +313,8 @@ class MemoryObjectStore:
             staged_candidates = tuple(
                 key
                 for key, record in self._staging.items()
-                if record.finalized is None
+                if not record.abandoned
+                and record.finalized is None
                 and record.staged.object_id not in live_ids
                 and record.recorded_at <= cutoff
             )

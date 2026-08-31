@@ -35,6 +35,7 @@ __all__ = [
     "CatalogPhaseAdvance",
     "CatalogQuarantine",
     "CommitResolution",
+    "PreSubmissionCancelled",
     "PreparedMutation",
     "resolve_ambiguous_operation",
     "resolve_ambiguous_start",
@@ -208,10 +209,21 @@ class CatalogQuarantine:
             raise _invalid()
 
 
+class PreSubmissionCancelled(asyncio.CancelledError):
+    """Cancellation observed before any commit reached a port.
+
+    Every raise site is provably ahead of submission: the port coroutine has either not been
+    created or has been closed without being started, so no durable write can exist that could
+    later reference the caller's finalized objects. A caller that finalized caller-owned objects
+    for the refused mutation may therefore abandon them; a plain ``CancelledError`` carries no
+    such guarantee and must be treated as an ambiguous commit.
+    """
+
+
 def _raise_if_cancelling() -> None:
     current = asyncio.current_task()
     if current is not None and current.cancelling():
-        raise asyncio.CancelledError
+        raise PreSubmissionCancelled
 
 
 async def _await_definite[T](operation: Coroutine[Any, Any, T]) -> T:
