@@ -17,6 +17,8 @@ from yoetz.domain.events import (
     AssignmentRecordedPayload,
     CheckRecordedPayload,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
+    ClaimRevisionMismatch,
     DecisionRecordedPayload,
     EventDraft,
     EventPayload,
@@ -44,6 +46,7 @@ from yoetz.domain.events import (
     is_observation_authored,
     is_observation_authorship,
     media_type_for,
+    public_error_for_claim_revision_mismatch,
     public_error_for_no_obligations_reason_mismatch,
     public_error_for_obligation_resolution_mismatch,
 )
@@ -285,6 +288,7 @@ _LOCATABLE_PAYLOAD_FIELDS: Final = frozenset(
         "affected_obligation_ids",
         "disputes_refs",
         "evidence_refs",
+        "limitation_refs",
         "obligation_ids",
         "obligation_refs",
         "redaction_target_event_ids",
@@ -295,6 +299,7 @@ _LOCATABLE_PAYLOAD_FIELDS: Final = frozenset(
         "scope",
         "source_refs",
         "supporting_refs",
+        "supersedes_claim_refs",
         "target_event_ids",
         "target_object_ids",
     }
@@ -1030,6 +1035,8 @@ def _logical_key_for_payload(payload: EventPayload, draft_event_id: str) -> str 
         return payload.result_id
     if type(payload) is EvidenceRecordedPayload:
         return payload.evidence_id
+    if type(payload) is ClaimRecordedPayloadV1_1:
+        return payload.claim_id
     if type(payload) is ClaimRecordedPayload:
         return payload.claim_id
     if type(payload) is FindingRecordedPayload:
@@ -1297,6 +1304,14 @@ async def _preflight_dry_run_feasibility(
         raise public_error_for_no_obligations_reason_mismatch(
             exc, event_index=draft_index
         ) from None
+    except ClaimRevisionMismatch as exc:
+        draft_index = None
+        if exc.event_id is not None:
+            for index, item in enumerate(prepared.drafts):
+                if item.draft.event_id == exc.event_id:
+                    draft_index = index
+                    break
+        raise public_error_for_claim_revision_mismatch(exc, event_index=draft_index) from None
     except (
         ValueError,
         TypeError,

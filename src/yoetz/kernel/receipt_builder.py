@@ -10,6 +10,7 @@ from typing import Final, cast
 from yoetz.domain.events import (
     CheckRecordedPayload,
     ClaimKind,
+    ClaimRecordedPayloadV1_1,
     NoObligationsReason,
     ObligationChangeKind,
     ObligationStatus,
@@ -56,6 +57,7 @@ from yoetz.domain.values import (
     Timestamp,
     finding_id,
 )
+from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.deterministic_checks import CaseAvailabilityFacts, CaseGap
 from yoetz.kernel.plan_scope import CurrentPlanScope, current_plan_scope
 from yoetz.kernel.projections import ObligationProjectionRecord, ProjectionRecord, ProjectionState
@@ -347,7 +349,7 @@ def _select_obligations(
         if record is None or record.payload is None:
             continue
         claim_roots: set[ClaimId] = set()
-        for claim_id_value, claim_record in context.projection.claims.items():
+        for claim_id_value, claim_record in effective_claim_items(context.projection):
             if (
                 claim_record.payload is not None
                 and obligation_id_value in claim_record.payload.obligation_refs
@@ -376,7 +378,7 @@ def _select_claim_refs(
 ) -> tuple[ClaimId, ...]:
     refs: set[ClaimId] = {
         claim_id_value
-        for claim_id_value, record in context.projection.claims.items()
+        for claim_id_value, record in effective_claim_items(context.projection)
         if record.payload is not None and record.payload.claim_kind is ClaimKind.COMPLETION
     }
     for finding in findings:
@@ -430,6 +432,9 @@ def _select_evidence_refs(
                                     context.projection, cast(ResultId, resolution_ref)
                                 )
                             )
+        if type(record.payload) is ClaimRecordedPayloadV1_1:
+            for limitation_ref in record.payload.limitation_refs:
+                refs.update(_evidence_from_result(context.projection, limitation_ref))
     for obligation in obligations:
         record = context.projection.obligations.get(obligation.obligation_id)
         if record is None or record.payload is None:

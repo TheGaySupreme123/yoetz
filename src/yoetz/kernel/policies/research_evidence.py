@@ -21,6 +21,11 @@ from yoetz.domain.values import (
     SubjectStateRelation,
     subject_state_relation,
 )
+from yoetz.kernel.claims import (
+    claim_discloses_result,
+    effective_claim_items,
+    result_is_relevant_to_claim,
+)
 from yoetz.kernel.deterministic_checks import (
     DeterministicAssessment,
     DeterministicCase,
@@ -37,6 +42,7 @@ from yoetz.kernel.policies.response_support import (
     RESEARCH_REJECTION_PRESENT_FACT,
     response_support_admissible,
 )
+from yoetz.kernel.projections import ClaimProjectionRecord
 from yoetz.protocol.coverage import PublicationChannel
 
 __all__ = [
@@ -160,7 +166,7 @@ def _response_support_admissible(
 
 def _support_mismatch_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
     output: list[DeterministicAssessment] = []
-    for claim_id, record in case.projection.claims.items():
+    for claim_id, record in effective_claim_items(case.projection):
         claim = record.payload
         if claim is None:
             continue
@@ -192,7 +198,7 @@ def _support_mismatch_findings(case: DeterministicCase) -> list[DeterministicAss
 
 def _diff_mismatch_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
     output: list[DeterministicAssessment] = []
-    for claim_id, record in case.projection.claims.items():
+    for claim_id, record in effective_claim_items(case.projection):
         claim = record.payload
         if claim is None or claim.subject_state is None:
             continue
@@ -252,7 +258,12 @@ def _observation_outcome_unavailable(case: DeterministicCase, ref: FindingBasisR
     )
 
 
-def _limiting_refs(case: DeterministicCase) -> tuple[FindingBasisRef, ...]:
+def _limiting_refs(
+    case: DeterministicCase,
+    claim_record: ClaimProjectionRecord,
+) -> tuple[FindingBasisRef, ...]:
+    if claim_record.payload is None:
+        return ()
     limitations: set[FindingBasisRef] = set()
     for result_id, record in case.projection.results.items():
         if (
@@ -264,8 +275,14 @@ def _limiting_refs(case: DeterministicCase) -> tuple[FindingBasisRef, ...]:
                 ResultOutcome.UNKNOWN,
             }
             and not _observation_outcome_unavailable(case, result_id)
+            and result_is_relevant_to_claim(case.projection, claim_record, result_id)
         ):
             limitations.add(result_id)
+    # A material coverage gap on an obligation, result, or evidence record is a task-level
+    # honesty fact about the recorded account, not a claim-scoped result relevance question.
+    # ADR-025 bounds which *results* a claim must disclose; it does not bound this scan, and
+    # restricting it to refs the claim already links made uncited evidence with a material gap
+    # (for example a redacted object) stop producing MATERIAL_LIMITATION_OMITTED entirely.
     for ref, coverage in case.coverage_by_ref.items():
         if ref.startswith(("obl_", "res_", "evd_")) and _MATERIAL_GAPS & set(coverage.known_gaps):
             limitations.add(ref)
@@ -274,16 +291,20 @@ def _limiting_refs(case: DeterministicCase) -> tuple[FindingBasisRef, ...]:
 
 def _limitation_findings(case: DeterministicCase) -> list[DeterministicAssessment]:
     output: list[DeterministicAssessment] = []
-    limiting = _limiting_refs(case)
     rootless_material_gap = any(
         not gap.subject_refs and gap.code in _MATERIAL_GAPS for gap in case.gaps
     )
-    for claim_id, record in case.projection.claims.items():
+    for claim_id, record in effective_claim_items(case.projection):
         claim = record.payload
         if claim is None or claim.claim_kind is not ClaimKind.COMPLETION:
             continue
+        limiting = _limiting_refs(case, record)
         for limiting_ref in limiting:
-            if limiting_ref in claim.supporting_refs:
+            if limiting_ref.startswith("res_") and claim_discloses_result(
+                claim, ResultId(limiting_ref)
+            ):
+                continue
+            if not limiting_ref.startswith("res_") and limiting_ref in claim.supporting_refs:
                 continue
             fact_refs = _refs((claim_id, limiting_ref))
             output.append(

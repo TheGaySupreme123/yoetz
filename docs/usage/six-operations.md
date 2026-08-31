@@ -56,6 +56,14 @@ Read `status view=obligations` first and account for every exact `unattempted_it
 preview is not evidential and is not citable as a check, publication, or coverage source. Reuse the
 same `request_id` for the real publish after the preview succeeds.
 
+To correct a recorded claim, publish a fresh `claim_recorded/1.1.0` event. Put the prior effective
+claim ids in `supersedes_claim_refs`, keep supporting evidence and successful results in
+`supporting_refs`, and put every relevant partial or failed result in `limitation_refs`. That field
+also accepts a relevant result whose outcome is unknown, so an unknown outcome still has somewhere
+to be disclosed; naming it there does not call it a partial or a failure. Read
+`status view=candidate_findings`, `history`, and `results` first, then dry-run the exact replacement;
+the original claim remains immutable history.
+
 Yoetz does not watch your workspace. What is published is what exists.
 
 Authoring help for MCP: tool descriptions name `yoetz://guidance/publication-policy.md`; invalid

@@ -8,6 +8,7 @@ from builders.policy_cases import (
     BASE_COVERAGE,
     FRONTIER,
     act,
+    claim_record,
     clm,
     evd,
     evidence_record,
@@ -25,6 +26,7 @@ from yoetz.domain.events import (
     ActionRecordedPayload,
     ClaimKind,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
     EvidenceKind,
     EvidenceRecordedPayload,
     ObligationChange,
@@ -216,6 +218,82 @@ def test_failed_work_omitted_and_exact_disclosure_nontrigger() -> None:
     assert FindingKind.FAILED_WORK_OMITTED not in _kinds(near)
 
 
+def test_versioned_replacement_is_effective_and_keeps_partial_result_as_limitation() -> None:
+    old = ClaimRecordedPayload(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Overbroad completion",
+        supporting_refs=(),
+        obligation_refs=(obl(1),),
+    )
+    replacement = ClaimRecordedPayloadV1_1(
+        claim_id=clm(2),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Narrowed completion with partial result disclosed",
+        supporting_refs=(res(1),),
+        obligation_refs=(obl(1),),
+        limitation_refs=(res(2),),
+        supersedes_claim_refs=(clm(1),),
+    )
+    case = make_case(
+        actions={act(1): record(_action(1, 1), 1), act(2): record(_action(2, 1), 2)},
+        results={
+            res(1): record(_result(1, 1, ResultOutcome.SUCCESS), 3),
+            res(2): record(_result(2, 2, ResultOutcome.PARTIAL), 4),
+        },
+        claims={
+            clm(1): claim_record(old, 5, superseded_by_claim_id=clm(2)),
+            clm(2): record(replacement, 6),
+        },
+    )
+    kinds = _kinds(case)
+    assert FindingKind.FAILED_WORK_OMITTED not in kinds
+    assert FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE not in kinds
+
+
+def test_completion_does_not_inherit_future_or_disjoint_partial_results() -> None:
+    claim = ClaimRecordedPayloadV1_1(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Obligation two completed",
+        supporting_refs=(res(2),),
+        obligation_refs=(obl(2),),
+    )
+    case = make_case(
+        actions={act(1): record(_action(1, 1), 1), act(2): record(_action(2, 2), 2)},
+        results={
+            res(1): record(_result(1, 1, ResultOutcome.PARTIAL), 3),
+            res(2): record(_result(2, 2, ResultOutcome.SUCCESS), 4),
+            res(3): record(_result(3, 2, ResultOutcome.PARTIAL), 6),
+        },
+        claims={clm(1): record(claim, 5)},
+    )
+    assert FindingKind.FAILED_WORK_OMITTED not in _kinds(case)
+
+
+def test_failed_work_finding_names_exact_versioned_repair_refs() -> None:
+    claim = ClaimRecordedPayload(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Complete",
+        supporting_refs=(),
+        obligation_refs=(obl(1),),
+    )
+    case = make_case(
+        actions={act(1): record(_action(1, 1), 1)},
+        results={res(1): record(_result(1, 1, ResultOutcome.PARTIAL), 2)},
+        claims={clm(1): record(claim, 3)},
+    )
+    result = run_deterministic_policies(case, WORK_INTEGRITY_POLICY_PACK)
+    finding = next(
+        item
+        for item in result.assessments
+        if item.candidate.kind is FindingKind.FAILED_WORK_OMITTED
+    )
+    assert f"supersedes_claim_refs [{clm(1)}]" in finding.candidate.detail
+    assert f"limitation_refs [{res(1)}]" in finding.candidate.detail
+
+
 def test_claim_without_admissible_evidence_and_supported_nontrigger() -> None:
     unsupported = ClaimRecordedPayload(
         claim_id=clm(1),
@@ -312,6 +390,17 @@ def test_contradictory_claims_require_explicit_unresolved_edge() -> None:
         contradictions={key: edge},
     )
     assert FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED in _kinds(trigger)
+    result = run_deterministic_policies(trigger, WORK_INTEGRITY_POLICY_PACK)
+    finding = next(
+        item
+        for item in result.assessments
+        if item.candidate.kind is FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED
+    )
+    assert "claim_recorded/1.1.0 supersedes_claim_refs" in finding.candidate.detail
+    assert str(clm(1)) in finding.candidate.detail
+    assert str(clm(2)) in finding.candidate.detail
+    assert "disputes_refs" in finding.candidate.detail
+    assert "decision supersedes_event_id" in finding.candidate.detail
     near = make_case(claims={clm(1): record(left, 1), clm(2): record(right, 2)})
     assert FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED not in _kinds(near)
 

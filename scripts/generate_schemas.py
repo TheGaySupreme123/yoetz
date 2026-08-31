@@ -454,8 +454,46 @@ def _evidence_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
     return document
 
 
+def _claim_payload_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Derive v1.1 correction fields from the frozen v1.0 claim bytes."""
+
+    source = (
+        Path(__file__).resolve().parent.parent / "schemas/events/claim-recorded-1.0.0.schema.json"
+    )
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        properties = cast(dict[str, JsonValue], document["properties"])
+        required = cast(list[JsonValue], document["required"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "claim_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    properties["limitation_refs"] = {
+        "items": {
+            "pattern": "^res_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string",
+        },
+        "maxItems": 64,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    properties["supersedes_claim_refs"] = {
+        "items": {
+            "pattern": "^clm_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "type": "string",
+        },
+        "maxItems": 16,
+        "type": "array",
+        "uniqueItems": True,
+    }
+    required.extend(("limitation_refs", "supersedes_claim_refs"))
+    required.sort(key=lambda value: cast(str, value).encode("ascii"))
+    return document
+
+
 def _event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Add exact post-v1.0 evidence pairs to the reviewed draft structural union."""
+    """Derive v1.1 from the frozen v1.0 draft and add post-v1.0 claim and evidence pairs."""
 
     source = Path(__file__).resolve().parent.parent / "schemas/events/event-draft-1.0.0.schema.json"
     try:
@@ -468,18 +506,38 @@ def _event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         ) from exc
 
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = "Yoetz event draft 1.1.0"
+    opaque_branch = next(
+        (
+            item
+            for item in branches
+            if isinstance(item, dict)
+            and item.get("$ref")
+            == SCHEMA_NAMESPACE + "events/opaque-unknown-event-draft-1.0.0.schema.json"
+        ),
+        None,
+    )
+    if opaque_branch is None:
+        raise SchemaGenerationError(
+            "event_draft_schema_template_invalid", entries=(entry.relative_path,)
+        )
+    opaque_branch["$ref"] = SCHEMA_NAMESPACE + "events/opaque-unknown-event-draft-1.1.0.schema.json"
     branches[:] = [
         item
         for item in branches
         if not (
             isinstance(item, dict)
             and any(
-                f"evidence-recorded-{version}.schema.json" in json.dumps(item)
-                for version in ("1.1.0", "1.2.0")
+                marker in json.dumps(item)
+                for marker in (
+                    "claim-recorded-1.1.0.schema.json",
+                    "evidence-recorded-1.1.0.schema.json",
+                    "evidence-recorded-1.2.0.schema.json",
+                )
             )
         )
     ]
-    legacy_index = next(
+    evidence_legacy_index = next(
         (
             index
             for index, item in enumerate(branches)
@@ -487,7 +545,7 @@ def _event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
         ),
         None,
     )
-    if legacy_index is None:
+    if evidence_legacy_index is None:
         raise SchemaGenerationError(
             "event_draft_schema_template_invalid", entries=(entry.relative_path,)
         )
@@ -506,7 +564,7 @@ def _event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
             "$ref": f"#/$defs/schema_identity_evidence_recorded_{suffix}"
         }
         branches.insert(
-            legacy_index + offset,
+            evidence_legacy_index + offset,
             {
                 "properties": {
                     "payload": {
@@ -520,22 +578,45 @@ def _event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
                 "required": ["schema", "payload"],
             },
         )
-    opaque_ref = "https://schemas.yoetz.dev/0.1/events/opaque-unknown-event-draft-1.0.0.schema.json"
-    for branch in branches:
-        if isinstance(branch, dict) and branch.get("$ref") == opaque_ref:
-            branch["$ref"] = (
-                "https://schemas.yoetz.dev/0.1/events/opaque-unknown-event-draft-1.1.0.schema.json"
-            )
-            break
-    else:
+    definitions["schema_identity_claim_recorded_1_1"] = {
+        "additionalProperties": False,
+        "properties": {
+            "name": {"const": "claim_recorded"},
+            "version": {"const": "1.1.0"},
+        },
+        "required": ["name", "version"],
+        "type": "object",
+    }
+    definitions["claim_recorded_1_1_schema"] = {
+        "$ref": "#/$defs/schema_identity_claim_recorded_1_1"
+    }
+    claim_branch: dict[str, JsonValue] = {
+        "properties": {
+            "payload": {
+                "$ref": "https://schemas.yoetz.dev/0.1/events/claim-recorded-1.1.0.schema.json"
+            },
+            "schema": {"$ref": "#/$defs/claim_recorded_1_1_schema"},
+        },
+        "required": ["schema", "payload"],
+    }
+    claim_legacy_index = next(
+        (
+            index
+            for index, item in enumerate(branches)
+            if isinstance(item, dict) and "claim-recorded-1.0.0.schema.json" in json.dumps(item)
+        ),
+        None,
+    )
+    if claim_legacy_index is None:
         raise SchemaGenerationError(
             "event_draft_schema_template_invalid", entries=(entry.relative_path,)
         )
+    branches.insert(claim_legacy_index + 1, claim_branch)
     return document
 
 
 def _opaque_unknown_event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
-    """Exclude every exact-known pair, including additive evidence versions."""
+    """Exclude every exact-known pair, including additive claim and evidence versions."""
 
     source = (
         Path(__file__).resolve().parent.parent
@@ -552,6 +633,7 @@ def _opaque_unknown_event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonV
         ) from exc
 
     document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = "Yoetz opaque unknown event draft 1.1.0"
     legacy = current_not
     if "anyOf" in current_not:
         values = cast(list[JsonValue], current_not["anyOf"])
@@ -571,6 +653,15 @@ def _opaque_unknown_event_draft_schema(entry: _RegistryEntry) -> dict[str, JsonV
                 }
                 for version in ("1.1.0", "1.2.0")
             ),
+            {
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"const": "claim_recorded"},
+                    "version": {"const": "1.1.0"},
+                },
+                "required": ["name", "version"],
+                "type": "object",
+            },
         ]
     }
     return document
@@ -935,6 +1026,28 @@ def _opaque_unknown_event_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonVa
                 "type": "object",
             }
         )
+    return document
+
+
+def _publish_work_request_schema(entry: _RegistryEntry) -> dict[str, JsonValue]:
+    """Derive v1.1 authoring from frozen v1.0 and select the v1.1 draft union."""
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "schemas/operations/publish-work-request-1.0.0.schema.json"
+    )
+    try:
+        document = cast(dict[str, JsonValue], json.loads(source.read_bytes()))
+        properties = cast(dict[str, JsonValue], document["properties"])
+        event_drafts = cast(dict[str, JsonValue], properties["event_drafts"])
+        items = cast(dict[str, JsonValue], event_drafts["items"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
+        raise SchemaGenerationError(
+            "publish_work_request_schema_template_invalid", entries=(entry.relative_path,)
+        ) from exc
+    document["$id"] = SCHEMA_NAMESPACE + entry.relative_path
+    document["title"] = "Yoetz publish-work request 1.1.0"
+    items["$ref"] = SCHEMA_NAMESPACE + "events/event-draft-1.1.0.schema.json"
     return document
 
 
@@ -2082,6 +2195,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         ),
     ),
     _RegistryEntry(
+        "events/claim-recorded-1.1.0.schema.json",
+        "claim-recorded",
+        "1.1.0",
+        "event",
+        "event-payload",
+        lambda: (
+            __import__(
+                "yoetz.domain.events", fromlist=["ClaimRecordedPayloadV1_1"]
+            ).ClaimRecordedPayloadV1_1
+        ),
+    ),
+    _RegistryEntry(
         "events/decision-recorded-1.0.0.schema.json",
         "decision-recorded",
         "1.0.0",
@@ -2397,6 +2522,18 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "operations/publish-work-request-1.0.0.schema.json",
         "publish-work-request",
         "1.0.0",
+        "request_result",
+        "MCP input",
+        lambda: (
+            __import__(
+                "yoetz.protocol.models", fromlist=["PublishWorkRequestModel"]
+            ).PublishWorkRequestModel
+        ),
+    ),
+    _RegistryEntry(
+        "operations/publish-work-request-1.1.0.schema.json",
+        "publish-work-request",
+        "1.1.0",
         "request_result",
         "MCP input",
         lambda: (
@@ -2851,6 +2988,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "version-report",
         lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
     ),
+    _RegistryEntry(
+        "version/version-manifest-2.2.0.schema.json",
+        "version-manifest",
+        "2.2.0",
+        "version_manifest",
+        "version-report",
+        lambda: __import__("yoetz.version", fromlist=["VersionManifest"]).VersionManifest,
+    ),
 )
 
 
@@ -3084,12 +3229,16 @@ def build_schema_documents(
             "events/evidence-recorded-1.2.0.schema.json",
         }:
             normalized = _evidence_payload_schema(entry)
+        elif entry.relative_path == "events/claim-recorded-1.1.0.schema.json":
+            normalized = _claim_payload_schema(entry)
         elif entry.relative_path == "events/response-recorded-1.0.0.schema.json":
             normalized = _response_recorded_schema(entry)
         elif entry.relative_path == "events/opaque-unknown-event-draft-1.0.0.schema.json":
             normalized = _frozen_schema(entry)
         elif entry.relative_path == "events/opaque-unknown-event-draft-1.1.0.schema.json":
             normalized = _opaque_unknown_event_v1_1_schema(entry)
+        elif entry.relative_path == "operations/publish-work-request-1.1.0.schema.json":
+            normalized = _publish_work_request_schema(entry)
         elif entry.relative_path == "findings/runtime-attempt-evidence-1.0.0.schema.json":
             normalized = _runtime_attempt_evidence_schema(entry)
         elif entry.relative_path == "findings/semantic-provenance-1.1.0.schema.json":
@@ -3145,9 +3294,12 @@ def build_schema_documents(
                     "semantic-provenance-1.0.0": "semantic-provenance-1.1.0",
                 },
             )
-        elif entry.relative_path == "version/version-manifest-2.0.0.schema.json":
+        elif entry.relative_path in {
+            "version/version-manifest-2.0.0.schema.json",
+            "version/version-manifest-2.1.0.schema.json",
+        }:
             normalized = _frozen_version_manifest_schema(entry)
-        elif entry.relative_path == "version/version-manifest-2.1.0.schema.json":
+        elif entry.relative_path == "version/version-manifest-2.2.0.schema.json":
             normalized = _version_manifest_schema(entry)
         elif entry.relative_path == "privacy/outbound-case-1.1.0.schema.json":
             normalized = _outbound_case_schema(entry)

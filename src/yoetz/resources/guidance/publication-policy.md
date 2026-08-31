@@ -88,6 +88,23 @@ values are reserved for the capability-proven service path and trusted importer.
 `evidence_recorded/1.0.0` records remain readable byte-for-byte; a historical digest without a
 binding is reported as legacy/unknown and cannot silently satisfy a new completion claim.
 
+### Claim correction and limitation linkage
+
+Use `claim_recorded/1.1.0` for new claims and send both new arrays, even when empty. Keep admissible
+evidence, successful results, and resolved obligations in `supporting_refs`; put partial or failed
+result ids in `limitation_refs`.
+To correct an append-only claim, publish a fresh claim id and name every prior effective claim it
+replaces in `supersedes_claim_refs`. Restate corrected overlapping `obligation_refs`. The prior
+event stays immutable and visible as history, while checks and receipts evaluate the replacement
+as current.
+
+Before append, read `candidate_findings`, `history`, and `results`, then dry-run the exact
+replacement. Preflight rejects a missing or already-superseded target, a different claim kind,
+disjoint or absent declared scope, a success/unknown/unrelated limitation, a non-success result in
+`supporting_refs`, or an incomplete set of relevant partial/failed results. Do not use
+`disputes_refs` or `decision_recorded.supersedes_event_id` as claim supersession; those fields keep
+their existing contradiction and decision-history meanings.
+
 ## Declare completion scope in the plan
 
 The effective current plan must distinguish obligations from an intentional empty scope. Normally,

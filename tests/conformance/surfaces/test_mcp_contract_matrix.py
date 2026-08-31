@@ -280,8 +280,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:1d9cf5638ab280e43ad95cabb9d9a91c781a804fc6c86c4fde63e4f38500607a",
-        "strict": "sha256:4eb3862121e6da91bed7ac017567c507cd88852590e35510ae7cae1c6ba2ba87",
+        "policy": "sha256:dba64015fdf21506ec059dd61f1fb9c77f899d2b31bdfbb81a8a5d37338873b3",
+        "strict": "sha256:1eef9bddd8429c49ac033574a9624357b3c80feed34bc15988695d68f5311f9d",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -309,6 +309,12 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert (
         "unique and already in ascending ASCII order" in descriptor_for("publish_work").description
     )
+    publish_descriptor = descriptor_for("publish_work")
+    assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.1.0.schema.json")
+    assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.0.0.schema.json")
+    status_descriptor = descriptor_for("status")
+    assert status_descriptor.input_schema_ref.endswith("status-request-1.1.0.schema.json")
+    assert status_descriptor.output_schema_ref.endswith("status-result-1.1.0.schema.json")
     for descriptors in TOOL_DESCRIPTORS.values():
         assert {item.name for item in descriptors if item.annotations.read_only} == {
             "status",

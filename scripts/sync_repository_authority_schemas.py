@@ -412,6 +412,16 @@ def _status_v23_result() -> dict[str, Any]:
     return generated
 
 
+def _claim_v24_request() -> dict[str, Any]:
+    generated = _with_id("control-request", "2.4.0", _status_v23_request())
+    _replace_schema_ref(
+        generated,
+        "https://schemas.yoetz.dev/0.1/operations/publish-work-request-1.0.0.schema.json",
+        "https://schemas.yoetz.dev/0.1/operations/publish-work-request-1.1.0.schema.json",
+    )
+    return generated
+
+
 def _semantic_provenance_v24_result() -> dict[str, Any]:
     generated = _with_id("control-result", "2.4.0", _status_v23_result())
     for old, new in (
@@ -465,7 +475,7 @@ def _documents() -> dict[Path, bytes]:
             "2.4.0",
             _with_id("control-hello-result", "2.0.0", _load("control-hello-result")),
         ),
-        ("control-request", "2.4.0"): _with_id("control-request", "2.4.0", _status_v23_request()),
+        ("control-request", "2.4.0"): _claim_v24_request(),
         ("control-result", "2.4.0"): _semantic_provenance_v24_result(),
     }
     return {

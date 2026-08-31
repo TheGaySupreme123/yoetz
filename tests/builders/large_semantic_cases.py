@@ -32,9 +32,9 @@ from yoetz.domain.events import (
 from yoetz.domain.values import ClaimId, EvidenceId, ObligationId, timestamp_from_string
 from yoetz.kernel.deterministic_checks import DeterministicCase
 from yoetz.kernel.projections import (
+    ClaimProjectionRecord,
     EvidenceProjectionRecord,
     ObligationProjectionRecord,
-    ProjectionRecord,
 )
 from yoetz.protocol.coverage import EvidenceImmutability
 
@@ -103,7 +103,7 @@ def large_case(
         )
         sequence += 1
 
-    claims: dict[ClaimId, ProjectionRecord[ClaimRecordedPayload]] = {}
+    claims: dict[ClaimId, ClaimProjectionRecord] = {}
     for index in range(1, claim_count + 1):
         # Half the claims cite evidence and half do not, so the deterministic policies produce a
         # realistic mix of assessments rather than one repeated finding.

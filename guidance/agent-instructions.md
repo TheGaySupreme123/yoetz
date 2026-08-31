@@ -33,6 +33,12 @@ Never publish chain-of-thought or hidden reasoning; full prompts, transcripts, o
 
 Publish the material completion claim and its current evidence, call `check`, disposition any findings, then call `receipt`. Recheck after a material change or new evidence; a readable response to a finding this check returned is not material change, a redacted or unreadable response is.
 
+Use `claim_recorded/1.1.0` for new completion claims. Keep admissible support in
+`supporting_refs`, partial/failed results in `limitation_refs`, and prior effective claim ids in
+`supersedes_claim_refs` when correcting an append-only claim. Read `candidate_findings`, `history`,
+and `results`, then dry-run the exact correction before append. `disputes_refs` and a decision's
+`supersedes_event_id` do not replace a claim.
+
 For `check` mode: use `semantic_if_configured` for most material implementation/review claims; use `semantic_required` when the completion claim depends on qualitative correctness, design conformance, security/privacy reasoning, interoperability, or whether the code satisfies the ask; use `deterministic_only` only for explicitly local/structural checks, semantic-disabled policy, or a deliberate no-egress choice — and disclose that limitation. Omitting `mode` resolves via the configured verification policy (default optional → `semantic_if_configured`).
 
 # A recorded finding stays recorded
@@ -109,9 +115,8 @@ expiry, cancellation, stale authority, or an incomplete ceremony remains a no di
 # Publishing a completion claim is an assertion, not a conclusion
 
 A published completion claim is the input to a check, not the output of one. It does not license
-telling the user the work is finished. Publish the claim and its evidence, run `check`, disposition
-findings, recheck after material change, an unreadable response, or a readable response to a finding
-not returned by the current check, take a `receipt`, and only then answer.
+telling the user the work is finished: answer only after `check`, finding disposition, any recheck
+the rules above require, and `receipt`.
 
 # When to stop retrying
 
@@ -190,9 +195,8 @@ This is an agent-attested trust model, not host-verified proof: Yoetz cannot ind
 authenticate the chat provenance, and a compromised agent could forge the assertion. Your source
 checks above are therefore load-bearing skill behavior. Target binding, expiry, single-use claim,
 repository commitment, machine-policy ceilings, vault reauthentication, and no-echo result rules
-remain runtime-enforced.
-
-For Codex JSONL import, follow its skill; never put source/excerpts in chat.
+remain runtime-enforced. For Codex JSONL import, follow its skill; never put source or excerpts in
+chat.
 
 `vault_initialize` and `vault_passphrase_rotate` use that same path; never handle or ask for a
 passphrase. Interrupted rotation: leave the staged entry and restart. Locked vaults keep the

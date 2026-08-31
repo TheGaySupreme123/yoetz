@@ -313,10 +313,12 @@ including a failed attempt — so the receipt can account for every requested it
 
 ## `publish_work`: claim
 
-The claim payload is closed: it admits `claim_id`, `claim_kind`, `disputes_refs`,
-`obligation_refs`, `statement`, `subject_state`, and `supporting_refs` — never `attempted_items`,
-which lives on `action_recorded`. Link the obligations a claim answers with `obligation_refs` and
-its evidence with `supporting_refs`.
+Use `claim_recorded/1.1.0` for new claims. Its payload keeps admissible evidence, successful
+results, and resolved obligations in `supporting_refs`, while partial or failed results belong in
+`limitation_refs`. It also admits `claim_id`, `claim_kind`, `disputes_refs`, `obligation_refs`,
+`statement`, `subject_state`, and `supersedes_claim_refs` — never `attempted_items`, which lives on
+`action_recorded`. The current descriptor selects `publish-work-request/1.1.0`, but the public
+request body's `schema_version` remains `1.0.0` as shown below.
 
 ```json
 {
@@ -327,12 +329,52 @@ its evidence with `supporting_refs`.
   "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
   "event_drafts": [{
     "event_id": "evt_00000000-0000-4000-8000-000000000008",
-    "schema": {"name": "claim_recorded", "version": "1.0.0"},
+    "schema": {"name": "claim_recorded", "version": "1.1.0"},
     "occurred_at": "2026-01-01T00:00:00.000Z", "causal_parents": [],
     "payload": {
       "claim_id": "clm_00000000-0000-4000-8000-000000000001",
       "claim_kind": "completion", "statement": "Replace with the bounded claim",
-      "supporting_refs": ["evd_00000000-0000-4000-8000-000000000001"]
+      "supporting_refs": ["evd_00000000-0000-4000-8000-000000000001"],
+      "obligation_refs": ["obl_00000000-0000-4000-8000-000000000001"],
+      "limitation_refs": [], "supersedes_claim_refs": []
+    },
+    "artifact_refs": [], "evidence_refs": []
+  }],
+  "actor": {"actor_id": "harness:mcp-template", "actor_type": "harness"},
+  "client": {"kind": "cooperative_agent", "version": "0.1.0", "integration": "cooperative_mcp"}
+}
+```
+
+### Canonical completion-claim repair
+
+Read `status` with `view=candidate_findings`, then `view=history` for the named claim event and
+`view=results` for each named `res_` identifier. Publish one new `claim_recorded/1.1.0` with a fresh
+`claim_id`. Copy the prior effective claim id into `supersedes_claim_refs`, restate corrected
+overlapping `obligation_refs`, keep only admissible support in `supporting_refs`, and put every
+relevant partial or failed result in `limitation_refs`. Preview this exact draft with `dry_run:
+true`; append it only after the preview accepts it. `disputes_refs` and
+`decision_recorded.supersedes_event_id` retain their existing meanings and do not replace a claim.
+
+```json
+{
+  "protocol_version": "0.1", "schema_version": "1.0.0",
+  "request_id": "req_00000000-0000-4000-8000-000000000016",
+  "session_id": "ses_00000000-0000-4000-8000-000000000001",
+  "writer_id": "wri_00000000-0000-4000-8000-000000000001",
+  "expected_frontier": {"sequence": "0", "head_digest": "genesis"},
+  "dry_run": true,
+  "event_drafts": [{
+    "event_id": "evt_00000000-0000-4000-8000-000000000016",
+    "schema": {"name": "claim_recorded", "version": "1.1.0"},
+    "occurred_at": "2026-01-01T00:00:00.000Z", "causal_parents": [],
+    "payload": {
+      "claim_id": "clm_00000000-0000-4000-8000-000000000016",
+      "claim_kind": "completion",
+      "statement": "Replace with the narrowed completion claim and retained limitation",
+      "supporting_refs": ["evd_00000000-0000-4000-8000-000000000001"],
+      "obligation_refs": ["obl_00000000-0000-4000-8000-000000000001"],
+      "limitation_refs": ["res_00000000-0000-4000-8000-000000000001"],
+      "supersedes_claim_refs": ["clm_00000000-0000-4000-8000-000000000001"]
     },
     "artifact_refs": [], "evidence_refs": []
   }],

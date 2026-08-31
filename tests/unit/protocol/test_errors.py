@@ -34,6 +34,8 @@ accepted_record_shape_invalid
 actor_id_malformed
 actor_id_not_generated
 byte_order_mark_forbidden
+claim_revision_invalid
+claim_revision_mismatch
 commitment_only_object_kind
 dependency_changed
 duplicate_object_key
@@ -359,7 +361,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 162
+    assert len(source_values) == 164
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

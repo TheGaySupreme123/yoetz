@@ -144,6 +144,12 @@ The skill name is `/yoetz:yoetz`. The MCP server is `plugin:yoetz:yoetz`, and ca
 `mcp__plugin_yoetz_yoetz__<operation>`. A live proof needs a fresh session and correlated
 `start`/`status` call through that scoped name; a list/details/MCP handshake alone is insufficient.
 
+Claim correction uses the shared `publish_work` descriptor and
+`publish-work-request/1.1.0`; Claude hooks do not author or infer claim supersession. A session still
+bound to the older descriptor/control manifest must be reloaded through the normal plugin/service
+upgrade path before that capability is claimed; manifest mismatch stops the stale service before
+the new pair can fall through its legacy opaque branch.
+
 ## Hooks and observation
 
 Claude Code remains structural-only for issue #302: the scoped hook path discards raw prompt,

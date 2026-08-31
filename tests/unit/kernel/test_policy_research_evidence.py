@@ -22,6 +22,7 @@ from yoetz.domain.events import (
     ActionRecordedPayload,
     ClaimKind,
     ClaimRecordedPayload,
+    ClaimRecordedPayloadV1_1,
     EvidenceKind,
     EvidenceRecordedPayload,
     ObligationChangeKind,
@@ -140,6 +141,25 @@ def test_cited_non_success_result_is_limitation_disclosure_not_support_mismatch(
     assert FindingKind.MATERIAL_LIMITATION_OMITTED not in kinds
 
 
+def test_versioned_claim_uses_limitation_refs_without_treating_them_as_support() -> None:
+    claim = ClaimRecordedPayloadV1_1(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Partial result retained as a limitation",
+        supporting_refs=(evd(1),),
+        limitation_refs=(res(1),),
+    )
+    case = make_case(
+        actions={act(1): record(_action(), 1)},
+        results={res(1): record(_result(ResultOutcome.PARTIAL), 2)},
+        evidence={evd(1): evidence_record(_evidence(), 3)},
+        claims={clm(1): record(claim, 4)},
+    )
+    kinds = _kinds(case)
+    assert FindingKind.MATERIAL_LIMITATION_OMITTED not in kinds
+    assert FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM not in kinds
+
+
 def test_diff_does_not_match_account_and_equal_digest_nontrigger() -> None:
     old = SubjectStateRef(tree_digest=_DIGEST_A)
     new = SubjectStateRef(tree_digest=_DIGEST_B)
@@ -197,6 +217,8 @@ def test_material_limitation_omitted_and_exact_link_nontrigger() -> None:
     )
     assert finding.basis.required_but_missing_facts[0].fact_code == ("limitation_disclosure_absent")
     assert f"Omitted limitation basis: limiting result {res(1)}." in finding.candidate.detail
+    assert f"limitation_refs [{res(1)}]" in finding.candidate.detail
+    assert f"supersedes_claim_refs names [{clm(1)}]" in finding.candidate.detail
     assert omitted.statement not in finding.candidate.detail
     disclosed = ClaimRecordedPayload(
         claim_id=clm(1),
@@ -439,3 +461,87 @@ def test_provenance_dispute_does_not_trigger_rejection_penalty() -> None:
         extra_refs=(evt(99),),
     )
     assert FindingKind.QUESTIONABLE_FINDING_REJECTION not in _kinds(case)
+
+
+def _material_gap_coverage() -> object:
+    from dataclasses import replace as dc_replace
+
+    return dc_replace(BASE_COVERAGE, known_gaps=("redacted_object",))
+
+
+def test_uncited_evidence_material_gap_still_omits_a_limitation() -> None:
+    """A material coverage gap is task-level, not claim-linked.
+
+    ADR-025 bounds which recorded *results* a claim must disclose. Bounding the coverage-gap scan
+    to refs the claim already links silently dropped this finding for every uncited record, which
+    is exactly the honesty regression the claim-correction work must not introduce.
+    """
+
+    claim = ClaimRecordedPayloadV1_1(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Complete",
+        supporting_refs=(),
+        obligation_refs=(obl(1),),
+    )
+    case = make_case(
+        evidence={evd(1): evidence_record(_evidence(), 1)},
+        claims={clm(1): record(claim, 2)},
+        coverage_overrides={evd(1): _material_gap_coverage()},  # type: ignore[dict-item]
+    )
+    result = run_deterministic_policies(case, RESEARCH_EVIDENCE_POLICY_PACK)
+    finding = next(
+        item
+        for item in result.assessments
+        if item.candidate.kind is FindingKind.MATERIAL_LIMITATION_OMITTED
+    )
+    material_fact = next(
+        fact
+        for fact in finding.basis.observed_facts
+        if fact.fact_code == "material_limitation_present"
+    )
+    assert evd(1) in material_fact.subject_refs
+    assert f"material coverage-gap record {evd(1)}" in finding.candidate.detail
+
+
+def test_versioned_claim_can_disclose_a_relevant_unknown_result() -> None:
+    """#432: v1.1 must keep a disclosure channel for an `unknown` outcome.
+
+    `claim_discloses_result` reads only `limitation_refs` for v1.1, so an `unknown` result that the
+    limitation policy treats as limiting would otherwise have no field that clears the finding.
+    """
+
+    unknown = ResultRecordedPayload(
+        result_id=res(1),
+        action_id=act(1),
+        outcome=ResultOutcome.UNKNOWN,
+        exit_status=3,
+    )
+    omitted = ClaimRecordedPayloadV1_1(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Complete",
+        supporting_refs=(),
+        obligation_refs=(obl(1),),
+    )
+    trigger = make_case(
+        actions={act(1): record(_action(), 1)},
+        results={res(1): record(unknown, 2)},
+        claims={clm(1): record(omitted, 3)},
+    )
+    assert FindingKind.MATERIAL_LIMITATION_OMITTED in _kinds(trigger)
+
+    disclosed = ClaimRecordedPayloadV1_1(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.COMPLETION,
+        statement="Complete subject to one unknown outcome",
+        supporting_refs=(),
+        obligation_refs=(obl(1),),
+        limitation_refs=(res(1),),
+    )
+    near = make_case(
+        actions={act(1): record(_action(), 1)},
+        results={res(1): record(unknown, 2)},
+        claims={clm(1): record(disclosed, 3)},
+    )
+    assert FindingKind.MATERIAL_LIMITATION_OMITTED not in _kinds(near)

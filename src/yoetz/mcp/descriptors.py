@@ -24,6 +24,7 @@ from yoetz.protocol.schemas import (
 __all__ = [
     "ADVERTISED_SURFACE_BUDGET",
     "INITIALIZE_GUIDANCE_URIS",
+    "ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS",
     "ORDINARY_MCP_PUBLISH_EVENT_FAMILIES",
     "PRESENTATION_INPUT_SCHEMA_BUDGETS",
     "SERVER_INSTRUCTIONS_BUDGET",
@@ -43,11 +44,16 @@ __all__ = [
 type McpRouteProfile = Literal["policy", "strict"]
 
 _SCHEMA_VERSION: Final = "1.0.0"
-_TOOL_SCHEMA_VERSIONS: Final = MappingProxyType({"status": "1.1.0"})
+_TOOL_INPUT_SCHEMA_VERSIONS: Final = MappingProxyType({"publish_work": "1.1.0", "status": "1.1.0"})
+_TOOL_OUTPUT_SCHEMA_VERSIONS: Final = MappingProxyType({"status": "1.1.0"})
 
 
-def _tool_schema_version(name: str) -> str:
-    return _TOOL_SCHEMA_VERSIONS.get(name, _SCHEMA_VERSION)
+def _tool_input_schema_version(name: str) -> str:
+    return _TOOL_INPUT_SCHEMA_VERSIONS.get(name, _SCHEMA_VERSION)
+
+
+def _tool_output_schema_version(name: str) -> str:
+    return _TOOL_OUTPUT_SCHEMA_VERSIONS.get(name, _SCHEMA_VERSION)
 
 
 # Exactly the entry document. Every other guidance document is fetched on demand: the catalog
@@ -68,6 +74,9 @@ _BOUNDARY_TERMS: Final = re.compile(
 
 # Mirrors application/publish_work ordinary cooperative_mcp|local_cli admission. Advertised
 # publish_work schemas project to this set; catalog admission schemas remain authoritative.
+# Presentation keeps ordinary families through schema 1.1.0. Additive ``evidence_recorded/1.2.0``
+# (``observation_captured``) is authored only by the observation coordinator, not MCP/CLI publish.
+ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS: Final[frozenset[str]] = frozenset({"1.0.0", "1.1.0"})
 ORDINARY_MCP_PUBLISH_EVENT_FAMILIES: Final[frozenset[str]] = frozenset(
     {
         "plan_published",
@@ -89,9 +98,9 @@ _COMMON_INLINE_SCHEMA_IDS: Final[frozenset[str]] = frozenset(
         f"{SCHEMA_NAMESPACE}common/frontier-1.0.0.schema.json",
     }
 )
-_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.0.0.schema.json"
+_EVENT_DRAFT_SCHEMA_ID: Final = f"{SCHEMA_NAMESPACE}events/event-draft-1.1.0.schema.json"
 _OPAQUE_EVENT_DRAFT_SCHEMA_ID: Final = (
-    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.0.0.schema.json"
+    f"{SCHEMA_NAMESPACE}events/opaque-unknown-event-draft-1.1.0.schema.json"
 )
 
 # Reviewed keyword budgets for tools/list presentation schemas (agent-usability guardrails).
@@ -116,7 +125,7 @@ PRESENTATION_INPUT_SCHEMA_BUDGETS: Final[Mapping[str, Mapping[str, int]]] = Mapp
                 "max_conditional_nodes": 0,
                 "max_defs_count": 20,
                 "max_defs_nest_depth": 1,
-                "max_encoded_bytes": 32_000,
+                "max_encoded_bytes": 34_000,
             }
         ),
         "check-request": MappingProxyType(
@@ -195,7 +204,7 @@ SERVER_INSTRUCTIONS_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
 # worst observed host behavior, one full copy of the instructions block charged to each of the
 # seven advertised tools, which is what the total is computed against.
 ADVERTISED_SURFACE_BUDGET: Final[Mapping[str, int]] = MappingProxyType(
-    {"instructions_copies_per_tool": 1, "max_encoded_bytes": 200_000}
+    {"instructions_copies_per_tool": 1, "max_encoded_bytes": 205_000}
 )
 
 
@@ -488,7 +497,10 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                             "claim_kind": "completion",
                             "statement": "The requested change is implemented and covered.",
                             "supporting_refs": [_example_id("evidence", 1)],
+                            "limitation_refs": [],
+                            "supersedes_claim_refs": [],
                         },
+                        version="1.1.0",
                     ),
                 ],
                 "actor": dict(_EXAMPLE_ACTOR),
@@ -603,22 +615,11 @@ def _strip_schema_metadata(value: Mapping[str, JsonValue]) -> dict[str, JsonValu
     }
 
 
-def _event_family_from_draft_branch(branch: Mapping[str, JsonValue]) -> str | None:
+def _event_identity_from_payload_ref(branch: Mapping[str, JsonValue]) -> tuple[str, str] | None:
     properties = branch.get("properties")
     if not isinstance(properties, Mapping):
         return None
-    props = cast(Mapping[str, JsonValue], properties)
-    schema_node = props.get("schema")
-    if isinstance(schema_node, Mapping):
-        schema_map = cast(Mapping[str, JsonValue], schema_node)
-        nested_props = schema_map.get("properties")
-        if isinstance(nested_props, Mapping):
-            name_node = cast(Mapping[str, JsonValue], nested_props).get("name")
-            if isinstance(name_node, Mapping):
-                const_name = cast(Mapping[str, JsonValue], name_node).get("const")
-                if type(const_name) is str:
-                    return const_name
-    payload = props.get("payload")
+    payload = cast(Mapping[str, JsonValue], properties).get("payload")
     if not isinstance(payload, Mapping):
         return None
     ref = cast(Mapping[str, JsonValue], payload).get("$ref")
@@ -634,8 +635,39 @@ def _event_family_from_draft_branch(branch: Mapping[str, JsonValue]) -> str | No
         slug = stem[:delimiter]
         version = stem[delimiter + 1 :]
         if slug and SCHEMA_VERSION_PATTERN.fullmatch(version) is not None:
-            return slug.replace("-", "_")
+            return slug.replace("-", "_"), version
     return None
+
+
+def _event_identity_from_schema_consts(branch: Mapping[str, JsonValue]) -> tuple[str, str] | None:
+    properties = branch.get("properties")
+    if not isinstance(properties, Mapping):
+        return None
+    schema_node = cast(Mapping[str, JsonValue], properties).get("schema")
+    if not isinstance(schema_node, Mapping):
+        return None
+    nested_props = cast(Mapping[str, JsonValue], schema_node).get("properties")
+    if not isinstance(nested_props, Mapping):
+        return None
+    typed_props = cast(Mapping[str, JsonValue], nested_props)
+    name_node = typed_props.get("name")
+    version_node = typed_props.get("version")
+    if not isinstance(name_node, Mapping) or not isinstance(version_node, Mapping):
+        return None
+    const_name = cast(Mapping[str, JsonValue], name_node).get("const")
+    const_version = cast(Mapping[str, JsonValue], version_node).get("const")
+    if type(const_name) is str and type(const_version) is str:
+        return const_name, const_version
+    return None
+
+
+def _event_identity_from_draft_branch(branch: Mapping[str, JsonValue]) -> tuple[str, str] | None:
+    return _event_identity_from_schema_consts(branch) or _event_identity_from_payload_ref(branch)
+
+
+def _event_family_from_draft_branch(branch: Mapping[str, JsonValue]) -> str | None:
+    identity = _event_identity_from_draft_branch(branch)
+    return None if identity is None else identity[0]
 
 
 def _project_event_draft_for_ordinary_mcp(
@@ -654,8 +686,14 @@ def _project_event_draft_for_ordinary_mcp(
         ref = branch_map.get("$ref")
         if type(ref) is str and ref.partition("#")[0] == _OPAQUE_EVENT_DRAFT_SCHEMA_ID:
             continue
-        family = _event_family_from_draft_branch(branch_map)
-        if family in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES:
+        identity = _event_identity_from_draft_branch(branch_map)
+        if identity is None:
+            continue
+        family, version = identity
+        if (
+            family in ORDINARY_MCP_PUBLISH_EVENT_FAMILIES
+            and version in ORDINARY_MCP_PRESENTATION_SCHEMA_VERSIONS
+        ):
             kept.append(_mutable_json(branch_map))
             kept_families.add(family)
     if kept_families != set(ORDINARY_MCP_PUBLISH_EVENT_FAMILIES):
@@ -1329,27 +1367,29 @@ class ToolDescriptor:
     @property
     def input_schema(self) -> Mapping[str, JsonValue]:
         return _mcp_presentation_schema(
-            f"{self.name.replace('_', '-')}-request", _tool_schema_version(self.name)
+            f"{self.name.replace('_', '-')}-request", _tool_input_schema_version(self.name)
         )
 
     @property
     def output_schema(self) -> Mapping[str, JsonValue]:
         return _mcp_output_presentation_schema(
-            f"{self.name.replace('_', '-')}-result", _tool_schema_version(self.name)
+            f"{self.name.replace('_', '-')}-result", _tool_output_schema_version(self.name)
         )
 
     @property
     def catalog_output_schema(self) -> Mapping[str, JsonValue]:
         """Full catalog-bundled output schema before MCP root-object projection."""
 
-        return _mcp_schema(f"{self.name.replace('_', '-')}-result", _tool_schema_version(self.name))
+        return _mcp_schema(
+            f"{self.name.replace('_', '-')}-result", _tool_output_schema_version(self.name)
+        )
 
     @property
     def catalog_input_schema(self) -> Mapping[str, JsonValue]:
         """Full catalog-bundled input schema (admission dual-surface; not tools/list)."""
 
         return _mcp_schema(
-            f"{self.name.replace('_', '-')}-request", _tool_schema_version(self.name)
+            f"{self.name.replace('_', '-')}-request", _tool_input_schema_version(self.name)
         )
 
 
@@ -1363,16 +1403,17 @@ def _descriptor(
     open_world: bool = False,
 ) -> ToolDescriptor:
     schema_name = name.replace("_", "-")
-    schema_version = _tool_schema_version(name)
+    input_schema_version = _tool_input_schema_version(name)
+    output_schema_version = _tool_output_schema_version(name)
     return ToolDescriptor(
         name=name,
         title=title,
         description=description,
         input_schema_ref=(
-            f"{SCHEMA_NAMESPACE}operations/{schema_name}-request-{schema_version}.schema.json"
+            f"{SCHEMA_NAMESPACE}operations/{schema_name}-request-{input_schema_version}.schema.json"
         ),
         output_schema_ref=(
-            f"{SCHEMA_NAMESPACE}operations/{schema_name}-result-{schema_version}.schema.json"
+            f"{SCHEMA_NAMESPACE}operations/{schema_name}-result-{output_schema_version}.schema.json"
         ),
         annotations=ToolAnnotations(
             read_only=read_only,
@@ -1415,7 +1456,14 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "claim_recorded. decision_recorded authority is a structural actor id such as "
         "harness:cli, never approval prose; the approval story belongs in rationale. action_kind "
         "is a closed enum of command, edit, research, review, and other; a source or file change "
-        "is edit, and command additionally requires the command field. Each draft "
+        "is edit, and command additionally requires the command field. "
+        "claim_recorded at schema 1.1.0 keeps admissible supporting_refs separate from partial or "
+        "failed limitation_refs; a correction names only exact prior effective claim ids in "
+        "supersedes_claim_refs. Dry-run validates target and limitation existence, result outcome, "
+        "scope overlap, replacement effectiveness, and complete limitation linkage before append. "
+        "Read candidate_findings, history, and results to author the correction; disputes_refs "
+        "and decision supersedes_event_id keep their existing meanings and do not replace a claim. "
+        "Each draft "
         "occurred_at is a caller-asserted RFC 3339 UTC time with millisecond precision: use the "
         "best real time available and do not copy the illustrative example timestamp. Ledger order "
         "follows ingestion sequence; receipt freshness is frontier-bound. Service accepted_at is "
@@ -1613,7 +1661,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
-                "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
+                "publish_work": "sha256:dd9725bbf8cadd9582c7be95f3314e74d642d56dd34d4f30a6c1ed6d9a32f367",
                 "check": "sha256:db57da2058052843ebb583f2ac141ebf7925dcf920583b0cdad6533c3f7fa29a",
                 "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
                 "status": "sha256:5147f6a2c2a6b1e2e2275dc32568fcf3c89e8f983edca6aa9b05d5bd432e9355",
@@ -1624,7 +1672,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
-                "publish_work": "sha256:6e33d197dcc25d82dc893b1f297c43425ca8d08170fda0ce6d1634deb943f915",
+                "publish_work": "sha256:dd9725bbf8cadd9582c7be95f3314e74d642d56dd34d4f30a6c1ed6d9a32f367",
                 "check": "sha256:89899d93b76ea85c90d79d3df150f076f6b64a28cdb8f410c263ce3c1aa89b91",
                 "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
                 "status": "sha256:5147f6a2c2a6b1e2e2275dc32568fcf3c89e8f983edca6aa9b05d5bd432e9355",
@@ -1636,8 +1684,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:1d9cf5638ab280e43ad95cabb9d9a91c781a804fc6c86c4fde63e4f38500607a",
-        "strict": "sha256:4eb3862121e6da91bed7ac017567c507cd88852590e35510ae7cae1c6ba2ba87",
+        "policy": "sha256:dba64015fdf21506ec059dd61f1fb9c77f899d2b31bdfbb81a8a5d37338873b3",
+        "strict": "sha256:1eef9bddd8429c49ac033574a9624357b3c80feed34bc15988695d68f5311f9d",
     }
 )
 

@@ -200,6 +200,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         "application/json",
         True,
     ),
+    (
+        "fixtures/canonical/claim-correction-1.1.0.case.json",
+        "canonical_vector",
+        "application/json",
+        True,
+    ),
     ("fixtures/canonical/identifiers.case.json", "canonical_vector", "application/json", True),
     ("fixtures/canonical/object-envelope.case.json", "canonical_vector", "application/json", True),
     (
@@ -467,6 +473,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/events/claim-recorded-1.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/events/decision-recorded-1.0.0.schema.json",
         "json_schema",
         "application/schema+json",
@@ -639,6 +651,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/operations/publish-work-request-1.0.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/operations/publish-work-request-1.1.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,
@@ -939,6 +957,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
     ),
     (
         "schemas/version/version-manifest-2.1.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
+        "schemas/version/version-manifest-2.2.0.schema.json",
         "json_schema",
         "application/schema+json",
         True,

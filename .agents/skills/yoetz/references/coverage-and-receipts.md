@@ -73,6 +73,16 @@ Permitted: “I saw an unresolved attempt and went back to it.”
 
 Forbidden after only a candidate read: “I checked and found nothing.”
 
+## Effective claims and limitations
+
+`claim_recorded/1.1.0` separates admissible `supporting_refs` from partial/failed
+`limitation_refs`, which also accepts a relevant `unknown` result so that outcome still has a
+disclosure field. A replacement names prior effective claim ids in `supersedes_claim_refs`.
+Checks and receipts use only effective claims for current conclusions; superseded claims and their
+past findings remain visible as history. A result limits a claim only when it existed by that claim
+and its action overlaps the claim's declared obligation scope; unscoped records remain
+conservatively task-wide.
+
 ## Check mode and semantic coverage
 
 A clean deterministic-only check is not an implementation review. When `mode=deterministic_only` (or semantic status is `not_requested`), the receipt/check coverage includes `semantic_review_not_requested` and completeness is coverage-incomplete even if the verdict is `no_issue_detected`. Prefer `semantic_if_configured` for material claims; reserve `deterministic_only` for structural checks and disclose the limitation.

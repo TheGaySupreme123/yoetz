@@ -13,6 +13,7 @@ from yoetz.domain.events import (
     MAX_REF_LIST,
     AcceptedEvent,
     ClaimKind,
+    ClaimRecordedPayloadV1_1,
     EventSchema,
     EvidenceContentAvailability,
     LedgerRecord,
@@ -56,6 +57,7 @@ from yoetz.domain.values import (
     timestamp_from_string,
     validate_sha256_digest,
 )
+from yoetz.kernel.claims import effective_claim_items
 from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.kernel.projections import (
     ProjectionRecord,
@@ -390,7 +392,7 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
         ),
         FindingKind.FAILED_WORK_OMITTED: DeterministicFindingTemplate(
             "Recorded failed work is omitted from the published account.",
-            "Disclose the failed work or revise the account.",
+            "Replace the claim with claim_recorded/1.1.0 and name the result in limitation_refs.",
         ),
         FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE: DeterministicFindingTemplate(
             "A recorded claim has no admissible supporting evidence.",
@@ -410,7 +412,7 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
         ),
         FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED: DeterministicFindingTemplate(
             "Explicitly disputed claims remain structurally unresolved.",
-            "Record a structural resolution or supersession.",
+            "Replace the effective claim with claim_recorded/1.1.0 supersedes_claim_refs.",
         ),
         FindingKind.LEDGER_STALE_OR_INCOMPLETE: DeterministicFindingTemplate(
             "The ledger is too incomplete for a current conclusion.",
@@ -422,7 +424,7 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
         ),
         FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM: DeterministicFindingTemplate(
             "The cited evidence does not support the recorded claim.",
-            "Provide relevant evidence or revise the claim.",
+            "Publish supported evidence or replace the claim with claim_recorded/1.1.0.",
         ),
         FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT: DeterministicFindingTemplate(
             "Recorded subject-state digests contradict the published account.",
@@ -430,7 +432,7 @@ DETERMINISTIC_FINDING_TEMPLATES: Final[
         ),
         FindingKind.MATERIAL_LIMITATION_OMITTED: DeterministicFindingTemplate(
             "A material recorded limitation is omitted from the published account.",
-            "Disclose the limitation or revise the account.",
+            "Replace or narrow the claim with exact accepted support or limitation references.",
         ),
         FindingKind.QUESTIONABLE_FINDING_REJECTION: DeterministicFindingTemplate(
             "A deterministic finding was rejected without admissible support.",
@@ -500,14 +502,58 @@ def render_deterministic_finding_text(
                 )
                 for ref in limitation_refs
             )
+            claim_records = ", ".join(ref for ref in refs if ref.startswith("clm_"))
+            result_records = ", ".join(ref for ref in limitation_refs if ref.startswith("res_"))
+            support_records = ", ".join(
+                ref for ref in limitation_refs if not ref.startswith("res_")
+            )
+            accepted_links: list[str] = []
+            if result_records:
+                accepted_links.append(f"limitation_refs [{result_records}]")
+            if support_records:
+                accepted_links.append(f"supporting_refs [{support_records}]")
             detail = (
-                f"{detail} Omitted limitation basis: {limiting_records}. "
-                "Its disclosure link is absent."
+                f"{detail} Omitted limitation basis: {limiting_records}. Accepted disclosure "
+                f"link: {' and '.join(accepted_links)}. For replacement, claim_recorded/1.1.0 "
+                f"supersedes_claim_refs names [{claim_records}]."
             )
         else:
             detail = (
                 f"{detail} Omitted limitation basis: task-level material coverage gap; "
                 "no individual limitation record was available."
+            )
+    if kind is FindingKind.FAILED_WORK_OMITTED:
+        failed_refs = tuple(
+            ref
+            for fact in observed_facts
+            if fact.fact_code == "failed_result_present"
+            for ref in fact.subject_refs
+            if ref.startswith("res_")
+        )
+        claim_refs = tuple(ref for ref in refs if ref.startswith("clm_"))
+        if failed_refs and claim_refs:
+            detail = (
+                f"{detail} Canonical repair: publish claim_recorded/1.1.0 with "
+                f"supersedes_claim_refs [{', '.join(claim_refs)}] and limitation_refs "
+                f"[{', '.join(failed_refs)}]; keep admissible support in supporting_refs."
+            )
+    if kind is FindingKind.CONTRADICTORY_CLAIMS_UNRESOLVED:
+        claim_refs = tuple(ref for ref in refs if ref.startswith("clm_"))
+        if claim_refs:
+            detail = (
+                f"{detail} The accepted supersession reference kind is a claim id in "
+                f"claim_recorded/1.1.0 supersedes_claim_refs; candidate claim ids: "
+                f"{', '.join(claim_refs)}. disputes_refs and decision supersedes_event_id do "
+                "not supersede claims."
+            )
+    if kind is FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM:
+        claim_refs = tuple(ref for ref in refs if ref.startswith("clm_"))
+        evidence_refs = tuple(ref for ref in refs if not ref.startswith("clm_"))
+        if claim_refs and evidence_refs:
+            detail = (
+                f"{detail} To replace the claim, name {', '.join(claim_refs)} in "
+                "claim_recorded/1.1.0 supersedes_claim_refs and do not cite the mismatched "
+                f"reference as support: {', '.join(evidence_refs)}."
             )
     return template.summary, detail
 
@@ -1380,7 +1426,7 @@ def completion_scope_gap(projection: ProjectionState) -> CaseGap | None:
 
     completion_claim_present = any(
         record.payload is not None and record.payload.claim_kind is ClaimKind.COMPLETION
-        for record in projection.claims.values()
+        for _, record in effective_claim_items(projection)
     )
     plan_scope = current_plan_scope(projection.plans, projection.coverage_gaps)
     if not (
@@ -1454,7 +1500,7 @@ def build_deterministic_case(
 
     relevant_evidence: set[EvidenceId] = set()
     relevant_results: set[ResultId] = set()
-    for record in projection.claims.values():
+    for _, record in effective_claim_items(projection):
         if record.payload is not None:
             relevant_evidence.update(
                 evidence_id(ref) for ref in record.payload.supporting_refs if ref.startswith("evd_")
@@ -1462,6 +1508,8 @@ def build_deterministic_case(
             relevant_results.update(
                 result_id(ref) for ref in record.payload.supporting_refs if ref.startswith("res_")
             )
+            if type(record.payload) is ClaimRecordedPayloadV1_1:
+                relevant_results.update(record.payload.limitation_refs)
     for record in projection.obligations.values():
         if record.payload is not None:
             relevant_evidence.update(
