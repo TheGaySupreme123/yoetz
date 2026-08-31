@@ -7,7 +7,8 @@ import binascii
 import hashlib
 import hmac
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -70,6 +71,7 @@ _ERRORS: Final = frozenset(
         "authority_mismatch",
         "entry_exists",
         "staged_entry_exists",
+        "initialization_in_progress",
         "entry_invalid",
         "correlation_mismatch",
         "migration_not_proven",
@@ -201,6 +203,7 @@ class AutoUnlockPassphraseStore:
     __slots__ = (
         "_backend",
         "_backend_id",
+        "_guard_path",
         "_staged_init_username",
         "_staged_username",
         "_username",
@@ -215,6 +218,36 @@ class AutoUnlockPassphraseStore:
         self._username = "bundle-" + hashlib.sha256(encoded).hexdigest()
         self._staged_username = self._username + "-staged-rotation"
         self._staged_init_username = self._username + "-staged-initialization"
+        self._guard_path = Path(os.path.abspath(bundle_path)) / "auto-unlock-init.lock"
+
+    @contextmanager
+    def staged_initialization_guard(self) -> Generator[None]:
+        """Serialize local staging, promotion, and proof-based discard of the staged slot.
+
+        A bundle-scoped advisory lock. The initializing process holds it across its whole
+        stage -> ceremony -> promote/cleanup span, so a concurrent repair or retry can never
+        delete the staged entry between a stale ``uninitialized`` status read and the vault
+        envelope commit; discard-only callers re-prove the vault state while holding it. The
+        lock releases automatically if its holder dies, and a held lock fails fast rather than
+        blocking behind a ceremony.
+        """
+
+        try:
+            import fcntl
+        except ImportError:
+            raise OSKeyringError("unsupported") from None
+        try:
+            fd = os.open(self._guard_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            raise OSKeyringError("unsupported") from None
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise OSKeyringError("initialization_in_progress") from None
+            yield
+        finally:
+            os.close(fd)
 
     @property
     def entry_identity(self) -> tuple[str, str]:

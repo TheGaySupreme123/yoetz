@@ -5,7 +5,8 @@ from __future__ import annotations
 import importlib
 import io
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -821,6 +822,18 @@ class _StagedInitStore:
         self.promoted = False
         self.discarded = 0
         self.staged_calls = 0
+        self.guard_acquisitions = 0
+        self.guard_held = False
+
+    @contextmanager
+    def staged_initialization_guard(self) -> Generator[None]:
+        assert not self.guard_held, "the guard is exclusive"
+        self.guard_held = True
+        self.guard_acquisitions += 1
+        try:
+            yield
+        finally:
+            self.guard_held = False
 
     def slot_report(self) -> dict[str, str]:
         return {
@@ -933,13 +946,13 @@ def test_ambiguous_initialize_outcome_keeps_staged_credential(tmp_path: Path) ->
     async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
         return VaultStateResult("locked", "initialization_ambiguous")
 
-    async def unprovable() -> str | None:
+    async def unprovable() -> tuple[str, str] | None:
         return None
 
     async def run() -> None:
         with (
             patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
-            patch("yoetz.cli.elevated._service_vault_mode", side_effect=unprovable),
+            patch("yoetz.cli.elevated._service_vault_state", side_effect=unprovable),
             patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
         ):
             with pytest.raises(ElevatedBootstrapError) as exc:
@@ -961,13 +974,13 @@ def test_retry_reconciles_orphaned_staged_credential_before_staging() -> None:
     async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
         return VaultStateResult("ready", "succeeded")
 
-    async def uninitialized() -> str | None:
-        return "uninitialized"
+    async def uninitialized() -> tuple[str, str] | None:
+        return ("locked", "uninitialized")
 
     async def run() -> dict[str, object]:
         with (
             patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
-            patch("yoetz.cli.elevated._service_vault_mode", side_effect=uninitialized),
+            patch("yoetz.cli.elevated._service_vault_state", side_effect=uninitialized),
             patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
         ):
             return cast(
@@ -988,13 +1001,13 @@ def test_unprovable_staged_leftover_fails_closed_without_entry_exists() -> None:
     generated = bytearray(b"p" * 64)
     store = _StagedInitStore(generated, staged_leftover=True)
 
-    async def committed() -> str | None:
-        return "passphrase"
+    async def committed() -> tuple[str, str] | None:
+        return ("locked", "passphrase")
 
     async def run() -> None:
         with (
             patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
-            patch("yoetz.cli.elevated._service_vault_mode", side_effect=committed),
+            patch("yoetz.cli.elevated._service_vault_state", side_effect=committed),
         ):
             with pytest.raises(ElevatedBootstrapError) as exc:
                 await elevated._complete_vault_initialize_generated()  # pyright: ignore[reportPrivateUsage]
@@ -1117,8 +1130,8 @@ def test_agent_authorized_non_ready_vault_result_fails_before_approval(tmp_path:
     async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
         return VaultStateResult("locked", "throttle_record_exists")
 
-    async def uninitialized() -> str | None:
-        return "uninitialized"
+    async def uninitialized() -> tuple[str, str] | None:
+        return ("locked", "uninitialized")
 
     async def run() -> None:
         with _patch_state(tmp_path):
@@ -1127,7 +1140,7 @@ def test_agent_authorized_non_ready_vault_result_fails_before_approval(tmp_path:
             assert pending is not None
             with (
                 patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
-                patch("yoetz.cli.elevated._service_vault_mode", side_effect=uninitialized),
+                patch("yoetz.cli.elevated._service_vault_state", side_effect=uninitialized),
                 patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
             ):
                 with pytest.raises(ElevatedBootstrapError) as exc:
@@ -1219,8 +1232,8 @@ def test_trusted_review_non_ready_vault_result_is_consumed_as_failed(tmp_path: P
     ) -> VaultStateResult:
         return VaultStateResult("locked", "keyring_unavailable")
 
-    async def uninitialized() -> str | None:
-        return "uninitialized"
+    async def uninitialized() -> tuple[str, str] | None:
+        return ("locked", "uninitialized")
 
     async def run() -> None:
         with _patch_state(tmp_path):
@@ -1229,7 +1242,7 @@ def test_trusted_review_non_ready_vault_result_is_consumed_as_failed(tmp_path: P
                 _patch_verified_presence(),
                 patch("yoetz.cli.elevated.TrustedForegroundConsole", return_value=_Console()),
                 patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
-                patch("yoetz.cli.elevated._service_vault_mode", side_effect=uninitialized),
+                patch("yoetz.cli.elevated._service_vault_state", side_effect=uninitialized),
                 patch(
                     "yoetz.cli.elevated.run_human_ceremony_on_terminal",
                     side_effect=ceremony,
@@ -1255,8 +1268,8 @@ def test_authorize_cli_projects_the_bounded_vault_failure_reason(tmp_path: Path)
     async def ceremony(_kind: object, _target: object, **_kwargs: object) -> VaultStateResult:
         return VaultStateResult("locked", "throttle_record_exists")
 
-    async def uninitialized() -> str | None:
-        return "uninitialized"
+    async def uninitialized() -> tuple[str, str] | None:
+        return ("locked", "uninitialized")
 
     with _patch_state(tmp_path):
         elevated.prepare_elevated("vault_initialize")
@@ -1264,7 +1277,7 @@ def test_authorize_cli_projects_the_bounded_vault_failure_reason(tmp_path: Path)
         assert pending is not None
         with (
             patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
-            patch("yoetz.cli.elevated._service_vault_mode", side_effect=uninitialized),
+            patch("yoetz.cli.elevated._service_vault_state", side_effect=uninitialized),
             patch("yoetz.cli.elevated.run_human_ceremony", side_effect=ceremony),
         ):
             result = CliRunner().invoke(

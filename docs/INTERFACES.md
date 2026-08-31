@@ -1935,8 +1935,12 @@ discards each strictly by proof against the vault envelope. No MCP method, ordin
 config value, environment value, argv value, stdin path, or log field can carry the secret.
 Active-slot deletion is not exposed until it can be atomically coupled to a human-known passphrase
 rewrap; a staged slot is deleted, with verified read-back, only after proof that no vault envelope
-depends on it (the accepting unlock disproved it, or the live service reports the vault
-uninitialized), so generated-passphrase installations cannot be stranded.
+depends on it (the accepting unlock disproved it, or the live service reports a locked,
+uninitialized vault). CLI-side staging, promotion, and proof-based discard serialize on a
+bundle-scoped advisory lock held by the initializing process for its whole
+stage→ceremony→promote span and re-checked by discard-only callers while held, so a stale status
+read can never delete a credential whose vault commit is in flight, and generated-passphrase
+installations cannot be stranded.
 
 `SecretMemoryPort` exposes `capability`, `capture`, `allocate`, and `close` over opaque one-shot
 `SecretHandle` values. `SecretPurpose` is exactly `vault_initialize`, `vault_unlock`,

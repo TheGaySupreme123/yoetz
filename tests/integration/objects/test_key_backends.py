@@ -190,6 +190,27 @@ def test_staged_initialization_leftover_refuses_a_second_staging(tmp_path: Path)
     assert base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)) == bytes(first)
 
 
+def test_staged_initialization_guard_is_exclusive_per_bundle(tmp_path: Path) -> None:
+    """#511 review: staging, promotion, and proof-based discard serialize on one bundle lock."""
+
+    backend = _AtomicBackend()
+    bundle = tmp_path.resolve()
+    holder = AutoUnlockPassphraseStore(bundle, backend=backend)
+    contender = AutoUnlockPassphraseStore(bundle, backend=backend)
+    holder._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+    contender._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    with holder.staged_initialization_guard():
+        with pytest.raises(OSKeyringError) as exc:
+            with contender.staged_initialization_guard():
+                pass
+        assert exc.value.reason == "initialization_in_progress"
+
+    # Released on exit: the contender can now take it.
+    with contender.staged_initialization_guard():
+        pass
+
+
 def test_staged_initialization_is_a_restart_unlock_candidate(tmp_path: Path) -> None:
     backend = _AtomicBackend()
     store = AutoUnlockPassphraseStore(tmp_path.resolve(), backend=backend)

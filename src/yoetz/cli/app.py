@@ -2105,13 +2105,31 @@ async def _service_auto_unlock_repair(json_output: bool) -> int:
     except ControlError as error:
         return _control_failure(error)
     if status.vault_mode == "uninitialized":
-        # The service just proved no vault envelope exists that a staged-initialization secret
-        # could unlock, so an orphan left by a failed initialization attempt (#511) is removed
-        # here with verified read-back. Active entries are never deleted by this command.
+        # An orphan left by a failed initialization attempt (#511) is removed with verified
+        # read-back, but only under the bundle-scoped guard with the vault state re-proven
+        # while it is held: no initializer can stage, commit, or promote while the guard is
+        # taken, so the status cannot go stale between the read and the delete. Active entries
+        # are never deleted by this command.
         orphan_store = _auto_unlock_store()
         if orphan_store.slot_report().get("staged_initialization") == "present":
             try:
-                orphan_store.discard_staged_initialization()
+                with orphan_store.staged_initialization_guard():
+                    try:
+                        client = await build_service_client()
+                        try:
+                            proven = await client.service_status()
+                        finally:
+                            await client.close()
+                    except ControlError as error:
+                        return _control_failure(error)
+                    if proven.state.value != "locked" or proven.vault_mode != "uninitialized":
+                        _stderr(
+                            "auto_unlock_repair_unproven: the vault state changed; rerun "
+                            "'yoetz service auto-unlock status'"
+                        )
+                        return 20
+                    if orphan_store.slot_report().get("staged_initialization") == "present":
+                        orphan_store.discard_staged_initialization()
             except OSKeyringError as error:
                 _stderr(f"auto_unlock_{error.reason}")
                 return 20

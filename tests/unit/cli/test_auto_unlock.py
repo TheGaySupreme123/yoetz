@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -61,6 +63,11 @@ class _Store:
     def discard_staged_initialization(self) -> None:
         self.staged_initialization = "absent"
         self.discarded += 1
+
+    @contextmanager
+    def staged_initialization_guard(self) -> Generator[None]:
+        self.guard_acquisitions = getattr(self, "guard_acquisitions", 0) + 1
+        yield
 
     def save(self, value: bytearray) -> None:
         self.saved = bytes(value)
@@ -250,7 +257,32 @@ async def test_auto_unlock_repair_discards_initialization_orphan_with_proof(
     assert report["outcome"] == "initialization_orphan_cleared"
     assert report["next_command"] == "yoetz consent prepare vault_initialize"
     assert store.discarded == 1
+    assert store.guard_acquisitions == 1, "discard must happen under the exclusive guard"
     assert client.closed
+
+
+@pytest.mark.anyio
+async def test_auto_unlock_repair_refuses_orphan_discard_when_reproof_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#511 review: the vault state is re-proven under the guard; a change refuses deletion."""
+
+    store = _Store(None, "auto_unlock_absent", staged_initialization="present")
+    first = _Client(state="locked", reason="none", vault_mode="uninitialized")
+    second = _Client(state="unlocking", reason="none", vault_mode="uninitialized")
+    clients = iter([first, second])
+    monkeypatch.setattr(module, "_auto_unlock_store", lambda: store)
+    monkeypatch.setattr(module, "build_service_client", lambda: _async_value(next(clients)))
+
+    assert (
+        await module._service_auto_unlock_repair(  # pyright: ignore[reportPrivateUsage]
+            True
+        )
+        == 20
+    )
+
+    assert "auto_unlock_repair_unproven" in capsys.readouterr().err
+    assert store.discarded == 0
 
 
 @pytest.mark.anyio
