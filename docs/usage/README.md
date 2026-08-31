@@ -11,6 +11,8 @@ the decisions behind it see [`docs/adr/`](../adr/).
   vocabulary, keys, and slash commands.
 - [The six operations](six-operations.md) — `start`, `publish_work`, `check`, `respond`, `status`,
   `receipt`, end to end.
+- [Importing bounded Codex JSONL](importing-codex-jsonl.md) — stage, review, authorize, and resume
+  one exact local `codex exec --json` import.
 - [Privacy and semantic review](privacy-and-semantic-review.md) — the zero-egress default, the
   policy profiles, and what changes when you turn external review on.
 - [Auto-approving an MCP route](auto-approving-agents.md) — the host-declared strict route that

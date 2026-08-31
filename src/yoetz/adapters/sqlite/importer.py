@@ -560,6 +560,28 @@ class SqliteImporter:
             ),
         )
 
+    async def release_lease_for_authorization(self, allocation: ImportAllocation) -> None:
+        """Make a prepared, unpublished plan immediately resumable after consent."""
+
+        now = self._clock.now_utc()
+        now_wire = format_rfc3339_millis(now)
+
+        def transaction(db: apsw.Connection) -> None:
+            self._begin(db)
+            try:
+                self._require_lease_row(db, allocation, {ImportPhase.PLAN_READY}, now)
+                db.execute(
+                    "UPDATE import_jobs SET job_revision=job_revision+1, lease_expires_at=?, "
+                    "updated_at=? WHERE source_identity_digest=?",
+                    (now_wire, now_wire, allocation.source_identity.identity_digest),
+                )
+                db.execute("COMMIT")
+            except BaseException:
+                self._rollback(db)
+                raise
+
+        await self._submit(transaction)
+
     async def record_batch(
         self, allocation: ImportAllocation, batch: ImportBatch, result: AppendResult
     ) -> ImportAllocation:
@@ -1220,6 +1242,24 @@ class SqliteImporter:
     ) -> ImportAllocation:
         identity = self._identity_from_row(row)
         source_ref = self._object_ref(cast(str, row[7]), ObjectKind.IMPORT_SOURCE)
+        manifest_ref = self._object_ref(cast(str, row[8]), ObjectKind.IMPORT_SOURCE_MANIFEST)
+        captured_source = CapturedImportSource(
+            source_object=source_ref,
+            source_commitment=cast(str, row[3]),
+            byte_count=cast(int, row[10]),
+            line_count=cast(int, row[11]),
+            final_newline=bool(row[12]),
+            metadata_digest=cast(str, row[20]),
+            codex_capability_profile_id=cast(str, row[4]),
+            codex_version=cast(str, row[13]),
+            exit_status=cast(int, row[15]),
+            source_kind=cast(Literal["file", "stdin"], row[14]),
+            capture_metadata_object=manifest_ref,
+            stderr_present=False,
+            stderr_captured_bytes=0,
+            stderr_truncated=False,
+            stderr_commitment=None,
+        )
         db = self._read_factory()
         try:
             batches = tuple(
@@ -1283,6 +1323,7 @@ class SqliteImporter:
             lease_expires_at=(
                 None if row[27] is None else timestamp_from_datetime(parse_rfc3339_millis(row[27]))
             ),
+            captured_source=captured_source,
             source_object=source_ref,
             source_commitment=cast(str, row[3]),
             plan_digest=cast(str | None, row[28]),

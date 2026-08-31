@@ -213,6 +213,10 @@ and keep each support claim bounded by its actual proof facets.
 
 ## Hooks and observation
 
+Cursor has no `codex exec --json` import surface. Issue #301's bounded import authorization makes
+no Cursor adapter change; Cursor evidence continues through cooperative MCP and native
+hook/observation paths.
+
 The native IDE plugin advertises only `sessionStart`, `sessionEnd`, `afterMCPExecution`,
 `afterFileEdit`, and `stop` for the pinned local profile. It intentionally excludes
 `afterAgentThought`. The portable CLI artifact advertises no hooks. SDK fixture metadata advertises

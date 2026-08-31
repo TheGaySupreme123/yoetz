@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
@@ -11,13 +12,22 @@ import pytest
 
 import yoetz.observability.diagnostics as diagnostics_module
 import yoetz.service.ready_composition as ready_composition_module
-from builders.ledger_adapters import FixedClock
+from builders.ledger_adapters import (
+    FixedClock,
+    append_command,
+    memory_adapter,
+    ownership_fence,
+    sqlite_adapter,
+)
 from builders.policy_cases import FRONTIER, make_case
+from yoetz.adapters.memory.ledger import MemoryLedgerAdapter
+from yoetz.adapters.sqlite.repository import SqliteLedger
 from yoetz.application.check import FinalSemanticEvaluation, semantic_coverage_gap_code
 from yoetz.application.egress import (
     PrivacyCoordinator,
     RepositoryGrantAdmission,
     SemanticEgressAwaitingHuman,
+    SemanticEgressBlocked,
     SemanticEgressProviderOutcome,
 )
 from yoetz.domain.findings import SamplingParams, SemanticDispatchKind, SemanticFailureClass
@@ -27,8 +37,10 @@ from yoetz.domain.privacy import (
     ChannelPolicy,
     DataClass,
     EgressChannel,
+    PrivacyOutcome,
     PrivacyPolicy,
     PrivacyProfile,
+    PrivacyReason,
     ProviderBinding,
     ReviewContextProfile,
     ReviewSelectionPolicy,
@@ -37,7 +49,10 @@ from yoetz.domain.receipts import (
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
 )
+from yoetz.ports.diagnostics import RuntimeCapability
+from yoetz.ports.importer import ImporterPort
 from yoetz.ports.ledger import CheckPhase, FrozenCase, OperationLease
+from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectSource, ObjectStorePort
 from yoetz.ports.privacy import (
     EffectivePrivacyPolicy,
     OutboundGatewayPort,
@@ -46,6 +61,7 @@ from yoetz.ports.privacy import (
     PrivacyPolicyStorePort,
     RepositoryPrivacyAuthority,
 )
+from yoetz.ports.runtime import TaskRuntime
 from yoetz.ports.semantic import ProviderAttemptProvenance, SemanticResultUnavailable
 from yoetz.ports.start_catalog import (
     SessionBinding,
@@ -53,7 +69,7 @@ from yoetz.ports.start_catalog import (
     TaskRoute,
     TaskRouteState,
 )
-from yoetz.protocol.canonical import canonical_digest
+from yoetz.protocol.canonical import canonical_digest, canonical_encode
 from yoetz.protocol.models import DataCategory, SemanticReason, SemanticStatus
 
 _TASK = "tsk_53000000-0000-4000-8000-000000000001"
@@ -175,21 +191,25 @@ class _PolicyApplication:
 
 
 class _Privacy:
-    def __init__(self, *, repository_granted: bool = True) -> None:
+    def __init__(self, *, repository_granted: bool = True, task_id: str = _TASK) -> None:
         self.calls = 0
+        self.resume_calls = 0
         self.repository_granted = repository_granted
+        self.task_id = task_id
         # Real policy path is required for dispatch; never mint synthetic policy identity.
         self.policy_application = _PolicyApplication(
             _test_effective_policy(), repository_granted=repository_granted
         )
         self.terminal_provider_result = False
+        self.resume_terminal: tuple[PrivacyOutcome, PrivacyReason] | None = None
+        self.cancel_on_resume = False
 
     async def activate_repository(self, scope: AuthorizationScope) -> bool:
         assert scope == AuthorizationScope(
             AuthorizationScopeKind.TASK,
             _INSTALLATION,
             _REPOSITORY,
-            _TASK,
+            self.task_id,
         )
         return self.repository_granted
 
@@ -259,13 +279,27 @@ class _Privacy:
             datetime(2030, 1, 1, tzinfo=UTC),
         )
 
+    async def resume(self, request_id: str, case_digest: str, deadline: object) -> object:
+        del case_digest, deadline
+        self.resume_calls += 1
+        if self.cancel_on_resume:
+            raise asyncio.CancelledError
+        assert self.resume_terminal is not None
+        outcome, reason = self.resume_terminal
+        return SemanticEgressBlocked(
+            request_id,
+            outcome,
+            reason,
+            privacy_proposal_id="ppr_53000000-0000-4000-8000-000000000001",
+        )
+
 
 class _Catalog:
     def __init__(self, route: TaskRoute | None) -> None:
         self.route = route
 
     async def resolve_route(self, session: str) -> TaskRoute | None:
-        assert session == _SESSION
+        assert self.route is None or session == self.route.session_id
         return self.route
 
     async def session_binding(self, session: str) -> SessionBinding | None:
@@ -310,6 +344,107 @@ def _frozen() -> FrozenCase:
             "sha256:" + "d" * 64,
         ),
     )
+
+
+def _route_for(task_id: str, session_id: str) -> TaskRoute:
+    route_generation = 1
+    bundle_relpath = f"tasks/{task_id}"
+    return TaskRoute(
+        task_id,
+        session_id,
+        bundle_relpath,
+        route_generation,
+        TaskRouteState.ACTIVE,
+        canonical_digest(
+            {
+                "task_id": task_id,
+                "bundle_relpath": bundle_relpath,
+                "route_generation": route_generation,
+            }
+        ),
+        _REPOSITORY,
+    )
+
+
+async def _durable_semantic_case(
+    adapter: MemoryLedgerAdapter | SqliteLedger,
+) -> tuple[FrozenCase, TaskRuntime]:
+    command = append_command()
+    await adapter.append_batch(command)
+    frozen = await adapter.freeze_case(
+        command.session_id,
+        command.writer_id,
+        1,
+        _REQUEST,
+        "sha256:" + "7" * 64,
+    )
+    assert type(frozen) is FrozenCase
+    operation = await adapter.lookup_operation(command.writer_id, _REQUEST)
+    assert operation is not None and operation.resume_object_ref is not None
+    prior = operation.resume_object_ref
+    local_canonical = canonical_encode(
+        {
+            "schema_version": "1.0.0",
+            "request_id": _REQUEST,
+            "request_digest": "sha256:" + "7" * 64,
+            "task_id": command.task_id,
+            "session_id": command.session_id,
+            "writer_id": command.writer_id,
+            "subject_frontier": frozen.case.frontier.as_wire(),
+            "dependency_digest": frozen.lease.dependency_digest,
+            "prior_resume": {
+                "object_id": prior.object_id,
+                "envelope_digest": prior.envelope_digest,
+                "commitment": prior.commitment,
+            },
+            "policy_executions": (),
+            "assessments": (),
+        }
+    )
+    objects = cast(ObjectStorePort, adapter._objects)  # pyright: ignore[reportPrivateUsage]
+    staged = await objects.stage(
+        ObjectSource(data=local_canonical, declared_size=len(local_canonical)),
+        ObjectMetadata(
+            ObjectKind.DETERMINISTIC_RESULT,
+            "application/vnd.yoetz.deterministic-result+json",
+            command.task_id,
+            datetime(2026, 7, 19, 12, 0, tzinfo=UTC),
+        ),
+    )
+    local_result = await objects.finalize(staged)
+    lease = await adapter.advance_check_phase(
+        frozen.lease,
+        CheckPhase.RESERVED,
+        CheckPhase.LOCAL_READY,
+        local_result,
+    )
+    lease = await adapter.advance_check_phase(
+        lease,
+        CheckPhase.LOCAL_READY,
+        CheckPhase.SEMANTIC_WAIT,
+    )
+    runtime = TaskRuntime(
+        command.task_id,
+        command.session_id,
+        command.writer_id,
+        frozenset(
+            {
+                RuntimeCapability.WRITE,
+                RuntimeCapability.STRUCTURAL_READ,
+                RuntimeCapability.PAYLOAD_READ,
+                RuntimeCapability.SEMANTIC,
+            }
+        ),
+        adapter,
+        objects,
+        cast(ImporterPort, object()),
+        "0.1.0",
+        "0.1.0",
+        "0.1",
+        "1.0.0",
+        ownership_fence(),
+    )
+    return FrozenCase(frozen.case, lease), runtime
 
 
 def _evaluator(
@@ -427,6 +562,216 @@ async def test_exact_same_request_resumes_after_trusted_grant_to_terminal_provid
     )
     assert resumed.continuation is None
     assert provider_resolutions == privacy.calls == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "adapter_factory",
+    (memory_adapter, sqlite_adapter),
+    ids=("memory", "sqlite"),
+)
+@pytest.mark.parametrize(
+    ("terminal", "expected"),
+    (
+        (
+            (PrivacyOutcome.HUMAN_DENIED, PrivacyReason.HUMAN_DENIED),
+            (SemanticStatus.HUMAN_DENIED, SemanticReason.HUMAN_DENIED),
+        ),
+        (
+            (PrivacyOutcome.APPROVAL_EXPIRED, PrivacyReason.AUTHORIZATION_EXPIRED),
+            (SemanticStatus.APPROVAL_EXPIRED, SemanticReason.HUMAN_APPROVAL_EXPIRED),
+        ),
+        (
+            (PrivacyOutcome.BLOCKED_BY_POLICY, PrivacyReason.SCOPE_MISMATCH),
+            (SemanticStatus.BLOCKED_BY_POLICY, SemanticReason.SCOPE_NOT_AUTHORIZED),
+        ),
+    ),
+)
+async def test_disclosure_wait_replay_uses_resume_and_terminalizes_one_exact_attempt(
+    adapter_factory: Callable[[object], MemoryLedgerAdapter | SqliteLedger],
+    terminal: tuple[PrivacyOutcome, PrivacyReason],
+    expected: tuple[SemanticStatus, SemanticReason],
+) -> None:
+    command = append_command()
+    adapter = adapter_factory(command)
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _Privacy(task_id=runtime.task_id)
+    evaluator = cast(
+        Callable[[FrozenCase, tuple[object, ...], TaskRuntime], Awaitable[FinalSemanticEvaluation]],
+        _evaluator(
+            privacy,
+            lambda: _PROVIDER,
+            _route_for(runtime.task_id, runtime.session_id),
+        ),
+    )
+
+    waiting = await evaluator(frozen, (), runtime)
+    assert waiting.status is SemanticStatus.AWAITING_HUMAN
+    assert waiting.operation_lease is not None
+    job = await adapter.load_semantic_job(runtime.writer_id or "", _REQUEST)
+    assert job is not None
+    attempts = await adapter.list_semantic_attempts(job.job_id)
+    assert len(attempts) == 1 and attempts[0].state == "started"
+    original_attempt = attempts[0]
+
+    privacy.resume_terminal = terminal
+    resumed = await evaluator(
+        FrozenCase(frozen.case, waiting.operation_lease),
+        (),
+        runtime,
+    )
+
+    assert (resumed.status, resumed.reason) == expected
+    assert privacy.calls == 1
+    assert privacy.resume_calls == 1
+    terminal_job = await adapter.load_semantic_job(runtime.writer_id or "", _REQUEST)
+    assert terminal_job is not None and terminal_job.state == "failed"
+    terminal_attempts = await adapter.list_semantic_attempts(terminal_job.job_id)
+    assert len(terminal_attempts) == 1
+    assert terminal_attempts[0].attempt_id == original_attempt.attempt_id
+    assert terminal_attempts[0].provider_request_id == original_attempt.provider_request_id
+    assert terminal_attempts[0].state == "failed"
+    wait = await adapter.load_disclosure_wait(runtime.writer_id or "", _REQUEST)
+    assert wait is not None and wait.state == "resolved"
+
+
+@pytest.mark.anyio
+async def test_cancellation_while_resuming_a_wait_terminalizes_before_propagating() -> None:
+    command = append_command()
+    adapter = memory_adapter(command)
+    frozen, runtime = await _durable_semantic_case(adapter)
+    privacy = _Privacy(task_id=runtime.task_id)
+    evaluator = cast(
+        Callable[[FrozenCase, tuple[object, ...], TaskRuntime], Awaitable[FinalSemanticEvaluation]],
+        _evaluator(
+            privacy,
+            lambda: _PROVIDER,
+            _route_for(runtime.task_id, runtime.session_id),
+        ),
+    )
+    waiting = await evaluator(frozen, (), runtime)
+    assert waiting.operation_lease is not None
+    privacy.cancel_on_resume = True
+
+    with pytest.raises(asyncio.CancelledError):
+        await evaluator(FrozenCase(frozen.case, waiting.operation_lease), (), runtime)
+
+    job = await adapter.load_semantic_job(runtime.writer_id or "", _REQUEST)
+    assert job is not None and job.state == "failed"
+    assert job.terminal_code is SemanticReason.COORDINATOR_FAILURE
+    attempts = await adapter.list_semantic_attempts(job.job_id)
+    assert len(attempts) == 1 and attempts[0].state == "failed"
+    wait = await adapter.load_disclosure_wait(runtime.writer_id or "", _REQUEST)
+    assert wait is not None and wait.state == "resolved"
+    assert privacy.calls == privacy.resume_calls == 1
+
+
+@pytest.mark.anyio
+async def test_sqlite_restart_mid_wait_recovers_the_same_attempt_and_resume_route() -> None:
+    command = append_command()
+    original = sqlite_adapter(command)
+    frozen, runtime = await _durable_semantic_case(original)
+    privacy = _Privacy(task_id=runtime.task_id)
+    evaluator = cast(
+        Callable[[FrozenCase, tuple[object, ...], TaskRuntime], Awaitable[FinalSemanticEvaluation]],
+        _evaluator(
+            privacy,
+            lambda: _PROVIDER,
+            _route_for(runtime.task_id, runtime.session_id),
+        ),
+    )
+    waiting = await evaluator(frozen, (), runtime)
+    assert waiting.operation_lease is not None
+
+    original._db.execute(  # pyright: ignore[reportPrivateUsage]
+        "UPDATE bundle_meta SET value='2' WHERE key='owner_generation'"
+    )
+    restarted = SqliteLedger(
+        db=original._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=runtime.task_id,
+        ownership_fence=ownership_fence(generation=2),
+        clock=FixedClock(),
+        ids=original._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=original._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    restarted_runtime = replace(
+        runtime,
+        ledger=restarted,
+        fence=ownership_fence(generation=2),
+    )
+    recovered = await restarted.load_semantic_job(runtime.writer_id or "", _REQUEST)
+    assert recovered is not None and recovered.state == "leased"
+    recovered_attempts = await restarted.list_semantic_attempts(recovered.job_id)
+    assert len(recovered_attempts) == 1 and recovered_attempts[0].state == "started"
+    recovered_wait = await restarted.load_disclosure_wait(runtime.writer_id or "", _REQUEST)
+    assert recovered_wait is not None and recovered_wait.state == "awaiting"
+    reclaimed = await restarted.freeze_case(
+        runtime.session_id,
+        runtime.writer_id or "",
+        1,
+        _REQUEST,
+        "sha256:" + "7" * 64,
+    )
+    assert type(reclaimed) is FrozenCase
+
+    privacy.resume_terminal = (PrivacyOutcome.HUMAN_DENIED, PrivacyReason.HUMAN_DENIED)
+    result = await evaluator(
+        reclaimed,
+        (),
+        restarted_runtime,
+    )
+
+    assert (result.status, result.reason) == (
+        SemanticStatus.HUMAN_DENIED,
+        SemanticReason.HUMAN_DENIED,
+    )
+    terminal = await restarted.load_semantic_job(runtime.writer_id or "", _REQUEST)
+    assert terminal is not None and terminal.state == "failed"
+    attempts = await restarted.list_semantic_attempts(terminal.job_id)
+    assert len(attempts) == 1
+    assert attempts[0].attempt_id == recovered_attempts[0].attempt_id
+    assert attempts[0].provider_request_id == recovered_attempts[0].provider_request_id
+    assert privacy.calls == privacy.resume_calls == 1
+
+    # A second crash after the terminal semantic write but before the outer check commit must
+    # recover that terminal answer without calling either privacy entrypoint again.
+    assert result.operation_lease is not None
+    original._db.execute(  # pyright: ignore[reportPrivateUsage]
+        "UPDATE bundle_meta SET value='3' WHERE key='owner_generation'"
+    )
+    recovered_terminal = SqliteLedger(
+        db=original._db,  # pyright: ignore[reportPrivateUsage]
+        task_id=runtime.task_id,
+        ownership_fence=ownership_fence(generation=3),
+        clock=FixedClock(),
+        ids=original._ids,  # pyright: ignore[reportPrivateUsage]
+        objects=original._objects,  # pyright: ignore[reportPrivateUsage]
+    )
+    terminal_runtime = replace(
+        runtime,
+        ledger=recovered_terminal,
+        fence=ownership_fence(generation=3),
+    )
+    terminal_reclaimed = await recovered_terminal.freeze_case(
+        runtime.session_id,
+        runtime.writer_id or "",
+        1,
+        _REQUEST,
+        "sha256:" + "7" * 64,
+    )
+    assert type(terminal_reclaimed) is FrozenCase
+    replayed = await evaluator(
+        terminal_reclaimed,
+        (),
+        terminal_runtime,
+    )
+    assert (replayed.status, replayed.reason) == (
+        SemanticStatus.HUMAN_DENIED,
+        SemanticReason.HUMAN_DENIED,
+    )
+    replayed_wait = await recovered_terminal.load_disclosure_wait(runtime.writer_id or "", _REQUEST)
+    assert replayed_wait is not None and replayed_wait.state == "resolved"
+    assert privacy.calls == privacy.resume_calls == 1
 
 
 class _ClosingGateway:
