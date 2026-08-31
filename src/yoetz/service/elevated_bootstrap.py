@@ -1146,10 +1146,28 @@ def claim_pending_for_review(*, _state: Path | None = None) -> PendingElevatedCo
         return claimed
 
 
+_FAILURE_REASON_CHARACTERS: Final = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+
+
+def _validated_failure_reason(outcome: str, failure_reason: str | None) -> str | None:
+    if failure_reason is None:
+        return None
+    if outcome != "failed":
+        raise ElevatedBootstrapError("review_outcome_invalid")
+    if (
+        type(failure_reason) is not str
+        or not 0 < len(failure_reason) <= 128
+        or any(character not in _FAILURE_REASON_CHARACTERS for character in failure_reason)
+    ):
+        raise ElevatedBootstrapError("failure_reason_invalid")
+    return failure_reason
+
+
 def _complete_review_unlocked(
     pending: PendingElevatedConsent,
     *,
     outcome: str,
+    failure_reason: str | None = None,
     _state: Path | None = None,
 ) -> None:
     """Consume the claimed request exactly once for approval, denial, cancellation, or expiry."""
@@ -1158,6 +1176,7 @@ def _complete_review_unlocked(
         raise TypeError("pending_review_invalid")
     if outcome not in {"approved", "cancelled", "denied", "expired", "failed"}:
         raise ElevatedBootstrapError("review_outcome_invalid")
+    reason = _validated_failure_reason(outcome, failure_reason)
     claim = review_path(_state=_state)
     claimed = _load_pending_path(claim, _state=_state, expire=False)
     if claimed is None:
@@ -1168,27 +1187,30 @@ def _complete_review_unlocked(
         claim.unlink()
     except OSError as exc:
         raise ElevatedBootstrapError("pending_clear_failed") from exc
-    _audit(
-        {
-            "event": "review_consumed",
-            "pending_id": pending.pending_id,
-            "operation": pending.operation,
-            "outcome": outcome,
-        },
-        _state=_state,
-    )
+    event: dict[str, JsonValue] = {
+        "event": "review_consumed",
+        "pending_id": pending.pending_id,
+        "operation": pending.operation,
+        "outcome": outcome,
+    }
+    if reason is not None:
+        event["failure_reason"] = reason
+    _audit(event, _state=_state)
 
 
 def complete_review(
     pending: PendingElevatedConsent,
     *,
     outcome: str,
+    failure_reason: str | None = None,
     _state: Path | None = None,
 ) -> None:
     """Consume the claimed request exactly once for approval, denial, cancellation, or expiry."""
 
     with _PendingStateLock(_state):
-        _complete_review_unlocked(pending, outcome=outcome, _state=_state)
+        _complete_review_unlocked(
+            pending, outcome=outcome, failure_reason=failure_reason, _state=_state
+        )
 
 
 def projection_for_status(

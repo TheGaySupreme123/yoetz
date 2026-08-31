@@ -129,19 +129,32 @@ def _review_result(
         "trusted_console_presence", "agent_attested_chat_instruction"
     ] = "trusted_console_presence",
 ) -> dict[str, JsonValue]:
-    model = ConsentReviewResultModel.model_validate(
-        {
-            "schema": "yoetz.elevated-bootstrap.result/5",
-            "pending_id": pending.pending_id,
-            "operation": pending.operation,
-            "risk_class": pending.risk_class,
-            "outcome": outcome,
-            "danger_digest": pending.danger_digest,
-            "authority_channel": authority_channel,
-            "result": dict(result),
-        }
-    )
+    try:
+        model = ConsentReviewResultModel.model_validate(
+            {
+                "schema": "yoetz.elevated-bootstrap.result/5",
+                "pending_id": pending.pending_id,
+                "operation": pending.operation,
+                "risk_class": pending.risk_class,
+                "outcome": outcome,
+                "danger_digest": pending.danger_digest,
+                "authority_channel": authority_channel,
+                "result": dict(result),
+            }
+        )
+    except (TypeError, ValueError) as exc:
+        raise ElevatedBootstrapError("result_invalid") from exc
     return model.model_dump(mode="json", by_alias=True)
+
+
+def _validated_vault_success(result: object) -> dict[str, JsonValue]:
+    """Admit only the exact schema-admitted success; project a bounded failure otherwise."""
+
+    if type(result) is not VaultStateResult:
+        raise ElevatedBootstrapError("result_invalid")
+    if result.state != "ready" or result.reason != "succeeded":
+        raise ElevatedBootstrapError(f"vault_result_{result.reason}")
+    return {"state": result.state, "reason": result.reason}
 
 
 def _require_action_bound_user_presence() -> None:
@@ -177,9 +190,12 @@ async def review_elevated() -> dict[str, JsonValue]:
                 consumed = True
                 raise ElevatedBootstrapError("pending_expired")
             result = await _complete_approved(console, pending)
+            # Validate the projected result before the durable approval record exists: a
+            # result the schema does not admit must consume this review as failed.
+            payload = _review_result(pending, outcome="completed", result=result)
             complete_review(pending, outcome="approved")
             consumed = True
-            return _review_result(pending, outcome="completed", result=result)
+            return payload
     except TrustedConsoleError as exc:
         if pending is not None and not consumed:
             _consume_failed_review(pending, "cancelled")
@@ -190,15 +206,21 @@ async def review_elevated() -> dict[str, JsonValue]:
         if pending is not None and not consumed:
             _consume_failed_review(pending, "cancelled")
         raise ElevatedBootstrapError("review_cancelled") from exc
-    except BaseException:
+    except BaseException as exc:
         if pending is not None and not consumed:
-            _consume_failed_review(pending, "failed")
+            _consume_failed_review(pending, "failed", _bounded_failure_reason(exc))
         raise
 
 
-def _consume_failed_review(pending: PendingElevatedConsent, outcome: str) -> None:
+def _bounded_failure_reason(error: BaseException) -> str | None:
+    return error.reason if type(error) is ElevatedBootstrapError else None
+
+
+def _consume_failed_review(
+    pending: PendingElevatedConsent, outcome: str, failure_reason: str | None = None
+) -> None:
     try:
-        complete_review(pending, outcome=outcome)
+        complete_review(pending, outcome=outcome, failure_reason=failure_reason)
     except ElevatedBootstrapError:
         # Preserve the original bounded failure. A claim that could not be removed remains
         # fail-closed and prevents reuse or a second pending request.
@@ -305,17 +327,20 @@ async def authorize_elevated(
             }
         else:
             raise ElevatedBootstrapError("chat_user_operation_forbidden")
-        complete_review(pending, outcome="approved")
-        consumed = True
-        return _review_result(
+        # Validate the projected result before the durable approval record exists: a
+        # result the schema does not admit must consume this review as failed.
+        payload = _review_result(
             pending,
             outcome="completed",
             result=result,
             authority_channel="agent_attested_chat_instruction",
         )
-    except BaseException:
+        complete_review(pending, outcome="approved")
+        consumed = True
+        return payload
+    except BaseException as exc:
         if pending is not None and not consumed:
-            _consume_failed_review(pending, "failed")
+            _consume_failed_review(pending, "failed", _bounded_failure_reason(exc))
         raise
     finally:
         if provider_credential is not None:
@@ -366,9 +391,7 @@ async def _complete_vault_initialize(
     finally:
         if generated is not None:
             overwrite_secret_buffer(generated)
-    if type(result) is not VaultStateResult:
-        raise ElevatedBootstrapError("result_invalid")
-    return {"state": result.state, "reason": result.reason}
+    return _validated_vault_success(result)
 
 
 async def _complete_vault_initialize_generated() -> dict[str, JsonValue]:
@@ -394,9 +417,7 @@ async def _complete_vault_initialize_generated() -> dict[str, JsonValue]:
     finally:
         if generated is not None:
             overwrite_secret_buffer(generated)
-    if type(result) is not VaultStateResult:
-        raise ElevatedBootstrapError("result_invalid")
-    return {"state": result.state, "reason": result.reason}
+    return _validated_vault_success(result)
 
 
 async def _complete_vault_passphrase_rotate_generated() -> dict[str, JsonValue]:
@@ -421,12 +442,11 @@ async def _complete_vault_passphrase_rotate_generated() -> dict[str, JsonValue]:
             passphrase=bytearray(current),
             vault_rewrap_secret=bytearray(replacement),
         )
-        if type(result) is not VaultStateResult:
-            raise ElevatedBootstrapError("result_invalid")
-        # Promote only after the service reports a completed rewrap. On any ambiguous failure the
-        # staged slot intentionally remains for daemon restart reconciliation.
+        # Promote only after the service reports the exact completed rewrap. On any failed or
+        # ambiguous outcome the staged slot intentionally remains for restart reconciliation.
+        validated = _validated_vault_success(result)
         store.promote_staged_rotation()
-        return {"state": result.state, "reason": result.reason}
+        return validated
     except ConfidentialClientError as exc:
         raise ElevatedBootstrapError(f"ceremony_{exc.reason}") from exc
     except HumanCeremonyCliError as exc:

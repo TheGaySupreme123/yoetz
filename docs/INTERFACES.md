@@ -2142,6 +2142,17 @@ helper generates and scoped-credential-store-verifies it before confidential sub
 unlock an already-locked vault. The six MCP tools (ADR-011) are unchanged; authorize is local
 CLI control.
 
+A consent action is recorded approved only after its operation result is validated as the exact
+success the review-result schema admits (issue #510). A ceremony that ends in any other state —
+for example a locked vault reporting `throttle_record_exists` — consumes the pending decision
+with audit outcome `failed` and a bounded `failure_reason`, prints
+`elevated_bootstrap: vault_result_<reason>` (`result_invalid` for a result outside the schema),
+and leaves no durable claim of approval, so failed execution stays distinguishable from denial,
+expiry, and completion. Retry is one new `yoetz consent prepare`, which rebinds the identical
+target digest for vault operations. A failed generated rotation never promotes the staged
+scoped-credential replacement; startup reconciliation still owns the staged slot. Recovery of a
+generated auto-unlock credential left behind by a failed initialization is owned by issue #511.
+
 The current public JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
 `review-result`, and `status`, each at version `5.0.0` under `schemas/consent/`; frozen versions
 `2.0.0` through `4.0.0` remain shipped for compatibility. The current version report is

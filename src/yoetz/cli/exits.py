@@ -234,6 +234,11 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
             "make the owner-only state directory accessible and writable from the supported host "
             "surface, then retry"
         ),
+        "result_invalid": (
+            "the operation produced a result the consent schema does not admit, so the "
+            "approval was recorded as failed and nothing was approved; run "
+            "'yoetz consent prepare <operation>' again, and report a defect if this recurs"
+        ),
         "workspace_unresolvable": (
             "the --workspace locator is empty, missing, symlinked, foreign-owned, or otherwise "
             "unsafe; pass the resolved path of a directory owned by the current user (host hooks "
@@ -247,4 +252,13 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
 def remediation_message(reason: str) -> str | None:
     """Return the next-step half of an operator-facing line for a bounded token, or None."""
 
-    return REMEDIATION_MESSAGES.get(reason)
+    message = REMEDIATION_MESSAGES.get(reason)
+    if message is None and reason.startswith("vault_result_"):
+        # One remediation for the whole family: the token names the exact service condition,
+        # and the consent approval was consumed as failed, never recorded as approved.
+        return (
+            "the vault ceremony finished without reaching its exact successful state, so the "
+            "approval was recorded as failed; inspect 'yoetz service status', resolve the "
+            "named condition, then run 'yoetz consent prepare <operation>' and authorize again"
+        )
+    return message
