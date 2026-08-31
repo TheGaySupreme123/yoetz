@@ -7,7 +7,11 @@ import hashlib
 from dataclasses import dataclass, replace
 from typing import Final, Literal, Protocol, cast
 
-from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
+from yoetz.application.unit_of_work import (
+    PreparedMutation,
+    PreSubmissionCancelled,
+    run_prepared_append,
+)
 from yoetz.domain.events import (
     CheckRecordedPayload,
     EventDraft,
@@ -373,19 +377,50 @@ async def _abandon_preappend_objects(
                     request_id=request_id,
                 )
 
-    cleanup = asyncio.create_task(abandon_all())
-    cancellation: asyncio.CancelledError | None = None
+    pending = abandon_all()
     try:
-        await asyncio.shield(cleanup)
-    except asyncio.CancelledError as exc:
-        cancellation = exc
-    while not cleanup.done():
+        cleanup = asyncio.create_task(pending)
+    except RuntimeError as exc:
+        # A closing loop cannot host the cleanup task at all. Closing the un-started coroutine
+        # keeps it from becoming an unawaited warning, and the caller still gets its classified
+        # persist failure; the exact objects stay eligible for generation-fenced GC.
+        pending.close()
+        record_classified_exception_without_raising(
+            exc,
+            component="application.receipt",
+            operation="receipt_object_abandon_failed",
+            request_id=request_id,
+        )
+        return
+    current = asyncio.current_task()
+    cancellation: asyncio.CancelledError | None = None
+    while True:
         try:
             await asyncio.shield(cleanup)
         except asyncio.CancelledError as exc:
-            if cancellation is None:
+            # ``shield`` reports two different facts with one exception type: a cancellation
+            # requested against this task, and the cleanup task itself ending cancelled. Only the
+            # first defers to the caller. The second is a cleanup failure, recorded below, and
+            # must never become the error the caller sees in place of its classified persist
+            # failure.
+            if cancellation is None and current is not None and current.cancelling():
                 cancellation = exc
-    cleanup.result()
+        if cleanup.done():
+            break
+    try:
+        # Retrieve the definite cleanup outcome so a failed task never becomes an unobserved
+        # exception, but never let it replace the classified public error the caller needs to
+        # retry. ``abandon_all`` already absorbs ``Exception``; this guards the BaseException
+        # escapes (a cancellation raised inside an adapter, interpreter shutdown) the same way
+        # ``unit_of_work._await_definite`` guards its own commit task.
+        cleanup.result()
+    except BaseException as exc:
+        record_classified_exception_without_raising(
+            exc,
+            component="application.receipt",
+            operation="receipt_object_abandon_failed",
+            request_id=request_id,
+        )
     if cancellation is not None:
         raise cancellation
 
@@ -859,7 +894,14 @@ async def execute_receipt(app: Application, request: ReceiptRequest) -> ReceiptI
         except BaseException:
             await _abandon_preappend_objects(runtime, staged_objects, request_id=request.request_id)
             raise
-        result = await run_prepared_append(runtime.ledger, prepared)
+        try:
+            result = await run_prepared_append(runtime.ledger, prepared)
+        except PreSubmissionCancelled:
+            # The commit boundary refused the mutation before the ledger coroutine was ever
+            # started, so no durable write can reference either object. Every other failure or
+            # cancellation from here on leaves an ambiguous commit outcome and must not abandon.
+            await _abandon_preappend_objects(runtime, staged_objects, request_id=request.request_id)
+            raise
         return _internal_result(request, document, receipt_ref, digest, result.result_frontier)
     except ProtocolValueError as exc:
         raise _error(PublicErrorCode.INVALID_REQUEST, "The receipt request is invalid.") from exc

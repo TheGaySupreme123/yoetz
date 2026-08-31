@@ -1260,13 +1260,16 @@ site with a bounded exception-class reason and optional `yoetz` origin; the daem
 id on the `ok:false` envelope and does not mint an `internal_error` diagnostic. Pre-append object
 `stage`/`finalize` I/O on a fresh receipt is retryable `STORAGE_UNSAFE` because nothing has
 committed. `execute_receipt` retains both stage handles until the complete prepared append exists.
-Any failure or cancellation before ledger submission abandons both exact stages in reverse order,
-including a file renamed before a failing directory fsync, so a second-object failure cannot
-accumulate one finalized receipt per retry. The cleanup runs in a shielded task to a definite
-outcome before cancellation propagates. Cleanup failure never hides the original public error, and
-the exact unreferenced object remains eligible for delayed generation-fenced orphan GC. After
-ledger submission begins, receipt code never abandons either object because commit outcome may be
-ambiguous.
+Any failure or cancellation while the prepared append is still being built abandons both exact
+stages in reverse order, including a file renamed before a failing directory fsync, so a
+second-object failure cannot accumulate one finalized receipt per retry. Cancellation the commit
+boundary itself refuses ahead of submission — `PreSubmissionCancelled`, raised only where the port
+coroutine has not been created or has been closed unstarted — abandons them on the same terms.
+Every other outcome of the submitted append, cancellation included, leaves both objects alone
+because the commit outcome may be ambiguous; abandonment is never inferred from an uncertified
+cancellation. The cleanup runs in a shielded task to a definite outcome before cancellation
+propagates. Cleanup failure never hides the original public error, and the exact unreferenced
+object remains eligible for delayed generation-fenced orphan GC.
 Receipt replay binding mismatches use the same application-site correlation contract with one of
 the closed structural reasons `receipt_digest_mismatch`, `receipt_id_mismatch`,
 `receipt_frontier_mismatch`, `receipt_conclusion_mismatch`, or
@@ -1505,9 +1508,11 @@ repository-privacy commitment, and cannot select or inherit disclosure authority
   non-publishing, used to build a logical request digest before object publication;
 - `stage(ObjectSource, ObjectMetadata) -> StagedObject`;
 - `finalize(StagedObject) -> ObjectRef`;
-- `abandon(StagedObject) -> None` — idempotently remove the exact caller-owned temp or finalized
+- `abandon(StagedObject) -> None` — idempotently remove the exact caller-owned temp *and* finalized
   bytes only while the caller can prove that its reference has not been submitted to a durable
-  owner; a byte mismatch fails closed and an abandoned stage cannot be finalized later;
+  owner; a byte mismatch fails closed and an abandoned stage cannot be finalized later. Both
+  locations are attempted even when one fails, so a temp-path fault cannot strand the finalized
+  copy; the first failure is raised and the stage stays un-abandoned so a retry re-attempts both;
 - `resolve_verified(object_id, envelope_digest) -> ObjectRef` — bounded exact finalized-object
   resolution for catalog-pinned START crash resume; deterministic verification failures raise
   `ValueError("object_verification_failed")`, while environmental I/O re-raises `OSError` for the

@@ -224,6 +224,10 @@ async def test_abandon_removes_unadmitted_staged_and_finalized_objects(tmp_path:
 
         with pytest.raises(ValueError, match="object_verification_failed"):
             await _read(ref, store)
+        # The bytes are gone now, not merely unreferenced: the catalog-pinned resume path must
+        # not resolve an abandoned object on either adapter.
+        with pytest.raises(ValueError, match="object_verification_failed"):
+            await store.resolve_verified(ref.object_id, ref.envelope_digest)
         with pytest.raises(ValueError, match="abandoned_staged_object"):
             await store.finalize(staged)
 
@@ -231,6 +235,32 @@ async def test_abandon_removes_unadmitted_staged_and_finalized_objects(tmp_path:
         await store.abandon(unfinalized)
         with pytest.raises(ValueError, match="abandoned_staged_object"):
             await store.finalize(unfinalized)
+
+
+@pytest.mark.anyio
+async def test_abandon_leaves_no_staged_bytes_behind(tmp_path: Path) -> None:
+    """The file store unlinks the temp path; the memory oracle must not keep the frame.
+
+    Residency is not visible through ``ObjectStorePort`` on either adapter, so the two stores are
+    each checked where their bytes actually live: the staging directory for files, the staging
+    record for memory. Without this, the memory oracle silently retains every abandoned frame and
+    ``sweep_orphans`` never reclaims it, because it skips records already marked abandoned.
+    """
+
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    metadata = ObjectMetadata(ObjectKind.RECEIPT, "application/json", _TASK_ID, now)
+    memory, files = _stores(tmp_path, now)
+
+    memory_staged = await memory.stage(ObjectSource(data=b"{}"), metadata)
+    await memory.finalize(memory_staged)
+    await memory.abandon(memory_staged)
+    residual = memory._staging  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    assert [record.frame for record in residual.values()] == [b""]
+
+    files_staged = await files.stage(ObjectSource(data=b"{}"), metadata)
+    await files.finalize(files_staged)
+    await files.abandon(files_staged)
+    assert not tuple((tmp_path / "objects" / ".staging").iterdir())
 
 
 @pytest.mark.anyio

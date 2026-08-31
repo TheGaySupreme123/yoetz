@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import json
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ from yoetz.application.receipt import (  # noqa: SLF001
     _read_object,  # pyright: ignore[reportPrivateUsage]
     _stage_object,  # pyright: ignore[reportPrivateUsage]
 )
-from yoetz.observability.diagnostics import lookup_diagnostic_records
+from yoetz.observability.diagnostics import diagnostic_log_path, lookup_diagnostic_records
 from yoetz.ports.objects import (
     ObjectKind,
     ObjectMetadata,
@@ -287,3 +288,75 @@ async def test_abandon_finishes_every_stage_before_repeated_cancellation_propaga
     with pytest.raises(asyncio.CancelledError):
         await cleanup
     assert abandoned == [second.object_id, first.object_id]
+
+
+def _staged(object_id: str) -> StagedObject:
+    ref = _receipt_ref()
+    return StagedObject(
+        object_id,
+        ref.plaintext_size,
+        ref.commitment,
+        ref.envelope_digest,
+        ref.encryption_format,
+        ref.key_slot,
+        ref.metadata,
+        object(),
+    )
+
+
+def _abandon_diagnostics(root: Path) -> tuple[Mapping[str, object], ...]:
+    path = diagnostic_log_path(root=root)
+    if not path.is_file():
+        return ()
+    records: list[Mapping[str, object]] = []
+    for raw in path.read_bytes().splitlines():
+        if not raw.strip():
+            continue
+        parsed: object = json.loads(raw.decode("ascii"))
+        assert type(parsed) is dict
+        source = cast(Mapping[str, object], parsed)
+        if source.get("operation") == "receipt_object_abandon_failed":
+            records.append(source)
+    return tuple(records)
+
+
+async def test_abandon_never_replaces_the_caller_error_with_a_base_exception(
+    _diagnostic_dir: Path,
+) -> None:
+    """A cleanup escape stays a diagnostic; the caller keeps its classified retryable error."""
+
+    staged = _staged("obj_ffffffff-0000-4000-8000-000000000003")
+
+    async def abandon(_staged: StagedObject) -> None:
+        raise asyncio.CancelledError
+
+    runtime = cast(TaskRuntime, SimpleNamespace(objects=SimpleNamespace(abandon=abandon)))
+    # No raise: the caller's ``raise`` after cleanup must be the one that reaches the client.
+    await _abandon_preappend_objects(runtime, (staged,), request_id=_REQUEST_ID)
+    assert len(_abandon_diagnostics(_diagnostic_dir)) == 1
+
+
+async def test_abandon_records_a_diagnostic_when_the_cleanup_task_cannot_start(
+    _diagnostic_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A closing loop refuses ``create_task`` outside the cleanup task entirely."""
+
+    staged = _staged("obj_ffffffff-0000-4000-8000-000000000004")
+    abandoned: list[str] = []
+
+    async def abandon(staged_object: StagedObject) -> None:
+        abandoned.append(staged_object.object_id)
+
+    def refuse_task(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("Event loop is closed")
+
+    runtime = cast(TaskRuntime, SimpleNamespace(objects=SimpleNamespace(abandon=abandon)))
+    monkeypatch.setattr(asyncio, "create_task", refuse_task)
+    # This path never suspends, so the patched factory is restored before the loop needs it again.
+    await _abandon_preappend_objects(runtime, (staged,), request_id=_REQUEST_ID)
+    monkeypatch.undo()
+
+    assert abandoned == []
+    records = _abandon_diagnostics(_diagnostic_dir)
+    assert len(records) == 1
+    assert records[0]["reason"] == "exception_runtime_error"

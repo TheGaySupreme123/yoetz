@@ -20,10 +20,13 @@ reverse-chronological released versions.
 ### Fixed
 
 - Receipt creation now abandons both exact caller-owned object stages when the payload object's
-  stage/finalize fails before ledger submission. This removes a receipt file even when its rename
-  completed before a directory-fsync error, preserves the retryable `STORAGE_UNSAFE` result if
-  cleanup itself fails, waits for exact cleanup before propagating cancellation, and lets the
-  identical request retry without accumulating one finalized orphan per attempt (issue #339).
+  stage/finalize fails before ledger submission, and equally when the commit boundary refuses the
+  append ahead of submission because cancellation is already pending. This removes a receipt file
+  even when its rename completed before a directory-fsync error, attempts both owned locations so
+  a temp-path fault cannot strand the finalized copy, preserves the retryable `STORAGE_UNSAFE`
+  result if cleanup itself fails or cannot start, waits for exact cleanup before propagating
+  cancellation, and lets the identical request retry without accumulating one finalized orphan per
+  attempt (issue #339).
 
 - Frontier-motion delivery marks now retain the announced head digest and are compared with the
   routed ledger's actual current frontier. A same-task restore below the delivered high-water (or

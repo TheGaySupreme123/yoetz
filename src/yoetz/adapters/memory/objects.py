@@ -231,6 +231,11 @@ class MemoryObjectStore:
                 raise ValueError("object_destination_collision")
             self._durable.pop(staged.object_id, None)
             self._allocated_ids.discard(staged.object_id)
+            # Parity with the file store, which unlinks both the temp and the final path: the
+            # staged bytes go too, not only the durable admission. The record itself stays so a
+            # repeat abandon is idempotent and a later finalize still fails closed, mirroring the
+            # file store's retained ``_StageState``; the orphan sweep never revisits it.
+            record.frame = b""
             record.finalized = None
             record.abandoned = True
 

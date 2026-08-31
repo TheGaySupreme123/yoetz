@@ -18,6 +18,7 @@ from yoetz.application.unit_of_work import (
     CatalogQuarantine,
     CommitResolution,
     PreparedMutation,
+    PreSubmissionCancelled,
     resolve_ambiguous_operation,
     resolve_ambiguous_start,
     run_catalog_transition,
@@ -435,11 +436,14 @@ async def test_cancellation_during_commit_waits_for_definite_outcome_then_rerais
     await asyncio.sleep(0)
     assert not task.done()
     adapter.release.set()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as caught:
         await task
     assert adapter.committed
     assert adapter.calls == 1
     assert adapter.events == ["port_commit_begin", "port_commit_done"]
+    # A submitted commit is ambiguous, so it must never carry the pre-submission certificate that
+    # licenses a caller to abandon its finalized objects.
+    assert not isinstance(caught.value, PreSubmissionCancelled)
 
 
 @pytest.mark.anyio
@@ -453,9 +457,10 @@ async def test_cancellation_pending_before_submission_never_calls_port() -> None
         current.cancel()
         await run_prepared_append(_ledger(adapter), prepared)
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(PreSubmissionCancelled):
         await cancelled_caller()
     assert adapter.calls == 0
+    assert issubclass(PreSubmissionCancelled, asyncio.CancelledError)
 
 
 @pytest.mark.anyio
