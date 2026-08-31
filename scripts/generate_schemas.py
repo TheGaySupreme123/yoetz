@@ -1403,6 +1403,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "4.0.0",
         "request_result",
         "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/catalog-5.0.0.schema.json",
+        "catalog",
+        "5.0.0",
+        "request_result",
+        "local-control",
         lambda: (
             __import__(
                 "yoetz.protocol.consent", fromlist=["ConsentCatalogModel"]
@@ -1443,6 +1451,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "4.0.0",
         "request_result",
         "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/pending-agent-5.0.0.schema.json",
+        "pending-agent",
+        "5.0.0",
+        "request_result",
+        "local-control",
         lambda: (
             __import__(
                 "yoetz.protocol.consent", fromlist=["AgentSafePendingModel"]
@@ -1469,6 +1485,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "consent/prepare-result-4.0.0.schema.json",
         "prepare-result",
         "4.0.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/prepare-result-5.0.0.schema.json",
+        "prepare-result",
+        "5.0.0",
         "request_result",
         "local-control",
         lambda: (
@@ -1499,6 +1523,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "4.0.0",
         "request_result",
         "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/review-result-5.0.0.schema.json",
+        "review-result",
+        "5.0.0",
+        "request_result",
+        "local-control",
         lambda: (
             __import__(
                 "yoetz.protocol.consent", fromlist=["ConsentReviewResultModel"]
@@ -1525,6 +1557,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "consent/status-4.0.0.schema.json",
         "status",
         "4.0.0",
+        "request_result",
+        "local-control",
+        None,
+    ),
+    _RegistryEntry(
+        "consent/status-5.0.0.schema.json",
+        "status",
+        "5.0.0",
         "request_result",
         "local-control",
         lambda: (

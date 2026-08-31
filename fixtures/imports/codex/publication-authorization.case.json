@@ -1,0 +1,60 @@
+{
+  "controls": {
+    "clock": "fixture_supplied",
+    "external_io": "forbidden",
+    "network": "forbidden",
+    "randomness": "forbidden"
+  },
+  "expected": {
+    "changed_target_refused": true,
+    "denial_publishes_nothing": true,
+    "grant_carried_in_request": false,
+    "one_use": true,
+    "reviewer_egress_changed": false,
+    "target_digest": "sha256:b4491fda2db4152de47afbca7bb1be84645f9d90c6d86c25063142b53c2ff999"
+  },
+  "fixture_id": "IMP-010",
+  "fixture_schema": "yoetz.fixture-case/1.0.0",
+  "fixture_version": "1.0.0",
+  "input": {
+    "target": {
+      "batch_count": 1,
+      "candidate_count_upper_bound": 6,
+      "capture_manifest_commitment": "hmac-sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "codex_capability_profile_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "codex_capability_profile_id": "codex-exec-jsonl/0.139.0/v1",
+      "codex_version": "0.139.0",
+      "complete_transcript_included": false,
+      "gap_count_upper_bound": 3,
+      "mapping_version": "codex-jsonl/1.0.0",
+      "max_batches": 1024,
+      "max_events_per_batch": 100,
+      "max_excerpt_bytes": 8192,
+      "max_line_bytes": 1048576,
+      "max_lines": 20000,
+      "max_source_bytes": 4194304,
+      "publication_count": 2,
+      "publication_plan_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "reasoning_items_included": false,
+      "reviewer_egress_changed": false,
+      "schema": "yoetz.import-publication-target/1",
+      "session_id": "ses_10000000-0000-4000-8000-000000000002",
+      "source_byte_count": 120,
+      "source_identity_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "source_line_count": 3,
+      "task_id": "tsk_10000000-0000-4000-8000-000000000001",
+      "writer_id": "wri_10000000-0000-4000-8000-000000000003"
+    }
+  },
+  "minimum_versions": {
+    "engine": "0.1.0",
+    "fixture_schema": "1.0.0",
+    "protocol": "0.1"
+  },
+  "owns_requirements": [
+    "ADR-015:single-use-consent",
+    "ADR-016:exact-review-target",
+    "issue-301:bounded-import-publication"
+  ],
+  "purpose": "Golden exact-target and non-bearer authority facts for one bounded Codex JSONL import publication."
+}

@@ -5,7 +5,8 @@ console review; amended 2026-08-09 for agent-attested current-chat authorize (is
 2026-08-18 for atomic concurrent review claims (issue #344); amended 2026-08-21 to assign portable
 plugin artifact and host-activation mutation to `review_only` (issue #149, ADR-023; implementation
 owned by #150); amended 2026-08-25 to keep Codex marketplace/MCP removal on the ADR-012
-digest-bound `--accept` lane rather than `plugin_artifact_apply` (issue #419).
+digest-bound `--accept` lane rather than `plugin_artifact_apply` (issue #419); amended 2026-08-30
+for exact bounded Codex JSONL import publication (issue #301).
 **Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
 `src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`,
 `src/yoetz/protocol/consent.py`, `src/yoetz/protocol/chat_user_authority.py`, and
@@ -28,7 +29,7 @@ documents that Yoetz cannot independently authenticate its chat provenance.
 | `default_safe` | MCP `start`/`publish_work`/`check`/`respond`/`status`/`receipt`; privacy tighten | No consent ceremony | None |
 | `secret_ingress` | vault initialize; provider credential set/rotate | Trusted console review, or agent-attested current-chat authorize for credential set/rotate only | Trusted confidential ceremony; chat authorize may supply one-shot credential after warning |
 | `secret_reauth` | idle-relock weakening; some privacy widening | Trusted review plus owning reauthentication | Trusted confidential ceremony only |
-| `review_only` | backup/restore/migrate execute; skill or harness configuration | Trusted review of exact plan digest | None |
+| `review_only` | exact Codex JSONL import publication; backup/restore/migrate execute; skill or harness configuration | Trusted review or, for the exact prepared import only, agent-attested current-chat authorize | None |
 | `privacy_widen` | repository privacy grant; privacy policy widen; disclosure approve | Trusted local privacy TUI, or agent-attested current-chat authorize for exact recipe grant | Owning ceremony when required |
 
 ## Decisions
@@ -38,10 +39,10 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    `implemented=false` cannot be prepared.
 
 2. **Agent-safe contracts.** Catalog, pending projection, prepare result, review result, and status
-   publish current v4 contracts in `schemas/consent/`; the frozen v2 and v3 bytes remain shipped for
+   publish current v5 contracts in `schemas/consent/`; the frozen v2-v4 bytes remain shipped for
    compatibility. They contain no reusable approval value, generated passphrase, or credential.
-   The v4 pending projection includes only a bounded recipe and an authorize command for operations
-   that actually support agent-chat authorization.
+   The v5 pending projection adds the closed, content-free `import_publication_preview` only for
+   an importer-prepared request.
 
 3. **One pending request.** One owner-only request with a 15-minute TTL may exist. The trusted
    reviewer atomically claims it by creating a no-clobber hard-link review marker. Marker creation
@@ -58,7 +59,8 @@ documents that Yoetz cannot independently authenticate its chat provenance.
 5. **Agent-attested current-chat authorize (issue #164).** When the user explicitly asks the agent
    in the current chat for help
    with an exact prepared setup action, `yoetz consent authorize` may complete
-   `provider_credential_set`, `provider_credential_rotate`, or `repository_privacy_grant` under a
+   `provider_credential_set`, `provider_credential_rotate`, `repository_privacy_grant`, or one
+   importer-prepared `import_publication` under a
    `yoetz.chat-user-attestation/1` envelope. The envelope is an agent assertion, not independent
    proof; a compromised agent can forge it. Catalog rules expose that limitation directly through
    `agent_attestation_is_independent_proof=false` and
@@ -80,6 +82,16 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    idle-relock weakening, and generic `privacy_policy_widen` remain catalogued but unimplemented
    until the owning mutation boundary consumes this single-shot review safely.
    `repository_privacy_grant` is the implemented exact-recipe privacy path for chat-user authorize.
+
+   **Amendment (2026-08-30, issue #301).** `import_publication` is implemented as a one-use
+   `review_only` operation. The first import call durably stores its encrypted source and exact
+   publication plan, exposes only the bounded structural preview through consent status, releases
+   its lease, and returns `PRIVACY_AUTHORITY_REQUIRED`. Approval creates no bearer token: an
+   owner-only internal record binds the source identity, capture manifest, plan, target task and
+   session, profile/version, mapping version, counts, and limits. Replaying the identical import
+   resumes publication; target drift fails closed. The record survives restart until terminal
+   completion and is then consumed. This is intake authority only and does not widen reviewer
+   egress, add an MCP tool, or authorize another import.
 
    **Amendment (ADR-023, 2026-08-21, issue #149):** the skill/harness-configuration slice of
    `review_only` is the accepted owning boundary for standalone portable plugin artifact
