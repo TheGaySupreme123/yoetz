@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -57,6 +60,249 @@ def _binding(executable: Path, home: Path):
         model="gpt-5.6-sol",
         reasoning_effort="high",
     )
+
+
+def _write_codex_package_layout(
+    root: Path,
+    *,
+    nested: bool,
+    native_manifest: Mapping[str, object] | None = None,
+    wrapper_manifest: Mapping[str, object] | None = None,
+    native_bytes: bytes = b"native-codex",
+) -> tuple[Path, Path]:
+    wrapper_root = root / "node_modules" / "@openai" / "codex"
+    wrapper_bin = wrapper_root / "bin"
+    wrapper_bin.mkdir(parents=True, exist_ok=True)
+    wrapper = wrapper_bin / "codex.js"
+    wrapper.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    wrapper_document: Mapping[str, object] = (
+        {
+            "name": "@openai/codex",
+            "version": module.CODEX_EVALUATOR_RUNTIME_VERSION,
+            "bin": {"codex": "bin/codex.js"},
+            "optionalDependencies": {
+                "@openai/codex-darwin-arm64": module._CODEX_NATIVE_PACKAGE_SPEC  # pyright: ignore[reportPrivateUsage]
+            },
+        }
+        if wrapper_manifest is None
+        else wrapper_manifest
+    )
+    (wrapper_root / "package.json").write_text(json.dumps(wrapper_document), encoding="utf-8")
+
+    native_root = (
+        wrapper_root / "node_modules" / "@openai" / "codex-darwin-arm64"
+        if nested
+        else wrapper_root.parent / "codex-darwin-arm64"
+    )
+    native_bin = native_root / "vendor" / "aarch64-apple-darwin" / "bin"
+    native_bin.mkdir(parents=True, exist_ok=True)
+    native = native_bin / "codex"
+    native.write_bytes(native_bytes)
+    native.chmod(0o700)
+    native_document: Mapping[str, object] = (
+        {
+            "name": "@openai/codex",
+            "version": module._CODEX_NATIVE_PACKAGE_VERSION,  # pyright: ignore[reportPrivateUsage]
+            "os": ["darwin"],
+            "cpu": ["arm64"],
+        }
+        if native_manifest is None
+        else native_manifest
+    )
+    (native_root / "package.json").write_text(json.dumps(native_document), encoding="utf-8")
+    return wrapper, native
+
+
+def test_codex_package_layout_resolves_nested_optional_dependency_before_digest(
+    tmp_path: Path,
+) -> None:
+    wrapper, native = _write_codex_package_layout(tmp_path, nested=True)
+
+    assert module._resolve_codex_package_layout(wrapper) == native  # pyright: ignore[reportPrivateUsage]
+
+
+def test_codex_package_layout_resolves_npm_prefix_hoisted_sibling(tmp_path: Path) -> None:
+    wrapper, native = _write_codex_package_layout(tmp_path, nested=False)
+
+    assert module._resolve_codex_package_layout(wrapper) == native  # pyright: ignore[reportPrivateUsage]
+
+
+def test_codex_package_layout_nested_candidate_has_deterministic_precedence(
+    tmp_path: Path,
+) -> None:
+    wrapper, nested_native = _write_codex_package_layout(
+        tmp_path, nested=True, native_bytes=b"nested"
+    )
+    _, hoisted_native = _write_codex_package_layout(tmp_path, nested=False, native_bytes=b"hoisted")
+
+    assert nested_native != hoisted_native
+    assert module._resolve_codex_package_layout(wrapper) == nested_native  # pyright: ignore[reportPrivateUsage]
+
+
+def test_codex_package_layout_does_not_fall_back_after_invalid_nested_candidate(
+    tmp_path: Path,
+) -> None:
+    wrapper, _ = _write_codex_package_layout(
+        tmp_path,
+        nested=True,
+        native_manifest={
+            "name": "@openai/codex",
+            "version": "0.0.0-darwin-arm64",
+            "os": ["darwin"],
+            "cpu": ["arm64"],
+        },
+    )
+    _write_codex_package_layout(tmp_path, nested=False)
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("manifest_kind", "field", "value"),
+    [
+        ("wrapper", "name", "@openai/not-codex"),
+        ("wrapper", "version", "0.150.0"),
+        ("wrapper", "bin", {"codex": "other.js"}),
+        ("wrapper", "optionalDependencies", {}),
+        ("native", "name", "@openai/not-codex"),
+        ("native", "version", "0.150.0-darwin-arm64"),
+        ("native", "os", ["linux"]),
+        ("native", "cpu", ["x64"]),
+    ],
+)
+def test_codex_package_layout_rejects_mismatched_package_metadata(
+    tmp_path: Path, manifest_kind: str, field: str, value: object
+) -> None:
+    if manifest_kind == "wrapper":
+        wrapper_manifest: dict[str, object] = {
+            "name": "@openai/codex",
+            "version": module.CODEX_EVALUATOR_RUNTIME_VERSION,
+            "bin": {"codex": "bin/codex.js"},
+            "optionalDependencies": {
+                "@openai/codex-darwin-arm64": module._CODEX_NATIVE_PACKAGE_SPEC  # pyright: ignore[reportPrivateUsage]
+            },
+        }
+        wrapper_manifest[field] = value
+        wrapper, _ = _write_codex_package_layout(
+            tmp_path, nested=True, wrapper_manifest=wrapper_manifest
+        )
+    else:
+        native_manifest: dict[str, object] = {
+            "name": "@openai/codex",
+            "version": module._CODEX_NATIVE_PACKAGE_VERSION,  # pyright: ignore[reportPrivateUsage]
+            "os": ["darwin"],
+            "cpu": ["arm64"],
+        }
+        native_manifest[field] = value
+        wrapper, _ = _write_codex_package_layout(
+            tmp_path, nested=True, native_manifest=native_manifest
+        )
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_codex_package_layout_does_not_search_ancestors_or_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    selected_root = tmp_path / "selected"
+    wrapper, native = _write_codex_package_layout(selected_root, nested=True)
+    shutil.rmtree(native.parents[3])
+    ancestor_native = selected_root / "node_modules" / "codex-darwin-arm64"
+    ancestor_native.mkdir(parents=True)
+    path_native = tmp_path / "path-entry" / "codex"
+    path_native.parent.mkdir()
+    path_native.write_bytes(b"path-native")
+    path_native.chmod(0o700)
+    monkeypatch.setenv("PATH", str(path_native.parent))
+
+    with pytest.raises(ValueError, match="codex_runtime_not_found"):
+        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_codex_package_layout_rejects_native_executable_symlink_escape(tmp_path: Path) -> None:
+    wrapper, native = _write_codex_package_layout(tmp_path, nested=True)
+    outside = tmp_path / "outside-codex"
+    outside.write_bytes(b"outside")
+    outside.chmod(0o700)
+    native.unlink()
+    native.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_codex_package_layout_rejects_native_package_symlink_escape(tmp_path: Path) -> None:
+    wrapper, native = _write_codex_package_layout(tmp_path, nested=True)
+    native_root = native.parents[3]
+    outside_root = tmp_path / "outside-native-package"
+    native_root.rename(outside_root)
+    native_root.symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_codex_package_layout_rejects_intermediate_dependency_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    wrapper, _native = _write_codex_package_layout(tmp_path, nested=True)
+    dependency_root = wrapper.parent.parent / "node_modules"
+    outside_root = tmp_path / "outside-dependencies"
+    dependency_root.rename(outside_root)
+    dependency_root.symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("manifest_owner", ["wrapper", "native"])
+def test_codex_package_layout_rejects_symlinked_manifest(
+    tmp_path: Path, manifest_owner: str
+) -> None:
+    wrapper, native = _write_codex_package_layout(tmp_path, nested=True)
+    package_root = wrapper.parent.parent if manifest_owner == "wrapper" else native.parents[3]
+    manifest = package_root / "package.json"
+    outside = tmp_path / f"outside-{manifest_owner}.json"
+    manifest.rename(outside)
+    manifest.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_codex_package_layout_rejects_oversized_manifest_before_parsing(tmp_path: Path) -> None:
+    wrapper, _native = _write_codex_package_layout(tmp_path, nested=True)
+    (wrapper.parent.parent / "package.json").write_bytes(
+        b" " * (module._CODEX_PACKAGE_JSON_MAX_BYTES + 1)  # pyright: ignore[reportPrivateUsage]
+    )
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_direct_native_executable_support_keeps_platform_and_digest_checks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    native = tmp_path / "vendor" / "aarch64-apple-darwin" / "bin" / "codex"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"reviewed-native")
+    native.chmod(0o700)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(module.platform, "machine", lambda: "arm64")
+    expected_digest = "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b"
+
+    def fake_digest(_path: Path) -> str:
+        return expected_digest
+
+    monkeypatch.setattr(module, "_sha256_file", fake_digest)
+
+    resolved, actual_digest, source_identity = module.resolve_supported_codex_executable(native)
+
+    assert resolved == native
+    assert actual_digest == expected_digest
+    assert source_identity == "openai-codex-npm-darwin-arm64-0.150.1"
 
 
 def test_preview_resolves_exact_cell_without_creating_home(
