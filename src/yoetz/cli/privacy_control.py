@@ -15,7 +15,11 @@ from yoetz.cli.unlock import (
     _verify_preview,  # pyright: ignore[reportPrivateUsage]
     overwrite_secret_buffer,
 )
-from yoetz.service.confidential_client import HumanControlClient
+from yoetz.service.confidential_client import (
+    ConfidentialClientError,
+    ConfidentialResultUnconfirmed,
+    HumanControlClient,
+)
 from yoetz.service.confidential_protocol import (
     DecisionAction,
     DecisionRequiredPhase,
@@ -28,10 +32,20 @@ from yoetz.service.confidential_protocol import (
 
 __all__ = [
     "PrivacyLocalEditResult",
+    "PrivacyDecisionUnconfirmed",
     "decide_disclosure",
     "decide_policy",
     "decide_policy_with_local_reauthentication",
 ]
+
+
+class PrivacyDecisionUnconfirmed(ConfidentialClientError):
+    """A privacy decision was attempted but no authoritative result was received."""
+
+
+_UNCONFIRMED_AFTER_DECISION_REASONS = frozenset(
+    {"ambiguous", "correlation_mismatch", "protocol_error", "service_unavailable", "timeout"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +171,7 @@ async def _decide_policy_supplied(
     kind = HumanCeremonyKind.PRIVACY_POLICY_DECISION
     client = HumanControlClient()
     terminal = _SuppliedSecretTerminal()
+    session = None
     try:
         session = await client.open(kind, target)
         async with session:
@@ -177,6 +192,14 @@ async def _decide_policy_supplied(
                     passphrase=passphrase,
                 )
                 return cast(PrivacyDecisionResult, result)
+            except ConfidentialResultUnconfirmed:
+                await _cancel_quietly(session)
+                raise
+            except ConfidentialClientError as exc:
+                await _cancel_quietly(session)
+                if session.decision_attempted and exc.reason in _UNCONFIRMED_AFTER_DECISION_REASONS:
+                    raise PrivacyDecisionUnconfirmed("ambiguous") from exc
+                raise
             except BaseException:
                 await _cancel_quietly(session)
                 raise

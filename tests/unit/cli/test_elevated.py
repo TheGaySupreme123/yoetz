@@ -501,11 +501,13 @@ def test_repository_grant_carried_denied_result_stays_a_bounded_failure(tmp_path
     assert any('"failure_reason":"repository_privacy_grant_failed"' in line for line in audit)
 
 
-def test_repository_grant_ambiguity_without_a_result_is_typed_unconfirmed(tmp_path: Path) -> None:
-    """A post-decision outcome that is unprovable either way must not claim failure."""
+def test_repository_grant_post_decision_ambiguity_is_typed_unconfirmed(tmp_path: Path) -> None:
+    """A submitted decision with no result must not be reported as a failed grant."""
+
+    from yoetz.cli.privacy_control import PrivacyDecisionUnconfirmed
 
     async def decide(*_args: object, **_kwargs: object) -> object:
-        raise ConfidentialClientError("ambiguous")
+        raise PrivacyDecisionUnconfirmed("ambiguous")
 
     async def run() -> None:
         with _patch_state(tmp_path):
@@ -522,6 +524,33 @@ def test_repository_grant_ambiguity_without_a_result_is_typed_unconfirmed(tmp_pa
     audit = _audit_lines(tmp_path)
     assert not any('"outcome":"approved"' in line for line in audit)
     assert any('"failure_reason":"repository_privacy_grant_unconfirmed"' in line for line in audit)
+
+
+def test_repository_grant_pre_decision_ambiguity_is_a_retryable_failed_review(
+    tmp_path: Path,
+) -> None:
+    """An open/read failure sent no decision and must not claim the grant may be effective."""
+
+    async def decide(*_args: object, **_kwargs: object) -> object:
+        raise ConfidentialClientError("ambiguous")
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=_GRANT_BINDING)
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            with _repository_grant_patches(decide):
+                with pytest.raises(ElevatedBootstrapError) as caught:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+            assert caught.value.reason == "repository_privacy_grant_failed"
+
+    anyio.run(run)
+    assert load_pending(_state=tmp_path) is None
+    audit = _audit_lines(tmp_path)
+    assert any('"failure_reason":"repository_privacy_grant_failed"' in line for line in audit)
+    assert not any(
+        '"failure_reason":"repository_privacy_grant_unconfirmed"' in line for line in audit
+    )
 
 
 def test_repository_grant_pre_commit_failures_stay_bounded_with_no_grant(tmp_path: Path) -> None:

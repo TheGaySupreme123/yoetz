@@ -692,7 +692,7 @@ async def _complete_repository_privacy_grant(
     recipe = pending.grant_binding["recipe"]
     expected_commitment = pending.grant_binding["repository_privacy_commitment"]
     expected_authority_digest = pending.grant_binding["authority_digest"]
-    from yoetz.cli.privacy_control import decide_policy
+    from yoetz.cli.privacy_control import PrivacyDecisionUnconfirmed, decide_policy
     from yoetz.cli.privacy_setup import (
         build_candidate_policy,
         configured_bindings,
@@ -738,11 +738,11 @@ async def _complete_repository_privacy_grant(
         # stored terminal outcome. Consume it exactly once, read-only — never by replaying the
         # privacy expansion as a new decision — and let the shared validation below decide.
         decision_result = exc.result
+    except PrivacyDecisionUnconfirmed as exc:
+        # The client began sending an approval action but never received an authoritative result.
+        # It is therefore unsafe to report failure or to invite an immediate replay.
+        raise ElevatedBootstrapError("repository_privacy_grant_unconfirmed") from exc
     except ConfidentialClientError as exc:
-        if exc.reason == "ambiguous":
-            # No result in hand and the transport outcome is unprovable either way: the durable
-            # grant may already be effective, so reporting failure here would be untruthful.
-            raise ElevatedBootstrapError("repository_privacy_grant_unconfirmed") from exc
         raise ElevatedBootstrapError("repository_privacy_grant_failed") from exc
     except (HumanCeremonyCliError, OSError, ValueError) as exc:
         raise ElevatedBootstrapError("repository_privacy_grant_failed") from exc

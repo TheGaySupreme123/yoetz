@@ -345,6 +345,7 @@ class HumanControlSession:
         "_awaiting_server",
         "_closed",
         "_connect_secret",
+        "_decision_attempted",
         "_next_step",
         "_opened",
         "_stream",
@@ -372,6 +373,7 @@ class HumanControlSession:
         self._next_step = opened.step + 1
         self._closed = False
         self._awaiting_server = isinstance(opened.phase, SecretRequiredPhase)
+        self._decision_attempted = False
         self._token: ConfidentialSessionToken | None = None
         self._replace_token(opened.phase)
 
@@ -420,6 +422,17 @@ class HumanControlSession:
             _token=_SECRET_CLIENT_CONSTRUCTOR,
         )
 
+    @property
+    def decision_attempted(self) -> bool:
+        """Whether this session began sending an approve/deny action.
+
+        The flag is set before the transport write because a failed send may still have delivered
+        the complete frame. Callers use it only to distinguish failures that happened before any
+        decision attempt from genuinely ambiguous post-attempt outcomes.
+        """
+
+        return self._decision_attempted
+
     async def send_action(self, action: HumanAction) -> None:
         self._ensure_open()
         if self._awaiting_server:
@@ -436,6 +449,8 @@ class HumanControlSession:
             step=self._next_step,
             action=action,
         )
+        if type(action) is DecisionAction:
+            self._decision_attempted = True
         await _write_human_frame(self._stream, envelope)
         self._replace_token(None)
         self._next_step += 1
