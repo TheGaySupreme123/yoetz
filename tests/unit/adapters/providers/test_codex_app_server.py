@@ -662,7 +662,11 @@ async def test_launch_failure_removes_the_private_attempt_directory(
     def allow_local_binding(_profile: CodexAppServerProfile) -> None:
         return None
 
+    def allow_private_bundle(_path: Path) -> None:
+        return None
+
     monkeypatch.setattr(module.CodexAppServerProfile, "verify_local_binding", allow_local_binding)
+    monkeypatch.setattr(module, "verify_private_local_bundle", allow_private_bundle)
 
     async def fail_launch(*_args: object, **_kwargs: object) -> None:
         raise OSError("closed launch failure")
@@ -700,6 +704,9 @@ async def test_launch_cancellation_cleans_a_process_returned_after_cancellation(
     def allow_local_binding(_profile: CodexAppServerProfile) -> None:
         return None
 
+    def allow_private_bundle(_path: Path) -> None:
+        return None
+
     async def delayed_spawn(*_args: object, **_kwargs: object) -> asyncio.subprocess.Process:
         spawn_started.set()
         await release_spawn.wait()
@@ -709,6 +716,7 @@ async def test_launch_cancellation_cleans_a_process_returned_after_cancellation(
         raise ProcessLookupError
 
     monkeypatch.setattr(module.CodexAppServerProfile, "verify_local_binding", allow_local_binding)
+    monkeypatch.setattr(module, "verify_private_local_bundle", allow_private_bundle)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
     monkeypatch.setattr(module.os, "killpg", absent_group)
 
