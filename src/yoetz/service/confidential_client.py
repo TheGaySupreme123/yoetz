@@ -52,6 +52,7 @@ from yoetz.service.confidential_protocol import (
 
 __all__ = [
     "ConfidentialClientError",
+    "ConfidentialResultUnconfirmed",
     "ConfidentialSecretClient",
     "HumanControlClient",
     "HumanControlSession",
@@ -158,6 +159,25 @@ class ConfidentialClientError(Exception):
             raise ValueError("confidential_client_reason_invalid")
         self.reason = reason
         super().__init__(reason)
+
+
+class ConfidentialResultUnconfirmed(ConfidentialClientError):
+    """The correlated terminal result arrived; only the close confirmation did not.
+
+    The server records its durable terminal transition before it writes the result frame, so a
+    result that already passed correlation on the authenticated stream is authoritative even when
+    the trailing close frame is missing, wrong, or lost with the connection. The validated result
+    rides on the exception so a caller that can act on it recovers the stored terminal outcome
+    exactly once, read-only; every other caller observes the unchanged bounded reason token.
+    """
+
+    __slots__ = ("result",)
+
+    result: HumanResult
+
+    def __init__(self, reason: str, result: HumanResult) -> None:
+        super().__init__(reason)
+        self.result = result
 
 
 def _mapped_error(error: BaseException) -> ConfidentialClientError:
@@ -459,7 +479,13 @@ class HumanControlSession:
             return frame.phase
         if type(frame) is ServerResultEnvelope:
             self._replace_token(None)
-            await self._require_close("completed")
+            try:
+                await self._require_close("completed")
+            except ConfidentialClientError as exc:
+                # The durable terminal transition committed before this result frame was sent
+                # (issue #519): losing only the close confirmation must not discard the
+                # validated result in hand.
+                raise ConfidentialResultUnconfirmed(exc.reason, frame.result) from exc
             return frame.result
         if type(frame) is ServerErrorEnvelope:
             self._replace_token(None)

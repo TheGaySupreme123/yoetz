@@ -26,7 +26,10 @@ from yoetz.protocol.consent import (
     ConsentReviewResultModel,
     RepositoryPrivacyRecipe,
 )
-from yoetz.service.confidential_client import ConfidentialClientError
+from yoetz.service.confidential_client import (
+    ConfidentialClientError,
+    ConfidentialResultUnconfirmed,
+)
 from yoetz.service.confidential_protocol import (
     EmptyVaultTarget,
     HumanCeremonyKind,
@@ -724,11 +727,24 @@ async def _complete_repository_privacy_grant(
     passphrase = _load_auto_unlock_passphrase()
     if passphrase is None:
         raise ElevatedBootstrapError("chat_user_reauthentication_unavailable")
+    decision_result: object
     try:
         decision_result = await decide_policy(
             proposal_id, decision="approve", passphrase=passphrase
         )
-    except (HumanCeremonyCliError, ConfidentialClientError, OSError, ValueError) as exc:
+    except ConfidentialResultUnconfirmed as exc:
+        # Commit-aware recovery (issue #519): the server records the durable transition before
+        # it sends the result, so a validated result whose close confirmation was lost is the
+        # stored terminal outcome. Consume it exactly once, read-only — never by replaying the
+        # privacy expansion as a new decision — and let the shared validation below decide.
+        decision_result = exc.result
+    except ConfidentialClientError as exc:
+        if exc.reason == "ambiguous":
+            # No result in hand and the transport outcome is unprovable either way: the durable
+            # grant may already be effective, so reporting failure here would be untruthful.
+            raise ElevatedBootstrapError("repository_privacy_grant_unconfirmed") from exc
+        raise ElevatedBootstrapError("repository_privacy_grant_failed") from exc
+    except (HumanCeremonyCliError, OSError, ValueError) as exc:
         raise ElevatedBootstrapError("repository_privacy_grant_failed") from exc
     from yoetz.service.confidential_protocol import PrivacyDecisionResult
 

@@ -2193,6 +2193,19 @@ as a typed orphan that `yoetz service auto-unlock status` distinguishes
 resolves by proof, so retry never fails on `auto_unlock_entry_exists` from an abandoned
 same-attempt entry.
 
+A `repository_privacy_grant` result is commit-aware (issue #519). The service records the
+durable policy transition before it sends the correlated ceremony result, so when only the
+trailing close confirmation is missing, wrong, or lost with the connection, the confidential
+client carries the already-validated result instead of discarding it, and authorize recovers
+that stored terminal outcome exactly once, read-only — a committed grant completes as `granted`
+with a consumed approved review, and a carried denied or stale result stays a bounded failure
+with no grant. The privacy expansion is never replayed as a new decision. When the decision was
+submitted but no result is in hand and the transport outcome is unprovable, authorize reports
+the typed `elevated_bootstrap: repository_privacy_grant_unconfirmed` instead of claiming
+failure, and `yoetz provider status` remains the authoritative read of the repository grant
+state. A genuine pre-commit proposal or decision failure still reports
+`repository_privacy_grant_failed` with no grant.
+
 The current public JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
 `review-result`, and `status`, each at version `5.0.0` under `schemas/consent/`; frozen versions
 `2.0.0` through `4.0.0` remain shipped for compatibility. The current version report is

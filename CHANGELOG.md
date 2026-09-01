@@ -39,6 +39,18 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- An authorized `repository_privacy_grant` no longer reports `repository_privacy_grant_failed`
+  after the durable grant already committed. The service records the policy transition before it
+  sends the ceremony result, so when only the trailing close confirmation is missing, wrong, or
+  lost with the connection, the confidential client now carries the already-validated result
+  instead of discarding it, and authorize recovers that stored terminal outcome exactly once,
+  read-only — a committed grant completes as `granted` with a consumed approved review, a carried
+  denied or stale result stays a bounded failure with no grant, and the privacy expansion is never
+  replayed as a new decision. A post-decision transport outcome that is unprovable either way now
+  reports the typed `elevated_bootstrap: repository_privacy_grant_unconfirmed` with remediation
+  pointing at `yoetz provider status`, while genuine pre-commit proposal/decision failures keep
+  `repository_privacy_grant_failed` (issue #519).
+
 - Receipt creation now abandons both exact caller-owned object stages when the payload object's
   stage/finalize fails before ledger submission, and equally when the commit boundary refuses the
   append ahead of submission because cancellation is already pending. This removes a receipt file

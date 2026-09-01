@@ -177,6 +177,16 @@ def test_vault_result_family_names_the_failed_approval_and_the_retry() -> None:
     assert remediation_message("result_invalid") is not None
 
 
+def test_grant_unconfirmed_remediation_points_at_status_not_a_blind_retry() -> None:
+    """#519: an unprovable grant outcome must send the owner to the authoritative state read."""
+
+    message = remediation_message("repository_privacy_grant_unconfirmed")
+
+    assert message is not None
+    assert "yoetz provider status" in message
+    assert "may already be effective" in message
+
+
 def test_resource_count_remediation_names_the_owning_sync_script() -> None:
     message = remediation_message("resource_counts_invalid")
 
