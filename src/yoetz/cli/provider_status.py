@@ -8,21 +8,26 @@ when every installation condition holds.
 
 from __future__ import annotations
 
-import json
+import hashlib
+import hmac
 import os
+import stat
 import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal, cast
 
 from yoetz.config.load import load_config
-from yoetz.config.paths import state_dir
+from yoetz.config.models import ConfigError
+from yoetz.config.paths import PathSafetyError, bundle_root
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
-from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.service.client import connect_service
 
 __all__ = [
+    "MachineScopeError",
     "credential_human_display",
     "host_admission_observation",
     "machine_scope_request",
@@ -36,6 +41,18 @@ _CREDENTIAL_MASK: Final = "********"
 # This report probes the persistent user service over the fixed endpoint only. It never starts
 # one, unlike the MCP bridge's connect-on-demand path.
 _PROBED_LIFECYCLE: Final = "user_service_no_autostart"
+_INSTALLATION_MARKER_DOMAIN: Final = b"yoetz/installation-state/v1\x00"
+_MAX_INSTALLATION_MARKER_BYTES: Final = 65_536
+_INSTALLATION_MARKER_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "installation_id",
+        "vault_mode",
+        "root_envelope_base64",
+        "mode_binding_digest",
+        "record_digest",
+    }
+)
 
 
 def _stdout_json(value: JsonValue) -> None:
@@ -309,20 +326,110 @@ def host_admission_observation(
     return report
 
 
+# Closed remediation set: each machine-scope construction failure names exactly one trusted next
+# command. Values are fixed strings — no paths, no marker content, no user-controlled text.
+_MACHINE_SCOPE_REMEDIATIONS: Final[Mapping[str, str]] = {
+    "installation_bundle_unavailable": (
+        "the configured storage bundle could not be resolved; "
+        "fix [storage].data_dir in config.toml, then retry"
+    ),
+    "installation_marker_invalid": (
+        "the installation marker could not be read; "
+        "run 'yoetz service recovery status' for the trusted repair path, then retry"
+    ),
+    "installation_marker_missing": (
+        "this installation is not initialized; run 'yoetz setup', then retry"
+    ),
+}
+
+
+class MachineScopeError(Exception):
+    """A bounded local machine-scope construction failure; never a service result.
+
+    Raised before any service request when this installation's identity cannot be resolved from
+    the configured storage bundle. The reason set is closed so every caller renders one valid
+    actionable diagnostic instead of constructing an error the control vocabulary does not admit
+    (issue #517: an inadmissible ``ControlError`` reason surfaced as generic ``internal_error``).
+    """
+
+    __slots__ = ("reason",)
+
+    reason: str
+
+    def __init__(self, reason: str) -> None:
+        if type(reason) is not str or reason not in _MACHINE_SCOPE_REMEDIATIONS:
+            raise ValueError("machine_scope_reason_invalid")
+        self.reason = reason
+        super().__init__(reason)
+
+    @property
+    def remediation(self) -> str:
+        """One fixed actionable next step for this reason; safe for human stderr output."""
+
+        return _MACHINE_SCOPE_REMEDIATIONS[self.reason]
+
+
 def machine_scope_request() -> JsonObject:
     """Build the ``privacy_get_effective`` body for this installation's machine scope.
 
-    ``scope`` is required by the frozen request schema, so an unreadable installation id is
-    reported as a caller error here rather than sent as a body the service must reject.
+    The installation marker lives in the configured storage bundle — the same root the service
+    resolves via ``bundle_root(_data_dir=config.storage.data_dir)`` — not the fixed platform
+    state directory, so an explicit ``storage.data_dir`` is honored here too (issue #517).
+    ``scope`` is required by the frozen request schema, so a scope that cannot be constructed
+    locally is reported as a bounded :class:`MachineScopeError` before any service request rather
+    than sent as a body the service must reject.
     """
 
     try:
-        state = json.loads((state_dir() / "installation-state.json").read_text())
-        installation_id = state["installation_id"]
-    except (OSError, KeyError, TypeError, ValueError) as exc:
-        raise ControlError("invalid_request") from exc
-    if type(installation_id) is not str or not installation_id:
-        raise ControlError("invalid_request")
+        config = load_config({}, os.environ, None)
+        root = bundle_root(_data_dir=config.storage.data_dir)
+    except (ConfigError, OSError, PathSafetyError) as exc:
+        raise MachineScopeError("installation_bundle_unavailable") from exc
+    marker = root / "installation-state.json"
+    try:
+        facts = marker.lstat()
+        encoded = marker.read_bytes()
+    except FileNotFoundError as exc:
+        raise MachineScopeError("installation_marker_missing") from exc
+    except OSError as exc:
+        raise MachineScopeError("installation_marker_invalid") from exc
+    try:
+        if (
+            not stat.S_ISREG(facts.st_mode)
+            or stat.S_ISLNK(facts.st_mode)
+            or facts.st_nlink != 1
+            or len(encoded) > _MAX_INSTALLATION_MARKER_BYTES
+            or not encoded.endswith(b"\n")
+            or encoded.endswith(b"\n\n")
+        ):
+            raise ValueError
+        if os.name == "posix" and stat.S_IMODE(facts.st_mode) & 0o077:
+            raise ValueError
+        state: object = strict_json_parse(encoded[:-1])
+        if type(state) is not dict or canonical_encode(cast(JsonValue, state)) != encoded[:-1]:
+            raise ValueError
+        source = cast("dict[str, JsonValue]", state)
+        if frozenset(source) != _INSTALLATION_MARKER_KEYS or source["schema_version"] != "1":
+            raise ValueError
+        body = dict(source)
+        record_digest = body.pop("record_digest")
+        if type(record_digest) is not str:
+            raise ValueError
+        expected = (
+            "sha256:"
+            + hashlib.sha256(_INSTALLATION_MARKER_DOMAIN + canonical_encode(body)).hexdigest()
+        )
+        if not hmac.compare_digest(record_digest, expected):
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise MachineScopeError("installation_marker_invalid") from exc
+    installation_id: object = source["installation_id"]
+    if type(installation_id) is not str:
+        raise MachineScopeError("installation_marker_invalid")
+    try:
+        validate_id(IdKind.INSTALLATION, installation_id)
+    except (TypeError, ValueError) as exc:
+        raise MachineScopeError("installation_marker_invalid") from exc
     body: dict[str, JsonValue] = {
         "schema_version": "1.0.0",
         "scope": {"kind": "machine", "installation_id": installation_id},

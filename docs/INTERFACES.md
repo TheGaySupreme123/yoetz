@@ -4186,7 +4186,15 @@ facade and are never MCP tools.
 - `config/write.py` / `config/privacy_desired.py`: atomic nonsecret TOML writers and privacy
   desired-state export/apply classification (widen never silent).
 - `config/paths.py`: platformdirs-based `bundle_root()`, `catalog_path()`, path safety checks
-  (rejects repo/sync/network/world-readable locations).
+  (rejects repo/sync/network/world-readable locations). Owns the one exact-target isolation
+  contract (`ISOLATED_ROOT_ENV` = `YOETZ_ISOLATED_ROOT`, ADR-026, issue #518): when set, every
+  identity root — `config_file_path()`, default `bundle_root()`, `state_dir()` (service
+  lock/generation), `runtime_dir()` (control/secret/human-control endpoints), `cache_dir()`,
+  `log_dir()` — derives from the validated `isolated_root()`; a set but unusable root fails
+  closed as `PathSafetyError("isolation_root_invalid")` or the precise existing path-safety
+  reason, never by falling back to ambient platform directories. `YOETZ_STORAGE_DATA_DIR` and
+  `storage.data_dir` alone are storage relocation, not isolation. The connection-free proof
+  surface is `yoetz service isolation --json` (`cli/isolation_status.py`), digest-only.
 - `observability/logging.py`: structured stderr logging, allowlisted fields only; shared `LogMode`
   is exactly `service|cli|mcp_stdio|confidential_helper` so each process installs only its bounded
   sink/filter profile.

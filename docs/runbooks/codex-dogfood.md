@@ -13,6 +13,22 @@ the machine on its own, authenticate the report author, or upgrade a digest into
 
 - Use a disposable worktree, an isolated Codex executable/home, an isolated Yoetz installation and
   state directory, and a candidate wheel built from the recorded source ref.
+- Yoetz isolation uses exactly one supported contract (ADR-026, issue #518): provision one
+  owner-only (0700), symlink-free private directory outside shared temp and any repository, and
+  export `YOETZ_ISOLATED_ROOT` to it for **every** tested process — the launcher, the MCP server
+  entry, hook commands, and every `yoetz` control command the run executes. Config, storage
+  bundle, state (service lock/generation), control endpoints, cache, and logs all derive from
+  that root, so the isolated runtime structurally cannot reach the normal singleton. Do not treat
+  `YOETZ_STORAGE_DATA_DIR` alone as isolation (it relocates only storage), and do not rely on a
+  bare `yoetz` child command resolving ambient identity. A set but unusable root fails closed
+  (`isolation_root_invalid` or the precise path-safety reason) instead of falling back to the
+  normal install.
+- Prove, never assume, the isolation mode with two connection-free snapshots. First run the normal
+  target's exact `yoetz service isolation --json` without the isolation variable; then run the
+  candidate executable with the exact launch environment. Compare the two exact reports. Platform
+  defaults are not a substitute because the normal target may relocate its config or storage.
+- Rollback of Yoetz state is deleting the isolation root: every artifact of the isolated runtime
+  lives beneath it. Stop only processes the runner started, then remove the root.
 - The exact worktree passed to Codex is also passed to plugin status, observation status, consent,
   mapping, drain, and session-stream reconciliation. Never substitute the primary checkout.
 - Observation consent is independent trusted-local authority. Do not copy its database row, reuse
@@ -40,6 +56,7 @@ Resolve and verify, rather than merely accept, these inputs:
 | `launcher_digest` | Exact launcher bytes that start the tested Codex process. |
 | `route_profile` | Registered `strict` or `policy` route actually observed for that isolated target. |
 | `worktree_digest` | SHA-256 over the canonical tested Git-root identity; do not publish the path. |
+| `yoetz_isolation` | `mode` and candidate identity digests from the exact launch report, plus `normal_mode` and the five `normal_*` digests copied from the exact normal-target report: state, endpoint, storage, config, and Yoetz executable. |
 
 The source ref, wheel digest, executable digest/version, and launcher digest must agree with the
 actual launch inputs. A clean working tree is not a substitute for the exact source ref, and an
@@ -50,6 +67,8 @@ installed package version is not a substitute for the wheel digest.
 Run each status command from the isolated runtime, with the exact selectors filled in:
 
 ```text
+<normal-yoetz> service isolation --json
+YOETZ_ISOLATED_ROOT=<exact-root> <candidate-yoetz> service isolation --json
 yoetz recommend list --codex-path <exact-executable> --codex-home <exact-home> --json
 yoetz integrate codex plugin status --project-root <exact-worktree> --codex-path <exact-executable> --codex-home <exact-home> --json
 CODEX_HOME=<exact-home> CODEX_TESTING_HOME=<exact-home> yoetz integrate codex mcp status --codex-path <exact-executable> --json
@@ -64,6 +83,7 @@ bounded reason token, an optional evidence digest, and a closed next action.
 |---|---|
 | `source_identity` | Worktree HEAD equals `source_ref`. |
 | `package_identity` | Installed candidate is the recorded package digest. |
+| `service_isolation` | The exact normal report has mode `ambient`, the exact launch report has mode `isolated`, and every state/endpoint/storage/config/executable digest differs. Shared, relocated, ambient, or unknown identity cannot pass. |
 | `workspace_binding` | Codex and every Yoetz control use the same exact worktree. |
 | `observation_consent` | Consent is `active` for that worktree commitment. |
 | `plugin_source` | Exact managed source is present in that worktree. |
@@ -75,6 +95,12 @@ bounded reason token, an optional evidence digest, and a closed next action.
 | `plugin_cache` | The versioned cache matches the intended rendered digest. |
 | `plugin_activation` | Exact target state is `active`; presence or enablement alone is insufficient. |
 | `normal_target_snapshot` | A digest-only before-run snapshot exists. |
+
+If isolation is not proven — the command fails, reports `ambient`, or any identity digest equals
+its normal-target counterpart — record the non-pass `service_isolation` row with the
+`provision_isolated_yoetz_root` continuation, provision a fresh isolation root, re-export
+`YOETZ_ISOLATED_ROOT`, and rebuild the report from fresh status. Never launch over shared,
+ambient, or unknown Yoetz identity.
 
 If consent is missing, record `blocked / observation_consent_missing /
 yoetz_observe_grant_exact_worktree`, show the trusted local command, and stop. If activation is
@@ -154,9 +180,13 @@ an out-of-scope pass, failure, or block is inconsistent evidence and invalidates
 ## 7. Report shape and statuses
 
 The top-level keys are exactly `schema`, `identity`, `scope`, `observed`, and `facets`; the current
-schema is `yoetz.codex-dogfood-parity/1`. `observed` retains only closed states/counts:
-activation state, exact/primary consent states, workspace-match boolean, mapping presence, accepted
-envelope count, undelivered count, drain success, hook coverage, and stream coverage.
+schema is `yoetz.codex-dogfood-parity/2` (version 1 reports, which carried no Yoetz isolation
+identity, are no longer accepted). `observed` retains only closed states/counts:
+activation state, Yoetz isolation state (`isolated|shared|ambient|unknown`), exact/primary consent
+states, workspace-match boolean, mapping presence, accepted envelope count, undelivered count,
+drain success, hook coverage, and stream coverage. The validator rejects a passing
+`service_isolation` row whose observed state is not `isolated`, whose identity mode is not
+`isolated`, or whose digests show any shared identity root.
 
 Every facet is reported even when unsupported or not run. The validator rejects extra top-level,
 identity, scope, observed, or facet-row fields; this is the privacy boundary that keeps paths and

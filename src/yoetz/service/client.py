@@ -149,6 +149,10 @@ _SECRET_ENV_MARKERS: Final = (
 _SERVICE_CONFIG_ENV_NAMES: Final = frozenset(
     {
         "YOETZ_CONFIG",
+        # The exact-target isolation root must reach the detached service process, or an
+        # isolated client would spawn a service whose state, storage, and endpoints silently
+        # land in the ambient install (issue #518).
+        "YOETZ_ISOLATED_ROOT",
         "YOETZ_LOG_LEVEL",
         "YOETZ_PROFILE",
         "YOETZ_PROVIDER_ENDPOINT_PROFILE_ID",

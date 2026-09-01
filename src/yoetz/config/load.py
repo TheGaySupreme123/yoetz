@@ -36,6 +36,12 @@ _ENV_TO_LEAF: Final[dict[str, _LeafPath | None]] = {
     # Documented presentation control, recognized here so strict config loading cannot mistake
     # the prompt-loop opt-out for a service setting. It maps to no configuration leaf.
     "YOETZ_TUI": None,
+    # The one supported exact-target isolation contract (issue #518). It is consumed and
+    # fail-closed validated by yoetz.config.paths, which rebases every identity root (config,
+    # storage bundle, state, runtime endpoints, cache, logs) onto the isolation root. It maps to
+    # no configuration leaf; recognizing it here keeps strict config loading from rejecting an
+    # isolated runtime as carrying an unknown YOETZ_ variable.
+    "YOETZ_ISOLATED_ROOT": None,
     "YOETZ_PROFILE": ("profile",),
     "YOETZ_STORAGE_DATA_DIR": ("storage", "data_dir"),
     "YOETZ_STORAGE_DURABILITY": ("storage", "durability"),

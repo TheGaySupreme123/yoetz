@@ -411,6 +411,23 @@ def _usage_failure() -> int:
     return 2
 
 
+def _machine_scope_request_or_none() -> JsonObject | None:
+    """Build the machine-scope privacy body locally, or emit one bounded diagnostic.
+
+    Machine-scope construction is a local read of the configured installation bundle. When it
+    fails, the bounded reason and its remediation are reported here and ``None`` is returned so
+    the caller stops before any service request is sent (issue #517).
+    """
+
+    from yoetz.cli.provider_status import MachineScopeError, machine_scope_request
+
+    try:
+        return machine_scope_request()
+    except MachineScopeError as error:
+        _stderr(f"machine_scope_unavailable: {error.reason}: {error.remediation}")
+        return None
+
+
 def _bounded_failure_line(reason: str, *, prefix: str | None = None) -> str:
     """Render one bounded token with its remediation; the token itself stays first."""
 
@@ -1080,15 +1097,17 @@ async def _call_support(
 ) -> int:
     try:
         if input_path is None and inline is None and method == "privacy_get_effective":
-            from yoetz.cli.provider_status import machine_scope_request
-
-            request = machine_scope_request()
+            scoped = _machine_scope_request_or_none()
+            if scoped is None:
+                return 2
+            request = scoped
         else:
             request = _json_object(input_path, inline)
             if method == "privacy_get_effective" and len(request) == 0:
-                from yoetz.cli.provider_status import machine_scope_request
-
-                request = machine_scope_request()
+                scoped = _machine_scope_request_or_none()
+                if scoped is None:
+                    return 2
+                request = scoped
         # Every support body passes through here, whichever branch built it, so the normalization
         # is one step rather than a property of one path.
         request = with_body_schema_version(method, request)
@@ -1279,6 +1298,32 @@ def service_run() -> None:
         daemon_main()
     except LifecycleError as error:
         _finish(_lifecycle_failure(error))
+
+
+@service_app.command("isolation")
+def service_isolation(json_output: _JSON = False) -> None:
+    """Report the resolved identity roots and isolation mode without connecting to a service.
+
+    Digest-only output: each root is a digest over its canonical resolved path identity. The
+    dogfood parity preflight compares one report from the exact normal target with another from
+    the isolated launch environment; platform defaults cannot stand in for a relocated target.
+    """
+
+    from yoetz.cli.isolation_status import isolation_report
+    from yoetz.config.models import ConfigError
+    from yoetz.config.paths import PathSafetyError
+
+    try:
+        report = isolation_report()
+    except PathSafetyError as error:
+        _stderr(f"isolation_invalid: {error.reason_code}")
+        _finish(2)
+    except ConfigError as error:
+        _stderr(f"isolation_unprovable: {error.reason_code}")
+        _finish(2)
+    else:
+        _human_or_json(cast(JsonValue, dict(report)), json_output=json_output)
+        _finish(0)
 
 
 @service_app.command("diagnostics")
@@ -2979,12 +3024,15 @@ def privacy_export_desired(
         from yoetz.adapters.privacy.catalog import decode_privacy_policy_canonical
         from yoetz.config.privacy_desired import write_privacy_desired_toml
 
+        # Machine scope is a local construction; resolve it before connecting so a broken
+        # installation marker stops here without any service request (issue #517).
+        scoped = _machine_scope_request_or_none()
+        if scoped is None:
+            return 2
         try:
             client = await build_service_client()
             try:
-                from yoetz.cli.provider_status import machine_scope_request
-
-                effective = await client.privacy_get_effective(machine_scope_request())
+                effective = await client.privacy_get_effective(scoped)
             finally:
                 await client.close()
         except ControlError as error:
@@ -3025,12 +3073,15 @@ def privacy_apply_desired(
         except ConfigError as error:
             typer.echo(f"invalid_request: {error.reason_code}", err=True)
             return 2
+        # Machine scope is a local construction; resolve it before connecting so a broken
+        # installation marker stops here without any service request (issue #517).
+        scoped = _machine_scope_request_or_none()
+        if scoped is None:
+            return 2
         try:
             client = await build_service_client()
             try:
-                from yoetz.cli.provider_status import machine_scope_request
-
-                effective = await client.privacy_get_effective(machine_scope_request())
+                effective = await client.privacy_get_effective(scoped)
             finally:
                 await client.close()
         except ControlError as error:

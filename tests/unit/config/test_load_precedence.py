@@ -142,6 +142,21 @@ def test_tui_opt_out_is_known_process_control_not_a_config_override(tmp_path: Pa
     assert config.profile == "strict-local"
 
 
+def test_isolated_root_is_known_paths_control_not_a_config_override(tmp_path: Path) -> None:
+    """The isolation root (issue #518) belongs to yoetz.config.paths, not to config leaves.
+
+    Strict loading must recognize it (an isolated service start would otherwise refuse with
+    ``unknown_config_env_var``) while leaving every configuration value untouched.
+    """
+
+    config = load_config(
+        {}, {"YOETZ_ISOLATED_ROOT": str(tmp_path / "iso")}, tmp_path / "missing.toml"
+    )
+
+    assert config.profile == "strict-local"
+    assert config.storage.data_dir is None
+
+
 def test_minimal_parse_ignores_nonminimal_provider_shape(tmp_path: Path) -> None:
     config_path = tmp_path / "minimal.toml"
     config_path.write_text(

@@ -510,7 +510,11 @@ state, source/installed/preview digests, the bounded reason token, and file-stat
 For a disposable-worktree integration run, use the [Codex dogfood parity
 runbook](codex-dogfood.md). The ordinary setup/semantic checks above are necessary but do not prove
 exact-worktree activation, consent, host delivery, observation, rollback, or normal-target
-isolation.
+isolation. In particular, an isolated Codex home (`CODEX_TESTING_HOME`) does not isolate Yoetz:
+without `YOETZ_ISOLATED_ROOT` (ADR-026) exported to every tested process, the run's Yoetz clients
+and any service they spawn resolve the normal singleton, state directory, and storage. Prove the
+mode with `yoetz service isolation --json` before launch; the parity gate's `service_isolation`
+facet fails closed on shared, ambient, or unknown identity.
 
 ## Subscription evaluator is a separate Codex role
 
