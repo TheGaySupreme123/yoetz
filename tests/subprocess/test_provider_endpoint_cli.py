@@ -260,6 +260,53 @@ def test_grok_shorthand_writes_same_preset_as_provider_alias(
     assert loaded["provider"]["model"] == "grok-4.5"
 
 
+def test_endpoint_write_preserves_an_existing_storage_data_dir(
+    endpoint_config: Path, tmp_path: Path
+) -> None:
+    """A valid ``storage.data_dir`` base must survive a provider-binding write (#520).
+
+    Hand-parsed strict validation rejected this valid file, and the swallowed failure
+    silently replaced the operator's configuration with defaults — dropping ``data_dir``.
+    """
+
+    endpoint_config.write_text(
+        'schema_version = "1"\n'
+        'profile = "strict-local"\n'
+        "\n"
+        "[storage]\n"
+        f'data_dir = "{tmp_path / "state"}"\n',
+        encoding="utf-8",
+    )
+
+    result = _RUNNER.invoke(
+        cli.app,
+        ["provider", "endpoint", "--grok", "--model", "grok-4.5", "--json"],
+    )
+
+    assert result.exit_code == 0
+    loaded = tomllib.loads(endpoint_config.read_text(encoding="utf-8"))
+    assert loaded["storage"]["data_dir"] == str(tmp_path / "state")
+    assert loaded["provider"]["provider_id"] == "xai"
+
+
+def test_endpoint_write_refuses_an_invalid_base_instead_of_discarding_it(
+    endpoint_config: Path,
+) -> None:
+    """An unloadable config is a bounded refusal, never silently replaced with defaults."""
+
+    original = "[storage]\ndata_dir = 5\n"
+    endpoint_config.write_text(original, encoding="utf-8")
+
+    result = _RUNNER.invoke(
+        cli.app,
+        ["provider", "endpoint", "--grok", "--model", "grok-4.5", "--json"],
+    )
+
+    assert result.exit_code == 2
+    assert "invalid_request: config_value_invalid" in result.stderr
+    assert endpoint_config.read_text(encoding="utf-8") == original
+
+
 @pytest.mark.parametrize(
     "choice",
     [
