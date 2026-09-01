@@ -616,7 +616,8 @@ async def _cleanup(
             except TimeoutError:
                 pass
             except ProcessLookupError:
-                process_exited = True
+                # Without an observed return code, disappearance is not proof of a reap.
+                pass
             else:
                 process_exited = process.returncode is not None
         if not await await_group_exit(_CLEANUP_GRACE_SECONDS):
@@ -632,7 +633,8 @@ async def _cleanup(
                 except TimeoutError:
                     pass
                 except ProcessLookupError:
-                    process_exited = True
+                    # Preserve an unconfirmed cleanup result when the process cannot be reaped.
+                    pass
                 else:
                     process_exited = process.returncode is not None
             if not await await_group_exit(_CLEANUP_GRACE_SECONDS):

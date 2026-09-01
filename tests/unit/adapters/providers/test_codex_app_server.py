@@ -773,6 +773,43 @@ async def test_cleanup_reaps_child_after_process_group_signal_race(
     assert not workdir.exists()
 
 
+async def test_cleanup_reports_failed_when_process_disappears_without_reap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    profile = replace(_profile(), codex_home=tmp_path / "codex-home")
+    workdir = profile.codex_home / "runtime" / "attempt-unreaped"
+    workdir.mkdir(parents=True)
+
+    class FakeProcess:
+        pid = 991_527
+        returncode: int | None = None
+
+        async def wait(self) -> int:
+            raise ProcessLookupError
+
+    async def stderr_drain() -> bool:
+        await asyncio.Event().wait()
+        return False
+
+    runtime = module._CodexProcess(  # pyright: ignore[reportPrivateUsage]
+        profile=profile,
+        process=cast(asyncio.subprocess.Process, FakeProcess()),
+        workdir=workdir,
+        stderr_task=asyncio.create_task(stderr_drain()),
+        pending_notifications=[],
+    )
+
+    def absent_group(_pid: int, _sig: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(module.os, "killpg", absent_group)
+
+    result = await module._cleanup(runtime)  # pyright: ignore[reportPrivateUsage]
+
+    assert result == "failed"
+    assert not workdir.exists()
+
+
 async def test_success_records_weaker_runtime_boundary_without_identity_or_transcript(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

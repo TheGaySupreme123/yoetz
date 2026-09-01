@@ -207,6 +207,18 @@ def _package_candidate_present(path: Path) -> bool:
         raise ValueError("codex_runtime_unavailable") from error
 
 
+def _reject_symlinked_package_root(path: Path) -> None:
+    """Keep package identity bound to the selected layout, including same-parent aliases."""
+
+    try:
+        if stat.S_ISLNK(path.lstat().st_mode):
+            raise ValueError("codex_runtime_capability_unsupported")
+    except FileNotFoundError as error:
+        raise ValueError("codex_runtime_not_found") from error
+    except OSError as error:
+        raise ValueError("codex_runtime_unavailable") from error
+
+
 def _resolve_codex_package_layout(selected: Path) -> Path:
     """Resolve a selected wrapper to its exact nested or npm-prefix native executable.
 
@@ -226,10 +238,12 @@ def _resolve_codex_package_layout(selected: Path) -> Path:
     nested = package_root / "node_modules" / "@openai" / _CODEX_NATIVE_PACKAGE_DIRECTORY
     hoisted = package_root.parent / _CODEX_NATIVE_PACKAGE_DIRECTORY
     if _package_candidate_present(nested):
+        _reject_symlinked_package_root(nested)
         expected_parent = nested.parent
         allowed_parent = _runtime_path(nested.parent, missing_token="codex_runtime_not_found")
         native_root = _runtime_path(nested, missing_token="codex_runtime_not_found")
     elif _package_candidate_present(hoisted):
+        _reject_symlinked_package_root(hoisted)
         expected_parent = hoisted.parent
         allowed_parent = _runtime_path(hoisted.parent, missing_token="codex_runtime_not_found")
         native_root = _runtime_path(hoisted, missing_token="codex_runtime_not_found")

@@ -244,6 +244,19 @@ def test_codex_package_layout_rejects_native_package_symlink_escape(tmp_path: Pa
         module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
 
 
+def test_codex_package_layout_rejects_same_parent_native_package_symlink(
+    tmp_path: Path,
+) -> None:
+    wrapper, native = _write_codex_package_layout(tmp_path, nested=True)
+    native_root = native.parents[3]
+    sibling_root = native_root.with_name("codex-darwin-arm64-real")
+    native_root.rename(sibling_root)
+    native_root.symlink_to(sibling_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="codex_runtime_capability_unsupported"):
+        module._resolve_codex_package_layout(wrapper)  # pyright: ignore[reportPrivateUsage]
+
+
 def test_codex_package_layout_rejects_intermediate_dependency_symlink_escape(
     tmp_path: Path,
 ) -> None:
