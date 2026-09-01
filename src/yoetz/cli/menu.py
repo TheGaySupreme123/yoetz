@@ -432,9 +432,20 @@ def _provider_menu() -> None:
 async def _privacy_show(method: str) -> None:
     from yoetz.cli.app import build_service_client
 
+    request = JsonObject({})
+    if method == "privacy_get_effective":
+        from yoetz.cli.provider_status import MachineScopeError, machine_scope_request
+
+        # The frozen request schema requires a machine scope; it is a local construction, so a
+        # broken installation marker is reported here without any service request (issue #517).
+        try:
+            request = machine_scope_request()
+        except MachineScopeError as error:
+            typer.echo(f"machine_scope_unavailable: {error.reason}: {error.remediation}", err=True)
+            return
     client = await build_service_client()
     try:
-        result = await getattr(client, method)(JsonObject({}))
+        result = await getattr(client, method)(request)
     finally:
         await client.close()
     _show(result)

@@ -39,6 +39,17 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- `yoetz privacy show` — and every other local machine-scope privacy read: the empty-request CLI
+  body, `privacy export-desired`, `privacy apply-desired`, the prompt-loop menu's effective-policy
+  view, and setup's update-policy probe — now resolves the installation marker through the
+  configured storage bundle, the same root the service uses, instead of the fixed platform state
+  directory, so an explicit `[storage].data_dir` no longer breaks machine-scope construction. A
+  missing or malformed marker (or an unresolvable bundle) stops locally with one bounded
+  actionable diagnostic (`machine_scope_unavailable: <reason>: <next command>`, exit 2) before
+  any service request, instead of an inadmissible error construction the CLI masked as generic
+  `internal_error` exit 70. The diagnostic names no paths, marker content, or secrets
+  (issue #517).
+
 - Receipt creation now abandons both exact caller-owned object stages when the payload object's
   stage/finalize fails before ledger submission, and equally when the commit boundary refuses the
   append ahead of submission because cancellation is already pending. This removes a receipt file
