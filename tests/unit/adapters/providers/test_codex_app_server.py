@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
@@ -21,6 +23,7 @@ from yoetz.adapters.providers.codex_app_server import (
     CodexAppServerEvaluator,
     CodexAppServerExternalFactory,
     CodexAppServerProfile,
+    CodexRuntimeStatus,
 )
 from yoetz.adapters.providers.data_use_catalog import data_use_record_for_endpoint
 from yoetz.domain.findings import SemanticFailureClass
@@ -294,6 +297,102 @@ class _Runtime:
         return self.events.pop(0)
 
 
+class _LoginRuntime:
+    def __init__(
+        self,
+        profile: CodexAppServerProfile,
+        events: list[object],
+        *,
+        account_results: list[Mapping[str, object]] | None = None,
+        login_result: Mapping[str, object] | None = None,
+        cancel_error: BaseException | None = None,
+        block_read: bool = False,
+    ) -> None:
+        self.profile = profile
+        self.workdir = Path("/private/empty-login-attempt")
+        self.events = list(events)
+        self.account_results: list[Mapping[str, object]] = list(
+            account_results or [{"account": {"type": "chatgpt", "planType": "plus"}}]
+        )
+        self.login_result = login_result
+        self.cancel_error = cancel_error
+        self.block_read = block_read
+        self.pending_notifications: list[dict[str, object]] = []
+        self.methods: list[str] = []
+        self.timeouts: list[float] = []
+        self.read_timeouts: list[float] = []
+        self.sent: list[dict[str, object]] = []
+        self.read_started = asyncio.Event()
+        self.release_read = asyncio.Event()
+
+    async def send(self, value: dict[str, object]) -> None:
+        self.sent.append(value)
+
+    async def request(
+        self, request_id: int, method: str, params: object, timeout: float
+    ) -> Mapping[str, object]:
+        del request_id
+        self.methods.append(method)
+        self.timeouts.append(timeout)
+        if method == "initialize":
+            return {
+                "codexHome": str(self.profile.codex_home),
+                "userAgent": "yoetz_semantic_evaluator/0.150.1",
+            }
+        if method == "account/login/start":
+            assert isinstance(params, dict)
+            if self.login_result is not None:
+                return self.login_result
+            if params["type"] == "chatgpt":
+                return {
+                    "type": "chatgpt",
+                    "loginId": "login-1",
+                    "authUrl": "https://chatgpt.com/auth",
+                }
+            return {
+                "type": "chatgptDeviceCode",
+                "loginId": "login-1",
+                "verificationUrl": "https://auth.openai.com/codex/device",
+                "userCode": "ABCD-1234",
+            }
+        if method == "account/login/cancel":
+            if self.cancel_error is not None:
+                raise self.cancel_error
+            return {}
+        if method == "account/read":
+            result = self.account_results.pop(0)
+            if self.account_results:
+                self.pending_notifications.append({"method": "account/updated", "params": {}})
+            return result
+        if method == "model/list":
+            return {
+                "data": [
+                    {
+                        "id": self.profile.model,
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": self.profile.reasoning_effort}
+                        ],
+                    }
+                ],
+                "nextCursor": None,
+            }
+        raise AssertionError(method)
+
+    async def read(self, timeout: float) -> dict[str, object]:
+        self.timeouts.append(timeout)
+        self.read_timeouts.append(timeout)
+        self.read_started.set()
+        if self.block_read:
+            await self.release_read.wait()
+        if not self.events:
+            raise TimeoutError
+        event = self.events.pop(0)
+        if isinstance(event, BaseException):
+            raise event
+        assert isinstance(event, dict)
+        return cast(dict[str, object], event)
+
+
 async def _evaluate(
     monkeypatch: pytest.MonkeyPatch,
     runtime: _Runtime,
@@ -317,6 +416,361 @@ async def _evaluate(
         SemanticResultSuccess | SemanticResultUnavailable | SemanticResultInvalid,
         await evaluator.evaluate(case, Deadline(_NOW + timedelta(seconds=30), 30.0)),
     )
+
+
+async def _login(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: _LoginRuntime,
+    *,
+    mode: str = "browser",
+) -> CodexRuntimeStatus:
+    async def launch(profile: CodexAppServerProfile) -> _LoginRuntime:
+        assert profile is runtime.profile
+        return runtime
+
+    async def cleanup(value: object) -> str:
+        assert value is runtime
+        return "terminated"
+
+    monkeypatch.setattr(module, "_launch", launch)
+    monkeypatch.setattr(module, "_cleanup", cleanup)
+    return await module.codex_login(
+        runtime.profile,
+        mode=cast("Literal['browser', 'device_code']", mode),
+        present_challenge=lambda _challenge: None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_timeout"),
+    [("browser", 600.0), ("device_code", 900.0)],
+)
+async def test_login_uses_the_native_method_window(
+    monkeypatch: pytest.MonkeyPatch, mode: str, expected_timeout: float
+) -> None:
+    runtime = _LoginRuntime(
+        _profile(),
+        [
+            {
+                "method": "account/login/completed",
+                "params": {"loginId": "login-1", "success": True},
+            }
+        ],
+    )
+
+    result = await _login(monkeypatch, runtime, mode=mode)
+
+    assert result.auth_mode == "chatgpt"
+    assert result.model_available is True
+    assert any(timeout >= expected_timeout - 0.1 for timeout in runtime.timeouts)
+    assert runtime.methods.count("account/login/cancel") == 0
+
+
+async def test_login_accepts_terminal_event_in_bounded_grace_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _LoginRuntime(
+        _profile(),
+        [
+            TimeoutError(),
+            {
+                "method": "account/login/completed",
+                "params": {"loginId": "login-1", "success": True},
+            },
+        ],
+    )
+
+    result = await _login(monkeypatch, runtime)
+
+    assert result.auth_mode == "chatgpt"
+    assert runtime.methods.count("account/login/cancel") == 0
+    assert runtime.read_timeouts[-1] <= module._LOGIN_TERMINAL_GRACE_SECONDS  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_login_timeout_cancels_native_flow_without_masking_primary_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _LoginRuntime(
+        _profile(),
+        [TimeoutError(), TimeoutError()],
+        cancel_error=RuntimeError("native detail must not escape"),
+    )
+
+    with pytest.raises(TimeoutError):
+        await _login(monkeypatch, runtime)
+
+    assert runtime.methods.count("account/login/cancel") == 1
+
+
+async def test_login_invalid_terminal_cancels_native_flow_without_masking_primary_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _LoginRuntime(
+        _profile(),
+        [{"method": "unexpected/notification", "params": {}}],
+    )
+
+    with pytest.raises(ValueError, match="codex_login_event_invalid"):
+        await _login(monkeypatch, runtime)
+
+    assert runtime.methods.count("account/login/cancel") == 1
+
+
+@pytest.mark.parametrize("returned_id", [None, 5, "login-other"])
+async def test_login_rejects_unbound_or_mismatched_completion(
+    monkeypatch: pytest.MonkeyPatch, returned_id: object
+) -> None:
+    runtime = _LoginRuntime(
+        _profile(),
+        [
+            {
+                "method": "account/login/completed",
+                "params": {"loginId": returned_id, "success": True},
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="codex_login_event_invalid"):
+        await _login(monkeypatch, runtime)
+
+    assert runtime.methods.count("account/login/cancel") == 1
+
+
+async def test_login_rejects_challenge_mode_different_from_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _LoginRuntime(
+        _profile(),
+        [],
+        login_result={
+            "type": "chatgptDeviceCode",
+            "loginId": "login-1",
+            "verificationUrl": "https://auth.openai.com/codex/device",
+            "userCode": "ABCD-1234",
+        },
+    )
+
+    with pytest.raises(ValueError, match="codex_login_response_invalid"):
+        await _login(monkeypatch, runtime, mode="browser")
+
+    assert runtime.methods.count("account/login/cancel") == 1
+
+
+async def test_login_waits_for_account_projection_after_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _LoginRuntime(
+        _profile(),
+        [
+            {
+                "method": "account/login/completed",
+                "params": {"loginId": "login-1", "success": True},
+            }
+        ],
+        account_results=[
+            {"account": None},
+            {"account": {"type": "chatgpt", "planType": "plus"}},
+        ],
+    )
+
+    result = await _login(monkeypatch, runtime)
+
+    assert result.auth_mode == "chatgpt"
+    assert runtime.methods.count("account/read") == 2
+    assert runtime.methods.count("account/login/cancel") == 0
+
+
+async def test_login_preserves_cancellation_and_still_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _LoginRuntime(_profile(), [], block_read=True)
+    cleaned = False
+
+    async def launch(profile: CodexAppServerProfile) -> _LoginRuntime:
+        assert profile is runtime.profile
+        return runtime
+
+    async def cleanup(value: object) -> str:
+        nonlocal cleaned
+        assert value is runtime
+        cleaned = True
+        return "terminated"
+
+    monkeypatch.setattr(module, "_launch", launch)
+    monkeypatch.setattr(module, "_cleanup", cleanup)
+    task = asyncio.create_task(
+        module.codex_login(
+            runtime.profile,
+            mode="browser",
+            present_challenge=lambda _challenge: None,
+        )
+    )
+    await runtime.read_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned is True
+    assert runtime.methods.count("account/login/cancel") == 1
+
+
+async def test_login_repeated_cancellation_cannot_interrupt_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _LoginRuntime(_profile(), [], block_read=True)
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleaned = False
+
+    async def launch(profile: CodexAppServerProfile) -> _LoginRuntime:
+        assert profile is runtime.profile
+        return runtime
+
+    async def cleanup(value: object) -> str:
+        nonlocal cleaned
+        assert value is runtime
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleaned = True
+        return "terminated"
+
+    monkeypatch.setattr(module, "_launch", launch)
+    monkeypatch.setattr(module, "_cleanup", cleanup)
+    task = asyncio.create_task(
+        module.codex_login(
+            runtime.profile,
+            mode="browser",
+            present_challenge=lambda _challenge: None,
+        )
+    )
+    await runtime.read_started.wait()
+    task.cancel()
+    await cleanup_started.wait()
+    task.cancel()
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned is True
+
+
+async def test_launch_failure_removes_the_private_attempt_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    profile = replace(_profile(), codex_home=tmp_path / "codex-home")
+
+    def allow_local_binding(_profile: CodexAppServerProfile) -> None:
+        return None
+
+    monkeypatch.setattr(module.CodexAppServerProfile, "verify_local_binding", allow_local_binding)
+
+    async def fail_launch(*_args: object, **_kwargs: object) -> None:
+        raise OSError("closed launch failure")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_launch)
+
+    with pytest.raises(OSError, match="closed launch failure"):
+        await module._launch(profile)  # pyright: ignore[reportPrivateUsage]
+
+    runtime_root = profile.codex_home / "runtime"
+    assert runtime_root.is_dir()
+    assert list(runtime_root.glob("attempt-*")) == []
+
+
+async def test_launch_cancellation_cleans_a_process_returned_after_cancellation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    profile = replace(_profile(), codex_home=tmp_path / "codex-home")
+    spawn_started = asyncio.Event()
+    release_spawn = asyncio.Event()
+
+    class FakeProcess:
+        pid = 991_526
+        returncode: int | None = None
+        stderr = None
+        wait_calls = 0
+
+        async def wait(self) -> int:
+            self.wait_calls += 1
+            self.returncode = 0
+            return 0
+
+    process = FakeProcess()
+
+    def allow_local_binding(_profile: CodexAppServerProfile) -> None:
+        return None
+
+    async def delayed_spawn(*_args: object, **_kwargs: object) -> asyncio.subprocess.Process:
+        spawn_started.set()
+        await release_spawn.wait()
+        return cast(asyncio.subprocess.Process, process)
+
+    def absent_group(_pid: int, _sig: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(module.CodexAppServerProfile, "verify_local_binding", allow_local_binding)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+    monkeypatch.setattr(module.os, "killpg", absent_group)
+
+    launch_task = asyncio.create_task(module._launch(profile))  # pyright: ignore[reportPrivateUsage]
+    await spawn_started.wait()
+    launch_task.cancel()
+    release_spawn.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await launch_task
+
+    assert process.wait_calls == 1
+    assert list((profile.codex_home / "runtime").glob("attempt-*")) == []
+
+
+async def test_cleanup_reaps_child_after_process_group_signal_race(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    profile = replace(_profile(), codex_home=tmp_path / "codex-home")
+    workdir = profile.codex_home / "runtime" / "attempt-race"
+    workdir.mkdir(parents=True)
+
+    class FakeProcess:
+        pid = 991_525
+        returncode: int | None = None
+        wait_calls = 0
+
+        async def wait(self) -> int:
+            self.wait_calls += 1
+            self.returncode = 0
+            return 0
+
+    async def stderr_drain() -> bool:
+        await asyncio.Event().wait()
+        return False
+
+    process = FakeProcess()
+    runtime = module._CodexProcess(  # pyright: ignore[reportPrivateUsage]
+        profile=profile,
+        process=cast(asyncio.subprocess.Process, process),
+        workdir=workdir,
+        stderr_task=asyncio.create_task(stderr_drain()),
+        pending_notifications=[],
+    )
+    probes = 0
+
+    def racing_killpg(_pid: int, sig: int) -> None:
+        nonlocal probes
+        if sig == 0:
+            probes += 1
+            if probes == 1:
+                return
+        raise ProcessLookupError
+
+    monkeypatch.setattr(module.os, "killpg", racing_killpg)
+
+    result = await module._cleanup(runtime)  # pyright: ignore[reportPrivateUsage]
+
+    assert result == "terminated"
+    assert process.wait_calls == 1
+    assert process.returncode == 0
+    assert not workdir.exists()
 
 
 async def test_success_records_weaker_runtime_boundary_without_identity_or_transcript(
