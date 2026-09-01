@@ -264,6 +264,14 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
             "the selected Yoetz config file declares a schema_version this installation does "
             'not support; set schema_version = "1" or upgrade Yoetz'
         ),
+        "config_preimage_mismatch": (
+            "the selected Yoetz config changed while the Codex authentication operation was in "
+            "progress; review the current file, then retry the same setup or disconnect command"
+        ),
+        "durability_unsupported": (
+            "the selected storage durability mode is unsupported; choose the documented durable "
+            "SQLite mode in config.toml and retry"
+        ),
         "secret_in_config": (
             "the selected Yoetz config file contains a secret-named key; config.toml is "
             "nonsecret — provision credentials with 'yoetz provider credential set' instead"
@@ -291,6 +299,28 @@ def remediation_message(reason: str) -> str | None:
     """Return the next-step half of an operator-facing line for a bounded token, or None."""
 
     message = REMEDIATION_MESSAGES.get(reason)
+    if message is None and reason in {
+        "external_profile_forbids_local_model",
+        "external_runtime_forbids_local_model",
+        "external_runtime_forbids_provider",
+        "external_runtime_required_for_semantic",
+        "https_origin_invalid",
+        "local_model_locator_forbidden",
+        "max_findings_out_of_range",
+        "owner_declared_endpoint_forbidden",
+        "owner_declared_endpoint_required",
+        "payload_logging_forbidden",
+        "privacy_bootstrap_unsafe",
+        "provider_required_for_semantic",
+        "release_probe_not_a_user_profile",
+        "strict_local_forbids_provider",
+        "test_fake_forbids_local_model",
+        "test_fake_forbids_provider",
+    }:
+        return (
+            "the selected Yoetz configuration violates the named profile or field constraint; "
+            "correct that profile/section in config.toml, then retry"
+        )
     if message is None and reason.startswith("vault_result_"):
         # One remediation for the whole family: the token names the exact service condition,
         # and the consent approval was consumed as failed, never recorded as approved.

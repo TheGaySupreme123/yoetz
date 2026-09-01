@@ -161,12 +161,30 @@ _PROVIDER_SETUP_PRIVACY_REASONS: Final = frozenset(
 )
 _PROVIDER_SETUP_CONFIG_REASONS: Final = frozenset(
     {
+        "config_file_too_large",
+        "config_file_unreadable",
+        "config_preimage_mismatch",
+        "config_schema_unsupported",
+        "config_toml_invalid",
         "config_value_invalid",
+        "durability_unsupported",
+        "external_profile_forbids_local_model",
+        "external_runtime_forbids_local_model",
+        "external_runtime_forbids_provider",
+        "external_runtime_required_for_semantic",
         "https_origin_invalid",
+        "local_model_locator_forbidden",
+        "max_findings_out_of_range",
         "owner_declared_endpoint_forbidden",
         "owner_declared_endpoint_required",
+        "payload_logging_forbidden",
+        "privacy_bootstrap_unsafe",
         "provider_required_for_semantic",
+        "release_probe_not_a_user_profile",
         "secret_in_config",
+        "strict_local_forbids_provider",
+        "test_fake_forbids_local_model",
+        "test_fake_forbids_provider",
         "unknown_config_key",
     }
 )

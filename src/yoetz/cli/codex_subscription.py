@@ -33,12 +33,12 @@ from yoetz.config.load import load_config
 from yoetz.config.models import ConfigError, ExternalRuntimeProfileConfig, YoetzConfig
 from yoetz.config.paths import bundle_root, config_file_path
 from yoetz.config.write import (
-    clear_external_runtime_binding,
     cleared_external_runtime_config,
     codex_subscription_runtime,
+    config_write_snapshot,
     external_runtime_binding_config,
     preflight_config_write,
-    write_external_runtime_binding,
+    write_config_toml_if_unchanged,
 )
 from yoetz.protocol.canonical import JsonValue
 
@@ -196,6 +196,12 @@ def _base_config(path: Path | None) -> YoetzConfig:
     return _bounded_config_operation(lambda: load_config({}, {}, target))
 
 
+def _config_snapshot(path: Path) -> tuple[YoetzConfig, bytes | None]:
+    """Load the write base and exact preimage as one locked operation."""
+
+    return _bounded_config_operation(lambda: config_write_snapshot(path))
+
+
 def _target_config_path(path: Path | None) -> Path:
     if path is not None:
         return path
@@ -287,9 +293,13 @@ async def codex_subscription_setup(
         reasoning_effort=reasoning_effort,
     )
     target = _target_config_path(config_path)
-    base = _base_config(target)
+    base, expected_bytes = _config_snapshot(target)
     _bounded_config_operation(
-        lambda: preflight_config_write(external_runtime_binding_config(binding, base=base), target)
+        lambda: preflight_config_write(
+            external_runtime_binding_config(binding, base=base),
+            target,
+            expected_bytes=expected_bytes,
+        )
     )
     prepare_codex_home(codex_home)
     profile = _profile(binding)
@@ -312,7 +322,11 @@ async def codex_subscription_setup(
     if status.auth_mode != "chatgpt" or not status.model_available or status.cleanup == "failed":
         raise ValueError("codex_subscription_readiness_unproven")
     _bounded_config_operation(
-        lambda: write_external_runtime_binding(binding, path=target, base=base)
+        lambda: write_config_toml_if_unchanged(
+            external_runtime_binding_config(binding, base=base),
+            expected_bytes=expected_bytes,
+            path=target,
+        )
     )
     return _safe_status(binding, status)
 
@@ -393,18 +407,26 @@ async def codex_subscription_disconnect(*, config_path: Path | None = None) -> d
     """
 
     target = _target_config_path(config_path)
-    config = _base_config(target)
+    config, expected_bytes = _config_snapshot(target)
     binding = config.external_runtime
     if binding is None:
         raise ValueError("codex_subscription_not_configured")
     _bounded_config_operation(
-        lambda: preflight_config_write(cleared_external_runtime_config(config), target)
+        lambda: preflight_config_write(
+            cleared_external_runtime_config(config),
+            target,
+            expected_bytes=expected_bytes,
+        )
     )
     status = await codex_logout(_profile(binding))
     if status.cleanup == "failed":
         raise ValueError("codex_logout_unconfirmed")
     written = _bounded_config_operation(
-        lambda: clear_external_runtime_binding(path=target, base=config)
+        lambda: write_config_toml_if_unchanged(
+            cleared_external_runtime_config(config),
+            expected_bytes=expected_bytes,
+            path=target,
+        )
     )
     result = _safe_status(binding, status)
     result["binding_removed"] = True
@@ -416,10 +438,14 @@ def codex_subscription_rollback(*, config_path: Path | None = None) -> dict[str,
     """Remove only the nonsecret binding; preserve the dedicated home and Codex install."""
 
     target = _target_config_path(config_path)
-    config = _base_config(target)
+    config, expected_bytes = _config_snapshot(target)
     home = None if config.external_runtime is None else config.external_runtime.codex_home
     written = _bounded_config_operation(
-        lambda: clear_external_runtime_binding(path=target, base=config)
+        lambda: write_config_toml_if_unchanged(
+            cleared_external_runtime_config(config),
+            expected_bytes=expected_bytes,
+            path=target,
+        )
     )
     return {
         "schema": "yoetz.codex-subscription-rollback/1",

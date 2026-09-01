@@ -131,23 +131,31 @@ async def test_setup_persists_binding_only_after_codex_confirms_chatgpt_readines
     def build_profile(_binding: ExternalRuntimeProfileConfig) -> object:
         return object()
 
-    def write_binding(value: ExternalRuntimeProfileConfig, **_kwargs: object) -> Path:
-        written.append(value)
+    def write_binding(_config: YoetzConfig, **_kwargs: object) -> Path:
+        written.append(binding)
         return tmp_path / "config.toml"
+
+    def snapshot(_path: Path) -> tuple[YoetzConfig, bytes | None]:
+        return YoetzConfig(), None
+
+    def preflight(*_args: object, **_kwargs: object) -> Path:
+        return tmp_path / "config.toml"
+
+    def prepare(_home: Path) -> None:
+        return None
 
     monkeypatch.setattr(module, "_binding", build_binding)
     monkeypatch.setattr(module, "_profile", build_profile)
 
-    def isolated_config(_path: Path | None) -> YoetzConfig:
-        return YoetzConfig()
-
-    monkeypatch.setattr(module, "_base_config", isolated_config)
+    monkeypatch.setattr(module, "_config_snapshot", snapshot)
+    monkeypatch.setattr(module, "preflight_config_write", preflight)
+    monkeypatch.setattr(module, "prepare_codex_home", prepare)
 
     async def login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
         return CodexRuntimeStatus(True, "chatgpt", "plus", True, "terminated")
 
     monkeypatch.setattr(module, "codex_login", login)
-    monkeypatch.setattr(module, "write_external_runtime_binding", write_binding)
+    monkeypatch.setattr(module, "write_config_toml_if_unchanged", write_binding)
 
     result = await module.codex_subscription_setup(
         executable=executable,
@@ -180,19 +188,27 @@ async def test_setup_failure_never_writes_a_binding(
     def forbidden_write(*_args: object, **_kwargs: object) -> Path:
         pytest.fail("failed readiness must not persist a binding")
 
+    def snapshot(_path: Path) -> tuple[YoetzConfig, bytes | None]:
+        return YoetzConfig(), None
+
+    def preflight(*_args: object, **_kwargs: object) -> Path:
+        return tmp_path / "config.toml"
+
+    def prepare(_home: Path) -> None:
+        return None
+
     monkeypatch.setattr(module, "_binding", build_binding)
     monkeypatch.setattr(module, "_profile", build_profile)
 
-    def isolated_config(_path: Path | None) -> YoetzConfig:
-        return YoetzConfig()
-
-    monkeypatch.setattr(module, "_base_config", isolated_config)
+    monkeypatch.setattr(module, "_config_snapshot", snapshot)
+    monkeypatch.setattr(module, "preflight_config_write", preflight)
+    monkeypatch.setattr(module, "prepare_codex_home", prepare)
 
     async def login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
         return CodexRuntimeStatus(True, None, None, False, "terminated")
 
     monkeypatch.setattr(module, "codex_login", login)
-    monkeypatch.setattr(module, "write_external_runtime_binding", forbidden_write)
+    monkeypatch.setattr(module, "write_config_toml_if_unchanged", forbidden_write)
 
     with pytest.raises(ValueError, match="codex_subscription_readiness_unproven"):
         await module.codex_subscription_setup(
@@ -207,6 +223,47 @@ async def test_setup_failure_never_writes_a_binding(
 
 
 @pytest.mark.anyio
+async def test_setup_preserves_a_concurrent_config_edit_during_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "config.toml"
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+
+    def build_binding(**_kwargs: object) -> ExternalRuntimeProfileConfig:
+        return binding
+
+    def build_profile(_binding: ExternalRuntimeProfileConfig) -> object:
+        return object()
+
+    def prepare(_home: Path) -> None:
+        return None
+
+    monkeypatch.setattr(module, "_binding", build_binding)
+    monkeypatch.setattr(module, "_profile", build_profile)
+    monkeypatch.setattr(module, "prepare_codex_home", prepare)
+
+    async def login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
+        target.write_text("# concurrent config edit\n", encoding="utf-8")
+        return CodexRuntimeStatus(True, "chatgpt", "plus", True, "terminated")
+
+    monkeypatch.setattr(module, "codex_login", login)
+
+    with pytest.raises(ValueError, match="config_preimage_mismatch"):
+        await module.codex_subscription_setup(
+            executable=tmp_path / "codex",
+            codex_home=tmp_path / "dedicated-home",
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+            login_mode="browser",
+            open_browser=False,
+            switch_account=False,
+            config_path=target,
+        )
+
+    assert target.read_text(encoding="utf-8") == "# concurrent config edit\n"
+
+
+@pytest.mark.anyio
 async def test_disconnect_confirms_logout_before_removing_only_the_binding(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -214,24 +271,28 @@ async def test_disconnect_confirms_logout_before_removing_only_the_binding(
     config = YoetzConfig(profile="codex-subscription", external_runtime=binding)
     removed: list[object] = []
 
-    def base_config(_path: Path | None) -> YoetzConfig:
-        return config
-
     def build_profile(_binding: ExternalRuntimeProfileConfig) -> object:
         return object()
 
-    def clear_binding(**_kwargs: object) -> Path:
+    def clear_binding(_config: YoetzConfig, **_kwargs: object) -> Path:
         removed.append(binding)
         return tmp_path / "config.toml"
 
-    monkeypatch.setattr(module, "_base_config", base_config)
+    def snapshot(_path: Path) -> tuple[YoetzConfig, bytes | None]:
+        return config, b"before"
+
+    def preflight(*_args: object, **_kwargs: object) -> Path:
+        return tmp_path / "config.toml"
+
+    monkeypatch.setattr(module, "_config_snapshot", snapshot)
+    monkeypatch.setattr(module, "preflight_config_write", preflight)
     monkeypatch.setattr(module, "_profile", build_profile)
 
     async def logout(_profile: object) -> CodexRuntimeStatus:
         return CodexRuntimeStatus(True, None, None, False, "terminated")
 
     monkeypatch.setattr(module, "codex_logout", logout)
-    monkeypatch.setattr(module, "clear_external_runtime_binding", clear_binding)
+    monkeypatch.setattr(module, "write_config_toml_if_unchanged", clear_binding)
 
     result = await module.codex_subscription_disconnect(config_path=tmp_path / "config.toml")
 
@@ -240,20 +301,40 @@ async def test_disconnect_confirms_logout_before_removing_only_the_binding(
     assert result["process_cleanup"] == "terminated"
 
 
+@pytest.mark.anyio
+async def test_disconnect_preserves_a_concurrent_config_edit_during_logout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+    target = _bound_config_file(tmp_path, binding)
+    before = target.read_text(encoding="utf-8")
+
+    async def logout(_profile: object) -> CodexRuntimeStatus:
+        target.write_text(before + "# concurrent config edit\n", encoding="utf-8")
+        return CodexRuntimeStatus(True, None, None, False, "terminated")
+
+    monkeypatch.setattr(module, "codex_logout", logout)
+
+    with pytest.raises(ValueError, match="config_preimage_mismatch"):
+        await module.codex_subscription_disconnect(config_path=target)
+
+    assert target.read_text(encoding="utf-8") == before + "# concurrent config edit\n"
+
+
 def test_rollback_preserves_the_dedicated_home_and_installation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
     config = YoetzConfig(profile="codex-subscription", external_runtime=binding)
 
-    def base_config(_path: Path | None) -> YoetzConfig:
-        return config
-
-    def clear_binding(**_kwargs: object) -> Path:
+    def clear_binding(_config: YoetzConfig, **_kwargs: object) -> Path:
         return tmp_path / "config.toml"
 
-    monkeypatch.setattr(module, "_base_config", base_config)
-    monkeypatch.setattr(module, "clear_external_runtime_binding", clear_binding)
+    def snapshot(_path: Path) -> tuple[YoetzConfig, bytes | None]:
+        return config, b"before"
+
+    monkeypatch.setattr(module, "_config_snapshot", snapshot)
+    monkeypatch.setattr(module, "write_config_toml_if_unchanged", clear_binding)
 
     result = module.codex_subscription_rollback(config_path=tmp_path / "config.toml")
 

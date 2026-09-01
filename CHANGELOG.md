@@ -47,7 +47,9 @@ reverse-chronological released versions.
   the same loader rule, configuration failures surface as their bounded closed reason tokens
   with remediation text, and `setup` validates the configuration and probes the writable binding
   target before opening the Codex login flow — with `disconnect` likewise probing its removal
-  write before Codex logs the dedicated home out (issue #520).
+  write before Codex logs the dedicated home out. Both interactive transitions compare the exact
+  locked preimage again before writing, so a concurrent config edit is preserved and reported as
+  `config_preimage_mismatch` instead of being silently overwritten (issue #520).
 
 - Receipt creation now abandons both exact caller-owned object stages when the payload object's
   stage/finalize fails before ledger submission, and equally when the commit boundary refuses the

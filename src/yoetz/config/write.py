@@ -13,7 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal
 
-from yoetz.config.load import validate_config_mapping
+from yoetz.config.load import load_config, validate_config_mapping
 from yoetz.config.models import (
     CODEX_SUBSCRIPTION_ENDPOINT_PROFILE_ID,
     CODEX_SUBSCRIPTION_PROVIDER_ID,
@@ -45,6 +45,7 @@ __all__ = [
     "xai_provider",
     "write_config_toml",
     "write_config_toml_if_unchanged",
+    "config_write_snapshot",
     "cleared_external_runtime_config",
     "clear_external_runtime_binding",
     "external_runtime_binding_config",
@@ -646,6 +647,21 @@ def _current_config_bytes(target: Path) -> bytes | None:
         raise ConfigError("config_value_invalid") from exc
 
 
+def config_write_snapshot(path: Path | None = None) -> tuple[YoetzConfig, bytes | None]:
+    """Load a config and its exact write preimage under the shared config lock.
+
+    Interactive provider operations keep the returned bytes across the external login/logout
+    boundary and compare them again before persisting. This prevents a stale model snapshot from
+    replacing a concurrent configuration edit.
+    """
+
+    target = _config_target(path)
+    with _ConfigWriteLock(target):
+        expected_bytes = _current_config_bytes(target)
+        config = load_config({}, {}, target)
+    return config, expected_bytes
+
+
 def _atomic_write_config(target: Path, payload: bytes) -> None:
     descriptor, temporary_name = tempfile.mkstemp(prefix=".yoetz-config-", dir=target.parent)
     temporary = Path(temporary_name)
@@ -695,7 +711,12 @@ def write_config_toml_if_unchanged(
     return target
 
 
-def preflight_config_write(config: YoetzConfig, path: Path | None = None) -> Path:
+def preflight_config_write(
+    config: YoetzConfig,
+    path: Path | None = None,
+    *,
+    expected_bytes: bytes | None,
+) -> Path:
     """Prove the exact config renders and its locked target accepts a write, without writing.
 
     Runs every deterministic local step of :func:`write_config_toml` except the final atomic
@@ -708,7 +729,8 @@ def preflight_config_write(config: YoetzConfig, path: Path | None = None) -> Pat
     target = _config_target(path)
     render_config_toml(config)
     with _ConfigWriteLock(target):
-        pass
+        if _current_config_bytes(target) != expected_bytes:
+            raise ConfigError("config_preimage_mismatch")
     return target
 
 
