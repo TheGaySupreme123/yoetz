@@ -52,6 +52,7 @@ from yoetz.service.confidential_protocol import (
 
 __all__ = [
     "ConfidentialClientError",
+    "ConfidentialResultUnconfirmed",
     "ConfidentialSecretClient",
     "HumanControlClient",
     "HumanControlSession",
@@ -158,6 +159,25 @@ class ConfidentialClientError(Exception):
             raise ValueError("confidential_client_reason_invalid")
         self.reason = reason
         super().__init__(reason)
+
+
+class ConfidentialResultUnconfirmed(ConfidentialClientError):
+    """The correlated terminal result arrived; only the close confirmation did not.
+
+    The server records its durable terminal transition before it writes the result frame, so a
+    result that already passed correlation on the authenticated stream is authoritative even when
+    the trailing close frame is missing, wrong, or lost with the connection. The validated result
+    rides on the exception so a caller that can act on it recovers the stored terminal outcome
+    exactly once, read-only; every other caller observes the unchanged bounded reason token.
+    """
+
+    __slots__ = ("result",)
+
+    result: HumanResult
+
+    def __init__(self, reason: str, result: HumanResult) -> None:
+        super().__init__(reason)
+        self.result = result
 
 
 def _mapped_error(error: BaseException) -> ConfidentialClientError:
@@ -325,6 +345,7 @@ class HumanControlSession:
         "_awaiting_server",
         "_closed",
         "_connect_secret",
+        "_decision_attempted",
         "_next_step",
         "_opened",
         "_stream",
@@ -352,6 +373,7 @@ class HumanControlSession:
         self._next_step = opened.step + 1
         self._closed = False
         self._awaiting_server = isinstance(opened.phase, SecretRequiredPhase)
+        self._decision_attempted = False
         self._token: ConfidentialSessionToken | None = None
         self._replace_token(opened.phase)
 
@@ -400,6 +422,17 @@ class HumanControlSession:
             _token=_SECRET_CLIENT_CONSTRUCTOR,
         )
 
+    @property
+    def decision_attempted(self) -> bool:
+        """Whether this session began sending an approve/deny action.
+
+        The flag is set before the transport write because a failed send may still have delivered
+        the complete frame. Callers use it only to distinguish failures that happened before any
+        decision attempt from genuinely ambiguous post-attempt outcomes.
+        """
+
+        return self._decision_attempted
+
     async def send_action(self, action: HumanAction) -> None:
         self._ensure_open()
         if self._awaiting_server:
@@ -416,6 +449,8 @@ class HumanControlSession:
             step=self._next_step,
             action=action,
         )
+        if type(action) is DecisionAction:
+            self._decision_attempted = True
         await _write_human_frame(self._stream, envelope)
         self._replace_token(None)
         self._next_step += 1
@@ -459,7 +494,13 @@ class HumanControlSession:
             return frame.phase
         if type(frame) is ServerResultEnvelope:
             self._replace_token(None)
-            await self._require_close("completed")
+            try:
+                await self._require_close("completed")
+            except ConfidentialClientError as exc:
+                # The durable terminal transition committed before this result frame was sent
+                # (issue #519): losing only the close confirmation must not discard the
+                # validated result in hand.
+                raise ConfidentialResultUnconfirmed(exc.reason, frame.result) from exc
             return frame.result
         if type(frame) is ServerErrorEnvelope:
             self._replace_token(None)

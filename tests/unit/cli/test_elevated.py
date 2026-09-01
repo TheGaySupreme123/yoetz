@@ -24,7 +24,15 @@ from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.chat_user_authority import ChatUserAttestationModel
 from yoetz.protocol.consent import ConsentReviewResultModel
 from yoetz.protocol.schemas import SchemaInstanceInvalid, validate_schema_instance
-from yoetz.service.confidential_protocol import ProviderCredentialResult, VaultStateResult
+from yoetz.service.confidential_client import (
+    ConfidentialClientError,
+    ConfidentialResultUnconfirmed,
+)
+from yoetz.service.confidential_protocol import (
+    PrivacyDecisionResult,
+    ProviderCredentialResult,
+    VaultStateResult,
+)
 from yoetz.service.elevated_bootstrap import (
     ElevatedBootstrapError,
     audit_path,
@@ -380,6 +388,203 @@ def test_chat_user_authorize_denial_is_single_shot_for_repository_grant(tmp_path
     assert result["outcome"] == "denied"
     assert result["authority_channel"] == "agent_attested_chat_instruction"
     assert load_pending(_state=tmp_path) is None
+
+
+_GRANT_BINDING = {
+    "recipe": "assisted_review",
+    "repository_privacy_commitment": "hmac-sha256:" + ("d" * 64),
+    "authority_digest": "sha256:" + ("e" * 64),
+}
+
+
+@contextmanager
+def _repository_grant_patches(
+    decide: Callable[..., object],
+    propose: Callable[..., object] | None = None,
+) -> Generator[Any]:
+    """Patch everything around the decide ceremony so its outcome handling is under test."""
+
+    async def snapshot() -> SimpleNamespace:
+        return SimpleNamespace(
+            bound_scope={
+                "workspace_ref_commitment": _GRANT_BINDING["repository_privacy_commitment"]
+            },
+            authority_digest=_GRANT_BINDING["authority_digest"],
+            composed_policy=object(),
+        )
+
+    async def default_propose(candidate: object, authority_digest: str) -> str:
+        del candidate, authority_digest
+        return "ppr_00000000-0000-4000-8000-000000000519"
+
+    with (
+        patch("yoetz.cli.privacy_setup.get_privacy_setup_snapshot", side_effect=snapshot),
+        patch("yoetz.cli.privacy_setup.configured_bindings", return_value=(None, None)),
+        patch("yoetz.cli.privacy_setup.recipe_answers", return_value=object()),
+        patch("yoetz.cli.privacy_setup.build_candidate_policy", return_value=object()),
+        patch(
+            "yoetz.cli.privacy_setup.propose_privacy_candidate",
+            side_effect=default_propose if propose is None else propose,
+        ),
+        patch(
+            "yoetz.cli.elevated._load_auto_unlock_passphrase",
+            return_value=bytearray(b"scoped-reauth"),
+        ),
+        patch("yoetz.cli.privacy_control.decide_policy", side_effect=decide) as decide_mock,
+    ):
+        yield decide_mock
+
+
+def _audit_lines(tmp_path: Path) -> list[str]:
+    return (
+        (tmp_path / "elevated-bootstrap" / "elevated-bootstrap-audit.jsonl")
+        .read_text("utf-8")
+        .splitlines()
+    )
+
+
+def test_repository_grant_recovers_committed_result_when_close_confirmation_lost(
+    tmp_path: Path,
+) -> None:
+    """#519: the durable grant committed; losing only the close frame must not report failure."""
+
+    committed = PrivacyDecisionResult("committed", "sha256:" + ("f" * 64))
+
+    async def decide(*_args: object, **_kwargs: object) -> object:
+        raise ConfidentialResultUnconfirmed("ambiguous", committed)
+
+    async def run() -> dict[str, Any]:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=_GRANT_BINDING)
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            with _repository_grant_patches(decide) as decide_mock:
+                result = cast(
+                    dict[str, Any],
+                    await elevated.authorize_elevated(_chat_attestation(pending)),
+                )
+            # One-shot recovery: the carried result is consumed read-only, never by replaying
+            # the privacy expansion as a new decision.
+            decide_mock.assert_awaited_once()
+            return result
+
+    result = anyio.run(run)
+    assert result["outcome"] == "completed"
+    assert result["result"] == {"recipe": "assisted_review", "outcome": "granted"}
+    validate_schema_instance("review-result", "5.0.0", result)
+    assert load_pending(_state=tmp_path) is None
+    audit = _audit_lines(tmp_path)
+    assert any('"outcome":"approved"' in line for line in audit)
+    assert not any('"outcome":"failed"' in line for line in audit)
+
+
+def test_repository_grant_carried_denied_result_stays_a_bounded_failure(tmp_path: Path) -> None:
+    denied = PrivacyDecisionResult("denied", "sha256:" + ("f" * 64))
+
+    async def decide(*_args: object, **_kwargs: object) -> object:
+        raise ConfidentialResultUnconfirmed("ambiguous", denied)
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=_GRANT_BINDING)
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            with _repository_grant_patches(decide):
+                with pytest.raises(ElevatedBootstrapError) as caught:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+            assert caught.value.reason == "repository_privacy_grant_failed"
+
+    anyio.run(run)
+    assert load_pending(_state=tmp_path) is None
+    audit = _audit_lines(tmp_path)
+    assert not any('"outcome":"approved"' in line for line in audit)
+    assert any('"failure_reason":"repository_privacy_grant_failed"' in line for line in audit)
+
+
+def test_repository_grant_post_decision_ambiguity_is_typed_unconfirmed(tmp_path: Path) -> None:
+    """A submitted decision with no result must not be reported as a failed grant."""
+
+    from yoetz.cli.privacy_control import PrivacyDecisionUnconfirmed
+
+    async def decide(*_args: object, **_kwargs: object) -> object:
+        raise PrivacyDecisionUnconfirmed("ambiguous")
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=_GRANT_BINDING)
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            with _repository_grant_patches(decide):
+                with pytest.raises(ElevatedBootstrapError) as caught:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+            assert caught.value.reason == "repository_privacy_grant_unconfirmed"
+
+    anyio.run(run)
+    assert load_pending(_state=tmp_path) is None
+    audit = _audit_lines(tmp_path)
+    assert not any('"outcome":"approved"' in line for line in audit)
+    assert any('"failure_reason":"repository_privacy_grant_unconfirmed"' in line for line in audit)
+
+
+def test_repository_grant_pre_decision_ambiguity_is_a_retryable_failed_review(
+    tmp_path: Path,
+) -> None:
+    """An open/read failure sent no decision and must not claim the grant may be effective."""
+
+    async def decide(*_args: object, **_kwargs: object) -> object:
+        raise ConfidentialClientError("ambiguous")
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=_GRANT_BINDING)
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            with _repository_grant_patches(decide):
+                with pytest.raises(ElevatedBootstrapError) as caught:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+            assert caught.value.reason == "repository_privacy_grant_failed"
+
+    anyio.run(run)
+    assert load_pending(_state=tmp_path) is None
+    audit = _audit_lines(tmp_path)
+    assert any('"failure_reason":"repository_privacy_grant_failed"' in line for line in audit)
+    assert not any(
+        '"failure_reason":"repository_privacy_grant_unconfirmed"' in line for line in audit
+    )
+
+
+def test_repository_grant_pre_commit_failures_stay_bounded_with_no_grant(tmp_path: Path) -> None:
+    async def cancelled_decide(*_args: object, **_kwargs: object) -> object:
+        raise ConfidentialClientError("cancelled")
+
+    async def failing_propose(*_args: object, **_kwargs: object) -> object:
+        raise OSError("proposal channel down")
+
+    async def run() -> None:
+        decision_state = tmp_path / "decision"
+        with _patch_state(decision_state):
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=_GRANT_BINDING)
+            pending = load_pending(_state=decision_state)
+            assert pending is not None
+            with _repository_grant_patches(cancelled_decide):
+                with pytest.raises(ElevatedBootstrapError) as caught:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+            assert caught.value.reason == "repository_privacy_grant_failed"
+            assert load_pending(_state=decision_state) is None
+
+        proposal_state = tmp_path / "proposal"
+        with _patch_state(proposal_state):
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=_GRANT_BINDING)
+            pending = load_pending(_state=proposal_state)
+            assert pending is not None
+            with _repository_grant_patches(cancelled_decide, propose=failing_propose) as decided:
+                with pytest.raises(ElevatedBootstrapError) as caught:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+                decided.assert_not_awaited()
+            assert caught.value.reason == "repository_privacy_grant_failed"
+            assert load_pending(_state=proposal_state) is None
+
+    anyio.run(run)
 
 
 def test_chat_user_authorize_requires_advertised_capability_before_claim(tmp_path: Path) -> None:

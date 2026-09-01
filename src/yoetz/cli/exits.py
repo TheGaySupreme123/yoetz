@@ -285,6 +285,12 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
             "an unrecognized YOETZ_-prefixed environment variable is set; unset it or use a "
             "documented configuration variable"
         ),
+        "repository_privacy_grant_unconfirmed": (
+            "the grant decision was submitted but its outcome could not be confirmed over the "
+            "confidential channel, so it may already be effective; check 'yoetz provider status' "
+            "for the repository grant state before preparing a new consent — do not assume it "
+            "failed"
+        ),
         "workspace_unresolvable": (
             "the --workspace locator is empty, missing, symlinked, foreign-owned, or otherwise "
             "unsafe; pass the resolved path of a directory owned by the current user (host hooks "
