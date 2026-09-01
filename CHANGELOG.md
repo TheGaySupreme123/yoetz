@@ -8,6 +8,16 @@ reverse-chronological released versions.
 
 ### Added
 
+- One supported exact-target isolation contract for test and dogfood runtimes (ADR-026): setting
+  `YOETZ_ISOLATED_ROOT` to a pre-provisioned owner-only private directory derives every identity
+  root from it — config, storage bundle, state directory (service singleton lock and generation),
+  control endpoints, cache, and logs — so an isolated runtime structurally cannot reach the
+  normal Yoetz service. A set but unusable root fails closed instead of falling back to ambient
+  platform directories. `yoetz service isolation --json` reports one exact target's digest-only
+  identities without a service connection; the Codex dogfood parity gate compares separate exact
+  normal and candidate snapshots (including relocated storage and the Yoetz executable) and
+  rejects shared, ambient, or unknown identity before launch (issue #518).
+
 - `claim_recorded/1.1.0` adds append-only completion-claim correction: a fresh replacement names
   prior effective claims in `supersedes_claim_refs` and records partial or failed results in
   `limitation_refs` instead of treating them as support. Dry-run rejects missing, stale, disjoint,

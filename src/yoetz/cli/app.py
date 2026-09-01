@@ -1300,6 +1300,32 @@ def service_run() -> None:
         _finish(_lifecycle_failure(error))
 
 
+@service_app.command("isolation")
+def service_isolation(json_output: _JSON = False) -> None:
+    """Report the resolved identity roots and isolation mode without connecting to a service.
+
+    Digest-only output: each root is a digest over its canonical resolved path identity. The
+    dogfood parity preflight compares one report from the exact normal target with another from
+    the isolated launch environment; platform defaults cannot stand in for a relocated target.
+    """
+
+    from yoetz.cli.isolation_status import isolation_report
+    from yoetz.config.models import ConfigError
+    from yoetz.config.paths import PathSafetyError
+
+    try:
+        report = isolation_report()
+    except PathSafetyError as error:
+        _stderr(f"isolation_invalid: {error.reason_code}")
+        _finish(2)
+    except ConfigError as error:
+        _stderr(f"isolation_unprovable: {error.reason_code}")
+        _finish(2)
+    else:
+        _human_or_json(cast(JsonValue, dict(report)), json_output=json_output)
+        _finish(0)
+
+
 @service_app.command("diagnostics")
 def service_diagnostics(
     correlation_id: Annotated[

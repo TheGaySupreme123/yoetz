@@ -25,7 +25,11 @@ release line at `1.0.24`. Nearby versions are untested, not implicitly compatibl
 
 ## Preview and install
 
-Use an explicit isolated root; never point a test at regular `~/.cursor`. The Cursor plugin
+Use an explicit isolated root; never point a test at regular `~/.cursor`. An isolated Cursor
+home isolates only Cursor: an isolated-Yoetz test cell must also export `YOETZ_ISOLATED_ROOT`
+(ADR-026) into the cell's `mcp.json` `env` and hook commands, or the plugin's Yoetz children
+resolve the live service singleton and state; prove the mode with
+`yoetz service isolation --json` from the cell environment. The Cursor plugin
 command surface is `preview`, `install`, `status`, and `remove` (`--action replace` previews a
 replacement); the generic `update`, `enable`, `disable`, and `export` commands listed by the shared
 group are Claude Code lifecycles and refuse for Cursor with
