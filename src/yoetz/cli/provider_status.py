@@ -8,8 +8,10 @@ when every installation condition holds.
 
 from __future__ import annotations
 
-import json
+import hashlib
+import hmac
 import os
+import stat
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,7 +22,8 @@ from yoetz.config.models import ConfigError
 from yoetz.config.paths import PathSafetyError, bundle_root
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
-from yoetz.protocol.canonical import JsonValue, canonical_encode
+from yoetz.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
+from yoetz.protocol.ids import IdKind, validate_id
 from yoetz.service.client import connect_service
 
 __all__ = [
@@ -38,6 +41,18 @@ _CREDENTIAL_MASK: Final = "********"
 # This report probes the persistent user service over the fixed endpoint only. It never starts
 # one, unlike the MCP bridge's connect-on-demand path.
 _PROBED_LIFECYCLE: Final = "user_service_no_autostart"
+_INSTALLATION_MARKER_DOMAIN: Final = b"yoetz/installation-state/v1\x00"
+_MAX_INSTALLATION_MARKER_BYTES: Final = 65_536
+_INSTALLATION_MARKER_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "installation_id",
+        "vault_mode",
+        "root_envelope_base64",
+        "mode_binding_digest",
+        "record_digest",
+    }
+)
 
 
 def _stdout_json(value: JsonValue) -> None:
@@ -370,21 +385,51 @@ def machine_scope_request() -> JsonObject:
         root = bundle_root(_data_dir=config.storage.data_dir)
     except (ConfigError, OSError, PathSafetyError) as exc:
         raise MachineScopeError("installation_bundle_unavailable") from exc
+    marker = root / "installation-state.json"
     try:
-        text = (root / "installation-state.json").read_text()
+        facts = marker.lstat()
+        encoded = marker.read_bytes()
     except FileNotFoundError as exc:
         raise MachineScopeError("installation_marker_missing") from exc
     except OSError as exc:
         raise MachineScopeError("installation_marker_invalid") from exc
     try:
-        state: object = json.loads(text)
-    except ValueError as exc:
+        if (
+            not stat.S_ISREG(facts.st_mode)
+            or stat.S_ISLNK(facts.st_mode)
+            or facts.st_nlink != 1
+            or len(encoded) > _MAX_INSTALLATION_MARKER_BYTES
+            or not encoded.endswith(b"\n")
+            or encoded.endswith(b"\n\n")
+        ):
+            raise ValueError
+        if os.name == "posix" and stat.S_IMODE(facts.st_mode) & 0o077:
+            raise ValueError
+        state: object = strict_json_parse(encoded[:-1])
+        if type(state) is not dict or canonical_encode(cast(JsonValue, state)) != encoded[:-1]:
+            raise ValueError
+        source = cast("dict[str, JsonValue]", state)
+        if frozenset(source) != _INSTALLATION_MARKER_KEYS or source["schema_version"] != "1":
+            raise ValueError
+        body = dict(source)
+        record_digest = body.pop("record_digest")
+        if type(record_digest) is not str:
+            raise ValueError
+        expected = (
+            "sha256:"
+            + hashlib.sha256(_INSTALLATION_MARKER_DOMAIN + canonical_encode(body)).hexdigest()
+        )
+        if not hmac.compare_digest(record_digest, expected):
+            raise ValueError
+    except (TypeError, ValueError) as exc:
         raise MachineScopeError("installation_marker_invalid") from exc
-    installation_id: object = (
-        cast("dict[str, object]", state).get("installation_id") if type(state) is dict else None
-    )
-    if type(installation_id) is not str or not installation_id:
+    installation_id: object = source["installation_id"]
+    if type(installation_id) is not str:
         raise MachineScopeError("installation_marker_invalid")
+    try:
+        validate_id(IdKind.INSTALLATION, installation_id)
+    except (TypeError, ValueError) as exc:
+        raise MachineScopeError("installation_marker_invalid") from exc
     body: dict[str, JsonValue] = {
         "schema_version": "1.0.0",
         "scope": {"kind": "machine", "installation_id": installation_id},

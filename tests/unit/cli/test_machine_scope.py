@@ -11,6 +11,7 @@ raised before any service request.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import cast
@@ -21,6 +22,7 @@ from yoetz.cli import provider_status as module
 from yoetz.cli.provider_status import MachineScopeError, machine_scope_request
 from yoetz.config.models import ConfigError, StorageConfig, YoetzConfig
 from yoetz.config.paths import PathSafetyError
+from yoetz.protocol.canonical import JsonValue, canonical_encode
 
 _INSTALLATION_ID = "ins_50000000-0000-4000-8000-000000000001"
 
@@ -52,14 +54,35 @@ def _wire(
 
 
 def _write_marker(bundle: Path, text: str) -> None:
-    (bundle / "installation-state.json").write_text(text)
+    marker = bundle / "installation-state.json"
+    marker.write_text(text)
+    marker.chmod(0o600)
+
+
+def _valid_marker(*, installation_id: object = _INSTALLATION_ID) -> str:
+    body = {
+        "installation_id": installation_id,
+        "mode_binding_digest": "sha256:" + ("a" * 64),
+        "root_envelope_base64": None,
+        "schema_version": "1",
+        "vault_mode": "os_keyring",
+    }
+    record_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            b"yoetz/installation-state/v1\x00" + canonical_encode(cast(JsonValue, body))
+        ).hexdigest()
+    )
+    return (
+        canonical_encode(cast(JsonValue, {**body, "record_digest": record_digest})).decode() + "\n"
+    )
 
 
 def test_default_configuration_reads_marker_from_default_bundle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     bundle, observed = _wire(monkeypatch, tmp_path)
-    _write_marker(bundle, json.dumps({"installation_id": _INSTALLATION_ID}))
+    _write_marker(bundle, _valid_marker())
 
     request = machine_scope_request()
 
@@ -77,7 +100,7 @@ def test_explicit_data_dir_resolves_the_configured_bundle(
 
     configured = tmp_path / "configured-bundle"
     bundle, observed = _wire(monkeypatch, tmp_path, data_dir=configured)
-    _write_marker(bundle, json.dumps({"installation_id": _INSTALLATION_ID}))
+    _write_marker(bundle, _valid_marker())
 
     request = machine_scope_request()
 
@@ -103,10 +126,20 @@ def test_missing_marker_is_a_bounded_local_failure(
         "not json at all",
         json.dumps(["not", "an", "object"]),
         json.dumps({"schema_version": "1"}),
-        json.dumps({"installation_id": ""}),
-        json.dumps({"installation_id": 7}),
+        _valid_marker(installation_id=""),
+        _valid_marker(installation_id="not-an-installation-id"),
+        _valid_marker(installation_id=7),
+        _valid_marker().replace('"record_digest":"sha256:', '"record_digest":"sha256:0', 1),
     ],
-    ids=["not_json", "not_object", "id_absent", "id_empty", "id_not_string"],
+    ids=[
+        "not_json",
+        "not_object",
+        "id_absent",
+        "id_empty",
+        "id_malformed",
+        "id_not_string",
+        "digest_mismatch",
+    ],
 )
 def test_malformed_marker_is_a_bounded_local_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, marker: str
