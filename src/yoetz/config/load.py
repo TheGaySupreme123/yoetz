@@ -21,6 +21,7 @@ __all__ = [
     "default_config_file_path",
     "load_config",
     "parse_minimal_safe_config",
+    "validate_config_mapping",
 ]
 
 ENV_PREFIX: Final = "YOETZ_"
@@ -265,6 +266,30 @@ def _reject_file_release_probe(file_values: Mapping[str, object]) -> None:
         raise ConfigError("release_probe_not_a_user_profile")
 
 
+def validate_config_mapping(values: Mapping[str, object]) -> YoetzConfig:
+    """Normalize file-shape leaves and strictly validate one config mapping.
+
+    This is the single canonical rule for turning parsed configuration data into a validated
+    ``YoetzConfig``: the file-shape ``storage.data_dir`` string becomes a ``Path`` before strict
+    model validation, and every failure surfaces as a bounded ``ConfigError``. Writers use it as
+    their round-trip check so a file Yoetz writes is, by construction, a file this loader
+    accepts (#520).
+    """
+
+    merged = dict(values)
+    data_dir, present = _file_leaf(merged, ("storage", "data_dir"))
+    if present and type(data_dir) is str:
+        _set_leaf(merged, ("storage", "data_dir"), Path(data_dir))
+    try:
+        return YoetzConfig.model_validate(merged, strict=True)
+    except ConfigError:
+        raise
+    except ValidationError as exc:
+        raise ConfigError("config_value_invalid") from exc
+    except Exception as exc:
+        raise ConfigError("config_value_invalid") from exc
+
+
 def load_config(
     service_overrides: Mapping[str, str],
     env: Mapping[str, str],
@@ -282,15 +307,7 @@ def load_config(
         _reject_file_release_probe(file_values)
     if explicit and read and _in_repository(selected_path):
         _emit_explicit_project_config()
-    merged = _merge_selected(file_values, env_values, override_values)
-    try:
-        return YoetzConfig.model_validate(merged, strict=True)
-    except ConfigError:
-        raise
-    except ValidationError as exc:
-        raise ConfigError("config_value_invalid") from exc
-    except Exception as exc:
-        raise ConfigError("config_value_invalid") from exc
+    return validate_config_mapping(_merge_selected(file_values, env_values, override_values))
 
 
 def _minimal_file_value(source: Mapping[str, object], leaf: _LeafPath, default: object) -> object:

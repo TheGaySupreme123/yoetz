@@ -39,6 +39,16 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Codex-subscription lifecycle commands (`setup`, `status`, `disconnect`, `rollback`) and
+  provider-endpoint binding writes now read the target configuration through the canonical
+  loader, so a valid `config.toml` with an explicit `storage.data_dir` string no longer crashes
+  as a masked `internal_error` exit 70 (and an endpoint write no longer silently replaces an
+  unloadable base with defaults, dropping `data_dir`). The rendered-config round-trip check uses
+  the same loader rule, configuration failures surface as their bounded closed reason tokens
+  with remediation text, and `setup` validates the configuration and probes the writable binding
+  target before opening the Codex login flow — with `disconnect` likewise probing its removal
+  write before Codex logs the dedicated home out (issue #520).
+
 - Receipt creation now abandons both exact caller-owned object stages when the payload object's
   stage/finalize fails before ledger submission, and equally when the commit boundary refuses the
   append ahead of submission because cancellation is already pending. This removes a receipt file

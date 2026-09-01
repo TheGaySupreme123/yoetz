@@ -239,6 +239,44 @@ REMEDIATION_MESSAGES: Final = MappingProxyType(
             "approval was recorded as failed and nothing was approved; run "
             "'yoetz consent prepare <operation>' again, and report a defect if this recurs"
         ),
+        # Canonical config-loading tokens surfaced by provider lifecycle commands (#520). Each
+        # names the failing condition without echoing file content or private paths.
+        "config_toml_invalid": (
+            "the selected Yoetz config file is not valid TOML; fix the syntax error and retry"
+        ),
+        "config_value_invalid": (
+            "a value in the selected Yoetz config file (or a YOETZ_ override) is outside the "
+            "reviewed configuration model; correct it and retry"
+        ),
+        "unknown_config_key": (
+            "the selected Yoetz config file names a key the reviewed configuration model does "
+            "not admit; remove or correct that key and retry"
+        ),
+        "config_file_unreadable": (
+            "the selected Yoetz config file exists but could not be read; check its permissions "
+            "and retry"
+        ),
+        "config_file_too_large": (
+            "the selected Yoetz config file exceeds the bounded 64 KiB limit; remove unrelated "
+            "content and retry"
+        ),
+        "config_schema_unsupported": (
+            "the selected Yoetz config file declares a schema_version this installation does "
+            'not support; set schema_version = "1" or upgrade Yoetz'
+        ),
+        "secret_in_config": (
+            "the selected Yoetz config file contains a secret-named key; config.toml is "
+            "nonsecret — provision credentials with 'yoetz provider credential set' instead"
+        ),
+        "secret_env_forbidden": (
+            "a secret-named YOETZ_ environment variable is set; Yoetz never reads secrets from "
+            "the environment — unset it and provision credentials with "
+            "'yoetz provider credential set'"
+        ),
+        "unknown_config_env_var": (
+            "an unrecognized YOETZ_-prefixed environment variable is set; unset it or use a "
+            "documented configuration variable"
+        ),
         "workspace_unresolvable": (
             "the --workspace locator is empty, missing, symlinked, foreign-owned, or otherwise "
             "unsafe; pass the resolved path of a directory owned by the current user (host hooks "

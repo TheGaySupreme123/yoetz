@@ -7,8 +7,8 @@ import os
 import platform
 import re
 import sys
-import tomllib
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final, Literal, cast
 
@@ -30,11 +30,14 @@ from yoetz.adapters.providers.codex_app_server import (
     prepare_codex_home,
 )
 from yoetz.config.load import load_config
-from yoetz.config.models import ExternalRuntimeProfileConfig, YoetzConfig
+from yoetz.config.models import ConfigError, ExternalRuntimeProfileConfig, YoetzConfig
 from yoetz.config.paths import bundle_root, config_file_path
 from yoetz.config.write import (
     clear_external_runtime_binding,
+    cleared_external_runtime_config,
     codex_subscription_runtime,
+    external_runtime_binding_config,
+    preflight_config_write,
     write_external_runtime_binding,
 )
 from yoetz.protocol.canonical import JsonValue
@@ -67,9 +70,25 @@ def _sha256_file(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def _bounded_config_operation[T](operation: Callable[[], T]) -> T:
+    """Run one local config step; surface a ``ConfigError`` as its closed reason token.
+
+    Every subscription surface (CLI commands, terminal menu, TUI runtime) already maps
+    ``ValueError`` through :func:`subscription_failure_reason`; a raw ``ConfigError`` escaping
+    any of them was masked as a generic ``internal_error`` exit (#520).
+    """
+
+    try:
+        return operation()
+    except ConfigError as error:
+        raise ValueError(error.reason_code) from error
+
+
 def subscription_failure_reason(error: BaseException) -> str:
     """Map subscription CLI failures to one closed token; never echo native OS text."""
 
+    if isinstance(error, ConfigError):
+        return error.reason_code
     if isinstance(error, FileNotFoundError):
         return "codex_runtime_not_found"
     if isinstance(error, TimeoutError):
@@ -124,7 +143,7 @@ def resolve_supported_codex_executable(selected: Path) -> tuple[Path, str, str]:
 
 
 def default_codex_home() -> Path:
-    config = load_config({}, os.environ, None)
+    config = _bounded_config_operation(lambda: load_config({}, os.environ, None))
     if config.external_runtime is not None:
         return Path(config.external_runtime.codex_home)
     return bundle_root(_data_dir=config.storage.data_dir) / "external-runtimes" / "codex-0.150.1"
@@ -164,11 +183,17 @@ def codex_subscription_preview(
 
 
 def _base_config(path: Path | None) -> YoetzConfig:
+    """Load the exact target config through the canonical loader; fail as one closed token.
+
+    Strict validation of raw TOML rejected valid files whose ``storage.data_dir`` string the
+    canonical loader converts to ``Path`` before model validation (#520). Loading through
+    :func:`yoetz.config.load.load_config` keeps one rule: a file the service accepts is a file
+    every subscription lifecycle command accepts. Sources stay file-only (no environment or
+    override leaves) so a write base never persists ambient environment state.
+    """
+
     target = _target_config_path(path)
-    try:
-        return YoetzConfig.model_validate(tomllib.loads(target.read_text("utf-8")), strict=True)
-    except FileNotFoundError:
-        return YoetzConfig()
+    return _bounded_config_operation(lambda: load_config({}, {}, target))
 
 
 def _target_config_path(path: Path | None) -> Path:
@@ -181,13 +206,14 @@ def _target_config_path(path: Path | None) -> Path:
 def _binding(
     *, executable: Path, codex_home: Path, model: str, reasoning_effort: str
 ) -> ExternalRuntimeProfileConfig:
+    """Validate and construct the exact nonsecret binding without creating any state."""
+
     preview = codex_subscription_preview(
         executable=executable,
         codex_home=codex_home,
         model=model,
         reasoning_effort=reasoning_effort,
     )
-    prepare_codex_home(codex_home)
     return codex_subscription_runtime(
         executable_path=cast(str, preview["executable_path"]),
         executable_sha256=cast(str, preview["executable_sha256"]),
@@ -246,7 +272,13 @@ async def codex_subscription_setup(
     switch_account: bool,
     config_path: Path | None = None,
 ) -> dict[str, JsonValue]:
-    """Login through Codex, confirm entitlement, then persist only a nonsecret binding."""
+    """Validate the binding and its persistence, login through Codex, then persist it.
+
+    Every deterministic local requirement — the exact runtime cell, the canonical target
+    configuration, and a render-validated, lock-probed write of the staged binding — is proven
+    before the Codex login flow opens, so a configuration failure can never follow login side
+    effects (#520).
+    """
 
     binding = _binding(
         executable=executable,
@@ -254,6 +286,12 @@ async def codex_subscription_setup(
         model=model,
         reasoning_effort=reasoning_effort,
     )
+    target = _target_config_path(config_path)
+    base = _base_config(target)
+    _bounded_config_operation(
+        lambda: preflight_config_write(external_runtime_binding_config(binding, base=base), target)
+    )
+    prepare_codex_home(codex_home)
     profile = _profile(binding)
     if switch_account:
         logout_status = await codex_logout(profile)
@@ -273,8 +311,9 @@ async def codex_subscription_setup(
     status = await codex_login(profile, mode=login_mode, present_challenge=present)
     if status.auth_mode != "chatgpt" or not status.model_available or status.cleanup == "failed":
         raise ValueError("codex_subscription_readiness_unproven")
-    target = _target_config_path(config_path)
-    write_external_runtime_binding(binding, path=target, base=_base_config(target))
+    _bounded_config_operation(
+        lambda: write_external_runtime_binding(binding, path=target, base=base)
+    )
     return _safe_status(binding, status)
 
 
@@ -346,17 +385,27 @@ async def codex_subscription_status(*, config_path: Path | None = None) -> dict[
 
 
 async def codex_subscription_disconnect(*, config_path: Path | None = None) -> dict[str, JsonValue]:
-    """Confirm Codex logout, then remove only the Yoetz binding."""
+    """Prove the cleared config persists, confirm Codex logout, then remove only the binding.
+
+    The removal write is render-validated and lock-probed before Codex logs the dedicated home
+    out, so a local persistence failure cannot strand a logged-out home behind a binding that
+    still claims to be active.
+    """
 
     target = _target_config_path(config_path)
     config = _base_config(target)
     binding = config.external_runtime
     if binding is None:
         raise ValueError("codex_subscription_not_configured")
+    _bounded_config_operation(
+        lambda: preflight_config_write(cleared_external_runtime_config(config), target)
+    )
     status = await codex_logout(_profile(binding))
     if status.cleanup == "failed":
         raise ValueError("codex_logout_unconfirmed")
-    written = clear_external_runtime_binding(path=target, base=config)
+    written = _bounded_config_operation(
+        lambda: clear_external_runtime_binding(path=target, base=config)
+    )
     result = _safe_status(binding, status)
     result["binding_removed"] = True
     result["config_path"] = str(written)
@@ -369,7 +418,9 @@ def codex_subscription_rollback(*, config_path: Path | None = None) -> dict[str,
     target = _target_config_path(config_path)
     config = _base_config(target)
     home = None if config.external_runtime is None else config.external_runtime.codex_home
-    written = clear_external_runtime_binding(path=target, base=config)
+    written = _bounded_config_operation(
+        lambda: clear_external_runtime_binding(path=target, base=config)
+    )
     return {
         "schema": "yoetz.codex-subscription-rollback/1",
         "binding_removed": config.external_runtime is not None,

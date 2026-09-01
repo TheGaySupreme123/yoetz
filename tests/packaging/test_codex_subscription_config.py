@@ -1,0 +1,249 @@
+"""Codex-subscription lifecycle CLI against a real installed artifact and real config TOML.
+
+Regression slice for issue #520: a valid ``config.toml`` whose ``storage.data_dir`` is the
+ordinary TOML string form crashed every ``yoetz provider codex-subscription`` command with a
+masked ``internal_error`` exit 70 before any command logic ran, because the subscription CLI
+strict-validated raw TOML instead of loading through the canonical configuration loader.
+
+Each case installs the built wheel into an isolated root, points ``YOETZ_CONFIG`` at a real
+hand-written TOML file whose ``storage.data_dir`` names an isolated data directory, spawns the
+real console script, and requires a bounded, non-internal, path-free diagnostic or a successful
+result. No case opens a Codex login flow: ``status`` and ``rollback`` never log in, and the
+bound-runtime case points at an executable that does not exist, so the runtime probe fails
+closed locally.
+"""
+
+from __future__ import annotations
+
+import json
+import platform
+import subprocess
+import sys
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final
+
+import pytest
+
+_REPO_ROOT: Final = Path(__file__).resolve().parents[2]
+
+
+def _is_advertised_host() -> bool:
+    if sys.platform == "darwin":
+        return platform.machine() == "arm64"
+    if sys.platform.startswith("linux"):
+        return platform.machine() in {"x86_64", "amd64"}
+    return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _is_advertised_host(),
+    reason="only the v0.1 advertised macOS arm64 / manylinux_2_28 x86-64 cells are certified",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _BuiltDist:
+    directory: Path
+    wheel: Path
+
+
+@pytest.fixture(scope="module")
+def built_dist(tmp_path_factory: pytest.TempPathFactory) -> _BuiltDist:
+    dist_dir = tmp_path_factory.mktemp("codex-subscription-dist")
+    result = subprocess.run(
+        ["uv", "build", "--no-sources", "-o", str(dist_dir), str(_REPO_ROOT)],
+        capture_output=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    wheels = sorted(dist_dir.glob("*.whl"))
+    assert len(wheels) == 1
+    return _BuiltDist(dist_dir, wheels[0])
+
+
+def _real_cache_dir() -> str:
+    result = subprocess.run(["uv", "cache", "dir"], capture_output=True, timeout=15, check=False)
+    return result.stdout.decode("utf-8").strip()
+
+
+def _tool_install(dist_dir: Path, root: Path, home: Path) -> tuple[Path, dict[str, str]]:
+    import os
+
+    tool_dir = root / "tool"
+    bin_dir = root / "bin"
+    spec = "yoetz==0.1.0"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "UV_TOOL_DIR": str(tool_dir),
+        "UV_TOOL_BIN_DIR": str(bin_dir),
+        "UV_CACHE_DIR": _real_cache_dir(),
+    }
+
+    def _install(offline: bool) -> subprocess.CompletedProcess[bytes]:
+        args = ["uv", "tool", "install", "--python", "3.14.6"]
+        if offline:
+            args.append("--offline")
+        args += ["--find-links", str(dist_dir), spec]
+        return subprocess.run(args, capture_output=True, timeout=180, env=env, check=False)
+
+    result = _install(offline=True)
+    if result.returncode != 0:
+        result = _install(offline=False)
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    return bin_dir / "yoetz", env
+
+
+def _data_dir_config(root: Path) -> tuple[Path, Path]:
+    """Write the real user-shaped TOML with an explicit isolated storage.data_dir."""
+
+    data_dir = root / "state"
+    data_dir.mkdir(mode=0o700, exist_ok=True)
+    config = root / "config.toml"
+    config.write_text(
+        f'schema_version = "1"\nprofile = "strict-local"\n\n[storage]\ndata_dir = "{data_dir}"\n',
+        encoding="utf-8",
+    )
+    return config, data_dir
+
+
+def _bound_runtime_config(root: Path) -> tuple[Path, Path]:
+    """Write the exact persisted subscription binding shape around an absent executable."""
+
+    data_dir = root / "state"
+    data_dir.mkdir(mode=0o700, exist_ok=True)
+    digest = "sha256:" + "a" * 64
+    config = root / "config.toml"
+    config.write_text(
+        'schema_version = "1"\n'
+        'profile = "codex-subscription"\n'
+        "\n"
+        "[storage]\n"
+        f'data_dir = "{data_dir}"\n'
+        "\n"
+        "[external_runtime]\n"
+        'provider_id = "openai-codex"\n'
+        'endpoint_profile_id = "codex-chatgpt-subscription"\n'
+        'endpoint_profile_version = "1.0.0"\n'
+        'credential_authority = "external_runtime_oauth"\n'
+        f'executable_path = "{root / "absent-codex"}"\n'
+        f'executable_sha256 = "{digest}"\n'
+        'runtime_version = "0.150.1"\n'
+        'source_identity = "openai-codex-npm-darwin-arm64-0.150.1"\n'
+        f'app_server_schema_sha256 = "{digest}"\n'
+        f'capability_cell_sha256 = "{digest}"\n'
+        f'isolated_config_sha256 = "{digest}"\n'
+        'capability_profile = "codex-evaluator/0.150.1/v1"\n'
+        'capability_evidence_expires_at = "2026-11-30T00:00:00Z"\n'
+        f'codex_home = "{root / "dedicated-home"}"\n'
+        'model = "gpt-5.6-sol"\n'
+        'reasoning_effort = "high"\n',
+        encoding="utf-8",
+    )
+    return config, data_dir
+
+
+def _run(
+    yoetz_exe: Path, env: dict[str, str], config: Path, *argv: str
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [str(yoetz_exe), *argv],
+        capture_output=True,
+        timeout=30,
+        env={**env, "YOETZ_CONFIG": str(config)},
+        check=False,
+    )
+
+
+def _assert_bounded(result: subprocess.CompletedProcess[bytes], *, config: Path) -> None:
+    assert b"internal_error" not in result.stderr, result.stderr
+    assert b"Traceback (most recent call last)" not in result.stderr
+    assert str(config).encode("utf-8") not in result.stderr
+    assert str(_REPO_ROOT).encode("utf-8") not in result.stderr
+
+
+def test_status_with_valid_data_dir_config_is_bounded_not_internal_error(
+    built_dist: _BuiltDist, tmp_path: Path
+) -> None:
+    root = tmp_path / "install"
+    home = root / "home"
+    home.mkdir(parents=True)
+    yoetz_exe, env = _tool_install(built_dist.directory, root, home)
+    cfg_root = tmp_path / "cfg"
+    cfg_root.mkdir(mode=0o700)
+    config, _data_dir = _data_dir_config(cfg_root)
+
+    result = _run(yoetz_exe, env, config, "provider", "codex-subscription", "status", "--json")
+
+    assert result.returncode == 20, (result.returncode, result.stderr)
+    assert b"codex_subscription: codex_subscription_not_configured" in result.stderr
+    _assert_bounded(result, config=config)
+
+
+def test_status_with_bound_runtime_and_data_dir_probes_the_runtime_not_the_loader(
+    built_dist: _BuiltDist, tmp_path: Path
+) -> None:
+    root = tmp_path / "install"
+    home = root / "home"
+    home.mkdir(parents=True)
+    yoetz_exe, env = _tool_install(built_dist.directory, root, home)
+    cfg_root = tmp_path / "cfg"
+    cfg_root.mkdir(mode=0o700)
+    config, _data_dir = _bound_runtime_config(cfg_root)
+
+    result = _run(yoetz_exe, env, config, "provider", "codex-subscription", "status", "--json")
+
+    # The valid file loads; the failure, if any, is the absent runtime — one closed token,
+    # never a masked internal_error and never a config-loader crash.
+    assert result.returncode == 20, (result.returncode, result.stderr)
+    assert b"codex_subscription: codex_" in result.stderr
+    assert b"config_value_invalid" not in result.stderr
+    _assert_bounded(result, config=config)
+
+
+def test_rollback_preserves_data_dir_while_removing_only_the_binding(
+    built_dist: _BuiltDist, tmp_path: Path
+) -> None:
+    root = tmp_path / "install"
+    home = root / "home"
+    home.mkdir(parents=True)
+    yoetz_exe, env = _tool_install(built_dist.directory, root, home)
+    cfg_root = tmp_path / "cfg"
+    cfg_root.mkdir(mode=0o700)
+    config, data_dir = _bound_runtime_config(cfg_root)
+
+    result = _run(yoetz_exe, env, config, "provider", "codex-subscription", "rollback", "--json")
+
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    payload = json.loads(result.stdout)
+    assert payload["binding_removed"] is True
+    assert payload["codex_installation_preserved"] is True
+    rewritten = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert "external_runtime" not in rewritten
+    assert rewritten["storage"]["data_dir"] == str(data_dir)
+    assert rewritten["profile"] == "strict-local"
+    _assert_bounded(result, config=config)
+
+
+def test_invalid_config_is_a_bounded_actionable_diagnostic(
+    built_dist: _BuiltDist, tmp_path: Path
+) -> None:
+    root = tmp_path / "install"
+    home = root / "home"
+    home.mkdir(parents=True)
+    yoetz_exe, env = _tool_install(built_dist.directory, root, home)
+    cfg_root = tmp_path / "cfg"
+    cfg_root.mkdir(mode=0o700)
+    config = cfg_root / "config.toml"
+    config.write_text("[storage]\ndata_dir = 5\n", encoding="utf-8")
+
+    result = _run(yoetz_exe, env, config, "provider", "codex-subscription", "status", "--json")
+
+    assert result.returncode == 20, (result.returncode, result.stderr)
+    assert b"codex_subscription: config_value_invalid" in result.stderr
+    # Actionable: the token carries its remediation half, not just a bare code.
+    assert b"reviewed configuration model" in result.stderr
+    _assert_bounded(result, config=config)

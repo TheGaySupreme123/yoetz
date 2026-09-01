@@ -6,12 +6,12 @@ Writes service-owned ``config.toml`` only. Credentials remain on the confidentia
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
 from typing import Final, Literal
 
 import typer
 
+from yoetz.config.load import load_config
 from yoetz.config.models import ConfigError, ProviderProfileConfig, YoetzConfig
 from yoetz.config.paths import config_file_path
 from yoetz.config.write import (
@@ -53,14 +53,16 @@ NEXT_CREDENTIAL: Final = (
 
 
 def _load_base(path: Path | None) -> YoetzConfig:
-    target = config_file_path() if path is None else path
-    if not target.is_file():
-        return YoetzConfig()
-    try:
-        raw = tomllib.loads(target.read_bytes().decode("utf-8"))
-        return YoetzConfig.model_validate(raw, strict=True)
-    except ConfigError, OSError, UnicodeError, tomllib.TOMLDecodeError, ValueError:
-        return YoetzConfig()
+    """Load the exact write-target config through the canonical loader; never guess.
+
+    Strict raw-TOML validation rejected valid files whose ``storage.data_dir`` string the
+    canonical loader converts to ``Path`` first, and swallowing that failure silently replaced
+    the operator's configuration with defaults — so a provider-binding write would drop the very
+    settings it must preserve (#520). An unloadable config now surfaces as its bounded
+    ``ConfigError``, which every caller already reports as ``invalid_request``.
+    """
+
+    return load_config({}, {}, config_file_path() if path is None else path)
 
 
 def apply_provider_endpoint_choice(

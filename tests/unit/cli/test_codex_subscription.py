@@ -18,8 +18,8 @@ from yoetz.adapters.providers.codex_app_server import (
     CodexRuntimeStatus,
 )
 from yoetz.cli import codex_subscription as module
-from yoetz.config.models import ExternalRuntimeProfileConfig, YoetzConfig
-from yoetz.config.write import codex_subscription_runtime
+from yoetz.config.models import ConfigError, ExternalRuntimeProfileConfig, YoetzConfig
+from yoetz.config.write import codex_subscription_runtime, render_config_toml
 
 
 @pytest.fixture(autouse=True)
@@ -270,6 +270,10 @@ def test_subscription_failure_reason_never_echoes_native_os_text() -> None:
     assert module.subscription_failure_reason(denied) == "codex_runtime_unavailable"
     assert module.subscription_failure_reason(TimeoutError()) == "codex_subscription_timeout"
     assert (
+        module.subscription_failure_reason(ConfigError("config_value_invalid"))
+        == "config_value_invalid"
+    )
+    assert (
         module.subscription_failure_reason(ValueError("codex_runtime_capability_unsupported"))
         == "codex_runtime_capability_unsupported"
     )
@@ -464,3 +468,229 @@ def test_guided_setup_offers_account_switch(
     assert any(item.startswith("Continue to Codex sign-in") for item in confirms)
     assert any("switch ChatGPT account" in item for item in confirms)
     assert captured == [True]
+
+
+def _data_dir_config_text(data_dir: Path) -> str:
+    return f'schema_version = "1"\nprofile = "strict-local"\n\n[storage]\ndata_dir = "{data_dir}"\n'
+
+
+def _bound_config_file(tmp_path: Path, binding: ExternalRuntimeProfileConfig) -> Path:
+    """Write the exact rendered config selecting the binding, with an explicit data_dir."""
+
+    from yoetz.config.models import StorageConfig
+
+    config = YoetzConfig(
+        profile="codex-subscription",
+        storage=StorageConfig(data_dir=tmp_path / "state"),
+        external_runtime=binding,
+    )
+    target = tmp_path / "config.toml"
+    target.write_text(render_config_toml(config), encoding="utf-8")
+    return target
+
+
+def test_base_config_accepts_valid_storage_data_dir_through_the_canonical_loader(
+    tmp_path: Path,
+) -> None:
+    """A file the service loader accepts is a file the lifecycle commands accept (#520)."""
+
+    target = tmp_path / "config.toml"
+    target.write_text(_data_dir_config_text(tmp_path / "state"), encoding="utf-8")
+
+    config = module._base_config(target)  # pyright: ignore[reportPrivateUsage]
+
+    assert config.storage.data_dir == tmp_path / "state"
+
+
+def test_base_config_fails_as_one_closed_token_on_invalid_configuration(tmp_path: Path) -> None:
+    target = tmp_path / "config.toml"
+    target.write_text("[storage]\ndata_dir = 5\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="config_value_invalid"):
+        module._base_config(target)  # pyright: ignore[reportPrivateUsage]
+
+    target.write_text("not [ valid toml\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="config_toml_invalid"):
+        module._base_config(target)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_rollback_preserves_storage_data_dir_while_removing_only_the_binding(
+    tmp_path: Path,
+) -> None:
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+    target = _bound_config_file(tmp_path, binding)
+
+    result = module.codex_subscription_rollback(config_path=target)
+
+    assert result["binding_removed"] is True
+    rewritten = module._base_config(target)  # pyright: ignore[reportPrivateUsage]
+    assert rewritten.external_runtime is None
+    assert rewritten.storage.data_dir == tmp_path / "state"
+    assert rewritten.profile == "strict-local"
+
+
+@pytest.mark.anyio
+async def test_status_reads_a_binding_from_a_config_with_explicit_data_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+    target = _bound_config_file(tmp_path, binding)
+
+    async def account_status(_profile: object) -> CodexRuntimeStatus:
+        return CodexRuntimeStatus(True, "chatgpt", "plus", True, "terminated")
+
+    monkeypatch.setattr(module, "codex_account_status", account_status)
+
+    result = await module.codex_subscription_status(config_path=target)
+
+    assert result["codex_home"] == str(tmp_path / "dedicated-home")
+    assert result["auth_mode"] == "chatgpt"
+
+
+@pytest.mark.anyio
+async def test_disconnect_preserves_storage_data_dir_from_a_valid_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+    target = _bound_config_file(tmp_path, binding)
+
+    async def logout(_profile: object) -> CodexRuntimeStatus:
+        return CodexRuntimeStatus(True, None, None, False, "terminated")
+
+    monkeypatch.setattr(module, "codex_logout", logout)
+
+    result = await module.codex_subscription_disconnect(config_path=target)
+
+    assert result["binding_removed"] is True
+    rewritten = module._base_config(target)  # pyright: ignore[reportPrivateUsage]
+    assert rewritten.external_runtime is None
+    assert rewritten.storage.data_dir == tmp_path / "state"
+
+
+@pytest.mark.anyio
+async def test_setup_validates_configuration_before_any_login_or_home_side_effect(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An invalid config is a deterministic local failure; login must never open (#520)."""
+
+    target = tmp_path / "config.toml"
+    target.write_text("[storage]\ndata_dir = 5\n", encoding="utf-8")
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+
+    def build_binding(**_kwargs: object) -> ExternalRuntimeProfileConfig:
+        return binding
+
+    monkeypatch.setattr(module, "_binding", build_binding)
+
+    async def forbidden_login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
+        pytest.fail("an invalid configuration must fail before the Codex login flow")
+
+    def forbidden_prepare(_home: Path) -> None:
+        pytest.fail("an invalid configuration must fail before the dedicated home is created")
+
+    monkeypatch.setattr(module, "codex_login", forbidden_login)
+    monkeypatch.setattr(module, "prepare_codex_home", forbidden_prepare)
+
+    with pytest.raises(ValueError, match="config_value_invalid"):
+        await module.codex_subscription_setup(
+            executable=tmp_path / "codex",
+            codex_home=tmp_path / "dedicated-home",
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+            login_mode="browser",
+            open_browser=False,
+            switch_account=False,
+            config_path=target,
+        )
+
+
+@pytest.mark.anyio
+async def test_setup_probes_the_writable_binding_target_before_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    target = blocked / "config.toml"
+    target.write_text(_data_dir_config_text(tmp_path / "state"), encoding="utf-8")
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+
+    def build_binding(**_kwargs: object) -> ExternalRuntimeProfileConfig:
+        return binding
+
+    monkeypatch.setattr(module, "_binding", build_binding)
+
+    async def forbidden_login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
+        pytest.fail("an unwritable binding target must fail before the Codex login flow")
+
+    monkeypatch.setattr(module, "codex_login", forbidden_login)
+
+    blocked.chmod(0o500)
+    try:
+        with pytest.raises(ValueError, match="config_value_invalid"):
+            await module.codex_subscription_setup(
+                executable=tmp_path / "codex",
+                codex_home=tmp_path / "dedicated-home",
+                model="gpt-5.6-sol",
+                reasoning_effort="high",
+                login_mode="browser",
+                open_browser=False,
+                switch_account=False,
+                config_path=target,
+            )
+    finally:
+        blocked.chmod(0o700)
+
+
+@pytest.mark.anyio
+async def test_disconnect_probes_the_removal_write_before_codex_logout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+    target = _bound_config_file(tmp_path, binding)
+
+    async def forbidden_logout(_profile: object) -> CodexRuntimeStatus:
+        pytest.fail("an unpersistable removal must fail before Codex logs the home out")
+
+    monkeypatch.setattr(module, "codex_logout", forbidden_logout)
+
+    tmp_path.chmod(0o500)
+    try:
+        with pytest.raises(ValueError, match="config_value_invalid"):
+            await module.codex_subscription_disconnect(config_path=target)
+    finally:
+        tmp_path.chmod(0o700)
+
+
+def test_cli_status_reports_a_bounded_config_token_instead_of_internal_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exit 70 ``internal_error`` for a local configuration problem was the #520 defect."""
+
+    from yoetz.cli.app import app
+
+    target = tmp_path / "config.toml"
+    target.write_text("[storage]\ndata_dir = 5\n", encoding="utf-8")
+    monkeypatch.setenv("YOETZ_CONFIG", str(target))
+
+    result = CliRunner().invoke(app, ["provider", "codex-subscription", "status", "--json"])
+
+    assert result.exit_code == 20
+    assert "codex_subscription: config_value_invalid" in result.stderr
+    assert "internal_error" not in result.stderr
+    assert str(tmp_path) not in result.stderr
+
+
+def test_cli_status_accepts_a_valid_storage_data_dir_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yoetz.cli.app import app
+
+    target = tmp_path / "config.toml"
+    target.write_text(_data_dir_config_text(tmp_path / "state"), encoding="utf-8")
+    monkeypatch.setenv("YOETZ_CONFIG", str(target))
+
+    result = CliRunner().invoke(app, ["provider", "codex-subscription", "status"])
+
+    assert result.exit_code == 20
+    assert "codex_subscription_not_configured" in result.stderr
+    assert "internal_error" not in result.stderr

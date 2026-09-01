@@ -13,6 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal
 
+from yoetz.config.load import validate_config_mapping
 from yoetz.config.models import (
     CODEX_SUBSCRIPTION_ENDPOINT_PROFILE_ID,
     CODEX_SUBSCRIPTION_PROVIDER_ID,
@@ -44,7 +45,10 @@ __all__ = [
     "xai_provider",
     "write_config_toml",
     "write_config_toml_if_unchanged",
+    "cleared_external_runtime_config",
     "clear_external_runtime_binding",
+    "external_runtime_binding_config",
+    "preflight_config_write",
     "write_provider_binding",
     "write_external_runtime_binding",
 ]
@@ -577,7 +581,10 @@ def render_config_toml(config: YoetzConfig) -> str:
         )
 
     text = "\n".join(lines).rstrip() + "\n"
-    YoetzConfig.model_validate(tomllib.loads(text), strict=True)
+    # Round-trip through the canonical loader rule, not raw strict validation: a rendered
+    # ``storage.data_dir`` is file-shape (a string) and only the loader's normalization makes
+    # the written file provably loadable (#520).
+    validate_config_mapping(tomllib.loads(text))
     return text
 
 
@@ -688,6 +695,23 @@ def write_config_toml_if_unchanged(
     return target
 
 
+def preflight_config_write(config: YoetzConfig, path: Path | None = None) -> Path:
+    """Prove the exact config renders and its locked target accepts a write, without writing.
+
+    Runs every deterministic local step of :func:`write_config_toml` except the final atomic
+    replacement: target directory preparation, full strict render validation, and acquisition of
+    the shared persistent write lock. A caller about to perform a non-local side effect (such as
+    opening a provider login flow) uses this to fail closed before that side effect instead of
+    after it (#520).
+    """
+
+    target = _config_target(path)
+    render_config_toml(config)
+    with _ConfigWriteLock(target):
+        pass
+    return target
+
+
 def write_provider_binding(
     provider: ProviderProfileConfig,
     *,
@@ -709,6 +733,24 @@ def write_provider_binding(
     return write_config_toml(updated, path=path)
 
 
+def external_runtime_binding_config(
+    runtime: ExternalRuntimeProfileConfig, *, base: YoetzConfig | None = None
+) -> YoetzConfig:
+    """Return the exact config selecting this external runtime, without writing it."""
+
+    if type(runtime) is not ExternalRuntimeProfileConfig:
+        raise TypeError("config_write_wrong_type")
+    source = YoetzConfig() if base is None else base
+    return source.model_copy(
+        update={
+            "profile": "codex-subscription",
+            "provider": None,
+            "local_model": None,
+            "external_runtime": runtime,
+        }
+    )
+
+
 def write_external_runtime_binding(
     runtime: ExternalRuntimeProfileConfig,
     *,
@@ -717,18 +759,21 @@ def write_external_runtime_binding(
 ) -> Path:
     """Atomically select the exact external-runtime route and remove API/local fallbacks."""
 
-    if type(runtime) is not ExternalRuntimeProfileConfig:
-        raise TypeError("config_write_wrong_type")
+    return write_config_toml(external_runtime_binding_config(runtime, base=base), path=path)
+
+
+def cleared_external_runtime_config(base: YoetzConfig | None = None) -> YoetzConfig:
+    """Return the config with only the Codex evaluator binding removed, without writing it."""
+
     source = YoetzConfig() if base is None else base
-    updated = source.model_copy(
+    if source.external_runtime is None:
+        return source
+    return source.model_copy(
         update={
-            "profile": "codex-subscription",
-            "provider": None,
-            "local_model": None,
-            "external_runtime": runtime,
+            "profile": "strict-local",
+            "external_runtime": None,
         }
     )
-    return write_config_toml(updated, path=path)
 
 
 def clear_external_runtime_binding(
@@ -736,13 +781,4 @@ def clear_external_runtime_binding(
 ) -> Path:
     """Remove only the Codex evaluator binding; never touch its installation or home."""
 
-    source = YoetzConfig() if base is None else base
-    if source.external_runtime is None:
-        return write_config_toml(source, path=path)
-    updated = source.model_copy(
-        update={
-            "profile": "strict-local",
-            "external_runtime": None,
-        }
-    )
-    return write_config_toml(updated, path=path)
+    return write_config_toml(cleared_external_runtime_config(base), path=path)
