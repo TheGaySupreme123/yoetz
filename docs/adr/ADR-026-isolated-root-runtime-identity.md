@@ -1,0 +1,92 @@
+# ADR-026 — Exact-target isolated-root runtime identity
+
+**Status:** Accepted (2026-09-01), maintainer-authorized in
+[issue #518](https://github.com/TheGaySupreme123/yoetz/issues/518).
+**Implemented by:** `src/yoetz/config/paths.py` (`isolated_root()`, `runtime_dir()`,
+`ISOLATED_ROOT_ENV`), `src/yoetz/adapters/control/unix_socket.py`, `src/yoetz/config/load.py`,
+`src/yoetz/service/client.py`, `src/yoetz/cli/isolation_status.py`, the
+`yoetz service isolation` CLI command, `scripts/check_codex_dogfood_parity.py`
+(`yoetz.codex-dogfood-parity/2`), and `tests/packaging/test_isolated_root_boundary.py`.
+**Relates to:** ADR-001 (single service/writer authority), ADR-003 (durable storage), and the
+[Codex dogfood parity runbook](../runbooks/codex-dogfood.md).
+
+## Context
+
+Every Yoetz identity root previously resolved independently: `storage.data_dir` (and
+`YOETZ_STORAGE_DATA_DIR`) relocated only the storage bundle, while the platform `state_dir()` kept
+owning the service singleton lock, service generation, and setup markers, and the platform runtime
+directory kept owning the control endpoints. A dogfood or test environment could therefore hold an
+isolated Codex home, candidate wheel, plugin tree, and storage bundle and still transparently
+connect to — and write through — the live user's Yoetz singleton. In a real run, a repository
+privacy grant intended for a disposable dogfood environment committed into the normal Yoetz
+state, and the parity preflight had no facet that could expose the shared service identity.
+
+Internal test isolation existed only as unsupported mechanisms: monkeypatched path functions in
+unit tests and whole-`HOME` overrides in packaging tests. A `HOME` override is not an exact-target
+contract — it drags the host's Codex home, keychain-adjacent state, and every other `HOME`-derived
+identity along with it, and nothing validates or proves it.
+
+## Decisions
+
+1. **One isolation contract, one variable.** `YOETZ_ISOLATED_ROOT` (owned by
+   `yoetz.config.paths`) is the sole supported way to isolate a Yoetz runtime. When set, every
+   identity root derives from the single root: config `<root>/config/config.toml`, default
+   storage bundle `<root>/data`, state `<root>/state` (service lock, generation, setup markers),
+   runtime endpoints `<root>/run` (control, secret-ingress, human-control sockets), cache
+   `<root>/cache`, and logs `<root>/log`. There is deliberately no pile of per-subsystem
+   overrides: partial mechanisms (`YOETZ_STORAGE_DATA_DIR`, `storage.data_dir`) remain storage
+   relocation, never isolation.
+2. **Fail closed, never fall back.** A set but unusable root raises
+   `PathSafetyError("isolation_root_invalid")` (empty, relative, missing, or not a directory) or
+   the precise existing path-safety reason (symlink component, shared temp, repository, sync
+   folder, network filesystem, foreign owner, broad permissions) from the same
+   `verify_private_local_bundle` gate that guards every private directory. No code path resolves
+   to an ambient platform directory while the variable is set. At the endpoint layer this
+   surfaces as the bounded `runtime_directory_unsafe` transport reason.
+3. **The endpoint follows the root.** `runtime_dir()` in `config/paths.py` now owns the runtime
+   endpoint directory and `adapters/control/unix_socket.py` consumes it, so an isolated runtime
+   binds and connects only beneath its root. Not sharing an endpoint (or lock, which already
+   derives from `state_dir()`) is what makes reaching the ambient singleton structurally
+   impossible rather than merely discouraged.
+4. **The variable is paths authority, not configuration.** `config/load.py` recognizes
+   `YOETZ_ISOLATED_ROOT` as mapping to no configuration leaf (like `YOETZ_TUI`), and
+   `service/client.py` forwards it to the detached service process it spawns, so an isolated
+   client can never start a service whose state lands in the ambient install. An explicit
+   `storage.data_dir` still wins over the isolated default `<root>/data`; the parity gate, not
+   silent rejection, is what exposes an override that reaches shared storage.
+5. **Isolation is provable, not assumed.** `yoetz service isolation [--json]` resolves — locally,
+   without connecting to any service or opening any ledger — the exact identity roots this
+   environment would use and reports each as a digest over the canonical resolved path identity
+   (never a raw path), beside the ambient platform-default identities and a `distinct`
+   conclusion. Ambient identities are the normal target's *default* identities: the command never
+   reads the ambient install's config file, so a normal target relocated by its own config is
+   compared against its platform default. The command is CLI-only by design; MCP tools and hook
+   events inherit isolation transparently through the process environment and expose no
+   isolation surface of their own.
+6. **The dogfood parity gate fails closed on shared identity.** Report schema
+   `yoetz.codex-dogfood-parity/2` adds the `service_isolation` preflight facet, the
+   `identity.yoetz_isolation` digest block, and the `observed.yoetz_isolation_state` closed state
+   (`isolated|shared|ambient|unknown`). The facet can pass only when the observed state is
+   `isolated`, the identity mode is `isolated`, and every resolved state/endpoint/storage/config
+   digest differs from its normal-target counterpart; any equality, ambient mode, or unknown
+   state is rejected or fails preflight, and a non-pass row must carry the
+   `provision_isolated_yoetz_root` continuation. Version 1 reports are no longer accepted.
+
+## Reverse states and rollback
+
+Unsetting `YOETZ_ISOLATED_ROOT` restores ambient resolution with no residue: every artifact an
+isolated runtime creates lives beneath the root, so deleting the root is complete rollback and
+cannot touch unrelated user state. The packaged regression
+(`tests/packaging/test_isolated_root_boundary.py`) locks this: an isolated service run leaves the
+ambient home tree byte-identical before/after, an ambient client cannot reach the isolated
+singleton, and removing the root removes every trace.
+
+## Consequences
+
+- Dogfood and test environments get a natively separate temporary Yoetz whose service singleton,
+  storage, config, and endpoints cannot reach the live install, with a preflight that proves it.
+- The isolation root must be provisioned deliberately (existing, owner-only, symlink-free,
+  outside shared temp and repositories) before launch; there is no auto-creation, so a typoed
+  root is an error instead of a silently different target.
+- Existing unsupported isolation mechanisms remain internal test details; new tooling must use
+  this contract.

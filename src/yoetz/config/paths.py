@@ -15,13 +15,16 @@ from typing import Final
 from platformdirs import PlatformDirs
 
 __all__ = [
+    "ISOLATED_ROOT_ENV",
     "PathSafetyError",
     "bundle_root",
     "cache_dir",
     "catalog_path",
     "config_file_path",
     "ensure_owner_only_dir",
+    "isolated_root",
     "log_dir",
+    "runtime_dir",
     "service_generation_path",
     "setup_marker_path",
     "state_dir",
@@ -31,6 +34,7 @@ __all__ = [
 ]
 
 _APP_NAME: Final = "yoetz"
+ISOLATED_ROOT_ENV: Final = "YOETZ_ISOLATED_ROOT"
 _PRIVATE_DIR_MODE: Final = 0o700
 _VCS_MARKERS: Final = frozenset({".git", ".hg", ".svn", ".jj"})
 _NETWORK_FILESYSTEMS_LINUX: Final = frozenset(
@@ -57,6 +61,7 @@ _LINUX_SYNC_COMPONENTS: Final = frozenset(
 _SYNC_METADATA_NAMES: Final = frozenset({".dropbox", ".dropbox.cache", ".stfolder", ".sync"})
 _PATH_SAFETY_REASONS: Final = frozenset(
     {
+        "isolation_root_invalid",
         "path_contains_symlink",
         "path_in_repository",
         "path_in_sync_folder",
@@ -158,11 +163,45 @@ def _probe_or_default(probe: _PathProbe | None) -> _PathProbe:
     return _default_probe() if probe is None else probe
 
 
+def isolated_root(*, _probe: _PathProbe | None = None) -> Path | None:
+    """Return the validated exact-target isolation root, or ``None`` in ambient mode.
+
+    ``YOETZ_ISOLATED_ROOT`` is the one supported isolation contract (issue #518): when it is
+    set, every identity root — config, storage bundle, state directory (service lock and
+    generation), runtime endpoint directory, cache, and logs — derives from this single root, so
+    an isolated runtime can never share the ambient platform singleton. Validation fails closed:
+    a set-but-unusable root raises instead of falling back to the ambient platform directories.
+    The root must already exist as an absolute, owner-only, symlink-free private directory
+    outside shared temp, repositories, and sync folders.
+    """
+
+    raw = os.environ.get(ISOLATED_ROOT_ENV)
+    if raw is None:
+        return None
+    if not raw:
+        raise PathSafetyError("isolation_root_invalid")
+    root = Path(raw)
+    if not root.is_absolute():
+        raise PathSafetyError("isolation_root_invalid")
+    probe = _probe_or_default(_probe)
+    verify_private_local_bundle(root, _probe=probe)
+    try:
+        facts = root.lstat()
+    except OSError as exc:
+        raise PathSafetyError("isolation_root_invalid") from exc
+    if not stat.S_ISDIR(facts.st_mode):
+        raise PathSafetyError("isolation_root_invalid")
+    return root
+
+
 def bundle_root(*, _data_dir: Path | None = None, _probe: _PathProbe | None = None) -> Path:
     """Return the default bundle root or a safety-verified explicit override."""
 
     probe = _probe_or_default(_probe)
     if _data_dir is None:
+        isolated = isolated_root(_probe=probe)
+        if isolated is not None:
+            return isolated / "data"
         return Path(probe.platform_dirs.user_data_dir)
     verify_private_local_bundle(_data_dir, _probe=probe)
     return _data_dir
@@ -186,25 +225,55 @@ def config_file_path(*, _probe: _PathProbe | None = None) -> Path:
     """Return the sole default user configuration file path."""
 
     probe = _probe_or_default(_probe)
+    isolated = isolated_root(_probe=probe)
+    if isolated is not None:
+        return isolated / "config" / "config.toml"
     return Path(probe.platform_dirs.user_config_dir) / "config.toml"
 
 
 def cache_dir(*, _probe: _PathProbe | None = None) -> Path:
-    """Return the platform-native user cache directory."""
+    """Return the platform-native or isolated user cache directory."""
 
-    return Path(_probe_or_default(_probe).platform_dirs.user_cache_dir)
+    probe = _probe_or_default(_probe)
+    isolated = isolated_root(_probe=probe)
+    if isolated is not None:
+        return isolated / "cache"
+    return Path(probe.platform_dirs.user_cache_dir)
 
 
 def state_dir(*, _probe: _PathProbe | None = None) -> Path:
-    """Return the platform-native user state directory."""
+    """Return the platform-native or isolated user state directory."""
 
-    return Path(_probe_or_default(_probe).platform_dirs.user_state_dir)
+    probe = _probe_or_default(_probe)
+    isolated = isolated_root(_probe=probe)
+    if isolated is not None:
+        return isolated / "state"
+    return Path(probe.platform_dirs.user_state_dir)
 
 
 def log_dir(*, _probe: _PathProbe | None = None) -> Path:
-    """Return the platform-native user log directory."""
+    """Return the platform-native or isolated user log directory."""
 
-    return Path(_probe_or_default(_probe).platform_dirs.user_log_dir)
+    probe = _probe_or_default(_probe)
+    isolated = isolated_root(_probe=probe)
+    if isolated is not None:
+        return isolated / "log"
+    return Path(probe.platform_dirs.user_log_dir)
+
+
+def runtime_dir(*, _probe: _PathProbe | None = None) -> Path:
+    """Return the platform-native or isolated runtime endpoint directory.
+
+    The service control, secret-ingress, and human-control endpoints bind beneath this
+    directory, so deriving it from the isolation root is what makes an isolated runtime unable
+    to reach — or be reached by — the ambient service singleton.
+    """
+
+    probe = _probe_or_default(_probe)
+    isolated = isolated_root(_probe=probe)
+    if isolated is not None:
+        return isolated / "run"
+    return Path(probe.platform_dirs.user_runtime_path)
 
 
 def service_generation_path(*, _probe: _PathProbe | None = None) -> Path:

@@ -29,6 +29,7 @@ ADR wins; when an ADR and the code disagree, that is a bug in one of them and wo
 | [022](ADR-022-harness-observation-writer-identity-and-observation-tolerant-concurrency.md) | Harness observation writer identity and observation-tolerant concurrency |
 | [023](ADR-023-portable-plugin-carrier-host-activation.md) | Portable plugin carrier and host activation |
 | [025](ADR-025-versioned-claim-correction.md) | Versioned append-only claim correction |
+| [026](ADR-026-isolated-root-runtime-identity.md) | Exact-target isolated-root runtime identity |
 
 Unresolved gates are centralized in [`docs/OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md), not scattered
 through individual ADRs.
