@@ -8,6 +8,16 @@ reverse-chronological released versions.
 
 ### Added
 
+- One supported exact-target isolation contract for test and dogfood runtimes (ADR-026): setting
+  `YOETZ_ISOLATED_ROOT` to a pre-provisioned owner-only private directory derives every identity
+  root from it — config, storage bundle, state directory (service singleton lock and generation),
+  control endpoints, cache, and logs — so an isolated runtime structurally cannot reach the
+  normal Yoetz service. A set but unusable root fails closed instead of falling back to ambient
+  platform directories. `yoetz service isolation --json` reports one exact target's digest-only
+  identities without a service connection; the Codex dogfood parity gate compares separate exact
+  normal and candidate snapshots (including relocated storage and the Yoetz executable) and
+  rejects shared, ambient, or unknown identity before launch (issue #518).
+
 - `claim_recorded/1.1.0` adds append-only completion-claim correction: a fresh replacement names
   prior effective claims in `supersedes_claim_refs` and records partial or failed results in
   `limitation_refs` instead of treating them as support. Dry-run rejects missing, stale, disjoint,
@@ -39,17 +49,16 @@ reverse-chronological released versions.
 
 ### Fixed
 
-- Codex-subscription lifecycle commands (`setup`, `status`, `disconnect`, `rollback`) and
-  provider-endpoint binding writes now read the target configuration through the canonical
-  loader, so a valid `config.toml` with an explicit `storage.data_dir` string no longer crashes
-  as a masked `internal_error` exit 70 (and an endpoint write no longer silently replaces an
-  unloadable base with defaults, dropping `data_dir`). The rendered-config round-trip check uses
-  the same loader rule, configuration failures surface as their bounded closed reason tokens
-  with remediation text, and `setup` validates the configuration and probes the writable binding
-  target before opening the Codex login flow — with `disconnect` likewise probing its removal
-  write before Codex logs the dedicated home out. Both interactive transitions compare the exact
-  locked preimage again before writing, so a concurrent config edit is preserved and reported as
-  `config_preimage_mismatch` instead of being silently overwritten (issue #520).
+- `yoetz privacy show` — and every other local machine-scope privacy read: the empty-request CLI
+  body, `privacy export-desired`, `privacy apply-desired`, the prompt-loop menu's effective-policy
+  view, and setup's update-policy probe — now resolves the installation marker through the
+  configured storage bundle, the same root the service uses, instead of the fixed platform state
+  directory, so an explicit `[storage].data_dir` no longer breaks machine-scope construction. A
+  missing or malformed marker (or an unresolvable bundle) stops locally with one bounded
+  actionable diagnostic (`machine_scope_unavailable: <reason>: <next command>`, exit 2) before
+  any service request, instead of an inadmissible error construction the CLI masked as generic
+  `internal_error` exit 70. The diagnostic names no paths, marker content, or secrets
+  (issue #517).
 
 - Receipt creation now abandons both exact caller-owned object stages when the payload object's
   stage/finalize fails before ledger submission, and equally when the commit boundary refuses the

@@ -1,4 +1,4 @@
-"""Executable classification locks for exact-worktree Codex dogfood parity (#464)."""
+"""Executable classification locks for exact-worktree Codex dogfood parity (#464, #518)."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ PREFLIGHT_FACETS = _MODULE.PREFLIGHT_FACETS
 DogfoodGateError = _MODULE.DogfoodGateError
 classify_codex_dogfood_report = _MODULE.classify_codex_dogfood_report
 _DIGEST = "sha256:" + ("a" * 64)
+_NORMAL_DIGEST = "sha256:" + ("b" * 64)
 
 
 def _gate(status: str = "pass") -> dict[str, object]:
@@ -42,7 +43,7 @@ def _gate(status: str = "pass") -> dict[str, object]:
 
 def _report() -> dict[str, object]:
     return {
-        "schema": "yoetz.codex-dogfood-parity/1",
+        "schema": "yoetz.codex-dogfood-parity/2",
         "identity": {
             "source_ref": "a" * 40,
             "package_digest": _DIGEST,
@@ -52,6 +53,20 @@ def _report() -> dict[str, object]:
             "launcher_digest": _DIGEST,
             "route_profile": "policy",
             "worktree_digest": _DIGEST,
+            "yoetz_isolation": {
+                "mode": "isolated",
+                "normal_mode": "ambient",
+                "state_digest": _DIGEST,
+                "endpoint_digest": _DIGEST,
+                "storage_digest": _DIGEST,
+                "config_digest": _DIGEST,
+                "executable_digest": _DIGEST,
+                "normal_state_digest": _NORMAL_DIGEST,
+                "normal_endpoint_digest": _NORMAL_DIGEST,
+                "normal_storage_digest": _NORMAL_DIGEST,
+                "normal_config_digest": _NORMAL_DIGEST,
+                "normal_executable_digest": _NORMAL_DIGEST,
+            },
         },
         "scope": {
             "hooks_advertised": True,
@@ -61,6 +76,7 @@ def _report() -> dict[str, object]:
         },
         "observed": {
             "activation_state": "active",
+            "yoetz_isolation_state": "isolated",
             "exact_worktree_consent": "active",
             "primary_checkout_consent": "active",
             "controls_workspace_match": True,
@@ -182,6 +198,85 @@ def test_out_of_scope_failure_cannot_be_ignored_by_full_aggregation() -> None:
     }
 
     with pytest.raises(DogfoodGateError, match="out_of_scope_facet_not_not_run"):
+        classify_codex_dogfood_report(report)
+
+
+def _identity(report: dict[str, object]) -> dict[str, object]:
+    return cast(dict[str, object], report["identity"])
+
+
+def _isolation(report: dict[str, object]) -> dict[str, object]:
+    return cast(dict[str, object], _identity(report)["yoetz_isolation"])
+
+
+def test_shared_yoetz_identity_cannot_pass_the_isolation_facet() -> None:
+    report = _report()
+    _isolation(report)["state_digest"] = _NORMAL_DIGEST
+
+    with pytest.raises(DogfoodGateError, match="service_isolation_identity_shared"):
+        classify_codex_dogfood_report(report)
+
+
+def test_shared_yoetz_executable_cannot_pass_the_isolation_facet() -> None:
+    report = _report()
+    _isolation(report)["executable_digest"] = _NORMAL_DIGEST
+
+    with pytest.raises(DogfoodGateError, match="service_isolation_identity_shared"):
+        classify_codex_dogfood_report(report)
+
+
+def test_ambient_or_unknown_isolation_state_contradicts_a_passing_facet() -> None:
+    for state in ("ambient", "shared", "unknown"):
+        report = _report()
+        _observed(report)["yoetz_isolation_state"] = state
+        with pytest.raises(DogfoodGateError, match="service_isolation_state_mismatch"):
+            classify_codex_dogfood_report(report)
+
+
+def test_ambient_identity_mode_contradicts_a_passing_isolation_facet() -> None:
+    report = _report()
+    _isolation(report)["mode"] = "ambient"
+
+    with pytest.raises(DogfoodGateError, match="service_isolation_identity_mismatch"):
+        classify_codex_dogfood_report(report)
+
+
+def test_nonambient_normal_snapshot_contradicts_a_passing_isolation_facet() -> None:
+    report = _report()
+    _isolation(report)["normal_mode"] = "isolated"
+
+    with pytest.raises(DogfoodGateError, match="service_isolation_identity_mismatch"):
+        classify_codex_dogfood_report(report)
+
+
+def test_failed_isolation_refuses_launch_with_the_provisioning_continuation() -> None:
+    report = _report()
+    _observed(report)["yoetz_isolation_state"] = "shared"
+    _facets(report)["service_isolation"] = {
+        "status": "fail",
+        "reason": "yoetz_identity_shared",
+        "evidence_digest": _DIGEST,
+        "next_action": "provision_isolated_yoetz_root",
+    }
+
+    result = classify_codex_dogfood_report(report)
+
+    assert result["preflight_outcome"] == "fail"
+    assert result["launch_allowed"] is False
+    assert result["failed_facets"] == ["service_isolation"]
+
+
+def test_failed_isolation_without_the_provisioning_continuation_is_invalid() -> None:
+    report = _report()
+    _observed(report)["yoetz_isolation_state"] = "unknown"
+    _facets(report)["service_isolation"] = {
+        "status": "blocked",
+        "reason": "yoetz_identity_unknown",
+        "evidence_digest": None,
+        "next_action": "do_not_launch",
+    }
+
+    with pytest.raises(DogfoodGateError, match="service_isolation_continuation_missing"):
         classify_codex_dogfood_report(report)
 
 

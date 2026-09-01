@@ -14,9 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Final, NoReturn, Protocol, Self
 
-from platformdirs import PlatformDirs
-
-from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir
+from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir, runtime_dir
 
 __all__ = [
     "CONTROL_ENDPOINT_BASENAME",
@@ -363,7 +361,13 @@ def authenticate_peer(
 
 
 def _runtime_directory() -> Path:
-    return PlatformDirs(appname="yoetz", appauthor=False, roaming=False).user_runtime_path
+    # Derives from the one isolation contract in yoetz.config.paths: an isolated runtime binds
+    # and connects beneath its isolation root, never at the ambient platform endpoint. A set but
+    # unusable isolation root fails closed as the bounded transport reason.
+    try:
+        return runtime_dir()
+    except PathSafetyError as exc:
+        raise LocalControlTransportError("runtime_directory_unsafe") from exc
 
 
 def _endpoint_path(kind: EndpointKind) -> Path:

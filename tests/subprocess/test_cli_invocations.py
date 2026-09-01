@@ -138,6 +138,44 @@ def test_empty_privacy_show_request_uses_the_machine_scope(
     assert observed == [scoped]
 
 
+def test_privacy_show_machine_scope_failure_is_bounded_and_sends_no_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local machine-scope failure is one actionable diagnostic, never exit-70 masking.
+
+    Issue #517: an unreadable installation marker was converted into a ``ControlError`` reason
+    the closed control vocabulary does not admit, so the constructor's own failure surfaced as a
+    generic ``internal_error`` exit 70. The repaired contract stops before any service request
+    with one bounded line naming the reason and the next command.
+    """
+
+    from typing import NoReturn
+
+    from yoetz.cli.provider_status import MachineScopeError
+
+    connections: list[str] = []
+
+    async def build() -> object:
+        connections.append("connected")
+        raise AssertionError("no service request may be sent on local machine-scope failure")
+
+    monkeypatch.setattr(cli, "build_service_client", build)
+
+    def failing_scope() -> NoReturn:
+        raise MachineScopeError("installation_marker_missing")
+
+    monkeypatch.setattr("yoetz.cli.provider_status.machine_scope_request", failing_scope)
+
+    result = CliRunner().invoke(cli.app, ["privacy", "show", "--json"])
+
+    assert result.exit_code == 2
+    assert connections == []
+    assert "machine_scope_unavailable: installation_marker_missing" in result.stderr
+    assert "yoetz setup" in result.stderr
+    assert "internal_error" not in result.output
+    assert "Traceback" not in result.stderr
+
+
 def test_workflow_uses_service_client_and_preserves_failure_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

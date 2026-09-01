@@ -98,19 +98,15 @@ class _Client:
         self.closed = True
 
 
-_INSTALLATION_ID = "ins_50000000-0000-4000-8000-000000000001"
-
-
 def _install(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    _tmp_path: Path,
     *,
     semantic: str = "optional",
     provider: ProviderProfileConfig | None = None,
     capabilities: tuple[str, ...] = ("external_provider",),
     llm_inference_enabled: bool = True,
     grant_state: str = "granted",
-    installation_state: str | None = None,
     service_state: str = "ready",
     service_state_reason: str = "none",
     mcp_route: dict[str, object] | None = None,
@@ -137,16 +133,6 @@ def _install(
         return client
 
     monkeypatch.setattr(module, "connect_service", _connect)
-
-    # privacy_get_effective requires a scope, which is read from installation state; without
-    # this the report degrades to "unknown" for every policy-derived condition.
-    state = tmp_path / "state"
-    state.mkdir(exist_ok=True)
-    if installation_state is None:
-        installation_state = json.dumps({"installation_id": _INSTALLATION_ID})
-    if installation_state:
-        (state / "installation-state.json").write_text(installation_state)
-    monkeypatch.setattr(module, "state_dir", lambda: state)
 
     # The route probe shells out to a discovered `codex`, so leaving it unpatched would make
     # every test in this module depend on the developer's own registration. The default is the
@@ -344,9 +330,13 @@ async def test_exit_code_is_zero_when_ready(
 async def test_repository_setup_does_not_trust_client_installation_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The service binds repository and installation; client state cannot choose either."""
+    """The service binds repository and installation; client state cannot choose either.
 
-    _install(monkeypatch, tmp_path, provider=_provider(), installation_state="")
+    No installation marker exists anywhere in this cell, so a report that read one — instead of
+    letting the service bind the installation — could not produce these policy-derived facts.
+    """
+
+    _install(monkeypatch, tmp_path, provider=_provider())
 
     report = await module.provider_status_report()
 

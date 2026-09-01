@@ -89,6 +89,12 @@ status never mistakes it for the marketplace-installed cell, and `preview` refus
 session proves skill delivery, MCP binding/runtime, hooks, model use, semantic dispatch, and receipts
 for the exact bytes, but never marketplace installation, discovery, enablement, or host activation.
 
+An isolated `CLAUDE_CONFIG_DIR` isolates only Claude Code. When the session's Yoetz must not touch
+the live install, also export `YOETZ_ISOLATED_ROOT` (ADR-026) into the session environment so the
+plugin's MCP bridge, hook commands, and any service they spawn derive config, storage, state, and
+endpoints from the isolated root; prove it beforehand with `yoetz service isolation --json` run
+under the same environment.
+
 ## Upgrading Yoetz under a running service
 
 The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz
