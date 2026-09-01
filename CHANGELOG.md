@@ -13,10 +13,10 @@ reverse-chronological released versions.
   root from it — config, storage bundle, state directory (service singleton lock and generation),
   control endpoints, cache, and logs — so an isolated runtime structurally cannot reach the
   normal Yoetz service. A set but unusable root fails closed instead of falling back to ambient
-  platform directories. `yoetz service isolation --json` proves the resolved mode with
-  digest-only identity comparisons and no service connection, and the Codex dogfood parity gate
-  (schema `yoetz.codex-dogfood-parity/2`) gains a `service_isolation` preflight facet that
-  rejects shared, ambient, or unknown Yoetz service/state identity before launch (issue #518).
+  platform directories. `yoetz service isolation --json` reports one exact target's digest-only
+  identities without a service connection; the Codex dogfood parity gate compares separate exact
+  normal and candidate snapshots (including relocated storage and the Yoetz executable) and
+  rejects shared, ambient, or unknown identity before launch (issue #518).
 
 - `claim_recorded/1.1.0` adds append-only completion-claim correction: a fresh replacement names
   prior effective claims in `supersedes_claim_refs` and records partial or failed results in

@@ -55,6 +55,7 @@ def _report() -> dict[str, object]:
             "worktree_digest": _DIGEST,
             "yoetz_isolation": {
                 "mode": "isolated",
+                "normal_mode": "ambient",
                 "state_digest": _DIGEST,
                 "endpoint_digest": _DIGEST,
                 "storage_digest": _DIGEST,
@@ -64,6 +65,7 @@ def _report() -> dict[str, object]:
                 "normal_endpoint_digest": _NORMAL_DIGEST,
                 "normal_storage_digest": _NORMAL_DIGEST,
                 "normal_config_digest": _NORMAL_DIGEST,
+                "normal_executable_digest": _NORMAL_DIGEST,
             },
         },
         "scope": {
@@ -215,6 +217,14 @@ def test_shared_yoetz_identity_cannot_pass_the_isolation_facet() -> None:
         classify_codex_dogfood_report(report)
 
 
+def test_shared_yoetz_executable_cannot_pass_the_isolation_facet() -> None:
+    report = _report()
+    _isolation(report)["executable_digest"] = _NORMAL_DIGEST
+
+    with pytest.raises(DogfoodGateError, match="service_isolation_identity_shared"):
+        classify_codex_dogfood_report(report)
+
+
 def test_ambient_or_unknown_isolation_state_contradicts_a_passing_facet() -> None:
     for state in ("ambient", "shared", "unknown"):
         report = _report()
@@ -226,6 +236,14 @@ def test_ambient_or_unknown_isolation_state_contradicts_a_passing_facet() -> Non
 def test_ambient_identity_mode_contradicts_a_passing_isolation_facet() -> None:
     report = _report()
     _isolation(report)["mode"] = "ambient"
+
+    with pytest.raises(DogfoodGateError, match="service_isolation_identity_mismatch"):
+        classify_codex_dogfood_report(report)
+
+
+def test_nonambient_normal_snapshot_contradicts_a_passing_isolation_facet() -> None:
+    report = _report()
+    _isolation(report)["normal_mode"] = "isolated"
 
     with pytest.raises(DogfoodGateError, match="service_isolation_identity_mismatch"):
         classify_codex_dogfood_report(report)

@@ -23,9 +23,10 @@ the machine on its own, authenticate the report author, or upgrade a digest into
   bare `yoetz` child command resolving ambient identity. A set but unusable root fails closed
   (`isolation_root_invalid` or the precise path-safety reason) instead of falling back to the
   normal install.
-- Prove, never assume, the isolation mode: `yoetz service isolation --json` (run with the exact
-  launch environment) reports the resolved state/endpoint/storage/config identity digests beside
-  the normal-target defaults and a `distinct` conclusion, without connecting to any service.
+- Prove, never assume, the isolation mode with two connection-free snapshots. First run the normal
+  target's exact `yoetz service isolation --json` without the isolation variable; then run the
+  candidate executable with the exact launch environment. Compare the two exact reports. Platform
+  defaults are not a substitute because the normal target may relocate its config or storage.
 - Rollback of Yoetz state is deleting the isolation root: every artifact of the isolated runtime
   lives beneath it. Stop only processes the runner started, then remove the root.
 - The exact worktree passed to Codex is also passed to plugin status, observation status, consent,
@@ -55,7 +56,7 @@ Resolve and verify, rather than merely accept, these inputs:
 | `launcher_digest` | Exact launcher bytes that start the tested Codex process. |
 | `route_profile` | Registered `strict` or `policy` route actually observed for that isolated target. |
 | `worktree_digest` | SHA-256 over the canonical tested Git-root identity; do not publish the path. |
-| `yoetz_isolation` | The verbatim `mode`, resolved identity digests, and normal-target digests from `yoetz service isolation --json` run in the exact launch environment: `state_digest`, `endpoint_digest`, `storage_digest`, `config_digest`, `executable_digest`, and the four `normal_*` counterparts. |
+| `yoetz_isolation` | `mode` and candidate identity digests from the exact launch report, plus `normal_mode` and the five `normal_*` digests copied from the exact normal-target report: state, endpoint, storage, config, and Yoetz executable. |
 
 The source ref, wheel digest, executable digest/version, and launcher digest must agree with the
 actual launch inputs. A clean working tree is not a substitute for the exact source ref, and an
@@ -66,7 +67,8 @@ installed package version is not a substitute for the wheel digest.
 Run each status command from the isolated runtime, with the exact selectors filled in:
 
 ```text
-yoetz service isolation --json
+<normal-yoetz> service isolation --json
+YOETZ_ISOLATED_ROOT=<exact-root> <candidate-yoetz> service isolation --json
 yoetz recommend list --codex-path <exact-executable> --codex-home <exact-home> --json
 yoetz integrate codex plugin status --project-root <exact-worktree> --codex-path <exact-executable> --codex-home <exact-home> --json
 CODEX_HOME=<exact-home> CODEX_TESTING_HOME=<exact-home> yoetz integrate codex mcp status --codex-path <exact-executable> --json
@@ -81,7 +83,7 @@ bounded reason token, an optional evidence digest, and a closed next action.
 |---|---|
 | `source_identity` | Worktree HEAD equals `source_ref`. |
 | `package_identity` | Installed candidate is the recorded package digest. |
-| `service_isolation` | The launch environment's `yoetz service isolation` reports mode `isolated` with every state/endpoint/storage/config digest distinct from its normal-target counterpart. Shared, ambient, or unknown Yoetz service/state identity cannot pass. |
+| `service_isolation` | The exact normal report has mode `ambient`, the exact launch report has mode `isolated`, and every state/endpoint/storage/config/executable digest differs. Shared, relocated, ambient, or unknown identity cannot pass. |
 | `workspace_binding` | Codex and every Yoetz control use the same exact worktree. |
 | `observation_consent` | Consent is `active` for that worktree commitment. |
 | `plugin_source` | Exact managed source is present in that worktree. |

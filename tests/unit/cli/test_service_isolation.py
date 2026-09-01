@@ -8,6 +8,9 @@ ambient, or unprovable Yoetz service/state identity before any launch.
 from __future__ import annotations
 
 import hashlib
+import shutil
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 
@@ -17,6 +20,16 @@ from yoetz.cli.isolation_status import isolation_report
 from yoetz.config.paths import ISOLATED_ROOT_ENV, PathSafetyError
 
 _DIGEST_KEYS = ("state_digest", "endpoint_digest", "storage_digest", "config_digest")
+
+
+@pytest.fixture
+def private_root() -> Iterator[Path]:
+    root = Path(tempfile.mkdtemp(prefix=".yz-isolation-test-", dir=Path.home()))
+    root.chmod(0o700)
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def _scrub_yoetz_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -30,7 +43,7 @@ def _expected_digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(str(path.resolve(strict=False)).encode("utf-8")).hexdigest()
 
 
-def test_ambient_mode_reports_identical_platform_identities(
+def test_ambient_mode_reports_the_exact_platform_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _scrub_yoetz_env(monkeypatch)
@@ -40,31 +53,21 @@ def test_ambient_mode_reports_identical_platform_identities(
     report = isolation_report()
 
     assert report["mode"] == "ambient"
-    assert report["distinct"] is False
     identity = cast(dict[str, str], report["identity"])
-    ambient = cast(dict[str, str], report["ambient_identity"])
-    for key in ("state_digest", "endpoint_digest", "storage_digest"):
-        assert identity[key] == ambient[key]
     assert set(identity) == {*_DIGEST_KEYS, "executable_digest"}
-    assert set(ambient) == set(_DIGEST_KEYS)
 
 
-def test_isolated_mode_proves_every_identity_root_distinct(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_isolated_mode_reports_every_identity_beneath_the_exact_root(
+    private_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _scrub_yoetz_env(monkeypatch)
-    root = tmp_path / "iso"
+    root = private_root / "iso"
     root.mkdir(mode=0o700)
     monkeypatch.setenv(ISOLATED_ROOT_ENV, str(root))
 
     report = isolation_report()
 
     assert report["mode"] == "isolated"
-    assert report["distinct"] is True
-    identity = cast(dict[str, str], report["identity"])
-    ambient = cast(dict[str, str], report["ambient_identity"])
-    for key in _DIGEST_KEYS:
-        assert identity[key] != ambient[key]
     assert report["identity"]["state_digest"] == _expected_digest(root / "state")
     assert report["identity"]["endpoint_digest"] == _expected_digest(root / "run")
     assert report["identity"]["storage_digest"] == _expected_digest(root / "data")
@@ -73,25 +76,26 @@ def test_isolated_mode_proves_every_identity_root_distinct(
     assert str(root) not in repr(report)
 
 
-def test_isolated_storage_pointed_at_ambient_data_is_not_distinct(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_two_target_reports_expose_shared_relocated_storage(
+    private_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """YOETZ_STORAGE_DATA_DIR alone is not isolation; the report must expose the overlap."""
-
-    from platformdirs import PlatformDirs
+    """The exact normal target, not platform defaults, supplies the comparison identity."""
 
     _scrub_yoetz_env(monkeypatch)
-    root = tmp_path / "iso"
+    relocated = private_root / "relocated-data"
+    relocated.mkdir(mode=0o700)
+    monkeypatch.setenv("YOETZ_STORAGE_DATA_DIR", str(relocated))
+
+    normal = isolation_report()
+
+    root = private_root / "iso"
     root.mkdir(mode=0o700)
     monkeypatch.setenv(ISOLATED_ROOT_ENV, str(root))
-    ambient_data = PlatformDirs(appname="yoetz", appauthor=False, roaming=False).user_data_dir
-    monkeypatch.setenv("YOETZ_STORAGE_DATA_DIR", str(ambient_data))
+    isolated = isolation_report()
 
-    report = isolation_report()
-
-    assert report["mode"] == "isolated"
-    assert report["distinct"] is False
-    assert report["identity"]["storage_digest"] == report["ambient_identity"]["storage_digest"]
+    assert normal["mode"] == "ambient"
+    assert isolated["mode"] == "isolated"
+    assert isolated["identity"]["storage_digest"] == normal["identity"]["storage_digest"]
 
 
 def test_unusable_root_is_unprovable_never_ambient(monkeypatch: pytest.MonkeyPatch) -> None:

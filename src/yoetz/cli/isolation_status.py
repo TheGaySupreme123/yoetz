@@ -3,9 +3,9 @@
 ``yoetz service isolation`` resolves — locally, without touching any service, lock, or ledger —
 which identity roots this exact process environment would use: state directory (service lock and
 generation), runtime endpoint directory, effective storage bundle, selected config file, and the
-runtime executable. It reports each as a digest over the canonical resolved path identity, never
-as a raw path, next to the ambient platform-default identities, so a dogfood preflight can PROVE
-that an isolated runtime shares nothing with the normal Yoetz target instead of assuming it.
+Yoetz launcher. It reports each as a digest over the canonical resolved path identity, never as a
+raw path. A dogfood preflight combines one exact normal-target report with one exact isolated
+report, so relocated normal storage cannot be mistaken for separation.
 
 A set but unusable ``YOETZ_ISOLATED_ROOT`` propagates as the bounded ``PathSafetyError`` — the
 mode is then unprovable and callers must fail closed, never report ``ambient``.
@@ -17,9 +17,7 @@ import hashlib
 import os
 import sys
 from pathlib import Path
-from typing import Final, Literal, TypedDict
-
-from platformdirs import PlatformDirs
+from typing import Literal, TypedDict
 
 from yoetz.config.load import parse_minimal_safe_config
 from yoetz.config.paths import (
@@ -32,8 +30,6 @@ from yoetz.config.paths import (
 
 __all__ = ["IsolationReport", "isolation_report"]
 
-_APP_NAME: Final = "yoetz"
-
 
 class ResolvedIdentity(TypedDict):
     state_digest: str
@@ -43,18 +39,9 @@ class ResolvedIdentity(TypedDict):
     executable_digest: str
 
 
-class AmbientIdentity(TypedDict):
-    state_digest: str
-    endpoint_digest: str
-    storage_digest: str
-    config_digest: str
-
-
 class IsolationReport(TypedDict):
     mode: Literal["isolated", "ambient"]
-    distinct: bool
     identity: ResolvedIdentity
-    ambient_identity: AmbientIdentity
 
 
 def _identity_digest(path: Path) -> str:
@@ -82,24 +69,15 @@ def _effective_storage_dir() -> Path:
 
 
 def isolation_report() -> IsolationReport:
-    """Resolve the exact-environment identity roots and the ambient-default counterparts.
+    """Resolve only this exact environment's identity roots.
 
     Raises ``PathSafetyError`` when ``YOETZ_ISOLATED_ROOT`` is set but unusable and
     ``ConfigError`` when the selected configuration cannot be minimally parsed; both mean the
-    isolation state is unprovable and the caller must fail closed.
+    isolation state is unprovable and the caller must fail closed. A dogfood preflight compares
+    this report with a second report captured from the exact normal target; platform defaults are
+    not a substitute because that target may use relocated config or storage.
     """
 
-    ambient_dirs = PlatformDirs(appname=_APP_NAME, appauthor=False, roaming=False)
-    ambient = AmbientIdentity(
-        state_digest=_identity_digest(Path(ambient_dirs.user_state_dir)),
-        endpoint_digest=_identity_digest(Path(ambient_dirs.user_runtime_path)),
-        # Ambient storage/config are the normal target's DEFAULT identities. The normal
-        # install's config file is deliberately not read here: an isolated runtime must not
-        # touch the ambient install even read-only, so a normal target relocated by its own
-        # config is compared against its platform default identity instead.
-        storage_digest=_identity_digest(Path(ambient_dirs.user_data_dir)),
-        config_digest=_identity_digest(Path(ambient_dirs.user_config_dir) / "config.toml"),
-    )
     root = isolated_root()
     mode: Literal["isolated", "ambient"] = "ambient" if root is None else "isolated"
     identity = ResolvedIdentity(
@@ -107,18 +85,9 @@ def isolation_report() -> IsolationReport:
         endpoint_digest=_identity_digest(runtime_dir()),
         storage_digest=_identity_digest(_effective_storage_dir()),
         config_digest=_identity_digest(_selected_config_path()),
-        executable_digest=_identity_digest(Path(sys.executable)),
+        # ``sys.argv[0]`` is the exact selected Yoetz launcher. ``sys.executable`` would identify
+        # only the shared Python interpreter and could make two distinct installed targets look
+        # identical (or the reverse when wrappers share one interpreter).
+        executable_digest=_identity_digest(Path(sys.argv[0])),
     )
-    pairs = (
-        (identity["state_digest"], ambient["state_digest"]),
-        (identity["endpoint_digest"], ambient["endpoint_digest"]),
-        (identity["storage_digest"], ambient["storage_digest"]),
-        (identity["config_digest"], ambient["config_digest"]),
-    )
-    distinct = mode == "isolated" and all(resolved != normal for resolved, normal in pairs)
-    return IsolationReport(
-        mode=mode,
-        distinct=distinct,
-        identity=identity,
-        ambient_identity=ambient,
-    )
+    return IsolationReport(mode=mode, identity=identity)

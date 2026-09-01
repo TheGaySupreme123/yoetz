@@ -97,6 +97,7 @@ class DogfoodScope(TypedDict):
 
 class DogfoodYoetzIsolation(TypedDict):
     mode: Literal["isolated", "ambient", "unknown"]
+    normal_mode: Literal["isolated", "ambient", "unknown"]
     state_digest: str
     endpoint_digest: str
     storage_digest: str
@@ -106,6 +107,7 @@ class DogfoodYoetzIsolation(TypedDict):
     normal_endpoint_digest: str
     normal_storage_digest: str
     normal_config_digest: str
+    normal_executable_digest: str
 
 
 class DogfoodIdentity(TypedDict):
@@ -176,17 +178,22 @@ def _parse_yoetz_isolation(value: object) -> DogfoodYoetzIsolation:
         "normal_endpoint_digest",
         "normal_storage_digest",
         "normal_config_digest",
+        "normal_executable_digest",
     )
-    if set(row) != {"mode", *digest_fields}:
+    if set(row) != {"mode", "normal_mode", *digest_fields}:
         raise _error("yoetz_isolation_fields_invalid")
     mode = row["mode"]
+    normal_mode = row["normal_mode"]
     if mode not in {"isolated", "ambient", "unknown"}:
         raise _error("yoetz_isolation_mode_invalid")
+    if normal_mode not in {"isolated", "ambient", "unknown"}:
+        raise _error("yoetz_isolation_normal_mode_invalid")
     digests = {
         name: _require_digest(row[name], "yoetz_isolation_digest_invalid") for name in digest_fields
     }
     return DogfoodYoetzIsolation(
         mode=cast(Literal["isolated", "ambient", "unknown"], mode),
+        normal_mode=cast(Literal["isolated", "ambient", "unknown"], normal_mode),
         state_digest=digests["state_digest"],
         endpoint_digest=digests["endpoint_digest"],
         storage_digest=digests["storage_digest"],
@@ -196,6 +203,7 @@ def _parse_yoetz_isolation(value: object) -> DogfoodYoetzIsolation:
         normal_endpoint_digest=digests["normal_endpoint_digest"],
         normal_storage_digest=digests["normal_storage_digest"],
         normal_config_digest=digests["normal_config_digest"],
+        normal_executable_digest=digests["normal_executable_digest"],
     )
 
 
@@ -443,13 +451,14 @@ def classify_codex_dogfood_report(document: object) -> DogfoodGateResult:
     ):
         raise _error("service_isolation_state_mismatch")
     if facets["service_isolation"]["status"] == "pass":
-        if isolation["mode"] != "isolated":
+        if isolation["mode"] != "isolated" or isolation["normal_mode"] != "ambient":
             raise _error("service_isolation_identity_mismatch")
         shared_identity_pairs = (
             (isolation["state_digest"], isolation["normal_state_digest"]),
             (isolation["endpoint_digest"], isolation["normal_endpoint_digest"]),
             (isolation["storage_digest"], isolation["normal_storage_digest"]),
             (isolation["config_digest"], isolation["normal_config_digest"]),
+            (isolation["executable_digest"], isolation["normal_executable_digest"]),
         )
         if any(resolved == normal for resolved, normal in shared_identity_pairs):
             raise _error("service_isolation_identity_shared")

@@ -1285,9 +1285,9 @@ def service_run() -> None:
 def service_isolation(json_output: _JSON = False) -> None:
     """Report the resolved identity roots and isolation mode without connecting to a service.
 
-    Digest-only output: each root is a digest over its canonical resolved path identity so the
-    dogfood parity preflight (issue #518) can prove an isolated runtime shares no state
-    directory, endpoint, storage bundle, or config with the ambient target.
+    Digest-only output: each root is a digest over its canonical resolved path identity. The
+    dogfood parity preflight compares one report from the exact normal target with another from
+    the isolated launch environment; platform defaults cannot stand in for a relocated target.
     """
 
     from yoetz.cli.isolation_status import isolation_report

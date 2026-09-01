@@ -141,7 +141,6 @@ def test_isolation_report_modes_and_fail_closed_root(built_dist: Path) -> None:
         assert ambient.returncode == 0, ambient.stderr
         ambient_report = json.loads(ambient.stdout)
         assert ambient_report["mode"] == "ambient"
-        assert ambient_report["distinct"] is False
 
         iso = root / "iso"
         iso.mkdir(mode=0o700)
@@ -155,7 +154,6 @@ def test_isolation_report_modes_and_fail_closed_root(built_dist: Path) -> None:
         assert isolated.returncode == 0, isolated.stderr
         isolated_report = json.loads(isolated.stdout)
         assert isolated_report["mode"] == "isolated"
-        assert isolated_report["distinct"] is True
         for key in ("state_digest", "endpoint_digest", "storage_digest", "config_digest"):
             assert isolated_report["identity"][key] != ambient_report["identity"][key]
         # Digest-only privacy boundary: the report publishes no raw path.

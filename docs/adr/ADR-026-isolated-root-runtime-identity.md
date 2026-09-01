@@ -54,21 +54,20 @@ identity along with it, and nothing validates or proves it.
    client can never start a service whose state lands in the ambient install. An explicit
    `storage.data_dir` still wins over the isolated default `<root>/data`; the parity gate, not
    silent rejection, is what exposes an override that reaches shared storage.
-5. **Isolation is provable, not assumed.** `yoetz service isolation [--json]` resolves — locally,
-   without connecting to any service or opening any ledger — the exact identity roots this
-   environment would use and reports each as a digest over the canonical resolved path identity
-   (never a raw path), beside the ambient platform-default identities and a `distinct`
-   conclusion. Ambient identities are the normal target's *default* identities: the command never
-   reads the ambient install's config file, so a normal target relocated by its own config is
-   compared against its platform default. The command is CLI-only by design; MCP tools and hook
-   events inherit isolation transparently through the process environment and expose no
-   isolation surface of their own.
+5. **Isolation is proved from two exact target snapshots.** `yoetz service isolation [--json]`
+   resolves — locally, without connecting to a service or opening a ledger — only the identity
+   roots of the executable and environment that invoked it. Dogfood captures one report from the
+   exact normal executable/config environment and one from the exact isolated candidate. The gate
+   compares those reports; it never substitutes platform defaults for the normal target, because
+   its config or storage may be relocated. Each report contains canonical path-identity digests,
+   never raw paths. The command is CLI-only; MCP and hooks inherit isolation through environment.
 6. **The dogfood parity gate fails closed on shared identity.** Report schema
    `yoetz.codex-dogfood-parity/2` adds the `service_isolation` preflight facet, the
    `identity.yoetz_isolation` digest block, and the `observed.yoetz_isolation_state` closed state
    (`isolated|shared|ambient|unknown`). The facet can pass only when the observed state is
-   `isolated`, the identity mode is `isolated`, and every resolved state/endpoint/storage/config
-   digest differs from its normal-target counterpart; any equality, ambient mode, or unknown
+   `isolated`, the candidate mode is `isolated`, the normal mode is `ambient`, and every resolved
+   state/endpoint/storage/config/executable digest differs from its exact normal-target counterpart;
+   any equality, wrong mode, or unknown
    state is rejected or fails preflight, and a non-pass row must carry the
    `provision_isolated_yoetz_root` continuation. Version 1 reports are no longer accepted.
 
