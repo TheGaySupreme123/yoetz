@@ -2244,9 +2244,12 @@ async def _effective_update_policy_bits() -> tuple[bool | None, bool]:
         from yoetz.cli.app import build_service_client
         from yoetz.cli.provider_status import machine_scope_request
 
+        # Machine scope is a local construction; resolve it before connecting so a broken
+        # installation marker fails soft here without any service request (issue #517).
+        scoped = machine_scope_request()
         client = await build_service_client()
         try:
-            raw = await client.privacy_get_effective(machine_scope_request())
+            raw = await client.privacy_get_effective(scoped)
         finally:
             await client.close()
         raw_map = cast(Mapping[str, object], raw)

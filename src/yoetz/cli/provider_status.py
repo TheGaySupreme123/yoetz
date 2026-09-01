@@ -16,13 +16,15 @@ from pathlib import Path
 from typing import Final, Literal, cast
 
 from yoetz.config.load import load_config
-from yoetz.config.paths import state_dir
+from yoetz.config.models import ConfigError
+from yoetz.config.paths import PathSafetyError, bundle_root
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
 from yoetz.protocol.canonical import JsonValue, canonical_encode
 from yoetz.service.client import connect_service
 
 __all__ = [
+    "MachineScopeError",
     "credential_human_display",
     "host_admission_observation",
     "machine_scope_request",
@@ -309,20 +311,80 @@ def host_admission_observation(
     return report
 
 
+# Closed remediation set: each machine-scope construction failure names exactly one trusted next
+# command. Values are fixed strings — no paths, no marker content, no user-controlled text.
+_MACHINE_SCOPE_REMEDIATIONS: Final[Mapping[str, str]] = {
+    "installation_bundle_unavailable": (
+        "the configured storage bundle could not be resolved; "
+        "fix [storage].data_dir in config.toml, then retry"
+    ),
+    "installation_marker_invalid": (
+        "the installation marker could not be read; "
+        "run 'yoetz service recovery status' for the trusted repair path, then retry"
+    ),
+    "installation_marker_missing": (
+        "this installation is not initialized; run 'yoetz setup', then retry"
+    ),
+}
+
+
+class MachineScopeError(Exception):
+    """A bounded local machine-scope construction failure; never a service result.
+
+    Raised before any service request when this installation's identity cannot be resolved from
+    the configured storage bundle. The reason set is closed so every caller renders one valid
+    actionable diagnostic instead of constructing an error the control vocabulary does not admit
+    (issue #517: an inadmissible ``ControlError`` reason surfaced as generic ``internal_error``).
+    """
+
+    __slots__ = ("reason",)
+
+    reason: str
+
+    def __init__(self, reason: str) -> None:
+        if type(reason) is not str or reason not in _MACHINE_SCOPE_REMEDIATIONS:
+            raise ValueError("machine_scope_reason_invalid")
+        self.reason = reason
+        super().__init__(reason)
+
+    @property
+    def remediation(self) -> str:
+        """One fixed actionable next step for this reason; safe for human stderr output."""
+
+        return _MACHINE_SCOPE_REMEDIATIONS[self.reason]
+
+
 def machine_scope_request() -> JsonObject:
     """Build the ``privacy_get_effective`` body for this installation's machine scope.
 
-    ``scope`` is required by the frozen request schema, so an unreadable installation id is
-    reported as a caller error here rather than sent as a body the service must reject.
+    The installation marker lives in the configured storage bundle — the same root the service
+    resolves via ``bundle_root(_data_dir=config.storage.data_dir)`` — not the fixed platform
+    state directory, so an explicit ``storage.data_dir`` is honored here too (issue #517).
+    ``scope`` is required by the frozen request schema, so a scope that cannot be constructed
+    locally is reported as a bounded :class:`MachineScopeError` before any service request rather
+    than sent as a body the service must reject.
     """
 
     try:
-        state = json.loads((state_dir() / "installation-state.json").read_text())
-        installation_id = state["installation_id"]
-    except (OSError, KeyError, TypeError, ValueError) as exc:
-        raise ControlError("invalid_request") from exc
+        config = load_config({}, os.environ, None)
+        root = bundle_root(_data_dir=config.storage.data_dir)
+    except (ConfigError, OSError, PathSafetyError) as exc:
+        raise MachineScopeError("installation_bundle_unavailable") from exc
+    try:
+        text = (root / "installation-state.json").read_text()
+    except FileNotFoundError as exc:
+        raise MachineScopeError("installation_marker_missing") from exc
+    except OSError as exc:
+        raise MachineScopeError("installation_marker_invalid") from exc
+    try:
+        state: object = json.loads(text)
+    except ValueError as exc:
+        raise MachineScopeError("installation_marker_invalid") from exc
+    installation_id: object = (
+        cast("dict[str, object]", state).get("installation_id") if type(state) is dict else None
+    )
     if type(installation_id) is not str or not installation_id:
-        raise ControlError("invalid_request")
+        raise MachineScopeError("installation_marker_invalid")
     body: dict[str, JsonValue] = {
         "schema_version": "1.0.0",
         "scope": {"kind": "machine", "installation_id": installation_id},
