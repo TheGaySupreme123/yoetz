@@ -14,6 +14,7 @@ from yoetz.adapters.control.unix_socket import AuthenticatedUnixStream
 from yoetz.service import confidential_protocol
 from yoetz.service.confidential_client import (
     ConfidentialClientError,
+    ConfidentialResultUnconfirmed,
     HumanControlClient,
 )
 from yoetz.service.confidential_protocol import (
@@ -246,6 +247,63 @@ def test_confidential_clients_have_no_raw_endpoint_or_secret_constructor() -> No
         )(lambda: None, object(), _token=None)
     assert not hasattr(HumanControlClient, "connect_secret")
     assert "HumanEnvelope" in confidential_protocol.__all__
+
+
+_READY_RESULT = VaultStateResult(state="ready", reason="succeeded")
+
+
+def _result_frame() -> bytes:
+    return encode_human_frame(
+        ServerResultEnvelope(ceremony_id=_CEREMONY_ID, step=2, result=_READY_RESULT)
+    )
+
+
+@pytest.mark.anyio
+async def test_missing_close_after_result_carries_the_validated_result() -> None:
+    """#519: a lost close confirmation must not discard a correlated terminal result."""
+
+    client, human_stream, session = await _open(_SecretStream())
+    await human_stream.feed(_result_frame())
+    await human_stream.aclose()
+    with pytest.raises(ConfidentialResultUnconfirmed) as caught:
+        await getattr(session, "wait_phase_or_result")()
+    assert caught.value.result == _READY_RESULT
+    assert caught.value.reason == "ambiguous"
+    # Callers that only understand the bounded error taxonomy observe it unchanged.
+    assert isinstance(caught.value, ConfidentialClientError)
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_wrong_close_outcome_after_result_carries_the_validated_result() -> None:
+    client, human_stream, session = await _open(_SecretStream())
+    await human_stream.feed(
+        _result_frame()
+        + encode_human_frame(
+            ServerCloseEnvelope(ceremony_id=_CEREMONY_ID, step=3, outcome="failed")
+        )
+    )
+    with pytest.raises(ConfidentialResultUnconfirmed) as caught:
+        await getattr(session, "wait_phase_or_result")()
+    assert caught.value.result == _READY_RESULT
+    assert caught.value.reason == "ambiguous"
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_miscorrelated_close_after_result_keeps_its_exact_reason() -> None:
+    client, human_stream, session = await _open(_SecretStream())
+    await human_stream.feed(
+        _result_frame()
+        + encode_human_frame(
+            ServerCloseEnvelope(ceremony_id=_CEREMONY_ID, step=9, outcome="completed")
+        )
+    )
+    with pytest.raises(ConfidentialResultUnconfirmed) as caught:
+        await getattr(session, "wait_phase_or_result")()
+    assert caught.value.result == _READY_RESULT
+    assert caught.value.reason == "correlation_mismatch"
+    await client.close()
 
 
 class _RecoveryStream:
