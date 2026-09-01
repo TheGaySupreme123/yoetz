@@ -41,14 +41,37 @@ yoetz provider codex-subscription disconnect --accept
 yoetz provider codex-subscription rollback
 ```
 
-Setup resolves the selected npm wrapper to its exact native binary and refuses every unknown
-digest. Before Codex login it shows the runtime, destination, model/reasoning selection, dedicated
-home, unknown plan-specific data-use posture, privacy implication, and reverse commands. Browser
-and device-code login are the only accepted methods. Guided setup, the prompt-loop menu, and
-`/provider` can log out the dedicated home first when switching accounts. Disconnect asks Codex to
-log out and removes the Yoetz binding only after structural confirmation; rollback never logs out
-or deletes the home or installation. CLI, menu, and `/provider` recompose the local service after
-setup, disconnect, or rollback so a running daemon cannot keep dispatching the previous cell.
+## Selected executable resolution
+
+Pass one absolute selected path. The supported npm layouts are:
+
+1. the npm wrapper whose `@openai/codex-darwin-arm64` optional package is nested below that
+   wrapper's package root; and
+2. an npm-prefix wrapper whose native package is hoisted beside `@openai/codex` under the same
+   selected prefix.
+
+The third supported form is the exact native `codex` executable. Resolution follows only the
+selected wrapper's package root and, for a prefix install, that same prefix. It never searches
+arbitrary PATH entries, unrelated prefixes, or unbounded parent directories. All forms retain the
+platform, package-version, native-executable, and exact-digest checks; an executable that runs but
+is not the closed capability cell returns a bounded failure token.
+
+Setup resolves the selected wrapper to its exact native binary and refuses every unknown digest.
+Before Codex login it shows the runtime, destination, model/reasoning selection, dedicated home,
+unknown plan-specific data-use posture, privacy implication, and reverse commands. Browser and
+device-code login are the only accepted methods. The browser window is 600 seconds; the device-code
+window is 900 seconds. Cancellation and timeout use bounded process-group termination, pipe close,
+and task cleanup before returning one terminal diagnostic.
+
+No partial Yoetz binding is written. A timeout, denial, malformed completion, process exit,
+cancellation, or later configuration-write failure leaves a new or replacement Yoetz binding
+uncommitted. If Codex completed its own login before the failure, its OAuth state may remain in the
+dedicated home because Codex owns authentication, refresh, `auth.json`, and logout. Use
+`disconnect` to request Codex logout and then remove the Yoetz binding; use `rollback` to remove
+only the Yoetz binding while preserving the home and installation. Guided setup, the prompt-loop
+menu, and `/provider` can log out the dedicated home first when switching accounts. CLI, menu, and
+`/provider` recompose the local service after setup, disconnect, or rollback so a running daemon
+cannot keep dispatching the previous cell.
 
 Service READY composition does not spawn a Codex app-server to prove login. The READY credential
 fact is the exact binding, executable digest, isolated config, and dedicated home. `account/read`
@@ -94,6 +117,12 @@ retry. After acknowledgement, ambiguous transport or unverified process-group cl
 `unavailable/outcome_unknown`; do not retry it. Success requires schema-valid output and verified
 group disappearance before the terminal receipt.
 
+Structural readiness, privacy authority, and live dispatch remain separate claims. `status` can show
+the exact binding, dedicated-home readiness, account mode, or model availability without authorizing
+disclosure. The machine privacy ceiling and exact repository grant independently permit or refuse a
+case. Only an admitted `evaluate()` child with a semantic attempt and terminal receipt proves that
+task bytes were dispatched; login success, model listing, or `semantic_ready: true` alone never does.
+
 ## Packaged live-evidence checklist
 
 Use an exact packaged Yoetz build and an isolated logged-in evaluator home. Record these as
@@ -107,7 +136,10 @@ separate claims:
 4. logged-out home, incompatible binary, unavailable model/reasoning, modified config, hostile
    project instructions, same-name binary, API/proxy environment, and attempted tool events fail
    before disclosure or record the exact bounded post-disclosure failure;
-5. disconnect and rollback leave unrelated Codex installations, homes, settings, and sessions
+5. browser and device login timeout, cancellation, malformed completion, process exit, and
+   configuration-write failure leave no partial Yoetz binding while process groups and pipes are
+   cleaned up within their bounds;
+6. disconnect and rollback leave unrelated Codex installations, homes, settings, and sessions
    byte-unchanged.
 
 Do not call login, a model listing, unit tests, or one clean judgment proof of this checklist.

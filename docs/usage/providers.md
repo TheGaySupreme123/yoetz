@@ -41,12 +41,27 @@ setup, the prompt-loop provider menu, `/provider`, or run:
 yoetz provider codex-subscription setup --executable /absolute/path/to/codex
 ```
 
+The selected executable can be an npm wrapper with the native package nested below that wrapper,
+an npm-prefix wrapper with `@openai/codex-darwin-arm64` hoisted beside the wrapper package in the
+same prefix, or the exact native `codex` executable itself. Yoetz resolves only those bounded
+locations derived from the selected path: it does not search PATH, unrelated prefixes, or arbitrary
+parent directories. Every form still requires the supported platform, package version, native
+executable, and exact SHA-256 digest; a direct native path does not bypass those checks.
+
 Before opening a browser, Yoetz shows the resolved native executable and SHA-256 digest, Codex
 version, dedicated evaluator home, model and reasoning effort, OpenAI destination, unknown
 plan-specific data-use posture, privacy implications, and the reverse commands. The explicit
-confirmation starts Codex's documented browser login. Add `--device-code --no-open-browser` to use
-Codex's device-code flow instead. Codex owns the login, refresh, credential file, and logout;
-Yoetz neither receives nor stores the OAuth credential.
+confirmation starts Codex's documented browser login, which may remain open for its full 600-second
+window. Add `--device-code --no-open-browser` to use Codex's device-code flow instead; that flow
+may remain open for its full 900-second window. Cancellation and timeout use bounded process-group,
+pipe, and task cleanup and return one closed diagnostic. Codex owns the login, refresh, credential
+file, and logout; Yoetz neither receives nor stores the OAuth credential.
+
+A timeout, denial, malformed completion, process exit, cancellation, or later write failure never
+persists a partial Yoetz binding. If Codex completed login before a later failure, Codex may retain
+its own authentication in the dedicated home; that is separate from Yoetz configuration. Use
+`disconnect` when you want Codex to log out, or `rollback` when you want to remove the Yoetz
+binding while preserving the home and installation.
 
 The initial closed cell is Codex npm `0.150.1` on macOS arm64, capability
 `codex-evaluator/0.150.1/v1`. The selected native binary digest, app-server v2 schema digest,
@@ -75,7 +90,10 @@ Setup, disconnect, and rollback recompose the local service afterwards. The subs
 has unknown data-use posture, so Yoetz does not mark it as the Assisted recommendation. You may
 still explicitly approve a bounded external-review policy. Login, plan name, and model listing are
 readiness facts collected by status or by the evaluate child—not privacy consent and not proof that
-a semantic turn ran. See the [exact evaluator runbook](../runbooks/codex-subscription-evaluator.md).
+a semantic turn ran. `semantic_ready: true` means the structural provider, machine-policy, and
+repository conditions are present. Privacy authority is a separate disclosure gate, and live
+semantic dispatch is a separate runtime event evidenced by the check/evaluate result and receipt.
+See the [exact evaluator runbook](../runbooks/codex-subscription-evaluator.md).
 
 ## Interactive model choices
 
@@ -187,7 +205,7 @@ daemon cannot keep dispatching the previous cell.
 
 ## Readiness (`yoetz provider status`)
 
-Before spending a run on semantic review, ask whether the five structural conditions hold:
+Before spending a run on semantic review, ask whether the six structural conditions hold:
 
 ```text
 yoetz provider status --json

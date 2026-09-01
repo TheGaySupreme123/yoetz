@@ -49,6 +49,14 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Codex subscription setup now resolves the exact selected executable from both supported npm
+  layouts (nested native package and hoisted package under the same npm prefix), while retaining
+  direct-native support, bounded path resolution, and exact capability verification. Browser login
+  receives its full 600-second window and device-code login its full 900-second window; cancellation,
+  timeout, malformed completion, process exit, and write failure perform bounded process cleanup and
+  leave no partial Yoetz binding, while any Codex-owned authentication remains under Codex's control
+  (issue #525).
+
 - `yoetz privacy show` — and every other local machine-scope privacy read: the empty-request CLI
   body, `privacy export-desired`, `privacy apply-desired`, the prompt-loop menu's effective-policy
   view, and setup's update-policy probe — now resolves the installation marker through the
