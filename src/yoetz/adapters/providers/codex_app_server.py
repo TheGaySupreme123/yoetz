@@ -870,16 +870,51 @@ def _login_challenge(result: Mapping[str, object]) -> CodexLoginChallenge:
     return CodexLoginChallenge(mode, url, user_code)
 
 
+def _validate_predisclosure_notification(
+    message: Mapping[str, object],
+    *,
+    invalid_token: str = "codex_app_server_predisclosure_event_forbidden",
+) -> bool:
+    """Validate one reviewed pre-disclosure notification and retain no native payload."""
+
+    if "method" in message and "id" in message:
+        raise ValueError("codex_app_server_tool_request_forbidden")
+    method = message.get("method")
+    if type(method) is not str or method not in _PREDISCLOSURE_NOTIFICATION_METHODS:
+        raise ValueError(invalid_token)
+    if method == "account/updated":
+        return True
+    if method == "account/rateLimits/updated":
+        _discard_rate_limits_notification(message)
+    elif method == "warning":
+        raise _runtime_warning(message)
+    elif method == "remoteControl/status/changed":
+        params = _object(message.get("params"))
+        if set(params) != {"environmentId", "installationId", "serverName", "status"}:
+            raise ValueError("codex_app_server_remote_control_state_invalid")
+        if params.get("status") != "disabled":
+            raise ValueError("codex_app_server_remote_control_not_disabled")
+    return False
+
+
 def _login_notification(
     message: Mapping[str, object], login_id: str
-) -> Literal["account_updated", "completed"]:
+) -> Literal["account_updated", "completed", "predisclosure"]:
     """Validate one login notification without retaining any native payload text."""
 
     if "method" in message and "id" in message:
         raise ValueError("codex_app_server_tool_request_forbidden")
     method = message.get("method")
-    if method == "account/updated":
-        return "account_updated"
+    if type(method) is str and method in _PREDISCLOSURE_NOTIFICATION_METHODS:
+        try:
+            updated = _validate_predisclosure_notification(
+                message, invalid_token="codex_login_event_invalid"
+            )
+        except _CodexRuntimeWarning as warning:
+            # A native warning is not a login event. It ends the login with the bounded login
+            # token; its free-form body never leaves the adapter.
+            raise ValueError("codex_login_event_invalid") from warning
+        return "account_updated" if updated else "predisclosure"
     if method != "account/login/completed":
         raise ValueError("codex_login_event_invalid")
     params = _object(message.get("params"))
@@ -917,9 +952,12 @@ def _take_account_updated(runtime: _CodexProcess) -> bool:
     pending = runtime.pending_notifications
     runtime.pending_notifications = []
     for message in pending:
-        if message.get("method") != "account/updated":
+        notification = _login_notification(message, "")
+        if notification == "account_updated":
+            updated = True
+            continue
+        if notification != "predisclosure":
             raise ValueError("codex_login_event_invalid")
-        updated = True
     return updated
 
 
@@ -932,9 +970,12 @@ async def _wait_for_account_updated(runtime: _CodexProcess, deadline: float) -> 
             if remaining <= 0.0:
                 return False
             message = await runtime.read(remaining)
-            if _login_notification(message, "") != "account_updated":
-                raise ValueError("codex_login_event_invalid")
-            return True
+            notification = _login_notification(message, "")
+            if notification == "account_updated":
+                return True
+            if notification == "predisclosure":
+                continue
+            raise ValueError("codex_login_event_invalid")
     except TimeoutError:
         return False
 
@@ -1024,8 +1065,11 @@ async def codex_login(
                 except TimeoutError:
                     break
                 events_seen += 1
-                if _login_notification(message, login_id) == "account_updated":
+                notification = _login_notification(message, login_id)
+                if notification == "account_updated":
                     account_updated_seen = True
+                    continue
+                if notification == "predisclosure":
                     continue
                 completion_seen = True
                 completion_succeeded = True
@@ -1052,8 +1096,11 @@ async def codex_login(
                     except TimeoutError as error:
                         raise TimeoutError from error
                     events_seen += 1
-                    if _login_notification(message, login_id) == "account_updated":
+                    notification = _login_notification(message, login_id)
+                    if notification == "account_updated":
                         account_updated_seen = True
+                        continue
+                    if notification == "predisclosure":
                         continue
                     completion_seen = True
                     completion_succeeded = True
@@ -1290,22 +1337,7 @@ def _turn_failure(error: object) -> _CodexTurnFailure:
 
 def _validate_predisclosure_notifications(runtime: _CodexProcess) -> None:
     for message in runtime.pending_notifications:
-        if "method" in message and "id" in message:
-            raise ValueError("codex_app_server_tool_request_forbidden")
-        method = message.get("method")
-        if method not in _PREDISCLOSURE_NOTIFICATION_METHODS:
-            raise ValueError("codex_app_server_predisclosure_event_forbidden")
-        if method == "account/rateLimits/updated":
-            _discard_rate_limits_notification(message)
-            continue
-        if method == "warning":
-            raise _runtime_warning(message)
-        if method == "remoteControl/status/changed":
-            params = _object(message.get("params"))
-            if set(params) != {"environmentId", "installationId", "serverName", "status"}:
-                raise ValueError("codex_app_server_remote_control_state_invalid")
-            if params.get("status") != "disabled":
-                raise ValueError("codex_app_server_remote_control_not_disabled")
+        _validate_predisclosure_notification(message)
     runtime.pending_notifications.clear()
 
 
