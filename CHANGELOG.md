@@ -49,6 +49,31 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Codex subscription setup now resolves the exact selected executable from both supported npm
+  layouts (nested native package and hoisted package under the same npm prefix), while retaining
+  direct-native support, bounded path resolution, and exact capability verification. Browser login
+  receives its full 600-second window and device-code login its full 900-second window; cancellation,
+  timeout, malformed completion, process exit, and write failure perform bounded process cleanup and
+  leave no partial Yoetz binding, while any Codex-owned authentication remains under Codex's control
+  (issue #525).
+
+- Codex subscription semantic attempts now record which closed stage stopped them. A
+  `response_schema_invalid` result stays terminal and non-retryable, but its
+  `semantic_provenance.runtime_evidence.failure_stage` names one registered token — malformed or
+  fenced JSON (`output_not_json`), a wrong envelope, an invented enum, duplicate cited refs,
+  non-citable refs, a conclusion that contradicts its challenge list, prose outside the text
+  bounds, an extra or missing field, a second final message, a forbidden event or tool item, the
+  event budget, or an unconfirmed cleanup — and the service writes the same token as an
+  owner-only diagnostic line. No provider text is retained. The evaluator also stops rejecting
+  answers Codex 0.150.1 produces legitimately: interim `commentary`-phase agent messages are
+  discarded and only the `final_answer` is validated, informational notifications (thread naming,
+  moderation metadata, safety buffering, deprecation and config notices, queue and compaction
+  state, plan updates) are discarded unread, and the streamed-delta budget rose from 512 to 4096
+  events so a content-rich judgment no longer fails as schema-invalid. A `model/rerouted`
+  notice ends the turn as `refused` because the bound model did not answer. Evidence validation
+  failures now raise their registered `invalid_runtime_attempt_evidence` reason instead of
+  `unregistered_protocol_reason_code` (issue #527).
+
 - `yoetz privacy show` — and every other local machine-scope privacy read: the empty-request CLI
   body, `privacy export-desired`, `privacy apply-desired`, the prompt-loop menu's effective-policy
   view, and setup's update-policy probe — now resolves the installation marker through the

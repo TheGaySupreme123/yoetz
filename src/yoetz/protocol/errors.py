@@ -131,6 +131,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "invalid_receipt_section",
     "invalid_receipt_section_order",
     "invalid_receipt_version_slice",
+    "invalid_runtime_attempt_evidence",
     "invalid_sampling_params",
     "invalid_semantic_dispatch_kind",
     "invalid_semantic_failure_class",
@@ -178,6 +179,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "request_timeout",
     "response_fields_invalid",
     "response_projection_failed",
+    "runtime_attempt_evidence_json_shape_invalid",
     "schema_artifact_role_invalid",
     "schema_artifact_role_mismatch",
     "schema_bytes_invalid",
@@ -217,7 +219,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 164
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 166
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

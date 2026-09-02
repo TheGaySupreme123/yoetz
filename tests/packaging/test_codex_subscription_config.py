@@ -1,4 +1,4 @@
-"""Codex-subscription lifecycle CLI against a real installed artifact and real config TOML.
+"""Codex-subscription lifecycle and resolver checks against a real installed artifact.
 
 Regression slice for issue #520: a valid ``config.toml`` whose ``storage.data_dir`` is the
 ordinary TOML string form crashed every ``yoetz provider codex-subscription`` command with a
@@ -8,9 +8,10 @@ strict-validated raw TOML instead of loading through the canonical configuration
 Each case installs the built wheel into an isolated root, points ``YOETZ_CONFIG`` at a real
 hand-written TOML file whose ``storage.data_dir`` names an isolated data directory, spawns the
 real console script, and requires a bounded, non-internal, path-free diagnostic or a successful
-result. No case opens a Codex login flow: ``status`` and ``rollback`` never log in, and the
-bound-runtime case points at an executable that does not exist, so the runtime probe fails
-closed locally.
+result. Issue #525 additionally exercises the installed wheel's exact npm-layout resolver against
+synthetic nested and npm-prefix-hoisted package trees. No case opens a Codex login flow: ``status``
+and ``rollback`` never log in, and the bound-runtime case points at an executable that does not
+exist, so the runtime probe fails closed locally.
 """
 
 from __future__ import annotations
@@ -108,6 +109,89 @@ def _data_dir_config(root: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return config, data_dir
+
+
+def _codex_package_layout(root: Path, *, nested: bool) -> tuple[Path, Path]:
+    wrapper_root = root / "node_modules" / "@openai" / "codex"
+    wrapper = wrapper_root / "bin" / "codex.js"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    (wrapper_root / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@openai/codex",
+                "version": "0.150.1",
+                "bin": {"codex": "bin/codex.js"},
+                "optionalDependencies": {
+                    "@openai/codex-darwin-arm64": "npm:@openai/codex@0.150.1-darwin-arm64"
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    native_root = (
+        wrapper_root / "node_modules" / "@openai" / "codex-darwin-arm64"
+        if nested
+        else wrapper_root.parent / "codex-darwin-arm64"
+    )
+    native = native_root / "vendor" / "aarch64-apple-darwin" / "bin" / "codex"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"packaged-layout-probe")
+    native.chmod(0o700)
+    (native_root / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@openai/codex",
+                "version": "0.150.1-darwin-arm64",
+                "os": ["darwin"],
+                "cpu": ["arm64"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return wrapper, native
+
+
+def test_installed_wheel_resolves_nested_and_npm_prefix_codex_layouts(
+    built_dist: _BuiltDist, tmp_path: Path
+) -> None:
+    root = tmp_path / "install"
+    home = root / "home"
+    home.mkdir(parents=True)
+    _yoetz_exe, env = _tool_install(built_dist.directory, root, home)
+    env.pop("PYTHONPATH", None)
+    env["PYTHONNOUSERSITE"] = "1"
+    installed_python = root / "tool" / "yoetz" / "bin" / "python"
+    probe = (
+        "import sys; from pathlib import Path; "
+        "import yoetz.cli.codex_subscription as m; "
+        "sys.platform='darwin'; m.platform.machine=lambda: 'arm64'; "
+        "m._sha256_file=lambda _path: m._DARWIN_ARM64_EXECUTABLE_SHA256; "
+        "print(Path(m.__file__).resolve()); "
+        "print(*m.resolve_supported_codex_executable(Path(sys.argv[1])), sep='\\n')"
+    )
+
+    for nested in (True, False):
+        wrapper, native = _codex_package_layout(tmp_path / f"layout-{nested}", nested=nested)
+        result = subprocess.run(
+            [str(installed_python), "-c", probe, str(wrapper)],
+            capture_output=True,
+            timeout=30,
+            env=env,
+            cwd=root,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+        lines = result.stdout.decode("utf-8").splitlines()
+        assert len(lines) == 4
+        assert Path(lines[0]).is_relative_to(root / "tool" / "yoetz")
+        assert lines[1:] == [
+            str(native),
+            "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b",
+            "openai-codex-npm-darwin-arm64-0.150.1",
+        ]
+        assert str(_REPO_ROOT).encode("utf-8") not in result.stdout
 
 
 def _bound_runtime_config(root: Path) -> tuple[Path, Path]:

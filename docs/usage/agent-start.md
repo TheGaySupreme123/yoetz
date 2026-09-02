@@ -48,11 +48,12 @@ binding answers are the ones they give in their terminal:
    asks; the prompt wizard uses secure storage automatically and offers a passphrase only when it
    is unavailable.
 
-If they choose semantic review, additionally: a **provider and model** (reviewed presets, a custom
-HTTPS origin, or skip for now); a **privacy policy** (five options, one recommended with its
-reason and trade-off; the final decision is `approve` or `deny` at a trusted local ceremony that
-cannot be scripted); and the **API key**, typed at a hidden `Provider credential:` prompt. You
-never see the key.
+If they choose semantic review, additionally choose a **provider and model** (reviewed presets, a
+custom HTTPS origin, or skip for now) and a **privacy policy** (five options, one recommended with
+its reason and trade-off; the final decision is `approve` or `deny` at a trusted local ceremony that
+cannot be scripted). An API provider asks for its **API key** at a hidden `Provider credential:`
+prompt. A Codex subscription instead uses a dedicated Codex-owned home and its browser or
+device-code login; Yoetz never receives that OAuth credential. You never see an API key.
 
 ## 3. Before recommending a semantic provider — inspect the installed catalog
 
@@ -130,6 +131,9 @@ yoetz integrate codex mcp status --json   # only when Codex integration was set 
   session loaded them; `yoetz_owned` registration (with its `route_profile`) is not a live
   connection; `semantic_ready: true` means configured, not proven working; credential state is
   `credential_connected` `true`/`false`/`null` — never describe the key.
+- `semantic_ready` is structural readiness, `yoetz privacy show` and the repository grant are
+  disclosure authority, and only a completed check/evaluate receipt proves live semantic dispatch.
+  A Codex login or model listing is readiness evidence, not privacy consent or dispatch proof.
 
 Once integration is live, your operating instructions come from the guidance Yoetz serves —
 [`guidance/`](../../guidance/), starting with `agent-instructions.md`. For registration

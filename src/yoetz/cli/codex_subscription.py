@@ -6,9 +6,10 @@ import hashlib
 import os
 import platform
 import re
+import stat
 import sys
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Final, Literal, cast
 
@@ -40,7 +41,7 @@ from yoetz.config.write import (
     preflight_config_write,
     write_config_toml_if_unchanged,
 )
-from yoetz.protocol.canonical import JsonValue
+from yoetz.protocol.canonical import JsonValue, strict_json_parse
 
 __all__ = [
     "codex_subscription_preview",
@@ -58,6 +59,12 @@ _DARWIN_ARM64_EXECUTABLE_SHA256: Final = (
     "sha256:a14f9a907c12c8812878b70e6b7d65f81c39ed795513e46a55817d7428c0ca6b"
 )
 _DARWIN_ARM64_SOURCE_IDENTITY: Final = "openai-codex-npm-darwin-arm64-0.150.1"
+_CODEX_PACKAGE_NAME: Final = "@openai/codex"
+_CODEX_NATIVE_PACKAGE_DIRECTORY: Final = "codex-darwin-arm64"
+_CODEX_NATIVE_PACKAGE_VERSION: Final = f"{CODEX_EVALUATOR_RUNTIME_VERSION}-darwin-arm64"
+_CODEX_NATIVE_PACKAGE_SPEC: Final = f"npm:{_CODEX_PACKAGE_NAME}@{_CODEX_NATIVE_PACKAGE_VERSION}"
+_CODEX_NATIVE_EXECUTABLE_RELATIVE: Final = Path("vendor/aarch64-apple-darwin/bin/codex")
+_CODEX_PACKAGE_JSON_MAX_BYTES: Final = 64 * 1024
 _SUPPORTED_REASONING: Final = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
 _CLOSED_FAILURE_TOKEN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
@@ -102,34 +109,172 @@ def subscription_failure_reason(error: BaseException) -> str:
     return "codex_subscription_failed"
 
 
-def resolve_supported_codex_executable(selected: Path) -> tuple[Path, str, str]:
-    """Resolve only the selected npm distribution to its exact native executable."""
+def _runtime_path(path: Path, *, missing_token: str) -> Path:
+    """Resolve one path selected by the caller without widening its search scope."""
 
     try:
-        resolved = selected.expanduser().resolve(strict=True)
+        return path.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise ValueError(missing_token) from error
+    except (OSError, RuntimeError) as error:
+        raise ValueError("codex_runtime_unavailable") from error
+
+
+def _package_json(package_root: Path) -> Mapping[str, JsonValue]:
+    """Read one bounded npm manifest and convert all parse failures to safe tokens."""
+
+    path = package_root / "package.json"
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as error:
+        raise ValueError("codex_runtime_not_found") from error
+    except OSError as error:
+        raise ValueError("codex_runtime_capability_unsupported") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size <= 0
+            or metadata.st_size > _CODEX_PACKAGE_JSON_MAX_BYTES
+        ):
+            raise ValueError("codex_runtime_capability_unsupported")
+        chunks: list[bytes] = []
+        remaining = _CODEX_PACKAGE_JSON_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    except OSError as error:
+        raise ValueError("codex_runtime_capability_unsupported") from error
+    finally:
+        os.close(descriptor)
+    if not raw or len(raw) > _CODEX_PACKAGE_JSON_MAX_BYTES:
+        raise ValueError("codex_runtime_capability_unsupported")
+    try:
+        document = strict_json_parse(raw)
+    except (ValueError, RecursionError) as error:
+        raise ValueError("codex_runtime_capability_unsupported") from error
+    if not isinstance(document, Mapping):
+        raise ValueError("codex_runtime_capability_unsupported")
+    return cast(Mapping[str, JsonValue], document)
+
+
+def _validate_codex_wrapper_manifest(document: Mapping[str, JsonValue]) -> None:
+    """Validate the exact wrapper metadata for the closed evaluator cell."""
+
+    if document.get("name") != _CODEX_PACKAGE_NAME:
+        raise ValueError("codex_runtime_capability_unsupported")
+    if document.get("version") != CODEX_EVALUATOR_RUNTIME_VERSION:
+        raise ValueError("codex_runtime_capability_unsupported")
+    binary_map = document.get("bin")
+    if not isinstance(binary_map, Mapping) or binary_map.get("codex") != "bin/codex.js":
+        raise ValueError("codex_runtime_capability_unsupported")
+    optional_dependencies = document.get("optionalDependencies")
+    if (
+        not isinstance(optional_dependencies, Mapping)
+        or optional_dependencies.get(f"@openai/{_CODEX_NATIVE_PACKAGE_DIRECTORY}")
+        != _CODEX_NATIVE_PACKAGE_SPEC
+    ):
+        raise ValueError("codex_runtime_capability_unsupported")
+
+
+def _validate_codex_native_manifest(document: Mapping[str, JsonValue]) -> None:
+    """Validate the exact native package identity and macOS arm64 selectors."""
+
+    if document.get("name") != _CODEX_PACKAGE_NAME:
+        raise ValueError("codex_runtime_capability_unsupported")
+    if document.get("version") != _CODEX_NATIVE_PACKAGE_VERSION:
+        raise ValueError("codex_runtime_capability_unsupported")
+    if document.get("os") != ["darwin"] or document.get("cpu") != ["arm64"]:
+        raise ValueError("codex_runtime_capability_unsupported")
+
+
+def _package_candidate_present(path: Path) -> bool:
+    """Return presence without following an absent/broken candidate into a parent search."""
+
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise ValueError("codex_runtime_unavailable") from error
+
+
+def _reject_symlinked_package_root(path: Path) -> None:
+    """Keep package identity bound to the selected layout, including same-parent aliases."""
+
+    try:
+        if stat.S_ISLNK(path.lstat().st_mode):
+            raise ValueError("codex_runtime_capability_unsupported")
     except FileNotFoundError as error:
         raise ValueError("codex_runtime_not_found") from error
     except OSError as error:
         raise ValueError("codex_runtime_unavailable") from error
+
+
+def _resolve_codex_package_layout(selected: Path) -> Path:
+    """Resolve a selected wrapper to its exact nested or npm-prefix native executable.
+
+    The only allowed package roots are the optional dependency nested below the selected wrapper
+    and its direct hoisted sibling. The nested candidate wins deterministically; a present but
+    malformed nested package is terminal and never causes an unbounded parent/PATH search.
+    """
+
+    wrapper = _runtime_path(selected.expanduser(), missing_token="codex_runtime_not_found")
+    if wrapper.name != "codex.js" or wrapper.parent.name != "bin":
+        return wrapper
+    package_root = wrapper.parent.parent
+    if package_root == Path(package_root.anchor):
+        raise ValueError("codex_runtime_capability_unsupported")
+    _validate_codex_wrapper_manifest(_package_json(package_root))
+
+    nested = package_root / "node_modules" / "@openai" / _CODEX_NATIVE_PACKAGE_DIRECTORY
+    hoisted = package_root.parent / _CODEX_NATIVE_PACKAGE_DIRECTORY
+    if _package_candidate_present(nested):
+        _reject_symlinked_package_root(nested)
+        expected_parent = nested.parent
+        allowed_parent = _runtime_path(nested.parent, missing_token="codex_runtime_not_found")
+        native_root = _runtime_path(nested, missing_token="codex_runtime_not_found")
+    elif _package_candidate_present(hoisted):
+        _reject_symlinked_package_root(hoisted)
+        expected_parent = hoisted.parent
+        allowed_parent = _runtime_path(hoisted.parent, missing_token="codex_runtime_not_found")
+        native_root = _runtime_path(hoisted, missing_token="codex_runtime_not_found")
+    else:
+        raise ValueError("codex_runtime_not_found")
+    if (
+        allowed_parent != expected_parent
+        or native_root.parent != allowed_parent
+        or not native_root.is_dir()
+    ):
+        raise ValueError("codex_runtime_capability_unsupported")
+    _validate_codex_native_manifest(_package_json(native_root))
+    native = _runtime_path(
+        native_root / _CODEX_NATIVE_EXECUTABLE_RELATIVE,
+        missing_token="codex_runtime_not_found",
+    )
+    try:
+        native.relative_to(native_root)
+    except ValueError as error:
+        raise ValueError("codex_runtime_capability_unsupported") from error
+    return native
+
+
+def resolve_supported_codex_executable(selected: Path) -> tuple[Path, str, str]:
+    """Resolve only the selected npm distribution to its exact native executable."""
+
+    resolved = _runtime_path(selected.expanduser(), missing_token="codex_runtime_not_found")
     if resolved.name == "codex.js" and resolved.parent.name == "bin":
-        package_root = resolved.parent.parent
         if sys.platform != "darwin" or platform.machine() != "arm64":
             raise ValueError("codex_runtime_platform_unsupported")
-        try:
-            resolved = (
-                package_root
-                / "node_modules"
-                / "@openai"
-                / "codex-darwin-arm64"
-                / "vendor"
-                / "aarch64-apple-darwin"
-                / "bin"
-                / "codex"
-            ).resolve(strict=True)
-        except FileNotFoundError as error:
-            raise ValueError("codex_runtime_not_found") from error
-        except OSError as error:
-            raise ValueError("codex_runtime_unavailable") from error
+        resolved = _resolve_codex_package_layout(resolved)
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise ValueError("codex_runtime_executable_invalid")
     digest = _sha256_file(resolved)

@@ -1797,3 +1797,38 @@ def test_finding_payload_is_the_exact_finding_alias() -> None:
     payload = _decode_row(_ROW_BY_FAMILY["finding_recorded"])
     assert FindingRecordedPayload is Finding
     assert type(payload) is Finding
+
+
+def test_runtime_evidence_failure_stage_round_trips_and_stays_closed() -> None:
+    from yoetz.domain.findings import (
+        RUNTIME_FAILURE_STAGES,
+        semantic_provenance_from_json,
+        semantic_provenance_to_json,
+    )
+
+    provenance = replace(
+        _selected_final_provenance(),
+        provider="openai-codex",
+        endpoint_profile_id="codex-chatgpt-subscription",
+        model="gpt-5.6-sol",
+        sdk_version="codex-app-server-0.150.1",
+        dispatch_kind=SemanticDispatchKind.EXTERNAL_RUNTIME_OAUTH,
+        status=SemanticStatus.INVALID,
+        reason=SemanticReason.RESPONSE_SCHEMA_INVALID,
+        runtime_evidence=replace(
+            _external_runtime_evidence(), failure_stage="judgment_refs_duplicate"
+        ),
+    )
+
+    wire = semantic_provenance_to_json(provenance)
+    evidence_json = cast(Mapping[str, object], wire["runtime_evidence"])
+    assert evidence_json["failure_stage"] == "judgment_refs_duplicate"
+    assert semantic_provenance_from_json(wire) == provenance
+
+    success = semantic_provenance_to_json(_selected_final_provenance())
+    assert "runtime_evidence" not in success
+
+    for stage in RUNTIME_FAILURE_STAGES:
+        replace(_external_runtime_evidence(), failure_stage=stage)
+    with pytest.raises(ProtocolValueError, match="invalid_runtime_attempt_evidence"):
+        replace(_external_runtime_evidence(), failure_stage="provider text must not land here")

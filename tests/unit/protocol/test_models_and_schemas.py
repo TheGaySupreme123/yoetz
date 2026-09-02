@@ -306,9 +306,9 @@ _STATUS_PAGE_DEF_BY_VIEW_FOR_TEST: tuple[tuple[str, str], ...] = (
     ("versions", "versions_page"),
 )
 _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
-    ("check", None): 182,
+    ("check", None): 184,
     ("publish_work", None): 57,
-    ("receipt", None): 179,
+    ("receipt", None): 180,
     ("respond", None): 53,
     ("start", None): 65,
     ("status", None): 47,
@@ -317,7 +317,7 @@ _EXPECTED_RESULT_PATTERN_COUNTS: dict[tuple[str, str | None], int] = {
     ("status", "candidate_findings"): 32,
     ("status", "compact"): 46,
     ("status", "evidence"): 18,
-    ("status", "findings"): 90,
+    ("status", "findings"): 91,
     ("status", "history"): 12,
     ("status", "obligations"): 29,
     ("status", "operation"): 24,
@@ -2185,7 +2185,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
 
     derived_patterns = _derived_result_success_patterns(catalog)
-    assert len(derived_patterns) == 877
+    assert len(derived_patterns) == 881
 
     derived_counts = {
         context: sum(1 for method, view, _ in derived_patterns if (method, view) == context)
@@ -2194,7 +2194,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert derived_counts == _EXPECTED_RESULT_PATTERN_COUNTS
 
     assert type(rules) is tuple
-    assert len(rules) == 895
+    assert len(rules) == 899
     assert rules == tuple(sorted(rules, key=_test_rule_sort_key))
 
     rule_keys = {
@@ -2203,7 +2203,7 @@ def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     assert len(rule_keys) == len(rules)
 
     registry_patterns = {(rule.method, rule.status_view, rule.segments) for rule in rules}
-    assert len(registry_patterns) == 877
+    assert len(registry_patterns) == 881
     assert registry_patterns == derived_patterns
 
     content_rules = _expected_nonpublish_content_rules(models)

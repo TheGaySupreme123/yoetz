@@ -28,11 +28,17 @@ from yoetz.adapters.providers.openai_responses import (
     JUDGMENT_JSON_SCHEMA,
     OPENAI_MAX_OUTPUT_TOKENS,
     SEMANTIC_REVIEW_INSTRUCTION,
+    JudgmentValidationError,
     normalize_judgment,
 )
 from yoetz.config.models import ExternalRuntimeProfileConfig
 from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundle
-from yoetz.domain.findings import RuntimeAttemptEvidence, SamplingParams, SemanticFailureClass
+from yoetz.domain.findings import (
+    RUNTIME_FAILURE_STAGES,
+    RuntimeAttemptEvidence,
+    SamplingParams,
+    SemanticFailureClass,
+)
 from yoetz.domain.privacy import (
     ApprovedOutboundCase,
     ApprovedProviderCase,
@@ -61,6 +67,7 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
+from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.models import SemanticStatus
 
 __all__ = [
@@ -162,10 +169,23 @@ _CODEX_JUDGMENT_JSON_SCHEMA: Final = cast(
 )
 _OUTPUT_SCHEMA_SHA256: Final = canonical_digest(_CODEX_JUDGMENT_JSON_SCHEMA)
 _MAX_MESSAGE_BYTES: Final = 1_048_576
-_MAX_EVENT_COUNT: Final = 512
+# Streamed agent-message and reasoning deltas each arrive as one notification, so a content-rich
+# judgment can legitimately cross several hundred events. Every event is still bounded by
+# ``_MAX_MESSAGE_BYTES`` and the attempt deadline; this cap only stops an unbounded stream.
+_MAX_EVENT_COUNT: Final = 4096
 _MAX_STDERR_BYTES: Final = 65_536
 _CLEANUP_GRACE_SECONDS: Final = 2.0
+# The semantic evaluator's request deadline is carried by ``Deadline`` and is intentionally
+# unrelated to the interactive login ceremony.  Keep this legacy name for callers/tests that
+# imported it while giving each native Codex login method its full supported window.
 _LOGIN_TIMEOUT_SECONDS: Final = 300.0
+_LOGIN_TIMEOUT_SECONDS_BY_MODE: Final = {
+    "browser": 600.0,
+    "device_code": 900.0,
+}
+_LOGIN_TERMINAL_GRACE_SECONDS: Final = 2.0
+_LOGIN_CANCEL_TIMEOUT_SECONDS: Final = 1.0
+_LOGIN_READINESS_GRACE_SECONDS: Final = 2.0
 _SAFE_PLAN_TYPES: Final = frozenset(
     {
         "business",
@@ -187,22 +207,42 @@ _SAFE_PLAN_TYPES: Final = frozenset(
         "unknown",
     }
 )
-_ALLOWED_ITEM_TYPES: Final = frozenset({"agentMessage", "reasoning", "userMessage"})
+# Items a read-only, tool-less turn may legitimately produce. ``plan`` is the model's own
+# checklist and ``contextCompaction`` is Codex re-summarizing its context; neither executes
+# anything or touches the workspace. Every command, patch, MCP, web, image, or agent tool item
+# stays forbidden and terminates the turn.
+_ALLOWED_ITEM_TYPES: Final = frozenset(
+    {"agentMessage", "contextCompaction", "plan", "reasoning", "userMessage"}
+)
+_AGENT_MESSAGE_PHASES: Final = frozenset({"commentary", "final_answer"})
+# Informational notifications are validated for method only and discarded unread; none of them
+# authorizes anything, and none of their bodies is retained. ``model/rerouted`` is the one
+# informational event that changes the answer's provenance, so it is handled explicitly.
 _ALLOWED_NOTIFICATION_METHODS: Final = frozenset(
     {
         "account/updated",
         "account/rateLimits/updated",
+        "configWarning",
+        "deprecationNotice",
         "error",
         "item/agentMessage/delta",
         "item/completed",
+        "item/plan/delta",
         "item/reasoning/summaryPartAdded",
         "item/reasoning/summaryTextDelta",
         "item/reasoning/textDelta",
         "item/started",
+        "model/rerouted",
+        "model/safetyBuffering/updated",
+        "thread/compacted",
+        "thread/name/updated",
+        "thread/queue/changed",
         "thread/started",
         "thread/status/changed",
         "thread/tokenUsage/updated",
         "turn/completed",
+        "turn/moderationMetadata",
+        "turn/plan/updated",
         "turn/started",
         "warning",
     }
@@ -507,25 +547,64 @@ async def _launch(profile: CodexAppServerProfile) -> _CodexProcess:
     runtime_root = profile.codex_home / "runtime"
     ensure_owner_only_dir(runtime_root)
     verify_private_local_bundle(runtime_root)
-    workdir = Path(tempfile.mkdtemp(prefix="attempt-", dir=runtime_root))
-    os.chmod(workdir, 0o700)
-    process = await asyncio.create_subprocess_exec(
-        *profile.launcher_argv,
-        cwd=workdir,
-        env=_process_environment(profile),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-        limit=_MAX_MESSAGE_BYTES,
-    )
-    return _CodexProcess(
-        profile=profile,
-        process=process,
-        workdir=workdir,
-        stderr_task=asyncio.create_task(_drain_stderr(process.stderr)),
-        pending_notifications=[],
-    )
+    workdir: Path | None = None
+    try:
+        workdir = Path(tempfile.mkdtemp(prefix="attempt-", dir=runtime_root))
+        os.chmod(workdir, 0o700)
+        spawn_task = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                *profile.launcher_argv,
+                cwd=workdir,
+                env=_process_environment(profile),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+                limit=_MAX_MESSAGE_BYTES,
+            )
+        )
+        try:
+            process = await asyncio.shield(spawn_task)
+        except asyncio.CancelledError as cancellation:
+            while not spawn_task.done():
+                try:
+                    await asyncio.shield(spawn_task)
+                except asyncio.CancelledError:
+                    continue
+            try:
+                process = spawn_task.result()
+            except BaseException:
+                # Retrieve the spawn outcome, but keep cancellation authoritative.
+                raise cancellation from None
+            owned = _CodexProcess(
+                profile=profile,
+                process=process,
+                workdir=workdir,
+                stderr_task=asyncio.create_task(_drain_stderr(process.stderr)),
+                pending_notifications=[],
+            )
+            try:
+                await _cleanup_guaranteed(owned)
+            except asyncio.CancelledError:
+                # Repeated cancellation cannot interrupt cleanup; preserve the first signal.
+                pass
+            raise cancellation
+        return _CodexProcess(
+            profile=profile,
+            process=process,
+            workdir=workdir,
+            stderr_task=asyncio.create_task(_drain_stderr(process.stderr)),
+            pending_notifications=[],
+        )
+    except BaseException:
+        # Spawn cancellation above owns and cleans a returned process before it reaches here.
+        # Ordinary launch failures have no returned process handle, so remove their attempt root.
+        if workdir is not None:
+            try:
+                shutil.rmtree(workdir)
+            except OSError:
+                pass
+        raise
 
 
 async def _cleanup(
@@ -535,6 +614,7 @@ async def _cleanup(
         return "not_started"
     process = runtime.process
     outcome: Literal["terminated", "killed", "failed"] = "terminated"
+    process_exited = process.returncode is not None
 
     def group_exists() -> bool:
         try:
@@ -553,23 +633,43 @@ async def _cleanup(
 
     try:
         if group_exists():
-            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                # The child can exit between the existence probe and the signal.  That is a
+                # successful group-termination race.  Still await the process object below so
+                # the child is reaped and its return code is observed.
+                pass
         if process.returncode is None:
             try:
                 await asyncio.wait_for(process.wait(), timeout=_CLEANUP_GRACE_SECONDS)
             except TimeoutError:
                 pass
+            except ProcessLookupError:
+                # Without an observed return code, disappearance is not proof of a reap.
+                pass
+            else:
+                process_exited = process.returncode is not None
         if not await await_group_exit(_CLEANUP_GRACE_SECONDS):
             outcome = "killed"
-            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                # A concurrent child exit can win the kill race; still reap below.
+                pass
             if process.returncode is None:
                 try:
                     await asyncio.wait_for(process.wait(), timeout=_CLEANUP_GRACE_SECONDS)
                 except TimeoutError:
                     pass
+                except ProcessLookupError:
+                    # Preserve an unconfirmed cleanup result when the process cannot be reaped.
+                    pass
+                else:
+                    process_exited = process.returncode is not None
             if not await await_group_exit(_CLEANUP_GRACE_SECONDS):
                 outcome = "failed"
-        if process.returncode is None:
+        if process.returncode is None and not process_exited:
             outcome = "failed"
     except Exception:
         outcome = "failed"
@@ -588,6 +688,34 @@ async def _cleanup(
             except OSError:
                 outcome = "failed"
     return outcome
+
+
+async def _cleanup_guaranteed(
+    runtime: _CodexProcess | None,
+) -> Literal["not_started", "terminated", "killed", "failed"]:
+    """Finish process cleanup even when the caller is cancelled while awaiting it."""
+
+    cleanup_task = asyncio.create_task(_cleanup(runtime))
+    cancellation: asyncio.CancelledError | None = None
+    try:
+        return await asyncio.shield(cleanup_task)
+    except asyncio.CancelledError as error:
+        cancellation = error
+
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            continue
+
+    # Retrieve the bounded cleanup outcome so its failure cannot become an unobserved exception.
+    # Outer cancellation remains authoritative for the caller.
+    try:
+        cleanup_task.result()
+    except BaseException:
+        pass
+    assert cancellation is not None
+    raise cancellation
 
 
 def _remaining(deadline: Deadline, clock: ClockPort) -> float:
@@ -710,7 +838,7 @@ async def codex_account_status(profile: CodexAppServerProfile) -> CodexRuntimeSt
             else:
                 model_available = True
     finally:
-        cleanup = await _cleanup(runtime)
+        cleanup = await _cleanup_guaranteed(runtime)
     return CodexRuntimeStatus(
         runtime_ready=runtime_ready,
         auth_mode=auth_mode,
@@ -742,6 +870,109 @@ def _login_challenge(result: Mapping[str, object]) -> CodexLoginChallenge:
     return CodexLoginChallenge(mode, url, user_code)
 
 
+def _login_notification(
+    message: Mapping[str, object], login_id: str
+) -> Literal["account_updated", "completed"]:
+    """Validate one login notification without retaining any native payload text."""
+
+    if "method" in message and "id" in message:
+        raise ValueError("codex_app_server_tool_request_forbidden")
+    method = message.get("method")
+    if method == "account/updated":
+        return "account_updated"
+    if method != "account/login/completed":
+        raise ValueError("codex_login_event_invalid")
+    params = _object(message.get("params"))
+    returned_id = params.get("loginId")
+    if type(returned_id) is not str or returned_id != login_id:
+        raise ValueError("codex_login_event_invalid")
+    if params.get("success") is not True:
+        raise PermissionError("codex_login_failed")
+    return "completed"
+
+
+async def _cancel_login(runtime: _CodexProcess, login_id: str) -> None:
+    """Ask Codex to cancel a pending login, never replacing the primary failure."""
+
+    try:
+        await asyncio.wait_for(
+            runtime.request(
+                3,
+                "account/login/cancel",
+                {"loginId": login_id},
+                _LOGIN_CANCEL_TIMEOUT_SECONDS,
+            ),
+            timeout=_LOGIN_CANCEL_TIMEOUT_SECONDS,
+        )
+    except BaseException:
+        # Cancellation is best effort.  In particular, a task cancellation must remain visible
+        # to the caller and a native failure must not mask the timeout or invalid-event token.
+        return
+
+
+def _take_account_updated(runtime: _CodexProcess) -> bool:
+    """Consume only the expected post-login readiness notification from buffered events."""
+
+    updated = False
+    pending = runtime.pending_notifications
+    runtime.pending_notifications = []
+    for message in pending:
+        if message.get("method") != "account/updated":
+            raise ValueError("codex_login_event_invalid")
+        updated = True
+    return updated
+
+
+async def _wait_for_account_updated(runtime: _CodexProcess, deadline: float) -> bool:
+    """Wait briefly for Codex's account projection to catch up after login completion."""
+
+    try:
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0.0:
+                return False
+            message = await runtime.read(remaining)
+            if _login_notification(message, "") != "account_updated":
+                raise ValueError("codex_login_event_invalid")
+            return True
+    except TimeoutError:
+        return False
+
+
+async def _account_after_login(
+    runtime: _CodexProcess, *, account_updated_seen: bool
+) -> tuple[Literal["chatgpt"], str | None]:
+    """Read readiness after completion, allowing the account/updated projection to catch up."""
+
+    readiness_deadline = asyncio.get_running_loop().time() + _LOGIN_READINESS_GRACE_SECONDS
+    try:
+        account = await runtime.request(
+            2,
+            "account/read",
+            {"refreshToken": False},
+            min(10.0, max(0.001, readiness_deadline - asyncio.get_running_loop().time())),
+        )
+        return _account(account)
+    except PermissionError as error:
+        account_updated_seen = _take_account_updated(runtime) or account_updated_seen
+        if not account_updated_seen:
+            account_updated_seen = await _wait_for_account_updated(runtime, readiness_deadline)
+            if not account_updated_seen:
+                raise error
+        if asyncio.get_running_loop().time() >= readiness_deadline:
+            raise error
+        try:
+            account = await runtime.request(
+                4,
+                "account/read",
+                {"refreshToken": False},
+                min(10.0, max(0.001, readiness_deadline - asyncio.get_running_loop().time())),
+            )
+            return _account(account)
+        except PermissionError:
+            raise
+
+
 async def codex_login(
     profile: CodexAppServerProfile,
     *,
@@ -767,38 +998,81 @@ async def codex_login(
             {"type": "chatgpt" if mode == "browser" else "chatgptDeviceCode"},
             10.0,
         )
+        login_deadline = asyncio.get_running_loop().time() + _LOGIN_TIMEOUT_SECONDS_BY_MODE[mode]
         login_id = cast(str | None, login_result.get("loginId"))
         if type(login_id) is not str or not login_id:
             raise ValueError("codex_login_response_invalid")
-        present_challenge(_login_challenge(login_result))
-        login_deadline = asyncio.get_running_loop().time() + _LOGIN_TIMEOUT_SECONDS
-        for _ in range(_MAX_EVENT_COUNT):
-            remaining = login_deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError
-            message = await runtime.read(remaining)
-            if "method" in message and "id" in message:
-                raise ValueError("codex_app_server_tool_request_forbidden")
-            method = message.get("method")
-            if method == "account/updated":
-                continue
-            if method != "account/login/completed":
-                raise ValueError("codex_login_event_invalid")
-            params = _object(message.get("params"))
-            returned_id = params.get("loginId")
-            if returned_id is not None and returned_id != login_id:
-                raise ValueError("codex_login_event_invalid")
-            if params.get("success") is not True:
-                raise PermissionError("codex_login_failed")
-            break
-        else:
-            raise ValueError("codex_app_server_event_limit")
-        account = await runtime.request(2, "account/read", {"refreshToken": False}, 10.0)
-        auth_mode, plan_type = _account(account)
-        await _require_model(runtime, profile, 10.0)
-        model_available = True
+        completion_succeeded = False
+        try:
+            challenge = _login_challenge(login_result)
+            if challenge.mode != mode:
+                raise ValueError("codex_login_response_invalid")
+            present_challenge(challenge)
+            account_updated_seen = False
+            completion_seen = False
+            events_seen = 0
+            for _ in range(_MAX_EVENT_COUNT):
+                remaining = login_deadline - asyncio.get_running_loop().time()
+                if remaining <= 0.0:
+                    break
+                try:
+                    message = (
+                        runtime.pending_notifications.pop(0)
+                        if runtime.pending_notifications
+                        else await runtime.read(remaining)
+                    )
+                except TimeoutError:
+                    break
+                events_seen += 1
+                if _login_notification(message, login_id) == "account_updated":
+                    account_updated_seen = True
+                    continue
+                completion_seen = True
+                completion_succeeded = True
+                break
+            else:
+                raise ValueError("codex_app_server_event_limit")
+
+            if not completion_seen:
+                # A terminal event can be delivered just after the native deadline.  Give the
+                # app-server one short, bounded chance to report it before preserving timeout.
+                grace_deadline = asyncio.get_running_loop().time() + _LOGIN_TERMINAL_GRACE_SECONDS
+                while True:
+                    if events_seen >= _MAX_EVENT_COUNT:
+                        raise ValueError("codex_app_server_event_limit")
+                    remaining = grace_deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0.0:
+                        raise TimeoutError
+                    try:
+                        message = (
+                            runtime.pending_notifications.pop(0)
+                            if runtime.pending_notifications
+                            else await runtime.read(remaining)
+                        )
+                    except TimeoutError as error:
+                        raise TimeoutError from error
+                    events_seen += 1
+                    if _login_notification(message, login_id) == "account_updated":
+                        account_updated_seen = True
+                        continue
+                    completion_seen = True
+                    completion_succeeded = True
+                    break
+
+            auth_mode, plan_type = await _account_after_login(
+                runtime, account_updated_seen=account_updated_seen
+            )
+            await _require_model(runtime, profile, 10.0)
+            model_available = True
+        except asyncio.CancelledError:
+            await _cancel_login(runtime, login_id)
+            raise
+        except Exception:
+            if not completion_succeeded:
+                await _cancel_login(runtime, login_id)
+            raise
     finally:
-        cleanup = await _cleanup(runtime)
+        cleanup = await _cleanup_guaranteed(runtime)
     return CodexRuntimeStatus(
         runtime_ready=runtime_ready,
         auth_mode=auth_mode,
@@ -823,7 +1097,7 @@ async def codex_logout(profile: CodexAppServerProfile) -> CodexRuntimeStatus:
         if account.get("account") is not None:
             raise ValueError("codex_logout_unconfirmed")
     finally:
-        cleanup = await _cleanup(runtime)
+        cleanup = await _cleanup_guaranteed(runtime)
     return CodexRuntimeStatus(runtime_ready, None, None, False, cleanup)
 
 
@@ -853,19 +1127,29 @@ def _validate_thread(
     return thread_id
 
 
-def _notification_item(message: Mapping[str, object]) -> tuple[str | None, str | None]:
+def _notification_item(
+    message: Mapping[str, object],
+) -> tuple[str | None, str | None, str | None]:
+    """Return the bounded (type, text, phase) triple of one item notification.
+
+    ``phase`` is Codex's own classification of an agent message as interim ``commentary`` or the
+    ``final_answer``; providers do not emit it consistently, so ``None`` means unknown.
+    """
+
     params = message.get("params")
     if not isinstance(params, Mapping):
-        return None, None
+        return None, None, None
     item = cast(Mapping[str, object], params).get("item")
     if not isinstance(item, Mapping):
-        return None, None
+        return None, None, None
     source = cast(Mapping[str, object], item)
     item_type = source.get("type")
     text = source.get("text")
+    phase = source.get("phase")
     return (
         item_type if type(item_type) is str else None,
         text if type(text) is str else None,
+        phase if type(phase) is str else None,
     )
 
 
@@ -874,10 +1158,12 @@ class _CodexTurnFailure(Exception):
         self,
         outcome: Literal["invalid", "refused", "unavailable"],
         failure_class: SemanticFailureClass,
+        stage: str = "turn_failed",
     ) -> None:
         super().__init__(outcome)
         self.outcome: Literal["invalid", "refused", "unavailable"] = outcome
         self.failure_class = failure_class
+        self.stage = stage
 
 
 class _CodexRuntimeWarning(Exception):
@@ -1035,6 +1321,74 @@ async def _interrupt(runtime: _CodexProcess, thread_id: str, turn_id: str) -> No
         return
 
 
+# Adapter-raised tokens → closed ``RUNTIME_FAILURE_STAGES`` members. Every key is a literal this
+# module raises itself; a token outside the map falls back to the exception family below.
+_FAILURE_STAGE_BY_TOKEN: Final[Mapping[str, str]] = {
+    "codex_runtime_capability_time_invalid": "capability_evidence_stale",
+    "codex_runtime_capability_evidence_stale": "capability_evidence_stale",
+    "codex_runtime_version_mismatch": "initialize_invalid",
+    "codex_home_mismatch": "initialize_invalid",
+    "codex_login_required": "login_required",
+    "codex_chatgpt_login_required": "login_required",
+    "codex_model_unavailable": "model_unavailable",
+    "codex_reasoning_effort_unavailable": "model_unavailable",
+    "codex_model_catalog_invalid": "model_unavailable",
+    "codex_thread_isolation_unproven": "thread_invalid",
+    "codex_app_server_predisclosure_event_forbidden": "predisclosure_event_forbidden",
+    "codex_app_server_remote_control_state_invalid": "predisclosure_event_forbidden",
+    "codex_app_server_remote_control_not_disabled": "predisclosure_event_forbidden",
+    "codex_runtime_case_invalid": "case_invalid",
+    "codex_turn_ack_invalid": "turn_ack_invalid",
+    "codex_app_server_tool_request_forbidden": "tool_request_forbidden",
+    "codex_app_server_event_forbidden": "event_forbidden",
+    "codex_app_server_tool_event_forbidden": "tool_event_forbidden",
+    "codex_app_server_rate_limits_invalid": "rate_limits_invalid",
+    "codex_app_server_warning_invalid": "runtime_warning",
+    "codex_app_server_completion_invalid": "completion_mismatch",
+    "codex_app_server_agent_message_count": "agent_message_count",
+    "codex_app_server_output_empty": "output_empty",
+    "codex_app_server_output_oversize": "output_oversize",
+    "codex_app_server_event_limit": "event_limit",
+    "codex_app_server_request_failed": "request_failed",
+    "codex_app_server_stdin_unavailable": "transport_failed",
+    "codex_app_server_stdout_unavailable": "transport_failed",
+    "codex_app_server_stderr_limit": "transport_failed",
+    "codex_app_server_message_too_large": "transport_failed",
+    "codex_app_server_message_invalid": "transport_failed",
+    "semantic_judgment_invalid": "judgment_invariant_invalid",
+}
+
+
+def _failure_stage(error: Exception, *, turn_acknowledged: bool, launched: bool) -> str:
+    """Name the closed stage at which one attempt stopped, from the exception family only.
+
+    Only the adapter's own literal tokens and exception types are consulted; provider text never
+    reaches the token, and an unrecognized shape is reported as ``unclassified``.
+    """
+
+    if isinstance(error, _CodexTurnFailure):
+        stage = error.stage
+    elif isinstance(error, _CodexRuntimeWarning):
+        stage = "runtime_warning"
+    elif isinstance(error, JudgmentValidationError):
+        stage = f"judgment_{error.stage}"
+    elif isinstance(error, ProtocolValueError):
+        stage = "output_not_json" if turn_acknowledged else "case_invalid"
+    elif isinstance(error, PermissionError):
+        stage = _FAILURE_STAGE_BY_TOKEN.get(str(error), "login_required")
+    elif isinstance(error, TimeoutError):
+        stage = "deadline_expired"
+    elif isinstance(error, ValueError):
+        stage = _FAILURE_STAGE_BY_TOKEN.get(str(error), "unclassified")
+    elif isinstance(error, OSError) and not launched:
+        stage = "launch_failed"
+    else:
+        stage = "unclassified"
+    if stage not in RUNTIME_FAILURE_STAGES:
+        raise RuntimeError("codex_failure_stage_registry_incomplete")
+    return stage
+
+
 def _classify_runtime_exception(
     error: Exception, *, turn_acknowledged: bool
 ) -> tuple[
@@ -1098,6 +1452,7 @@ class CodexAppServerEvaluator:
             Literal["timeout", "post_ack_unknown", "invalid", "refused", "unavailable"] | None
         ) = None
         failure_class = SemanticFailureClass.UNSUPPORTED_PROFILE
+        failure_stage: str | None = None
         raw_size = 0
         try:
             self.profile.verify_capability_evidence(self.clock.now_utc())
@@ -1174,7 +1529,12 @@ class CodexAppServerEvaluator:
                 raise ValueError("codex_turn_ack_invalid")
             turn_acknowledged = True
 
+            # Codex tags each agent message as interim ``commentary`` or the ``final_answer``.
+            # Commentary is narration the constrained-output schema never governs; it is
+            # discarded unread. Legacy models omit the phase, so untagged messages are kept as
+            # the fallback candidate set. Exactly one candidate must remain.
             final_texts: list[str] = []
+            untagged_texts: list[str] = []
             messages = list(runtime.pending_notifications)
             runtime.pending_notifications.clear()
             for _ in range(_MAX_EVENT_COUNT):
@@ -1196,14 +1556,24 @@ class CodexAppServerEvaluator:
                 if method == "error":
                     params = _object(message.get("params"))
                     raise _turn_failure(params.get("error"))
+                if method == "model/rerouted":
+                    # The bound model did not answer; the provenance this attempt would record
+                    # is no longer true, so the turn ends here without reading the reroute body.
+                    raise _CodexTurnFailure(
+                        "refused", SemanticFailureClass.AUTHORIZATION, stage="model_rerouted"
+                    )
                 if method in {"item/started", "item/completed"}:
-                    item_type, text = _notification_item(message)
+                    item_type, text, phase = _notification_item(message)
                     if item_type not in _ALLOWED_ITEM_TYPES:
                         raise ValueError("codex_app_server_tool_event_forbidden")
                     if method == "item/completed" and item_type == "agentMessage":
+                        if phase is not None and phase not in _AGENT_MESSAGE_PHASES:
+                            raise ValueError("codex_app_server_event_forbidden")
+                        if phase == "commentary":
+                            continue
                         if text is None or not text:
-                            raise ValueError("codex_app_server_output_invalid")
-                        final_texts.append(text)
+                            raise ValueError("codex_app_server_output_empty")
+                        (final_texts if phase == "final_answer" else untagged_texts).append(text)
                 if method != "turn/completed":
                     continue
                 params = _object(message.get("params"))
@@ -1212,12 +1582,13 @@ class CodexAppServerEvaluator:
                     raise ValueError("codex_app_server_completion_invalid")
                 if completed.get("status") != "completed" or completed.get("error") is not None:
                     raise _turn_failure(completed.get("error"))
-                if len(final_texts) != 1:
-                    raise ValueError("codex_app_server_completion_invalid")
-                raw = final_texts[0]
+                candidates = final_texts if final_texts else untagged_texts
+                if len(candidates) != 1:
+                    raise ValueError("codex_app_server_agent_message_count")
+                raw = candidates[0]
                 raw_size = len(raw.encode("utf-8"))
                 if raw_size > _MAX_MESSAGE_BYTES:
-                    raise ValueError("codex_app_server_output_invalid")
+                    raise ValueError("codex_app_server_output_oversize")
                 raw_bytes = raw.encode("utf-8")
                 final_output_sha256 = _sha256_bytes(raw_bytes)
                 judgment = normalize_judgment(strict_json_parse(raw_bytes))
@@ -1228,14 +1599,25 @@ class CodexAppServerEvaluator:
             failure, failure_class = _classify_runtime_exception(
                 error, turn_acknowledged=turn_acknowledged
             )
+            failure_stage = _failure_stage(
+                error, turn_acknowledged=turn_acknowledged, launched=runtime is not None
+            )
         finally:
-            if runtime is not None and thread_id is not None and turn_id is not None and failure:
-                await _interrupt(runtime, thread_id, turn_id)
-            cleanup = await _cleanup(runtime)
+            try:
+                if (
+                    runtime is not None
+                    and thread_id is not None
+                    and turn_id is not None
+                    and failure
+                ):
+                    await _interrupt(runtime, thread_id, turn_id)
+            finally:
+                cleanup = await _cleanup_guaranteed(runtime)
 
         if cleanup == "failed" and failure is None:
             failure = "post_ack_unknown" if turn_acknowledged else "unavailable"
             failure_class = SemanticFailureClass.TRANSPORT
+            failure_stage = "cleanup_unconfirmed"
 
         evidence = RuntimeAttemptEvidence(
             credential_authority="external_runtime_oauth",
@@ -1264,6 +1646,7 @@ class CodexAppServerEvaluator:
             case_disclosed=case_disclosed,
             turn_acknowledged=turn_acknowledged,
             process_cleanup=cleanup,
+            failure_stage=failure_stage,
         )
         latency_ms = max(0, int((self.clock.monotonic_seconds() - started) * 1000))
         status = (

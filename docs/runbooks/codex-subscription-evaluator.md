@@ -41,14 +41,37 @@ yoetz provider codex-subscription disconnect --accept
 yoetz provider codex-subscription rollback
 ```
 
-Setup resolves the selected npm wrapper to its exact native binary and refuses every unknown
-digest. Before Codex login it shows the runtime, destination, model/reasoning selection, dedicated
-home, unknown plan-specific data-use posture, privacy implication, and reverse commands. Browser
-and device-code login are the only accepted methods. Guided setup, the prompt-loop menu, and
-`/provider` can log out the dedicated home first when switching accounts. Disconnect asks Codex to
-log out and removes the Yoetz binding only after structural confirmation; rollback never logs out
-or deletes the home or installation. CLI, menu, and `/provider` recompose the local service after
-setup, disconnect, or rollback so a running daemon cannot keep dispatching the previous cell.
+## Selected executable resolution
+
+Pass one absolute selected path. The supported npm layouts are:
+
+1. the npm wrapper whose `@openai/codex-darwin-arm64` optional package is nested below that
+   wrapper's package root; and
+2. an npm-prefix wrapper whose native package is hoisted beside `@openai/codex` under the same
+   selected prefix.
+
+The third supported form is the exact native `codex` executable. Resolution follows only the
+selected wrapper's package root and, for a prefix install, that same prefix. It never searches
+arbitrary PATH entries, unrelated prefixes, or unbounded parent directories. All forms retain the
+platform, package-version, native-executable, and exact-digest checks; an executable that runs but
+is not the closed capability cell returns a bounded failure token.
+
+Setup resolves the selected wrapper to its exact native binary and refuses every unknown digest.
+Before Codex login it shows the runtime, destination, model/reasoning selection, dedicated home,
+unknown plan-specific data-use posture, privacy implication, and reverse commands. Browser and
+device-code login are the only accepted methods. The browser window is 600 seconds; the device-code
+window is 900 seconds. Cancellation and timeout use bounded process-group termination, pipe close,
+and task cleanup before returning one terminal diagnostic.
+
+No partial Yoetz binding is written. A timeout, denial, malformed completion, process exit,
+cancellation, or later configuration-write failure leaves a new or replacement Yoetz binding
+uncommitted. If Codex completed its own login before the failure, its OAuth state may remain in the
+dedicated home because Codex owns authentication, refresh, `auth.json`, and logout. Use
+`disconnect` to request Codex logout and then remove the Yoetz binding; use `rollback` to remove
+only the Yoetz binding while preserving the home and installation. Guided setup, the prompt-loop
+menu, and `/provider` can log out the dedicated home first when switching accounts. CLI, menu, and
+`/provider` recompose the local service after setup, disconnect, or rollback so a running daemon
+cannot keep dispatching the previous cell.
 
 Service READY composition does not spawn a Codex app-server to prove login. The READY credential
 fact is the exact binding, executable digest, isolated config, and dedicated home. `account/read`
@@ -70,8 +93,17 @@ approved case then enters only as `turn/start` text with the digest-bound Codex 
 frozen judgment schema. The exact runtime rejects JSON Schema's `uniqueItems` keyword, so that is
 the only omitted provider-side constraint; Yoetz's unchanged local normalizer still enforces every
 uniqueness rule before accepting a judgment. Any child tool request, tool item, unknown event,
-extra agent message, invalid/truncated/refused completion, or configuration mismatch fails closed.
-Prompt wording is not treated as the isolation boundary.
+invalid/truncated/refused completion, or configuration mismatch fails closed. Codex tags each
+agent message with a phase: `commentary` messages are interim narration and are discarded
+unread; only `final_answer` messages are judgment candidates, and exactly one must remain
+(untagged messages from legacy models fall back to the same one-message rule). Informational
+notifications — thread naming, moderation metadata, safety buffering, deprecation and
+configuration notices, queue and compaction state, plan updates — and the model's own `plan` and
+`contextCompaction` items are validated for method/type only and discarded; none of their bodies
+is retained. A `model/rerouted` notice ends the turn as `refused`, because the bound model did not
+produce the answer. The post-acknowledgement event budget is 4096 notifications, each bounded to
+1 MiB, so a content-rich streamed judgment is not mistaken for an unbounded stream. Prompt wording
+is not treated as the isolation boundary.
 
 The cell is application confinement, not a general OS sandbox claim. Its negative controls and
 exact-version behavior are part of compatibility evidence; a version that cannot prove the listed
@@ -94,6 +126,31 @@ retry. After acknowledgement, ambiguous transport or unverified process-group cl
 `unavailable/outcome_unknown`; do not retry it. Success requires schema-valid output and verified
 group disappearance before the terminal receipt.
 
+Structural readiness, privacy authority, and live dispatch remain separate claims. `status` can show
+the exact binding, dedicated-home readiness, account mode, or model availability without authorizing
+disclosure. The machine privacy ceiling and exact repository grant independently permit or refuse a
+case. Only an admitted `evaluate()` child with a semantic attempt and terminal receipt proves that
+task bytes were dispatched; login success, model listing, or `semantic_ready: true` alone never does.
+
+## Diagnosing a failed attempt
+
+`semantic_status` / `semantic_reason` stay the closed public pair. The exact stage is
+`semantic_provenance.runtime_evidence.failure_stage` in the receipt JSON, and the service writes
+the same token as an owner-only diagnostic line (`semantic_composition` /
+`semantic_provider_attempt_invalid`). Stages are registered literals, never provider text:
+
+| Stage | Meaning | Retry posture |
+|---|---|---|
+| `capability_evidence_stale`, `launch_failed`, `initialize_invalid`, `login_required`, `model_unavailable`, `thread_invalid`, `predisclosure_event_forbidden` | Failed before the case crossed stdin. | Ordinary pre-disclosure transient/unsupported handling; nothing was disclosed. |
+| `turn_ack_invalid`, `tool_request_forbidden`, `event_forbidden`, `tool_event_forbidden`, `rate_limits_invalid`, `runtime_warning`, `turn_failed`, `model_rerouted`, `completion_mismatch` | The child broke the isolation contract or Codex reported a turn failure. | Terminal for this attempt. A repeated `event_forbidden` or `tool_event_forbidden` on the same runtime means the cell no longer matches Codex behavior: file it, do not widen the allowlist locally. |
+| `agent_message_count`, `output_empty`, `output_oversize`, `event_limit` | The turn completed but did not yield exactly one bounded final answer. | Terminal. `event_limit` on a legitimately long answer is a budget question for the cell. |
+| `output_not_json` | The final answer was not strict JSON (prose, fenced code, trailing text). | Terminal; not retried. |
+| `judgment_envelope_invalid`, `judgment_enum_invalid`, `judgment_refs_duplicate`, `judgment_refs_invalid`, `judgment_conclusion_mismatch`, `judgment_text_bounds`, `judgment_shape_invalid`, `judgment_invariant_invalid` | Strict JSON that failed the frozen judgment contract at the named stage. | Terminal (`response_schema_invalid`); asking again is not a fix. `judgment_refs_invalid` is the model citing an item id instead of a `citable_refs` entry. |
+| `request_failed`, `transport_failed`, `deadline_expired`, `cleanup_unconfirmed`, `unclassified` | Runtime transport, deadline, or cleanup ambiguity. | Per ADR-006: pre-acknowledgement transients may retry; post-acknowledgement ambiguity is `outcome_unknown` and is not retried. |
+
+`semantic_case_content_over_item_limit` is a separate coverage gap on the disclosed case; it is
+reported alongside a stage, never inferred from one.
+
 ## Packaged live-evidence checklist
 
 Use an exact packaged Yoetz build and an isolated logged-in evaluator home. Record these as
@@ -107,7 +164,10 @@ separate claims:
 4. logged-out home, incompatible binary, unavailable model/reasoning, modified config, hostile
    project instructions, same-name binary, API/proxy environment, and attempted tool events fail
    before disclosure or record the exact bounded post-disclosure failure;
-5. disconnect and rollback leave unrelated Codex installations, homes, settings, and sessions
+5. browser and device login timeout, cancellation, malformed completion, process exit, and
+   configuration-write failure leave no partial Yoetz binding while process groups and pipes are
+   cleaned up within their bounds;
+6. disconnect and rollback leave unrelated Codex installations, homes, settings, and sessions
    byte-unchanged.
 
 Do not call login, a model listing, unit tests, or one clean judgment proof of this checklist.
