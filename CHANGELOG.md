@@ -57,6 +57,12 @@ reverse-chronological released versions.
   leave no partial Yoetz binding, while any Codex-owned authentication remains under Codex's control
   (issue #525).
 
+- Fresh Codex subscription login now demultiplexes only the reviewed pre-disclosure notifications
+  from the pinned 0.150.1 app-server cell, including its mandatory `remoteControl/status/changed`
+  notice, while retaining exact `loginId`/success completion matching and fail-closed handling for
+  unknown or unallowlisted notifications. Notification payloads remain unread and do not cross the
+  adapter (issue #530).
+
 - Codex subscription semantic attempts now record which closed stage stopped them. A
   `response_schema_invalid` result stays terminal and non-retryable, but its
   `semantic_provenance.runtime_evidence.failure_stage` names one registered token — malformed or

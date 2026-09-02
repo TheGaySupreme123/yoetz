@@ -63,6 +63,16 @@ device-code login are the only accepted methods. The browser window is 600 secon
 window is 900 seconds. Cancellation and timeout use bounded process-group termination, pipe close,
 and task cleanup before returning one terminal diagnostic.
 
+Codex 0.150.1 emits `remoteControl/status/changed` immediately after initialization, so either
+login method may receive that notification while `account/login/start` is outstanding. The login
+waiter follows the same reviewed pre-disclosure method allowlist as the evaluator: accepted
+structural notifications are demultiplexed and discarded unread, with the remote-control and rate
+limit shapes validated; warnings remain fail-closed. `account/login/completed` remains the only
+terminal login event and must carry the exact `loginId` with `success: true`. Unknown, tool, or
+otherwise unallowlisted notifications still fail closed. This mirrors the official SDK's separate
+login waiter/global-notification routing without introducing a broad ignore or carrying notification
+payload content across the adapter.
+
 No partial Yoetz binding is written. A timeout, denial, malformed completion, process exit,
 cancellation, or later configuration-write failure leaves a new or replacement Yoetz binding
 uncommitted. If Codex completed its own login before the failure, its OAuth state may remain in the

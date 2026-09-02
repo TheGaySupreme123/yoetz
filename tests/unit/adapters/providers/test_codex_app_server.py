@@ -306,6 +306,7 @@ class _LoginRuntime:
         *,
         account_results: list[Mapping[str, object]] | None = None,
         login_result: Mapping[str, object] | None = None,
+        login_notifications: list[dict[str, object]] | None = None,
         cancel_error: BaseException | None = None,
         block_read: bool = False,
     ) -> None:
@@ -316,6 +317,7 @@ class _LoginRuntime:
             account_results or [{"account": {"type": "chatgpt", "planType": "plus"}}]
         )
         self.login_result = login_result
+        self.login_notifications = list(login_notifications or [])
         self.cancel_error = cancel_error
         self.block_read = block_read
         self.pending_notifications: list[dict[str, object]] = []
@@ -342,6 +344,7 @@ class _LoginRuntime:
             }
         if method == "account/login/start":
             assert isinstance(params, dict)
+            self.pending_notifications.extend(self.login_notifications)
             if self.login_result is not None:
                 return self.login_result
             if params["type"] == "chatgpt":
@@ -465,6 +468,150 @@ async def test_login_uses_the_native_method_window(
     assert result.model_available is True
     assert any(timeout >= expected_timeout - 0.1 for timeout in runtime.timeouts)
     assert runtime.methods.count("account/login/cancel") == 0
+
+
+@pytest.mark.parametrize("mode", ["browser", "device_code"])
+async def test_login_demultiplexes_exact_remote_control_notice_before_completion(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    runtime = _LoginRuntime(
+        _profile(),
+        [
+            {
+                "method": "account/login/completed",
+                "params": {"loginId": "login-1", "success": True},
+            }
+        ],
+        # Codex 0.150.1 emits this notification while account/login/start is in flight. The
+        # request buffers it before returning the login challenge, as the native process does.
+        login_notifications=[
+            {
+                "method": "remoteControl/status/changed",
+                "params": {
+                    "environmentId": None,
+                    "installationId": "discard-installation-canary",
+                    "serverName": "discard-server-canary",
+                    "status": "disabled",
+                },
+            }
+        ],
+    )
+
+    result = await _login(monkeypatch, runtime, mode=mode)
+
+    assert result.auth_mode == "chatgpt"
+    assert result.model_available is True
+    assert runtime.methods.count("account/login/cancel") == 0
+    assert runtime.pending_notifications == []
+    assert "discard-installation-canary" not in repr(result)
+    assert "discard-server-canary" not in repr(result)
+
+
+_RATE_LIMITS_NOTICE: dict[str, object] = {
+    "method": "account/rateLimits/updated",
+    "params": {
+        "rateLimits": {
+            "limitId": "codex",
+            "limitName": None,
+            "primary": {"usedPercent": 3, "windowDurationMins": 10080, "resetsAt": 1788698233},
+            "secondary": None,
+            "credits": {"hasCredits": False, "unlimited": False, "balance": "discard-balance"},
+            "individualLimit": None,
+            "spendControlReached": None,
+            "planType": "prolite",
+            "rateLimitReachedType": None,
+        }
+    },
+}
+_REMOTE_CONTROL_NOTICE: dict[str, object] = {
+    "method": "remoteControl/status/changed",
+    "params": {
+        "environmentId": None,
+        "installationId": "discard-installation-canary",
+        "serverName": "discard-server-canary",
+        "status": "disabled",
+    },
+}
+_LOGIN_COMPLETED: dict[str, object] = {
+    "method": "account/login/completed",
+    "params": {"loginId": "login-1", "success": True},
+}
+
+
+async def test_login_demultiplexes_every_reviewed_predisclosure_notice_in_the_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _LoginRuntime(
+        _profile(),
+        [_RATE_LIMITS_NOTICE, _REMOTE_CONTROL_NOTICE, _LOGIN_COMPLETED],
+        login_notifications=[_REMOTE_CONTROL_NOTICE],
+    )
+
+    result = await _login(monkeypatch, runtime)
+
+    assert result.auth_mode == "chatgpt"
+    assert result.model_available is True
+    assert runtime.methods.count("account/login/cancel") == 0
+    assert "discard-balance" not in repr(result)
+    assert "discard-installation-canary" not in repr(result)
+
+
+async def test_login_tolerates_predisclosure_notices_around_the_account_projection_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _LoginRuntime(
+        _profile(),
+        [
+            _LOGIN_COMPLETED,
+            _RATE_LIMITS_NOTICE,
+            {"method": "account/updated", "params": {"account": {"type": "chatgpt"}}},
+        ],
+        account_results=[
+            {"account": None},
+            {"account": {"type": "chatgpt", "planType": "plus"}},
+        ],
+    )
+
+    result = await _login(monkeypatch, runtime)
+
+    assert result.auth_mode == "chatgpt"
+    assert runtime.methods.count("account/read") == 2
+    assert runtime.methods.count("account/login/cancel") == 0
+
+
+@pytest.mark.parametrize(
+    "notice",
+    [
+        {"method": "warning", "params": {"message": "native-text-canary", "threadId": "t"}},
+        {
+            "method": "remoteControl/status/changed",
+            "params": {
+                "environmentId": None,
+                "installationId": "i",
+                "serverName": "s",
+                "status": "enabled-canary",
+            },
+        },
+        {"method": "thread/name/updated", "params": {"threadId": "t", "threadName": "canary"}},
+        {"method": "item/completed", "params": {"item": {"type": "commandExecution"}}},
+        {"method": "account/rateLimits/updated", "params": {"rateLimits": {"limitId": "x"}}},
+    ],
+)
+async def test_login_still_fails_closed_on_unallowlisted_or_malformed_notices(
+    monkeypatch: pytest.MonkeyPatch, notice: dict[str, object]
+) -> None:
+    runtime = _LoginRuntime(_profile(), [notice, _LOGIN_COMPLETED])
+
+    with pytest.raises(ValueError) as info:
+        await _login(monkeypatch, runtime)
+
+    assert str(info.value) in {
+        "codex_login_event_invalid",
+        "codex_app_server_remote_control_not_disabled",
+        "codex_app_server_rate_limits_invalid",
+    }
+    assert "canary" not in repr(info.value) and "canary" not in repr(info.value.__cause__)
+    assert runtime.methods.count("account/login/cancel") == 1
 
 
 async def test_login_accepts_terminal_event_in_bounded_grace_window(
