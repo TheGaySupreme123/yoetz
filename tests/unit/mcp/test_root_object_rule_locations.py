@@ -196,6 +196,28 @@ def test_selected_payload_any_of_required_names_metadata_only_alternatives() -> 
     assert "strength admits" not in message
 
 
+def test_selected_payload_required_peers_share_one_complete_hint_part() -> None:
+    """One selected branch's peers must not consume the global three-part hint budget."""
+
+    base = deepcopy(cast(dict[str, object], cast(list[object], _PUBLISH_SCHEMA["examples"])[0]))
+    draft = cast(dict[str, object], cast(list[object], base["event_drafts"])[0])
+    draft["schema"] = {"name": "evidence_recorded", "version": "1.1.0"}
+    draft["payload"] = {
+        "evidence_id": "evd_00000000-0000-4000-8000-000000000001",
+        "evidence_kind": "artifact",
+        "strength": "independently_reproduced",
+        "observed_at": "2026-01-01T00:00:00.000Z",
+        "description": "bounded evidence description",
+    }
+    with pytest.raises(ValidationError) as captured:
+        PublishWorkRequest.model_validate(base)
+
+    locations = safe_validation_locations(captured.value)
+    message = invalid_request_message("publish_work", locations)
+    assert message.count("strength independently_reproduced requires") == 1
+    assert "captured_object_id, content_digest, and subject_state" in message
+
+
 def test_selected_payload_all_of_requires_digest_binding_with_content_digest() -> None:
     """A content_digest draft missing digest_binding must name the allOf peer (#335)."""
 

@@ -814,7 +814,9 @@ def _selected_branch_requirement_text(
             continue
         branch_required = source.get("required")
         if isinstance(branch_required, list) and required in cast(list[object], branch_required):
-            return f"{condition_field} {condition_value} requires {required}"
+            required_names = _format_required_list(branch_required, prop_names)
+            if required_names:
+                return f"{condition_field} {condition_value} requires {required_names}"
         alternatives = source.get("anyOf")
         if not isinstance(alternatives, list):
             continue
