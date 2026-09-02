@@ -772,6 +772,14 @@ def _runtime_attempt_evidence_schema(entry: _RegistryEntry) -> dict[str, JsonVal
                 "const": "external_runtime_oauth",
                 "type": "string",
             },
+            "failure_stage": {
+                "enum": sorted(
+                    __import__(
+                        "yoetz.domain.findings", fromlist=["RUNTIME_FAILURE_STAGES"]
+                    ).RUNTIME_FAILURE_STAGES
+                ),
+                "type": "string",
+            },
             "plan_type": {
                 "maxLength": 64,
                 "minLength": 1,

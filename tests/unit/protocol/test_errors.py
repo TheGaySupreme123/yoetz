@@ -110,6 +110,7 @@ invalid_receipt_response
 invalid_receipt_section
 invalid_receipt_section_order
 invalid_receipt_version_slice
+invalid_runtime_attempt_evidence
 invalid_sampling_params
 invalid_semantic_dispatch_kind
 invalid_semantic_failure_class
@@ -157,6 +158,7 @@ request_identity_conflict
 request_timeout
 response_fields_invalid
 response_projection_failed
+runtime_attempt_evidence_json_shape_invalid
 schema_artifact_role_invalid
 schema_artifact_role_mismatch
 schema_bytes_invalid
@@ -361,7 +363,7 @@ def test_public_error_code_membership() -> None:
 def test_protocol_reason_registry_is_exact_and_import_order_independent() -> None:
     source_values = cast(tuple[str, ...], getattr(errors_module, "_PROTOCOL_REASON_CODE_VALUES"))
     assert source_values == _EXPECTED_REASON_CODES
-    assert len(source_values) == 164
+    assert len(source_values) == 166
     assert source_values == tuple(sorted(source_values, key=str.encode))
     assert len(source_values) == len(set(source_values))
     assert PROTOCOL_REASON_CODES == frozenset(_EXPECTED_REASON_CODES)

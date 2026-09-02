@@ -2575,7 +2575,11 @@ constrained-schema mismatch → `response_schema_invalid` (`failure_class=respon
 output truncation / provider `incomplete` / Chat Completions `finish_reason=length` →
 `response_content_invalid` (`failure_class=response_content`); case-bound post-validation
 rejection → `semantic_judgment_rejected`; real transport/deadline timeout → `provider_timeout`.
-`incomplete` caused by the output token cap must not be labeled a transport timeout.
+`incomplete` caused by the output token cap must not be labeled a transport timeout. The public
+pair is closed; for `dispatch_kind=external_runtime_oauth` the exact stage is carried separately as
+`runtime_evidence.failure_stage` (below) so an operator can tell malformed JSON from a wrong
+envelope, an invented enum, duplicate refs, or a conclusion/challenge contradiction without any
+retained plaintext. A stage never widens retry: `response_schema_invalid` stays terminal.
 
 Shared types are
 `SemanticCase`, `ReviewPacket`, `ReviewAssessment`, `SemanticCaseItem`, `TargetedExcerptRef`,
@@ -2594,7 +2598,9 @@ capability-cell/capability-evidence-expiry/launcher/config,
 disclosed-case/instruction/output-schema/selection/final-output digests, model reasoning
 selection, optional safe thread/turn correlation, `chatgpt` auth mode, optional allowlisted plan
 type, disclosure/acknowledgement booleans, cleanup classification (`not_started` when no child
-existed), and
+existed), an optional closed `failure_stage` (one member of `RUNTIME_FAILURE_STAGES` in
+`yoetz.domain.findings`, absent on success; the `judgment_*` members mirror the local
+validation stages of a completed turn's final answer), and
 the literal `upstream_body_observability=unavailable`. Email, credential paths/bytes, raw account
 or workspace IDs, prompt/reasoning/event/stderr text, and an asserted upstream body digest are
 forbidden. `turn_acknowledged=true` plus ambiguous transport or cleanup maps to

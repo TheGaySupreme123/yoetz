@@ -15,9 +15,10 @@ from __future__ import annotations
 import hashlib
 import importlib
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Protocol, cast
+from types import MappingProxyType
+from typing import Any, Final, Literal, Protocol, cast
 
 import httpx
 from pydantic import TypeAdapter, ValidationError
@@ -48,8 +49,11 @@ from yoetz.protocol.canonical import (
 )
 from yoetz.protocol.models import (
     ProviderChallengeModel,
+    ProviderJudgmentChallengesModel,
     ProviderJudgmentEnvelopeModel,
+    ProviderJudgmentInsufficientModel,
     ProviderJudgmentModel,
+    ProviderJudgmentNoDiscrepancyModel,
     SemanticStatus,
 )
 
@@ -65,6 +69,8 @@ __all__ = [
     "OPENAI_MAX_OUTPUT_TOKENS",
     "OPENAI_MAX_RESPONSE_BODY_BYTES",
     "SEMANTIC_REVIEW_INSTRUCTION",
+    "JudgmentValidationError",
+    "JudgmentValidationStage",
     "OneAttemptCredentialTransport",
     "OpenAIProfile",
     "OpenAIResponsesEvaluator",
@@ -137,6 +143,121 @@ _PROVIDER_JUDGMENT_ADAPTER: Final[TypeAdapter[ProviderJudgmentModel]] = TypeAdap
 _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER: Final[TypeAdapter[ProviderJudgmentEnvelopeModel]] = (
     TypeAdapter(ProviderJudgmentEnvelopeModel)
 )
+# One adapter per conclusion branch. Used only to classify an already-rejected judgment: the
+# union adapter above decides acceptance, and the branch selected by the stated conclusion
+# yields errors that name one field instead of every branch's disagreement.
+_PROVIDER_JUDGMENT_BRANCH_ADAPTERS: Final[Mapping[str, TypeAdapter[Any]]] = MappingProxyType(
+    {
+        "no_material_discrepancy": TypeAdapter(ProviderJudgmentNoDiscrepancyModel),
+        "challenges_returned": TypeAdapter(ProviderJudgmentChallengesModel),
+        "insufficient_packet": TypeAdapter(ProviderJudgmentInsufficientModel),
+    }
+)
+
+type JudgmentValidationStage = Literal[
+    "envelope_invalid",
+    "enum_invalid",
+    "refs_duplicate",
+    "refs_invalid",
+    "conclusion_mismatch",
+    "text_bounds",
+    "shape_invalid",
+]
+_JUDGMENT_STAGE_PRECEDENCE: Final[tuple[JudgmentValidationStage, ...]] = (
+    "enum_invalid",
+    "conclusion_mismatch",
+    "refs_duplicate",
+    "refs_invalid",
+    "text_bounds",
+    "shape_invalid",
+)
+_REVIEW_TEXT_FIELDS: Final = frozenset(
+    {"summary", "discrepancy", "alternative_interpretation", "message_to_main_agent", "uncertainty"}
+)
+
+
+class JudgmentValidationError(ValueError):
+    """A rejected provider judgment with its closed validation stage.
+
+    The message stays the historical ``openai_judgment_shape_invalid`` token so every existing
+    ``ValueError`` consumer keeps its behavior; ``stage`` is the only addition. Stages are chosen
+    from the shape of the local validation failure, never from provider text.
+    """
+
+    def __init__(self, stage: JudgmentValidationStage) -> None:
+        super().__init__("openai_judgment_shape_invalid")
+        self.stage: JudgmentValidationStage = stage
+
+
+def _stage_of_branch_error(error: Mapping[str, object]) -> JudgmentValidationStage:
+    loc = tuple(str(item) for item in cast(tuple[object, ...], error.get("loc", ())))
+    kind = str(error.get("type", ""))
+    message = str(error.get("msg", ""))
+    leaf = loc[-1] if loc else ""
+    if kind == "literal_error" and leaf in {"conclusion", "finding_kind", "requested_next_step"}:
+        return "enum_invalid"
+    if leaf == "reviewer_challenges" and kind in {"too_short", "too_long"}:
+        return "conclusion_mismatch"
+    if "cited_refs" in loc:
+        if kind == "value_error" and "array_not_unique_or_bounded" in message:
+            return "refs_duplicate"
+        return "refs_invalid"
+    if leaf in _REVIEW_TEXT_FIELDS and (
+        kind in {"string_too_short", "string_too_long"}
+        or (kind == "value_error" and "provider_review_text_invalid" in message)
+    ):
+        return "text_bounds"
+    if kind == "value_error" and "array_not_unique_or_bounded" in message:
+        # The challenge-level uniqueness validator reports at the challenge, not the field.
+        return "refs_duplicate"
+    if kind == "value_error" and "provider_review_text_invalid" in message:
+        return "text_bounds"
+    return "shape_invalid"
+
+
+def _classify_rejected_judgment(parsed: JsonValue) -> JudgmentValidationStage:
+    """Name the first closed stage at which an already-rejected judgment fails."""
+
+    if type(parsed) is not dict:
+        return "envelope_invalid"
+    root = cast(dict[str, JsonValue], parsed)
+    if "judgment" in root:
+        if set(root) != {"judgment"} or type(root["judgment"]) is not dict:
+            return "envelope_invalid"
+        body_object = cast(dict[str, JsonValue], root["judgment"])
+    else:
+        body_object = root
+    if "conclusion" not in body_object:
+        return "envelope_invalid"
+    conclusion = body_object["conclusion"]
+    adapter = (
+        _PROVIDER_JUDGMENT_BRANCH_ADAPTERS.get(conclusion) if type(conclusion) is str else None
+    )
+    if adapter is None:
+        return "enum_invalid"
+    try:
+        adapter.validate_python(body_object)
+    except ValidationError as exc:
+        errors = [cast(Mapping[str, object], error) for error in exc.errors()]
+        # A challenge that fails its own validation also makes pydantic report the tuple as
+        # "too short after validation"; that derived count error is not a coupling failure.
+        item_failed = any(
+            len(cast(tuple[object, ...], error.get("loc", ()))) > 1
+            and cast(tuple[object, ...], error.get("loc", ()))[0] == "reviewer_challenges"
+            for error in errors
+        )
+        stages = {
+            _stage_of_branch_error(error)
+            for error in errors
+            if not (
+                item_failed
+                and tuple(cast(tuple[object, ...], error.get("loc", ())))
+                == ("reviewer_challenges",)
+            )
+        }
+        return next(stage for stage in _JUDGMENT_STAGE_PRECEDENCE if stage in stages)
+    # The branch accepted what the union rejected: only the wrapper can differ.
+    return "envelope_invalid"
 
 
 def _rename_schema_defs(raw: dict[str, object]) -> dict[str, object]:
@@ -670,16 +791,17 @@ def normalize_judgment(parsed: JsonValue) -> SemanticJudgment:
     # accepted because the two shapes are unambiguous (``judgment`` versus ``conclusion``) and a
     # provider that flattens the wrapper is still returning output the contract can admit.
     model: ProviderJudgmentModel
+    source: JsonValue = parsed
     if type(parsed) is dict and "judgment" in parsed:
         try:
             model = _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER.validate_python(parsed).judgment
         except ValidationError as exc:
-            raise ValueError("openai_judgment_shape_invalid") from exc
+            raise JudgmentValidationError(_classify_rejected_judgment(source)) from exc
     else:
         try:
             model = _PROVIDER_JUDGMENT_ADAPTER.validate_python(parsed)
         except ValidationError as exc:
-            raise ValueError("openai_judgment_shape_invalid") from exc
+            raise JudgmentValidationError(_classify_rejected_judgment(source)) from exc
     challenges = tuple(_challenge_from_model(item) for item in model.reviewer_challenges)
     return SemanticJudgment(model.conclusion, challenges)
 

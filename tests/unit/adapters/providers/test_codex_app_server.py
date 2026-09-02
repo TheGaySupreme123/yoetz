@@ -38,6 +38,7 @@ from yoetz.ports.semantic import (
     Deadline,
     ExternalRuntimeAuthority,
     SemanticResultInvalid,
+    SemanticResultRefused,
     SemanticResultSuccess,
     SemanticResultUnavailable,
 )
@@ -1164,3 +1165,310 @@ async def test_evaluator_rejects_deadline_not_bound_to_runtime_authority() -> No
 
     with pytest.raises(ValueError, match="codex_runtime_attempt_binding_invalid"):
         await evaluator.evaluate(case, Deadline(_NOW + timedelta(seconds=30), 31.0))
+
+
+# --- issue #527: bounded validation-stage diagnostics -------------------------------------------
+
+_REF = "clm_20000000-0000-4000-8000-000000000001"
+_NO_DISCREPANCY = '{"conclusion":"no_material_discrepancy","reviewer_challenges":[]}'
+
+
+def _challenge_json(**overrides: object) -> str:
+    challenge: dict[str, object] = {
+        "finding_kind": "claim_without_admissible_evidence",
+        "summary": "Evidence gap",
+        "cited_refs": [_REF],
+        "discrepancy": "The claim lacks a recorded basis.",
+        "alternative_interpretation": "The claim may remain unresolved.",
+        "message_to_main_agent": "Main agent: provide evidence for the claim.",
+        "requested_next_step": "provide_evidence",
+        "uncertainty": "The missing material may exist outside the case.",
+    }
+    challenge.update(overrides)
+    return json.dumps({"conclusion": "challenges_returned", "reviewer_challenges": [challenge]})
+
+
+def _agent_message(text: str, *, phase: str | None = None) -> dict[str, object]:
+    item: dict[str, object] = {"type": "agentMessage", "text": text}
+    if phase is not None:
+        item["phase"] = phase
+    return {"method": "item/completed", "params": {"item": item}}
+
+
+def _runtime_with_output(*outputs: dict[str, object]) -> _Runtime:
+    runtime = _Runtime(_profile())
+    completion = runtime.events[-1]
+    runtime.events = [*outputs, completion]
+    return runtime
+
+
+async def test_commentary_phase_is_discarded_and_final_answer_is_the_judgment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime_with_output(
+        _agent_message("narration-canary: reviewing the packet now", phase="commentary"),
+        _agent_message(_NO_DISCREPANCY, phase="final_answer"),
+    )
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage is None
+    assert "narration-canary" not in repr(result)
+
+
+async def test_commentary_alone_never_counts_as_a_judgment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime_with_output(_agent_message(_NO_DISCREPANCY, phase="commentary"))
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultInvalid
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage == "agent_message_count"
+
+
+@pytest.mark.parametrize("phase", ["final_answer", None])
+async def test_two_candidate_messages_report_the_count_stage(
+    monkeypatch: pytest.MonkeyPatch, phase: str | None
+) -> None:
+    runtime = _runtime_with_output(
+        _agent_message(_NO_DISCREPANCY, phase=phase),
+        _agent_message(_NO_DISCREPANCY, phase=phase),
+    )
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultInvalid
+    assert result.provenance.failure_class is SemanticFailureClass.RESPONSE_SCHEMA
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage == "agent_message_count"
+
+
+async def test_unknown_message_phase_is_a_forbidden_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime_with_output(_agent_message(_NO_DISCREPANCY, phase="draft"))
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultInvalid
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage == "event_forbidden"
+
+
+@pytest.mark.parametrize(
+    ("text", "stage"),
+    [
+        ("```json\n" + _NO_DISCREPANCY + "\n```", "output_not_json"),
+        ("Here is my review-canary: " + _NO_DISCREPANCY, "output_not_json"),
+        ('{"conclusion":"no_material_discrepancy","reviewer_challenges":[],}', "output_not_json"),
+        ('{"result":' + _NO_DISCREPANCY + "}", "judgment_envelope_invalid"),
+        ('{"judgment":"' + "prose-canary" + '"}', "judgment_envelope_invalid"),
+        ('{"conclusion":"maybe-canary","reviewer_challenges":[]}', "judgment_enum_invalid"),
+        (_challenge_json(finding_kind="hunch-canary"), "judgment_enum_invalid"),
+        (_challenge_json(requested_next_step="ask-canary"), "judgment_enum_invalid"),
+        (_challenge_json(cited_refs=[_REF, _REF]), "judgment_refs_duplicate"),
+        (_challenge_json(cited_refs=["item-canary"]), "judgment_refs_invalid"),
+        (
+            '{"conclusion":"challenges_returned","reviewer_challenges":[]}',
+            "judgment_conclusion_mismatch",
+        ),
+        (
+            json.dumps(
+                {
+                    "conclusion": "no_material_discrepancy",
+                    "reviewer_challenges": json.loads(_challenge_json())["reviewer_challenges"],
+                }
+            ),
+            "judgment_conclusion_mismatch",
+        ),
+        (_challenge_json(summary=""), "judgment_text_bounds"),
+        (_challenge_json(summary="canary " * 2000), "judgment_text_bounds"),
+        (_challenge_json(extra="field-canary"), "judgment_shape_invalid"),
+    ],
+)
+async def test_invalid_final_answers_name_one_closed_validation_stage(
+    monkeypatch: pytest.MonkeyPatch, text: str, stage: str
+) -> None:
+    runtime = _runtime_with_output(_agent_message(text, phase="final_answer"))
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultInvalid
+    assert result.provenance.status is module.SemanticStatus.INVALID
+    assert result.provenance.failure_class is SemanticFailureClass.RESPONSE_SCHEMA
+    assert result.raw_size == len(text.encode("utf-8"))
+    evidence = result.provenance.runtime_evidence
+    assert evidence is not None
+    assert evidence.failure_stage == stage
+    assert evidence.turn_acknowledged is True
+    assert evidence.final_output_sha256 == module._sha256_bytes(  # pyright: ignore[reportPrivateUsage]
+        text.encode("utf-8")
+    )
+    assert "canary" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [_NO_DISCREPANCY, '{"judgment":' + _NO_DISCREPANCY + "}", _challenge_json()],
+)
+async def test_valid_bare_and_enveloped_final_answers_succeed(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    runtime = _runtime_with_output(_agent_message(text, phase="final_answer"))
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage is None
+
+
+async def test_informational_notifications_and_plan_items_are_discarded_unread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    thread = "019a0000-0000-7000-8000-000000000001"
+    runtime.events[0:0] = [
+        {"method": "thread/name/updated", "params": {"threadId": thread, "threadName": "canary"}},
+        {"method": "turn/moderationMetadata", "params": {"metadata": {"note": "canary"}}},
+        {"method": "model/safetyBuffering/updated", "params": {"threadId": thread}},
+        {"method": "deprecationNotice", "params": {"message": "canary"}},
+        {"method": "configWarning", "params": {"message": "canary"}},
+        {"method": "thread/queue/changed", "params": {"threadId": thread}},
+        {"method": "thread/compacted", "params": {"threadId": thread}},
+        {"method": "item/started", "params": {"item": {"type": "plan", "text": "canary"}}},
+        {"method": "item/plan/delta", "params": {"delta": "canary"}},
+        {"method": "turn/plan/updated", "params": {"plan": [{"step": "canary"}]}},
+        {"method": "item/completed", "params": {"item": {"type": "plan", "text": "canary"}}},
+        {"method": "item/started", "params": {"item": {"type": "contextCompaction"}}},
+        {"method": "item/completed", "params": {"item": {"type": "contextCompaction"}}},
+        {"method": "item/agentMessage/delta", "params": {"delta": "canary"}},
+    ]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+    assert "canary" not in repr(result)
+
+
+async def test_model_reroute_ends_the_turn_as_refused_with_its_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    runtime.events.insert(
+        0,
+        {
+            "method": "model/rerouted",
+            "params": {
+                "fromModel": "gpt-5.6-sol",
+                "toModel": "other-canary",
+                "reason": "highRiskCyberActivity",
+                "threadId": "019a0000-0000-7000-8000-000000000001",
+                "turnId": "019a0000-0000-7000-8000-000000000002",
+            },
+        },
+    )
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultRefused
+    assert result.provenance.failure_class is SemanticFailureClass.AUTHORIZATION
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage == "model_rerouted"
+    assert "other-canary" not in repr(result)
+
+
+async def test_delta_storm_is_bounded_by_the_event_limit_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    delta: dict[str, object] = {"method": "item/agentMessage/delta", "params": {"delta": "x"}}
+    runtime.events[0:0] = [
+        delta
+        for _ in range(module._MAX_EVENT_COUNT)  # pyright: ignore[reportPrivateUsage]
+    ]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultInvalid
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage == "event_limit"
+
+
+async def test_large_streamed_judgment_fits_the_event_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+    delta: dict[str, object] = {"method": "item/agentMessage/delta", "params": {"delta": "x"}}
+    runtime.events[0:0] = [delta for _ in range(2000)]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultSuccess
+
+
+async def test_tool_event_and_unconfirmed_cleanup_name_their_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool_runtime = _Runtime(_profile())
+    tool_runtime.events[0] = {
+        "method": "item/completed",
+        "params": {"item": {"type": "commandExecution", "text": "never-retained"}},
+    }
+    tool = await _evaluate(monkeypatch, tool_runtime)
+    assert type(tool) is SemanticResultInvalid
+    assert tool.provenance.runtime_evidence is not None
+    assert tool.provenance.runtime_evidence.failure_stage == "tool_event_forbidden"
+
+    unconfirmed = await _evaluate(monkeypatch, _Runtime(_profile()), cleanup_outcome="failed")
+    assert type(unconfirmed) is SemanticResultUnavailable
+    assert unconfirmed.provenance.runtime_evidence is not None
+    assert unconfirmed.provenance.runtime_evidence.failure_stage == "cleanup_unconfirmed"
+
+
+async def test_post_ack_read_timeout_names_the_deadline_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _Runtime(_profile())
+
+    async def stalled_read(timeout: float) -> dict[str, object]:
+        del timeout
+        raise TimeoutError
+
+    runtime.read = stalled_read  # type: ignore[method-assign]
+
+    result = await _evaluate(monkeypatch, runtime)
+
+    assert type(result) is SemanticResultUnavailable
+    assert result.provenance.failure_class is SemanticFailureClass.TRANSPORT
+    assert result.provenance.runtime_evidence is not None
+    assert result.provenance.runtime_evidence.failure_stage == "deadline_expired"
+
+
+def test_every_adapter_stage_token_is_a_registered_closed_stage() -> None:
+    from yoetz.domain.findings import RUNTIME_FAILURE_STAGES
+
+    mapped = set(module._FAILURE_STAGE_BY_TOKEN.values())  # pyright: ignore[reportPrivateUsage]
+    assert mapped <= RUNTIME_FAILURE_STAGES
+    judgment_stages = {
+        "judgment_envelope_invalid",
+        "judgment_enum_invalid",
+        "judgment_refs_duplicate",
+        "judgment_refs_invalid",
+        "judgment_conclusion_mismatch",
+        "judgment_text_bounds",
+        "judgment_shape_invalid",
+    }
+    assert judgment_stages <= RUNTIME_FAILURE_STAGES
+    unmapped = {
+        module._failure_stage(  # pyright: ignore[reportPrivateUsage]
+            error, turn_acknowledged=acknowledged, launched=True
+        )
+        for error in (RuntimeError("native detail"), ValueError("unmapped_token"))
+        for acknowledged in (True, False)
+    }
+    assert unmapped == {"unclassified"}

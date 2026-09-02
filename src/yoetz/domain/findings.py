@@ -58,6 +58,7 @@ __all__ = [
     "FindingOrigin",
     "RankedFindings",
     "ResponseDisposition",
+    "RUNTIME_FAILURE_STAGES",
     "RuntimeAttemptEvidence",
     "SamplingParams",
     "SemanticDispatchKind",
@@ -155,6 +156,53 @@ class SemanticFailureClass(str, Enum):  # noqa: UP042 - exact wire enum base
     UNSUPPORTED_PROFILE = "unsupported_profile"
 
 
+# Closed, nonsecret classification of where one external-runtime attempt stopped. Every token is a
+# reviewed literal chosen by the adapter from its own bounded checks; none is derived from provider
+# text. ``None`` means the attempt produced an accepted judgment. Stages before ``turn_ack_invalid``
+# happen before the case is disclosed; the ``judgment_*`` family is the local validation stage of
+# a completed turn's final answer, so an operator can tell malformed JSON from a wrong envelope,
+# an invented enum, duplicate refs, or a conclusion/challenge contradiction without any plaintext.
+RUNTIME_FAILURE_STAGES: Final[frozenset[str]] = frozenset(
+    {
+        "capability_evidence_stale",
+        "launch_failed",
+        "initialize_invalid",
+        "login_required",
+        "model_unavailable",
+        "thread_invalid",
+        "predisclosure_event_forbidden",
+        "case_invalid",
+        "turn_ack_invalid",
+        "tool_request_forbidden",
+        "event_forbidden",
+        "tool_event_forbidden",
+        "rate_limits_invalid",
+        "runtime_warning",
+        "turn_failed",
+        "model_rerouted",
+        "completion_mismatch",
+        "agent_message_count",
+        "output_empty",
+        "output_oversize",
+        "event_limit",
+        "output_not_json",
+        "judgment_envelope_invalid",
+        "judgment_enum_invalid",
+        "judgment_refs_duplicate",
+        "judgment_refs_invalid",
+        "judgment_conclusion_mismatch",
+        "judgment_text_bounds",
+        "judgment_shape_invalid",
+        "judgment_invariant_invalid",
+        "request_failed",
+        "transport_failed",
+        "deadline_expired",
+        "cleanup_unconfirmed",
+        "unclassified",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeAttemptEvidence:
     """Bounded nonsecret evidence for one exact external-runtime attempt."""
@@ -183,6 +231,7 @@ class RuntimeAttemptEvidence:
     case_disclosed: bool
     turn_acknowledged: bool
     process_cleanup: Literal["not_started", "terminated", "killed", "failed"]
+    failure_stage: str | None = None
 
     def __post_init__(self) -> None:
         identity = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$", re.ASCII)
@@ -230,6 +279,10 @@ class RuntimeAttemptEvidence:
         if self.turn_acknowledged and not self.case_disclosed:
             raise ProtocolValueError("invalid_runtime_attempt_evidence")
         if self.process_cleanup not in {"not_started", "terminated", "killed", "failed"}:
+            raise ProtocolValueError("invalid_runtime_attempt_evidence")
+        if self.failure_stage is not None and (
+            type(self.failure_stage) is not str or self.failure_stage not in RUNTIME_FAILURE_STAGES
+        ):
             raise ProtocolValueError("invalid_runtime_attempt_evidence")
 
 
@@ -774,7 +827,16 @@ def _runtime_attempt_evidence_from_json(value: JsonValue | None) -> RuntimeAttem
             "upstream_body_observability",
         }
     )
-    optional = frozenset({"auth_mode", "final_output_sha256", "plan_type", "thread_id", "turn_id"})
+    optional = frozenset(
+        {
+            "auth_mode",
+            "failure_stage",
+            "final_output_sha256",
+            "plan_type",
+            "thread_id",
+            "turn_id",
+        }
+    )
     source = _require_json_object(
         value,
         required=required,
@@ -815,6 +877,7 @@ def _runtime_attempt_evidence_from_json(value: JsonValue | None) -> RuntimeAttem
             Literal["not_started", "terminated", "killed", "failed"],
             source["process_cleanup"],
         ),
+        failure_stage=cast(str | None, source.get("failure_stage")),
     )
 
 
@@ -1017,6 +1080,8 @@ def semantic_provenance_to_json(value: SemanticProvenance) -> JsonObject:
             runtime_json["turn_id"] = runtime.turn_id
         if runtime.final_output_sha256 is not None:
             runtime_json["final_output_sha256"] = runtime.final_output_sha256
+        if runtime.failure_stage is not None:
+            runtime_json["failure_stage"] = runtime.failure_stage
         result["runtime_evidence"] = JsonObject(runtime_json)
     return JsonObject(result)
 

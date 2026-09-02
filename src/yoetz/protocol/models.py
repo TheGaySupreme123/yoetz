@@ -3379,6 +3379,7 @@ _SEMANTIC_PROVENANCE_LEAVES: Final = (
     "runtime_evidence/credential_authority",
     "runtime_evidence/disclosed_case_sha256",
     "runtime_evidence/executable_sha256",
+    "runtime_evidence/failure_stage",
     "runtime_evidence/final_output_sha256",
     "runtime_evidence/instruction_sha256",
     "runtime_evidence/isolated_config_sha256",
@@ -4165,7 +4166,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 895:
+    if len(result) != 899:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

@@ -28,11 +28,17 @@ from yoetz.adapters.providers.openai_responses import (
     JUDGMENT_JSON_SCHEMA,
     OPENAI_MAX_OUTPUT_TOKENS,
     SEMANTIC_REVIEW_INSTRUCTION,
+    JudgmentValidationError,
     normalize_judgment,
 )
 from yoetz.config.models import ExternalRuntimeProfileConfig
 from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundle
-from yoetz.domain.findings import RuntimeAttemptEvidence, SamplingParams, SemanticFailureClass
+from yoetz.domain.findings import (
+    RUNTIME_FAILURE_STAGES,
+    RuntimeAttemptEvidence,
+    SamplingParams,
+    SemanticFailureClass,
+)
 from yoetz.domain.privacy import (
     ApprovedOutboundCase,
     ApprovedProviderCase,
@@ -61,6 +67,7 @@ from yoetz.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
+from yoetz.protocol.errors import ProtocolValueError
 from yoetz.protocol.models import SemanticStatus
 
 __all__ = [
@@ -162,7 +169,10 @@ _CODEX_JUDGMENT_JSON_SCHEMA: Final = cast(
 )
 _OUTPUT_SCHEMA_SHA256: Final = canonical_digest(_CODEX_JUDGMENT_JSON_SCHEMA)
 _MAX_MESSAGE_BYTES: Final = 1_048_576
-_MAX_EVENT_COUNT: Final = 512
+# Streamed agent-message and reasoning deltas each arrive as one notification, so a content-rich
+# judgment can legitimately cross several hundred events. Every event is still bounded by
+# ``_MAX_MESSAGE_BYTES`` and the attempt deadline; this cap only stops an unbounded stream.
+_MAX_EVENT_COUNT: Final = 4096
 _MAX_STDERR_BYTES: Final = 65_536
 _CLEANUP_GRACE_SECONDS: Final = 2.0
 # The semantic evaluator's request deadline is carried by ``Deadline`` and is intentionally
@@ -197,22 +207,42 @@ _SAFE_PLAN_TYPES: Final = frozenset(
         "unknown",
     }
 )
-_ALLOWED_ITEM_TYPES: Final = frozenset({"agentMessage", "reasoning", "userMessage"})
+# Items a read-only, tool-less turn may legitimately produce. ``plan`` is the model's own
+# checklist and ``contextCompaction`` is Codex re-summarizing its context; neither executes
+# anything or touches the workspace. Every command, patch, MCP, web, image, or agent tool item
+# stays forbidden and terminates the turn.
+_ALLOWED_ITEM_TYPES: Final = frozenset(
+    {"agentMessage", "contextCompaction", "plan", "reasoning", "userMessage"}
+)
+_AGENT_MESSAGE_PHASES: Final = frozenset({"commentary", "final_answer"})
+# Informational notifications are validated for method only and discarded unread; none of them
+# authorizes anything, and none of their bodies is retained. ``model/rerouted`` is the one
+# informational event that changes the answer's provenance, so it is handled explicitly.
 _ALLOWED_NOTIFICATION_METHODS: Final = frozenset(
     {
         "account/updated",
         "account/rateLimits/updated",
+        "configWarning",
+        "deprecationNotice",
         "error",
         "item/agentMessage/delta",
         "item/completed",
+        "item/plan/delta",
         "item/reasoning/summaryPartAdded",
         "item/reasoning/summaryTextDelta",
         "item/reasoning/textDelta",
         "item/started",
+        "model/rerouted",
+        "model/safetyBuffering/updated",
+        "thread/compacted",
+        "thread/name/updated",
+        "thread/queue/changed",
         "thread/started",
         "thread/status/changed",
         "thread/tokenUsage/updated",
         "turn/completed",
+        "turn/moderationMetadata",
+        "turn/plan/updated",
         "turn/started",
         "warning",
     }
@@ -1097,19 +1127,29 @@ def _validate_thread(
     return thread_id
 
 
-def _notification_item(message: Mapping[str, object]) -> tuple[str | None, str | None]:
+def _notification_item(
+    message: Mapping[str, object],
+) -> tuple[str | None, str | None, str | None]:
+    """Return the bounded (type, text, phase) triple of one item notification.
+
+    ``phase`` is Codex's own classification of an agent message as interim ``commentary`` or the
+    ``final_answer``; providers do not emit it consistently, so ``None`` means unknown.
+    """
+
     params = message.get("params")
     if not isinstance(params, Mapping):
-        return None, None
+        return None, None, None
     item = cast(Mapping[str, object], params).get("item")
     if not isinstance(item, Mapping):
-        return None, None
+        return None, None, None
     source = cast(Mapping[str, object], item)
     item_type = source.get("type")
     text = source.get("text")
+    phase = source.get("phase")
     return (
         item_type if type(item_type) is str else None,
         text if type(text) is str else None,
+        phase if type(phase) is str else None,
     )
 
 
@@ -1118,10 +1158,12 @@ class _CodexTurnFailure(Exception):
         self,
         outcome: Literal["invalid", "refused", "unavailable"],
         failure_class: SemanticFailureClass,
+        stage: str = "turn_failed",
     ) -> None:
         super().__init__(outcome)
         self.outcome: Literal["invalid", "refused", "unavailable"] = outcome
         self.failure_class = failure_class
+        self.stage = stage
 
 
 class _CodexRuntimeWarning(Exception):
@@ -1279,6 +1321,74 @@ async def _interrupt(runtime: _CodexProcess, thread_id: str, turn_id: str) -> No
         return
 
 
+# Adapter-raised tokens → closed ``RUNTIME_FAILURE_STAGES`` members. Every key is a literal this
+# module raises itself; a token outside the map falls back to the exception family below.
+_FAILURE_STAGE_BY_TOKEN: Final[Mapping[str, str]] = {
+    "codex_runtime_capability_time_invalid": "capability_evidence_stale",
+    "codex_runtime_capability_evidence_stale": "capability_evidence_stale",
+    "codex_runtime_version_mismatch": "initialize_invalid",
+    "codex_home_mismatch": "initialize_invalid",
+    "codex_login_required": "login_required",
+    "codex_chatgpt_login_required": "login_required",
+    "codex_model_unavailable": "model_unavailable",
+    "codex_reasoning_effort_unavailable": "model_unavailable",
+    "codex_model_catalog_invalid": "model_unavailable",
+    "codex_thread_isolation_unproven": "thread_invalid",
+    "codex_app_server_predisclosure_event_forbidden": "predisclosure_event_forbidden",
+    "codex_app_server_remote_control_state_invalid": "predisclosure_event_forbidden",
+    "codex_app_server_remote_control_not_disabled": "predisclosure_event_forbidden",
+    "codex_runtime_case_invalid": "case_invalid",
+    "codex_turn_ack_invalid": "turn_ack_invalid",
+    "codex_app_server_tool_request_forbidden": "tool_request_forbidden",
+    "codex_app_server_event_forbidden": "event_forbidden",
+    "codex_app_server_tool_event_forbidden": "tool_event_forbidden",
+    "codex_app_server_rate_limits_invalid": "rate_limits_invalid",
+    "codex_app_server_warning_invalid": "runtime_warning",
+    "codex_app_server_completion_invalid": "completion_mismatch",
+    "codex_app_server_agent_message_count": "agent_message_count",
+    "codex_app_server_output_empty": "output_empty",
+    "codex_app_server_output_oversize": "output_oversize",
+    "codex_app_server_event_limit": "event_limit",
+    "codex_app_server_request_failed": "request_failed",
+    "codex_app_server_stdin_unavailable": "transport_failed",
+    "codex_app_server_stdout_unavailable": "transport_failed",
+    "codex_app_server_stderr_limit": "transport_failed",
+    "codex_app_server_message_too_large": "transport_failed",
+    "codex_app_server_message_invalid": "transport_failed",
+    "semantic_judgment_invalid": "judgment_invariant_invalid",
+}
+
+
+def _failure_stage(error: Exception, *, turn_acknowledged: bool, launched: bool) -> str:
+    """Name the closed stage at which one attempt stopped, from the exception family only.
+
+    Only the adapter's own literal tokens and exception types are consulted; provider text never
+    reaches the token, and an unrecognized shape is reported as ``unclassified``.
+    """
+
+    if isinstance(error, _CodexTurnFailure):
+        stage = error.stage
+    elif isinstance(error, _CodexRuntimeWarning):
+        stage = "runtime_warning"
+    elif isinstance(error, JudgmentValidationError):
+        stage = f"judgment_{error.stage}"
+    elif isinstance(error, ProtocolValueError):
+        stage = "output_not_json" if turn_acknowledged else "case_invalid"
+    elif isinstance(error, PermissionError):
+        stage = _FAILURE_STAGE_BY_TOKEN.get(str(error), "login_required")
+    elif isinstance(error, TimeoutError):
+        stage = "deadline_expired"
+    elif isinstance(error, ValueError):
+        stage = _FAILURE_STAGE_BY_TOKEN.get(str(error), "unclassified")
+    elif isinstance(error, OSError) and not launched:
+        stage = "launch_failed"
+    else:
+        stage = "unclassified"
+    if stage not in RUNTIME_FAILURE_STAGES:
+        raise RuntimeError("codex_failure_stage_registry_incomplete")
+    return stage
+
+
 def _classify_runtime_exception(
     error: Exception, *, turn_acknowledged: bool
 ) -> tuple[
@@ -1342,6 +1452,7 @@ class CodexAppServerEvaluator:
             Literal["timeout", "post_ack_unknown", "invalid", "refused", "unavailable"] | None
         ) = None
         failure_class = SemanticFailureClass.UNSUPPORTED_PROFILE
+        failure_stage: str | None = None
         raw_size = 0
         try:
             self.profile.verify_capability_evidence(self.clock.now_utc())
@@ -1418,7 +1529,12 @@ class CodexAppServerEvaluator:
                 raise ValueError("codex_turn_ack_invalid")
             turn_acknowledged = True
 
+            # Codex tags each agent message as interim ``commentary`` or the ``final_answer``.
+            # Commentary is narration the constrained-output schema never governs; it is
+            # discarded unread. Legacy models omit the phase, so untagged messages are kept as
+            # the fallback candidate set. Exactly one candidate must remain.
             final_texts: list[str] = []
+            untagged_texts: list[str] = []
             messages = list(runtime.pending_notifications)
             runtime.pending_notifications.clear()
             for _ in range(_MAX_EVENT_COUNT):
@@ -1440,14 +1556,24 @@ class CodexAppServerEvaluator:
                 if method == "error":
                     params = _object(message.get("params"))
                     raise _turn_failure(params.get("error"))
+                if method == "model/rerouted":
+                    # The bound model did not answer; the provenance this attempt would record
+                    # is no longer true, so the turn ends here without reading the reroute body.
+                    raise _CodexTurnFailure(
+                        "refused", SemanticFailureClass.AUTHORIZATION, stage="model_rerouted"
+                    )
                 if method in {"item/started", "item/completed"}:
-                    item_type, text = _notification_item(message)
+                    item_type, text, phase = _notification_item(message)
                     if item_type not in _ALLOWED_ITEM_TYPES:
                         raise ValueError("codex_app_server_tool_event_forbidden")
                     if method == "item/completed" and item_type == "agentMessage":
+                        if phase is not None and phase not in _AGENT_MESSAGE_PHASES:
+                            raise ValueError("codex_app_server_event_forbidden")
+                        if phase == "commentary":
+                            continue
                         if text is None or not text:
-                            raise ValueError("codex_app_server_output_invalid")
-                        final_texts.append(text)
+                            raise ValueError("codex_app_server_output_empty")
+                        (final_texts if phase == "final_answer" else untagged_texts).append(text)
                 if method != "turn/completed":
                     continue
                 params = _object(message.get("params"))
@@ -1456,12 +1582,13 @@ class CodexAppServerEvaluator:
                     raise ValueError("codex_app_server_completion_invalid")
                 if completed.get("status") != "completed" or completed.get("error") is not None:
                     raise _turn_failure(completed.get("error"))
-                if len(final_texts) != 1:
-                    raise ValueError("codex_app_server_completion_invalid")
-                raw = final_texts[0]
+                candidates = final_texts if final_texts else untagged_texts
+                if len(candidates) != 1:
+                    raise ValueError("codex_app_server_agent_message_count")
+                raw = candidates[0]
                 raw_size = len(raw.encode("utf-8"))
                 if raw_size > _MAX_MESSAGE_BYTES:
-                    raise ValueError("codex_app_server_output_invalid")
+                    raise ValueError("codex_app_server_output_oversize")
                 raw_bytes = raw.encode("utf-8")
                 final_output_sha256 = _sha256_bytes(raw_bytes)
                 judgment = normalize_judgment(strict_json_parse(raw_bytes))
@@ -1471,6 +1598,9 @@ class CodexAppServerEvaluator:
         except Exception as error:  # noqa: BLE001 - no foreign native exception crosses boundary
             failure, failure_class = _classify_runtime_exception(
                 error, turn_acknowledged=turn_acknowledged
+            )
+            failure_stage = _failure_stage(
+                error, turn_acknowledged=turn_acknowledged, launched=runtime is not None
             )
         finally:
             try:
@@ -1487,6 +1617,7 @@ class CodexAppServerEvaluator:
         if cleanup == "failed" and failure is None:
             failure = "post_ack_unknown" if turn_acknowledged else "unavailable"
             failure_class = SemanticFailureClass.TRANSPORT
+            failure_stage = "cleanup_unconfirmed"
 
         evidence = RuntimeAttemptEvidence(
             credential_authority="external_runtime_oauth",
@@ -1515,6 +1646,7 @@ class CodexAppServerEvaluator:
             case_disclosed=case_disclosed,
             turn_acknowledged=turn_acknowledged,
             process_cleanup=cleanup,
+            failure_stage=failure_stage,
         )
         latency_ms = max(0, int((self.clock.monotonic_seconds() - started) * 1000))
         status = (
