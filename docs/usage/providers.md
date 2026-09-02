@@ -86,6 +86,12 @@ yoetz provider codex-subscription disconnect --accept  # Codex logout, then remo
 yoetz provider codex-subscription rollback             # remove binding; preserve home/install
 ```
 
+When an attempt fails after the case was disclosed, the receipt keeps the closed
+`semantic_status` / `semantic_reason` pair and adds `runtime_evidence.failure_stage`: one fixed
+token such as `output_not_json`, `judgment_refs_duplicate`, `judgment_conclusion_mismatch`,
+`agent_message_count`, or `event_limit`. It tells you where validation stopped without keeping
+any of Codex's text. A `response_schema_invalid` result stays final and is not retried.
+
 Setup, disconnect, and rollback recompose the local service afterwards. The subscription endpoint
 has unknown data-use posture, so Yoetz does not mark it as the Assisted recommendation. You may
 still explicitly approve a bounded external-review policy. Login, plan name, and model listing are

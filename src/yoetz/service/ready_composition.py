@@ -1595,6 +1595,16 @@ def _map_provider_outcome(
         else:
             # Constrained-schema mismatch / non-JSON / empty output: structural schema stage.
             reason = SemanticReason.RESPONSE_SCHEMA_INVALID
+        runtime = provider.provenance.runtime_evidence
+        if runtime is not None:
+            # The public reason is a closed pair; the exact stage at which an external runtime's
+            # answer failed local validation is the owner-only diagnostic that makes the failure
+            # actionable. `failure_stage` is a closed registry token, never provider text.
+            record_bounded_event_without_raising(
+                component="semantic_composition",
+                operation="semantic_provider_attempt_invalid",
+                reason="unclassified" if runtime.failure_stage is None else runtime.failure_stage,
+            )
     elif type(provider) is SemanticResultLate:
         status, reason = SemanticStatus.LATE, SemanticReason.DEADLINE_AUTHORITY_LOST
     elif type(provider) is SemanticResultUnavailable:

@@ -22,6 +22,7 @@ from yoetz.adapters.providers.openai_responses import (
     CHALLENGE_FIELD_GLOSSARY,
     FINDING_KIND_GLOSSARY,
     JUDGMENT_JSON_SCHEMA,
+    JudgmentValidationError,
     OpenAIProfile,
     build_judgment_json_schema,
     classify_provider_failure,
@@ -31,7 +32,7 @@ from yoetz.adapters.providers.openai_responses import (
 from yoetz.adapters.providers.openai_responses import (
     normalize_response as normalize_responses_response,
 )
-from yoetz.domain.findings import FindingKind, SemanticFailureClass
+from yoetz.domain.findings import RUNTIME_FAILURE_STAGES, FindingKind, SemanticFailureClass
 from yoetz.ports.semantic import (
     SemanticResultInvalid,
     SemanticResultRefused,
@@ -527,3 +528,37 @@ def test_conforming_challenge_response_succeeds_on_first_parse() -> None:
         _REF_B,
         _REF_A,
     ) or result.judgment.challenges[0].cited_refs == tuple(sorted((_REF_A, _REF_B)))
+
+
+@pytest.mark.parametrize(
+    ("parsed", "stage"),
+    [
+        (["not-an-object"], "envelope_invalid"),
+        ({"result": _judgment()}, "envelope_invalid"),
+        ({"judgment": "prose"}, "envelope_invalid"),
+        ({"judgment": _judgment(), "extra": 1}, "envelope_invalid"),
+        (_judgment("maybe"), "enum_invalid"),
+        (_judgment("challenges_returned", [_challenge(kind="hunch")]), "enum_invalid"),
+        (_judgment("challenges_returned", [_challenge(refs=[_REF_A, _REF_A])]), "refs_duplicate"),
+        (_judgment("challenges_returned", [_challenge(refs=["item-1"])]), "refs_invalid"),
+        (_judgment("challenges_returned", [_challenge(refs=[])]), "refs_invalid"),
+        (_judgment("challenges_returned", []), "conclusion_mismatch"),
+        (_judgment("no_material_discrepancy", [_challenge()]), "conclusion_mismatch"),
+        (_judgment("insufficient_packet", [_challenge()]), "conclusion_mismatch"),
+        (_judgment("challenges_returned", [_challenge(summary="")]), "text_bounds"),
+        (_judgment("challenges_returned", [_challenge(summary="x" * 9000)]), "text_bounds"),
+        ({**_judgment(), "note": "extra"}, "shape_invalid"),
+        (
+            _judgment("no_material_discrepancy", cast(list[dict[str, JsonValue]], "none")),
+            "shape_invalid",
+        ),
+    ],
+)
+def test_rejected_judgments_carry_one_closed_validation_stage(
+    parsed: JsonValue, stage: str
+) -> None:
+    with pytest.raises(JudgmentValidationError, match="openai_judgment_shape_invalid") as info:
+        normalize_judgment(parsed)
+    assert info.value.stage == stage
+    # Every stage token doubles as the ``judgment_<stage>`` runtime-evidence member.
+    assert f"judgment_{stage}" in RUNTIME_FAILURE_STAGES

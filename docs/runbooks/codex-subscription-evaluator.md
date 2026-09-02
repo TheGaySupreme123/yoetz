@@ -93,8 +93,17 @@ approved case then enters only as `turn/start` text with the digest-bound Codex 
 frozen judgment schema. The exact runtime rejects JSON Schema's `uniqueItems` keyword, so that is
 the only omitted provider-side constraint; Yoetz's unchanged local normalizer still enforces every
 uniqueness rule before accepting a judgment. Any child tool request, tool item, unknown event,
-extra agent message, invalid/truncated/refused completion, or configuration mismatch fails closed.
-Prompt wording is not treated as the isolation boundary.
+invalid/truncated/refused completion, or configuration mismatch fails closed. Codex tags each
+agent message with a phase: `commentary` messages are interim narration and are discarded
+unread; only `final_answer` messages are judgment candidates, and exactly one must remain
+(untagged messages from legacy models fall back to the same one-message rule). Informational
+notifications — thread naming, moderation metadata, safety buffering, deprecation and
+configuration notices, queue and compaction state, plan updates — and the model's own `plan` and
+`contextCompaction` items are validated for method/type only and discarded; none of their bodies
+is retained. A `model/rerouted` notice ends the turn as `refused`, because the bound model did not
+produce the answer. The post-acknowledgement event budget is 4096 notifications, each bounded to
+1 MiB, so a content-rich streamed judgment is not mistaken for an unbounded stream. Prompt wording
+is not treated as the isolation boundary.
 
 The cell is application confinement, not a general OS sandbox claim. Its negative controls and
 exact-version behavior are part of compatibility evidence; a version that cannot prove the listed
@@ -122,6 +131,25 @@ the exact binding, dedicated-home readiness, account mode, or model availability
 disclosure. The machine privacy ceiling and exact repository grant independently permit or refuse a
 case. Only an admitted `evaluate()` child with a semantic attempt and terminal receipt proves that
 task bytes were dispatched; login success, model listing, or `semantic_ready: true` alone never does.
+
+## Diagnosing a failed attempt
+
+`semantic_status` / `semantic_reason` stay the closed public pair. The exact stage is
+`semantic_provenance.runtime_evidence.failure_stage` in the receipt JSON, and the service writes
+the same token as an owner-only diagnostic line (`semantic_composition` /
+`semantic_provider_attempt_invalid`). Stages are registered literals, never provider text:
+
+| Stage | Meaning | Retry posture |
+|---|---|---|
+| `capability_evidence_stale`, `launch_failed`, `initialize_invalid`, `login_required`, `model_unavailable`, `thread_invalid`, `predisclosure_event_forbidden` | Failed before the case crossed stdin. | Ordinary pre-disclosure transient/unsupported handling; nothing was disclosed. |
+| `turn_ack_invalid`, `tool_request_forbidden`, `event_forbidden`, `tool_event_forbidden`, `rate_limits_invalid`, `runtime_warning`, `turn_failed`, `model_rerouted`, `completion_mismatch` | The child broke the isolation contract or Codex reported a turn failure. | Terminal for this attempt. A repeated `event_forbidden` or `tool_event_forbidden` on the same runtime means the cell no longer matches Codex behavior: file it, do not widen the allowlist locally. |
+| `agent_message_count`, `output_empty`, `output_oversize`, `event_limit` | The turn completed but did not yield exactly one bounded final answer. | Terminal. `event_limit` on a legitimately long answer is a budget question for the cell. |
+| `output_not_json` | The final answer was not strict JSON (prose, fenced code, trailing text). | Terminal; not retried. |
+| `judgment_envelope_invalid`, `judgment_enum_invalid`, `judgment_refs_duplicate`, `judgment_refs_invalid`, `judgment_conclusion_mismatch`, `judgment_text_bounds`, `judgment_shape_invalid`, `judgment_invariant_invalid` | Strict JSON that failed the frozen judgment contract at the named stage. | Terminal (`response_schema_invalid`); asking again is not a fix. `judgment_refs_invalid` is the model citing an item id instead of a `citable_refs` entry. |
+| `request_failed`, `transport_failed`, `deadline_expired`, `cleanup_unconfirmed`, `unclassified` | Runtime transport, deadline, or cleanup ambiguity. | Per ADR-006: pre-acknowledgement transients may retry; post-acknowledgement ambiguity is `outcome_unknown` and is not retried. |
+
+`semantic_case_content_over_item_limit` is a separate coverage gap on the disclosed case; it is
+reported alongside a stage, never inferred from one.
 
 ## Packaged live-evidence checklist
 

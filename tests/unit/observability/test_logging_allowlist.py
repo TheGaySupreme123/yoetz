@@ -10,7 +10,7 @@ import pytest
 
 from builders.clock import frozen_clock
 from yoetz.config.models import LoggingConfig
-from yoetz.domain.findings import SemanticFailureClass
+from yoetz.domain.findings import RUNTIME_FAILURE_STAGES, SemanticFailureClass
 from yoetz.observability.logging import (
     LogMode,
     configure_logging,
@@ -282,3 +282,22 @@ def test_unexpected_exception_record_carries_the_caller_request_id(
     assert records[0]["request_id"] == _REQUEST_ID
     assert records[0]["correlation_id"] == correlation_id
     assert records[0]["operation"] == "check_internal_error"
+
+
+@pytest.mark.parametrize("reason", sorted(RUNTIME_FAILURE_STAGES))
+def test_semantic_provider_invalid_stage_tokens_are_accepted(
+    reason: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure()
+
+    record_bounded_event_without_raising(
+        component="semantic_composition",
+        operation="semantic_provider_attempt_invalid",
+        reason=reason,
+    )
+
+    records = _records(capsys.readouterr().err)
+    assert len(records) == 1
+    assert records[0]["operation"] == "semantic_provider_attempt_invalid"
+    assert records[0]["reason"] == reason
