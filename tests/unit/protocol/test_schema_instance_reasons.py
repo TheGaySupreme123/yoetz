@@ -17,6 +17,7 @@ from jsonschema.exceptions import ValidationError
 from yoetz.protocol.schemas import (
     SchemaInstanceInvalid,
     _best_schema_instance_error,  # pyright: ignore[reportPrivateUsage]
+    _project_selected_one_of_required_locations,  # pyright: ignore[reportPrivateUsage]
 )
 
 _DISCRIMINATED_UNION: dict[str, Any] = {
@@ -156,3 +157,46 @@ def test_an_undiscriminated_union_keeps_whole_tree_scoring() -> None:
     best = _best_schema_instance_error(captured.value)
 
     assert best.validator in {"oneOf", "type", "required"}
+
+
+def test_const_free_branch_remains_live_beside_matching_const_branch() -> None:
+    """Projection must not select a const branch while a const-free alternative also survives."""
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string"},
+            "alpha_peer": {"type": "string"},
+            "fallback_peer": {"type": "string"},
+        },
+        "oneOf": [
+            {"properties": {"kind": {"const": "alpha"}}, "required": ["alpha_peer"]},
+            {"properties": {"kind": {"const": "beta"}}, "required": ["beta_peer"]},
+            {"properties": {"kind": {"const": "gamma"}}, "required": ["gamma_peer"]},
+            {"required": ["fallback_peer"]},
+        ],
+    }
+    validator = Draft202012Validator(cast(Any, schema))
+    with pytest.raises(ValidationError) as captured:
+        cast(Any, validator).validate({"kind": "alpha"})
+
+    assert _project_selected_one_of_required_locations(captured.value) is None
+
+
+def test_fully_const_discriminated_union_still_projects_the_selected_peer() -> None:
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"kind": {"type": "string"}, "alpha_peer": {"type": "string"}},
+        "oneOf": [
+            {"properties": {"kind": {"const": "alpha"}}, "required": ["alpha_peer"]},
+            {"properties": {"kind": {"const": "beta"}}, "required": ["beta_peer"]},
+            {"properties": {"kind": {"const": "gamma"}}, "required": ["gamma_peer"]},
+        ],
+    }
+    validator = Draft202012Validator(cast(Any, schema))
+    with pytest.raises(ValidationError) as captured:
+        cast(Any, validator).validate({"kind": "alpha"})
+
+    projected = _project_selected_one_of_required_locations(captured.value)
+    assert projected is not None
+    assert projected[:3] == (((("alpha_peer",), "conditional_field_required"),), "kind", "alpha")

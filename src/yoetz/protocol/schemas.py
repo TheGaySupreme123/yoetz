@@ -1061,37 +1061,16 @@ def _project_selected_one_of_required_locations_impl(
     if base_path is None:
         return None
     for field in sorted(root_properties):
-        rejected: set[int] = set()
-        candidates: list[tuple[int, str]] = []
-        for index, errors in branches.items():
-            if not 0 <= index < len(option_values) or not isinstance(option_values[index], Mapping):
-                return None
-            properties = cast(Mapping[str, JsonValue], option_values[index]).get("properties")
-            if not isinstance(properties, Mapping):
-                continue
-            condition = cast(Mapping[str, JsonValue], properties).get(field)
-            if not isinstance(condition, Mapping):
-                continue
-            value = cast(Mapping[str, JsonValue], condition).get("const")
-            if type(value) is not str or not value.isascii() or not 1 <= len(value) <= 64:
-                continue
-            candidates.append((index, value))
-            if any(
-                error.validator == "const"
-                and tuple((_path_items_from(error) or ())[-1:]) == (field,)
-                for error in errors
-            ):
-                rejected.add(index)
-        survivors = [(index, value) for index, value in candidates if index not in rejected]
-        if (
-            len(candidates) < _MIN_DISCRIMINATED_BRANCHES
-            or len(rejected) < _MIN_DISCRIMINATED_BRANCHES
-        ):
+        selected = _const_discriminator_selected_branch(exc, branches, field=field)
+        if selected is None:
             continue
-        if len(survivors) != 1:
+        selected_index, selected_errors, selected_value = selected
+        if selected_value is None:
+            # A const-free branch can be the sole survivor, but it supplies no safe condition text
+            # for a selected-branch repair. The recursive path below may still project an inner
+            # schema-authored conditional rule from that branch.
             continue
-        selected_index, selected_value = survivors[0]
-        ordered = _missing_required_locations(branches[selected_index], base_path, root_properties)
+        ordered = _missing_required_locations(selected_errors, base_path, root_properties)
         if ordered:
             return (tuple(ordered), field, selected_value, _selected_family_for(exc))
     # Descend only into a branch the discriminator proved selected. Recursing into
@@ -1516,19 +1495,65 @@ def _discriminator_selected_branch(exc: ValidationError) -> tuple[ValidationErro
     # top-level const properties such as evidence strength. Select those only when const failures
     # rule out every sibling but one; the selected branch then exposes its real required peer.
     for field in _const_discriminator_fields(exc, branches):
-        rejected = {
-            index
-            for index, errors in branches.items()
-            if any(
-                error.validator == "const"
-                and tuple((_path_items_from(error) or ())[-1:]) == (field,)
-                for error in errors
-            )
-        }
-        selected = [errors for index, errors in branches.items() if index not in rejected]
-        if len(rejected) >= _MIN_DISCRIMINATED_BRANCHES and len(selected) == 1:
-            return tuple(selected[0])
+        selected = _const_discriminator_selected_branch(exc, branches, field=field)
+        if selected is not None:
+            return tuple(selected[1])
     return None
+
+
+def _const_discriminator_selected_branch(
+    exc: ValidationError,
+    branches: Mapping[int, Sequence[ValidationError]],
+    *,
+    field: str,
+) -> tuple[int, Sequence[ValidationError], str | None] | None:
+    """Select one branch only when every other branch has a proven const rejection.
+
+    Branches without a const for ``field`` are always survivors. Returning the selected const
+    value separately lets required-peer projection name a condition only when the sole survivor
+    actually declares one, while ordinary branch scoring can still select a const-free fallback.
+    """
+
+    validator_value = cast(object, exc.validator_value)
+    if not isinstance(validator_value, list):
+        return None
+    options = cast(list[object], validator_value)
+    const_values: dict[int, str] = {}
+    rejected: set[int] = set()
+    for index, errors in branches.items():
+        if not 0 <= index < len(options):
+            return None
+        branch = options[index]
+        if not isinstance(branch, Mapping):
+            return None
+        properties = cast(Mapping[str, JsonValue], branch).get("properties")
+        condition = (
+            cast(Mapping[str, JsonValue], properties).get(field)
+            if isinstance(properties, Mapping)
+            else None
+        )
+        value = (
+            cast(Mapping[str, JsonValue], condition).get("const")
+            if isinstance(condition, Mapping)
+            else None
+        )
+        if type(value) is not str or not value.isascii() or not 1 <= len(value) <= 64:
+            continue
+        const_values[index] = value
+        if any(
+            error.validator == "const" and tuple((_path_items_from(error) or ())[-1:]) == (field,)
+            for error in errors
+        ):
+            rejected.add(index)
+    survivors = [index for index in branches if index not in rejected]
+    if (
+        len(const_values) < _MIN_DISCRIMINATED_BRANCHES
+        or len(rejected) < _MIN_DISCRIMINATED_BRANCHES
+        or len(survivors) != 1
+    ):
+        return None
+    selected_index = survivors[0]
+    return selected_index, branches[selected_index], const_values.get(selected_index)
 
 
 def _const_discriminator_fields(
