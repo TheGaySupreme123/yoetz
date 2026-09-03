@@ -6,6 +6,18 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Fixed
+
+- `yoetz provider codex-subscription setup` no longer forces a fresh Codex sign-in on a dedicated
+  evaluator home that Codex already reports signed in with the exact model available. Unless
+  `--switch-account` is passed, setup first runs the same structural app-server probe as `status`
+  (`account/read` with `refreshToken: false`, then `model/list`) and, on success, writes the
+  binding and reports `login_reused: true`; otherwise the existing login path runs and reports
+  `login_reused: false`. `--switch-account` (also the prompt-loop menu and `/provider` account
+  switch) always logs out and signs in again. Yoetz still never reads `auth.json`. A dedicated
+  evaluator home passed by path may live outside `YOETZ_ISOLATED_ROOT` and be reused across
+  dogfood runs; ADR-026 records that exemption (issue #534).
+
 ### Added
 
 - One supported exact-target isolation contract for test and dogfood runtimes (ADR-026): setting

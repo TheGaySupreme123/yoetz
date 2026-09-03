@@ -89,6 +89,7 @@ def _finding(
     kind: FindingKind = FindingKind.COMPLETION_WITH_OPEN_OBLIGATIONS,
     subject_refs: tuple[object, ...] = (obl(1),),
     origin: FindingOrigin = FindingOrigin.DETERMINISTIC,
+    policy_id: str = "work-integrity",
 ) -> Finding:
     provenance = None
     if origin is FindingOrigin.SEMANTIC_MODEL_DERIVED:
@@ -101,7 +102,7 @@ def _finding(
         summary="A completion claim covers an open obligation.",
         detail="Resolve or revise the obligation before claiming completion.",
         subject_refs=subject_refs,  # type: ignore[arg-type]
-        policy_id="work-integrity",
+        policy_id=policy_id,
         policy_version="0.1.0",
         subject_frontier=Frontier(3, _DIGEST),
         coverage=_coverage(semantic=origin is FindingOrigin.SEMANTIC_MODEL_DERIVED),
@@ -298,6 +299,83 @@ def test_evidence_strength_gaps_bound_the_receipt_but_not_the_proof(gap: str) ->
     semantic = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
     coverage = _coverage(gaps=(gap,), semantic=True)
     assert _resolves(semantic, _check(semantic=_SEMANTIC_OK, coverage=coverage)) is True
+
+
+@pytest.mark.parametrize(
+    ("gap", "freshness"),
+    (
+        ("captured_object_unavailable", LedgerFreshness.REDACTED_GAP),
+        ("content_unselected", LedgerFreshness.PARTIAL),
+        ("host_outcome_unavailable", LedgerFreshness.PARTIAL),
+        ("unpaired_event", LedgerFreshness.PARTIAL),
+    ),
+)
+def test_each_host_observation_gap_preserves_clean_deterministic_proof(
+    gap: str, freshness: LedgerFreshness
+) -> None:
+    coverage = _coverage(
+        gaps=(gap, "semantic_review_not_requested"),
+        freshness=freshness,
+    )
+    assert _resolves(_finding(), _check(coverage=coverage)) is True
+
+
+@pytest.mark.parametrize(
+    "freshness",
+    (LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE, LedgerFreshness.UNKNOWN),
+)
+def test_host_observation_gaps_do_not_admit_stale_or_unknown_freshness(
+    freshness: LedgerFreshness,
+) -> None:
+    """Only ``redacted_gap`` is admitted; the other unproven freshnesses stay fail-closed (#538)."""
+
+    coverage = _coverage(
+        gaps=("captured_object_unavailable", "unpaired_event"),
+        freshness=freshness,
+    )
+    assert _resolves(_finding(), _check(coverage=coverage)) is False
+
+
+def test_host_observation_gaps_do_not_veto_clean_deterministic_proof() -> None:
+    """Combined host limits remain on the check without making repair unprovable (#538)."""
+
+    coverage = _coverage(
+        gaps=(
+            "captured_object_unavailable",
+            "content_unselected",
+            "host_outcome_unavailable",
+            "semantic_review_not_requested",
+            "unpaired_event",
+        ),
+        freshness=LedgerFreshness.REDACTED_GAP,
+    )
+
+    assert _resolves(_finding(), _check(coverage=coverage)) is True
+    research_finding = _finding(
+        kind=FindingKind.MATERIAL_LIMITATION_OMITTED,
+        subject_refs=(clm(1),),
+        policy_id="research-evidence",
+    )
+    assert _resolves(research_finding, _check(coverage=coverage)) is True
+    semantic = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    assert _resolves(semantic, _check(semantic=_SEMANTIC_OK, coverage=coverage)) is False
+
+    unreadable_finding = replace(
+        _finding(),
+        coverage=_coverage(
+            gaps=("captured_object_unavailable",),
+            freshness=LedgerFreshness.REDACTED_GAP,
+        ),
+    )
+    assert _resolves(unreadable_finding, _check(coverage=coverage)) is False
+    partial_host_coverage = _coverage(gaps=("unpaired_event",))
+    assert _resolves(unreadable_finding, _check(coverage=partial_host_coverage)) is False
+
+    hidden_event = _coverage(
+        gaps=(*coverage.known_gaps, "redacted_event"),
+        freshness=LedgerFreshness.REDACTED_GAP,
+    )
+    assert _resolves(_finding(), _check(coverage=hidden_event)) is False
 
 
 def test_a_semantic_finding_needs_a_completed_semantic_review() -> None:

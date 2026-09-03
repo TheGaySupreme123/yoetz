@@ -47,6 +47,7 @@ from yoetz.application.observation_materialize import (
     media_type_for_schema,
     observation_author,
     observation_claim_identity,
+    observation_content_identity,
     observation_operation_digest,
     observation_writer_id,
     stable_observation_id,
@@ -590,6 +591,7 @@ class ObservationCoordinator:
                 store.bind_session(workspace, request.envelope.session_commitment)
                 (
                     captured_content,
+                    replay_content_candidates,
                     content_redacted,
                     content_unavailable,
                 ) = await self._capture_content(
@@ -634,12 +636,48 @@ class ObservationCoordinator:
                     captured_content=captured_content,
                 )
                 if batch.skip_reason is None and batch.drafts:
+                    replay_role_sets: list[tuple[str, ...]] = []
+                    # The inverse lost-order case is contentless first, then an
+                    # equivalent copy with content. Its immutable core operation
+                    # must win over a second operation that would remint the same
+                    # core event ids. The late content remains stored but cannot
+                    # retroactively strengthen that committed operation.
+                    core_batch = materialize_observation_envelope(
+                        replace(envelope, content_object_refs=()),
+                        task_id=runtime.task_id,
+                        captured_content=(),
+                    )
+                    if core_batch.skip_reason is None and core_batch.drafts:
+                        replay_role_sets.append(tuple(item.role for item in core_batch.drafts))
+                    for candidate in replay_content_candidates:
+                        replay_envelope = replace(
+                            envelope,
+                            content_object_refs=tuple(
+                                sorted(
+                                    (item.object_id for item in candidate),
+                                    key=str.encode,
+                                )
+                            ),
+                        )
+                        replay_batch = materialize_observation_envelope(
+                            replay_envelope,
+                            task_id=runtime.task_id,
+                            captured_content=candidate,
+                        )
+                        roles = tuple(item.role for item in replay_batch.drafts)
+                        if (
+                            replay_batch.skip_reason is None
+                            and roles
+                            and roles not in replay_role_sets
+                        ):
+                            replay_role_sets.append(roles)
                     stage = "ledger_append"
                     claim = await self._append_materialized(
                         runtime,
                         envelope,
                         batch,
                         legacy_writer_id=mapping.yoetz_writer_id,
+                        replay_draft_role_sets=tuple(replay_role_sets),
                     )
                     if claim is not None:
                         (
@@ -647,7 +685,17 @@ class ObservationCoordinator:
                             materialization_digest,
                             append_result,
                             resolved_mapping_version,
+                            resolved_draft_roles,
                         ) = claim
+                        current_draft_roles = tuple(item.role for item in batch.drafts)
+                        if resolved_draft_roles != current_draft_roles:
+                            await self._local(
+                                partial(
+                                    self.local.note_coverage_gap,
+                                    workspace,
+                                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                                )
+                            )
                         # The claim key is role-scoped so the phases of one host
                         # call (pre action, paired result, permission, subagent)
                         # never contend, and the recorded mapping version is the
@@ -658,7 +706,7 @@ class ObservationCoordinator:
                             workspace=workspace,
                             logical_identity=observation_claim_identity(
                                 envelope,
-                                tuple(item.role for item in batch.drafts),
+                                resolved_draft_roles,
                                 mapping_version=resolved_mapping_version,
                             ),
                             materialization_digest=materialization_digest,
@@ -820,12 +868,13 @@ class ObservationCoordinator:
                                         correction_digest,
                                         correction_result,
                                         correction_mapping_version,
+                                        correction_draft_roles,
                                     ) = corrected
                                     store.record_logical_identity_claim(
                                         workspace=workspace,
                                         logical_identity=observation_claim_identity(
                                             envelope,
-                                            tuple(item.role for item in correction.drafts),
+                                            correction_draft_roles,
                                             mapping_version=correction_mapping_version,
                                         ),
                                         materialization_digest=correction_digest,
@@ -863,7 +912,7 @@ class ObservationCoordinator:
                 )
                 return result
             except PublicOperationError as exc:
-                if exc.code in {
+                if exc.retryable and exc.code in {
                     PublicErrorCode.OPERATION_PENDING,
                     PublicErrorCode.BUNDLE_BUSY,
                     PublicErrorCode.FRONTIER_CONFLICT,
@@ -882,8 +931,6 @@ class ObservationCoordinator:
                     component="application.observation_coordinator",
                     operation=(f"observation_ingest_{stage}_{exc.code.value.lower()}"),
                 )
-                if exc.code is PublicErrorCode.VAULT_LOCKED:
-                    return _reject(ObservationGapCode.VAULT_LOCKED.value)
                 if exc.code is PublicErrorCode.STORAGE_CORRUPT:
                     if stage == "identity_claim":
                         # A conflicting logical-identity claim poisons one
@@ -893,6 +940,14 @@ class ObservationCoordinator:
                         return _reject(ObservationGapCode.DEDUP_CONFLICT.value)
                     self._storage_corrupt_sessions.add(codex_session_id)
                     return _reject(ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value)
+                if not exc.retryable:
+                    # Validation and identity rejections are terminal by their
+                    # public contract. Calling them service_unavailable made a
+                    # healthy daemon look down and left the FIFO head immortal
+                    # because every drain path retried it (#540).
+                    return _reject(ObservationGapCode.LEDGER_REJECTED.value)
+                if exc.code is PublicErrorCode.VAULT_LOCKED:
+                    return _reject(ObservationGapCode.VAULT_LOCKED.value)
                 if exc.code in {
                     PublicErrorCode.SERVICE_UNAVAILABLE,
                     PublicErrorCode.SESSION_NOT_FOUND,
@@ -1032,12 +1087,14 @@ class ObservationCoordinator:
         batch: MaterializedObservationBatch,
         *,
         legacy_writer_id: str | None = None,
-    ) -> tuple[str, str, AppendResult | None, str] | None:
+        replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
+    ) -> tuple[str, str, AppendResult | None, str, tuple[str, ...]] | None:
         writer_id = runtime.writer_id
         if writer_id is None:
             return None
         logical_identity = canonical_logical_identity(envelope)
         draft_roles = tuple(item.role for item in batch.drafts)
+        candidate_role_sets = tuple(dict.fromkeys((draft_roles, *replay_draft_role_sets)))
         writer_ids = [writer_id]
         if legacy_writer_id is not None and legacy_writer_id != writer_id:
             writer_ids.append(legacy_writer_id)
@@ -1052,25 +1109,27 @@ class ObservationCoordinator:
         # in-flight pre-upgrade outbox row reuses its committed operation.
         for mapping_version in mapping_versions:
             for candidate_writer_id in writer_ids:
-                candidate_digest = observation_operation_digest(
-                    task_id=runtime.task_id,
-                    session_id=runtime.session_id,
-                    writer_id=candidate_writer_id,
-                    logical_identity=logical_identity,
-                    draft_roles=draft_roles,
-                    mapping_version=mapping_version,
-                )
-                candidate_operation_id = self._stable_operation_id(candidate_digest)
-                existing = await runtime.ledger.lookup_operation(
-                    candidate_writer_id, candidate_operation_id
-                )
-                if existing is not None:
-                    return (
-                        candidate_operation_id,
-                        candidate_digest,
-                        _append_result_from_committed(existing),
-                        mapping_version,
+                for candidate_roles in candidate_role_sets:
+                    candidate_digest = observation_operation_digest(
+                        task_id=runtime.task_id,
+                        session_id=runtime.session_id,
+                        writer_id=candidate_writer_id,
+                        logical_identity=logical_identity,
+                        draft_roles=candidate_roles,
+                        mapping_version=mapping_version,
                     )
+                    candidate_operation_id = self._stable_operation_id(candidate_digest)
+                    existing = await runtime.ledger.lookup_operation(
+                        candidate_writer_id, candidate_operation_id
+                    )
+                    if existing is not None:
+                        return (
+                            candidate_operation_id,
+                            candidate_digest,
+                            _append_result_from_committed(existing),
+                            mapping_version,
+                            candidate_roles,
+                        )
 
         digest = observation_operation_digest(
             task_id=runtime.task_id,
@@ -1139,7 +1198,13 @@ class ObservationCoordinator:
             command,
         )
         append_result = await run_prepared_append(runtime.ledger, mutation)
-        return operation_id, digest, append_result, MATERIALIZATION_MAPPING_VERSION
+        return (
+            operation_id,
+            digest,
+            append_result,
+            MATERIALIZATION_MAPPING_VERSION,
+            draft_roles,
+        )
 
     async def _append_inspection_snapshot(
         self,
@@ -1501,39 +1566,225 @@ class ObservationCoordinator:
         workspace: str,
         envelope: ObservationEnvelope,
         chunks: tuple[ObservationContentChunk, ...],
-    ) -> tuple[tuple[ObservationContentManifest, ...], bool, bool]:
-        """Assemble encrypted captured-content chunk objects before SQLite references them."""
+    ) -> tuple[
+        tuple[ObservationContentManifest, ...],
+        tuple[tuple[ObservationContentManifest, ...], ...],
+        bool,
+        bool,
+    ]:
+        """Assemble usable content and replay-only manifest candidates.
+
+        Authenticated, readable objects may strengthen the new materialization.
+        Stored manifest identities also reconstruct prior operation role sets,
+        but an unreadable object is replay-only and never grants captured
+        coverage to a new append.
+        """
 
         logical_identity = canonical_logical_identity(envelope)
+        content_identity = observation_content_identity(envelope)
         manifests: dict[str, ObservationContentManifest] = {}
+        replay_candidates: list[tuple[ObservationContentManifest, ...]] = []
         any_redacted = False
         any_unavailable = False
+
+        async def verify_manifest(
+            loaded: ObservationContentManifest,
+        ) -> tuple[ObservationContentManifest, bool, bool]:
+            """Rebind manifest metadata to the authenticated captured object."""
+
+            if loaded.envelope_digest is None:
+                return loaded, False, False
+            try:
+                ref = await runtime.objects.resolve_verified(
+                    loaded.object_id, loaded.envelope_digest
+                )
+                if (
+                    ref.metadata.kind is not ObjectKind.CAPTURED_CONTENT
+                    or ref.metadata.media_type != "application/vnd.yoetz.observation-content+json"
+                ):
+                    return loaded, False, False
+                raw = bytearray()
+                async for chunk in runtime.objects.open_verified(ref):
+                    raw.extend(chunk)
+                    if len(raw) > ref.plaintext_size:
+                        return loaded, False, False
+                material = bytes(raw)
+                if len(material) != ref.plaintext_size:
+                    return loaded, False, False
+                parsed = strict_json_parse(material)
+                expected_keys = {
+                    "format",
+                    "content_kind",
+                    "correlation_identity",
+                    "source_commitment",
+                    "media_type",
+                    "part_index",
+                    "part_count",
+                    "redacted",
+                    "content_b64",
+                }
+                if (
+                    not isinstance(parsed, Mapping)
+                    or set(parsed) != expected_keys
+                    or canonical_encode(parsed) != material
+                    or parsed.get("format") != "yoetz.observation-content/1"
+                    or type(parsed.get("content_b64")) is not str
+                    or type(parsed.get("redacted")) is not bool
+                ):
+                    return loaded, False, False
+                content = base64.b64decode(cast(str, parsed["content_b64"]), validate=True)
+                verified = ObservationContentManifest(
+                    object_id=ref.object_id,
+                    envelope_digest=ref.envelope_digest,
+                    content_kind=ObservationContentKind(cast(str, parsed["content_kind"])),
+                    part_index=cast(int, parsed["part_index"]),
+                    part_count=cast(int, parsed["part_count"]),
+                    redacted=cast(bool, parsed["redacted"]),
+                    content_digest="sha256:" + hashlib.sha256(content).hexdigest(),
+                    content_bytes=len(content),
+                    correlation_identity=cast(str, parsed["correlation_identity"]),
+                    source_commitment=cast(str, parsed["source_commitment"]),
+                )
+                return verified, True, verified == loaded
+            except Exception:
+                return loaded, False, False
+
+        async def note_unavailable() -> None:
+            await self._local(
+                partial(
+                    self.local.note_coverage_gap,
+                    workspace,
+                    ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+                )
+            )
+
+        def manifests_complete(candidate: tuple[ObservationContentManifest, ...]) -> bool:
+            parts: dict[
+                tuple[str, ObservationContentKind],
+                list[ObservationContentManifest],
+            ] = {}
+            for item in candidate:
+                if item.correlation_identity is None or item.source_commitment is None:
+                    return False
+                key = (item.correlation_identity, item.content_kind)
+                parts.setdefault(key, []).append(item)
+            return bool(parts) and all(
+                len({item.part_count for item in group}) == 1
+                and len({item.source_commitment for item in group}) == 1
+                and len({item.part_index for item in group}) == len(group)
+                and {item.part_index for item in group} == set(range(group[0].part_count))
+                for group in parts.values()
+            )
+
+        def legacy_source_group(item: ObservationContentManifest) -> str:
+            correlation = item.correlation_identity
+            if correlation is None or ":" not in correlation:
+                return item.object_id
+            return correlation.rsplit(":", 1)[0]
+
+        # Content chunks are intentionally ephemeral at the hook boundary. If
+        # the ledger commit wins a client-side timeout, the durable outbox retry
+        # carries only the structural envelope. Recover the manifests that the
+        # first attempt already bound to this normalized phase so equivalent
+        # hook/stream copies reconstruct the same original role set
+        # and find the committed operation (#539).
+        recovered_current = store.content_manifests_for_logical_identity(
+            workspace=workspace,
+            logical_identity=content_identity,
+        )
+        # Upgrade recovery for manifests written before issue #539 added the
+        # phase-scoped content identity. The matching source group may supply
+        # usable content; every legacy source group is also kept separately as
+        # lookup-only input, because an equivalent post-upgrade stream copy has
+        # a different source identity but the same committed operation roles.
+        recovered_legacy_same_source = store.content_manifests_for_logical_identity(
+            workspace=workspace,
+            logical_identity=logical_identity,
+            correlation_identity_prefix=f"{envelope.source_identity}:",
+        )
+        recovered_legacy_all = store.content_manifests_for_logical_identity(
+            workspace=workspace,
+            logical_identity=logical_identity,
+        )
+        legacy_groups: dict[str, list[ObservationContentManifest]] = {}
+        for item in recovered_legacy_all:
+            legacy_groups.setdefault(legacy_source_group(item), []).append(item)
+        recovered_sets: list[tuple[ObservationContentManifest, ...]] = []
+        for candidate in (
+            recovered_current,
+            recovered_legacy_same_source,
+            *(
+                tuple(sorted(group, key=lambda item: item.object_id.encode()))
+                for group in legacy_groups.values()
+            ),
+        ):
+            if candidate and candidate not in recovered_sets:
+                recovered_sets.append(candidate)
+        primary_recovered = recovered_current or recovered_legacy_same_source
+        for candidate in recovered_sets:
+            complete = manifests_complete(candidate)
+            if not complete:
+                any_unavailable = True
+                await note_unavailable()
+            raw_candidate = tuple(sorted(candidate, key=lambda item: item.object_id.encode()))
+            verified_candidate: list[ObservationContentManifest] = []
+            verified_rows: list[
+                tuple[ObservationContentManifest, ObservationContentManifest, bool, bool]
+            ] = []
+            for loaded in candidate:
+                verified, readable, exact = await verify_manifest(loaded)
+                verified_candidate.append(verified if readable else loaded)
+                verified_rows.append((loaded, verified, readable, exact))
+                if not exact:
+                    any_unavailable = True
+                    await note_unavailable()
+            candidate_usable = complete and all(
+                readable and exact and loaded.content_digest is not None
+                for loaded, _verified, readable, exact in verified_rows
+            )
+            if candidate is primary_recovered and candidate_usable:
+                for loaded, verified, readable, exact in verified_rows:
+                    # A legacy-unbound row was intentionally excluded by the
+                    # materializer that may already have committed it. Reading
+                    # its object now must not silently add a captured role.
+                    assert readable and exact and loaded.content_digest is not None
+                    manifests[verified.object_id] = verified
+                    any_redacted = any_redacted or verified.redacted
+            normalized_verified = tuple(
+                sorted(verified_candidate, key=lambda item: item.object_id.encode())
+            )
+            for replay_candidate in (raw_candidate, normalized_verified):
+                if replay_candidate and replay_candidate not in replay_candidates:
+                    replay_candidates.append(replay_candidate)
+
+        # Once a phase has durable manifests its materialized role set is
+        # frozen. Equivalent hook/stream copies may carry fresh ephemeral
+        # chunks, but adding those roles after a commit would change the stable
+        # operation identity. The existing set remains authoritative.
+        freeze_roles = bool(primary_recovered)
         for chunk in chunks:
             existing = store.content_manifest_object_id(
                 workspace=workspace,
-                logical_identity=logical_identity,
+                logical_identity=content_identity,
                 chunk=chunk,
             )
             if existing is not None:
+                if existing in manifests:
+                    continue
                 loaded = store.load_content_manifest(existing)
                 if loaded is not None and loaded.content_digest is not None:
-                    try:
-                        await runtime.objects.resolve_verified(
-                            loaded.object_id, loaded.envelope_digest
-                        )
-                    except Exception:
+                    verified, readable, exact = await verify_manifest(loaded)
+                    if not exact:
                         any_unavailable = True
-                        await self._local(
-                            partial(
-                                self.local.note_coverage_gap,
-                                workspace,
-                                ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
-                            )
-                        )
-                        continue
-                    manifests[loaded.object_id] = loaded
-                    any_redacted = any_redacted or loaded.redacted
+                        await note_unavailable()
+                    if readable and exact:
+                        manifests[verified.object_id] = verified
+                        any_redacted = any_redacted or verified.redacted
                     continue
+            if freeze_roles:
+                any_unavailable = True
+                await note_unavailable()
+                continue
             scan = prepare_persisted_plaintext(chunk.content)
             if not scan.persist:
                 any_redacted = any_redacted or scan.redacted
@@ -1583,7 +1834,7 @@ class ObservationCoordinator:
                 ref = await runtime.objects.finalize(staged)
             else:
                 loaded = store.load_content_manifest(existing)
-                if loaded is None:
+                if loaded is None or loaded.envelope_digest is None:
                     any_unavailable = True
                     await self._local(
                         partial(
@@ -1609,7 +1860,7 @@ class ObservationCoordinator:
                     continue
             store.record_content_manifest(
                 workspace=workspace,
-                logical_identity=logical_identity,
+                logical_identity=content_identity,
                 chunk=stored_chunk,
                 ref=ref,
                 content_digest="sha256:" + hashlib.sha256(safe_content).hexdigest(),
@@ -1635,30 +1886,30 @@ class ObservationCoordinator:
                 continue
             manifests[loaded.object_id] = loaded
 
-        # A duplicate ingest can arrive with durable object refs but without ephemeral chunks.
-        # Recover only refs whose trusted manifest row exists; arbitrary caller-supplied object
-        # ids never become observation-captured evidence.
+        usable_manifests = tuple(
+            sorted(manifests.values(), key=lambda item: item.object_id.encode())
+        )
+        if usable_manifests and not manifests_complete(usable_manifests):
+            # The first ingest can itself carry only a prefix of a multipart
+            # value. Persisting that prefix helps a later exact retry, but it
+            # cannot become immutable captured evidence on its own.
+            usable_manifests = ()
+            any_unavailable = True
+            await note_unavailable()
+
+        # Durable refs are assertions from the incoming envelope, not authority
+        # to borrow a manifest from another phase. Correct phase-bound refs were
+        # already recovered above; every other ref weakens coverage.
         for ref in envelope.content_object_refs:
-            if not ref.startswith("obj_") or ref in manifests:
+            if not ref.startswith("obj_") or any(
+                item.object_id == ref for item in usable_manifests
+            ):
                 continue
-            loaded = store.load_content_manifest(ref)
-            if loaded is not None:
-                try:
-                    await runtime.objects.resolve_verified(loaded.object_id, loaded.envelope_digest)
-                except Exception:
-                    any_unavailable = True
-                    await self._local(
-                        partial(
-                            self.local.note_coverage_gap,
-                            workspace,
-                            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
-                        )
-                    )
-                    continue
-                manifests[loaded.object_id] = loaded
-                any_redacted = any_redacted or loaded.redacted
+            any_unavailable = True
+            await note_unavailable()
         return (
-            tuple(sorted(manifests.values(), key=lambda item: item.object_id.encode())),
+            usable_manifests,
+            tuple(replay_candidates),
             any_redacted,
             any_unavailable,
         )

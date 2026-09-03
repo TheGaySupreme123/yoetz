@@ -347,6 +347,8 @@ class FakeRuntime:
             "reasoning_effort": reasoning_effort,
         }
 
+    subscription_login_reused: bool = False
+
     async def setup_codex_subscription(
         self,
         executable: str,
@@ -364,6 +366,7 @@ class FakeRuntime:
             "plan_type": "plus",
             "model_available": True,
             "process_cleanup": "terminated",
+            "login_reused": self.subscription_login_reused and not switch_account,
         }
 
     async def codex_subscription_status(self) -> dict[str, object]:
