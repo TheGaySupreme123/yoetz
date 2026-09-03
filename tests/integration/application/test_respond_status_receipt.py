@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Literal, cast
 
@@ -72,6 +73,7 @@ from yoetz.domain.values import (
     event_id,
     evidence_id,
     finding_id,
+    object_id,
     result_id,
     session_id,
     timestamp_from_datetime,
@@ -2231,6 +2233,77 @@ async def _drain_observation_work_sequence(
     )
 
 
+async def _drain_host_observation_gaps(
+    app: Application,
+    runtime: _WorkflowRuntime,
+    started: StartInternalResult,
+    *,
+    seed: int,
+    expected_frontier: int,
+):
+    """Append an observation whose structured event is readable but captured bytes are absent."""
+
+    ledger, objects = next(iter(runtime.resources.values()))
+    now = app.clock.now_utc()
+    captured_object_id = object_id(protocol_id("obj_", seed + 2))
+    payload = EvidenceRecordedPayload(
+        evidence_id(protocol_id("evd_", seed + 3)),
+        EvidenceKind.ARTIFACT,
+        EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+        timestamp_from_datetime(now),
+        captured_object_id=captured_object_id,
+        content_digest="sha256:" + "9" * 64,
+        description="The host captured content but the frozen bytes are unavailable.",
+    )
+    encoded = canonical_encode(encode_payload(payload))
+    metadata = ObjectMetadata(
+        ObjectKind.EVENT_PAYLOAD, media_type_for("evidence_recorded"), started.task_id, now
+    )
+    staged = await objects.stage(ObjectSource(data=encoded, declared_size=len(encoded)), metadata)
+    payload_ref = await objects.finalize(staged)
+    coverage = replace(
+        coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+        ledger_freshness=LedgerFreshness.REDACTED_GAP,
+        known_gaps=(
+            "content_unselected",
+            "host_outcome_unavailable",
+            "unpaired_event",
+        ),
+    )
+    return await ledger.append_batch(
+        AppendCommand(
+            started.task_id,
+            started.session_id,
+            started.writer_id,
+            protocol_id("req_", seed),
+            OperationKind.PUBLISH_WORK,
+            _DIGEST,
+            expected_frontier,
+            (
+                AppendEntry(
+                    EventDraft(
+                        event_id(protocol_id("evt_", seed + 1)),
+                        EventSchema("evidence_recorded", "1.0.0"),
+                        timestamp_from_datetime(now),
+                        (),
+                        payload,
+                        (captured_object_id,),
+                        (),
+                    ),
+                    observation_author(),
+                    payload_ref,
+                    payload_ref.commitment,
+                    metadata.media_type,
+                    payload_ref.plaintext_size,
+                    PublicationChannel.HOOK_OBSERVED,
+                    coverage,
+                    "projected",
+                ),
+            ),
+        )
+    )
+
+
 def _drained_finding(subject_event_id: str, frontier: Frontier, seed: int) -> Finding:
     kind = FindingKind.LEDGER_STALE_OR_INCOMPLETE
     return Finding(
@@ -2772,6 +2845,203 @@ async def _findings_view(
         )
     )
     return cast(StatusFindingsPageModel, status.page)
+
+
+@pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
+async def test_host_observation_gaps_do_not_keep_repaired_action_finding_current(
+    ledger_backend: Literal["memory", "sqlite"],
+) -> None:
+    """Issue #538: unrelated host gaps limit coverage, not deterministic resolution."""
+
+    app, runtime, _ = _build_app(seed_offset=29, ledger_backend=ledger_backend)
+    started = await app.start(start_request(5000, title="Host-gap finding resolution"))
+    obligation_a = protocol_id("obl_", 5001)
+    obligation_b = protocol_id("obl_", 5002)
+    action_a = protocol_id("act_", 5003)
+    action_b = protocol_id("act_", 5004)
+    publish_wire: dict[str, JsonValue] = {
+        **_request_base(protocol_id("req_", 5005)),
+        "session_id": started.session_id,
+        "writer_id": started.writer_id,
+        "expected_frontier": _frontier(started.frontier),
+        "event_drafts": (
+            {
+                "event_id": protocol_id("evt_", 5006),
+                "schema": {"name": "plan_published", "version": "1.0.0"},
+                "occurred_at": "2026-07-19T12:00:00.000Z",
+                "causal_parents": (),
+                "payload": {
+                    "plan_version": 1,
+                    "summary": "Exercise action/result integrity under host coverage gaps.",
+                    "obligation_refs": (obligation_a, obligation_b),
+                },
+                "artifact_refs": (),
+                "evidence_refs": (),
+            },
+            *(
+                {
+                    "event_id": protocol_id("evt_", 5007 + offset),
+                    "schema": {"name": "obligation_published", "version": "1.0.0"},
+                    "occurred_at": "2026-07-19T12:00:00.000Z",
+                    "causal_parents": (),
+                    "payload": {
+                        "obligation_id": obligation,
+                        "description": f"Record result {offset + 1}.",
+                        "acceptance_criteria": "A linked result is recorded.",
+                        "evidence_expectation": "A result event.",
+                        "status": "open",
+                    },
+                    "artifact_refs": (),
+                    "evidence_refs": (),
+                }
+                for offset, obligation in enumerate((obligation_a, obligation_b))
+            ),
+            *(
+                {
+                    "event_id": protocol_id("evt_", 5009 + offset),
+                    "schema": {"name": "action_recorded", "version": "1.0.0"},
+                    "occurred_at": "2026-07-19T12:00:01.000Z",
+                    "causal_parents": (),
+                    "payload": {
+                        "action_id": action,
+                        "action_kind": "other",
+                        "description": f"Attempt result {offset + 1}.",
+                        "obligation_refs": (obligation,),
+                    },
+                    "artifact_refs": (),
+                    "evidence_refs": (),
+                }
+                for offset, (action, obligation) in enumerate(
+                    ((action_a, obligation_a), (action_b, obligation_b))
+                )
+            ),
+        ),
+    }
+    published = await app.publish_work(PublishWorkRequest.model_validate(publish_wire))
+    first_check = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 5011)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(published.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(first_check) is CheckCommitResult
+    action_finding = next(
+        item for item in first_check.findings if item.kind is FindingKind.ACTION_WITHOUT_RESULT
+    )
+    assert action_finding.coverage.ledger_freshness is LedgerFreshness.CURRENT
+    assert action_finding.coverage.known_gaps == ()
+
+    repaired = await app.publish_work(
+        PublishWorkRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 5012)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(first_check.result_frontier),
+                "event_drafts": (
+                    {
+                        "event_id": protocol_id("evt_", 5013),
+                        "schema": {"name": "result_recorded", "version": "1.0.0"},
+                        "occurred_at": "2026-07-19T12:00:02.000Z",
+                        "causal_parents": (),
+                        "payload": {
+                            "result_id": protocol_id("res_", 5014),
+                            "action_id": action_a,
+                            "outcome": "success",
+                            "summary": "The first action now has its result.",
+                        },
+                        "artifact_refs": (),
+                        "evidence_refs": (),
+                    },
+                ),
+            }
+        )
+    )
+    observed = await _drain_host_observation_gaps(
+        app,
+        runtime,
+        started,
+        seed=5015,
+        expected_frontier=int(repaired.result_frontier.sequence),
+    )
+    rechecked = await app.check(
+        CheckRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 5017)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(observed.result_frontier),
+                "mode": "deterministic_only",
+                "max_findings": "3",
+            }
+        )
+    )
+    assert type(rechecked) is CheckCommitResult
+    assert action_finding.finding_id not in {item.finding_id for item in rechecked.findings}
+    assert rechecked.coverage.ledger_freshness is LedgerFreshness.REDACTED_GAP
+    assert {
+        "captured_object_unavailable",
+        "content_unselected",
+        "host_outcome_unavailable",
+        "unpaired_event",
+    } <= set(rechecked.coverage.known_gaps)
+
+    history = await _findings_view(app, started, 5018, include_resolved=True)
+    by_id = {item.finding_id: item for item in history.items}
+    assert by_id[action_finding.finding_id].resolved is True
+    status = await app.status(
+        StatusRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 5019)),
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "view": "compact",
+                "limit": "10",
+            }
+        )
+    )
+    compact = cast(StatusCompactPageModel, status.page).items[0]
+    assert compact.receipt_blocking_finding_count == "0"
+    assert "receipt_findings_unresolved" not in status.closure_readiness.blocking_conditions
+
+    receipt = await app.receipt(
+        ReceiptRequest.model_validate(
+            {
+                **_request_base(protocol_id("req_", 5020)),
+                "task_id": started.task_id,
+                "session_id": started.session_id,
+                "writer_id": started.writer_id,
+                "expected_frontier": _frontier(rechecked.result_frontier),
+                "format": "json",
+                "include": "standard",
+                "redaction_profile": "full_local",
+            }
+        )
+    )
+    assert receipt.conclusion != "unresolved_findings_remain"
+    assert receipt.coverage.ledger_freshness is LedgerFreshness.REDACTED_GAP
+    assert {
+        "captured_object_unavailable",
+        "content_unselected",
+        "host_outcome_unavailable",
+        "unpaired_event",
+    } <= set(receipt.coverage.known_gaps)
+    document = cast(dict[str, JsonValue], receipt.document)
+    assert action_finding.finding_id in {
+        cast(str, cast(dict[str, JsonValue], row)["finding_id"])
+        for row in cast(list[JsonValue], document["findings"])
+    }
+    sections = {
+        cast(dict[str, JsonValue], section)["key"]: cast(dict[str, JsonValue], section)
+        for section in cast(list[JsonValue], document["sections"])
+    }
+    assert action_finding.finding_id in cast(list[str], sections["summary"]["items"])
 
 
 @pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))

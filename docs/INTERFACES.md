@@ -1406,16 +1406,28 @@ these hold: its recorded `subject_frontier` is at or after the finding's ingesti
 finding it returned is readable and none shares the row's issue key; `suppressed_count` is zero;
 the execution for the row's `(policy_id, policy_version)` is `run/completed`; its normalized
 `scope` is whole-case or names one of the row's `subject_refs`; its coverage `ledger_freshness` is
-not `stale_after_material_change|redacted_gap|unknown`; and its `known_gaps` lie within the
-proof class's closed tolerated set — for deterministic rows the semantic-review absence/weakness
-codes (`semantic_review_not_requested|semantic_review_not_configured|
+not `stale_after_material_change|unknown`; and its `known_gaps` lie within the proof class's closed
+tolerated set. `redacted_gap` also blocks by default. One deterministic-only exception admits it
+when the finding's own recorded coverage was readable and the check-wide gap set contains only
+tolerated codes including at least one host-observation code; this keeps unrelated host capture
+limits from making a structured-ledger repair permanently unprovable. For deterministic rows the
+tolerated set is the semantic-review absence/weakness codes
+(`semantic_review_not_requested|semantic_review_not_configured|
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 semantic_review_context_withheld|semantic_challenges_rejected|
 semantic_case_content_over_item_limit`) plus the evidence-strength codes
-(`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`);
-for `semantic_model_derived` rows only the evidence-strength codes, and the check must also record
-`succeeded/semantic_completed`. Any other gap — redacted or unavailable payloads and objects,
-missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
+(`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
+and the host-observation codes (`captured_object_unavailable|content_unselected|
+host_outcome_unavailable|unpaired_event`). Those host codes remain receipt coverage limitations;
+they only stop vetoing deterministic absence proof because deterministic packs judge structured
+event payloads and typed coverage, never captured-object bytes. If missing content matters to the
+rule, the completed pack re-fires the issue or returns its own coverage finding. The exception also
+requires the finding's original coverage to contain only the pre-existing semantic/evidence
+tolerances and to have freshness outside `stale_after_material_change|redacted_gap|unknown`.
+For `semantic_model_derived` rows only the evidence-strength codes are tolerated, and the check
+must also record
+`succeeded/semantic_completed`. Any other gap — redacted or unavailable payloads, redacted
+objects, missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
 both proof classes. A deterministic-only check therefore never resolves a semantic finding, and a
 weakened semantic review never resolves one either. A check that returns a finding again clears
 that row's proof; a resolved row is excluded from finding-ID reuse (`prior_finding_ids`), so a
