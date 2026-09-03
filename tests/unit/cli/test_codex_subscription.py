@@ -62,6 +62,62 @@ def _binding(executable: Path, home: Path):
     )
 
 
+async def _logged_out_probe(_profile: object) -> CodexRuntimeStatus:
+    """The pre-login readiness probe for a dedicated home Codex reports as logged out."""
+
+    return CodexRuntimeStatus(True, None, None, False, "terminated")
+
+
+def _stub_setup_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    binding: ExternalRuntimeProfileConfig,
+    written: list[object],
+) -> None:
+    """Replace every local persistence step of ``setup`` with recording stubs."""
+
+    def build_binding(**_kwargs: object) -> ExternalRuntimeProfileConfig:
+        return binding
+
+    def build_profile(_binding: ExternalRuntimeProfileConfig) -> object:
+        return object()
+
+    def write_binding(_config: YoetzConfig, **_kwargs: object) -> Path:
+        written.append(binding)
+        return tmp_path / "config.toml"
+
+    def snapshot(_path: Path) -> tuple[YoetzConfig, bytes | None]:
+        return YoetzConfig(), None
+
+    def preflight(*_args: object, **_kwargs: object) -> Path:
+        return tmp_path / "config.toml"
+
+    def prepare(_home: Path) -> None:
+        return None
+
+    monkeypatch.setattr(module, "_binding", build_binding)
+    monkeypatch.setattr(module, "_profile", build_profile)
+    monkeypatch.setattr(module, "_config_snapshot", snapshot)
+    monkeypatch.setattr(module, "preflight_config_write", preflight)
+    monkeypatch.setattr(module, "prepare_codex_home", prepare)
+    monkeypatch.setattr(module, "write_config_toml_if_unchanged", write_binding)
+
+
+async def _run_setup(
+    tmp_path: Path, *, switch_account: bool = False, config_path: Path | None = None
+) -> Mapping[str, object]:
+    return await module.codex_subscription_setup(
+        executable=tmp_path / "codex",
+        codex_home=tmp_path / "dedicated-home",
+        model="gpt-5.6-sol",
+        reasoning_effort="high",
+        login_mode="browser",
+        open_browser=False,
+        switch_account=switch_account,
+        config_path=config_path,
+    )
+
+
 def _write_codex_package_layout(
     root: Path,
     *,
@@ -413,6 +469,7 @@ async def test_setup_persists_binding_only_after_codex_confirms_chatgpt_readines
     async def login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
         return CodexRuntimeStatus(True, "chatgpt", "plus", True, "terminated")
 
+    monkeypatch.setattr(module, "codex_account_status", _logged_out_probe)
     monkeypatch.setattr(module, "codex_login", login)
     monkeypatch.setattr(module, "write_config_toml_if_unchanged", write_binding)
 
@@ -466,6 +523,7 @@ async def test_setup_failure_never_writes_a_binding(
     async def login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
         return CodexRuntimeStatus(True, None, None, False, "terminated")
 
+    monkeypatch.setattr(module, "codex_account_status", _logged_out_probe)
     monkeypatch.setattr(module, "codex_login", login)
     monkeypatch.setattr(module, "write_config_toml_if_unchanged", forbidden_write)
 
@@ -505,6 +563,7 @@ async def test_setup_preserves_a_concurrent_config_edit_during_login(
         target.write_text("# concurrent config edit\n", encoding="utf-8")
         return CodexRuntimeStatus(True, "chatgpt", "plus", True, "terminated")
 
+    monkeypatch.setattr(module, "codex_account_status", _logged_out_probe)
     monkeypatch.setattr(module, "codex_login", login)
 
     with pytest.raises(ValueError, match="config_preimage_mismatch"):
@@ -808,6 +867,253 @@ def test_guided_setup_offers_account_switch(
     assert any(item.startswith("Continue to Codex sign-in") for item in confirms)
     assert any("switch ChatGPT account" in item for item in confirms)
     assert captured == [True]
+
+
+@pytest.mark.anyio
+async def test_setup_reuses_an_already_signed_in_dedicated_home_without_a_login_challenge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The second setup against the same logged-in home must not open a sign-in (#534)."""
+
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+    written: list[object] = []
+    _stub_setup_persistence(monkeypatch, tmp_path, binding, written)
+    calls: list[str] = []
+
+    async def probe(_profile: object) -> CodexRuntimeStatus:
+        calls.append("account_status")
+        return CodexRuntimeStatus(True, "chatgpt", "plus", True, "terminated")
+
+    async def forbidden_login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
+        pytest.fail("a home Codex reports as signed in must not receive a new login challenge")
+
+    async def forbidden_logout(_profile: object) -> CodexRuntimeStatus:
+        pytest.fail("reuse must not log the dedicated home out")
+
+    monkeypatch.setattr(module, "codex_account_status", probe)
+    monkeypatch.setattr(module, "codex_login", forbidden_login)
+    monkeypatch.setattr(module, "codex_logout", forbidden_logout)
+
+    result = await _run_setup(tmp_path)
+
+    assert calls == ["account_status"]
+    assert written == [binding]
+    assert result["login_reused"] is True
+    assert result["auth_mode"] == "chatgpt"
+    assert result["model_available"] is True
+    assert result["process_cleanup"] == "terminated"
+
+
+@pytest.mark.anyio
+async def test_setup_reports_a_completed_login_as_not_reused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+    written: list[object] = []
+    _stub_setup_persistence(monkeypatch, tmp_path, binding, written)
+    calls: list[str] = []
+
+    async def probe(_profile: object) -> CodexRuntimeStatus:
+        calls.append("account_status")
+        return CodexRuntimeStatus(True, None, None, False, "terminated")
+
+    async def login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
+        calls.append("login")
+        return CodexRuntimeStatus(True, "chatgpt", "plus", True, "terminated")
+
+    monkeypatch.setattr(module, "codex_account_status", probe)
+    monkeypatch.setattr(module, "codex_login", login)
+
+    result = await _run_setup(tmp_path)
+
+    assert calls == ["account_status", "login"]
+    assert written == [binding]
+    assert result["login_reused"] is False
+
+
+@pytest.mark.anyio
+async def test_setup_signed_in_home_without_the_exact_model_still_takes_the_login_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Reuse needs the whole cell proven: a login without the model is not readiness."""
+
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+    written: list[object] = []
+    _stub_setup_persistence(monkeypatch, tmp_path, binding, written)
+    calls: list[str] = []
+
+    async def probe(_profile: object) -> CodexRuntimeStatus:
+        calls.append("account_status")
+        return CodexRuntimeStatus(True, "chatgpt", "plus", False, "terminated")
+
+    async def login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
+        calls.append("login")
+        return CodexRuntimeStatus(True, "chatgpt", "plus", False, "terminated")
+
+    monkeypatch.setattr(module, "codex_account_status", probe)
+    monkeypatch.setattr(module, "codex_login", login)
+
+    with pytest.raises(ValueError, match="codex_subscription_readiness_unproven"):
+        await _run_setup(tmp_path)
+
+    assert calls == ["account_status", "login"]
+    assert written == []
+
+
+@pytest.mark.anyio
+async def test_setup_switch_account_always_logs_out_and_signs_in_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+    written: list[object] = []
+    _stub_setup_persistence(monkeypatch, tmp_path, binding, written)
+    calls: list[str] = []
+
+    async def forbidden_probe(_profile: object) -> CodexRuntimeStatus:
+        pytest.fail("switching accounts must not consult the current login")
+
+    async def logout(_profile: object) -> CodexRuntimeStatus:
+        calls.append("logout")
+        return CodexRuntimeStatus(True, None, None, False, "terminated")
+
+    async def login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
+        calls.append("login")
+        return CodexRuntimeStatus(True, "chatgpt", "plus", True, "terminated")
+
+    monkeypatch.setattr(module, "codex_account_status", forbidden_probe)
+    monkeypatch.setattr(module, "codex_logout", logout)
+    monkeypatch.setattr(module, "codex_login", login)
+
+    result = await _run_setup(tmp_path, switch_account=True)
+
+    assert calls == ["logout", "login"]
+    assert written == [binding]
+    assert result["login_reused"] is False
+
+
+@pytest.mark.anyio
+async def test_setup_unconfirmed_probe_cleanup_fails_closed_before_login_or_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binding = _binding(tmp_path / "codex", tmp_path / "dedicated-home")
+    written: list[object] = []
+    _stub_setup_persistence(monkeypatch, tmp_path, binding, written)
+
+    async def probe(_profile: object) -> CodexRuntimeStatus:
+        return CodexRuntimeStatus(True, "chatgpt", "plus", True, "failed")
+
+    async def forbidden_login(*_args: object, **_kwargs: object) -> CodexRuntimeStatus:
+        pytest.fail("a probe whose process group is unconfirmed must not launch another child")
+
+    monkeypatch.setattr(module, "codex_account_status", probe)
+    monkeypatch.setattr(module, "codex_login", forbidden_login)
+
+    with pytest.raises(ValueError, match="codex_subscription_readiness_unproven"):
+        await _run_setup(tmp_path)
+
+    assert written == []
+
+
+class _SignedInAppServer:
+    """Fake app-server v2 runtime whose dedicated home Codex already reports as signed in."""
+
+    def __init__(self, profile: object) -> None:
+        self.profile = profile
+        self.workdir = Path("/private/empty-setup-attempt")
+        self.pending_notifications: list[dict[str, object]] = []
+        self.methods: list[str] = []
+        self.sent: list[dict[str, object]] = []
+
+    async def send(self, value: dict[str, object]) -> None:
+        self.sent.append(value)
+
+    async def request(
+        self, request_id: int, method: str, params: object, timeout: float
+    ) -> Mapping[str, object]:
+        del request_id, timeout
+        self.methods.append(method)
+        if method == "initialize":
+            return {
+                "codexHome": str(getattr(self.profile, "codex_home")),
+                "userAgent": "yoetz_semantic_evaluator/0.150.1",
+            }
+        if method == "account/read":
+            assert params == {"refreshToken": False}
+            return {"account": {"type": "chatgpt", "planType": "plus", "email": "x@y"}}
+        if method == "model/list":
+            return {
+                "data": [
+                    {
+                        "id": "gpt-5.6-sol",
+                        "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+                    }
+                ],
+                "nextCursor": None,
+            }
+        pytest.fail(f"unexpected app-server request {method}")
+
+    async def read(self, timeout: float) -> dict[str, object]:
+        del timeout
+        pytest.fail("a reused login must not wait on login notifications")
+
+
+@pytest.mark.anyio
+async def test_setup_against_fake_app_server_reads_account_and_never_starts_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End to end through the real adapter: ``account/read`` ready means no ``account/login/start``."""
+
+    from yoetz.adapters.providers import codex_app_server
+
+    executable = tmp_path / "codex"
+    home = tmp_path / "dedicated-home"
+    target = tmp_path / "config.toml"
+    target.write_text(_data_dir_config_text(tmp_path / "state"), encoding="utf-8")
+    binding = _binding(executable, home)
+    runtimes: list[_SignedInAppServer] = []
+
+    def build_binding(**_kwargs: object) -> ExternalRuntimeProfileConfig:
+        return binding
+
+    async def launch(profile: object) -> _SignedInAppServer:
+        runtime = _SignedInAppServer(profile)
+        runtimes.append(runtime)
+        return runtime
+
+    async def cleanup(value: object) -> str:
+        assert value is runtimes[-1]
+        return "terminated"
+
+    monkeypatch.setattr(module, "_binding", build_binding)
+    monkeypatch.setattr(codex_app_server, "_launch", launch)
+    monkeypatch.setattr(codex_app_server, "_cleanup", cleanup)
+
+    result = await _run_setup(tmp_path, config_path=target)
+
+    assert [runtime.methods for runtime in runtimes] == [
+        ["initialize", "account/read", "model/list"]
+    ]
+    assert "account/login/start" not in runtimes[0].methods
+    assert result["login_reused"] is True
+    assert result["auth_mode"] == "chatgpt"
+    assert (home / "config.toml").read_bytes() == codex_app_server.CODEX_EVALUATOR_CONFIG.encode()
+    rewritten = module._base_config(target)  # pyright: ignore[reportPrivateUsage]
+    assert rewritten.external_runtime is not None
+    assert rewritten.external_runtime.codex_home == str(home)
+    assert "x@y" not in json.dumps(result)
+
+
+def test_setup_rejects_a_reused_home_whose_config_differs_before_any_process(
+    tmp_path: Path,
+) -> None:
+    from yoetz.adapters.providers.codex_app_server import prepare_codex_home
+
+    home = tmp_path / "dedicated-home"
+    home.mkdir(mode=0o700)
+    (home / "config.toml").write_text('model = "other"\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="codex_runtime_config_conflict"):
+        prepare_codex_home(home)
 
 
 def _data_dir_config_text(data_dir: Path) -> str:

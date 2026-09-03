@@ -29,6 +29,16 @@ the machine on its own, authenticate the report author, or upgrade a digest into
   defaults are not a substitute because the normal target may relocate its config or storage.
 - Rollback of Yoetz state is deleting the isolation root: every artifact of the isolated runtime
   lives beneath it. Stop only processes the runner started, then remove the root.
+- Two Codex homes have different lifetimes. The **host** Codex home (the one carrying the plugin,
+  MCP activation, and hooks under test) is per run and lives beneath the run directory. The
+  **evaluator** home bound by `yoetz provider codex-subscription setup --codex-home <dir>` holds
+  Codex-owned ChatGPT OAuth state and no Yoetz identity, so it may be a stable owner-private
+  directory outside the isolation root that later runs pass again; `setup` then reuses the
+  existing sign-in (`login_reused: true`) instead of opening a new challenge. Record it through
+  its `codex_home_digest`; never use the ambient user Codex home or the host home for it, and log
+  it out with `yoetz provider codex-subscription disconnect`, not by deleting the root. Without an
+  explicit `--codex-home`, the default evaluator home resolves beneath the isolation root and is
+  therefore fresh — and asks for sign-in — on every run.
 - The exact worktree passed to Codex is also passed to plugin status, observation status, consent,
   mapping, drain, and session-stream reconciliation. Never substitute the primary checkout.
 - Observation consent is independent trusted-local authority. Do not copy its database row, reuse

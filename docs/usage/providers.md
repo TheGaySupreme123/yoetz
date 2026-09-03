@@ -50,9 +50,12 @@ executable, and exact SHA-256 digest; a direct native path does not bypass those
 
 Before opening a browser, Yoetz shows the resolved native executable and SHA-256 digest, Codex
 version, dedicated evaluator home, model and reasoning effort, OpenAI destination, unknown
-plan-specific data-use posture, privacy implications, and the reverse commands. The explicit
-confirmation starts Codex's documented browser login, which may remain open for its full 600-second
-window. Add `--device-code --no-open-browser` to use Codex's device-code flow instead; that flow
+plan-specific data-use posture, privacy implications, and the reverse commands. After the explicit
+confirmation, Yoetz first asks Codex whether that dedicated home is already signed in with the
+selected model available; if it is, the binding is written without a new sign-in and the result
+reports `login_reused: true`. Otherwise the confirmation starts Codex's documented browser login,
+which may remain open for its full 600-second window. `--switch-account` always logs the
+dedicated home out and signs in again. Add `--device-code --no-open-browser` to use Codex's device-code flow instead; that flow
 may remain open for its full 900-second window. Cancellation and timeout use bounded process-group,
 pipe, and task cleanup and return one closed diagnostic. Codex owns the login, refresh, credential
 file, and logout; Yoetz neither receives nor stores the OAuth credential.

@@ -1355,6 +1355,11 @@ class YoetzTui(App[int]):
                 *body,
                 "This will log out the dedicated home first, then open Codex sign-in.",
             )
+        else:
+            body = (
+                *body,
+                "A home Codex already reports signed in is reused without a new sign-in.",
+            )
         confirmed = await self.ask(
             ApprovalView(
                 name="codex-subscription-confirm",
@@ -1387,10 +1392,16 @@ class YoetzTui(App[int]):
         except RuntimeError_ as error:
             self._report(error)
             return
+        sign_in = (
+            "reused the existing Codex login"
+            if status.get("login_reused") is True
+            else "completed through Codex"
+        )
         self.say(
             Level.VERIFIED,
             "Codex subscription binding is ready",
             (
+                f"Sign-in: {sign_in}",
                 f"Auth mode: {status.get('auth_mode')}",
                 f"Plan: {status.get('plan_type') or 'not reported'}",
                 f"Model available: {status.get('model_available')}",

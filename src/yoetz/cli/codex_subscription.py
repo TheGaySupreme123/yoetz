@@ -385,6 +385,12 @@ def _profile(binding: ExternalRuntimeProfileConfig) -> CodexAppServerProfile:
     return CodexAppServerProfile.from_config(binding)
 
 
+def _already_ready(status: CodexRuntimeStatus) -> bool:
+    """Codex proved a ChatGPT login and the exact model/reasoning cell for this home."""
+
+    return status.runtime_ready and status.auth_mode == "chatgpt" and status.model_available
+
+
 def _safe_status(
     binding: ExternalRuntimeProfileConfig, status: CodexRuntimeStatus
 ) -> dict[str, JsonValue]:
@@ -423,12 +429,20 @@ async def codex_subscription_setup(
     switch_account: bool,
     config_path: Path | None = None,
 ) -> dict[str, JsonValue]:
-    """Validate the binding and its persistence, login through Codex, then persist it.
+    """Validate the binding and its persistence, prove or obtain Codex login, then persist it.
 
     Every deterministic local requirement — the exact runtime cell, the canonical target
     configuration, and a render-validated, lock-probed write of the staged binding — is proven
-    before the Codex login flow opens, so a configuration failure can never follow login side
+    before any Codex process starts, so a configuration failure can never follow login side
     effects (#520).
+
+    Login is Codex-owned state that lives once per dedicated home. Unless the caller asked to
+    switch accounts, the same structural probe ``status`` uses (app-server ``account/read`` with
+    ``refreshToken: false`` and ``model/list``) runs first; a home Codex already reports as
+    signed in with the exact model cell available is bound without a new ``account/login/start``
+    challenge (#534). Yoetz still never reads or copies ``auth.json``: readiness is only ever what
+    Codex itself answers. ``switch_account`` remains the explicit override that logs the home out
+    and signs in again.
     """
 
     binding = _binding(
@@ -448,10 +462,25 @@ async def codex_subscription_setup(
     )
     prepare_codex_home(codex_home)
     profile = _profile(binding)
+    login_reused = False
     if switch_account:
         logout_status = await codex_logout(profile)
         if logout_status.cleanup == "failed":
             raise ValueError("codex_logout_unconfirmed")
+        status: CodexRuntimeStatus | None = None
+    else:
+        status = await codex_account_status(profile)
+        if status.cleanup == "failed":
+            raise ValueError("codex_subscription_readiness_unproven")
+        if _already_ready(status):
+            login_reused = True
+            typer.echo("")
+            typer.echo(
+                "Codex reports this dedicated home is already signed in with the exact model "
+                "available; reusing it without a new sign-in."
+            )
+        else:
+            status = None
 
     def present(challenge: CodexLoginChallenge) -> None:
         typer.echo("")
@@ -463,9 +492,10 @@ async def codex_subscription_setup(
             if not webbrowser.open(challenge.url):
                 raise ValueError("codex_login_browser_unavailable")
 
-    status = await codex_login(profile, mode=login_mode, present_challenge=present)
-    if status.auth_mode != "chatgpt" or not status.model_available or status.cleanup == "failed":
-        raise ValueError("codex_subscription_readiness_unproven")
+    if status is None:
+        status = await codex_login(profile, mode=login_mode, present_challenge=present)
+        if not _already_ready(status) or status.cleanup == "failed":
+            raise ValueError("codex_subscription_readiness_unproven")
     _bounded_config_operation(
         lambda: write_config_toml_if_unchanged(
             external_runtime_binding_config(binding, base=base),
@@ -473,7 +503,9 @@ async def codex_subscription_setup(
             path=target,
         )
     )
-    return _safe_status(binding, status)
+    result = _safe_status(binding, status)
+    result["login_reused"] = login_reused
+    return result
 
 
 async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
@@ -518,10 +550,11 @@ async def prompt_codex_subscription_setup() -> dict[str, JsonValue]:
     typer.echo("  Yoetz receives no OAuth credential and cannot observe the upstream body")
     typer.echo(f"  disconnect: {preview['disconnect_command']}")
     typer.echo(f"  rollback only: {preview['rollback_command']}")
+    typer.echo("  a dedicated home Codex already reports signed in is reused without a new sign-in")
     if not typer.confirm("Continue to Codex sign-in?", default=False):
         raise ValueError("cancelled")
     switch_account = typer.confirm(
-        "Log out the dedicated home first (switch ChatGPT account)?",
+        "Log out the dedicated home first and sign in again (switch ChatGPT account)?",
         default=False,
     )
     return await codex_subscription_setup(

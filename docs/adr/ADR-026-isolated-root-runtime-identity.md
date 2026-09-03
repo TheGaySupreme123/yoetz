@@ -75,7 +75,13 @@ identity along with it, and nothing validates or proves it.
 
 Unsetting `YOETZ_ISOLATED_ROOT` restores ambient resolution with no residue: every artifact an
 isolated runtime creates lives beneath the root, so deleting the root is complete rollback and
-cannot touch unrelated user state. The packaged regression
+cannot touch unrelated user state. One explicit exemption (issue #534): a dedicated Codex
+evaluator home that the operator passes by path to `yoetz provider codex-subscription setup
+--codex-home` may live outside the root and be reused across runs. It holds Codex-owned OAuth
+state and no Yoetz identity, state, endpoint, or storage, so deleting the root still removes every
+Yoetz artifact; that home is reverse-stated by `yoetz provider codex-subscription disconnect`, and
+the parity gate still fails on any shared Yoetz identity. The default evaluator home (no explicit
+path) stays beneath the root. The packaged regression
 (`tests/packaging/test_isolated_root_boundary.py`) locks this: an isolated service run leaves the
 ambient home tree byte-identical before/after, an ambient client cannot reach the isolated
 singleton, and removing the root removes every trace.

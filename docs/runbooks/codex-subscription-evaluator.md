@@ -41,6 +41,25 @@ yoetz provider codex-subscription disconnect --accept
 yoetz provider codex-subscription rollback
 ```
 
+### Login lives once per dedicated home
+
+Codex owns the OAuth state of the dedicated home (`auth.json`, refresh, logout). `setup` therefore
+treats a sign-in as something to prove, not something to repeat (#534): after the local preflight
+and `prepare_codex_home`, it runs the same structural probe as `status` — app-server
+`account/read` with `refreshToken: false` followed by `model/list` — and, when Codex reports a
+ChatGPT account with the exact model/reasoning cell available, writes the binding and returns
+`login_reused: true` without issuing `account/login/start`. A logged-out home, a missing model, or
+an unproven cleanup still takes the ordinary login path or fails with its existing token; a
+dedicated home whose `config.toml` differs still fails `codex_runtime_config_conflict` before any
+process starts. `--switch-account` (the prompt-loop and `/provider` "switch account" choice) is
+the explicit override: it logs the home out through Codex and signs in again. Yoetz never reads,
+copies, or moves `auth.json`; readiness is only what Codex answers.
+
+The dedicated evaluator home may be reused across runs, including isolated dogfood runs, by
+passing the same owner-private directory to `--codex-home`. The parity report identifies it by
+its existing `codex_home_digest`. It must remain a dedicated home — never the ambient user Codex
+home and never the per-run host home — and `disconnect` remains the way to log it out.
+
 ## Selected executable resolution
 
 Pass one absolute selected path. The supported npm layouts are:
