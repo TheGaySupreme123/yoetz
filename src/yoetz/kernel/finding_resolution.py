@@ -4,9 +4,11 @@ A finding is a historical fact and stays visible forever. Whether it is *current
 fact, and only one kind of evidence may change it: a later deterministic check whose recorded
 state contains the finding, whose matching policy pack ran to completion with nothing suppressed,
 whose scope covers the finding's subject, whose coverage carries no weakening gap for the
-finding's proof class, and which did not return the same issue again. A response disposition
-never resolves a finding; it only answers it on the record. Weak, skipped, failed, capped, stale,
-unreadable, or non-overlapping checks do nothing, and nothing here ever strengthens coverage.
+finding's proof class, and which did not return the same issue again. A closed deterministic-only
+exception lets case-wide host-observation limitations remain on the receipt without vetoing clean
+structured-ledger proof. A response disposition never resolves a finding; it only answers it on
+the record. Weak, skipped, failed, capped, stale, unreadable, or non-overlapping checks do nothing,
+and nothing here ever strengthens coverage.
 
 Everything in this module is pure and replay-derived, so a receipt, a status counter, and a
 projection checkpoint all read the same fact.
@@ -64,10 +66,10 @@ _SEMANTIC_ONLY_GAPS: Final = frozenset(
 # was withheld, or its digest subject predates typed bindings. They bound how strong a receipt
 # can be — the receipt keeps reporting them — but they do not stop a policy pack from reading
 # the ledger state it judges, so they do not weaken the proof that an issue no longer fires.
-# Every other gap (redacted or unavailable payloads and objects, missing refs, unknown events,
-# completion-scope gaps, import ranges, and any code not named here) means the check could not
-# read or bound the material, and blocks both proof classes. The set is closed on purpose: a new
-# gap code blocks resolution until someone decides otherwise here.
+# Every other gap (redacted or unavailable payloads, redacted objects, missing refs, unknown
+# events, completion-scope gaps, import ranges, and any code not named here) means the check could
+# not read or bound the material, and blocks both proof classes. The set is closed on purpose: a
+# new gap code blocks resolution until someone decides otherwise here.
 _EVIDENCE_STRENGTH_GAPS: Final = frozenset(
     {
         "evidence_content_digest_only",
@@ -75,7 +77,25 @@ _EVIDENCE_STRENGTH_GAPS: Final = frozenset(
         "evidence_digest_subject_legacy_unknown",
     }
 )
-_DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = _SEMANTIC_ONLY_GAPS | _EVIDENCE_STRENGTH_GAPS
+# Host observation can leave case-wide limitations even when the deterministic policy's own
+# structured ledger inputs were readable. These codes keep bounding the receipt, but do not veto
+# absence proof for an already-recorded deterministic finding whose original coverage was itself
+# readable. ``captured_object_unavailable`` belongs here because deterministic packs judge event
+# payloads and their typed coverage, never captured-object bytes; if that absence matters to a
+# rule, the pack re-fires the issue or returns its own coverage finding. Event-payload loss and
+# source redaction remain excluded and therefore block.
+_HOST_OBSERVATION_GAPS: Final = frozenset(
+    {
+        "captured_object_unavailable",
+        "content_unselected",
+        "host_outcome_unavailable",
+        "unpaired_event",
+    }
+)
+_BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = _SEMANTIC_ONLY_GAPS | _EVIDENCE_STRENGTH_GAPS
+_DETERMINISTIC_PROOF_TOLERATED_GAPS: Final = (
+    _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS | _HOST_OBSERVATION_GAPS
+)
 _SEMANTIC_PROOF_TOLERATED_GAPS: Final = _EVIDENCE_STRENGTH_GAPS
 _UNPROVEN_FRESHNESS: Final = frozenset(
     {
@@ -122,6 +142,38 @@ def _policy_completed(check: CheckRecordedPayload, finding: Finding) -> bool:
     )
 
 
+def _deterministic_freshness_proven(
+    finding: Finding,
+    check: CheckRecordedPayload,
+    gaps: frozenset[str],
+) -> bool:
+    """Whether aggregate freshness still proves this deterministic issue absent.
+
+    ``redacted_gap`` is normally unproven. The only exception is a closed host-observation class
+    on a check of a deterministic finding whose own recorded proof was readable. This prevents an
+    unrelated unavailable capture from making repair impossible while keeping unknown freshness,
+    stale state, unreadable original proof, and every unclassified gap fail-closed.
+    """
+
+    freshness = check.coverage.ledger_freshness
+    host_limited = bool(gaps & _HOST_OBSERVATION_GAPS)
+    if host_limited:
+        finding_coverage = finding.coverage
+        finding_gaps = frozenset(finding_coverage.known_gaps)
+        if (
+            finding_coverage.ledger_freshness in _UNPROVEN_FRESHNESS
+            or not finding_gaps <= _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS
+        ):
+            return False
+    if freshness not in _UNPROVEN_FRESHNESS:
+        return True
+    return (
+        freshness is LedgerFreshness.REDACTED_GAP
+        and host_limited
+        and gaps <= _DETERMINISTIC_PROOF_TOLERATED_GAPS
+    )
+
+
 def qualifying_check_resolves(
     finding: Finding,
     finding_source_frontier: int,
@@ -151,19 +203,21 @@ def qualifying_check_resolves(
     if not _scope_covers(check, finding):
         return False
     coverage = check.coverage
-    if coverage.ledger_freshness in _UNPROVEN_FRESHNESS:
-        return False
     gaps = frozenset(coverage.known_gaps)
     if finding.origin is FindingOrigin.SEMANTIC_MODEL_DERIVED:
         # The semantic review is the proof: it must have completed, and nothing may have
         # weakened what it reviewed.
         if (
-            check.semantic_status is not SemanticStatus.SUCCEEDED
+            coverage.ledger_freshness in _UNPROVEN_FRESHNESS
+            or not gaps <= _SEMANTIC_PROOF_TOLERATED_GAPS
+            or check.semantic_status is not SemanticStatus.SUCCEEDED
             or check.semantic_reason is not SemanticReason.SEMANTIC_COMPLETED
         ):
             return False
-        return gaps <= _SEMANTIC_PROOF_TOLERATED_GAPS
-    return gaps <= _DETERMINISTIC_PROOF_TOLERATED_GAPS
+        return True
+    return gaps <= _DETERMINISTIC_PROOF_TOLERATED_GAPS and _deterministic_freshness_proven(
+        finding, check, gaps
+    )
 
 
 def apply_check_resolution(

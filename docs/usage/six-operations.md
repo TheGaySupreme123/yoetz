@@ -88,9 +88,14 @@ Answers a finding: accept and act, supply evidence, revise the claim, dispute wi
 state an unresolved limitation. **A response does not erase a finding**, and no disposition
 resolves one: an actionable finding keeps the receipt conclusion at `unresolved_findings_remain`
 until a later qualifying check finds the same issue absent from the repaired record, whichever
-disposition is recorded. A resolved finding stays visible as history. Recheck after any material edit,
-evidence change, or plan change. A readable response to a finding returned by the current check
-does not require a recheck; a redacted or unreadable response does.
+disposition is recorded. The check must cover the finding, run its owning pack to completion with
+nothing suppressed, and read the proof inputs. For a deterministic finding with readable original
+coverage, case-wide `captured_object_unavailable`, `content_unselected`,
+`host_outcome_unavailable`, and `unpaired_event` limits remain receipt gaps but do not veto clean
+structured-ledger proof; they never relax semantic proof. A resolved finding stays visible as
+history. Recheck after any material edit, evidence change, or plan change. A readable response to a
+finding returned by the current check does not require a recheck; a redacted or unreadable response
+does.
 
 ### `status`
 Reads current state — use it after a resume, a compaction, a handoff, or any uncertainty about what
@@ -114,7 +119,10 @@ separately: `unanswered_finding_count` is response work still to do, while
 `receipt_blocking_finding_count` is the current actionable finding set that prevents a clean
 receipt even after every response; only a later qualifying check of the repaired record shrinks
 it. Accordingly, `findings_unanswered` is answered; `receipt_findings_unresolved` is repaired and
-rechecked, and should not trigger another response loop.
+rechecked once, and should not trigger another response loop. After that recheck, read the finding's
+`resolved` value. If the issue re-fires, or it does not re-fire but remains `resolved=false` because
+the check did not qualify, stop rechecking unchanged state, request the bounded receipt, and
+disclose the current finding and limiting coverage.
 
 ### `receipt`
 Projects the honest summary of what was checked, at what coverage, and what remains open. Formats:

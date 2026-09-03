@@ -27,6 +27,8 @@ from yoetz.cli.observe_hooks import (
     map_hook_payload_to_envelope,
 )
 from yoetz.domain.observation import (
+    ObservationContentChunk,
+    ObservationContentKind,
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestResult,
@@ -1163,7 +1165,7 @@ def _drain_envelope(store: LocalObservationStore, session: str, identity: str, o
 
 
 @pytest.mark.anyio
-async def test_drain_quarantines_permanent_and_keeps_retryable(
+async def test_drain_quarantines_terminal_head_and_delivers_next_row(
     tmp_path: Path,
 ) -> None:
     store = LocalObservationStore(_state=tmp_path)
@@ -1175,21 +1177,24 @@ async def test_drain_quarantines_permanent_and_keeps_retryable(
     store.enqueue_outbox(workspace, "sess-drain", perm)
     store.enqueue_outbox(workspace, "sess-drain", retry)
     assert store.pending_outbox_count(workspace) == 2
+    calls = 0
 
     class Client:
         async def observation_ingest(self, body: object, *, deadline_ms: int):
+            nonlocal calls
             del deadline_ms
-            envelope = body["envelope"]  # type: ignore[index]
-            if envelope["source_identity"] == perm.source_identity:
+            del body
+            calls += 1
+            if calls == 1:
                 result = ObservationIngestResult(
                     ObservationIngestDisposition.REJECTED,
-                    ObservationGapCode.CONSENT_REVOKED.value,
+                    ObservationGapCode.LEDGER_REJECTED.value,
                     None,
                 )
             else:
                 result = ObservationIngestResult(
-                    ObservationIngestDisposition.REJECTED,
-                    ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                    ObservationIngestDisposition.DUPLICATE,
+                    None,
                     None,
                 )
             return observation_ingest_result_to_json(result)
@@ -1205,14 +1210,66 @@ async def test_drain_quarantines_permanent_and_keeps_retryable(
         workspace_commitment=workspace,
         codex_session_id="sess-drain",
         connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
     )
 
-    # Permanent -> quarantined (never dropped); retryable -> still pending.
+    # Permanent -> quarantined (never dropped); the next lane row still delivers.
     assert store.quarantined_count(workspace) == 1
     assert store.list_quarantine(workspace)[0][1].source_identity == perm.source_identity
-    pending = store.list_pending_outbox(workspace)
-    assert len(pending) == 1
-    assert pending[0][1].source_identity == retry.source_identity
+    await observe_hooks_module._drain_outbox(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="sess-drain",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+    assert calls == 2
+    assert store.list_pending_outbox(workspace) == ()
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.LEDGER_REJECTED.value in status.gaps
+    assert ObservationGapCode.OUTBOX_QUARANTINED.value in status.gaps
+    assert ObservationGapCode.SERVICE_UNAVAILABLE.value not in status.gaps
+    diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"ledger_rejected"' in diagnostics
+    assert '"reason":"service_unavailable"' not in diagnostics
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("control_reason", "retryable", "expected"),
+    [
+        ("frame_invalid", False, ObservationGapCode.LEDGER_REJECTED.value),
+        ("service_unavailable", True, ObservationGapCode.SERVICE_UNAVAILABLE.value),
+        ("vault_locked", False, ObservationGapCode.VAULT_LOCKED.value),
+    ],
+)
+async def test_service_ingest_preserves_control_error_retryability(
+    tmp_path: Path,
+    control_reason: str,
+    retryable: bool,
+    expected: str,
+) -> None:
+    """#540: transport failures do not make terminal control errors immortal."""
+
+    from yoetz.ports.control import ControlError
+
+    store = LocalObservationStore(_state=tmp_path)
+    envelope = _drain_envelope(store, "control-error", "hook:control-error", 1)
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            raise ControlError(control_reason, retryable=retryable)
+
+    result = await observe_hooks_module._try_service_ingest(  # pyright: ignore[reportPrivateUsage]
+        Client(),  # type: ignore[arg-type]
+        "control-error",
+        envelope,
+        deadline_ms=100,
+    )
+
+    assert result.disposition is ObservationIngestDisposition.REJECTED
+    assert result.reason == expected
 
 
 @pytest.mark.anyio
@@ -1333,6 +1390,76 @@ async def test_drain_budget_stops_without_advancing_unfinished_row(tmp_path: Pat
     assert store.list_pending_outbox_rows(workspace)[0].attempts == 0
     diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
     assert '"reason":"drain_budget_exhausted"' in diagnostics
+
+
+@pytest.mark.anyio
+async def test_drain_timeout_after_commit_replays_and_acknowledges_pending_row(
+    tmp_path: Path,
+) -> None:
+    """#539: client timeout loses only the reply, not replayability."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session_id = "committed-timeout"
+    store.bind_codex_session(workspace, session_id)
+    envelope = _drain_envelope(store, session_id, "hook:committed-timeout", 1)
+    store.enqueue_outbox(workspace, session_id, envelope)
+    calls = 0
+    committed = False
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            nonlocal calls, committed
+            del deadline_ms
+            calls += 1
+            if calls == 1:
+                assert body["content_chunks"]  # type: ignore[index]
+                committed = True
+                await asyncio.sleep(1)
+                raise AssertionError("the hook deadline must cancel the lost reply")
+            assert committed is True
+            assert "content_chunks" not in body  # type: ignore[operator]
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    chunk = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        "corr-1",
+        f"hmac-sha256:{'12' * 32}",
+        "text/plain",
+        0,
+        1,
+        b"captured output",
+    )
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id=session_id,
+        connect=connect,  # type: ignore[arg-type]
+        content_by_source_identity={envelope.source_identity: (chunk,)},
+        _state=tmp_path,
+        budget_seconds=0.01,
+    )
+    assert store.list_pending_outbox_rows(workspace)[0].attempts == 0
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id=session_id,
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+        budget_seconds=1.0,
+    )
+    assert calls == 2
+    assert store.list_pending_outbox_rows(workspace) == ()
 
 
 @pytest.mark.anyio

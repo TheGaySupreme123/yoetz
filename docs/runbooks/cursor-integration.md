@@ -312,6 +312,15 @@ defects retain the internal-error boundary. Fixed remediation omits the absolute
 sandboxed Cursor-agent result does not establish unrestricted Cursor-terminal behavior; record
 those proof cells separately.
 
+Shared drain terminalization is host-neutral: `ledger_rejected` means the ready service rejected
+one envelope non-retryably, so that row is retained in quarantine and later rows proceed. A row
+also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
+designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible
+in `quarantine_causes`, aggregate `delivery_causes`, and gaps;
+`pending_delivery_causes` names only pending rows. A hook-driven drain also writes
+`hook_diagnostics`, while manual and supervisor drains remain visible through status. Neither case
+is repaired by restarting a service that already reports ready.
+
 Measured on 2026-08-28 with Cursor Agent CLI `2026.08.25-3e8eec8` (payload `cursor_version`;
 `cursor-agent --version` printed `2026.08.11-e8db854`) loading the native plugin through
 `--plugin-dir` in an isolated cell: the plugin-sourced `sessionStart` hook ran with `$PWD` equal to

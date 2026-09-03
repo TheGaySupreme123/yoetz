@@ -961,7 +961,11 @@ async def _try_service_ingest(
         reason = (
             ObservationGapCode.VAULT_LOCKED.value
             if error.reason == "vault_locked"
-            else ObservationGapCode.SERVICE_UNAVAILABLE.value
+            else (
+                ObservationGapCode.SERVICE_UNAVAILABLE.value
+                if error.retryable
+                else ObservationGapCode.LEDGER_REJECTED.value
+            )
         )
         return ObservationIngestResult(ObservationIngestDisposition.REJECTED, reason, None)
     except Exception:
@@ -1035,6 +1039,7 @@ async def _drain_outbox_leased(
 
     from yoetz.application.observation_drain import (
         EXPECTED_OBSERVATION_BACKPRESSURE_REASONS,
+        WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS,
         ObservationDrainAction,
         route_observation_ingest,
     )
@@ -1094,13 +1099,6 @@ async def _drain_outbox_leased(
     #   struggling, so the pass yields after a few.
     # Re-attempting every row of a permanently-undeliverable backlog burned
     # the whole drain budget per hook forever — the recurrence tax of #211.
-    global_stop = frozenset(
-        {
-            ObservationGapCode.VAULT_LOCKED.value,
-            "observation_disabled",
-            "paused",
-        }
-    )
     skipped_sessions: set[str] = set()
     consecutive_unavailable = 0
     # The hook owns a bounded slice; the service sweeper owns bulk delivery.
@@ -1137,7 +1135,7 @@ async def _drain_outbox_leased(
                 if progressed == 0:
                     record_hook_diagnostic("drain_budget_exhausted", event_name, _state=_state)
                 break
-            decision = route_observation_ingest(result)
+            decision = route_observation_ingest(result, row=row)
             # One batch per row, opened only after this row's RPC returned and
             # closed before the next one: the acknowledgement is never durable
             # ahead of the ingest it acknowledges, and the store lock never
@@ -1170,7 +1168,7 @@ async def _drain_outbox_leased(
             if decision.reason is not None and not expected_backpressure:
                 record_hook_diagnostic(decision.reason, event_name, _state=_state)
             if decision.action is ObservationDrainAction.RETRY:
-                if decision.reason in global_stop:
+                if decision.reason in WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS:
                     break
                 # The lane's head row stays pending; skipping to a later row of
                 # the same session would deliver it out of order (#272), so the

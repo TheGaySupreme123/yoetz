@@ -1,7 +1,9 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-08-30 for issue #302 (captured observation ledger evidence) and issue #331
+**Amended:** 2026-09-03 for issues #539 (content-bearing committed replay) and #540 (terminal
+ingest rejection and retry ceiling); 2026-08-30 for issue #302 (captured observation ledger
+evidence) and issue #331
 (frontier-motion recovery across rewinds and restarts, decision 11); 2026-08-29 for
 issue #445 (standing-grant parks are not an observation barrier); 2026-08-27 for issue #418 rollout
 replay repairs; 2026-08-18 for the
@@ -15,7 +17,8 @@ for moderator-approved issue #244 and the reopened issue #216 recurrence.
 `src/yoetz/kernel/policies/observation_advice.py`, `src/yoetz/service/ready_composition.py`, and
 `src/yoetz/adapters/integrations/observation_local.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
-issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #302, #320, #322, #326, #331, and #445.
+issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #302, #320, #322, #326, #331,
+#445, #539, and #540.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -231,6 +234,32 @@ unsupported claims and unbounded duplicate findings.
     redaction remains visible as `content_redacted`; and bounded inspection prefixes retain
     `truncated_payload`. Replays check current 1.4 identities and the 1.3/1.2 legacy operation
     identities before staging, preserving append-only upgrade behavior.
+
+17. Captured-content chunks remain ephemeral at the hook boundary, but their encrypted manifests
+    are durable and indexed by a phase identity derived from the canonical host call plus normalized
+    phase. Equivalent hook/stream copies share that identity; Pre/Post/unpaired siblings do not.
+    Before materialization, ingest queries both that current identity and the legacy canonical
+    identity. The matching legacy source group may supply usable content; every legacy source group
+    remains a separate lookup-only candidate so a post-upgrade stream copy can find a hook commit
+    without combining sibling phases. It authenticates the object kind, media type, canonical
+    envelope, inner bytes, and multipart completeness. Only a complete, readable, digest-bound set
+    may strengthen a new materialization. Incomplete, unbound, orphaned, contradictory, or
+    unreadable stored metadata is replay-only: it may reconstruct old role tuples for completed-
+    operation lookup, but it never grants captured coverage or enters a new append. Once a phase
+    has durable manifests, an equivalent-source retry cannot expand the stable role set. The
+    content-independent core role tuple is also a replay candidate: if core-only materialization
+    committed before content arrived, the later content-bearing copy reuses that operation and
+    records `content_capture_unavailable` rather than reminting core event IDs or retroactively
+    upgrading coverage. Thus the role-scoped `obs-ledger/1.4.0` lookup safely handles either arrival
+    order. Missing, incomplete, contradictory, or unreadable objects remain
+    the explicit `content_capture_unavailable` gap; they are never inferred. A non-retryable public
+    error from ingest is terminal `ledger_rejected`, quarantines only that envelope, and never projects service
+    availability failure. Retryable reasons retain their existing scope, but 128 consecutive
+    rejections with the same reason terminally quarantine the row; designed `operation_pending`
+    back-pressure and workspace-global pause/vault/disabled gates remain pending under their
+    existing recovery contracts. Quarantine stays visible and lets the next FIFO row proceed. This ceiling
+    is a defensive bound for future catch-all classification defects, not evidence that a retryable
+    failure became successful (issues #539 and #540).
 
 ## Security and privacy consequences
 
