@@ -2764,7 +2764,10 @@ def provider_codex_subscription_setup(
         if switch_account:
             typer.echo("  existing sign-in: logged out first, then a new Codex sign-in")
         else:
-            typer.echo("  existing sign-in: reused when Codex reports the home already signed in")
+            typer.echo(
+                "  existing sign-in: reused when Codex reports the home already signed in;"
+                " pass --switch-account to sign in again"
+            )
         if not accept:
             if not (sys.stdin.isatty() and sys.stdout.isatty()) or not typer.confirm(
                 "Continue to Codex sign-in?", default=False

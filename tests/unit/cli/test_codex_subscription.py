@@ -869,6 +869,104 @@ def test_guided_setup_offers_account_switch(
     assert captured == [True]
 
 
+def test_guided_setup_discloses_login_reuse_before_the_confirmation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The prompt-loop screen must say a signed-in home is reused before asking to continue."""
+
+    prompts = iter(
+        [
+            str(tmp_path / "codex"),
+            str(tmp_path / "home"),
+            "gpt-5.6-sol",
+            "high",
+            "browser",
+        ]
+    )
+    disclosed_before_confirm: list[bool] = []
+
+    def prompt(message: str, **_kwargs: object) -> str:
+        del message
+        return next(prompts)
+
+    def confirm(message: str, **_kwargs: object) -> bool:
+        if message.startswith("Continue to Codex sign-in"):
+            disclosed_before_confirm.append(
+                "reused without a new sign-in" in capsys.readouterr().out
+            )
+            return True
+        return False
+
+    async def setup(**_kwargs: object) -> dict[str, object]:
+        return {"auth_mode": "chatgpt", "login_reused": False}
+
+    def preview(**_kwargs: object) -> dict[str, str]:
+        return {
+            "executable_path": "/opt/codex",
+            "executable_sha256": "sha256:" + "a" * 64,
+            "runtime_version": "0.150.1",
+            "capability_cell_sha256": "sha256:" + "b" * 64,
+            "capability_evidence_expires_at": "2026-11-30T00:00:00Z",
+            "codex_home": "/home",
+            "disconnect_command": "yoetz provider codex-subscription disconnect",
+            "rollback_command": "yoetz provider codex-subscription rollback",
+        }
+
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_discovery.discover_codex_binaries", list)
+    monkeypatch.setattr("typer.prompt", prompt)
+    monkeypatch.setattr("typer.confirm", confirm)
+    monkeypatch.setattr(module, "codex_subscription_preview", preview)
+    monkeypatch.setattr(module, "codex_subscription_setup", setup)
+
+    import anyio
+
+    anyio.run(module.prompt_codex_subscription_setup)
+
+    assert disclosed_before_confirm == [True]
+
+
+def test_cli_setup_discloses_reuse_and_names_its_override_before_the_confirmation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The `setup` notice must state reuse and the flag that forces a fresh sign-in (#534)."""
+
+    from yoetz.cli.app import app
+
+    def resolve(selected: Path) -> tuple[Path, str, str]:
+        return selected, "sha256:" + "a" * 64, "openai-codex-npm-darwin-arm64-0.150.1"
+
+    async def setup(**_kwargs: object) -> dict[str, object]:
+        return {"schema": "yoetz.codex-subscription-status/1", "login_reused": True}
+
+    async def restart() -> dict[str, object]:
+        return {"reachable": True, "state": "ready", "vault_mode": None}
+
+    monkeypatch.setattr(module, "resolve_supported_codex_executable", resolve)
+    monkeypatch.setattr(module, "codex_subscription_setup", setup)
+    monkeypatch.setattr("yoetz.cli.setup.restart_service_for_semantic_composition", restart)
+
+    runner = CliRunner()
+    arguments = [
+        "provider",
+        "codex-subscription",
+        "setup",
+        "--executable",
+        str(tmp_path / "codex"),
+        "--accept",
+        "--no-open-browser",
+    ]
+    reuse = runner.invoke(app, arguments)
+    switch = runner.invoke(app, [*arguments, "--switch-account"])
+
+    assert reuse.exit_code == 0
+    assert "existing sign-in: reused when Codex reports the home already signed in" in reuse.stdout
+    assert "--switch-account" in reuse.stdout
+    assert '"login_reused":true' in reuse.stdout
+    assert switch.exit_code == 0
+    assert "existing sign-in: logged out first, then a new Codex sign-in" in switch.stdout
+    assert "reused when Codex reports" not in switch.stdout
+
+
 @pytest.mark.anyio
 async def test_setup_reuses_an_already_signed_in_dedicated_home_without_a_login_challenge(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

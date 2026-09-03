@@ -1,7 +1,10 @@
 # ADR-026 — Exact-target isolated-root runtime identity
 
 **Status:** Accepted (2026-09-01), maintainer-authorized in
-[issue #518](https://github.com/TheGaySupreme123/yoetz/issues/518).
+[issue #518](https://github.com/TheGaySupreme123/yoetz/issues/518); amended 2026-09-03,
+maintainer-authorized in [issue #534](https://github.com/TheGaySupreme123/yoetz/issues/534), to
+exempt one explicitly passed dedicated Codex evaluator home from the "every artifact lives beneath
+the root" reverse state.
 **Implemented by:** `src/yoetz/config/paths.py` (`isolated_root()`, `runtime_dir()`,
 `ISOLATED_ROOT_ENV`), `src/yoetz/adapters/control/unix_socket.py`, `src/yoetz/config/load.py`,
 `src/yoetz/service/client.py`, `src/yoetz/cli/isolation_status.py`, the
@@ -78,10 +81,12 @@ isolated runtime creates lives beneath the root, so deleting the root is complet
 cannot touch unrelated user state. One explicit exemption (issue #534): a dedicated Codex
 evaluator home that the operator passes by path to `yoetz provider codex-subscription setup
 --codex-home` may live outside the root and be reused across runs. It holds Codex-owned OAuth
-state and no Yoetz identity, state, endpoint, or storage, so deleting the root still removes every
-Yoetz artifact; that home's reverse state is `yoetz provider codex-subscription disconnect`, and
-the parity gate still fails on any shared Yoetz identity. The default evaluator home (no explicit
-path) stays beneath the root. The packaged regression
+state plus the exact Codex `config.toml` Yoetz writes into it, and no Yoetz identity, state,
+endpoint, or storage, so deleting the root still removes every Yoetz identity artifact and the
+parity gate still fails on any shared Yoetz identity. That home is reverse-stated by
+`yoetz provider codex-subscription disconnect` — Codex logout plus binding removal — and then by
+the operator deleting the directory they provisioned; root deletion is not its rollback. The
+default evaluator home (no explicit path) stays beneath the root. The packaged regression
 (`tests/packaging/test_isolated_root_boundary.py`) locks this: an isolated service run leaves the
 ambient home tree byte-identical before/after, an ambient client cannot reach the isolated
 singleton, and removing the root removes every trace.

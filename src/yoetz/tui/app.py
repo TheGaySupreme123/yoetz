@@ -1359,6 +1359,7 @@ class YoetzTui(App[int]):
             body = (
                 *body,
                 "A home Codex already reports signed in is reused without a new sign-in.",
+                'Choose "Switch Codex ChatGPT account" instead to sign in as someone else.',
             )
         confirmed = await self.ask(
             ApprovalView(

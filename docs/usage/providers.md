@@ -57,8 +57,9 @@ reports `login_reused: true`. Otherwise the confirmation starts Codex's document
 which may remain open for its full 600-second window. `--switch-account` always logs the
 dedicated home out and signs in again. Add `--device-code --no-open-browser` to use Codex's
 device-code flow instead; that flow may remain open for its full 900-second window. Cancellation
-and timeout use bounded process-group, pipe, and task cleanup and return one closed diagnostic. Codex owns the login, refresh, credential
-file, and logout; Yoetz neither receives nor stores the OAuth credential.
+and timeout use bounded process-group, pipe, and task cleanup and return one closed diagnostic.
+Codex owns the login, refresh, credential file, and logout; Yoetz neither receives nor stores the
+OAuth credential.
 
 A timeout, denial, malformed completion, process exit, cancellation, or later write failure never
 persists a partial Yoetz binding. If Codex completed login before a later failure, Codex may retain
