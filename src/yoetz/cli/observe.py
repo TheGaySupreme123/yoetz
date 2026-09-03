@@ -8,6 +8,7 @@ import functools
 import os
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, ParamSpec, Protocol, cast
 
@@ -248,9 +249,24 @@ def _activation_state(
         return "unknown"
 
 
+@dataclass(frozen=True, slots=True)
+class _DeliveryFacts:
+    undelivered: int
+    pending_causes: dict[str, int]
+    last_drain: str
+    mapping_present: bool
+    # Receipt time of the oldest pending row (its hook received the host event
+    # then), or None when nothing is pending. Read with ``last_successful_drain``:
+    # a recent oldest row means delivery is keeping pace with the producer; an
+    # old one under a fresh drain means the backlog is being worked through
+    # from the head; an old one under a stale drain means delivery is stuck and
+    # ``pending_delivery_causes`` names why (#564).
+    oldest_pending_receipt: str | None
+
+
 def _delivery_facts(
     store: LocalObservationStore, commitment: str, *, state_root: Path | None
-) -> tuple[int, dict[str, int], str, bool]:
+) -> _DeliveryFacts:
     rows = store.list_pending_outbox_rows(commitment)
     causes: dict[str, int] = {}
     for row in rows:
@@ -262,7 +278,14 @@ def _delivery_facts(
         load_mapping(session, _state=state_root) is not None
         for session in store.codex_sessions_for_workspace(commitment)
     )
-    return len(rows), dict(sorted(causes.items())), last, mapping_present
+    oldest = min((row.envelope.receipt_time for row in rows), default=None)
+    return _DeliveryFacts(
+        undelivered=len(rows),
+        pending_causes=dict(sorted(causes.items())),
+        last_drain=last,
+        mapping_present=mapping_present,
+        oldest_pending_receipt=None if oldest is None else oldest.wire,
+    )
 
 
 @_bounded_operation("status")
@@ -282,9 +305,11 @@ def observe_status(
         store.refresh_advice(commitment)
     status = store.status(ObservationStatusQuery(commitment))
     snapshot = store.advice_snapshot_for(commitment)
-    undelivered, pending_delivery_causes, last_drain, mapping_present = _delivery_facts(
-        store, commitment, state_root=_state
-    )
+    delivery = _delivery_facts(store, commitment, state_root=_state)
+    undelivered = delivery.undelivered
+    pending_delivery_causes = delivery.pending_causes
+    last_drain = delivery.last_drain
+    mapping_present = delivery.mapping_present
     quarantine_depth, quarantine_evicted, quarantine_reclaimed = store.quarantine_facts(commitment)
     # Per-reason depth, so a destroyed-and-replaced-by-gap event (e.g. cursor_stale, #272)
     # is visible as its cause instead of hiding inside one opaque depth number.
@@ -343,6 +368,7 @@ def observe_status(
                 "undelivered_count": undelivered,
                 "delivery_causes": delivery_causes,
                 "pending_delivery_causes": pending_delivery_causes,
+                "oldest_pending_receipt": delivery.oldest_pending_receipt,
                 "last_successful_drain": last_drain,
                 "quarantine_count": quarantine_depth,
                 "quarantine_causes": quarantine_causes,
@@ -363,6 +389,7 @@ def observe_status(
         "undelivered": (
             f"{undelivered} (cause: "
             f"{','.join(f'{key}={value}' for key, value in pending_delivery_causes.items()) or 'none'}; "
+            f"oldest: {delivery.oldest_pending_receipt or 'none'}; "
             f"last successful drain: {last_drain})"
         ),
         "quarantine": (
@@ -396,132 +423,219 @@ def observe_status(
     return 0
 
 
+_DRAIN_TERMINAL_DRAINED: Final = "drained"
+_DRAIN_TERMINAL_RETRY_PENDING: Final = "retry_pending"
+_DRAIN_TERMINAL_SERVICE_UNAVAILABLE: Final = "service_unavailable"
+_DRAIN_TERMINAL_PASS_LIMIT: Final = "pass_limit"
+
+
+@dataclass(slots=True)
+class _DrainTally:
+    attempted: int = 0
+    acknowledged: int = 0
+    retry_pending: int = 0
+    quarantined: int = 0
+    reasons: dict[str, int] = field(default_factory=dict[str, int])
+
+    def note_reason(self, reason: str, count: int = 1) -> None:
+        self.reasons[reason] = self.reasons.get(reason, 0) + count
+
+    def summary(self, *, passes: int, pending_after: int, terminal: str) -> JsonObject:
+        return JsonObject(
+            {
+                "attempted": self.attempted,
+                "acknowledged": self.acknowledged,
+                "retry_pending": self.retry_pending,
+                "quarantined": self.quarantined,
+                "reasons": JsonObject(dict(sorted(self.reasons.items()))),
+                "passes": passes,
+                "pending_after": pending_after,
+                "terminal": terminal,
+            }
+        )
+
+
+def _collect_deliverable(
+    store: LocalObservationStore, workspaces: tuple[str, ...], tally: _DrainTally
+) -> list[tuple[str, ObservationOutboxRow]]:
+    """Snapshot every pending row, quarantining setup-probe rows on the way."""
+
+    deliverable: list[tuple[str, ObservationOutboxRow]] = []
+    for commitment in workspaces:
+        for row in store.list_pending_outbox_rows(commitment):
+            if row.codex_session_id == _SETUP_PROBE_SESSION:
+                if store.quarantine_outbox_row(commitment, row, "setup_probe"):
+                    tally.quarantined += 1
+                    tally.note_reason("setup_probe")
+                continue
+            deliverable.append((commitment, row))
+    return deliverable
+
+
+async def _drain_pass(
+    store: LocalObservationStore,
+    client: _DrainClient,
+    deliverable: list[tuple[str, ObservationOutboxRow]],
+    tally: _DrainTally,
+) -> int:
+    """Attempt one FIFO pass over the snapshot; return the rows it resolved.
+
+    A retryable rejection retires its lane for the pass (delivering a later
+    row of the same session would advance the ingest cursor past the failed
+    head, #272), and a workspace-global reason stops that workspace.
+    """
+
+    resolved = 0
+    retired_lanes: set[tuple[str, str]] = set()
+    stopped_workspaces: set[str] = set()
+    for commitment, row in deliverable:
+        lane = (commitment, row.codex_session_id)
+        if commitment in stopped_workspaces or lane in retired_lanes:
+            continue
+        tally.attempted += 1
+        try:
+            raw = await client.observation_ingest(
+                observation_ingest_request_to_json(
+                    ObservationIngestRequest(
+                        codex_session_id=row.codex_session_id,
+                        envelope=row.envelope,
+                    )
+                ),
+                deadline_ms=_DRAIN_DEADLINE_MS,
+            )
+            result = observation_ingest_result_from_json(raw)
+        except ControlError as exc:
+            reason = (
+                ObservationGapCode.VAULT_LOCKED.value
+                if exc.reason == "vault_locked"
+                else (
+                    ObservationGapCode.SERVICE_UNAVAILABLE.value
+                    if exc.retryable
+                    else ObservationGapCode.LEDGER_REJECTED.value
+                )
+            )
+            result = ObservationIngestResult(ObservationIngestDisposition.REJECTED, reason, None)
+        except Exception:
+            result = ObservationIngestResult(
+                ObservationIngestDisposition.REJECTED,
+                ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                None,
+            )
+        decision = route_observation_ingest(result, row=row)
+        updated = store.bump_outbox_row_attempt(commitment, row, reason=decision.reason)
+        if updated is None:
+            retired_lanes.add(lane)
+            continue
+        if decision.reason is not None:
+            tally.note_reason(decision.reason)
+            if decision.reason not in EXPECTED_OBSERVATION_BACKPRESSURE_REASONS:
+                store.note_coverage_gap(commitment, decision.reason)
+        if decision.action is ObservationDrainAction.RETRY:
+            retired_lanes.add(lane)
+            if decision.reason == ObservationGapCode.MAPPING_MISSING.value:
+                moved = store.quarantine_ended_unmapped_session(
+                    commitment,
+                    row.codex_session_id,
+                    decision.reason,
+                )
+                if moved:
+                    tally.quarantined += moved
+                    resolved += moved
+                    continue
+            tally.retry_pending += 1
+            if decision.reason is not None:
+                store.note_outbox_session_reason(
+                    commitment,
+                    row.codex_session_id,
+                    decision.reason,
+                )
+            if decision.reason in WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS:
+                stopped_workspaces.add(commitment)
+        elif decision.action is ObservationDrainAction.QUARANTINE:
+            if store.quarantine_outbox_row(
+                commitment,
+                updated,
+                decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
+            ):
+                tally.quarantined += 1
+                resolved += 1
+        elif store.acknowledge_outbox_row(commitment, updated):
+            tally.acknowledged += 1
+            resolved += 1
+    return resolved
+
+
 async def _drain_observation_async(
     *,
     workspace: str | None,
     _state: Path | None,
     connect: DrainConnector = cast(DrainConnector, connect_service_on_demand),
 ) -> tuple[int, JsonObject]:
+    """Drain to a documented terminal condition without sleeping (#564).
+
+    One pass retires a lane at its first retryable head, so a single pass over
+    a busy backlog cleared only the rows ahead of the first back-pressure
+    answer and stopped. Passes now repeat while the previous one resolved at
+    least one row and rows remain; the pass count is bounded by the backlog
+    size at entry, so a still-running producer cannot keep this loop alive.
+    ``terminal`` names why the loop ended:
+
+    - ``drained``: no pending row remains in the selected workspaces;
+    - ``retry_pending``: a full pass resolved nothing; every remaining lane
+      head is retryable and ``reasons`` names why (a check barrier's
+      ``operation_pending`` clears when the check completes, ``mapping_missing``
+      when the session maps or ends, ``paused``/``vault_locked`` when lifted);
+    - ``service_unavailable``: no connection could be opened (exit 20);
+    - ``pass_limit``: passes kept resolving rows until the bound, so a producer
+      is still adding rows faster than they were listed; run again once it
+      stops.
+    """
+
     store = LocalObservationStore(_state=_state)
     if workspace is None:
         workspaces = store.pending_workspaces()
     else:
         workspaces = (store.workspace_commitment(str(_resolve_workspace(workspace))),)
-    attempted = acknowledged = retry_pending = quarantined = 0
-    reasons: dict[str, int] = {}
-    deliverable: list[tuple[str, ObservationOutboxRow]] = []
-    for commitment in workspaces:
-        for row in store.list_pending_outbox_rows(commitment):
-            if row.codex_session_id == _SETUP_PROBE_SESSION:
-                if store.quarantine_outbox_row(commitment, row, "setup_probe"):
-                    quarantined += 1
-                    reasons["setup_probe"] = reasons.get("setup_probe", 0) + 1
-                continue
-            deliverable.append((commitment, row))
-    client = None
-    if deliverable:
-        try:
-            client = await connect(ControlClientKind.CLI)
-        except Exception:
-            reasons[ObservationGapCode.SERVICE_UNAVAILABLE.value] = len(deliverable)
-            return 20, JsonObject(
-                {
-                    "attempted": 0,
-                    "acknowledged": acknowledged,
-                    "retry_pending": len(deliverable),
-                    "quarantined": quarantined,
-                    "reasons": JsonObject(dict(sorted(reasons.items()))),
-                }
-            )
+    tally = _DrainTally()
+    passes = 0
+    terminal = _DRAIN_TERMINAL_DRAINED
+    client: _DrainClient | None = None
     try:
-        retired_lanes: set[tuple[str, str]] = set()
-        stopped_workspaces: set[str] = set()
-        for commitment, row in deliverable:
-            lane = (commitment, row.codex_session_id)
-            if commitment in stopped_workspaces or lane in retired_lanes:
-                continue
-            attempted += 1
-            try:
-                raw = await client.observation_ingest(  # type: ignore[union-attr]
-                    observation_ingest_request_to_json(
-                        ObservationIngestRequest(
-                            codex_session_id=row.codex_session_id,
-                            envelope=row.envelope,
-                        )
-                    ),
-                    deadline_ms=_DRAIN_DEADLINE_MS,
-                )
-                result = observation_ingest_result_from_json(raw)
-            except ControlError as exc:
-                reason = (
-                    ObservationGapCode.VAULT_LOCKED.value
-                    if exc.reason == "vault_locked"
-                    else (
-                        ObservationGapCode.SERVICE_UNAVAILABLE.value
-                        if exc.retryable
-                        else ObservationGapCode.LEDGER_REJECTED.value
+        deliverable = _collect_deliverable(store, workspaces, tally)
+        pass_limit = max(1, len(deliverable))
+        while deliverable:
+            if client is None:
+                try:
+                    client = await connect(ControlClientKind.CLI)
+                except Exception:
+                    tally.note_reason(
+                        ObservationGapCode.SERVICE_UNAVAILABLE.value, len(deliverable)
                     )
-                )
-                result = ObservationIngestResult(
-                    ObservationIngestDisposition.REJECTED, reason, None
-                )
-            except Exception:
-                result = ObservationIngestResult(
-                    ObservationIngestDisposition.REJECTED,
-                    ObservationGapCode.SERVICE_UNAVAILABLE.value,
-                    None,
-                )
-            decision = route_observation_ingest(result, row=row)
-            updated = store.bump_outbox_row_attempt(commitment, row, reason=decision.reason)
-            if updated is None:
-                retired_lanes.add(lane)
-                continue
-            if decision.reason is not None:
-                reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
-                if decision.reason not in EXPECTED_OBSERVATION_BACKPRESSURE_REASONS:
-                    store.note_coverage_gap(commitment, decision.reason)
-            if decision.action is ObservationDrainAction.RETRY:
-                retired_lanes.add(lane)
-                if decision.reason == ObservationGapCode.MAPPING_MISSING.value:
-                    moved = store.quarantine_ended_unmapped_session(
-                        commitment,
-                        row.codex_session_id,
-                        decision.reason,
+                    tally.retry_pending += len(deliverable)
+                    return 20, tally.summary(
+                        passes=passes,
+                        pending_after=len(deliverable),
+                        terminal=_DRAIN_TERMINAL_SERVICE_UNAVAILABLE,
                     )
-                    if moved:
-                        quarantined += moved
-                        continue
-                retry_pending += 1
-                if decision.reason is not None:
-                    store.note_outbox_session_reason(
-                        commitment,
-                        row.codex_session_id,
-                        decision.reason,
-                    )
-                if decision.reason in WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS:
-                    stopped_workspaces.add(commitment)
-            elif decision.action is ObservationDrainAction.QUARANTINE:
-                if store.quarantine_outbox_row(
-                    commitment,
-                    updated,
-                    decision.reason or ObservationGapCode.SERVICE_UNAVAILABLE.value,
-                ):
-                    quarantined += 1
-            elif store.acknowledge_outbox_row(commitment, updated):
-                acknowledged += 1
+            passes += 1
+            resolved = await _drain_pass(store, client, deliverable, tally)
+            if resolved == 0:
+                terminal = _DRAIN_TERMINAL_RETRY_PENDING
+                break
+            if passes >= pass_limit:
+                deliverable = _collect_deliverable(store, workspaces, tally)
+                if deliverable:
+                    terminal = _DRAIN_TERMINAL_PASS_LIMIT
+                break
+            deliverable = _collect_deliverable(store, workspaces, tally)
     finally:
         if client is not None:
             with contextlib.suppress(Exception):
                 await client.close()
-    return 0, JsonObject(
-        {
-            "attempted": attempted,
-            "acknowledged": acknowledged,
-            "retry_pending": retry_pending,
-            "quarantined": quarantined,
-            "reasons": JsonObject(dict(sorted(reasons.items()))),
-        }
-    )
+    pending_after = sum(store.pending_outbox_count(commitment) for commitment in workspaces)
+    if pending_after == 0:
+        terminal = _DRAIN_TERMINAL_DRAINED
+    return 0, tally.summary(passes=passes, pending_after=pending_after, terminal=terminal)
 
 
 @_bounded_operation("drain")
@@ -542,7 +656,9 @@ def drain_observation(
         typer.echo(
             "observation drain: "
             f"attempted={summary['attempted']} acknowledged={summary['acknowledged']} "
-            f"retry_pending={summary['retry_pending']} quarantined={summary['quarantined']}"
+            f"retry_pending={summary['retry_pending']} quarantined={summary['quarantined']} "
+            f"passes={summary['passes']} pending_after={summary['pending_after']} "
+            f"terminal={summary['terminal']}"
         )
         reasons = summary["reasons"]
         assert isinstance(reasons, Mapping)

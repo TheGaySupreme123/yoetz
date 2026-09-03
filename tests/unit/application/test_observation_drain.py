@@ -979,3 +979,49 @@ async def test_sweep_quarantines_repeated_retry_reason_and_unblocks_lane(
     quarantined = store.list_quarantine(workspace)
     assert quarantined[0][1].source_identity == poisoned.source_identity
     assert quarantined[0][2] == ObservationGapCode.SERVICE_UNAVAILABLE.value
+
+
+@pytest.mark.anyio
+async def test_sweep_yields_its_partial_summary_when_the_budget_is_spent(tmp_path: Path) -> None:
+    """#564: a pass that runs long returns what it resolved instead of being cancelled."""
+
+    store = _BlockingStore(_state=tmp_path)
+    store.delay = 0.05
+    workspace, outcomes = _accepted_backlog(store, tmp_path, rows=6)
+    sweeper = ObservationOutboxSweeper(store, _Coordinator(outcomes), budget_seconds=0.2)
+
+    summary = await asyncio.wait_for(sweeper.sweep(), timeout=5.0)
+
+    assert 1 <= summary.acknowledged < 6
+    assert summary.attempted == summary.acknowledged
+    assert store.pending_outbox_count(workspace) == 6 - summary.acknowledged
+    # The remaining rows are still the lane's FIFO tail; an unbudgeted pass finishes them.
+    rest = await ObservationOutboxSweeper(store, _Coordinator(outcomes)).sweep()
+    assert rest.acknowledged == 6 - summary.acknowledged
+    assert store.pending_outbox_count(workspace) == 0
+
+
+def test_sweep_budget_must_be_a_positive_float_or_absent(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    coordinator = _Coordinator({})
+    ObservationOutboxSweeper(store, coordinator, budget_seconds=None)
+    ObservationOutboxSweeper(store, coordinator, budget_seconds=0.5)
+    for invalid in (0.0, -1.0, 5, True):
+        with pytest.raises(ValueError, match="observation_sweep_budget_invalid"):
+            ObservationOutboxSweeper(
+                store,
+                coordinator,
+                budget_seconds=invalid,  # type: ignore[arg-type]
+            )
+
+
+def test_sweep_budget_yields_under_the_daemon_deadline() -> None:
+    """The budget is only useful if it fires before the deadline that discards the summary."""
+
+    from yoetz.application.observation_drain import DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS
+    from yoetz.service import daemon as daemon_module
+
+    deadline = daemon_module._OBSERVATION_SWEEP_DEADLINE_SECONDS  # pyright: ignore[reportPrivateUsage]
+    assert DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS < deadline
+    # Room for one slow ingest plus its store bookkeeping to land after the budget check.
+    assert deadline - DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS >= 5.0

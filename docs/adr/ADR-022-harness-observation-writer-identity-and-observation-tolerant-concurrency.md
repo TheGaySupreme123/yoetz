@@ -261,6 +261,31 @@ unsupported claims and unbounded duplicate findings.
     is a defensive bound for future catch-all classification defects, not evidence that a retryable
     failure became successful (issues #539 and #540).
 
+18. Yoetz observing its own MCP workflow is delivered in proportion to distinct evidence (issue
+    #564). Every host hook (Codex, Claude Code, Cursor) and the Codex session stream record Yoetz's
+    own `start`, `publish_work`, `check`, `respond`, `status`, `receipt`, and `read_guidance` calls
+    exactly like any other tool, and the hook process that records them is the same process that
+    drains the outbox, so the prescribed workflow's own status/respond/check traffic produced two
+    outbox rows plus a content capture per call and starved its own delivery. The service already
+    holds the authoritative record of every Yoetz-owned call it served, so the hook adapter and the
+    stream reconciler ingest such envelopes into the bounded local observation store
+    unconditionally but enqueue them for delivery only when they carry evidence the service cannot
+    know from serving the call: an explicit host failure or denial (any phase, any Yoetz tool), or
+    the post-event of a mutation (`start`, `publish_work`, `check`, `respond`). The pre-event of
+    every Yoetz-owned call and the post-event of a Yoetz-owned read (`status`, `receipt`,
+    `read_guidance`) without a stated failure stay local; pairing bookkeeping is unaffected, so a
+    delivered post-event still materializes its action. Yoetz-owned tool arguments and results are
+    never captured as tool input/output content: they are already durable in the ledger the call
+    read or wrote. Tool identity derives from the one registry tuple rendered into every host
+    spelling; a name that merely resembles a Yoetz tool is ordinary. Like decision 10 this is a
+    delivery-volume policy, not a coverage limitation, so it records no gap. On the consumer side,
+    the service sweeper yields with its partial summary on a budget under the daemon's sweep
+    deadline, so progress made under a backlog is never discarded as a timeout, and the manual
+    `observe drain` repeats bounded passes while a pass resolves rows and reports a terminal
+    condition (`drained`, `retry_pending`, `service_unavailable`, `pass_limit`) instead of stopping
+    at the first retryable lane head. `observe status` reports the receipt time of the oldest
+    pending row beside the last successful drain so convergence is readable from one call.
+
 ## Security and privacy consequences
 
 The observation writer id is derivable from public task/session identifiers, but derivation grants
@@ -279,7 +304,9 @@ Cooperative work can retain a frontier across observation-only delivery, while r
 concurrency still conflicts. Check cases make progress by temporarily applying back-pressure to the
 outbox rather than weakening verdict binding. Observation can contribute evidence and bounded
 advice without impersonating the agent or minting the same standing finding indefinitely. Routine
-reads retain their local observation evidence without producing an unbounded task-ledger trail, and
+reads retain their local observation evidence without producing an unbounded task-ledger trail,
+Yoetz's own tool calls are observed without recursively feeding the outbox they are drained
+from, and
 cooperative writers learn about meaningful observation-authored frontier motion before their next
 state-sensitive operation. Captured objects contribute immutable byte identity without being
 upgraded to validation, reproduction, or disclosure authority. Observation-advice policy `0.1.2`

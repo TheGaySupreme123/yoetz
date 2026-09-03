@@ -27,12 +27,14 @@ from yoetz.adapters.integrations.codex_lifecycle import (
 from yoetz.adapters.integrations.hook_spool import HookSpool
 from yoetz.adapters.integrations.observation_local import (
     HOOK_MAPPING_VERSION,
+    YOETZ_OWNED_TOOL_NAMES,
     YOETZ_TOOL_NAMES,
     AdviceDelivery,
     FrontierMotionNotice,
     LocalObservationConsent,
     LocalObservationStore,
     ObservationOutboxRow,
+    self_observation_deliverable,
 )
 from yoetz.cli import hook_io
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic, record_hook_timing
@@ -744,6 +746,16 @@ def _visible_content_chunks(
     from yoetz.observability.privacy import redact_sensitive_content
 
     selected: list[tuple[ObservationContentKind, str, bytes]] = []
+    if (
+        event_name in {"PreToolUse", "PostToolUse"}
+        and _token_or_none(payload.get("tool_name")) in YOETZ_OWNED_TOOL_NAMES
+    ):
+        # Yoetz's own tool arguments and results are already durable in the
+        # ledger the call wrote to or read from. Capturing them back as tool
+        # input/output evidence re-encrypted every ``status`` projection the
+        # agent read and was the heaviest part of the self-observation loop
+        # (#564). Nothing is omitted that the service does not hold.
+        return (), False
 
     def add(kind: ObservationContentKind, label: str, value: JsonValue) -> None:
         if type(value) is str and value:
@@ -1856,7 +1868,12 @@ def handle_observe(
 
             # Local durable ingest first (never plaintext transcript spool).
             local_result = store.ingest(envelope)
-            if local_result.disposition.value == "accepted":
+            # A Yoetz-owned tool call is delivered only when it carries evidence
+            # the service does not already hold from serving it (#564); the
+            # envelope itself is always retained locally above.
+            if local_result.disposition.value == "accepted" and self_observation_deliverable(
+                resolved_event, envelope.structural_payload
+            ):
                 overflow = store.enqueue_outbox(workspace_commitment, codex_session_id, envelope)
                 if overflow is not None:
                     if content_chunks:

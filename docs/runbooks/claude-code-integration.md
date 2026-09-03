@@ -237,6 +237,15 @@ in `quarantine_causes`, aggregate `delivery_causes`, and gaps;
 `hook_diagnostics`, while manual and supervisor drains remain visible through status. Neither case
 is repaired by restarting a service that already reports ready.
 
+Claude Code's hooks are scoped to Yoetz's own tools, so every `PostToolUse` it observes is Yoetz
+observing itself (issue #564). The shared self-observation policy applies: a `PostToolUse` of
+`mcp__plugin_yoetz_yoetz__status`, `_receipt`, or `_read_guidance` is ingested into the bounded
+local store but not enqueued for delivery; a `PostToolUse` of `_start`, `_publish_work`, `_check`,
+or `_respond` enqueues one row; every `PostToolUseFailure` enqueues one row. Claude sends no
+`PreToolUse` on this profile, so there is no pre-event to hold back. The `PostToolUse` advice
+channel is unchanged by this policy; only outbox delivery is governed. The manual
+`yoetz observe drain --json` reports `terminal: drained` once nothing is pending.
+
 Grant observation separately for the exact project. Exercise every advertised event and inspect
 `yoetz observe status`. Only consented accepted `claude_hook` envelopes earn coverage. Raw
 transcript/prompt/assistant/path/cwd/tool input/tool output/result/error values are discarded before

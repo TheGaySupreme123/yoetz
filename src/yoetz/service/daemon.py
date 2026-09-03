@@ -207,6 +207,11 @@ _CONTROL_HANDSHAKE_DEADLINE_SECONDS: Final = 5.0
 # before the stream is closed and the listener admission slot is released.
 _CONTROL_INACTIVE_SESSION_DEADLINE_SECONDS: Final = 300.0
 _OBSERVATION_SWEEP_INTERVAL_SECONDS: Final = 60.0
+# Hard stop for one sweep. The sweeper yields on its own budget
+# (``DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS``, composed in ready_composition) well
+# under this, returning its partial summary so progress licenses the immediate
+# re-sweep below; this deadline only catches a single ingest that never returns,
+# and a pass it cancels reads as no progress (#564).
 _OBSERVATION_SWEEP_DEADLINE_SECONDS: Final = 30.0
 # Yield between two immediately consecutive drain passes. One scheduler turn is not a fair share
 # when the next pass may take a cross-process store lock a hook process also wants.

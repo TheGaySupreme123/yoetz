@@ -1151,3 +1151,254 @@ def test_other_observe_verbs_share_the_typed_workspace_refusal(
         assert call() == 2
         captured = capsys.readouterr()
         assert captured.err.startswith(f"observation_{verb}_failed:workspace_unresolvable: ")
+
+
+def _enqueue_shell_rows(root: Path, session_id: str, ordinals: tuple[int, ...]) -> None:
+    for ordinal in ordinals:
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {"session_id": session_id, "tool_name": "shell", "event_ordinal": ordinal}
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(root),
+            _state=root,
+            skip_service=True,
+        )
+
+
+def _accepted() -> object:
+    # DUPLICATE is the cursor-free acknowledgement shape; ACCEPTED carries a cursor.
+    return observation_ingest_result_to_json(
+        ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, "duplicate", None)
+    )
+
+
+def _rejected(reason: str) -> object:
+    return observation_ingest_result_to_json(
+        ObservationIngestResult(ObservationIngestDisposition.REJECTED, reason, None)
+    )
+
+
+@pytest.mark.anyio
+async def test_manual_drain_repeats_passes_while_progressing_until_drained(
+    tmp_path: Path,
+) -> None:
+    """#564: one retryable head no longer ends the whole drain; passes repeat on progress."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    _enqueue_shell_rows(tmp_path, "lane-a", (1, 2))
+    _enqueue_shell_rows(tmp_path, "lane-b", (1, 2))
+    calls: list[str] = []
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del deadline_ms
+            session = str(body["codex_session_id"])  # type: ignore[index]
+            calls.append(session)
+            if session == "lane-a" and calls.count("lane-a") == 1:
+                return _rejected(ObservationGapCode.SERVICE_UNAVAILABLE.value)
+            return _accepted()
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    code, summary = await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    # Pass 1: lane-a head retries and retires its lane, lane-b drains. Pass 2: lane-a drains.
+    assert calls == ["lane-a", "lane-b", "lane-b", "lane-a", "lane-a"]
+    assert summary["passes"] == 2
+    assert summary["terminal"] == "drained"
+    assert summary["pending_after"] == 0
+    assert summary["attempted"] == 5
+    assert summary["acknowledged"] == 4
+    assert summary["retry_pending"] == 1
+    assert summary["reasons"] == {ObservationGapCode.SERVICE_UNAVAILABLE.value: 1}
+    assert store.pending_outbox_count(workspace) == 0
+
+
+@pytest.mark.anyio
+async def test_manual_drain_stops_at_retry_pending_when_a_pass_resolves_nothing(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    _enqueue_shell_rows(tmp_path, "barrier", (1, 2))
+    calls = 0
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            nonlocal calls
+            del body, deadline_ms
+            calls += 1
+            return _rejected(OBSERVATION_BACKPRESSURE_REASON)
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    code, summary = await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    assert calls == 1
+    assert summary["passes"] == 1
+    assert summary["terminal"] == "retry_pending"
+    assert summary["pending_after"] == 2
+    assert summary["reasons"] == {OBSERVATION_BACKPRESSURE_REASON: 1}
+    assert store.pending_outbox_count(workspace) == 2
+
+
+@pytest.mark.anyio
+async def test_manual_drain_names_service_unavailable_terminal_with_the_pending_count(
+    tmp_path: Path,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    _enqueue_shell_rows(tmp_path, "offline", (1, 2, 3))
+
+    async def connect(_kind: object):
+        raise ConnectionRefusedError
+
+    code, summary = await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 20
+    assert summary["passes"] == 0
+    assert summary["terminal"] == "service_unavailable"
+    assert summary["pending_after"] == 3
+    assert summary["retry_pending"] == 3
+    assert summary["reasons"] == {ObservationGapCode.SERVICE_UNAVAILABLE.value: 3}
+
+
+@pytest.mark.anyio
+async def test_manual_drain_is_bounded_against_a_producer_that_never_stops(
+    tmp_path: Path,
+) -> None:
+    """Passes are capped by the backlog at entry, so a live producer cannot hold the CLI."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    _enqueue_shell_rows(tmp_path, "producer", (1, 2))
+    next_ordinal = 3
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            nonlocal next_ordinal
+            del body, deadline_ms
+            # Every delivery is answered by a fresh hook row: the #564 loop in miniature.
+            _enqueue_shell_rows(tmp_path, "producer", (next_ordinal,))
+            next_ordinal += 1
+            return _accepted()
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    code, summary = await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    assert summary["passes"] == 2
+    assert summary["terminal"] == "pass_limit"
+    assert summary["acknowledged"] == 4
+    assert summary["pending_after"] == 2
+    assert store.pending_outbox_count(workspace) == 2
+
+
+def test_drain_text_output_reports_the_terminal_condition(
+    tmp_path: Path, capsys: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    _enqueue_shell_rows(tmp_path, "text", (1,))
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            return _accepted()
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    monkeypatch.setattr(observe_cli, "connect_service_on_demand", connect)
+    original = observe_cli._drain_observation_async  # pyright: ignore[reportPrivateUsage]
+
+    async def patched(**kwargs: object):
+        kwargs["connect"] = connect
+        return await original(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(observe_cli, "_drain_observation_async", patched)
+    assert (
+        observe_cli.drain_observation(workspace=str(tmp_path), json_output=False, _state=tmp_path)
+        == 0
+    )
+    out = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert "passes=1 pending_after=0 terminal=drained" in out
+    assert "reasons: none" in out
+
+
+def test_status_reports_the_oldest_pending_receipt_for_convergence(
+    tmp_path: Path, capsys: object
+) -> None:
+    """#564: status names how old the backlog head is, next to the last successful drain."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+
+    assert (
+        observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=tmp_path) == 0
+    )
+    empty = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
+    assert empty["undelivered_count"] == 0
+    assert empty["oldest_pending_receipt"] is None
+
+    _enqueue_shell_rows(tmp_path, "convergence", (1, 2))
+    rows = store.list_pending_outbox_rows(workspace)
+    oldest = min(row.envelope.receipt_time for row in rows)
+
+    assert (
+        observe_cli.observe_status(workspace=str(tmp_path), json_output=True, _state=tmp_path) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)  # type: ignore[attr-defined]
+    assert payload["undelivered_count"] == 2
+    assert payload["oldest_pending_receipt"] == oldest.wire
+    assert payload["oldest_pending_receipt"] == rows[0].envelope.receipt_time.wire
+
+    assert (
+        observe_cli.observe_status(workspace=str(tmp_path), json_output=False, _state=tmp_path) == 0
+    )
+    text = capsys.readouterr().out  # type: ignore[attr-defined]
+    assert f"oldest: {oldest.wire}" in text
+    assert "last successful drain: never" in text

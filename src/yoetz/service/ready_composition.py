@@ -64,7 +64,11 @@ from yoetz.application.observation_advice import (
 )
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
-from yoetz.application.observation_drain import ObservationDrainSummary, ObservationOutboxSweeper
+from yoetz.application.observation_drain import (
+    DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS,
+    ObservationDrainSummary,
+    ObservationOutboxSweeper,
+)
 from yoetz.application.observation_verification import ObservationVerificationSupervisor
 from yoetz.application.privacy_control import build_privacy_support_handlers
 from yoetz.application.privacy_policy import PrivacyPolicyApplication
@@ -2661,7 +2665,11 @@ async def provide_service_ready_context(
         verification_supervisor=verification_supervisor,
         observation_enabled=config.observation.enabled,
     )
-    observation_sweeper = ObservationOutboxSweeper(local_observation, observation_coordinator)
+    observation_sweeper = ObservationOutboxSweeper(
+        local_observation,
+        observation_coordinator,
+        budget_seconds=DEFAULT_OBSERVATION_SWEEP_BUDGET_SECONDS,
+    )
 
     async def sweep_observation() -> ObservationDrainSummary:
         """Move fenced legacy-hook spool records into the normal durable outbox.

@@ -1306,3 +1306,72 @@ def test_function_call_output_rejects_out_of_profile_exit_status(exit_code: obje
     assert "exit_status" not in envelope.structural_payload
     batch = materialize_observation_envelope(envelope, task_id="task_stream_invalid_exit")
     assert batch.skip_reason == "unsupported_or_gap"
+
+
+def test_reconcile_retains_yoetz_self_observation_locally_and_advances_past_it(
+    tmp_path: Path,
+) -> None:
+    """#564: the stream copy of a ``status`` call is the same self-observation the hook saw."""
+
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    session_id = "stream-self-observation"
+    target = sessions / f"rollout-{session_id}.jsonl"
+    target.write_bytes(
+        encode_lines(
+            session_meta(),
+            function_call(name="mcp__yoetz__status", call_id="y1", arguments="{}"),
+            function_call_output(call_id="y1", output="private projection", exit_code=None),
+            function_call(name="shell", call_id="s1", arguments='{"command":"pytest"}'),
+            function_call_output(call_id="s1", output="ok", exit_code=0),
+            function_call(name="mcp__yoetz__respond", call_id="y2", arguments="{}"),
+            function_call_output(call_id="y2", output="recorded", exit_code=None),
+            function_call(name="mcp__yoetz__status", call_id="y3", arguments="{}"),
+            function_call_output(call_id="y3", output="error", exit_code=1),
+        )
+    )
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+
+    assert result["resolved"] is True
+    delivered = [
+        (
+            row.envelope.structural_payload.get("action"),
+            row.envelope.structural_payload.get("tool_name"),
+        )
+        for row in store.list_pending_outbox_rows(workspace)
+    ]
+    assert delivered == [
+        # session_meta is lifecycle, not a tool phase, and stays deliverable.
+        (None, None),
+        ("function_call", "shell"),
+        ("function_call_output", "shell"),
+        ("function_call_output", "mcp__yoetz__respond"),
+        ("function_call_output", "mcp__yoetz__status"),
+    ]
+    # Every record was ingested locally and the cursor moved past all of them: a second
+    # reconcile finds nothing new rather than re-reading the retained calls.
+    accepted = result["accepted"]
+    assert isinstance(accepted, int) and accepted >= 8
+    again = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+    assert again["accepted"] == 0
+    assert again["duplicates"] == 0
+    assert store.pending_outbox_count(workspace) == 5
