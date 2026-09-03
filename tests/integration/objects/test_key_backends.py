@@ -6,6 +6,8 @@ import asyncio
 import base64
 import hashlib
 import inspect
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -486,3 +488,122 @@ def test_keyring_signatures_and_unapproved_backend_are_fail_closed() -> None:
     assert probe.state is OSKeyringState.UNSUPPORTED
     assert probe.create_if_absent
     memory.close()
+
+
+def test_staged_initialization_guard_creates_a_missing_bundle_root_owner_private(
+    tmp_path: Path,
+) -> None:
+    """#565: trusted initialization before any service start must not read as unsupported."""
+
+    import stat
+
+    parent = tmp_path.resolve() / "isolated"
+    parent.mkdir(mode=0o700)
+    bundle = parent / "data"
+    store = AutoUnlockPassphraseStore(bundle, backend=_AtomicBackend())
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    with store.staged_initialization_guard():
+        pass
+
+    facts = bundle.lstat()
+    assert stat.S_ISDIR(facts.st_mode) and not stat.S_ISLNK(facts.st_mode)
+    assert stat.S_IMODE(facts.st_mode) == 0o700
+    assert stat.S_IMODE((bundle / "auto-unlock-init.lock").lstat().st_mode) == 0o600
+    assert sorted(child.name for child in parent.iterdir()) == ["data"]
+
+
+def test_staged_initialization_guard_reports_a_missing_bundle_parent_distinctly(
+    tmp_path: Path,
+) -> None:
+    """#565: only the exact bundle root is created; a missing parent is its own outcome."""
+
+    absent_parent = tmp_path.resolve() / "absent"
+    store = AutoUnlockPassphraseStore(absent_parent / "data", backend=_AtomicBackend())
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(OSKeyringError) as exc:
+        with store.staged_initialization_guard():
+            pass
+
+    assert exc.value.reason == "bundle_parent_missing"
+    assert not absent_parent.exists()
+
+
+def test_staged_initialization_guard_rejects_a_symlinked_bundle_root(tmp_path: Path) -> None:
+    """#565: a symlink where the bundle root belongs is unsafe, never merely unsupported."""
+
+    root = tmp_path.resolve()
+    real = root / "real-data"
+    real.mkdir(mode=0o700)
+    link = root / "data"
+    link.symlink_to(real, target_is_directory=True)
+    store = AutoUnlockPassphraseStore(link, backend=_AtomicBackend())
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(OSKeyringError) as exc:
+        with store.staged_initialization_guard():
+            pass
+
+    assert exc.value.reason == "bundle_unsafe"
+    assert not (real / "auto-unlock-init.lock").exists()
+
+
+def test_staged_initialization_guard_rejects_a_symlinked_lock_file(tmp_path: Path) -> None:
+    """#565: O_NOFOLLOW rejection of a planted lock symlink stays distinct from unsupported."""
+
+    bundle = tmp_path.resolve() / "data"
+    bundle.mkdir(mode=0o700)
+    (bundle / "elsewhere").write_bytes(b"")
+    (bundle / "auto-unlock-init.lock").symlink_to(bundle / "elsewhere")
+    store = AutoUnlockPassphraseStore(bundle, backend=_AtomicBackend())
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(OSKeyringError) as exc:
+        with store.staged_initialization_guard():
+            pass
+
+    assert exc.value.reason == "bundle_unsafe"
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="permission checks need a non-root uid"
+)
+def test_staged_initialization_guard_reports_a_permission_failure_distinctly(
+    tmp_path: Path,
+) -> None:
+    """#565: an unwritable parent is a permission outcome, not a keyring verdict."""
+
+    parent = tmp_path.resolve() / "readonly"
+    parent.mkdir(mode=0o500)
+    store = AutoUnlockPassphraseStore(parent / "data", backend=_AtomicBackend())
+    store._backend_id = "keyring.backends.macOS.Keyring"  # pyright: ignore[reportPrivateUsage]
+
+    try:
+        with pytest.raises(OSKeyringError) as exc:
+            with store.staged_initialization_guard():
+                pass
+    finally:
+        parent.chmod(0o700)
+
+    assert exc.value.reason == "bundle_permission_denied"
+    assert not (parent / "data").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="installed macOS keyring backend")
+def test_installed_macos_keyring_guard_succeeds_on_a_pristine_bundle_root(
+    tmp_path: Path,
+) -> None:
+    """#565: the real installed macOS backend is supported and its guard opens before any
+    service has created the bundle root. The guard never touches the keychain itself."""
+
+    import keyring
+
+    store = AutoUnlockPassphraseStore(tmp_path.resolve() / "data", backend=keyring.get_keyring())
+    if store._backend_id != "keyring.backends.macOS.Keyring":  # pyright: ignore[reportPrivateUsage]
+        pytest.skip("macOS keychain backend is not the installed default here")
+
+    assert store.available is True
+    with store.staged_initialization_guard():
+        pass
+    assert (tmp_path.resolve() / "data" / "auto-unlock-init.lock").exists()

@@ -91,7 +91,12 @@ generate and store one locally without any secret-bearing agent channel.
    uninitialized; any unprovable outcome retains the entry as a typed orphan that
    `yoetz service auto-unlock status` names and that restart reconciliation resolves by
    cryptographic proof against the vault envelope, so a failed attempt never strands the
-   credential or blocks retry with `entry_exists`. `vault_passphrase_rotate` likewise carries no secret:
+   credential or blocks retry with `entry_exists`. **Pristine-root amendment (2026-09-03, issue
+   #565).** The bundle-scoped guard creates and verifies exactly the selected bundle root when
+   initialization runs before any service start has created it, and a missing parent,
+   permission failure, or symlink rejection is reported as its own bounded reason rather than
+   as an unsupported keyring, so the start-first continuation suffices on a pristine root.
+   `vault_passphrase_rotate` likewise carries no secret:
    the helper locally loads the active scoped secret, stages a generated replacement, completes
    reauthentication and rewrap, and then promotes the replacement. Trusted CLI/TUI remains the
    stronger recommended path.
