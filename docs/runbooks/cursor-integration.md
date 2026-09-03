@@ -239,8 +239,10 @@ hook/observation paths.
 
 The native IDE plugin advertises only `sessionStart`, `sessionEnd`, `afterMCPExecution`,
 `afterFileEdit`, and `stop` for the pinned local profile. It intentionally excludes
-`afterAgentThought`. The portable CLI artifact advertises no hooks. SDK fixture metadata advertises
-no hook capability; the SDKs' file-based hook contract is not execution evidence. Hooks call
+`afterAgentThought`. Cursor also supports Agent Plugins: Yoetz's portable artifact supplies the
+standardized skills and MCP components there, while hooks remain a Cursor-native plugin capability;
+the portable CLI artifact therefore advertises no hooks. SDK fixture metadata advertises no hook
+capability; the SDKs' file-based hook contract is not execution evidence. Hooks call
 `yoetz hooks cursor-observe`, are fail-open, and never enforce Cursor work.
 
 Native hook artifacts and the plugin-owned `mcp.json` resolve the invoking `yoetz` launcher to
@@ -281,7 +283,13 @@ symlinked ancestors, root/home locators, unsafe markers, or unbounded/control-be
 (with `paused` for a paused grant), recorded by the shared ingress for every host. A consented
 `sessionStart` auto-attaches through the shared `start mode=create_or_attach` request, pairing the
 resolved workspace root as `workspace_ref` with `cursor-session:<session_id>` as `external_ref`;
-a failed attempt records its typed cause (`auto_attach_workspace_unbound`,
+an exact `workspace_task_exists` conflict gets one `mode=attach` recovery only when the private
+local store already holds a valid mapping from an earlier Cursor session whose `sessionEnd` was
+received, every other bound session is ended, and the candidate is bound only to this consented
+workspace. The catalog also requires one mapped task, the selector still active, no sibling task,
+the matching repository-privacy binding, and no start already pending for that route. The conflict
+reveals no selector, and a hard crash without `sessionEnd` remains fail-closed rather than being
+guessed from age. A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict`, `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
 `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
@@ -289,6 +297,13 @@ same diagnostics file, and the session keeps an observation-only binding until a
 explicit `start` maps it. For `vault_locked` on a never-initialized install, that explicit
 `start` returns the typed `vault_initialization_required` continuation (see Troubleshooting)
 rather than a dead end.
+
+Cursor's hooks reference (re-read 2026-09-03) calls local `sessionStart` fire-and-forget: the hook
+process can complete this mapping and drain, but the agent loop does not wait for it. Therefore a
+rendered hook or passing local handler test does not prove the mapping existed before Cursor's first
+agent action; verify eventual `mapping_present`, accepted envelopes, and drain separately. Cursor
+cloud agents do not run `sessionStart` or `sessionEnd`, so this recovery is not claimed for that
+surface.
 
 The host-neutral `observe status` boundary also keeps storage layers distinct: unsafe state/lock
 paths report `storage_unsafe`, bounded open/permission/read-only/missing-parent/lock-acquisition

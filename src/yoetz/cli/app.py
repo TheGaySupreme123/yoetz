@@ -706,10 +706,21 @@ def _hooks_operation(name: str) -> Callable[..., int]:
 
 
 @hooks_app.command("user-prompt-submit")
-def hooks_user_prompt_submit() -> None:
+def hooks_user_prompt_submit(
+    workspace: Annotated[
+        str | None,
+        typer.Option(
+            "--workspace",
+            help=(
+                "Project workspace path (use '.' for the Codex session cwd). Only its "
+                "private commitment is retained."
+            ),
+        ),
+    ] = None,
+) -> None:
     """Inject the materiality/activation cue for UserPromptSubmit."""
 
-    _finish(_hooks_operation("handle_user_prompt_submit")())
+    _finish(_hooks_operation("handle_user_prompt_submit")(workspace=workspace))
 
 
 @hooks_app.command("post-tool-use")

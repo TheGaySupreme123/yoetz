@@ -26,7 +26,7 @@ from yoetz.kernel.plan_scope import current_plan_scope
 from yoetz.ports.diagnostics import RuntimeCapability
 from yoetz.ports.importer import ImporterPort, ImportStatusSnapshot
 from yoetz.ports.ledger import ProjectionView
-from yoetz.ports.objects import ObjectStorePort
+from yoetz.ports.objects import ObjectKind, ObjectRef, ObjectStorePort, StagedObject
 from yoetz.ports.runtime import RouteCommand, TaskRuntime
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
 from yoetz.protocol.models import (
@@ -235,6 +235,53 @@ async def test_publish_is_object_first_atomic_and_same_id_replay_is_stable() -> 
     assert replay.accepted_events == first.accepted_events
     assert len(objects._data) == durable_after_first  # pyright: ignore[reportPrivateUsage]
     assert app.runtime.release_count == 2
+
+
+async def test_second_payload_finalize_failure_abandons_batch_then_same_request_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #339: a failed second payload must not leave the first finalized object."""
+
+    app, objects = _composition()
+    request = _request(
+        request_tail=204,
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+        event_drafts=(
+            _draft(event_tail=205, action_tail=206),
+            _draft(event_tail=207, action_tail=208),
+        ),
+    )
+    refs_before = objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD)
+    data_before = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+    original_finalize = objects.finalize
+    finalize_calls = 0
+
+    async def _fail_second_finalize(staged: StagedObject) -> ObjectRef:
+        nonlocal finalize_calls
+        finalize_calls += 1
+        if finalize_calls == 2:
+            raise OSError("simulated_second_finalize_failure")
+        return await original_finalize(staged)
+
+    monkeypatch.setattr(objects, "finalize", _fail_second_finalize)
+
+    with pytest.raises(OSError, match="simulated_second_finalize_failure"):
+        await execute_publish_work(cast(Application, app), request)
+    assert objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD) == refs_before
+    assert len(objects._data) == data_before  # pyright: ignore[reportPrivateUsage]
+    assert (
+        await app.runtime.task.ledger.lookup_operation(request.writer_id, request.request_id)
+        is None
+    )
+
+    retried = await execute_publish_work(cast(Application, app), request)
+    assert retried.outcome == "accepted"
+    assert len(objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD)) == len(refs_before) + 2
+    durable_after_retry = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+    replayed = await execute_publish_work(cast(Application, app), request)
+    assert replayed.outcome == "replayed"
+    assert replayed.result_frontier == retried.result_frontier
+    assert len(objects._data) == durable_after_retry  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_forbidden_family_rejects_before_object_publication() -> None:

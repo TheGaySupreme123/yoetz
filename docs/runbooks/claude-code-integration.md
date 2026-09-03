@@ -195,7 +195,15 @@ A consented `SessionStart` auto-attaches a ledger task without an explicit MCP `
 sends `start mode=create_or_attach` with the canonical project root as `workspace_ref` and
 `claude-session:<session_id>` as `external_ref` (both persisted only as HMAC commitments). Success
 shows as `mapping_present: true` in `observe status` and the session's queued rows drain in the
-same pass. A failed attempt records its cause as a payload-free `hook_diagnostics` reason
+same pass. If that new pair conflicts because the workspace already has a task, the shared hook
+path retries once with `mode=attach` only when it already holds a valid private mapping from an
+earlier Claude session whose `SessionEnd` was received, every other bound session is ended, and the
+candidate is bound only to this consented workspace. The catalog additionally requires one mapped
+task, the selector still active, no sibling task, the matching repository-privacy binding, and no
+start already pending for that route. This reuses an already-known session selector; the public
+conflict still discloses no task or session ID, and a hard crash without `SessionEnd` remains
+fail-closed rather than being guessed from age. A failed attempt records its cause as a
+payload-free `hook_diagnostics` reason
 (`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_conflict`,
 `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`,
