@@ -172,7 +172,7 @@ def test_render_plugin_tree_wires_observation_and_compat_hooks() -> None:
     assert ".mcp.json" in tree
     assert "skills/yoetz/SKILL.md" in tree
     hooks = tree["hooks/hooks.json"].decode("utf-8")
-    assert "yoetz hooks user-prompt-submit" in hooks
+    assert "yoetz hooks user-prompt-submit --workspace ." in hooks
     assert "yoetz hooks post-tool-use" in hooks
     assert "yoetz hooks session-start" in hooks
     assert "yoetz hooks observe --workspace . --event SessionStart" in hooks

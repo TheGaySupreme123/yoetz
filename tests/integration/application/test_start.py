@@ -464,7 +464,7 @@ async def test_historical_session_reattaches_after_same_pair_rotation() -> None:
     attached = await execute_start(app, start_request(761, refs=True))
     assert attached.outcome == "attached"
     resumed = await execute_start(
-        app, start_request(762, mode="attach", session_id=created.session_id, refs=True)
+        app, start_request(762, mode="attach", session_id=created.session_id)
     )
     assert resumed.outcome == "attached"
     assert resumed.task_id == created.task_id
@@ -492,7 +492,18 @@ async def test_create_or_attach_drifted_pair_conflicts_until_explicit_create() -
     assert created.session_id not in caught.value.message
     assert created.writer_id not in caught.value.message
 
-    sibling_wire = start_request(772, mode="create", refs=True).model_dump(
+    # The hook recovery path uses the selector it already holds locally; the
+    # selector-free public conflict contributes no task identity (#535).
+    recovery_wire = start_request(
+        772, mode="attach", refs=True, session_id=created.session_id
+    ).model_dump(mode="json", exclude_none=True)
+    recovery_wire["external_ref"] = "external-B"
+    recovered = await execute_start(app, StartRequest.model_validate(recovery_wire))
+    assert recovered.outcome == "attached"
+    assert recovered.task_id == created.task_id
+    assert recovered.session_id != created.session_id
+
+    sibling_wire = start_request(773, mode="create", refs=True).model_dump(
         mode="json", exclude_none=True
     )
     sibling_wire["external_ref"] = "external-B"

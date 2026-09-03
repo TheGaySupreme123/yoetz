@@ -1160,10 +1160,39 @@ class SqliteStartCatalog:
             if by_commitment.task_id != by_session.task_id:
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
             return by_commitment
-        if request.session_id is not None and (
-            (by_session is None and by_commitment is not None)
-            or (by_session is not None and workspace is not None and by_commitment is None)
-        ):
+        if by_session is not None and workspace is not None and by_commitment is None:
+            # A host-session rotation may carry the new paired identity together
+            # with a selector it already holds. Admit that narrow recovery only
+            # while the selector is still active and uniquely owns this workspace;
+            # neither the pair nor workspace possession discovers a route.
+            workspace_rows = self._rows(
+                f"SELECT {self._route_columns} FROM task_routes "
+                "WHERE workspace_ref_commitment = ? AND state != 'quarantined' LIMIT 2",
+                (workspace,),
+            )
+            if (
+                request.mode is not StartMode.ATTACH
+                or request.session_id != by_session.active_session_id
+                or by_session.state is TaskRouteState.QUARANTINED
+                or by_session.workspace_ref_commitment is None
+                or not hmac.compare_digest(by_session.workspace_ref_commitment, workspace)
+                or len(workspace_rows) != 1
+                or _route_from_row(workspace_rows[0]).task_id != by_session.task_id
+            ):
+                raise _error(PublicErrorCode.SESSION_CONFLICT)
+            pending = self._rows(
+                "SELECT 1 FROM start_operations WHERE task_id = ? AND state = 'pending' LIMIT 1",
+                (by_session.task_id,),
+            )
+            if pending:
+                # One route rotation at a time. The pending operation owns recovery
+                # through its own request id and lease; a second rotation must not
+                # reserve against the same predecessor session. Scoped to this
+                # recovery admission so an abandoned pending operation never wedges
+                # the ordinary same-pair attach that still self-heals the route.
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
+            return by_session
+        if request.session_id is not None and (by_session is None and by_commitment is not None):
             raise _error(PublicErrorCode.SESSION_CONFLICT)
         return by_commitment or by_session
 
