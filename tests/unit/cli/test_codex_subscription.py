@@ -1084,7 +1084,12 @@ async def test_setup_against_fake_app_server_reads_account_and_never_starts_logi
         assert value is runtimes[-1]
         return "terminated"
 
+    def allow_private_bundle(_path: Path) -> None:
+        # pytest's temp root is shared temp on Linux; the owner-only gate is locked elsewhere.
+        return None
+
     monkeypatch.setattr(module, "_binding", build_binding)
+    monkeypatch.setattr(codex_app_server, "verify_private_local_bundle", allow_private_bundle)
     monkeypatch.setattr(codex_app_server, "_launch", launch)
     monkeypatch.setattr(codex_app_server, "_cleanup", cleanup)
 
@@ -1104,10 +1109,15 @@ async def test_setup_against_fake_app_server_reads_account_and_never_starts_logi
 
 
 def test_setup_rejects_a_reused_home_whose_config_differs_before_any_process(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from yoetz.adapters.providers import codex_app_server
     from yoetz.adapters.providers.codex_app_server import prepare_codex_home
 
+    def allow_private_bundle(_path: Path) -> None:
+        return None
+
+    monkeypatch.setattr(codex_app_server, "verify_private_local_bundle", allow_private_bundle)
     home = tmp_path / "dedicated-home"
     home.mkdir(mode=0o700)
     (home / "config.toml").write_text('model = "other"\n', encoding="utf-8")
