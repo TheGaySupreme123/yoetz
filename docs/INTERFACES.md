@@ -3037,7 +3037,23 @@ Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
 
 Canonical normalization precedes materialization. Equivalent hook/stream host calls share logical
 identity, roles, operation digest, and stable ledger IDs. That canonical logical identity remains
-the content and ledger-dedup key. The durable repository claim is separately domain-scoped by the
+the ledger-dedup key. Captured-content manifests use a narrower phase identity derived from that
+canonical host call plus normalized phase. Equivalent hook/stream copies of one completed phase
+therefore share recovery, while Pre/Post/unpaired siblings remain isolated. Manifests are recovered
+before materialization, including on a content-less durable-outbox retry. For pre-amendment rows,
+the matching source group may supply usable content; every legacy source group is also kept as a
+separate lookup-only role candidate so an equivalent post-upgrade stream copy can find a hook
+commit. Recovery authenticates each encrypted object's kind, media type, canonical envelope, and
+inner plaintext digest. A complete readable manifest set may strengthen a new materialization; an
+incomplete, legacy-unbound, contradictory, orphaned, or unreadable set is used only to reconstruct
+candidate role tuples for completed-operation lookup and never grants captured coverage. Once a
+phase has durable manifests, later equivalent-source chunks cannot expand its stable role set. The
+content-independent core role tuple is also a replay candidate: if a core-only operation committed
+before content arrived, the later copy reuses it and records `content_capture_unavailable` rather
+than reminting its event IDs or retroactively upgrading its coverage. The role-scoped operation
+digest can therefore find either committed ordering without changing event IDs.
+Missing, incomplete, contradictory, or unreadable objects add `content_capture_unavailable` rather
+than being inferred. The durable repository claim is separately domain-scoped by the
 materialization mapping version and exact draft-role tuple, so phases of one host call with
 different materializations (for example pre-action versus paired action/result) cannot collide,
 while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
@@ -3136,6 +3152,20 @@ quarantined-at time behind the trusted-clock epoch fence; an operator can drop i
 save resolves its active flag only when that save evicts nothing and leaves one-eighth of the state
 budget free. Merely landing under the cap cannot clear the same loss it just recorded; the durable
 gap history remains after recovery, and renewed shedding reactivates it (issue #310).
+
+Public ingest failures use their `retryable` contract, not a spelling fallback. A non-retryable
+failure that is not already a narrower terminal class (`dedup_conflict` or
+`observation_storage_corrupt`) becomes `ledger_rejected`; drain and sweep quarantine that one row,
+record the reason once, and continue its lane. Retryable failures keep their current reason and
+scope. A row that reaches 128 consecutive rejections with the same retryable reason is quarantined
+with that reason, so an accidental future catch-all classification cannot create an immortal FIFO
+head. Designed `operation_pending` back-pressure and workspace-global pause/vault/disabled gates
+are not subject to this ceiling and retain their existing recovery semantics. The terminal reason
+remains in `quarantine_causes`, the aggregate `delivery_causes`, and gaps. The
+`pending_delivery_causes` field names only pending rows, while `delivery_causes` combines pending
+and quarantined delivery failures so terminal causes remain visible after the row leaves the
+outbox. Hook-driven drains also write the bounded hook diagnostic, while manual and supervisor
+drains are visible through status rather than being mislabeled as hook activity (issue #540).
 
 Routine-read materialization follows ADR-022's rate policy. A service-owned structural
 `action=routine_read` label is derived only for the closed direct-read tool set or a conservatively

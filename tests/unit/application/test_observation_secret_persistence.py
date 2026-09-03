@@ -7,6 +7,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from yoetz.adapters.approved_checks import (
     ApprovedCheckRunner,
     approval_commitment,
 )
+from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
@@ -28,13 +30,25 @@ from yoetz.application.observation_coordinator import (
     ObservationCoordinator,
     build_inspection_excerpt_manifest,
 )
+from yoetz.application.observation_materialize import (
+    MATERIALIZATION_MAPPING_VERSION,
+    MaterializedObservationBatch,
+    canonical_logical_identity,
+    materialize_observation_envelope,
+    observation_operation_digest,
+    observation_writer_id,
+)
 from yoetz.application.observation_verification import ObservationVerificationJob
 from yoetz.domain.observation import (
     ObservationContentChunk,
     ObservationContentKind,
     ObservationCursor,
     ObservationEnvelope,
+    ObservationGapCode,
+    ObservationIngestDisposition,
+    ObservationIngestRequest,
     ObservationSource,
+    ObservationStatusQuery,
 )
 from yoetz.domain.values import JsonObject, Timestamp
 from yoetz.observability.privacy import PersistenceScanResult
@@ -80,6 +94,7 @@ class _CapturingObjects:
     def __init__(self) -> None:
         self.payloads: list[bytes] = []
         self.refs: dict[str, ObjectRef] = {}
+        self.object_payloads: dict[str, bytes] = {}
 
     async def stage(self, source: ObjectSource, metadata: ObjectMetadata) -> ObjectMetadata:
         assert source.data is not None
@@ -98,12 +113,16 @@ class _CapturingObjects:
             staged,
         )
         self.refs[ref.object_id] = ref
+        self.object_payloads[ref.object_id] = payload
         return ref
 
     async def resolve_verified(self, object_id: str, envelope_digest: str) -> ObjectRef:
         ref = self.refs[object_id]
         assert ref.envelope_digest == envelope_digest
         return ref
+
+    async def open_verified(self, ref: ObjectRef):
+        yield self.object_payloads[ref.object_id]
 
 
 def _artifact(relative_path: str, excerpt: bytes) -> InspectedArtifact:
@@ -168,7 +187,7 @@ async def test_observation_capture_binds_inner_bytes_and_deleted_object_weakens(
         content,
     )
 
-    manifests, redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    manifests, replay, redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         runtime,  # type: ignore[arg-type]
         store,
         workspace=_WORKSPACE,
@@ -177,12 +196,44 @@ async def test_observation_capture_binds_inner_bytes_and_deleted_object_weakens(
     )
     assert redacted is False
     assert unavailable is False
+    assert replay == ()
     assert len(manifests) == 1
     assert manifests[0].content_digest == "sha256:" + hashlib.sha256(content).hexdigest()
     assert manifests[0].content_bytes == len(content)
 
+    recovered, replay, redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(),
+    )
+    assert recovered == manifests
+    assert replay == (manifests,)
+    assert redacted is False
+    assert unavailable is False
+
+    db.execute(
+        "UPDATE observation_content_manifests SET content_digest=? WHERE object_id=?",
+        ("sha256:" + "f" * 64, manifests[0].object_id),
+    )
+    rebound, replay, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(),
+    )
+    assert rebound == ()
+    assert manifests in replay
+    assert unavailable is True
+    db.execute(
+        "UPDATE observation_content_manifests SET content_digest=? WHERE object_id=?",
+        (manifests[0].content_digest, manifests[0].object_id),
+    )
+
     objects.refs.pop(manifests[0].object_id)
-    recovered, redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    recovered, replay, redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         runtime,  # type: ignore[arg-type]
         store,
         workspace=_WORKSPACE,
@@ -190,8 +241,801 @@ async def test_observation_capture_binds_inner_bytes_and_deleted_object_weakens(
         chunks=(),
     )
     assert recovered == ()
+    assert replay == (manifests,)
     assert redacted is False
     assert unavailable is True
+    weakened = materialize_observation_envelope(
+        replace(
+            _observation_envelope(refs=(manifests[0].object_id,)),
+            gap_codes=("content_capture_unavailable",),
+        ),
+        task_id=_TASK,
+        captured_content=recovered,
+    )
+    assert all(not item.role.startswith("captured_") for item in weakened.drafts)
+    replay_only = materialize_observation_envelope(
+        _observation_envelope(refs=(manifests[0].object_id,)),
+        task_id=_TASK,
+        captured_content=replay[0],
+    )
+    assert any(item.role.startswith("captured_") for item in replay_only.drafts)
+
+
+@pytest.mark.anyio
+async def test_same_phase_stream_copy_reuses_hook_manifest_roles(tmp_path: Path) -> None:
+    """#539: equivalent sources share roles without expanding them after commit."""
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    hook = _observation_envelope()
+    hook_chunk = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        f"{hook.source_identity}:tool-output",
+        _COMMITMENT,
+        "text/plain",
+        0,
+        1,
+        b"hook output",
+    )
+    first, _, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=hook,
+        chunks=(hook_chunk,),
+    )
+    assert unavailable is False
+
+    stream = replace(
+        hook,
+        event_kind="item.completed",
+        source=ObservationSource.CODEX_SESSION_STREAM,
+        source_identity="stream:issue-539",
+    )
+    stream_chunk = replace(
+        hook_chunk,
+        correlation_identity=f"{stream.source_identity}:tool-output",
+        content=b"equivalent stream output",
+    )
+    usable, replay, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=stream,
+        chunks=(stream_chunk,),
+    )
+
+    assert usable == first
+    assert replay == (first,)
+    assert unavailable is True
+
+
+@pytest.mark.anyio
+async def test_legacy_hook_manifest_is_replay_candidate_for_stream_copy(tmp_path: Path) -> None:
+    """#539: a post-upgrade stream copy can find a pre-upgrade hook commit."""
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    hook = _observation_envelope()
+    chunk = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        f"{hook.source_identity}:tool-output",
+        _COMMITMENT,
+        "text/plain",
+        0,
+        1,
+        b"legacy hook output",
+    )
+    first, _, _, _ = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=hook,
+        chunks=(chunk,),
+    )
+    db.execute(
+        "UPDATE observation_content_manifests SET logical_identity=?",
+        (canonical_logical_identity(hook),),
+    )
+    stream = replace(
+        hook,
+        event_kind="item.completed",
+        source=ObservationSource.CODEX_SESSION_STREAM,
+        source_identity="stream:legacy-issue-539",
+    )
+
+    usable, replay, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=stream,
+        chunks=(),
+    )
+
+    assert usable == ()
+    assert first in replay
+    assert unavailable is False
+
+
+@pytest.mark.anyio
+async def test_legacy_unbound_manifest_stays_replay_only_without_adding_role(
+    tmp_path: Path,
+) -> None:
+    """#539: NULL legacy digest metadata preserves the original core-only roles."""
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    envelope = _observation_envelope()
+    chunk = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        f"{envelope.source_identity}:tool-output",
+        _COMMITMENT,
+        "text/plain",
+        0,
+        1,
+        b"legacy unbound output",
+    )
+    first, _, _, _ = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(chunk,),
+    )
+    db.execute(
+        "UPDATE observation_content_manifests "
+        "SET logical_identity=?,content_digest=NULL,content_bytes=NULL",
+        (canonical_logical_identity(envelope),),
+    )
+
+    usable, replay, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=replace(envelope, content_object_refs=(first[0].object_id,)),
+        chunks=(),
+    )
+
+    assert usable == ()
+    assert unavailable is True
+    assert any(candidate[0].content_digest is None for candidate in replay)
+    core = materialize_observation_envelope(envelope, task_id=_TASK, captured_content=usable)
+    legacy = materialize_observation_envelope(
+        replace(envelope, content_object_refs=(first[0].object_id,)),
+        task_id=_TASK,
+        captured_content=next(item for item in replay if item[0].content_digest is None),
+    )
+    assert tuple(item.role for item in legacy.drafts) == tuple(item.role for item in core.drafts)
+
+
+@pytest.mark.anyio
+async def test_incomplete_manifest_parts_weaken_new_materialization(tmp_path: Path) -> None:
+    """#539: a partial manifest set is a gap, never partial captured coverage."""
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    envelope = _observation_envelope()
+    chunks = tuple(
+        ObservationContentChunk(
+            ObservationContentKind.TOOL_OUTPUT,
+            f"{envelope.source_identity}:tool-output",
+            _COMMITMENT,
+            "text/plain",
+            index,
+            2,
+            f"part-{index}".encode(),
+        )
+        for index in range(2)
+    )
+    first, _, _, _ = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=chunks,
+    )
+    db.execute(
+        "DELETE FROM observation_content_manifests WHERE object_id=?",
+        (first[1].object_id,),
+    )
+
+    usable, replay, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(),
+    )
+
+    assert usable == ()
+    assert replay
+    assert unavailable is True
+
+
+@pytest.mark.anyio
+async def test_initial_partial_multipart_capture_never_becomes_evidence(tmp_path: Path) -> None:
+    """#539: a partial first delivery is persisted but cannot earn coverage."""
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    envelope = _observation_envelope()
+    partial = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        f"{envelope.source_identity}:tool-output",
+        _COMMITMENT,
+        "text/plain",
+        0,
+        2,
+        b"part-0",
+    )
+
+    usable, replay, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(partial,),
+    )
+
+    assert usable == ()
+    assert replay == ()
+    assert unavailable is True
+    batch = materialize_observation_envelope(envelope, task_id=_TASK, captured_content=usable)
+    assert all(not item.role.startswith("captured_") for item in batch.drafts)
+
+
+@pytest.mark.anyio
+async def test_unreadable_multipart_object_weaken_all_parts(tmp_path: Path) -> None:
+    """#539: one unreadable object cannot leave partial captured coverage."""
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    envelope = _observation_envelope()
+    chunks = tuple(
+        ObservationContentChunk(
+            ObservationContentKind.TOOL_OUTPUT,
+            f"{envelope.source_identity}:tool-output",
+            _COMMITMENT,
+            "text/plain",
+            index,
+            2,
+            f"part-{index}".encode(),
+        )
+        for index in range(2)
+    )
+    first, _, _, _ = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=chunks,
+    )
+    objects.refs.pop(first[1].object_id)
+
+    usable, replay, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(),
+    )
+
+    assert usable == ()
+    assert replay
+    assert unavailable is True
+
+
+@pytest.mark.anyio
+async def test_conflicting_multipart_source_commitments_weaken_new_materialization(
+    tmp_path: Path,
+) -> None:
+    """#539: contradictory multipart metadata cannot grant captured coverage."""
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    envelope = _observation_envelope()
+    chunks = tuple(
+        ObservationContentChunk(
+            ObservationContentKind.TOOL_OUTPUT,
+            f"{envelope.source_identity}:tool-output",
+            _COMMITMENT,
+            "text/plain",
+            index,
+            2,
+            f"part-{index}".encode(),
+        )
+        for index in range(2)
+    )
+    first, _, _, _ = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=chunks,
+    )
+    db.execute(
+        "UPDATE observation_content_manifests SET source_commitment=? WHERE object_id=?",
+        (f"hmac-sha256:{'ef' * 32}", first[1].object_id),
+    )
+
+    usable, replay, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(),
+    )
+
+    assert usable == ()
+    assert replay
+    assert unavailable is True
+
+
+@pytest.mark.anyio
+async def test_missing_object_inventory_is_content_gap_not_session_corruption(
+    tmp_path: Path,
+) -> None:
+    """#539: an orphaned manifest remains lookup-only and does not latch storage."""
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    envelope = _observation_envelope()
+    chunk = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        f"{envelope.source_identity}:tool-output",
+        _COMMITMENT,
+        "text/plain",
+        0,
+        1,
+        b"orphaned inventory output",
+    )
+    first, _, _, _ = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(chunk,),
+    )
+    db.execute("PRAGMA foreign_keys=OFF")
+    db.execute("DELETE FROM objects WHERE object_id=?", (first[0].object_id,))
+    db.execute("PRAGMA foreign_keys=ON")
+
+    usable, replay, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(),
+    )
+
+    assert usable == ()
+    assert replay
+    assert replay[0][0].envelope_digest is None
+    assert unavailable is True
+
+
+@pytest.mark.anyio
+async def test_legacy_manifest_recovery_does_not_borrow_sibling_phase_content(
+    tmp_path: Path,
+) -> None:
+    """#539: legacy sibling content is lookup-only, never usable evidence."""
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    post = replace(
+        _observation_envelope(),
+        source_identity="hook:post-539",
+        structural_payload=JsonObject(
+            {
+                "correlation_id": "call-539",
+                "tool_call_id": "call-539",
+                "tool_name": "shell",
+                "exit_status": 0,
+            }
+        ),
+    )
+    chunk = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        f"{post.source_identity}:tool-output",
+        _COMMITMENT,
+        "text/plain",
+        0,
+        1,
+        b"post-only output",
+    )
+    captured, _, _, _ = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=post,
+        chunks=(chunk,),
+    )
+    assert captured
+    db.execute(
+        "UPDATE observation_content_manifests SET logical_identity=?",
+        (canonical_logical_identity(post),),
+    )
+    pre = replace(
+        post,
+        event_kind="PreToolUse",
+        source_identity="hook:pre-539",
+        structural_payload=JsonObject(
+            {
+                "correlation_id": "call-539",
+                "tool_call_id": "call-539",
+                "tool_name": "shell",
+            }
+        ),
+    )
+    assert canonical_logical_identity(pre) == canonical_logical_identity(post)
+
+    recovered, replay, _, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=replace(pre, content_object_refs=(captured[0].object_id,)),
+        chunks=(),
+    )
+
+    assert recovered == ()
+    assert captured in replay
+    assert unavailable is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("kind", "content_kind", "gaps", "exit_status"),
+    [
+        ("PostToolUse", ObservationContentKind.TOOL_OUTPUT, (), 0),
+        (
+            "PostToolUse",
+            ObservationContentKind.TOOL_OUTPUT,
+            ("unpaired_event",),
+            0,
+        ),
+        ("PreToolUse", ObservationContentKind.TOOL_INPUT, (), None),
+    ],
+)
+async def test_contentless_retry_reconstructs_committed_materialization_identity(
+    tmp_path: Path,
+    kind: str,
+    content_kind: ObservationContentKind,
+    gaps: tuple[str, ...],
+    exit_status: int | None,
+) -> None:
+    """#539: persisted manifests restore the exact content-bearing role set."""
+
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": "task_obs", "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    coordinator = _coordinator(tmp_path, objects)
+    runtime = SimpleNamespace(task_id=_TASK, objects=objects)
+    structural: dict[str, object] = {
+        "correlation_id": "call-539",
+        "tool_call_id": "call-539",
+        "tool_name": "shell",
+    }
+    if exit_status is not None:
+        structural["exit_status"] = exit_status
+    envelope = ObservationEnvelope(
+        session_commitment=_COMMITMENT,
+        event_kind=kind,
+        source_identity="hook:issue-539",
+        source=ObservationSource.CODEX_HOOK,
+        cursor=ObservationCursor(1, 0, 1, _COMMITMENT, "codex-obs-hook/1.0.0"),
+        receipt_time=Timestamp("2026-09-03T00:00:00.000Z"),
+        structural_payload=JsonObject(structural),
+        content_object_refs=(),
+        gap_codes=gaps,
+    )
+    chunk = ObservationContentChunk(
+        content_kind,
+        f"{envelope.source_identity}:captured",
+        _COMMITMENT,
+        "text/plain",
+        0,
+        1,
+        b"content that exists only on the originating hook pass",
+    )
+
+    first, first_replay, _, first_unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(chunk,),
+    )
+    # Simulate a manifest written by the pre-#539 runtime, which keyed content
+    # on the cross-phase canonical action identity.
+    db.execute(
+        "UPDATE observation_content_manifests SET logical_identity=?",
+        (canonical_logical_identity(envelope),),
+    )
+    replayed, replay_candidates, _, replay_unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        runtime,  # type: ignore[arg-type]
+        store,
+        workspace=_WORKSPACE,
+        envelope=envelope,
+        chunks=(),
+    )
+    assert replayed == first
+    assert first_replay == ()
+    assert replay_candidates == (first,)
+    assert first_unavailable is replay_unavailable is False
+
+    first_envelope = replace(
+        envelope,
+        content_object_refs=tuple(item.object_id for item in first),
+    )
+    replay_envelope = replace(
+        envelope,
+        content_object_refs=tuple(item.object_id for item in replayed),
+    )
+    first_batch = materialize_observation_envelope(
+        first_envelope, task_id=_TASK, captured_content=first
+    )
+    replay_batch = materialize_observation_envelope(
+        replay_envelope, task_id=_TASK, captured_content=replayed
+    )
+    first_roles = tuple(item.role for item in first_batch.drafts)
+    replay_roles = tuple(item.role for item in replay_batch.drafts)
+    assert replay_roles == first_roles
+    writer = observation_writer_id(_TASK, "ses_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    identity = canonical_logical_identity(envelope)
+    first_digest = observation_operation_digest(
+        task_id=_TASK,
+        session_id="ses_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        writer_id=writer,
+        logical_identity=identity,
+        draft_roles=first_roles,
+    )
+    replay_digest = observation_operation_digest(
+        task_id=_TASK,
+        session_id="ses_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        writer_id=writer,
+        logical_identity=identity,
+        draft_roles=replay_roles,
+    )
+    assert replay_digest == first_digest
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("kind", "content_kind", "gaps", "exit_status", "core_roles"),
+    [
+        (
+            "PostToolUse",
+            ObservationContentKind.TOOL_OUTPUT,
+            (),
+            0,
+            ("action", "result"),
+        ),
+        (
+            "PostToolUse",
+            ObservationContentKind.TOOL_OUTPUT,
+            ("unpaired_event",),
+            0,
+            ("unpaired_evidence",),
+        ),
+        (
+            "PreToolUse",
+            ObservationContentKind.TOOL_INPUT,
+            (),
+            None,
+            ("action",),
+        ),
+    ],
+)
+@pytest.mark.parametrize("content_first", [True, False], ids=["content-first", "content-late"])
+async def test_coordinator_replays_content_commit_after_reply_is_lost(
+    tmp_path: Path,
+    kind: str,
+    content_kind: ObservationContentKind,
+    gaps: tuple[str, ...],
+    exit_status: int | None,
+    core_roles: tuple[str, ...],
+    content_first: bool,
+) -> None:
+    """#539: either content arrival order reuses the first immutable operation."""
+
+    local = LocalObservationStore(_state=tmp_path)
+    workspace = local.workspace_commitment(str(tmp_path.resolve()))
+    local.grant_consent(workspace)
+    codex_session_id = f"reply-lost-{kind}-{len(gaps)}"
+    session_commitment = local.bind_codex_session(workspace, codex_session_id)
+    task_id = _TASK
+    yoetz_session_id = "ses_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    writer_id = observation_writer_id(task_id, yoetz_session_id)
+    mapping = LifecycleMapping(
+        mapping_version=1,
+        codex_session_id=codex_session_id,
+        yoetz_task_id=task_id,
+        yoetz_session_id=yoetz_session_id,
+        yoetz_writer_id=writer_id,
+        last_frontier=None,
+    )
+    db = apsw.Connection(":memory:")
+    initialize_bundle(db, {"task_id": task_id, "owner_generation": "1"})
+    store = SqliteObservationStore(db)
+    objects = _CapturingObjects()
+    runtime = SimpleNamespace(
+        task_id=task_id,
+        session_id=yoetz_session_id,
+        writer_id=writer_id,
+        observation=store,
+        objects=objects,
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            assert released is runtime
+
+    class _ReplayCoordinator(ObservationCoordinator):
+        committed_roles: tuple[str, ...] | None = None
+        operation_ids: list[str] = []
+        outcomes: list[str] = []
+        batches: list[MaterializedObservationBatch] = []
+
+        async def _append_materialized(  # type: ignore[override]
+            self,
+            runtime: object,
+            envelope: ObservationEnvelope,
+            batch: MaterializedObservationBatch,
+            *,
+            legacy_writer_id: str | None = None,
+            replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
+        ) -> tuple[str, str, None, str, tuple[str, ...]]:
+            del legacy_writer_id
+            self.batches.append(batch)
+            current_roles = tuple(item.role for item in batch.drafts)
+            candidates = (current_roles, *replay_draft_role_sets)
+            if self.committed_roles is None:
+                self.committed_roles = current_roles
+                self.outcomes.append("accepted")
+            elif self.committed_roles in candidates:
+                self.outcomes.append("replayed")
+            else:
+                raise AssertionError("content-less retry missed the committed role set")
+            digest = observation_operation_digest(
+                task_id=runtime.task_id,  # type: ignore[attr-defined]
+                session_id=runtime.session_id,  # type: ignore[attr-defined]
+                writer_id=runtime.writer_id,  # type: ignore[attr-defined]
+                logical_identity=canonical_logical_identity(envelope),
+                draft_roles=self.committed_roles,
+            )
+            operation_id = self._stable_operation_id(digest)
+            self.operation_ids.append(operation_id)
+            return (
+                operation_id,
+                digest,
+                None,
+                MATERIALIZATION_MAPPING_VERSION,
+                self.committed_roles,
+            )
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    coordinator = _ReplayCoordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    structural: dict[str, object] = {
+        "correlation_id": "call-539",
+        "tool_call_id": "call-539",
+        "tool_name": "shell",
+    }
+    if exit_status is not None:
+        structural["exit_status"] = exit_status
+    envelope = ObservationEnvelope(
+        session_commitment=session_commitment,
+        event_kind=kind,
+        source_identity=f"hook:reply-lost:{kind}:{len(gaps)}",
+        source=ObservationSource.CODEX_HOOK,
+        cursor=ObservationCursor(
+            1,
+            0,
+            1,
+            session_commitment,
+            "codex-obs-hook/1.0.0",
+        ),
+        receipt_time=Timestamp("2026-09-03T00:00:00.000Z"),
+        structural_payload=JsonObject(structural),
+        content_object_refs=(),
+        gap_codes=gaps,
+    )
+    chunk = ObservationContentChunk(
+        content_kind,
+        f"{envelope.source_identity}:captured",
+        session_commitment,
+        "text/plain",
+        0,
+        1,
+        b"captured only on the first delivery",
+    )
+
+    first = await coordinator.ingest_request(
+        ObservationIngestRequest(codex_session_id, envelope, (chunk,) if content_first else ())
+    )
+    # The caller intentionally ignores the first reply, modeling a client-side
+    # timeout after the service-side commit. Exercise both the durable
+    # contentless retry and the inverse late-content equivalent copy.
+    replayed = await coordinator.ingest_request(
+        ObservationIngestRequest(codex_session_id, envelope, () if content_first else (chunk,))
+    )
+
+    assert first.disposition is ObservationIngestDisposition.ACCEPTED
+    assert replayed.disposition is ObservationIngestDisposition.DUPLICATE
+    assert coordinator.outcomes == ["accepted", "replayed"]
+    assert len(set(coordinator.operation_ids)) == 1
+    assert coordinator.committed_roles is not None
+    assert all(role in coordinator.committed_roles for role in core_roles)
+    has_captured_role = any(
+        role.startswith(f"captured_{content_kind.value}") for role in coordinator.committed_roles
+    )
+    if content_kind is ObservationContentKind.TOOL_INPUT:
+        assert has_captured_role is False
+        selected_batch = coordinator.batches[0 if content_first else 1]
+        assert "content_unselected" in selected_batch.gaps
+    elif not content_first:
+        assert has_captured_role is False
+    else:
+        assert has_captured_role is True
+    if not content_first and content_kind is ObservationContentKind.TOOL_OUTPUT:
+        assert any(
+            role.startswith("captured_")
+            for role in (item.role for item in coordinator.batches[1].drafts)
+        )
+        status = local.status(ObservationStatusQuery(workspace))
+        assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in status.gaps
 
 
 @pytest.mark.anyio
@@ -212,7 +1056,7 @@ async def test_observation_capture_secret_scans_before_digest_binding(tmp_path: 
         b"prefix " + _SECRET,
     )
 
-    manifests, redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    manifests, replay, redacted, unavailable = await coordinator._capture_content(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         runtime,  # type: ignore[arg-type]
         store,
         workspace=_WORKSPACE,
@@ -221,6 +1065,7 @@ async def test_observation_capture_secret_scans_before_digest_binding(tmp_path: 
     )
     assert redacted is True
     assert unavailable is False
+    assert replay == ()
     assert len(manifests) == 1
     captured_envelope = objects.payloads[0]
     assert _SECRET not in captured_envelope

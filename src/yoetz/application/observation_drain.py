@@ -28,15 +28,18 @@ from yoetz.domain.observation import (
 __all__ = [
     "DEFAULT_OBSERVATION_SWEEP_LIMIT",
     "EXPECTED_OBSERVATION_BACKPRESSURE_REASONS",
+    "MAX_CONSECUTIVE_OBSERVATION_REJECTIONS",
     "ObservationDrainAction",
     "ObservationDrainDecision",
     "ObservationDrainSummary",
     "ObservationOutboxSweeper",
     "RETRYABLE_OBSERVATION_REJECTIONS",
+    "WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS",
     "route_observation_ingest",
 ]
 
 DEFAULT_OBSERVATION_SWEEP_LIMIT: Final = 64
+MAX_CONSECUTIVE_OBSERVATION_REJECTIONS: Final = 128
 # One sweep is sequential, so a single worker would do; the spare capacity only exists so a
 # handful of stranded threads (a deadline expiring against a parked flock) cannot wedge the
 # next pass outright.
@@ -55,7 +58,7 @@ RETRYABLE_OBSERVATION_REJECTIONS: Final = frozenset(
         "paused",
     }
 )
-_WORKSPACE_GLOBAL_STOP_REASONS: Final = frozenset(
+WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS: Final = frozenset(
     {
         ObservationGapCode.VAULT_LOCKED.value,
         "observation_disabled",
@@ -79,7 +82,11 @@ class ObservationDrainDecision:
     reason: str | None
 
 
-def route_observation_ingest(result: ObservationIngestResult) -> ObservationDrainDecision:
+def route_observation_ingest(
+    result: ObservationIngestResult,
+    *,
+    row: ObservationOutboxRow | None = None,
+) -> ObservationDrainDecision:
     """Classify one typed ingest result without performing storage side effects."""
 
     if result.disposition in {
@@ -98,6 +105,17 @@ def route_observation_ingest(result: ObservationIngestResult) -> ObservationDrai
         if reason in RETRYABLE_OBSERVATION_REJECTIONS
         else ObservationDrainAction.QUARANTINE
     )
+    if (
+        action is ObservationDrainAction.RETRY
+        and reason
+        not in (
+            EXPECTED_OBSERVATION_BACKPRESSURE_REASONS | WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS
+        )
+        and row is not None
+    ):
+        next_consecutive = row.consecutive_reason_attempts + 1 if row.last_reason == reason else 1
+        if next_consecutive >= MAX_CONSECUTIVE_OBSERVATION_REJECTIONS:
+            action = ObservationDrainAction.QUARANTINE
     return ObservationDrainDecision(action, reason)
 
 
@@ -238,7 +256,7 @@ class ObservationOutboxSweeper:
                             ObservationGapCode.SERVICE_UNAVAILABLE.value,
                             None,
                         )
-                    decision = route_observation_ingest(result)
+                    decision = route_observation_ingest(result, row=row)
                     attempted_row = await self._off_loop(
                         partial(
                             self.local.bump_outbox_row_attempt,
@@ -293,7 +311,7 @@ class ObservationOutboxSweeper:
                                     decision.reason,
                                 )
                             )
-                        if decision.reason in _WORKSPACE_GLOBAL_STOP_REASONS:
+                        if decision.reason in WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS:
                             # This condition cannot heal for another lane in the
                             # same workspace during this pass. Preserve the
                             # attempted lane's bookkeeping, then stop before

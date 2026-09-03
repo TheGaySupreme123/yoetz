@@ -18,9 +18,12 @@ from yoetz.cli.app import app
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic
 from yoetz.cli.observe_hooks import handle_observe
 from yoetz.domain.observation import (
+    OBSERVATION_BACKPRESSURE_REASON,
+    ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestResult,
     ObservationLifecycle,
+    ObservationStatusQuery,
     observation_ingest_result_to_json,
 )
 
@@ -192,6 +195,7 @@ def test_status_separates_undelivered_from_lag_and_reports_ambiguous_activation(
     assert payload["status"]["lag_events"] == 0
     assert payload["undelivered_count"] == 1
     assert payload["delivery_causes"] == {"not_attempted": 1}
+    assert payload["pending_delivery_causes"] == {"not_attempted": 1}
     assert payload["last_successful_drain"] == "never"
     assert payload["mapping_present"] is False
     assert payload["plugin_activation"] == "unknown"
@@ -226,7 +230,10 @@ def test_status_surfaces_quarantine_depth_and_reclaim_empties_it(
         store.ingest(envelope)
         store.enqueue_outbox(workspace, "quarantine-cli", envelope)
         assert store.quarantine_outbox(
-            workspace, "quarantine-cli", envelope.source_identity, "consent_revoked"
+            workspace,
+            "quarantine-cli",
+            envelope.source_identity,
+            ObservationGapCode.LEDGER_REJECTED.value,
         )
 
     assert (
@@ -236,7 +243,9 @@ def test_status_surfaces_quarantine_depth_and_reclaim_empties_it(
     assert payload["quarantine_count"] == 2
     # Per-reason depth (#272): a destroyed-and-replaced event is visible as its
     # cause, not hidden inside one opaque number.
-    assert payload["quarantine_causes"] == {"consent_revoked": 2}
+    assert payload["quarantine_causes"] == {ObservationGapCode.LEDGER_REJECTED.value: 2}
+    assert payload["delivery_causes"] == {ObservationGapCode.LEDGER_REJECTED.value: 2}
+    assert payload["pending_delivery_causes"] == {}
     assert payload["quarantine_evicted_count"] == 0
 
     assert (
@@ -244,7 +253,7 @@ def test_status_surfaces_quarantine_depth_and_reclaim_empties_it(
     )
     text = capsys.readouterr().out  # type: ignore[attr-defined]
     assert "quarantine: 2" in text
-    assert "cause: consent_revoked=2" in text
+    assert "cause: ledger_rejected=2" in text
     assert (
         "reclaim by changing to the selected workspace and running "
         "'yoetz observe reclaim --workspace .'"
@@ -443,6 +452,378 @@ async def test_drain_quarantines_setup_probe_and_routes_other_rows(tmp_path: Pat
     assert summary["reasons"] == {"setup_probe": 1}
     assert store.pending_outbox_count(workspace) == 0
     assert store.quarantined_count(workspace) == 1
+
+
+@pytest.mark.anyio
+async def test_manual_drain_quarantines_nonretryable_control_error(tmp_path: Path) -> None:
+    """#540: the manual drain honors ControlError.retryable like hook drains."""
+
+    from yoetz.ports.control import ControlError
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {"session_id": "manual-control-error", "tool_name": "shell", "event_ordinal": 1}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            raise ControlError("frame_invalid", retryable=False)
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    code, summary = await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    assert summary["quarantined"] == 1
+    assert summary["retry_pending"] == 0
+    assert summary["reasons"] == {ObservationGapCode.LEDGER_REJECTED.value: 1}
+    assert store.list_pending_outbox_rows(workspace) == ()
+    assert store.list_quarantine(workspace)[0][2] == ObservationGapCode.LEDGER_REJECTED.value
+
+
+@pytest.mark.anyio
+async def test_manual_drain_retires_retrying_lane_before_later_row(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session_id = "manual-fifo"
+    for ordinal in (1, 2):
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": session_id,
+                    "tool_name": "shell",
+                    "event_ordinal": ordinal,
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+    calls = 0
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            nonlocal calls
+            del body, deadline_ms
+            calls += 1
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                    None,
+                )
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    code, summary = await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    assert calls == 1
+    assert summary["attempted"] == 1
+    assert summary["retry_pending"] == 1
+    rows = store.list_pending_outbox_rows(workspace)
+    assert len(rows) == 2
+    assert rows[0].attempts == 1
+    assert rows[1].attempts == 0
+    assert rows[1].last_reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reason", ["vault_locked", "paused", "observation_disabled"])
+async def test_manual_drain_stops_workspace_after_global_retry_reason(
+    tmp_path: Path,
+    reason: str,
+) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    for index in (1, 2):
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": f"manual-global-{index}",
+                    "tool_name": "shell",
+                    "event_ordinal": 1,
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+    calls = 0
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            nonlocal calls
+            del body, deadline_ms
+            calls += 1
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.REJECTED, reason, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    code, summary = await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    assert calls == 1
+    assert summary["attempted"] == 1
+    assert summary["retry_pending"] == 1
+    assert len(store.list_pending_outbox_rows(workspace)) == 2
+
+
+@pytest.mark.anyio
+async def test_manual_drain_does_not_project_designed_backpressure_gap(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    handle_observe(
+        event_name="PostToolUse",
+        stdin_bytes=json.dumps(
+            {"session_id": "manual-barrier", "tool_name": "shell", "event_ordinal": 1}
+        ).encode(),
+        stdout=io.BytesIO(),
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        skip_service=True,
+    )
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    OBSERVATION_BACKPRESSURE_REASON,
+                    None,
+                )
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert (
+        OBSERVATION_BACKPRESSURE_REASON not in store.status(ObservationStatusQuery(workspace)).gaps
+    )
+
+
+@pytest.mark.anyio
+async def test_manual_drain_quarantines_ended_unmapped_lane(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session_id = "manual-ended-unmapped"
+    for ordinal in (1, 2):
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {"session_id": session_id, "tool_name": "shell", "event_ordinal": ordinal}
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+    store.note_session_end(workspace, store.session_commitment(session_id))
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.MAPPING_MISSING.value,
+                    None,
+                )
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    code, summary = await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    assert summary["quarantined"] == 2
+    assert store.list_pending_outbox_rows(workspace) == ()
+
+
+@pytest.mark.anyio
+async def test_manual_drain_retires_lane_after_attempt_cas_loss(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session_id = "manual-cas-loss"
+    for ordinal in (1, 2):
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {"session_id": session_id, "tool_name": "shell", "event_ordinal": ordinal}
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+    selected = store.list_pending_outbox_rows(workspace)[0]
+    calls = 0
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            nonlocal calls
+            del body, deadline_ms
+            calls += 1
+            assert store.bump_outbox_row_attempt(
+                workspace,
+                selected,
+                reason=ObservationGapCode.SERVICE_UNAVAILABLE.value,
+            )
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert calls == 1
+    assert len(store.list_pending_outbox_rows(workspace)) == 2
+
+
+@pytest.mark.anyio
+async def test_manual_drain_retry_ceiling_quarantines_head_and_continues_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yoetz.application.observation_drain as drain_module
+
+    monkeypatch.setattr(drain_module, "MAX_CONSECUTIVE_OBSERVATION_REJECTIONS", 2)
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session_id = "manual-ceiling"
+    for ordinal in (1, 2):
+        handle_observe(
+            event_name="PostToolUse",
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": session_id,
+                    "tool_name": "shell",
+                    "event_ordinal": ordinal,
+                }
+            ).encode(),
+            stdout=io.BytesIO(),
+            workspace=str(tmp_path),
+            _state=tmp_path,
+            skip_service=True,
+        )
+    first = store.list_pending_outbox_rows(workspace)[0]
+    store.bump_outbox_row_attempt(
+        workspace,
+        first,
+        reason=ObservationGapCode.SERVICE_UNAVAILABLE.value,
+    )
+    identities = [row.envelope.source_identity for row in store.list_pending_outbox_rows(workspace)]
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del deadline_ms
+            identity = body["envelope"]["source_identity"]  # type: ignore[index]
+            result = (
+                ObservationIngestResult(
+                    ObservationIngestDisposition.REJECTED,
+                    ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                    None,
+                )
+                if identity == identities[0]
+                else ObservationIngestResult(
+                    ObservationIngestDisposition.DUPLICATE,
+                    None,
+                    None,
+                )
+            )
+            return observation_ingest_result_to_json(result)
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    code, summary = await observe_cli._drain_observation_async(  # pyright: ignore[reportPrivateUsage]
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+
+    assert code == 0
+    assert summary["attempted"] == 2
+    assert summary["quarantined"] == 1
+    assert summary["acknowledged"] == 1
+    assert store.list_pending_outbox_rows(workspace) == ()
+    assert store.list_quarantine(workspace)[0][1].source_identity == identities[0]
 
 
 @pytest.mark.parametrize(
