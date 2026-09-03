@@ -343,6 +343,30 @@ def test_each_host_observation_gap_preserves_clean_deterministic_proof(
 
 
 @pytest.mark.parametrize(
+    "gap",
+    (
+        "captured_object_unavailable",
+        "content_unselected",
+        "host_outcome_unavailable",
+        "unpaired_event",
+    ),
+)
+def test_hook_observed_finding_coverage_preserves_clean_deterministic_proof(gap: str) -> None:
+    """Issue #547: derived hook coverage may carry the host gap onto the finding itself."""
+
+    finding = replace(
+        _finding(),
+        coverage=_coverage(gaps=(gap,), freshness=LedgerFreshness.PARTIAL),
+    )
+    check_coverage = _coverage(
+        gaps=(gap, "semantic_review_not_requested"),
+        freshness=LedgerFreshness.PARTIAL,
+    )
+
+    assert _resolves(finding, _check(coverage=check_coverage)) is True
+
+
+@pytest.mark.parametrize(
     "freshness",
     (LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE, LedgerFreshness.UNKNOWN),
 )

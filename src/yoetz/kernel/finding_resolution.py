@@ -166,7 +166,7 @@ def _deterministic_freshness_proven(
         finding_gaps = frozenset(finding_coverage.known_gaps)
         if (
             finding_coverage.ledger_freshness in _UNPROVEN_FRESHNESS
-            or not finding_gaps <= _BASE_DETERMINISTIC_PROOF_TOLERATED_GAPS
+            or not finding_gaps <= _DETERMINISTIC_PROOF_TOLERATED_GAPS
         ):
             return False
     if freshness not in _UNPROVEN_FRESHNESS:

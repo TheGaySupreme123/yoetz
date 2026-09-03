@@ -1442,8 +1442,8 @@ host_outcome_unavailable|unpaired_event`). Those host codes remain receipt cover
 they only stop vetoing deterministic absence proof because deterministic packs judge structured
 event payloads and typed coverage, never captured-object bytes. If missing content matters to the
 rule, the completed pack re-fires the issue or returns its own coverage finding. The exception also
-requires the finding's original coverage to contain only the pre-existing semantic/evidence
-tolerances and to have freshness outside `stale_after_material_change|redacted_gap|unknown`.
+requires the finding's original coverage to contain only the pre-existing semantic/evidence/host-
+observation tolerances and to have freshness outside `stale_after_material_change|redacted_gap|unknown`.
 For `semantic_model_derived` rows only the evidence-strength codes are tolerated, and the check
 must also record
 `succeeded/semantic_completed`. Any other gap — redacted or unavailable payloads, redacted
