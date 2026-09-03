@@ -97,7 +97,9 @@ repository literal, so no caller- or service-derived string can steer an agent t
 keys. `SESSION_NOT_FOUND` with
 `reason_code: session_superseded` carries the current binding for a retired session. The separate
 `workspace_task_exists` conflict deliberately carries no task selector or count: possession of a
-workspace reference alone is not authority to discover or attach another task. For MCP
+workspace reference alone is not authority to discover or attach another task. A host hook may
+recover from that exact conflict only with a validated selector it already holds in the private
+local lifecycle store; the public error remains unchanged and reveals no binding. For MCP
 `INVALID_REQUEST` validation failures, `safe_details` may also carry parallel `fields` and
 `reasons` arrays: each entry is an allowlisted JSON pointer and a closed reason token for that
 location (same index order; at most eight locations). `reason_code` may co-occur with
@@ -1530,7 +1532,18 @@ binding. If the pair is new but the workspace already owns a non-quarantined tas
 lineage. An `initializing` route counts as occupied: ignoring a still-reclaimable start would let a
 concurrent drifted pair split lineage. The conflict discloses no binding; the caller must attach
 with a previously held session selector or choose `mode=create` explicitly for a separate sibling
-task. Raw refs never land in
+task. The observation hook's bounded recovery is one such previously held-selector path: after the
+exact conflict, it may choose the most recently written valid local mapping among same-host
+sessions bound to that consented workspace and no other local workspace, but only after a received
+`SessionEnd` durably marked every other bound host session ended and every eligible mapping names
+one task. It then issues `mode=attach` with the known Yoetz session selector plus the new paired
+host identity. The catalog admits that otherwise-unresolved pair only when the selector is still
+the route's active session, the route is the workspace's sole non-quarantined task, the trusted
+repository-privacy binding matches, and no start for that route is already pending. The pair is a
+one-request workspace proof, not a stored alias. The hook accepts only a success for the same task
+ID before mapping the new host session. It never infers death from age, derives a selector from the
+conflict, chooses among sibling tasks, crosses host families, supersedes a still-live host session,
+or implements the multi-task workspace admission planned by #494/#497/#498. Raw refs never land in
 durable state — only the commitments do. This
 model/agent-controlled `workspace_ref_commitment` is an attachment selector, not a
 repository-privacy commitment, and cannot select or inherit disclosure authority.
@@ -3068,7 +3081,20 @@ canonical workspace locator the hook already bound consent to as `workspace_ref`
 host-session identity as `external_ref`; the service persists only HMAC commitments of both, and a
 hook that reached consent through the legacy session→workspace map without a canonical locator
 never sends an unpaired request (issue #459). The request validates through the public
-`StartRequest` contract before dispatch. Every failed attempt records a closed hook-diagnostic
+`StartRequest` contract before dispatch. If the new pair receives the exact
+`workspace_task_exists` conflict, the shared Claude Code/Codex/Cursor hook path may retry once with
+`mode=attach` only when the private local store already holds a valid mapping from a received,
+durably recorded same-host `SessionEnd`, every other bound host session is ended, and the candidate
+session belongs to that consented workspace and no other local workspace. All eligible mappings
+must name one task; within it, the newest mapping-file write wins and the host session ID breaks
+timestamp ties. The attach carries that selector plus the new host pair, while the control
+handshake carries the canonical workspace for repository privacy. The catalog requires the
+selector to remain active, the task to be the workspace's sole non-quarantined route, and no start
+for that route to be pending. Both calls share one five-second deadline. The response must retain
+the candidate's task ID. A successful recovery records the new mapping and drains its pending rows
+without publishing the intermediate conflict as a diagnostic. With no eligible local selector, or
+when that attach fails, the ordinary typed failure path remains. Every failed attempt records a
+closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
 conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,

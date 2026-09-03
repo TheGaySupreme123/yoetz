@@ -202,7 +202,7 @@ def _hooks_json(*, codex_version: str | None = None) -> bytes:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "yoetz hooks user-prompt-submit",
+                            "command": "yoetz hooks user-prompt-submit --workspace .",
                             "timeout": 10,
                             "statusMessage": "Yoetz intake cue",
                         }

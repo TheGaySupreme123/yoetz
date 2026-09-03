@@ -16,6 +16,7 @@ from yoetz.adapters.integrations.codex_lifecycle import (
     acquire_session_lock,
     clear_mapping,
     encode_frontier_token,
+    load_latest_mapping,
     load_mapping,
     mapping_from_start_ids,
     store_mapping,
@@ -145,6 +146,35 @@ def test_clear_mapping(tmp_path: Path) -> None:
     )
     clear_mapping(codex_session_id, _state=tmp_path)
     assert load_mapping(codex_session_id, _state=tmp_path) is None
+
+
+def test_load_latest_mapping_uses_valid_mapping_write_recency(tmp_path: Path) -> None:
+    first_session, first_task, first_yoetz_session, first_writer = _ids()
+    second_session = "codex-session-def456"
+    second = mapping_from_start_ids(
+        codex_session_id=second_session,
+        yoetz_task_id=new_id(IdKind.TASK),
+        yoetz_session_id=new_id(IdKind.SESSION),
+        yoetz_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+    first = mapping_from_start_ids(
+        codex_session_id=first_session,
+        yoetz_task_id=first_task,
+        yoetz_session_id=first_yoetz_session,
+        yoetz_writer_id=first_writer,
+        last_frontier=None,
+    )
+    store_mapping(first, _state=tmp_path)
+    store_mapping(second, _state=tmp_path)
+    directory = tmp_path / "codex-lifecycle"
+    os.utime(directory / f"{first_session}.json", ns=(1_000_000_000, 1_000_000_000))
+    os.utime(directory / f"{second_session}.json", ns=(2_000_000_000, 2_000_000_000))
+
+    assert load_latest_mapping((first_session, second_session), _state=tmp_path) == second
+
+    (directory / f"{second_session}.json").write_text("invalid", encoding="ascii")
+    assert load_latest_mapping((first_session, second_session), _state=tmp_path) == first
 
 
 def test_session_lock_coalesces_concurrent_acquirers(tmp_path: Path) -> None:

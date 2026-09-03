@@ -9,12 +9,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
 from yoetz.adapters.integrations.codex_lifecycle import (
     load_mapping,
     mapping_from_start_ids,
     store_mapping,
 )
+from yoetz.cli import app as app_module
 from yoetz.cli import hooks as hooks_module
 from yoetz.cli.hooks import (
     INACTIVE_CONTEXT,
@@ -31,6 +33,30 @@ from yoetz.protocol.models import OperationFailureModel
 
 def _task_ids() -> tuple[str, str, str]:
     return new_id(IdKind.TASK), new_id(IdKind.SESSION), new_id(IdKind.WRITER)
+
+
+def test_user_prompt_submit_cli_forwards_the_explicit_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def operation(name: str):
+        assert name == "handle_user_prompt_submit"
+
+        def handle(**kwargs: object) -> int:
+            captured.update(kwargs)
+            return 0
+
+        return handle
+
+    monkeypatch.setattr(app_module, "_hooks_operation", operation)
+    result = CliRunner().invoke(
+        app_module.app,
+        ["hooks", "user-prompt-submit", "--workspace", "."],
+    )
+
+    assert result.exit_code == 0
+    assert captured == {"workspace": "."}
 
 
 def test_user_prompt_submit_emits_intake_cue_without_service(

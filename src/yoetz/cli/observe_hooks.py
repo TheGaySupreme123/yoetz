@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol, cast
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     acquire_session_lock,
+    load_latest_mapping,
     load_mapping,
     mapping_from_start_ids,
     store_mapping,
@@ -148,6 +149,7 @@ _HOOK_CONNECT_PREFLIGHT_SECONDS: Final = 1.0
 # Codex 3s SessionEnd clamp honest (attach 1.0 + connect preflight 1.0 + drain).
 _AUTO_ATTACH_RETRY_EVENTS: Final = frozenset({"UserPromptSubmit", "Stop", "SessionEnd"})
 _AUTO_ATTACH_RETRY_BUDGET_SECONDS: Final = 1.0
+_AUTO_ATTACH_START_DEADLINE_MS: Final = 5_000
 # End-to-end observability contract for one hook pass, process start included.
 # Never an abort point: the drain and preflight budgets own enforcement.
 # Derived from the enforced budgets nested inside one pass plus an allowance
@@ -1217,6 +1219,7 @@ async def _try_auto_start(
     _state: Path | None,
     harness_id: Literal["claude", "codex", "cursor"] = "codex",
     workspace_locator: str | None,
+    recovery_mapping: LifecycleMapping | None = None,
     connect: HookStartConnector | None = None,
 ) -> AutoAttachOutcome:
     """Service `start` for consented SessionStart auto-attach, or a typed reason.
@@ -1238,44 +1241,102 @@ async def _try_auto_start(
     from pydantic import ValidationError
 
     from yoetz import __version__
-    from yoetz.ports.control import ControlClientKind, ControlError
+    from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
     from yoetz.protocol.ids import IdKind, new_id
     from yoetz.protocol.models import OperationFailureModel, StartRequest
 
+    external_ref = f"{harness_id}-session:{codex_session_id.removeprefix(f'{harness_id}:')}"
+    request_base = {
+        "protocol_version": "0.1",
+        "schema_version": "1.0.0",
+        "actor": {
+            "actor_id": f"yoetz:{harness_id}-observe",
+            "actor_type": "harness",
+        },
+        "client": {
+            "kind": "yoetz_cli",
+            "version": __version__,
+            "integration": "local_cli",
+        },
+        "task_title": f"{harness_id.title()} observation auto-attach",
+        "requested_view": "compact",
+    }
     try:
         request = StartRequest.model_validate(
             {
-                "protocol_version": "0.1",
-                "schema_version": "1.0.0",
+                **request_base,
                 "request_id": new_id(IdKind.REQUEST),
-                "actor": {
-                    "actor_id": f"yoetz:{harness_id}-observe",
-                    "actor_type": "harness",
-                },
-                "client": {
-                    "kind": "yoetz_cli",
-                    "version": __version__,
-                    "integration": "local_cli",
-                },
                 "mode": "create_or_attach",
-                "task_title": f"{harness_id.title()} observation auto-attach",
-                "requested_view": "compact",
-                "external_ref": (
-                    f"{harness_id}-session:{codex_session_id.removeprefix(f'{harness_id}:')}"
-                ),
+                "external_ref": external_ref,
                 "workspace_ref": workspace_locator,
             }
+        )
+        recovery_request = (
+            None
+            if recovery_mapping is None
+            else StartRequest.model_validate(
+                {
+                    **request_base,
+                    "request_id": new_id(IdKind.REQUEST),
+                    "mode": "attach",
+                    "session_id": recovery_mapping.yoetz_session_id,
+                    "external_ref": external_ref,
+                    "workspace_ref": workspace_locator,
+                }
+            )
         )
     except ValidationError, ValueError, TypeError:
         # An authoring defect in this function, never a runtime condition: it
         # must be visible, not collapsed into an absent mapping.
         return AutoAttachOutcome(None, "auto_attach_request_invalid")
 
-    connector = cast(HookStartConnector, _connect_service()) if connect is None else connect
     client: _StartClient | None = None
+    attempt_started = time.monotonic()
+    recovered_task_id: str | None = None
+
+    def _remaining_deadline_ms() -> int:
+        elapsed_ms = int((time.monotonic() - attempt_started) * 1_000)
+        remaining = _AUTO_ATTACH_START_DEADLINE_MS - elapsed_ms
+        if remaining <= 0:
+            raise TimeoutError
+        return remaining
+
     try:
-        client = await connector(ControlClientKind.CLI)
-        result = await client.start(request, deadline_ms=5_000)
+        if connect is None:
+            connector = cast(Callable[..., Awaitable[_StartClient]], _connect_service())
+            client = await connector(
+                ControlClientKind.CLI,
+                workspace_locator=WorkspaceLocator(workspace_locator),
+            )
+        else:
+            client = await connect(ControlClientKind.CLI)
+        result = await client.start(request, deadline_ms=_remaining_deadline_ms())
+        branch = getattr(result, "root", result)
+        safe_details = (
+            getattr(branch.error, "safe_details", None)
+            if isinstance(branch, OperationFailureModel)
+            else None
+        )
+        reason_code = (
+            cast(Mapping[str, object], safe_details).get("reason_code")
+            if isinstance(safe_details, Mapping)
+            else None
+        )
+        if (
+            recovery_request is not None
+            and recovery_mapping is not None
+            and isinstance(branch, OperationFailureModel)
+            and branch.error.code is PublicErrorCode.SESSION_CONFLICT
+            and reason_code == "workspace_task_exists"
+        ):
+            # The public error intentionally discloses no task selector. Recovery is
+            # allowed only because the hook already holds a validated local selector
+            # from an ended host session in this exact consented workspace.
+            result = await client.start(
+                recovery_request,
+                deadline_ms=_remaining_deadline_ms(),
+            )
+            recovered_task_id = recovery_mapping.yoetz_task_id
     except ControlError as error:
         return AutoAttachOutcome(
             None, _AUTO_ATTACH_CONTROL_REASONS.get(error.reason, "service_unavailable")
@@ -1300,6 +1361,8 @@ async def _try_auto_start(
     session_id = getattr(branch, "session_id", None)
     writer_id = getattr(branch, "writer_id", None)
     if type(task_id) is not str or type(session_id) is not str or type(writer_id) is not str:
+        return AutoAttachOutcome(None, "auto_attach_result_invalid")
+    if recovered_task_id is not None and task_id != recovered_task_id:
         return AutoAttachOutcome(None, "auto_attach_result_invalid")
     frontier = getattr(branch, "frontier", None)
     last_frontier = None
@@ -1328,6 +1391,112 @@ async def _try_auto_start(
     except Exception:
         return AutoAttachOutcome(None, "auto_attach_mapping_write_failed")
     return AutoAttachOutcome(mapping, None)
+
+
+def _ended_workspace_recovery_mapping(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    codex_session_id: str,
+    *,
+    harness_id: Literal["claude", "codex", "cursor"],
+    _state: Path | None,
+) -> LifecycleMapping | None:
+    """Return the latest same-host selector when every other bound session has ended."""
+
+    unambiguous = frozenset(store.unambiguous_codex_sessions_for_workspace(workspace_commitment))
+    bound_sessions = store.codex_sessions_for_workspace(workspace_commitment)
+    if any(
+        session_id != codex_session_id
+        and not store.codex_session_ended(workspace_commitment, session_id)
+        for session_id in bound_sessions
+    ):
+        return None
+
+    def _same_harness(session_id: str) -> bool:
+        if harness_id == "claude":
+            return session_id.startswith("claude:")
+        if harness_id == "cursor":
+            return session_id.startswith("cursor:")
+        return not session_id.startswith(("claude:", "cursor:"))
+
+    ended = tuple(
+        session_id
+        for session_id in bound_sessions
+        if session_id != codex_session_id
+        and store.codex_session_ended(workspace_commitment, session_id)
+        and session_id in unambiguous
+        and _same_harness(session_id)
+    )
+    valid = tuple(
+        mapping
+        for session_id in ended
+        if (mapping := load_mapping(session_id, _state=_state)) is not None
+    )
+    if len({mapping.yoetz_task_id for mapping in valid}) != 1:
+        return None
+    return load_latest_mapping(
+        tuple(mapping.codex_session_id for mapping in valid),
+        _state=_state,
+    )
+
+
+async def _try_workspace_auto_start(
+    codex_session_id: str,
+    *,
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    workspace_locator: str | None,
+    harness_id: Literal["claude", "codex", "cursor"],
+    _state: Path | None,
+    connect: HookStartConnector | None,
+) -> AutoAttachOutcome:
+    """Auto-start, holding an ended predecessor stable through any recovery attach."""
+
+    recovery = _ended_workspace_recovery_mapping(
+        store,
+        workspace_commitment,
+        codex_session_id,
+        harness_id=harness_id,
+        _state=_state,
+    )
+    if recovery is None:
+        return await _try_auto_start(
+            codex_session_id,
+            _state=_state,
+            harness_id=harness_id,
+            workspace_locator=workspace_locator,
+            connect=connect,
+        )
+
+    with acquire_session_lock(recovery.codex_session_id, _state=_state) as predecessor_owned:
+        if predecessor_owned:
+            refreshed = _ended_workspace_recovery_mapping(
+                store,
+                workspace_commitment,
+                codex_session_id,
+                harness_id=harness_id,
+                _state=_state,
+            )
+            if refreshed == recovery:
+                return await _try_auto_start(
+                    codex_session_id,
+                    _state=_state,
+                    harness_id=harness_id,
+                    workspace_locator=workspace_locator,
+                    recovery_mapping=refreshed,
+                    connect=connect,
+                )
+
+    # A resumed predecessor or changed local state invalidates the capability.
+    # Still run the ordinary request so the hook records the service's typed
+    # conflict instead of inventing a local success or silently doing nothing.
+    return await _try_auto_start(
+        codex_session_id,
+        _state=_state,
+        harness_id=harness_id,
+        workspace_locator=workspace_locator,
+        connect=connect,
+    )
 
 
 def _record_auto_attach(
@@ -1410,6 +1579,7 @@ def handle_observe(
     _workspace_commitment: str | None = None,
     source: ObservationSource = ObservationSource.CODEX_HOOK,
     _output_event_name: str | None = None,
+    _session_lock_owned: bool = False,
 ) -> int:
     """Bounded observation ingress for Codex lifecycle hooks. Always exits 0.
 
@@ -1593,12 +1763,35 @@ def handle_observe(
         # ahead of the ingest it acknowledges, and it never spans a network
         # wait: it holds the interprocess store lock for its duration.
         with store.batched(workspace_commitment):
-            session_commitment = store.bind_codex_session(workspace_commitment, codex_session_id)
-            source_generation = (
-                store.begin_session_generation(workspace_commitment, session_commitment)
-                if resolved_event == "SessionStart"
-                else store.current_session_generation(workspace_commitment, session_commitment)
-            )
+            if resolved_event == "SessionStart":
+                # A recovery attach holds the predecessor's lifecycle lock. Gate
+                # generation restart on that same lock so a resumed predecessor
+                # cannot clear its ended marker between selection and attach.
+                if _session_lock_owned:
+                    session_commitment = store.bind_codex_session(
+                        workspace_commitment, codex_session_id
+                    )
+                    source_generation = store.begin_session_generation(
+                        workspace_commitment, session_commitment
+                    )
+                else:
+                    with acquire_session_lock(codex_session_id, _state=_state) as generation_owned:
+                        if not generation_owned:
+                            _stdout_json({}, stdout)
+                            return 0
+                        session_commitment = store.bind_codex_session(
+                            workspace_commitment, codex_session_id
+                        )
+                        source_generation = store.begin_session_generation(
+                            workspace_commitment, session_commitment
+                        )
+            else:
+                session_commitment = store.bind_codex_session(
+                    workspace_commitment, codex_session_id
+                )
+                source_generation = store.current_session_generation(
+                    workspace_commitment, session_commitment
+                )
             gap_codes: list[str] = []
 
             # Prefer the host's canonical tool-use identity, while retaining
@@ -1755,8 +1948,10 @@ def handle_observe(
                             if not skip_service:
 
                                 async def _attach() -> AutoAttachOutcome:
-                                    return await _try_auto_start(
+                                    return await _try_workspace_auto_start(
                                         codex_session_id,
+                                        store=store,
+                                        workspace_commitment=workspace_commitment,
                                         _state=_state,
                                         harness_id=harness_id,
                                         workspace_locator=workspace_locator,
@@ -1865,8 +2060,10 @@ def handle_observe(
                         async def _attach_retry() -> AutoAttachOutcome:
                             import asyncio
 
-                            attach = _try_auto_start(
+                            attach = _try_workspace_auto_start(
                                 codex_session_id,
+                                store=store,
+                                workspace_commitment=workspace_commitment,
                                 _state=_state,
                                 harness_id=harness_id,
                                 workspace_locator=workspace_locator,

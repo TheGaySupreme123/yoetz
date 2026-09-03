@@ -1197,6 +1197,32 @@ class LocalObservationStore:
             assert state.codex_session_bindings is not None
             return tuple(sorted(state.codex_session_bindings, key=str.encode))
 
+    def unambiguous_codex_sessions_for_workspace(
+        self, workspace_commitment: str
+    ) -> tuple[str, ...]:
+        """Return host session IDs recorded in this workspace and no other local workspace."""
+
+        with self._lock:
+            target = self._load(workspace_commitment)
+            assert target.codex_session_bindings is not None
+            owners: dict[str, set[str]] = {
+                session_id: set() for session_id in target.codex_session_bindings
+            }
+            for workspace, state in self._iter_workspaces():
+                assert state.codex_session_bindings is not None
+                for session_id in owners.keys() & state.codex_session_bindings.keys():
+                    owners[session_id].add(workspace)
+            return tuple(
+                sorted(
+                    (
+                        session_id
+                        for session_id, bound in owners.items()
+                        if bound == {workspace_commitment}
+                    ),
+                    key=str.encode,
+                )
+            )
+
     def consent_for(self, workspace_commitment: str) -> LocalObservationConsent | None:
         with self._lock:
             return self._load(workspace_commitment).consent
