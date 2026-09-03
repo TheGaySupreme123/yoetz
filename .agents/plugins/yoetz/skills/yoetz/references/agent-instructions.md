@@ -105,8 +105,8 @@ Act only when Yoetz reports the grant missing. If its catalog advertises chat au
 `repository_privacy_preview`, and follow the consent rules below. Otherwise the user must complete
 `yoetz --privacy`; chat text alone grants nothing, and you must not forge an authority channel.
 The grant stands for that repository until changed or revoked; `confirm_every_request` remains
-one-use. Keep the original check open and reuse its `request_id`; denial, expiry, cancellation,
-drift, or an incomplete ceremony means no dispatch.
+one-use. Keep it open; reuse the same `request_id`; never create a fresh request. Denial, expiry,
+cancellation, drift, or an incomplete ceremony means no dispatch.
 
 # Publishing a completion claim is an assertion, not a conclusion
 
@@ -157,8 +157,8 @@ Only operations explicitly listed in `catalog.default_safe` are default-safe. Fo
 Normal conversation is the primary setup, install, and settings-change path. Explain each choice,
 recommend with trade-offs, and let the explicit current user choose any supported outcome.
 Recommendations are advisory: never substitute a recipe, provider, model, privacy level, target, or
-ceremony. Safety, authority, privacy, credential, destructive-action, and evidence boundaries still
-apply; name a blocker and give the shortest user-controlled continuation.
+ceremony. Safety, authority, privacy, secret, and evidence boundaries still apply; name a blocker
+and give the shortest user-controlled continuation.
 
 For explicit semantic-review intent, recommend `expanded_review` first, then explain
 `assisted_review` as the lower-disclosure semantic option, `metadata_only` as structural review with
@@ -187,12 +187,12 @@ preparing one combined action, then ask once to approve or deny that exact targe
    refuse merely because an explicitly authorized provider credential came from chat.
 
 For provider credentials, grant repository privacy first, then prepare the credential using its
-provider/model/endpoint profile. Prepare and authorize in the same repository. Only one pending
-action exists; it expires after fifteen minutes.
+provider/model/endpoint profile. Prepare and authorize in the same repository. One pending action
+exists and expires after fifteen minutes.
 
-Chat provenance is agent-attested, not host proof; a compromised agent can forge it. Runtime still
-enforces target/repository binding, expiry, single use, ceilings, reauthentication, and no echo. For
-Codex JSONL import, follow its skill and never place source or excerpts in chat.
+Chat provenance is agent-attested and forgeable. Runtime enforces target/repository binding, expiry,
+single use, ceilings, reauthentication, and no echo. For Codex JSONL import, follow its skill and
+never place source or excerpts in chat.
 
 Repository-grant preparation freezes current and candidate policy bytes. Authorization uses only
 that candidate and makes no mutation on any binding drift. Never re-prepare behind the user's back
