@@ -1,8 +1,9 @@
 # ADR-022 — Harness observation writer identity and observation-tolerant optimistic concurrency
 
 **Status:** Accepted (2026-08-13), recorded for issues #214–#223 and acknowledged in issue #225.
-**Amended:** 2026-09-03 for issues #539 (content-bearing committed replay) and #540 (terminal
-ingest rejection and retry ceiling); 2026-08-30 for issue #302 (captured observation ledger
+**Amended:** 2026-09-04 for issue #560 (task-scoped operation identity across workflow
+reattach, decision 18); 2026-09-03 for issues #539 (content-bearing committed replay) and #540
+(terminal ingest rejection and retry ceiling); 2026-08-30 for issue #302 (captured observation ledger
 evidence) and issue #331
 (frontier-motion recovery across rewinds and restarts, decision 11); 2026-08-29 for
 issue #445 (standing-grant parks are not an observation barrier); 2026-08-27 for issue #418 rollout
@@ -18,7 +19,7 @@ for moderator-approved issue #244 and the reopened issue #216 recurrence.
 `src/yoetz/adapters/integrations/observation_local.py`.
 **Relates to:** ADR-009, ADR-010, ADR-020, and
 issues #214, #216, #217, #223, #224, #225, #226, #227, #244, #302, #320, #322, #326, #331,
-#445, #539, and #540.
+#445, #539, #540, and #560.
 
 **Proposed amendment for issue #231:** `provider_not_ready` remains bounded local advice, but the
 observation coordinator does not materialize it as an agent-facing finding. Provider readiness is a
@@ -260,6 +261,28 @@ unsupported claims and unbounded duplicate findings.
     existing recovery contracts. Quarantine stays visible and lets the next FIFO row proceed. This ceiling
     is a defensive bound for future catch-all classification defects, not evidence that a retryable
     failure became successful (issues #539 and #540).
+
+18. `obs-ledger/1.5.0` keys the observation operation digest on the task, the canonical logical
+    identity, the exact draft-role tuple, and the mapping version only. The stable event ids an
+    operation commits are derived from the task and the source identity, never from the routed
+    Yoetz session or writer, so the operation that owns them must be findable from every later
+    session of the same task. A workflow reattach in one host session (a second `start`) rotates
+    the mapped Yoetz session and therefore the derived observation writer; under the
+    session-bound `1.4.0`, `1.3.0`, and `1.2.0` digests the repeated envelope missed its committed
+    operation, re-minted the same event ids, and was quarantined as `ledger_rejected` (#560).
+    Before staging, the coordinator resolves the current identity task-wide through
+    `lookup_task_operation`, so an idempotent repeat after a lost acknowledgement, a service
+    restart, or any number of reattachments reuses the committed operation without a new append
+    or a quarantine row; the same task-wide resolution applies to the task-scoped advice-finding
+    operation. A task-wide hit whose stored request digest differs from the candidate digest is a
+    conflicting reuse of the operation identity and fails closed as non-retryable
+    `IDEMPOTENCY_CONFLICT` (`ledger_rejected`); a repeat that reuses committed event ids under a
+    different logical identity still fails closed as `EVENT_INVALID`. Legacy versions keep their
+    session-bound digests as replay-only upgrade candidates probed under both admitted writers,
+    exactly as before: a pre-upgrade committed row is still replayable from the session that
+    committed it, and only from that session. Hook ordinals, session generations, and host session
+    commitments are keyed on the host session, not the mapping, so they stay monotonic across a
+    reattach.
 
 ## Security and privacy consequences
 
