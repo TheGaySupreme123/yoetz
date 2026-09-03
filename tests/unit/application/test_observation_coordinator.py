@@ -144,6 +144,18 @@ def test_materialize_pre_post_and_unpaired() -> None:
     assert len(unpaired.drafts) == 1
     assert unpaired.drafts[0].draft.schema.name == "evidence_recorded"
     assert ObservationGapCode.UNPAIRED_EVENT.value in unpaired.gaps
+    assert ObservationGapCode.UNPAIRED_EVENT.value in unpaired.coverage.known_gaps
+
+    unselected = materialize_observation_envelope(
+        _envelope(
+            session=session,
+            kind="PreToolUse",
+            identity="hook:unselected",
+            gaps=(ObservationGapCode.CONTENT_UNSELECTED.value,),
+        ),
+        task_id=task,
+    )
+    assert ObservationGapCode.CONTENT_UNSELECTED.value in unselected.coverage.known_gaps
 
 
 def test_successful_routine_reads_stay_observation_only_but_failures_materialize() -> None:
