@@ -15,7 +15,7 @@ from typing import Literal, cast
 
 import pytest
 
-from yoetz.adapters.integrations.codex_lifecycle import acquire_session_lock
+from yoetz.adapters.integrations.codex_lifecycle import LifecycleMapping, acquire_session_lock
 from yoetz.adapters.integrations.hook_spool import HookSpool
 from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.recommendations import RecommendationState, store_recommendation_state
@@ -27,6 +27,8 @@ from yoetz.cli.observe_hooks import (
     map_hook_payload_to_envelope,
 )
 from yoetz.domain.observation import (
+    ObservationContentChunk,
+    ObservationContentKind,
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestResult,
@@ -36,6 +38,7 @@ from yoetz.domain.observation import (
 )
 from yoetz.protocol.canonical import JsonValue
 from yoetz.protocol.errors import PublicErrorCode, PublicOperationError
+from yoetz.protocol.models import StartRequest
 
 _KEY = b"k" * 32
 
@@ -1162,7 +1165,7 @@ def _drain_envelope(store: LocalObservationStore, session: str, identity: str, o
 
 
 @pytest.mark.anyio
-async def test_drain_quarantines_permanent_and_keeps_retryable(
+async def test_drain_quarantines_terminal_head_and_delivers_next_row(
     tmp_path: Path,
 ) -> None:
     store = LocalObservationStore(_state=tmp_path)
@@ -1174,21 +1177,24 @@ async def test_drain_quarantines_permanent_and_keeps_retryable(
     store.enqueue_outbox(workspace, "sess-drain", perm)
     store.enqueue_outbox(workspace, "sess-drain", retry)
     assert store.pending_outbox_count(workspace) == 2
+    calls = 0
 
     class Client:
         async def observation_ingest(self, body: object, *, deadline_ms: int):
+            nonlocal calls
             del deadline_ms
-            envelope = body["envelope"]  # type: ignore[index]
-            if envelope["source_identity"] == perm.source_identity:
+            del body
+            calls += 1
+            if calls == 1:
                 result = ObservationIngestResult(
                     ObservationIngestDisposition.REJECTED,
-                    ObservationGapCode.CONSENT_REVOKED.value,
+                    ObservationGapCode.LEDGER_REJECTED.value,
                     None,
                 )
             else:
                 result = ObservationIngestResult(
-                    ObservationIngestDisposition.REJECTED,
-                    ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                    ObservationIngestDisposition.DUPLICATE,
+                    None,
                     None,
                 )
             return observation_ingest_result_to_json(result)
@@ -1204,14 +1210,66 @@ async def test_drain_quarantines_permanent_and_keeps_retryable(
         workspace_commitment=workspace,
         codex_session_id="sess-drain",
         connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
     )
 
-    # Permanent -> quarantined (never dropped); retryable -> still pending.
+    # Permanent -> quarantined (never dropped); the next lane row still delivers.
     assert store.quarantined_count(workspace) == 1
     assert store.list_quarantine(workspace)[0][1].source_identity == perm.source_identity
-    pending = store.list_pending_outbox(workspace)
-    assert len(pending) == 1
-    assert pending[0][1].source_identity == retry.source_identity
+    await observe_hooks_module._drain_outbox(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id="sess-drain",
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+    )
+    assert calls == 2
+    assert store.list_pending_outbox(workspace) == ()
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.LEDGER_REJECTED.value in status.gaps
+    assert ObservationGapCode.OUTBOX_QUARANTINED.value in status.gaps
+    assert ObservationGapCode.SERVICE_UNAVAILABLE.value not in status.gaps
+    diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
+    assert '"reason":"ledger_rejected"' in diagnostics
+    assert '"reason":"service_unavailable"' not in diagnostics
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("control_reason", "retryable", "expected"),
+    [
+        ("frame_invalid", False, ObservationGapCode.LEDGER_REJECTED.value),
+        ("service_unavailable", True, ObservationGapCode.SERVICE_UNAVAILABLE.value),
+        ("vault_locked", False, ObservationGapCode.VAULT_LOCKED.value),
+    ],
+)
+async def test_service_ingest_preserves_control_error_retryability(
+    tmp_path: Path,
+    control_reason: str,
+    retryable: bool,
+    expected: str,
+) -> None:
+    """#540: transport failures do not make terminal control errors immortal."""
+
+    from yoetz.ports.control import ControlError
+
+    store = LocalObservationStore(_state=tmp_path)
+    envelope = _drain_envelope(store, "control-error", "hook:control-error", 1)
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            del body, deadline_ms
+            raise ControlError(control_reason, retryable=retryable)
+
+    result = await observe_hooks_module._try_service_ingest(  # pyright: ignore[reportPrivateUsage]
+        Client(),  # type: ignore[arg-type]
+        "control-error",
+        envelope,
+        deadline_ms=100,
+    )
+
+    assert result.disposition is ObservationIngestDisposition.REJECTED
+    assert result.reason == expected
 
 
 @pytest.mark.anyio
@@ -1332,6 +1390,76 @@ async def test_drain_budget_stops_without_advancing_unfinished_row(tmp_path: Pat
     assert store.list_pending_outbox_rows(workspace)[0].attempts == 0
     diagnostics = (tmp_path / "observation/hook-diagnostics.jsonl").read_text()
     assert '"reason":"drain_budget_exhausted"' in diagnostics
+
+
+@pytest.mark.anyio
+async def test_drain_timeout_after_commit_replays_and_acknowledges_pending_row(
+    tmp_path: Path,
+) -> None:
+    """#539: client timeout loses only the reply, not replayability."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session_id = "committed-timeout"
+    store.bind_codex_session(workspace, session_id)
+    envelope = _drain_envelope(store, session_id, "hook:committed-timeout", 1)
+    store.enqueue_outbox(workspace, session_id, envelope)
+    calls = 0
+    committed = False
+
+    class Client:
+        async def observation_ingest(self, body: object, *, deadline_ms: int):
+            nonlocal calls, committed
+            del deadline_ms
+            calls += 1
+            if calls == 1:
+                assert body["content_chunks"]  # type: ignore[index]
+                committed = True
+                await asyncio.sleep(1)
+                raise AssertionError("the hook deadline must cancel the lost reply")
+            assert committed is True
+            assert "content_chunks" not in body  # type: ignore[operator]
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object):
+        return Client()
+
+    chunk = ObservationContentChunk(
+        ObservationContentKind.TOOL_OUTPUT,
+        "corr-1",
+        f"hmac-sha256:{'12' * 32}",
+        "text/plain",
+        0,
+        1,
+        b"captured output",
+    )
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id=session_id,
+        connect=connect,  # type: ignore[arg-type]
+        content_by_source_identity={envelope.source_identity: (chunk,)},
+        _state=tmp_path,
+        budget_seconds=0.01,
+    )
+    assert store.list_pending_outbox_rows(workspace)[0].attempts == 0
+
+    await observe_hooks_module._drain_outbox(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace_commitment=workspace,
+        codex_session_id=session_id,
+        connect=connect,  # type: ignore[arg-type]
+        _state=tmp_path,
+        budget_seconds=1.0,
+    )
+    assert calls == 2
+    assert store.list_pending_outbox_rows(workspace) == ()
 
 
 @pytest.mark.anyio
@@ -1523,9 +1651,10 @@ def test_claude_session_start_auto_attach_preserves_the_harness_identity(
         _state: Path | None,
         harness_id: str = "codex",
         workspace_locator: str | None,
+        recovery_mapping: LifecycleMapping | None = None,
         connect: object = None,
     ) -> object | None:
-        del _state, connect
+        del _state, recovery_mapping, connect
         calls.append((codex_session_id, harness_id, workspace_locator))
         return observe_hooks_module.AutoAttachOutcome(None, "service_unavailable")
 
@@ -2012,6 +2141,11 @@ _START_IDS = {
     "session_id": "ses_1b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5c",
     "writer_id": "wri_1b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5d",
 }
+_SUCCESSOR_IDS = {
+    "task_id": _START_IDS["task_id"],
+    "session_id": "ses_2b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5c",
+    "writer_id": "wri_2b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5d",
+}
 
 
 class _StartOkClient(_InstantAckClient):
@@ -2033,9 +2167,11 @@ class _StartOkClient(_InstantAckClient):
 class _StartFailureClient(_InstantAckClient):
     def __init__(self, code: PublicErrorCode) -> None:
         self.code = code
+        self.requests: list[object] = []
 
     async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
-        del request, deadline_ms
+        del deadline_ms
+        self.requests.append(request)
         from yoetz.protocol.ids import IdKind, new_id
         from yoetz.protocol.models import OperationFailureModel
 
@@ -2054,6 +2190,52 @@ class _StartFailureClient(_InstantAckClient):
         )
 
 
+class _WorkspaceConflictThenAttachClient(_InstantAckClient):
+    """Model one workspace route: create once, then recover only by known session selector."""
+
+    def __init__(self, *, successor_task_id: str = _START_IDS["task_id"]) -> None:
+        self.requests: list[StartRequest] = []
+        self.created = False
+        self.successor_task_id = successor_task_id
+
+    async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
+        del deadline_ms
+        from yoetz.protocol.ids import IdKind, new_id
+        from yoetz.protocol.models import OperationFailureModel
+
+        assert isinstance(request, StartRequest)
+        self.requests.append(request)
+        if request.mode == "create_or_attach" and not self.created:
+            self.created = True
+            return SimpleNamespace(
+                ok=True,
+                frontier=SimpleNamespace(sequence="3", head_digest="sha256:" + "a" * 64),
+                **_START_IDS,
+            )
+        if request.mode == "create_or_attach":
+            return OperationFailureModel.model_validate(
+                {
+                    "protocol_version": "0.1",
+                    "schema_version": "1.0.0",
+                    "ok": False,
+                    "error": {
+                        "code": PublicErrorCode.SESSION_CONFLICT.value,
+                        "message": "workspace occupied",
+                        "retryable": False,
+                        "correlation_id": new_id(IdKind.CORRELATION),
+                        "safe_details": {"reason_code": "workspace_task_exists"},
+                    },
+                }
+            )
+        assert request.mode == "attach"
+        assert request.session_id == _START_IDS["session_id"]
+        return SimpleNamespace(
+            ok=True,
+            frontier=SimpleNamespace(sequence="4", head_digest="sha256:" + "b" * 64),
+            **{**_SUCCESSOR_IDS, "task_id": self.successor_task_id},
+        )
+
+
 def _connector(client: object):
     async def connect(_kind: object):
         return client
@@ -2068,6 +2250,7 @@ def _auto_start(
     _state: Path,
     workspace_locator: str | None,
     connect: object,
+    recovery_mapping: LifecycleMapping | None = None,
 ) -> observe_hooks_module.AutoAttachOutcome:
     return asyncio.run(
         observe_hooks_module._try_auto_start(  # pyright: ignore[reportPrivateUsage]
@@ -2075,6 +2258,7 @@ def _auto_start(
             _state=_state,
             harness_id=cast(Literal["claude", "codex", "cursor"], harness_id),
             workspace_locator=workspace_locator,
+            recovery_mapping=recovery_mapping,
             connect=cast(observe_hooks_module.HookStartConnector, connect),
         )
     )
@@ -2134,6 +2318,350 @@ def test_auto_start_without_a_workspace_locator_stops_before_any_service_call(
     assert outcome.reason == "auto_attach_workspace_unbound"
     assert calls == []
     assert observe_hooks_module.load_mapping("unbound-1", _state=tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    ("harness_id", "session"),
+    [("claude", "claude:next-1"), ("codex", "codex-next-1"), ("cursor", "cursor:next-1")],
+)
+def test_auto_start_workspace_conflict_reattaches_with_a_known_local_selector(
+    tmp_path: Path, harness_id: str, session: str
+) -> None:
+    """#535: the shared helper recovers without disclosing a route in the public error."""
+
+    prior = observe_hooks_module.mapping_from_start_ids(
+        codex_session_id=f"{harness_id}:ended-1",
+        yoetz_task_id=_START_IDS["task_id"],
+        yoetz_session_id=_START_IDS["session_id"],
+        yoetz_writer_id=_START_IDS["writer_id"],
+        last_frontier="3:sha256:" + "a" * 64,
+    )
+    client = _WorkspaceConflictThenAttachClient()
+    client.created = True
+
+    outcome = _auto_start(
+        harness_id,
+        session,
+        _state=tmp_path,
+        workspace_locator=str(tmp_path.resolve()),
+        recovery_mapping=prior,
+        connect=_connector(client),
+    )
+
+    assert outcome.reason is None
+    assert outcome.mapping is not None
+    assert outcome.mapping.yoetz_task_id == _START_IDS["task_id"]
+    assert outcome.mapping.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
+    first, second = client.requests
+    assert first.mode == "create_or_attach"
+    assert first.workspace_ref == str(tmp_path.resolve())
+    assert first.external_ref == f"{harness_id}-session:{session.removeprefix(harness_id + ':')}"
+    assert second.mode == "attach"
+    assert second.session_id == _START_IDS["session_id"]
+    assert second.workspace_ref == str(tmp_path.resolve())
+    assert second.external_ref == first.external_ref
+
+
+def test_workspace_conflict_recovery_never_selects_a_live_host_session(tmp_path: Path) -> None:
+    """The recovery selector is eligible only after the prior host lifecycle ended."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    previous = "codex-live-1"
+    previous_commitment = store.bind_codex_session(workspace, previous)
+    observe_hooks_module.store_mapping(
+        observe_hooks_module.mapping_from_start_ids(
+            codex_session_id=previous,
+            yoetz_task_id=_START_IDS["task_id"],
+            yoetz_session_id=_START_IDS["session_id"],
+            yoetz_writer_id=_START_IDS["writer_id"],
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    assert (
+        observe_hooks_module._ended_workspace_recovery_mapping(  # pyright: ignore[reportPrivateUsage]
+            store, workspace, "codex-next-1", harness_id="codex", _state=tmp_path
+        )
+        is None
+    )
+
+    store.note_session_end(workspace, previous_commitment)
+    recovered = observe_hooks_module._ended_workspace_recovery_mapping(  # pyright: ignore[reportPrivateUsage]
+        store, workspace, "codex-next-1", harness_id="codex", _state=tmp_path
+    )
+    assert recovered is not None
+    assert recovered.codex_session_id == previous
+
+
+def test_auto_start_does_not_recover_an_unclassified_session_conflict(tmp_path: Path) -> None:
+    """Only the exact workspace-occupied reason admits the ended-session recovery."""
+
+    prior = observe_hooks_module.mapping_from_start_ids(
+        codex_session_id="codex-ended-1",
+        yoetz_task_id=_START_IDS["task_id"],
+        yoetz_session_id=_START_IDS["session_id"],
+        yoetz_writer_id=_START_IDS["writer_id"],
+        last_frontier=None,
+    )
+    client = _StartFailureClient(PublicErrorCode.SESSION_CONFLICT)
+
+    outcome = _auto_start(
+        "codex",
+        "codex-next-1",
+        _state=tmp_path,
+        workspace_locator=str(tmp_path.resolve()),
+        recovery_mapping=prior,
+        connect=_connector(client),
+    )
+
+    assert outcome.mapping is None
+    assert outcome.reason == "auto_attach_conflict"
+    assert len(client.requests) == 1
+
+
+def test_auto_start_rejects_a_recovery_response_for_a_different_task(tmp_path: Path) -> None:
+    """The private selector can authorize only the task identity already held locally."""
+
+    prior = observe_hooks_module.mapping_from_start_ids(
+        codex_session_id="codex-ended-1",
+        yoetz_task_id=_START_IDS["task_id"],
+        yoetz_session_id=_START_IDS["session_id"],
+        yoetz_writer_id=_START_IDS["writer_id"],
+        last_frontier=None,
+    )
+    client = _WorkspaceConflictThenAttachClient(
+        successor_task_id="tsk_3b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5b"
+    )
+    client.created = True
+
+    outcome = _auto_start(
+        "codex",
+        "codex-next-1",
+        _state=tmp_path,
+        workspace_locator=str(tmp_path.resolve()),
+        recovery_mapping=prior,
+        connect=_connector(client),
+    )
+
+    assert outcome.mapping is None
+    assert outcome.reason == "auto_attach_result_invalid"
+    assert observe_hooks_module.load_mapping("codex-next-1", _state=tmp_path) is None
+
+
+def test_workspace_conflict_recovery_rejects_a_cross_workspace_session_binding(
+    tmp_path: Path,
+) -> None:
+    """A host session ID seen in two workspaces is ambiguous and cannot authorize attachment."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    first_locator = str((tmp_path / "first").resolve())
+    second_locator = str((tmp_path / "second").resolve())
+    first_workspace = store.workspace_commitment(first_locator)
+    second_workspace = store.workspace_commitment(second_locator)
+    store.grant_consent(first_workspace)
+    store.grant_consent(second_workspace)
+    previous = "codex-cross-workspace"
+    first_session_commitment = store.bind_codex_session(first_workspace, previous)
+    store.bind_codex_session(second_workspace, previous)
+    store.note_session_end(first_workspace, first_session_commitment)
+    observe_hooks_module.store_mapping(
+        observe_hooks_module.mapping_from_start_ids(
+            codex_session_id=previous,
+            yoetz_task_id=_START_IDS["task_id"],
+            yoetz_session_id=_START_IDS["session_id"],
+            yoetz_writer_id=_START_IDS["writer_id"],
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    recovered = observe_hooks_module._ended_workspace_recovery_mapping(  # pyright: ignore[reportPrivateUsage]
+        store,
+        first_workspace,
+        "codex-next-1",
+        harness_id="codex",
+        _state=tmp_path,
+    )
+    assert recovered is None
+
+
+def test_workspace_conflict_recovery_does_not_cross_host_families(tmp_path: Path) -> None:
+    """A Codex session never silently continues an ended Claude or Cursor mapping."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    previous = "claude:ended-1"
+    previous_commitment = store.bind_codex_session(workspace, previous)
+    store.note_session_end(workspace, previous_commitment)
+    observe_hooks_module.store_mapping(
+        observe_hooks_module.mapping_from_start_ids(
+            codex_session_id=previous,
+            yoetz_task_id=_START_IDS["task_id"],
+            yoetz_session_id=_START_IDS["session_id"],
+            yoetz_writer_id=_START_IDS["writer_id"],
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+
+    recovered = observe_hooks_module._ended_workspace_recovery_mapping(  # pyright: ignore[reportPrivateUsage]
+        store, workspace, "codex-next-1", harness_id="codex", _state=tmp_path
+    )
+    assert recovered is None
+
+
+def test_workspace_conflict_recovery_rejects_multiple_local_task_ids(tmp_path: Path) -> None:
+    """Mapping-file recency never selects silently among sibling tasks."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    task_ids = (
+        _START_IDS["task_id"],
+        "tsk_4b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5b",
+    )
+    for index, task_id in enumerate(task_ids):
+        previous = f"codex-ended-{index}"
+        commitment = store.bind_codex_session(workspace, previous)
+        store.note_session_end(workspace, commitment)
+        observe_hooks_module.store_mapping(
+            observe_hooks_module.mapping_from_start_ids(
+                codex_session_id=previous,
+                yoetz_task_id=task_id,
+                yoetz_session_id=(
+                    _START_IDS["session_id"]
+                    if index == 0
+                    else "ses_4b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5c"
+                ),
+                yoetz_writer_id=(
+                    _START_IDS["writer_id"]
+                    if index == 0
+                    else "wri_4b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5d"
+                ),
+                last_frontier=None,
+            ),
+            _state=tmp_path,
+        )
+
+    recovered = observe_hooks_module._ended_workspace_recovery_mapping(  # pyright: ignore[reportPrivateUsage]
+        store, workspace, "codex-next-1", harness_id="codex", _state=tmp_path
+    )
+    assert recovered is None
+
+
+def test_workspace_recovery_does_not_attach_while_predecessor_lock_is_held(
+    tmp_path: Path,
+) -> None:
+    """A predecessor resume wins before local recovery can rotate its route."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    previous = "codex-ended-1"
+    commitment = store.bind_codex_session(workspace, previous)
+    store.note_session_end(workspace, commitment)
+    observe_hooks_module.store_mapping(
+        observe_hooks_module.mapping_from_start_ids(
+            codex_session_id=previous,
+            yoetz_task_id=_START_IDS["task_id"],
+            yoetz_session_id=_START_IDS["session_id"],
+            yoetz_writer_id=_START_IDS["writer_id"],
+            last_frontier=None,
+        ),
+        _state=tmp_path,
+    )
+    client = _WorkspaceConflictThenAttachClient()
+    client.created = True
+
+    with acquire_session_lock(previous, _state=tmp_path) as owned:
+        assert owned is True
+        outcome = asyncio.run(
+            observe_hooks_module._try_workspace_auto_start(  # pyright: ignore[reportPrivateUsage]
+                "codex-next-1",
+                store=store,
+                workspace_commitment=workspace,
+                workspace_locator=locator,
+                harness_id="codex",
+                _state=tmp_path,
+                connect=cast(observe_hooks_module.HookStartConnector, _connector(client)),
+            )
+        )
+
+    assert outcome.mapping is None
+    assert outcome.reason == "auto_attach_conflict"
+    assert [request.mode for request in client.requests] == ["create_or_attach"]
+
+
+def test_session_restart_cannot_clear_ended_state_while_recovery_holds_lock(
+    tmp_path: Path,
+) -> None:
+    """Generation restart and recovery selection share one lifecycle lock."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    previous = "codex-ended-1"
+    commitment = store.bind_codex_session(workspace, previous)
+    store.note_session_end(workspace, commitment)
+
+    with acquire_session_lock(previous, _state=tmp_path) as owned:
+        assert owned is True
+        output = io.BytesIO()
+        assert (
+            handle_observe(
+                event_name="SessionStart",
+                stdin_bytes=json.dumps(
+                    {
+                        "session_id": previous,
+                        "hook_event_name": "SessionStart",
+                        "source": "resume",
+                    }
+                ).encode(),
+                stdout=output,
+                workspace=locator,
+                _state=tmp_path,
+                skip_service=True,
+            )
+            == 0
+        )
+
+    assert output.getvalue() == b"{}\n"
+    assert store.codex_session_ended(workspace, previous) is True
+
+
+def test_real_auto_start_connector_receives_the_canonical_workspace_locator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repository privacy context is bound by the hook's real control handshake."""
+
+    from yoetz.ports.control import WorkspaceLocator
+
+    captured: list[WorkspaceLocator | None] = []
+    client = _StartOkClient()
+
+    async def connect(_kind: object, *, workspace_locator: WorkspaceLocator | None = None):
+        captured.append(workspace_locator)
+        return client
+
+    monkeypatch.setattr(observe_hooks_module, "connect_service", connect, raising=False)
+    locator = str(tmp_path.resolve())
+    outcome = asyncio.run(
+        observe_hooks_module._try_auto_start(  # pyright: ignore[reportPrivateUsage]
+            "codex-next-1",
+            _state=tmp_path,
+            workspace_locator=locator,
+        )
+    )
+
+    assert outcome.mapping is not None
+    assert captured == [WorkspaceLocator(locator)]
 
 
 @pytest.mark.parametrize(
@@ -2283,6 +2811,71 @@ def test_session_start_auto_attaches_maps_and_drains_for_every_host(
     if diagnostics_path.exists():
         assert "auto_attach" not in diagnostics_path.read_text()
         assert '"reason":"service_unavailable"' not in diagnostics_path.read_text()
+
+
+@pytest.mark.parametrize(
+    ("source", "first_session", "second_session"),
+    [
+        (ObservationSource.CODEX_HOOK, "codex-ended-1", "codex-next-1"),
+        (ObservationSource.CLAUDE_HOOK, "claude:ended-1", "claude:next-1"),
+        (ObservationSource.CURSOR_HOOK, "cursor:ended-1", "cursor:next-1"),
+    ],
+)
+def test_fresh_session_reattaches_the_ended_workspace_task_and_drains_without_mapping_gap(
+    tmp_path: Path,
+    source: ObservationSource,
+    first_session: str,
+    second_session: str,
+) -> None:
+    """#535: an ended host session supplies a local selector for the shared recovery path."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    client = _WorkspaceConflictThenAttachClient()
+
+    def observe(event: str, session: str) -> bytes:
+        out = io.BytesIO()
+        code = handle_observe(
+            event_name=event,
+            stdin_bytes=json.dumps(
+                {
+                    "session_id": session,
+                    "hook_event_name": event,
+                    "source": "startup" if event == "SessionStart" else "other",
+                }
+            ).encode(),
+            stdout=out,
+            workspace=locator,
+            _state=tmp_path,
+            connect=_connector(client),  # type: ignore[arg-type]
+            source=source,
+            _output_event_name="sessionStart" if source is ObservationSource.CURSOR_HOOK else None,
+        )
+        assert code == 0
+        return out.getvalue()
+
+    observe("SessionStart", first_session)
+    observe("SessionEnd", first_session)
+    rendered = observe("SessionStart", second_session).decode()
+
+    mapping = observe_hooks_module.load_mapping(second_session, _state=tmp_path)
+    assert mapping is not None
+    assert mapping.yoetz_task_id == _START_IDS["task_id"]
+    assert mapping.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
+    assert store.list_pending_outbox_rows(workspace) == ()
+    assert _START_IDS["task_id"] in rendered
+    assert [request.mode for request in client.requests] == [
+        "create_or_attach",
+        "create_or_attach",
+        "attach",
+    ]
+    diagnostics_path = tmp_path / "observation/hook-diagnostics.jsonl"
+    if diagnostics_path.exists():
+        diagnostics = diagnostics_path.read_text()
+        assert '"reason":"auto_attach_conflict"' not in diagnostics
+        assert '"reason":"mapping_missing"' not in diagnostics
 
 
 def test_session_start_records_the_typed_cause_when_auto_attach_fails(tmp_path: Path) -> None:

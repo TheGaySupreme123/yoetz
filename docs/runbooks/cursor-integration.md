@@ -250,8 +250,10 @@ hook/observation paths.
 
 The native IDE plugin advertises only `sessionStart`, `sessionEnd`, `afterMCPExecution`,
 `afterFileEdit`, and `stop` for the pinned local profile. It intentionally excludes
-`afterAgentThought`. The portable CLI artifact advertises no hooks. SDK fixture metadata advertises
-no hook capability; the SDKs' file-based hook contract is not execution evidence. Hooks call
+`afterAgentThought`. Cursor also supports Agent Plugins: Yoetz's portable artifact supplies the
+standardized skills and MCP components there, while hooks remain a Cursor-native plugin capability;
+the portable CLI artifact therefore advertises no hooks. SDK fixture metadata advertises no hook
+capability; the SDKs' file-based hook contract is not execution evidence. Hooks call
 `yoetz hooks cursor-observe`, are fail-open, and never enforce Cursor work.
 
 Native hook artifacts and the plugin-owned `mcp.json` resolve the invoking `yoetz` launcher to
@@ -292,7 +294,13 @@ symlinked ancestors, root/home locators, unsafe markers, or unbounded/control-be
 (with `paused` for a paused grant), recorded by the shared ingress for every host. A consented
 `sessionStart` auto-attaches through the shared `start mode=create_or_attach` request, pairing the
 resolved workspace root as `workspace_ref` with `cursor-session:<session_id>` as `external_ref`;
-a failed attempt records its typed cause (`auto_attach_workspace_unbound`,
+an exact `workspace_task_exists` conflict gets one `mode=attach` recovery only when the private
+local store already holds a valid mapping from an earlier Cursor session whose `sessionEnd` was
+received, every other bound session is ended, and the candidate is bound only to this consented
+workspace. The catalog also requires one mapped task, the selector still active, no sibling task,
+the matching repository-privacy binding, and no start already pending for that route. The conflict
+reveals no selector, and a hard crash without `sessionEnd` remains fail-closed rather than being
+guessed from age. A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict`, `auto_attach_refused`,
 `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`,
 `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`, or `storage_corrupt`) in the
@@ -301,12 +309,28 @@ explicit `start` maps it. For `vault_locked` on a never-initialized install, tha
 `start` returns the typed `vault_initialization_required` continuation (see Troubleshooting)
 rather than a dead end.
 
+Cursor's hooks reference (re-read 2026-09-03) calls local `sessionStart` fire-and-forget: the hook
+process can complete this mapping and drain, but the agent loop does not wait for it. Therefore a
+rendered hook or passing local handler test does not prove the mapping existed before Cursor's first
+agent action; verify eventual `mapping_present`, accepted envelopes, and drain separately. Cursor
+cloud agents do not run `sessionStart` or `sessionEnd`, so this recovery is not claimed for that
+surface.
+
 The host-neutral `observe status` boundary also keeps storage layers distinct: unsafe state/lock
 paths report `storage_unsafe`, bounded open/permission/read-only/missing-parent/lock-acquisition
 failures report `storage_unavailable`, invalid stored data reports `storage_corrupt`, and other
 defects retain the internal-error boundary. Fixed remediation omits the absolute state path. A
 sandboxed Cursor-agent result does not establish unrestricted Cursor-terminal behavior; record
 those proof cells separately.
+
+Shared drain terminalization is host-neutral: `ledger_rejected` means the ready service rejected
+one envelope non-retryably, so that row is retained in quarantine and later rows proceed. A row
+also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
+designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible
+in `quarantine_causes`, aggregate `delivery_causes`, and gaps;
+`pending_delivery_causes` names only pending rows. A hook-driven drain also writes
+`hook_diagnostics`, while manual and supervisor drains remain visible through status. Neither case
+is repaired by restarting a service that already reports ready.
 
 Measured on 2026-08-28 with Cursor Agent CLI `2026.08.25-3e8eec8` (payload `cursor_version`;
 `cursor-agent --version` printed `2026.08.11-e8db854`) loading the native plugin through
@@ -376,6 +400,12 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 Cursor is not an allowlisted `yoetz consent authorize` attestation client in v0.1. It may show the
 agent-safe pending status and direct the user to a supported Codex attestation or local trusted
 command, but it must not emulate `vault_initialize` or `vault_passphrase_rotate` authorization.
+It still guides setup, installation, and settings choices in normal conversation and leaves each
+supported product choice with the user. When semantic review is the stated goal, it recommends
+Expanded first and explains Assisted as the lower-disclosure semantic option. It may show the full
+v6 repository privacy preview, but its missing chat-authority capability is a technical boundary:
+give the shortest exact trusted-local continuation and never silently downgrade the chosen recipe,
+provider, or model.
 
 First-run start continuation (issue #512): on a never-initialized install, the agent's first MCP
 `start` returns non-retryable `VAULT_LOCKED` carrying

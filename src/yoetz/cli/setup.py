@@ -1966,6 +1966,7 @@ async def _interactive_provider_setup(
                 "plan_type": status.get("plan_type"),
                 "model_available": status.get("model_available"),
                 "process_cleanup": status.get("process_cleanup"),
+                "login_reused": status.get("login_reused") is True,
             }
         )
         service = await _restart_service_for_semantic_composition()
@@ -2794,6 +2795,8 @@ def _emit_human_report(report: dict[str, JsonValue]) -> None:
         credential = provider.get("credential")
         if credential == "external_runtime_oauth":
             typer.echo("  Credential authority: Codex-managed ChatGPT login")
+            if provider.get("login_reused") is True:
+                typer.echo("  Sign-in: reused the existing Codex login")
         else:
             typer.echo(
                 "  Credential: "

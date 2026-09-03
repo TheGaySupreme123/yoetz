@@ -32,7 +32,12 @@ from yoetz.adapters.integrations.observation_local import (
     ObservationOutboxRow,
 )
 from yoetz.application.observation_check_policy import load_observation_check_policy
-from yoetz.application.observation_drain import ObservationDrainAction, route_observation_ingest
+from yoetz.application.observation_drain import (
+    EXPECTED_OBSERVATION_BACKPRESSURE_REASONS,
+    WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS,
+    ObservationDrainAction,
+    route_observation_ingest,
+)
 from yoetz.application.observation_verification import run_bound_approved_check
 from yoetz.cli.exits import exit_code_for, remediation_message
 from yoetz.cli.hook_diagnostics import hook_diagnostic_summary
@@ -277,7 +282,7 @@ def observe_status(
         store.refresh_advice(commitment)
     status = store.status(ObservationStatusQuery(commitment))
     snapshot = store.advice_snapshot_for(commitment)
-    undelivered, delivery_causes, last_drain, mapping_present = _delivery_facts(
+    undelivered, pending_delivery_causes, last_drain, mapping_present = _delivery_facts(
         store, commitment, state_root=_state
     )
     quarantine_depth, quarantine_evicted, quarantine_reclaimed = store.quarantine_facts(commitment)
@@ -287,6 +292,10 @@ def observe_status(
     for entry in store.list_quarantine(commitment):
         quarantine_causes[entry[2]] = quarantine_causes.get(entry[2], 0) + 1
     quarantine_causes = dict(sorted(quarantine_causes.items()))
+    delivery_causes = dict(pending_delivery_causes)
+    for reason, count in quarantine_causes.items():
+        delivery_causes[reason] = delivery_causes.get(reason, 0) + count
+    delivery_causes = dict(sorted(delivery_causes.items()))
     plugin_activation = _activation_state(
         root,
         codex_path=codex_path,
@@ -333,6 +342,7 @@ def observe_status(
                 "advice": advice_payload,
                 "undelivered_count": undelivered,
                 "delivery_causes": delivery_causes,
+                "pending_delivery_causes": pending_delivery_causes,
                 "last_successful_drain": last_drain,
                 "quarantine_count": quarantine_depth,
                 "quarantine_causes": quarantine_causes,
@@ -352,7 +362,7 @@ def observe_status(
         "lag_events": status.lag_events,
         "undelivered": (
             f"{undelivered} (cause: "
-            f"{','.join(f'{key}={value}' for key, value in delivery_causes.items()) or 'none'}; "
+            f"{','.join(f'{key}={value}' for key, value in pending_delivery_causes.items()) or 'none'}; "
             f"last successful drain: {last_drain})"
         ),
         "quarantine": (
@@ -424,7 +434,12 @@ async def _drain_observation_async(
                 }
             )
     try:
+        retired_lanes: set[tuple[str, str]] = set()
+        stopped_workspaces: set[str] = set()
         for commitment, row in deliverable:
+            lane = (commitment, row.codex_session_id)
+            if commitment in stopped_workspaces or lane in retired_lanes:
+                continue
             attempted += 1
             try:
                 raw = await client.observation_ingest(  # type: ignore[union-attr]
@@ -441,7 +456,11 @@ async def _drain_observation_async(
                 reason = (
                     ObservationGapCode.VAULT_LOCKED.value
                     if exc.reason == "vault_locked"
-                    else ObservationGapCode.SERVICE_UNAVAILABLE.value
+                    else (
+                        ObservationGapCode.SERVICE_UNAVAILABLE.value
+                        if exc.retryable
+                        else ObservationGapCode.LEDGER_REJECTED.value
+                    )
                 )
                 result = ObservationIngestResult(
                     ObservationIngestDisposition.REJECTED, reason, None
@@ -452,15 +471,35 @@ async def _drain_observation_async(
                     ObservationGapCode.SERVICE_UNAVAILABLE.value,
                     None,
                 )
-            decision = route_observation_ingest(result)
+            decision = route_observation_ingest(result, row=row)
             updated = store.bump_outbox_row_attempt(commitment, row, reason=decision.reason)
             if updated is None:
+                retired_lanes.add(lane)
                 continue
             if decision.reason is not None:
                 reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
-                store.note_coverage_gap(commitment, decision.reason)
+                if decision.reason not in EXPECTED_OBSERVATION_BACKPRESSURE_REASONS:
+                    store.note_coverage_gap(commitment, decision.reason)
             if decision.action is ObservationDrainAction.RETRY:
+                retired_lanes.add(lane)
+                if decision.reason == ObservationGapCode.MAPPING_MISSING.value:
+                    moved = store.quarantine_ended_unmapped_session(
+                        commitment,
+                        row.codex_session_id,
+                        decision.reason,
+                    )
+                    if moved:
+                        quarantined += moved
+                        continue
                 retry_pending += 1
+                if decision.reason is not None:
+                    store.note_outbox_session_reason(
+                        commitment,
+                        row.codex_session_id,
+                        decision.reason,
+                    )
+                if decision.reason in WORKSPACE_GLOBAL_OBSERVATION_STOP_REASONS:
+                    stopped_workspaces.add(commitment)
             elif decision.action is ObservationDrainAction.QUARANTINE:
                 if store.quarantine_outbox_row(
                     commitment,

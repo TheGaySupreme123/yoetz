@@ -2522,6 +2522,33 @@ def test_human_report_omits_a_credential_reason_once_the_credential_is_stored(
     assert "Credential reason:" not in _plain(capsys.readouterr().out)
 
 
+@pytest.mark.parametrize("login_reused", [True, False])
+def test_human_report_states_whether_the_codex_sign_in_was_reused(
+    capsys: pytest.CaptureFixture[str], login_reused: bool
+) -> None:
+    """First-run must say when setup reused the dedicated home's existing Codex login (#534)."""
+
+    import yoetz.cli.setup as setup_module
+
+    setup_module._emit_human_report(  # pyright: ignore[reportPrivateUsage]
+        {
+            "registration": {"outcome": "already_registered"},
+            "service": {"reachable": True, "state": "ready"},
+            "provider": {
+                "binding": "configured",
+                "credential": "external_runtime_oauth",
+                "login_reused": login_reused,
+            },
+            "integration": {},
+            "next_steps": [],
+        }
+    )
+
+    plain = _plain(capsys.readouterr().out)
+    assert "Credential authority: Codex-managed ChatGPT login" in plain
+    assert ("Sign-in: reused the existing Codex login" in plain) is login_reused
+
+
 def test_blocked_privacy_step_reports_its_own_reason_for_the_credential(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

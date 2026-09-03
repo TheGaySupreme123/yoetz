@@ -204,7 +204,15 @@ A consented `SessionStart` auto-attaches a ledger task without an explicit MCP `
 sends `start mode=create_or_attach` with the canonical project root as `workspace_ref` and
 `claude-session:<session_id>` as `external_ref` (both persisted only as HMAC commitments). Success
 shows as `mapping_present: true` in `observe status` and the session's queued rows drain in the
-same pass. A failed attempt records its cause as a payload-free `hook_diagnostics` reason
+same pass. If that new pair conflicts because the workspace already has a task, the shared hook
+path retries once with `mode=attach` only when it already holds a valid private mapping from an
+earlier Claude session whose `SessionEnd` was received, every other bound session is ended, and the
+candidate is bound only to this consented workspace. The catalog additionally requires one mapped
+task, the selector still active, no sibling task, the matching repository-privacy binding, and no
+start already pending for that route. This reuses an already-known session selector; the public
+conflict still discloses no task or session ID, and a hard crash without `SessionEnd` remains
+fail-closed rather than being guessed from age. A failed attempt records its cause as a
+payload-free `hook_diagnostics` reason
 (`auto_attach_workspace_unbound`, `auto_attach_request_invalid`, `auto_attach_conflict`,
 `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
 `privacy_authority_required`, `service_unavailable`, `vault_locked`, `timeout`, `storage_unsafe`,
@@ -219,6 +227,15 @@ open/permission/read-only/missing-parent/lock-acquisition failures to `storage_u
 invalid stored data to `storage_corrupt`; other defects retain the internal-error boundary. Its
 fixed remediation never prints the absolute state path. A result obtained from a sandboxed Claude
 carrier proves only that sandbox cell; unrestricted-terminal behavior needs its own run.
+
+Shared drain terminalization is host-neutral: `ledger_rejected` means the ready service rejected
+one envelope non-retryably, so that row is retained in quarantine and later rows proceed. A row
+also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
+designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible
+in `quarantine_causes`, aggregate `delivery_causes`, and gaps;
+`pending_delivery_causes` names only pending rows. A hook-driven drain also writes
+`hook_diagnostics`, while manual and supervisor drains remain visible through status. Neither case
+is repaired by restarting a service that already reports ready.
 
 Grant observation separately for the exact project. Exercise every advertised event and inspect
 `yoetz observe status`. Only consented accepted `claude_hook` envelopes earn coverage. Raw
@@ -316,6 +333,12 @@ tree; interrupted stage/rollback material surfaces in status as `recovery_requir
 Claude Code is not an allowlisted `yoetz consent authorize` attestation client in v0.1. It may show
 the agent-safe pending status and direct the user to a supported Codex attestation or local trusted
 command, but it must not emulate `vault_initialize` or `vault_passphrase_rotate` authorization.
+It still guides setup, installation, and settings choices in normal conversation and leaves each
+supported product choice with the user. When semantic review is the stated goal, it recommends
+Expanded first and explains Assisted as the lower-disclosure semantic option. It may show the full
+v6 repository privacy preview, but its missing chat-authority capability is a technical boundary:
+give the shortest exact trusted-local continuation and never silently downgrade the chosen recipe,
+provider, or model.
 
 First-run start continuation (issue #512): on a never-initialized install, the agent's first MCP
 `start` returns non-retryable `VAULT_LOCKED` carrying

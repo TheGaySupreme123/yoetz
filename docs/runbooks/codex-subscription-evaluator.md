@@ -41,6 +41,33 @@ yoetz provider codex-subscription disconnect --accept
 yoetz provider codex-subscription rollback
 ```
 
+### Login lives once per dedicated home
+
+Codex owns the OAuth state of the dedicated home (`auth.json`, refresh, logout). `setup` therefore
+treats a sign-in as something to prove, not something to repeat (#534): after the local preflight
+and `prepare_codex_home`, it runs the same structural probe as `status` — app-server
+`account/read` with `refreshToken: false` followed by `model/list` — and, when Codex reports a
+ChatGPT account with the exact model/reasoning cell available, writes the binding and returns
+`login_reused: true` without issuing `account/login/start`. The three non-reuse edges are distinct:
+a logged-out home or a home missing the exact model takes the ordinary login path, which still
+fails with its existing `codex_subscription_readiness_unproven` token when the login cannot prove
+the cell; a probe whose process-group cleanup is unconfirmed fails closed with that same token
+*before* any further child launch, never falling through to login; and a dedicated home whose
+`config.toml` differs still fails `codex_runtime_config_conflict` before any process starts. A
+probe that cannot complete at all — an unreachable or unanswering app-server, an expired
+capability cell — fails with its own bounded token rather than silently opening a login.
+`--switch-account` (the prompt-loop "switch ChatGPT account" confirmation and the `/provider`
+"Switch Codex ChatGPT account" choice) is the explicit override: it skips the probe, logs the home
+out through Codex, and signs in again. Yoetz never reads, copies, or moves `auth.json`; readiness
+is only what Codex answers.
+
+The dedicated evaluator home may be reused across runs, including isolated dogfood runs, by
+passing the same owner-private directory to `--codex-home`. The parity report identifies it by
+its existing `codex_home_digest`. It must remain a dedicated home — never the ambient user Codex
+home and never the per-run host home — and `disconnect` remains the way to log it out. Because a
+reused home outlives the isolation root, its full teardown is `disconnect` followed by the
+operator deleting that directory; deleting the isolation root does not remove it (ADR-026).
+
 ## Selected executable resolution
 
 Pass one absolute selected path. The supported npm layouts are:

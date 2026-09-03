@@ -133,10 +133,14 @@ does clear the status surface's `unanswered_finding_count`, while the actionable
 
 What does resolve a finding is proof: a later check that tested the repaired record and found the
 same issue absent. That check must cover the finding — the whole case, or a scope that names the
-finding's subject — with the owning policy pack run to completion, nothing suppressed, and no
-redacted or unreadable material in its coverage; a semantic finding additionally needs a completed
-semantic review, and a deterministic-only check never resolves one. Weak, scoped-away, stale, or
-failed checks change nothing, and a check that reports the same issue again keeps it current.
+finding's subject — with the owning policy pack run to completion, nothing suppressed, and its
+proof inputs readable. Case-wide host-observation limitations (`captured_object_unavailable`,
+`content_unselected`, `host_outcome_unavailable`, and `unpaired_event`) do not veto a deterministic
+finding's otherwise clean structured-ledger proof; they remain receipt coverage limitations. This
+exception requires the finding's own recorded coverage to have been readable and never applies to
+a semantic finding. Redacted or unavailable event payloads, redacted objects, missing references,
+unknown events, weak original finding coverage, suppression, stale state, scoped-away work, or a
+failed pack still change nothing, and a check that reports the same issue again keeps it current.
 
 A resolved finding is not erased. Status still lists it (`resolved: true`, shown when
 `include_resolved` is requested), the receipt still carries it as history, and the receipt wording
@@ -145,9 +149,11 @@ that are still current and from any coverage limitations. One exception is fixed
 status wire: a finding whose latest response is `provenance_disputed` stays current even after such
 a check.
 
-Repairing the record is therefore the way back to a clean receipt: repair, recheck, and read the
-result. A task whose recheck still fires the issue does not go on to produce a clean completion
-receipt, and the final answer should not describe one.
+Repairing the record is therefore the way back to a stronger receipt: repair, recheck, and read the
+finding's `resolved` state rather than assuming that absence alone qualified. If the issue re-fires,
+or it does not re-fire but remains current because the recheck did not qualify, stop rechecking the
+unchanged state; request the bounded receipt and disclose the current finding and limiting coverage.
+Neither case supports a clean completion receipt.
 
 Responding does not throw the check away. A recorded check still counts toward a later receipt when
 the only events between the two are responses to findings that check itself returned and/or a

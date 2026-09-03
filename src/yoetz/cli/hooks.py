@@ -458,7 +458,7 @@ def handle_session_start(
     stdin_bytes: bytes | None = None,
     stdout: BinaryIO | None = None,
     _state: Path | None = None,
-    connect: ServiceConnector = connect_service,
+    connect: ServiceConnector | None = None,
     run_async: AsyncRunner | None = None,
     workspace: str | None = None,
 ) -> int:
@@ -536,6 +536,7 @@ def handle_session_start(
                     _state=_state,
                     connect=connect,
                     run_async=run_async,
+                    _session_lock_owned=True,
                 )
                 observed = observe_out.getvalue()
                 if observed and observed not in {b"{}\n", b"{}\r\n"}:
@@ -550,7 +551,10 @@ def handle_session_start(
                 return 0
 
             async def _run() -> StatusOutcome:
-                return await _read_status(mapping, connect=connect)
+                return await _read_status(
+                    mapping,
+                    connect=connect_service if connect is None else connect,
+                )
 
             kind, updated = cast(StatusOutcome, runner(_run))
             from yoetz.cli.observe_hooks import handle_observe
@@ -563,6 +567,7 @@ def handle_session_start(
                 _state=_state,
                 connect=connect,
                 run_async=run_async,
+                _session_lock_owned=True,
             )
             if kind == "active" and updated is not None:
                 store_mapping(updated, _state=_state)

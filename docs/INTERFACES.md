@@ -97,7 +97,9 @@ repository literal, so no caller- or service-derived string can steer an agent t
 keys. `SESSION_NOT_FOUND` with
 `reason_code: session_superseded` carries the current binding for a retired session. The separate
 `workspace_task_exists` conflict deliberately carries no task selector or count: possession of a
-workspace reference alone is not authority to discover or attach another task. For MCP
+workspace reference alone is not authority to discover or attach another task. A host hook may
+recover from that exact conflict only with a validated selector it already holds in the private
+local lifecycle store; the public error remains unchanged and reveals no binding. For MCP
 `INVALID_REQUEST` validation failures, `safe_details` may also carry parallel `fields` and
 `reasons` arrays: each entry is an allowlisted JSON pointer and a closed reason token for that
 location (same index order; at most eight locations). `reason_code` may co-occur with
@@ -1311,6 +1313,14 @@ because the commit outcome may be ambiguous; abandonment is never inferred from 
 cancellation. The cleanup runs in a shielded task to a definite outcome before cancellation
 propagates. Cleanup failure never hides the original public error, and the exact unreferenced
 object remains eligible for delayed generation-fenced orphan GC.
+The same retained-stage and commit-boundary rules apply to every multi-object object-first append:
+cooperative `publish_work` batches and observation envelope, inspection, approved-check, and advice
+materialization abandon all exact stages when object preparation fails or the commit boundary
+certifies pre-submission cancellation. The guard spans the whole preparation — every draft, entry,
+and command construction between the first stage and the prepared mutation — not only the
+`stage`/`finalize` calls, so a rejected stored value cannot strand an already finalized object
+either. Once submission begins, those callers leave the objects alone because the commit outcome
+may be ambiguous.
 Receipt replay binding mismatches use the same application-site correlation contract with one of
 the closed structural reasons `receipt_digest_mismatch`, `receipt_id_mismatch`,
 `receipt_frontier_mismatch`, `receipt_conclusion_mismatch`, or
@@ -1415,17 +1425,29 @@ these hold: its recorded `subject_frontier` is at or after the finding's ingesti
 finding it returned is readable and none shares the row's issue key; `suppressed_count` is zero;
 the execution for the row's `(policy_id, policy_version)` is `run/completed`; its normalized
 `scope` is whole-case or names one of the row's `subject_refs`; its coverage `ledger_freshness` is
-not `stale_after_material_change|redacted_gap|unknown`; and its `known_gaps` lie within the
-proof class's closed tolerated set — for deterministic rows the semantic-review absence/weakness
-codes (`semantic_review_not_requested|semantic_review_not_configured|
+not `stale_after_material_change|unknown`; and its `known_gaps` lie within the proof class's closed
+tolerated set. `redacted_gap` also blocks by default. One deterministic-only exception admits it
+when the finding's own recorded coverage was readable and the check-wide gap set contains only
+tolerated codes including at least one host-observation code; this keeps unrelated host capture
+limits from making a structured-ledger repair permanently unprovable. For deterministic rows the
+tolerated set is the semantic-review absence/weakness codes
+(`semantic_review_not_requested|semantic_review_not_configured|
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
 optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|
 semantic_case_content_over_item_limit`) plus the evidence-strength codes
-(`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`);
-for `semantic_model_derived` rows only the evidence-strength codes, and the check must also record
-`succeeded/semantic_completed`. Any other gap — redacted or unavailable payloads and objects,
-missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
+(`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
+and the host-observation codes (`captured_object_unavailable|content_unselected|
+host_outcome_unavailable|unpaired_event`). Those host codes remain receipt coverage limitations;
+they only stop vetoing deterministic absence proof because deterministic packs judge structured
+event payloads and typed coverage, never captured-object bytes. If missing content matters to the
+rule, the completed pack re-fires the issue or returns its own coverage finding. The exception also
+requires the finding's original coverage to contain only the pre-existing semantic/evidence
+tolerances and to have freshness outside `stale_after_material_change|redacted_gap|unknown`.
+For `semantic_model_derived` rows only the evidence-strength codes are tolerated, and the check
+must also record
+`succeeded/semantic_completed`. Any other gap — redacted or unavailable payloads, redacted
+objects, missing refs, unknown events, completion scope, import range, or a code not in the list — blocks
 both proof classes. A deterministic-only check therefore never resolves a semantic finding, and a
 weakened semantic review never resolves one either. A check that returns a finding again clears
 that row's proof; a resolved row is excluded from finding-ID reuse (`prior_finding_ids`), so a
@@ -1540,7 +1562,18 @@ binding. If the pair is new but the workspace already owns a non-quarantined tas
 lineage. An `initializing` route counts as occupied: ignoring a still-reclaimable start would let a
 concurrent drifted pair split lineage. The conflict discloses no binding; the caller must attach
 with a previously held session selector or choose `mode=create` explicitly for a separate sibling
-task. Raw refs never land in
+task. The observation hook's bounded recovery is one such previously held-selector path: after the
+exact conflict, it may choose the most recently written valid local mapping among same-host
+sessions bound to that consented workspace and no other local workspace, but only after a received
+`SessionEnd` durably marked every other bound host session ended and every eligible mapping names
+one task. It then issues `mode=attach` with the known Yoetz session selector plus the new paired
+host identity. The catalog admits that otherwise-unresolved pair only when the selector is still
+the route's active session, the route is the workspace's sole non-quarantined task, the trusted
+repository-privacy binding matches, and no start for that route is already pending. The pair is a
+one-request workspace proof, not a stored alias. The hook accepts only a success for the same task
+ID before mapping the new host session. It never infers death from age, derives a selector from the
+conflict, chooses among sibling tasks, crosses host families, supersedes a still-live host session,
+or implements the multi-task workspace admission planned by #494/#497/#498. Raw refs never land in
 durable state — only the commitments do. This
 model/agent-controlled `workspace_ref_commitment` is an attachment selector, not a
 repository-privacy commitment, and cannot select or inherit disclosure authority.
@@ -2158,12 +2191,16 @@ authorization signals.
 
 Elevated consent (`service/elevated_bootstrap.py`, CLI `yoetz consent` /
 `yoetz elevated-bootstrap`) is a separate owner-only pending-file lane outside
-`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/5`) and creates
-digest-bound pending records (`yoetz.elevated-bootstrap.pending/3`). The agent-safe projection
+`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/6`) and creates
+digest-bound pending records (`yoetz.elevated-bootstrap.pending/4`). The agent-safe projection
 contains only operation, risk class, bounded danger text, exact digests, expiry, pending ID, an
 exact bounded repository recipe when applicable, the fixed `["yoetz","consent","review"]`
 command, and an authorize command only for operations that permit agent-chat authorization. A
-legacy v1 durable record is invalidated. Catalog rules explicitly state that agent attestation is
+repository grant additionally exposes `yoetz.repository-privacy-grant-preview/1`: exact recipe,
+keyed repository commitment, authority/current/candidate/diff digests, and the complete bounded
+substantive before/after policy diff. The owner-only pending record freezes both policy byte sets;
+the readable diff is the decision surface and its digest is only integrity evidence. Legacy v1-v3
+durable records are invalidated. Catalog rules explicitly state that agent attestation is
 not independent proof and that a compromised agent can forge it.
 
 `yoetz consent review` remains the OS-presence console path. It requires an independently
@@ -2185,6 +2222,17 @@ presence-only and never echo secret bytes. Vault initialization accepts no calle
 helper generates and scoped-credential-store-verifies it before confidential submission. This lane does not
 unlock an already-locked vault. The six MCP tools (ADR-011) are unchanged; authorize is local
 CLI control.
+
+`expanded_review` is an admitted exact repository recipe on this lane. Prepare binds the frozen
+candidate and diff to the repository commitment, authority generation, provider/model/endpoint,
+recipe, policy digests, target, and expiry. Authorize rechecks repository identity, authority
+snapshot, and the configured provider route, then proposes only the frozen candidate. Drift,
+denial, expiry, replay, malformed preview, or unsupported client yields no policy/provider mutation.
+Agents guide setup, installation, and settings changes in normal conversation, recommend with
+trade-offs, and treat explicit current user intent as final for supported product choices. When the
+user explicitly asks for semantic-review depth, Expanded is recommended first and Assisted is
+explained as the lower-disclosure semantic option. Recommendations never override technical
+authority, policy, never-send, credential, destructive-action, or evidence boundaries.
 
 A consent action is recorded approved only after its operation result is validated as the exact
 success the review-result schema admits (issue #510). A ceremony that ends in any other state —
@@ -2217,8 +2265,8 @@ state. A genuine pre-commit proposal or decision failure still reports
 `repository_privacy_grant_failed` with no grant.
 
 The current public JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
-`review-result`, and `status`, each at version `5.0.0` under `schemas/consent/`; frozen versions
-`2.0.0` through `4.0.0` remain shipped for compatibility. The current version report is
+`review-result`, and `status`, each at version `6.0.0` under `schemas/consent/`; frozen versions
+`2.0.0` through `5.0.0` remain shipped for compatibility. The current version report is
 `version/version-manifest-2.0.0.schema.json`; its released `1.0.0` predecessor remains byte-frozen.
 `yoetz.chat-user-attestation/1` is version 1.0.0.
 `review_only` irreversible
@@ -3047,7 +3095,23 @@ Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
 
 Canonical normalization precedes materialization. Equivalent hook/stream host calls share logical
 identity, roles, operation digest, and stable ledger IDs. That canonical logical identity remains
-the content and ledger-dedup key. The durable repository claim is separately domain-scoped by the
+the ledger-dedup key. Captured-content manifests use a narrower phase identity derived from that
+canonical host call plus normalized phase. Equivalent hook/stream copies of one completed phase
+therefore share recovery, while Pre/Post/unpaired siblings remain isolated. Manifests are recovered
+before materialization, including on a content-less durable-outbox retry. For pre-amendment rows,
+the matching source group may supply usable content; every legacy source group is also kept as a
+separate lookup-only role candidate so an equivalent post-upgrade stream copy can find a hook
+commit. Recovery authenticates each encrypted object's kind, media type, canonical envelope, and
+inner plaintext digest. A complete readable manifest set may strengthen a new materialization; an
+incomplete, legacy-unbound, contradictory, orphaned, or unreadable set is used only to reconstruct
+candidate role tuples for completed-operation lookup and never grants captured coverage. Once a
+phase has durable manifests, later equivalent-source chunks cannot expand its stable role set. The
+content-independent core role tuple is also a replay candidate: if a core-only operation committed
+before content arrived, the later copy reuses it and records `content_capture_unavailable` rather
+than reminting its event IDs or retroactively upgrading its coverage. The role-scoped operation
+digest can therefore find either committed ordering without changing event IDs.
+Missing, incomplete, contradictory, or unreadable objects add `content_capture_unavailable` rather
+than being inferred. The durable repository claim is separately domain-scoped by the
 materialization mapping version and exact draft-role tuple, so phases of one host call with
 different materializations (for example pre-action versus paired action/result) cannot collide,
 while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
@@ -3078,7 +3142,20 @@ canonical workspace locator the hook already bound consent to as `workspace_ref`
 host-session identity as `external_ref`; the service persists only HMAC commitments of both, and a
 hook that reached consent through the legacy session→workspace map without a canonical locator
 never sends an unpaired request (issue #459). The request validates through the public
-`StartRequest` contract before dispatch. Every failed attempt records a closed hook-diagnostic
+`StartRequest` contract before dispatch. If the new pair receives the exact
+`workspace_task_exists` conflict, the shared Claude Code/Codex/Cursor hook path may retry once with
+`mode=attach` only when the private local store already holds a valid mapping from a received,
+durably recorded same-host `SessionEnd`, every other bound host session is ended, and the candidate
+session belongs to that consented workspace and no other local workspace. All eligible mappings
+must name one task; within it, the newest mapping-file write wins and the host session ID breaks
+timestamp ties. The attach carries that selector plus the new host pair, while the control
+handshake carries the canonical workspace for repository privacy. The catalog requires the
+selector to remain active, the task to be the workspace's sole non-quarantined route, and no start
+for that route to be pending. Both calls share one five-second deadline. The response must retain
+the candidate's task ID. A successful recovery records the new mapping and drains its pending rows
+without publishing the intermediate conflict as a diagnostic. With no eligible local selector, or
+when that attach fails, the ordinary typed failure path remains. Every failed attempt records a
+closed hook-diagnostic
 reason instead of a silent absent mapping: `auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict` (session, idempotency, or request-identity
 conflict), `auto_attach_refused`, `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`,
@@ -3146,6 +3223,20 @@ quarantined-at time behind the trusted-clock epoch fence; an operator can drop i
 save resolves its active flag only when that save evicts nothing and leaves one-eighth of the state
 budget free. Merely landing under the cap cannot clear the same loss it just recorded; the durable
 gap history remains after recovery, and renewed shedding reactivates it (issue #310).
+
+Public ingest failures use their `retryable` contract, not a spelling fallback. A non-retryable
+failure that is not already a narrower terminal class (`dedup_conflict` or
+`observation_storage_corrupt`) becomes `ledger_rejected`; drain and sweep quarantine that one row,
+record the reason once, and continue its lane. Retryable failures keep their current reason and
+scope. A row that reaches 128 consecutive rejections with the same retryable reason is quarantined
+with that reason, so an accidental future catch-all classification cannot create an immortal FIFO
+head. Designed `operation_pending` back-pressure and workspace-global pause/vault/disabled gates
+are not subject to this ceiling and retain their existing recovery semantics. The terminal reason
+remains in `quarantine_causes`, the aggregate `delivery_causes`, and gaps. The
+`pending_delivery_causes` field names only pending rows, while `delivery_causes` combines pending
+and quarantined delivery failures so terminal causes remain visible after the row leaves the
+outbox. Hook-driven drains also write the bounded hook diagnostic, while manual and supervisor
+drains are visible through status rather than being mislabeled as hook activity (issue #540).
 
 Routine-read materialization follows ADR-022's rate policy. A service-owned structural
 `action=routine_read` label is derived only for the closed direct-read tool set or a conservatively

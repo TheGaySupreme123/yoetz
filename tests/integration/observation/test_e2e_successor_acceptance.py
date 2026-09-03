@@ -293,6 +293,7 @@ async def test_completed_approved_check_forwards_bounded_result_for_ledger_mater
 @pytest.mark.anyio
 async def test_approved_check_materialization_is_service_owned_and_idempotent(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from typing import cast
 
@@ -319,9 +320,10 @@ async def test_approved_check_materialization_is_service_owned_and_idempotent(
     )
     from yoetz.ports.diagnostics import RuntimeCapability
     from yoetz.ports.importer import ImporterPort
-    from yoetz.ports.objects import ObjectStorePort
+    from yoetz.ports.objects import ObjectKind, ObjectRef, ObjectStorePort, StagedObject
     from yoetz.ports.runtime import BundleRuntimePort, TaskRuntime
     from yoetz.protocol.coverage import PublicationChannel
+    from yoetz.protocol.errors import ProtocolValueError
 
     seed = append_command()
     ledger = memory_adapter(seed)
@@ -376,7 +378,54 @@ async def test_approved_check_materialization_is_service_owned_and_idempotent(
         recorded_at="2026-08-09T00:00:00.000Z",
     )
 
-    await coordinator._materialize_approved_check(runtime, completed)  # pyright: ignore[reportPrivateUsage]
+    refs_before = {
+        kind: objects.refs_for_kind(kind)
+        for kind in (ObjectKind.CAPTURED_CONTENT, ObjectKind.EVENT_PAYLOAD)
+    }
+    data_before = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+
+    # Issue #339: preparation between the finalized receipt object and the first payload stage
+    # can still fail on stored data — an unparsable recorded_at here. That is object preparation
+    # before submission, so the receipt stage must be abandoned exactly like a persist failure.
+    with pytest.raises(ProtocolValueError):
+        await coordinator._materialize_approved_check(  # pyright: ignore[reportPrivateUsage]
+            runtime, replace(completed, recorded_at="not-a-timestamp")
+        )
+    assert (
+        objects.refs_for_kind(ObjectKind.CAPTURED_CONTENT)
+        == refs_before[ObjectKind.CAPTURED_CONTENT]
+    )
+    assert objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD) == refs_before[ObjectKind.EVENT_PAYLOAD]
+    assert len(objects._data) == data_before  # pyright: ignore[reportPrivateUsage]
+
+    original_finalize = objects.finalize
+    finalize_calls = 0
+
+    async def _fail_second_finalize(staged: StagedObject) -> ObjectRef:
+        nonlocal finalize_calls
+        finalize_calls += 1
+        if finalize_calls == 2:
+            raise OSError("simulated_second_finalize_failure")
+        return await original_finalize(staged)
+
+    monkeypatch.setattr(objects, "finalize", _fail_second_finalize)
+
+    # Issue #339: the receipt finalizes first, then the first event payload persist fails. The
+    # identical materialization retries successfully without retaining either failed-attempt object.
+    with pytest.raises(OSError, match="simulated_second_finalize_failure"):
+        await coordinator._materialize_approved_check(  # pyright: ignore[reportPrivateUsage]
+            runtime, completed
+        )
+    assert (
+        objects.refs_for_kind(ObjectKind.CAPTURED_CONTENT)
+        == refs_before[ObjectKind.CAPTURED_CONTENT]
+    )
+    assert objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD) == refs_before[ObjectKind.EVENT_PAYLOAD]
+    assert len(objects._data) == data_before  # pyright: ignore[reportPrivateUsage]
+
+    await coordinator._materialize_approved_check(  # pyright: ignore[reportPrivateUsage]
+        runtime, completed
+    )
     object_count = len(objects._data)  # pyright: ignore[reportPrivateUsage]
     harness_runtime = replace(
         runtime,

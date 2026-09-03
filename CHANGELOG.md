@@ -6,7 +6,44 @@ reverse-chronological released versions.
 
 ## Unreleased
 
+### Fixed
+
+- A Codex MCP route that reverts to `strict` between install and session start no longer reports a
+  bare `route_semantic_ceiling`. `yoetz integrate codex mcp install` now records the applied route
+  in an owner-only state-directory record (no repository or prompt content); `mcp status`, provider
+  status, and the terminal surface report `applied_profile` and `drift_since_install`, and the MCP
+  bridge emits a structural `registration_drift` diagnostic at startup. A strict check served while
+  that record says `policy` keeps the same `blocked_by_policy` / `route_semantic_ceiling` status,
+  reason, and null provenance, and carries an additional
+  `optional_semantic_review_registration_drift` coverage gap whose receipt names the recovery
+  (`mcp preview`, `mcp install --route-profile policy`, a fresh Codex process) as a conditional,
+  because a strict route reached outside the install ceremony is a legitimate owner action. A
+  ceiling with no applied-policy record keeps its previous terminal wording byte-identical.
+  `mcp remove` clears the record and every later accepted install overwrites it, so no stale drift
+  claim survives. The host's own registration read stays the authority: an unread or unsafe record
+  reports no drift. Claude Code and Cursor record this as not supported (issue #537).
+
+- `yoetz provider codex-subscription setup` no longer forces a fresh Codex sign-in on a dedicated
+  evaluator home that Codex already reports signed in with the exact model available. Unless
+  `--switch-account` is passed, setup first runs the same structural app-server probe as `status`
+  (`account/read` with `refreshToken: false`, then `model/list`) and, on success, writes the
+  binding and reports `login_reused: true`; otherwise the existing login path runs and reports
+  `login_reused: false`. `--switch-account` (also the prompt-loop menu and `/provider` account
+  switch) always logs out and signs in again. Yoetz still never reads `auth.json`. A dedicated
+  evaluator home passed by path may live outside `YOETZ_ISOLATED_ROOT` and be reused across
+  dogfood runs; ADR-026 records that exemption (issue #534).
+
 ### Added
+
+- Agents can now set up or change semantic review through normal conversation. When a user
+  explicitly wants semantic review, the agent recommends Expanded review first, explains the
+  lower-disclosure Assisted, Metadata-only, and Private alternatives, shows one complete frozen
+  before/after repository privacy preview, and asks for one exact final approval; the user keeps the
+  choice. Consent schemas move to 6.0.0 so the pending target binds the selected recipe, the full
+  policy diff and lineage, the repository and authority, the review profile, and the provider,
+  model, and endpoint, and authorization is refused when any of them drifts. Codex may authorize
+  through current-chat attestation; Claude Code and Cursor carry the selected outcome into the
+  shortest trusted-local continuation instead of silently downgrading it (issues #532, #533).
 
 - One supported exact-target isolation contract for test and dogfood runtimes (ADR-026): setting
   `YOETZ_ISOLATED_ROOT` to a pre-provisioned owner-only private directory derives every identity
@@ -91,14 +128,14 @@ reverse-chronological released versions.
   `internal_error` exit 70. The diagnostic names no paths, marker content, or secrets
   (issue #517).
 
-- Receipt creation now abandons both exact caller-owned object stages when the payload object's
-  stage/finalize fails before ledger submission, and equally when the commit boundary refuses the
-  append ahead of submission because cancellation is already pending. This removes a receipt file
-  even when its rename completed before a directory-fsync error, attempts both owned locations so
-  a temp-path fault cannot strand the finalized copy, preserves the retryable `STORAGE_UNSAFE`
-  result if cleanup itself fails or cannot start, waits for exact cleanup before propagating
-  cancellation, and lets the identical request retry without accumulating one finalized orphan per
-  attempt (issue #339).
+- Multi-object object-first appends now abandon every exact caller-owned stage when object
+  preparation fails before ledger submission, and equally when the commit boundary refuses the
+  append ahead of submission because cancellation is already pending. The rule covers receipt
+  creation, cooperative publication batches, and observation materialization, so a later payload
+  failure cannot strand an earlier finalized object on every retry. Cleanup still attempts both
+  owned locations, preserves the original error if cleanup fails or cannot start, waits for a
+  definite outcome before propagating cancellation, and never abandons after submission begins
+  because the commit outcome may be ambiguous (issue #339).
 
 - Codex subscription setup, disconnect, and rollback now recompose the local service on the CLI,
   prompt-loop menu, and `/provider` surfaces so a running daemon cannot keep dispatching after the

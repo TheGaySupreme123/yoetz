@@ -1,4 +1,4 @@
-"""Consent v3 public artifacts contain no reusable approval or structural secret transport."""
+"""Current consent artifacts contain no reusable approval or structural secret transport."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def test_public_consent_artifacts_expose_no_reusable_authorization_or_secret_tra
                     assert forbidden not in text, path
 
 
-def test_live_agent_projection_contains_only_v3_bounded_review_data(tmp_path: Path) -> None:
+def test_live_agent_projection_contains_only_bounded_review_data(tmp_path: Path) -> None:
     rendered = json.dumps(
         {"catalog": catalog_payload(), "status": status_payload(_state=tmp_path)},
         sort_keys=True,

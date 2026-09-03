@@ -23,6 +23,7 @@ __all__ = [
     "clear_mapping",
     "codex_lifecycle_dir",
     "encode_frontier_token",
+    "load_latest_mapping",
     "load_mapping",
     "mapping_from_start_ids",
     "mapping_path",
@@ -199,6 +200,34 @@ def load_mapping(codex_session_id: str, *, _state: Path | None = None) -> Lifecy
         )
     except OSError, ProtocolValueError, UnicodeError, TypeError, ValueError:
         return None
+
+
+def load_latest_mapping(
+    codex_session_ids: tuple[str, ...], *, _state: Path | None = None
+) -> LifecycleMapping | None:
+    """Load the most recently written valid mapping from bounded local candidates.
+
+    The caller owns workspace and lifecycle eligibility. This adapter only ranks the
+    already-known session selectors by the owner-only mapping file's modification time;
+    malformed, missing, and symlinked candidates remain absent exactly as in ``load_mapping``.
+    """
+
+    latest: tuple[int, bytes, LifecycleMapping] | None = None
+    for codex_session_id in codex_session_ids:
+        mapping = load_mapping(codex_session_id, _state=_state)
+        if mapping is None:
+            continue
+        try:
+            path = mapping_path(codex_session_id, _state=_state)
+            if path.is_symlink():
+                continue
+            modified_ns = path.stat().st_mtime_ns
+        except OSError, ProtocolValueError:
+            continue
+        candidate = (modified_ns, codex_session_id.encode("ascii"), mapping)
+        if latest is None or candidate[:2] > latest[:2]:
+            latest = candidate
+    return None if latest is None else latest[2]
 
 
 def store_mapping(mapping: LifecycleMapping, *, _state: Path | None = None) -> None:

@@ -230,6 +230,14 @@ through the ordinary control channel. A separate foreground human-control surfac
 renders, reauthenticates, and commits it. Ordinary MCP/agent schemas expose no method that can reach
 that surface. Revocation of an existing authorization is immediate.
 
+The separate local `yoetz consent` lane may let an allowlisted first-party agent relay one explicit
+current-chat decision for an exact prepared repository recipe, including `expanded_review`. Its v6
+agent projection carries the complete bounded substantive before/after diff and binds both frozen
+policy byte sets, repository commitment, authority generation, provider/model/endpoint, recipe,
+target, and expiry. Authorization rechecks the live repository, authority snapshot, and configured
+route before proposing only the frozen candidate. It adds no MCP policy-mutation method, reusable
+grant, ambient approval, or authority to bypass a machine ceiling or never-send rule.
+
 For a new repository, one proposal may contain both a necessary machine-ceiling widening and the
 first repository row. The service returns one authority digest covering the complete ancestor and
 migration state; the trusted preview shows both changes, and one CAS commits every member or none.

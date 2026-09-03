@@ -179,6 +179,14 @@ class TaskObservationPort(Protocol):
         chunk: ObservationContentChunk,
     ) -> str | None: ...
 
+    def content_manifests_for_logical_identity(
+        self,
+        *,
+        workspace: str,
+        logical_identity: str,
+        correlation_identity_prefix: str | None = None,
+    ) -> tuple[ObservationContentManifest, ...]: ...
+
     def load_content_manifest(self, object_id: str) -> ObservationContentManifest | None: ...
 
     def bind_workspace_locator(

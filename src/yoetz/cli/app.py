@@ -706,10 +706,21 @@ def _hooks_operation(name: str) -> Callable[..., int]:
 
 
 @hooks_app.command("user-prompt-submit")
-def hooks_user_prompt_submit() -> None:
+def hooks_user_prompt_submit(
+    workspace: Annotated[
+        str | None,
+        typer.Option(
+            "--workspace",
+            help=(
+                "Project workspace path (use '.' for the Codex session cwd). Only its "
+                "private commitment is retained."
+            ),
+        ),
+    ] = None,
+) -> None:
     """Inject the materiality/activation cue for UserPromptSubmit."""
 
-    _finish(_hooks_operation("handle_user_prompt_submit")())
+    _finish(_hooks_operation("handle_user_prompt_submit")(workspace=workspace))
 
 
 @hooks_app.command("post-tool-use")
@@ -2723,7 +2734,11 @@ def provider_codex_subscription_setup(
         bool, typer.Option("--open-browser/--no-open-browser", help="Open Codex's returned URL.")
     ] = True,
     switch_account: Annotated[
-        bool, typer.Option("--switch-account", help="Log out the dedicated home before login.")
+        bool,
+        typer.Option(
+            "--switch-account",
+            help="Log out the dedicated home and sign in again, even if it is already signed in.",
+        ),
     ] = False,
     accept: Annotated[
         bool,
@@ -2731,7 +2746,7 @@ def provider_codex_subscription_setup(
     ] = False,
     json_output: _JSON = False,
 ) -> None:
-    """Login via Codex app-server and bind the exact subscription runtime after readiness."""
+    """Prove an existing Codex login (or obtain one) via app-server, then bind the exact runtime."""
 
     from yoetz.cli.codex_subscription import (
         CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
@@ -2757,6 +2772,13 @@ def provider_codex_subscription_setup(
         typer.echo("  Yoetz sends only a privacy-approved case; Codex owns the upstream body.")
         typer.echo("  disconnect: yoetz provider codex-subscription disconnect")
         typer.echo("  rollback only: yoetz provider codex-subscription rollback")
+        if switch_account:
+            typer.echo("  existing sign-in: logged out first, then a new Codex sign-in")
+        else:
+            typer.echo(
+                "  existing sign-in: reused when Codex reports the home already signed in;"
+                " pass --switch-account to sign in again"
+            )
         if not accept:
             if not (sys.stdin.isatty() and sys.stdout.isatty()) or not typer.confirm(
                 "Continue to Codex sign-in?", default=False
@@ -3502,7 +3524,7 @@ def elevated_prepare(
     elevated_error = cast(type[Exception], getattr(errors, "ElevatedBootstrapError"))
     prepare = cast(Callable[..., object], getattr(module, "prepare_elevated"))
     binding: dict[str, str] | None = None
-    grant: dict[str, str] | None = None
+    grant: dict[str, JsonValue] | None = None
     if operation in {"provider_credential_set", "provider_credential_rotate"}:
         required = {
             "provider_id": provider_id,
@@ -3568,6 +3590,10 @@ def elevated_prepare(
 
         async def _grant_binding() -> int:
             nonlocal grant
+            from datetime import UTC, datetime
+
+            from yoetz.config.models import ConfigError
+
             privacy = importlib.import_module("yoetz.cli.privacy_setup")
             try:
                 snapshot = await cast(
@@ -3580,11 +3606,33 @@ def elevated_prepare(
                 raise elevated_error("repository_privacy_scope_unavailable") from exc
             if type(commitment) is not str or type(authority_digest) is not str:
                 raise elevated_error("repository_privacy_scope_unavailable")
-            grant = {
-                "recipe": cast(str, recipe),
-                "repository_privacy_commitment": commitment,
-                "authority_digest": authority_digest,
-            }
+            try:
+                external, _local = cast(
+                    Callable[[], tuple[object | None, object | None]],
+                    getattr(privacy, "configured_bindings"),
+                )()
+                current = getattr(snapshot, "composed_policy")
+                answers = cast(Callable[..., object], getattr(privacy, "recipe_answers"))(
+                    cast(str, recipe), current, external
+                )
+                candidate = cast(Callable[..., object], getattr(privacy, "build_candidate_policy"))(
+                    current, answers, now=datetime.now(UTC)
+                )
+                binding_builder = cast(
+                    Callable[..., dict[str, JsonValue]],
+                    getattr(errors, "repository_grant_binding"),
+                )
+                grant = binding_builder(
+                    recipe=cast(str, recipe),
+                    repository_privacy_commitment=commitment,
+                    authority_digest=authority_digest,
+                    current_policy=current,
+                    candidate_policy=candidate,
+                )
+            except elevated_error:
+                raise
+            except (ConfigError, KeyError, TypeError, ValueError) as exc:
+                raise elevated_error("grant_binding_invalid") from exc
             return 0
 
         try:

@@ -74,7 +74,7 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # One independently reviewed cardinality tripwire guards the generated resource manifest. All
 # per-kind counts are derived from the manifest entries so adding a resource has exactly one
 # hand-authored count to review and the owning resource-ripple command can regenerate the rest.
-REVIEWED_RESOURCE_COUNT: Final = 164
+REVIEWED_RESOURCE_COUNT: Final = 169
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -89,7 +89,7 @@ _RESOURCE_KINDS: Final = frozenset(
 )
 _REQUEST_RESULT_VERSIONS: Final = (
     ("actor-assertion", "1.0.0"),
-    ("catalog", "5.0.0"),
+    ("catalog", "6.0.0"),
     ("chat-user-attestation", "1.0.0"),
     ("check-request", "1.0.0"),
     ("check-result", "1.1.0"),
@@ -104,8 +104,8 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("frontier", "1.0.0"),
     ("operation-result", "1.0.0"),
     ("outbound-case", "1.1.0"),
-    ("pending-agent", "5.0.0"),
-    ("prepare-result", "5.0.0"),
+    ("pending-agent", "6.0.0"),
+    ("prepare-result", "6.0.0"),
     ("privacy-policy", "1.0.0"),
     ("provider-judgment", "1.0.0"),
     ("public-error", "1.0.0"),
@@ -118,14 +118,14 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("receipt-result", "1.1.0"),
     ("respond-request", "1.0.0"),
     ("respond-result", "1.0.0"),
-    ("review-result", "5.0.0"),
+    ("review-result", "6.0.0"),
     ("runtime-attempt-evidence", "1.0.0"),
     ("semantic-provenance", "1.1.0"),
     ("service-status", "1.0.0"),
     ("setup-wizard-contract", "1.0.0"),
     ("start-request", "1.0.0"),
     ("start-result", "1.0.0"),
-    ("status", "5.0.0"),
+    ("status", "6.0.0"),
     ("status-request", "1.1.0"),
     ("status-result", "1.2.0"),
     ("subject-state-ref", "1.0.0"),

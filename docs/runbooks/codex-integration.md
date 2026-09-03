@@ -315,6 +315,13 @@ only from real observation evidence. `AdviceSnapshot` surfaces via nonblocking h
 path fails, use the ordinary manual resume/compaction procedure and cooperative publication; do not
 infer support from a different Codex version.
 
+The rendered `SessionStart`, `UserPromptSubmit`, tool, and turn-boundary commands bind
+`--workspace .`. Codex's hooks contract (re-read 2026-09-03) gives every hook the session `cwd` and
+runs command hooks from that directory, so `.` is the current project/subdirectory and the shared
+canonicalizer resolves it to the safe Git root. `UserPromptSubmit` must keep that explicit argument:
+without it, a fresh unmapped session has no older session binding from which to recover the
+workspace and its bounded auto-attach retry stops before a service call.
+
 For supported content-bearing Codex events, the ready service secret-scans and encrypts selected
 tool output, changed-file, and workspace-diff bytes before materializing their exact digest/object
 bindings as `observation_captured` ledger evidence. Inspection facts and bounded excerpts receive
@@ -509,12 +516,27 @@ reviewer egress.
 | MCP unavailable | Diagnose through separate MCP configuration/startup steps. |
 | Trigger absent or failed | Use the manual re-grounding procedure; never edit hook configuration through this integration. |
 | `observe status` shows no envelopes for a session | Read `hook_diagnostics.reasons`: `workspace_unresolvable` means the hook's `--workspace` locator could not be canonicalized; `workspace_unconsented` means the session's Git root carries no active consent (a session started in a subdirectory canonicalizes to the same root as the consent, so grant consent at the repository root); `paused` means consent is paused. A successful ingest records no diagnostic, so read `recent_count` together with the envelopes: no new envelopes and a zero `recent_count` means the hooks never reached the ingress or the runtime gate is disabled, not that a binding drop occurred. |
-| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`; read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (the session bound consent without a canonical locator, so no paired request was legal), `auto_attach_request_invalid` (an authoring defect in the request — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
+| `observe status` shows `mapping_present: false` after a consented `SessionStart` | The hook sends `start mode=create_or_attach` with the canonical `--workspace` root as `workspace_ref` and `codex-session:<session_id>` as `external_ref`. On the exact `workspace_task_exists` conflict it retries once with `mode=attach` only if the private local lifecycle store already holds a valid mapping from an earlier Codex session whose `SessionEnd` was received, every other bound session is ended, and the candidate is bound only to this consented workspace. The catalog then requires one mapped task, the selector still active, no sibling task, the matching repository-privacy binding, and no start already pending for that route. The public error reveals no selector; a hard crash without `SessionEnd` remains fail-closed rather than being guessed from age. Otherwise read `hook_diagnostics.reasons` for the typed cause: `auto_attach_workspace_unbound` (no paired request was legal), `auto_attach_request_invalid` (an authoring defect — file it), `auto_attach_conflict` / `auto_attach_refused` (the service answered and declined), `auto_attach_result_invalid`, `auto_attach_mapping_write_failed`, `privacy_authority_required`, `vault_locked`, `timeout`, `storage_unsafe` / `storage_corrupt`, or `service_unavailable` (the daemon was still starting; `UserPromptSubmit`, `Stop`, and `SessionEnd` retry under the bounded budget and add `auto_attach_retry_failed` beside the cause). An explicit MCP `start` remains the recovery path; for `vault_locked` on a never-initialized install, that `start` returns the typed `vault_initialization_required` continuation below rather than a dead end. |
+| `observe status` shows `ledger_rejected` and `outbox_quarantined` | The service was reachable but rejected one envelope non-retryably. The row is retained under `quarantine_causes`, aggregate `delivery_causes`, and gaps; `pending_delivery_causes` names only rows still in the outbox. Later rows can drain; reclaim only after the underlying defect is understood. A hook-driven attempt also appears in the bounded `hook_diagnostics`, while manual and supervisor drains are represented by status rather than hook activity. Do not restart a ready service. A row is also quarantined after 128 consecutive rejections with the same retryable reason so a catch-all failure cannot block the lane forever; pause, vault, disabled, and designed back-pressure reasons keep their existing recovery behavior. |
 | `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
 
 ## 11. Security, privacy, and prohibited actions
 
 Codex is the v0.1 allowlisted first-party client for exact current-chat consent attestation.
+It should guide Yoetz setup, installation, and settings changes in normal conversation: explain
+each consequential choice, recommend one outcome with its trade-off, and preserve the user's
+explicit selection. When the user explicitly wants semantic review, recommend Expanded first for
+review depth and explain Assisted as the lower-disclosure semantic option. Do not silently
+downgrade either choice.
+
+For `repository_privacy_grant`, run the catalog-advertised prepare command only after the recipe is
+chosen. Show the v6 `repository_privacy_preview` in full: repository commitment; authority,
+current-policy, candidate-policy, and diff digests; and every before/after row including the exact
+provider/model/endpoint. The user's final approve/deny applies only to that expiring one-use target.
+Any repository, authority, configured-route, recipe, target, expiry, or replay drift is a
+no-mutation failure; never prepare a replacement silently. Strict MCP routing, host admission,
+provider readiness, physical dispatch, and receipts remain separate facts.
+
 For `vault_initialize` and `vault_passphrase_rotate`, it relays only the prepared pending ID,
 operation, danger digest, target digest, decision, and warning acknowledgement. Yoetz generates,
 loads, stages, and submits vault secrets inside the local helper; Codex must never request or

@@ -7,6 +7,8 @@ plugin artifact and host-activation mutation to `review_only` (issue #149, ADR-0
 owned by #150); amended 2026-08-25 to keep Codex marketplace/MCP removal on the ADR-012
 digest-bound `--accept` lane rather than `plugin_artifact_apply` (issue #419); amended 2026-08-30
 for exact bounded Codex JSONL import publication (issue #301).
+Amended 2026-09-03 for user-controlled conversational setup and exact expanded-review grants
+(issues #532 and #533).
 **Implemented by:** `src/yoetz/service/elevated_bootstrap.py`,
 `src/yoetz/cli/elevated.py`, `src/yoetz/cli/trusted_console.py`,
 `src/yoetz/protocol/consent.py`, `src/yoetz/protocol/chat_user_authority.py`, and
@@ -39,10 +41,17 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    `implemented=false` cannot be prepared.
 
 2. **Agent-safe contracts.** Catalog, pending projection, prepare result, review result, and status
-   publish current v5 contracts in `schemas/consent/`; the frozen v2-v4 bytes remain shipped for
+   publish current v6 contracts in `schemas/consent/`; the frozen v2-v5 bytes remain shipped for
    compatibility. They contain no reusable approval value, generated passphrase, or credential.
-   The v5 pending projection adds the closed, content-free `import_publication_preview` only for
-   an importer-prepared request.
+   The v5 pending projection added the closed, content-free `import_publication_preview`. V6 adds
+   a closed `repository_privacy_preview` with the recipe, keyed repository commitment, authority,
+   current-policy, candidate-policy and diff digests, plus every bounded substantive before/after
+   change. The readable diff is the decision surface; its digest is integrity evidence, not a
+   substitute for disclosure.
+   The v4 durable pending shape invalidates legacy public pending files. It does not delete a
+   legacy private review marker, because that marker may still be owned by a live pre-upgrade
+   claimant; replacement remains fail-closed as `review_in_progress` under the existing
+   interrupted-review limitation.
 
 3. **One pending request.** One owner-only request with a 15-minute TTL may exist. The trusted
    reviewer atomically claims it by creating a no-clobber hard-link review marker. Marker creation
@@ -65,6 +74,14 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    proof; a compromised agent can forge it. Catalog rules expose that limitation directly through
    `agent_attestation_is_independent_proof=false` and
    `compromised_agent_can_forge_attestation=true`.
+
+   **Expanded-review amendment (2026-09-03, issue #533).** The exact-recipe grant now admits
+   `expanded_review`. Preparation freezes the complete current and candidate policy bytes and
+   derives the same substantive diff used by the policy classifier. The target and danger digests
+   bind those bytes, the provider/model/endpoint, repository commitment, authority generation,
+   recipe, and expiry. Authorization uses only the frozen candidate and separately re-checks the
+   live repository, authority snapshot, and configured provider binding. Drift, denial, expiry,
+   replay, unsupported client, or malformed preview fails closed before policy/provider mutation.
 
 6. **No standing danger mode.** There is no session-wide bypass or broad grant. Easy review means
    short bounded text and one console decision or exact agent assertion, not reduced target checks.
@@ -131,11 +148,22 @@ documents that Yoetz cannot independently authenticate its chat provenance.
    here. Cache purge is default-off (`--purge-cache`). Agent-chat authorize is not extended to
    these commands. Cursor standalone activation apply is unchanged.
 
+10. **User-selected supported outcomes (issue #532).** Normal conversation is the primary
+    agent-guided setup, install, and settings-change experience. The agent explains consequential
+    choices and recommends an option with its trade-off, but an explicit current user choice is
+    final for the supported product-policy outcome. The agent cannot silently substitute a recipe,
+    provider, model, privacy level, install target, or ceremony. Only factual technical limits,
+    unavailable authority, policy ceilings, target drift, never-send and credential/destructive
+    invariants, or honest proof boundaries may block; the response names the concrete boundary and
+    shortest user-controlled continuation. When the user explicitly asks for semantic review, the
+    agent recommends Expanded first for review depth and explains Assisted as the lower-disclosure
+    semantic alternative before preparing the one exact combined action.
+
 ## Consequences
 
-Agents may prepare and inspect a request, then either guide the human to `yoetz consent review` /
-`yoetz --privacy`, or — when the user asks for help on a capable first-party host — warn once and
-complete the exact pending action via agent-attested `yoetz consent authorize`. Until an approved
+Agents guide choices in ordinary conversation, prepare and inspect one combined request, then
+either complete it via agent-attested `yoetz consent authorize` on a capable first-party host or
+give the shortest exact trusted-local continuation when that authority capability is absent. Until an approved
 OS-presence adapter is installed, console review fails closed; chat-user authorize remains available
 for the operations that advertise it. Approval of one operation does not grant another operation,
 another digest, another installation, or a later session.

@@ -415,7 +415,7 @@ and controlling-TTY facts: only interactive human-readable CLI output selects
 
 | Event | Human required? | Rule |
 |---|---:|---|
-| First new-repository grant, first `assisted` commit, later wider provider/category/class/scope, or credential set/rotate | yes | Exact trusted-local compound diff/credential ceremony, or an explicit current-chat instruction relayed by the agent for the exact prepared consent action (issue #164) |
+| First new-repository grant, first `assisted`/`expanded` commit, later wider provider/category/class/scope, or credential set/rotate | yes | Exact trusted-local compound diff/credential ceremony, or an explicit current-chat instruction relayed by a capable agent for the exact prepared consent action (issues #164/#533) |
 | Eligible legacy machine authority narrowed onto its bounded pre-upgrade repository entitlement | no | Atomic carry-forward preserves machine bytes and grants no new repository |
 | Ordinary check, automatic retry inside the confirmed policy, reviewer challenge, agent response, or recheck | no | Direct agent-to-agent path with a fresh authorization and receipt per physical attempt |
 | Tightening policy | no | May apply immediately after the service proves it cannot widen |
@@ -433,6 +433,15 @@ not authorize under the agent skill contract. Denial, expiry, cancellation, targ
 unsupported client yields zero policy/credential mutation and zero provider dispatch. The trusted
 CLI/TUI (`yoetz --privacy`, `yoetz consent review`) remains the stronger recommended path and is
 always available.
+
+For an `expanded_review` chat grant, prepare returns the complete bounded substantive policy diff,
+not only its digest. It freezes both current and candidate policy bytes, and the exact target binds
+the repository commitment, authority snapshot, provider/model/endpoint, recipe, policy digests,
+diff, and expiry. Authorization uses the frozen candidate and rejects any live repository,
+authority-generation, or configured-route drift before policy mutation. The agent recommends
+Expanded when the user explicitly prioritizes semantic-review depth, explains Assisted as the
+lower-disclosure semantic option, and honors the selected supported outcome; the recommendation is
+never independent policy authority (issues #532/#533).
 
 ## Consequences and proof obligations
 
