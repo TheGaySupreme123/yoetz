@@ -323,6 +323,7 @@ async def test_approved_check_materialization_is_service_owned_and_idempotent(
     from yoetz.ports.objects import ObjectKind, ObjectRef, ObjectStorePort, StagedObject
     from yoetz.ports.runtime import BundleRuntimePort, TaskRuntime
     from yoetz.protocol.coverage import PublicationChannel
+    from yoetz.protocol.errors import ProtocolValueError
 
     seed = append_command()
     ledger = memory_adapter(seed)
@@ -382,6 +383,21 @@ async def test_approved_check_materialization_is_service_owned_and_idempotent(
         for kind in (ObjectKind.CAPTURED_CONTENT, ObjectKind.EVENT_PAYLOAD)
     }
     data_before = len(objects._data)  # pyright: ignore[reportPrivateUsage]
+
+    # Issue #339: preparation between the finalized receipt object and the first payload stage
+    # can still fail on stored data — an unparsable recorded_at here. That is object preparation
+    # before submission, so the receipt stage must be abandoned exactly like a persist failure.
+    with pytest.raises(ProtocolValueError):
+        await coordinator._materialize_approved_check(  # pyright: ignore[reportPrivateUsage]
+            runtime, replace(completed, recorded_at="not-a-timestamp")
+        )
+    assert (
+        objects.refs_for_kind(ObjectKind.CAPTURED_CONTENT)
+        == refs_before[ObjectKind.CAPTURED_CONTENT]
+    )
+    assert objects.refs_for_kind(ObjectKind.EVENT_PAYLOAD) == refs_before[ObjectKind.EVENT_PAYLOAD]
+    assert len(objects._data) == data_before  # pyright: ignore[reportPrivateUsage]
+
     original_finalize = objects.finalize
     finalize_calls = 0
 

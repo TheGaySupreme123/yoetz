@@ -1305,8 +1305,11 @@ object remains eligible for delayed generation-fenced orphan GC.
 The same retained-stage and commit-boundary rules apply to every multi-object object-first append:
 cooperative `publish_work` batches and observation envelope, inspection, approved-check, and advice
 materialization abandon all exact stages when object preparation fails or the commit boundary
-certifies pre-submission cancellation. Once submission begins, those callers leave the objects
-alone because the commit outcome may be ambiguous.
+certifies pre-submission cancellation. The guard spans the whole preparation — every draft, entry,
+and command construction between the first stage and the prepared mutation — not only the
+`stage`/`finalize` calls, so a rejected stored value cannot strand an already finalized object
+either. Once submission begins, those callers leave the objects alone because the commit outcome
+may be ambiguous.
 Receipt replay binding mismatches use the same application-site correlation contract with one of
 the closed structural reasons `receipt_digest_mismatch`, `receipt_id_mismatch`,
 `receipt_frontier_mismatch`, `receipt_conclusion_mismatch`, or

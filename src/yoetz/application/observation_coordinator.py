@@ -1366,150 +1366,140 @@ class ObservationCoordinator:
             )
             staged_objects.append(staged_receipt)
             receipt_ref = await runtime.objects.finalize(staged_receipt)
-        except BaseException:
-            await abandon_preappend_objects(
-                runtime.objects,
-                tuple(staged_objects),
-                component="application.observation_coordinator",
-                operation="observation_object_abandon_failed",
-                request_id=operation_id,
-            )
-            raise
-        receipt_digest = canonical_digest(receipt_document)
+            receipt_digest = canonical_digest(receipt_document)
 
-        source_identity = f"approved-check:{completed.job.job_id}:{result.result_digest}"
-        mapping = "approved-check/1.0.0"
-        action_value = action_id(
-            stable_observation_id(
-                kind=IdKind.ACTION,
-                task_id=runtime.task_id,
-                source_identity=source_identity,
-                mapping_version=mapping,
-                role="action",
+            source_identity = f"approved-check:{completed.job.job_id}:{result.result_digest}"
+            mapping = "approved-check/1.0.0"
+            action_value = action_id(
+                stable_observation_id(
+                    kind=IdKind.ACTION,
+                    task_id=runtime.task_id,
+                    source_identity=source_identity,
+                    mapping_version=mapping,
+                    role="action",
+                )
             )
-        )
-        evidence_value = evidence_id(
-            stable_observation_id(
-                kind=IdKind.EVIDENCE,
-                task_id=runtime.task_id,
-                source_identity=source_identity,
-                mapping_version=mapping,
-                role="evidence",
+            evidence_value = evidence_id(
+                stable_observation_id(
+                    kind=IdKind.EVIDENCE,
+                    task_id=runtime.task_id,
+                    source_identity=source_identity,
+                    mapping_version=mapping,
+                    role="evidence",
+                )
             )
-        )
-        result_value = result_id(
-            stable_observation_id(
-                kind=IdKind.RESULT,
-                task_id=runtime.task_id,
-                source_identity=source_identity,
-                mapping_version=mapping,
-                role="result",
+            result_value = result_id(
+                stable_observation_id(
+                    kind=IdKind.RESULT,
+                    task_id=runtime.task_id,
+                    source_identity=source_identity,
+                    mapping_version=mapping,
+                    role="result",
+                )
             )
-        )
-        action_event = event_id(
-            stable_observation_id(
-                kind=IdKind.EVENT,
-                task_id=runtime.task_id,
-                source_identity=source_identity,
-                mapping_version=mapping,
-                role="action_event",
+            action_event = event_id(
+                stable_observation_id(
+                    kind=IdKind.EVENT,
+                    task_id=runtime.task_id,
+                    source_identity=source_identity,
+                    mapping_version=mapping,
+                    role="action_event",
+                )
             )
-        )
-        evidence_event = event_id(
-            stable_observation_id(
-                kind=IdKind.EVENT,
-                task_id=runtime.task_id,
-                source_identity=source_identity,
-                mapping_version=mapping,
-                role="evidence_event",
+            evidence_event = event_id(
+                stable_observation_id(
+                    kind=IdKind.EVENT,
+                    task_id=runtime.task_id,
+                    source_identity=source_identity,
+                    mapping_version=mapping,
+                    role="evidence_event",
+                )
             )
-        )
-        result_event = event_id(
-            stable_observation_id(
-                kind=IdKind.EVENT,
-                task_id=runtime.task_id,
-                source_identity=source_identity,
-                mapping_version=mapping,
-                role="result_event",
+            result_event = event_id(
+                stable_observation_id(
+                    kind=IdKind.EVENT,
+                    task_id=runtime.task_id,
+                    source_identity=source_identity,
+                    mapping_version=mapping,
+                    role="result_event",
+                )
             )
-        )
-        occurred_at = timestamp_from_string(completed.recorded_at)
-        subject_state = SubjectStateRef(
-            described_state=f"approved-check:{completed.job.subject_state_digest}"
-        )
-        evidence_payload = EvidenceRecordedPayload(
-            evidence_id=evidence_value,
-            evidence_kind=EvidenceKind.TEST_RESULT,
-            strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
-            observed_at=occurred_at,
-            captured_object_id=object_id(receipt_ref.object_id),
-            content_digest=receipt_digest,
-            description=f"Approved check result status={result.status.value}",
-            subject_state=subject_state,
-            digest_binding=EvidenceDigestBinding(
-                subject=EvidenceDigestSubject.APPROVED_CHECK_RECEIPT,
-                content_availability=EvidenceContentAvailability.CAPTURED,
-                byte_count=len(receipt_bytes),
-                provenance=EvidenceDigestProvenance.APPROVED_CHECK,
-                approval_commitment=completed.job.approval_commitment,
-                approved_check_result_digest=result.result_digest,
-            ),
-        )
-        drafts = (
-            EventDraft(
-                action_event,
-                EventSchema("action_recorded", "1.0.0"),
-                occurred_at,
-                (),
-                ActionRecordedPayload(
-                    action_id=action_value,
-                    action_kind=ActionKind.COMMAND,
-                    description=f"Ran approved check {completed.approval_id}",
-                    command="approved-check-service",
-                    subject_state=subject_state,
+            occurred_at = timestamp_from_string(completed.recorded_at)
+            subject_state = SubjectStateRef(
+                described_state=f"approved-check:{completed.job.subject_state_digest}"
+            )
+            evidence_payload = EvidenceRecordedPayload(
+                evidence_id=evidence_value,
+                evidence_kind=EvidenceKind.TEST_RESULT,
+                strength=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+                observed_at=occurred_at,
+                captured_object_id=object_id(receipt_ref.object_id),
+                content_digest=receipt_digest,
+                description=f"Approved check result status={result.status.value}",
+                subject_state=subject_state,
+                digest_binding=EvidenceDigestBinding(
+                    subject=EvidenceDigestSubject.APPROVED_CHECK_RECEIPT,
+                    content_availability=EvidenceContentAvailability.CAPTURED,
+                    byte_count=len(receipt_bytes),
+                    provenance=EvidenceDigestProvenance.APPROVED_CHECK,
+                    approval_commitment=completed.job.approval_commitment,
+                    approved_check_result_digest=result.result_digest,
                 ),
-                (),
-                (),
-            ),
-            EventDraft(
-                evidence_event,
-                EventSchema("evidence_recorded", EVIDENCE_TYPED_SCHEMA_VERSION),
-                occurred_at,
-                (action_event,),
-                evidence_payload,
-                (object_id(receipt_ref.object_id),),
-                (),
-            ),
-            EventDraft(
-                result_event,
-                EventSchema("result_recorded", "1.0.0"),
-                occurred_at,
-                tuple(sorted((action_event, evidence_event), key=str.encode)),
-                ResultRecordedPayload(
-                    result_id=result_value,
-                    action_id=action_value,
-                    outcome=(
-                        ResultOutcome.SUCCESS
-                        if result.status is ApprovedCheckStatus.PASSED
-                        else ResultOutcome.FAILURE
+            )
+            drafts = (
+                EventDraft(
+                    action_event,
+                    EventSchema("action_recorded", "1.0.0"),
+                    occurred_at,
+                    (),
+                    ActionRecordedPayload(
+                        action_id=action_value,
+                        action_kind=ActionKind.COMMAND,
+                        description=f"Ran approved check {completed.approval_id}",
+                        command="approved-check-service",
+                        subject_state=subject_state,
                     ),
-                    exit_status=result.exit_status,
-                    summary=f"Approved check status={result.status.value}",
-                    subject_state=subject_state,
-                    evidence_refs=(evidence_value,),
+                    (),
+                    (),
                 ),
-                (),
-                (evidence_value,),
-            ),
-        )
-        coverage = replace(
-            coverage_for_channel(PublicationChannel.ENGINE_DERIVED),
-            evidence_immutability=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
-        )
-        refs: list[ObjectRef] = [receipt_ref]
-        entries: list[AppendEntry] = []
-        for draft in drafts:
-            try:
+                EventDraft(
+                    evidence_event,
+                    EventSchema("evidence_recorded", EVIDENCE_TYPED_SCHEMA_VERSION),
+                    occurred_at,
+                    (action_event,),
+                    evidence_payload,
+                    (object_id(receipt_ref.object_id),),
+                    (),
+                ),
+                EventDraft(
+                    result_event,
+                    EventSchema("result_recorded", "1.0.0"),
+                    occurred_at,
+                    tuple(sorted((action_event, evidence_event), key=str.encode)),
+                    ResultRecordedPayload(
+                        result_id=result_value,
+                        action_id=action_value,
+                        outcome=(
+                            ResultOutcome.SUCCESS
+                            if result.status is ApprovedCheckStatus.PASSED
+                            else ResultOutcome.FAILURE
+                        ),
+                        exit_status=result.exit_status,
+                        summary=f"Approved check status={result.status.value}",
+                        subject_state=subject_state,
+                        evidence_refs=(evidence_value,),
+                    ),
+                    (),
+                    (evidence_value,),
+                ),
+            )
+            coverage = replace(
+                coverage_for_channel(PublicationChannel.ENGINE_DERIVED),
+                evidence_immutability=EvidenceImmutability.IMMUTABLE_SNAPSHOT,
+            )
+            refs: list[ObjectRef] = [receipt_ref]
+            entries: list[AppendEntry] = []
+            for draft in drafts:
                 payload_bytes = canonical_encode(encode_payload(cast(Any, draft.payload)))
                 metadata = ObjectMetadata(
                     ObjectKind.EVENT_PAYLOAD,
@@ -1522,30 +1512,20 @@ class ObservationCoordinator:
                 )
                 staged_objects.append(staged)
                 payload_ref = await runtime.objects.finalize(staged)
-            except BaseException:
-                await abandon_preappend_objects(
-                    runtime.objects,
-                    tuple(staged_objects),
-                    component="application.observation_coordinator",
-                    operation="observation_object_abandon_failed",
-                    request_id=operation_id,
+                refs.append(payload_ref)
+                entries.append(
+                    AppendEntry(
+                        draft,
+                        approved_check_author(),
+                        payload_ref,
+                        payload_ref.commitment,
+                        metadata.media_type,
+                        payload_ref.plaintext_size,
+                        PublicationChannel.ENGINE_DERIVED,
+                        coverage,
+                        "projected",
+                    )
                 )
-                raise
-            refs.append(payload_ref)
-            entries.append(
-                AppendEntry(
-                    draft,
-                    approved_check_author(),
-                    payload_ref,
-                    payload_ref.commitment,
-                    metadata.media_type,
-                    payload_ref.plaintext_size,
-                    PublicationChannel.ENGINE_DERIVED,
-                    coverage,
-                    "projected",
-                )
-            )
-        try:
             command = AppendCommand(
                 runtime.task_id,
                 runtime.session_id,
