@@ -61,7 +61,12 @@ from yoetz.application.observation_verification import (
     VerificationDrainHandle,
     orchestrate_changed_path_inspection,
 )
-from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
+from yoetz.application.unit_of_work import (
+    PreparedMutation,
+    PreSubmissionCancelled,
+    abandon_preappend_objects,
+    run_prepared_append,
+)
 from yoetz.domain.events import (
     EVIDENCE_TYPED_SCHEMA_VERSION,
     ActionKind,
@@ -133,7 +138,7 @@ from yoetz.ports.ledger import (
     OperationState,
     ProjectionView,
 )
-from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
+from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource, StagedObject
 from yoetz.ports.observation import TaskObservationPort
 from yoetz.ports.runtime import (
     BundleRuntimePort,
@@ -1085,60 +1090,82 @@ class ObservationCoordinator:
         author = observation_author()
         refs: list[ObjectRef] = []
         entries: list[AppendEntry] = []
-        for item in batch.drafts:
-            commitment = await runtime.objects.commitment_for(
-                item.payload_bytes, ObjectKind.EVENT_PAYLOAD
-            )
-            metadata = ObjectMetadata(
-                ObjectKind.EVENT_PAYLOAD,
-                media_type_for_schema(item.draft.schema.name),
+        staged_objects: list[StagedObject] = []
+        try:
+            for item in batch.drafts:
+                commitment = await runtime.objects.commitment_for(
+                    item.payload_bytes, ObjectKind.EVENT_PAYLOAD
+                )
+                metadata = ObjectMetadata(
+                    ObjectKind.EVENT_PAYLOAD,
+                    media_type_for_schema(item.draft.schema.name),
+                    runtime.task_id,
+                    self.clock.now_utc(),
+                )
+                staged = await runtime.objects.stage(
+                    ObjectSource(data=item.payload_bytes, declared_size=len(item.payload_bytes)),
+                    metadata,
+                )
+                staged_objects.append(staged)
+                if staged.commitment != commitment:
+                    raise PublicOperationError(
+                        PublicErrorCode.STORAGE_CORRUPT,
+                        "Observation payload commitment mismatch.",
+                        retryable=False,
+                    )
+                ref = await runtime.objects.finalize(staged)
+                refs.append(ref)
+                entries.append(
+                    AppendEntry(
+                        item.draft,
+                        author,
+                        ref,
+                        commitment,
+                        metadata.media_type,
+                        ref.plaintext_size,
+                        batch.channel,
+                        batch.coverage,
+                        item.projection_status,
+                    )
+                )
+            command = AppendCommand(
                 runtime.task_id,
-                self.clock.now_utc(),
+                runtime.session_id,
+                writer_id,
+                operation_id,
+                OperationKind.PUBLISH_WORK,
+                digest,
+                None,
+                tuple(entries),
             )
-            staged = await runtime.objects.stage(
-                ObjectSource(data=item.payload_bytes, declared_size=len(item.payload_bytes)),
-                metadata,
+            mutation = PreparedMutation(
+                command.writer_id,
+                command.operation_id,
+                command.request_digest,
+                command.expected_frontier,
+                tuple(refs),
+                command,
             )
-            if staged.commitment != commitment:
-                raise PublicOperationError(
-                    PublicErrorCode.STORAGE_CORRUPT,
-                    "Observation payload commitment mismatch.",
-                    retryable=False,
-                )
-            ref = await runtime.objects.finalize(staged)
-            refs.append(ref)
-            entries.append(
-                AppendEntry(
-                    item.draft,
-                    author,
-                    ref,
-                    commitment,
-                    metadata.media_type,
-                    ref.plaintext_size,
-                    batch.channel,
-                    batch.coverage,
-                    item.projection_status,
-                )
+        except BaseException:
+            await abandon_preappend_objects(
+                runtime.objects,
+                tuple(staged_objects),
+                component="application.observation_coordinator",
+                operation="observation_object_abandon_failed",
+                request_id=operation_id,
             )
-        command = AppendCommand(
-            runtime.task_id,
-            runtime.session_id,
-            writer_id,
-            operation_id,
-            OperationKind.PUBLISH_WORK,
-            digest,
-            None,
-            tuple(entries),
-        )
-        mutation = PreparedMutation(
-            command.writer_id,
-            command.operation_id,
-            command.request_digest,
-            command.expected_frontier,
-            tuple(refs),
-            command,
-        )
-        append_result = await run_prepared_append(runtime.ledger, mutation)
+            raise
+        try:
+            append_result = await run_prepared_append(runtime.ledger, mutation)
+        except PreSubmissionCancelled:
+            await abandon_preappend_objects(
+                runtime.objects,
+                tuple(staged_objects),
+                component="application.observation_coordinator",
+                operation="observation_object_abandon_failed",
+                request_id=operation_id,
+            )
+            raise
         return operation_id, digest, append_result, MATERIALIZATION_MAPPING_VERSION
 
     async def _append_inspection_snapshot(
@@ -1179,60 +1206,82 @@ class ObservationCoordinator:
         author = observation_author()
         refs: list[ObjectRef] = []
         entries: list[AppendEntry] = []
-        for item in batch.drafts:
-            commitment = await runtime.objects.commitment_for(
-                item.payload_bytes, ObjectKind.EVENT_PAYLOAD
-            )
-            metadata = ObjectMetadata(
-                ObjectKind.EVENT_PAYLOAD,
-                media_type_for_schema(item.draft.schema.name),
+        staged_objects: list[StagedObject] = []
+        try:
+            for item in batch.drafts:
+                commitment = await runtime.objects.commitment_for(
+                    item.payload_bytes, ObjectKind.EVENT_PAYLOAD
+                )
+                metadata = ObjectMetadata(
+                    ObjectKind.EVENT_PAYLOAD,
+                    media_type_for_schema(item.draft.schema.name),
+                    runtime.task_id,
+                    self.clock.now_utc(),
+                )
+                staged = await runtime.objects.stage(
+                    ObjectSource(data=item.payload_bytes, declared_size=len(item.payload_bytes)),
+                    metadata,
+                )
+                staged_objects.append(staged)
+                if staged.commitment != commitment:
+                    raise PublicOperationError(
+                        PublicErrorCode.STORAGE_CORRUPT,
+                        "Observation inspection payload commitment mismatch.",
+                        retryable=False,
+                    )
+                ref = await runtime.objects.finalize(staged)
+                refs.append(ref)
+                entries.append(
+                    AppendEntry(
+                        item.draft,
+                        author,
+                        ref,
+                        commitment,
+                        metadata.media_type,
+                        ref.plaintext_size,
+                        batch.channel,
+                        batch.coverage,
+                        item.projection_status,
+                    )
+                )
+            command = AppendCommand(
                 runtime.task_id,
-                self.clock.now_utc(),
+                runtime.session_id,
+                writer_id,
+                operation_id,
+                OperationKind.PUBLISH_WORK,
+                operation_digest,
+                None,
+                tuple(entries),
             )
-            staged = await runtime.objects.stage(
-                ObjectSource(data=item.payload_bytes, declared_size=len(item.payload_bytes)),
-                metadata,
+            mutation = PreparedMutation(
+                command.writer_id,
+                command.operation_id,
+                command.request_digest,
+                command.expected_frontier,
+                tuple(refs),
+                command,
             )
-            if staged.commitment != commitment:
-                raise PublicOperationError(
-                    PublicErrorCode.STORAGE_CORRUPT,
-                    "Observation inspection payload commitment mismatch.",
-                    retryable=False,
-                )
-            ref = await runtime.objects.finalize(staged)
-            refs.append(ref)
-            entries.append(
-                AppendEntry(
-                    item.draft,
-                    author,
-                    ref,
-                    commitment,
-                    metadata.media_type,
-                    ref.plaintext_size,
-                    batch.channel,
-                    batch.coverage,
-                    item.projection_status,
-                )
+        except BaseException:
+            await abandon_preappend_objects(
+                runtime.objects,
+                tuple(staged_objects),
+                component="application.observation_coordinator",
+                operation="observation_object_abandon_failed",
+                request_id=operation_id,
             )
-        command = AppendCommand(
-            runtime.task_id,
-            runtime.session_id,
-            writer_id,
-            operation_id,
-            OperationKind.PUBLISH_WORK,
-            operation_digest,
-            None,
-            tuple(entries),
-        )
-        mutation = PreparedMutation(
-            command.writer_id,
-            command.operation_id,
-            command.request_digest,
-            command.expected_frontier,
-            tuple(refs),
-            command,
-        )
-        return await run_prepared_append(runtime.ledger, mutation)
+            raise
+        try:
+            return await run_prepared_append(runtime.ledger, mutation)
+        except PreSubmissionCancelled:
+            await abandon_preappend_objects(
+                runtime.objects,
+                tuple(staged_objects),
+                component="application.observation_coordinator",
+                operation="observation_object_abandon_failed",
+                request_id=operation_id,
+            )
+            raise
 
     async def _materialize_approved_check(
         self,
@@ -1310,10 +1359,22 @@ class ObservationCoordinator:
             runtime.task_id,
             self.clock.now_utc(),
         )
-        staged_receipt = await runtime.objects.stage(
-            ObjectSource(data=receipt_bytes, declared_size=len(receipt_bytes)), receipt_metadata
-        )
-        receipt_ref = await runtime.objects.finalize(staged_receipt)
+        staged_objects: list[StagedObject] = []
+        try:
+            staged_receipt = await runtime.objects.stage(
+                ObjectSource(data=receipt_bytes, declared_size=len(receipt_bytes)), receipt_metadata
+            )
+            staged_objects.append(staged_receipt)
+            receipt_ref = await runtime.objects.finalize(staged_receipt)
+        except BaseException:
+            await abandon_preappend_objects(
+                runtime.objects,
+                tuple(staged_objects),
+                component="application.observation_coordinator",
+                operation="observation_object_abandon_failed",
+                request_id=operation_id,
+            )
+            raise
         receipt_digest = canonical_digest(receipt_document)
 
         source_identity = f"approved-check:{completed.job.job_id}:{result.result_digest}"
@@ -1448,17 +1509,28 @@ class ObservationCoordinator:
         refs: list[ObjectRef] = [receipt_ref]
         entries: list[AppendEntry] = []
         for draft in drafts:
-            payload_bytes = canonical_encode(encode_payload(cast(Any, draft.payload)))
-            metadata = ObjectMetadata(
-                ObjectKind.EVENT_PAYLOAD,
-                media_type_for(draft.schema.name),
-                runtime.task_id,
-                self.clock.now_utc(),
-            )
-            staged = await runtime.objects.stage(
-                ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)), metadata
-            )
-            payload_ref = await runtime.objects.finalize(staged)
+            try:
+                payload_bytes = canonical_encode(encode_payload(cast(Any, draft.payload)))
+                metadata = ObjectMetadata(
+                    ObjectKind.EVENT_PAYLOAD,
+                    media_type_for(draft.schema.name),
+                    runtime.task_id,
+                    self.clock.now_utc(),
+                )
+                staged = await runtime.objects.stage(
+                    ObjectSource(data=payload_bytes, declared_size=len(payload_bytes)), metadata
+                )
+                staged_objects.append(staged)
+                payload_ref = await runtime.objects.finalize(staged)
+            except BaseException:
+                await abandon_preappend_objects(
+                    runtime.objects,
+                    tuple(staged_objects),
+                    component="application.observation_coordinator",
+                    operation="observation_object_abandon_failed",
+                    request_id=operation_id,
+                )
+                raise
             refs.append(payload_ref)
             entries.append(
                 AppendEntry(
@@ -1473,25 +1545,45 @@ class ObservationCoordinator:
                     "projected",
                 )
             )
-        command = AppendCommand(
-            runtime.task_id,
-            runtime.session_id,
-            writer_id,
-            operation_id,
-            OperationKind.PUBLISH_WORK,
-            operation_digest,
-            None,
-            tuple(entries),
-        )
-        mutation = PreparedMutation(
-            command.writer_id,
-            command.operation_id,
-            command.request_digest,
-            command.expected_frontier,
-            tuple(refs),
-            command,
-        )
-        await run_prepared_append(runtime.ledger, mutation)
+        try:
+            command = AppendCommand(
+                runtime.task_id,
+                runtime.session_id,
+                writer_id,
+                operation_id,
+                OperationKind.PUBLISH_WORK,
+                operation_digest,
+                None,
+                tuple(entries),
+            )
+            mutation = PreparedMutation(
+                command.writer_id,
+                command.operation_id,
+                command.request_digest,
+                command.expected_frontier,
+                tuple(refs),
+                command,
+            )
+        except BaseException:
+            await abandon_preappend_objects(
+                runtime.objects,
+                tuple(staged_objects),
+                component="application.observation_coordinator",
+                operation="observation_object_abandon_failed",
+                request_id=operation_id,
+            )
+            raise
+        try:
+            await run_prepared_append(runtime.ledger, mutation)
+        except PreSubmissionCancelled:
+            await abandon_preappend_objects(
+                runtime.objects,
+                tuple(staged_objects),
+                component="application.observation_coordinator",
+                operation="observation_object_abandon_failed",
+                request_id=operation_id,
+            )
+            raise
 
     async def _capture_content(
         self,
@@ -2447,99 +2539,119 @@ class ObservationCoordinator:
                 return
         entries: list[AppendEntry] = []
         object_refs: list[ObjectRef] = []
+        staged_objects: list[StagedObject] = []
         envelope_coverage = coverage_for_channel(PublicationChannel.ENGINE_DERIVED)
-        for item, subject_ref_values in items:
-            subject_refs = tuple(event_id(ref) for ref in subject_ref_values)
-            kind = _ADVICE_FINDING_KIND_BY_RULE[item.rule_code]
-            policy_id = (
-                "work-integrity"
-                if kind
-                in {
-                    FindingKind.FAILED_WORK_OMITTED,
-                    FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
-                    FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
-                    FindingKind.LEDGER_STALE_OR_INCOMPLETE,
-                }
-                else "research-evidence"
-            )
-            finding = Finding(
-                item.finding_id,
-                kind,
-                FindingOrigin.DETERMINISTIC,
-                FINDING_KIND_TRAITS[kind][0],
-                item.summary,
-                item.detail,
-                subject_refs,
-                policy_id,
-                "0.1.0",
-                frontier,
-                item.coverage,
-                None,
-            )
-            schema = EventSchema("finding_recorded", "1.1.0")
-            draft = EventDraft(
-                event_id(
-                    stable_observation_id(
-                        kind=IdKind.EVENT,
-                        task_id=runtime.task_id,
-                        source_identity=(
-                            f"advice-candidate:{item.finding_id}:"
-                            f"{canonical_digest(JsonObject({'subject_refs': subject_ref_values}))}"
-                        ),
-                        mapping_version="obs-advice/1.1.0",
-                        role=str(item.finding_id),
-                    )
-                ),
-                schema,
-                timestamp_from_datetime(self.clock.now_utc()),
-                (),
-                finding,
-                (),
-                (),
-            )
-            payload = canonical_encode(encode_payload(finding))
-            metadata = ObjectMetadata(
-                ObjectKind.EVENT_PAYLOAD,
-                media_type_for(schema.name),
-                runtime.task_id,
-                self.clock.now_utc(),
-            )
-            staged = await runtime.objects.stage(
-                ObjectSource(data=payload, declared_size=len(payload)), metadata
-            )
-            ref = await runtime.objects.finalize(staged)
-            object_refs.append(ref)
-            entries.append(
-                AppendEntry(
-                    draft,
-                    observation_author(),
-                    ref,
-                    ref.commitment,
-                    metadata.media_type,
-                    ref.plaintext_size,
-                    PublicationChannel.ENGINE_DERIVED,
-                    envelope_coverage,
-                    "projected",
+        try:
+            for item, subject_ref_values in items:
+                subject_refs = tuple(event_id(ref) for ref in subject_ref_values)
+                kind = _ADVICE_FINDING_KIND_BY_RULE[item.rule_code]
+                policy_id = (
+                    "work-integrity"
+                    if kind
+                    in {
+                        FindingKind.FAILED_WORK_OMITTED,
+                        FindingKind.STALE_EVIDENCE_FOR_CHANGED_STATE,
+                        FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+                        FindingKind.LEDGER_STALE_OR_INCOMPLETE,
+                    }
+                    else "research-evidence"
                 )
+                finding = Finding(
+                    item.finding_id,
+                    kind,
+                    FindingOrigin.DETERMINISTIC,
+                    FINDING_KIND_TRAITS[kind][0],
+                    item.summary,
+                    item.detail,
+                    subject_refs,
+                    policy_id,
+                    "0.1.0",
+                    frontier,
+                    item.coverage,
+                    None,
+                )
+                schema = EventSchema("finding_recorded", "1.1.0")
+                draft = EventDraft(
+                    event_id(
+                        stable_observation_id(
+                            kind=IdKind.EVENT,
+                            task_id=runtime.task_id,
+                            source_identity=(
+                                f"advice-candidate:{item.finding_id}:"
+                                f"{canonical_digest(JsonObject({'subject_refs': subject_ref_values}))}"
+                            ),
+                            mapping_version="obs-advice/1.1.0",
+                            role=str(item.finding_id),
+                        )
+                    ),
+                    schema,
+                    timestamp_from_datetime(self.clock.now_utc()),
+                    (),
+                    finding,
+                    (),
+                    (),
+                )
+                payload = canonical_encode(encode_payload(finding))
+                metadata = ObjectMetadata(
+                    ObjectKind.EVENT_PAYLOAD,
+                    media_type_for(schema.name),
+                    runtime.task_id,
+                    self.clock.now_utc(),
+                )
+                staged = await runtime.objects.stage(
+                    ObjectSource(data=payload, declared_size=len(payload)), metadata
+                )
+                staged_objects.append(staged)
+                ref = await runtime.objects.finalize(staged)
+                object_refs.append(ref)
+                entries.append(
+                    AppendEntry(
+                        draft,
+                        observation_author(),
+                        ref,
+                        ref.commitment,
+                        metadata.media_type,
+                        ref.plaintext_size,
+                        PublicationChannel.ENGINE_DERIVED,
+                        envelope_coverage,
+                        "projected",
+                    )
+                )
+            command = AppendCommand(
+                runtime.task_id,
+                runtime.session_id,
+                runtime.writer_id,
+                operation_id,
+                OperationKind.PUBLISH_WORK,
+                request_digest_value,
+                None,
+                tuple(entries),
             )
-        command = AppendCommand(
-            runtime.task_id,
-            runtime.session_id,
-            runtime.writer_id,
-            operation_id,
-            OperationKind.PUBLISH_WORK,
-            request_digest_value,
-            None,
-            tuple(entries),
-        )
-        await run_prepared_append(
-            runtime.ledger,
-            PreparedMutation(
+            mutation = PreparedMutation(
                 command.writer_id,
                 command.operation_id,
                 command.request_digest,
                 command.expected_frontier,
                 tuple(object_refs),
                 command,
-            ),
-        )
+            )
+        except BaseException:
+            await abandon_preappend_objects(
+                runtime.objects,
+                tuple(staged_objects),
+                component="application.observation_coordinator",
+                operation="observation_object_abandon_failed",
+                request_id=operation_id,
+            )
+            raise
+        try:
+            await run_prepared_append(runtime.ledger, mutation)
+        except PreSubmissionCancelled:
+            await abandon_preappend_objects(
+                runtime.objects,
+                tuple(staged_objects),
+                component="application.observation_coordinator",
+                operation="observation_object_abandon_failed",
+                request_id=operation_id,
+            )
+            raise

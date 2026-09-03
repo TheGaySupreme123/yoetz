@@ -14,7 +14,7 @@ from yoetz.ports.ledger import (
     OperationKind,
     OperationState,
 )
-from yoetz.ports.objects import ObjectRef
+from yoetz.ports.objects import ObjectRef, ObjectStorePort, StagedObject
 from yoetz.ports.publish_response_catalog import (
     PublishResponseCatalogPort,
     StoredPublishResponse,
@@ -37,6 +37,7 @@ __all__ = [
     "CommitResolution",
     "PreSubmissionCancelled",
     "PreparedMutation",
+    "abandon_preappend_objects",
     "resolve_ambiguous_operation",
     "resolve_ambiguous_start",
     "run_catalog_transition",
@@ -218,6 +219,72 @@ class PreSubmissionCancelled(asyncio.CancelledError):
     for the refused mutation may therefore abandon them; a plain ``CancelledError`` carries no
     such guarantee and must be treated as an ambiguous commit.
     """
+
+
+async def abandon_preappend_objects(
+    objects: ObjectStorePort,
+    staged_objects: tuple[StagedObject, ...],
+    *,
+    component: str,
+    operation: str,
+    request_id: str,
+) -> None:
+    """Finish best-effort cleanup for exact object stages never submitted to a ledger."""
+
+    from yoetz.observability.logging import record_classified_exception_without_raising
+
+    async def abandon_all() -> None:
+        for staged in reversed(staged_objects):
+            try:
+                await objects.abandon(staged)
+            except Exception as exc:
+                # Cleanup must not replace the caller's original failure. The exact object remains
+                # eligible for delayed generation-fenced GC when abandon cannot remove it.
+                record_classified_exception_without_raising(
+                    exc,
+                    component=component,
+                    operation=operation,
+                    request_id=request_id,
+                )
+
+    pending = abandon_all()
+    try:
+        cleanup = asyncio.create_task(pending)
+    except RuntimeError as exc:
+        # A closing loop cannot host the cleanup task. Close the un-started coroutine and retain
+        # the original caller failure; delayed generation-fenced GC remains the fallback.
+        pending.close()
+        record_classified_exception_without_raising(
+            exc,
+            component=component,
+            operation=operation,
+            request_id=request_id,
+        )
+        return
+    current = asyncio.current_task()
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError as exc:
+            # Distinguish cancellation of this caller from cancellation inside the cleanup task.
+            # The former is deferred until every exact stage has received an abandon attempt.
+            if cancellation is None and current is not None and current.cancelling():
+                cancellation = exc
+        if cleanup.done():
+            break
+    try:
+        cleanup.result()
+    except BaseException as exc:
+        # Retrieve every definite task outcome without replacing the original caller failure.
+        record_classified_exception_without_raising(
+            exc,
+            component=component,
+            operation=operation,
+            request_id=request_id,
+        )
+    if cancellation is not None:
+        raise cancellation
 
 
 def _raise_if_cancelling() -> None:
