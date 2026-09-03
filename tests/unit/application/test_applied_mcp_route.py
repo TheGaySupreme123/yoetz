@@ -349,11 +349,34 @@ def test_service_strict_reregistration_overwrites_policy(tmp_path: Path) -> None
     assert record["applied_serve_command"] == list(MCP_STRICT_SERVE_COMMAND)
 
 
-def test_service_noop_register_records_nothing(tmp_path: Path) -> None:
+def test_service_noop_register_still_records_the_route(tmp_path: Path) -> None:
+    """A NOOP register leaves the host on the accepted route, so the record must agree.
+
+    Skipping it left an earlier entry behind, and every later status then reported drift
+    against the very route the owner had just re-accepted (issue #537).
+    """
+
     service = HarnessMcpService(_RoutePort("policy", already_owned=True))
     result = anyio.run(lambda: service.register(_BINARY, _confirmation(), _state=tmp_path))
     assert result.action is McpRegistrationAction.NOOP
-    assert read_applied_route(_state=tmp_path) is None
+    record = read_applied_route(_state=tmp_path)
+    assert record is not None
+    assert record["applied_profile"] == "policy"
+
+
+def test_service_reconcile_overwrites_a_stale_record(tmp_path: Path) -> None:
+    """The CLI's own NOOP short-circuits never reach `register`, so they call this."""
+
+    record_applied_route(
+        "policy", list(MCP_SERVE_COMMAND), list(MCP_SERVE_COMMAND), _DIGEST, _state=tmp_path
+    )
+    service = HarnessMcpService(_RoutePort("strict", already_owned=True))
+    preview = anyio.run(lambda: service.preview(_BINARY))
+    assert preview.action is McpRegistrationAction.NOOP
+    service.reconcile_applied_route(_BINARY, preview, _state=tmp_path)
+    record = read_applied_route(_state=tmp_path)
+    assert record is not None
+    assert record["applied_profile"] == "strict"
 
 
 def test_service_unregister_clears_the_record(tmp_path: Path) -> None:

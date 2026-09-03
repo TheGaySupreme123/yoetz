@@ -278,10 +278,10 @@ async def mcp_route_observation(
         _applied_record = read_applied_route(_state=_state)
     except Exception:
         _applied_record = None
-    _applied_profile: JsonValue = None
+    _applied_profile: str | None = None
     if isinstance(_applied_record, dict):
         _candidate = _applied_record.get("applied_profile")
-        if _candidate in {"policy", "strict"}:
+        if isinstance(_candidate, str) and _candidate in {"policy", "strict"}:
             _applied_profile = _candidate
     _drift_since_install = (
         _applied_record is not None

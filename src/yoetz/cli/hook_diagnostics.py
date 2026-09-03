@@ -41,6 +41,10 @@ _EVENTS: Final = frozenset(
         "SubagentStop",
         "observe",
         "drain",
+        # Not a host hook event: the MCP bridge's own startup, which is the only place
+        # a process can compare its serving route against the applied-route record
+        # without paying for a host subprocess (issue #537).
+        "mcp_serve",
     }
 )
 _REASONS: Final = frozenset(

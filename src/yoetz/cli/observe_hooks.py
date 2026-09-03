@@ -1847,66 +1847,13 @@ def handle_observe(
                             with contextlib.suppress(Exception):
                                 _resolve_runner()(_drain)
 
-        if resolved_event == "SessionStart":
-            # Issue #537 slice B: applied-vs-serving drift probe. Reads the
-            # durable applied record first (no-record is the fast path), then
-            # the host's own live resolution via the bounded adapter (10s).
-            # Fail-soft, payload-free, and output-neutral by construction.
-            # This covers every handle_session_start delegation (startup,
-            # clear, and unmapped resume/compact all funnel through here); the
-            # direct resume/compact path in hooks.py relies on this single probe
-            # and runs no second `codex mcp get` (review M2).
-            try:
-                from yoetz.application.applied_mcp_route import read_applied_route as _read_route
-
-                try:
-                    _drift_record = _read_route(_state=_state)
-                except Exception:
-                    _drift_record = None
-                if isinstance(_drift_record, dict):
-                    _drift_applied = _drift_record.get("applied_profile")
-                    if _drift_applied in {"policy", "strict"}:
-                        from yoetz.adapters.integrations.codex_discovery import (
-                            discover_codex_binaries as _discover_binaries,
-                        )
-                        from yoetz.adapters.integrations.codex_mcp import (
-                            CodexMcpAdapter as _DriftAdapter,
-                        )
-                        from yoetz.application.harness_mcp import (
-                            HarnessMcpService as _DriftService,
-                        )
-
-                        try:
-                            _drift_binaries = _discover_binaries()
-                        except Exception:
-                            _drift_binaries = ()
-                        if _drift_binaries:
-
-                            async def _drift_observe() -> object:
-                                return await _DriftService(_DriftAdapter()).observe(
-                                    _drift_binaries[0]
-                                )
-
-                            try:
-                                _drift_observation = _resolve_runner()(_drift_observe)
-                            except Exception:
-                                _drift_observation = None
-                            if _drift_observation is not None:
-                                _drift_registered = getattr(
-                                    _drift_observation, "route_profile", None
-                                )
-                                if _drift_registered in {
-                                    "policy",
-                                    "strict",
-                                } and _drift_registered != _drift_applied:
-                                    with contextlib.suppress(Exception):
-                                        record_hook_diagnostic(
-                                            "registration_drift",
-                                            "SessionStart",
-                                            _state=_state,
-                                        )
-            except Exception:
-                pass
+        # Issue #537: no applied-vs-serving drift probe runs on this path. A hook process
+        # has no serving route of its own, so the only comparison available here is a
+        # `codex mcp get` subprocess plus the PATH version probes needed to find the
+        # binary — routinely a large fraction of `_HOOK_TOTAL_BUDGET_SECONDS` and bounded
+        # only by the adapter's own 10s command timeout, which is the #209-#213 hook
+        # latency loop again. The MCP bridge starts for the same Codex session, knows its
+        # serving route from its own argv, and emits `registration_drift` for free.
 
         if (
             not skip_service

@@ -973,7 +973,11 @@ def test_registration_drift_gap_names_policy_recovery_in_limitations() -> None:
     section = next(
         item for item in receipt.sections if item.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
     )
-    assert "the serving strict process is stale" in section.body
+    assert "the last install applied the policy route" in section.body
+    # A strict route reached outside the ceremony is a legitimate owner action, so the
+    # section reports the disagreement and offers the recovery conditionally.
+    assert "If this strict route was not intended" in section.body
+    assert "is stale" not in section.body
     assert "yoetz integrate codex mcp install --route-profile policy" in section.body
     assert "start a fresh Codex process" in section.body
     assert section.items == gaps
@@ -988,7 +992,13 @@ def test_genuine_strict_ceiling_keeps_generic_limitations_wording() -> None:
     receipt = _build(
         _context(
             coverage=coverage,
-            gaps=(CaseGap(OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP, OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP, ()),),
+            gaps=(
+                CaseGap(
+                    OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+                    OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+                    (),
+                ),
+            ),
             check=_check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
         )
     )

@@ -65,8 +65,8 @@ def _agent_route_detail(provider: ProviderPosture) -> str:
         return ""
     if provider.registered_route_profile == "strict":
         strict = "registered on the strict route; 'yoetz integrate codex mcp preview' to change it"
-        # The last applied route was policy, so this strict process is stale rather than
-        # an owner privacy decision (issue #537): re-register and start a fresh process.
+        # The live route disagrees with what the last install applied (issue #537). That
+        # disagreement is all this line claims; the owner decides whether it was intended.
         if provider.route_drift_since_install:
             return (
                 f"{strict}; applied route differs since install — re-run the previewed "

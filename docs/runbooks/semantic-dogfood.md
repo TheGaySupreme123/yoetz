@@ -103,10 +103,12 @@ disagrees with it). Record both at preflight alongside the table above. A ceilin
 served while the applied record says `policy` additionally carries the
 `optional_semantic_review_registration_drift` coverage gap next to the ceiling gap, and its
 receipt names the recovery: re-run `mcp preview` / `mcp install --route-profile policy` and
-start a fresh Codex process. At session start the `SessionStart` hook (and the MCP bridge at
-startup) emit a closed `registration_drift` hook diagnostic on the same mismatch, so read
-`hook_diagnostics.reasons` there too — a drift that appears mid-session invalidates the
-profile the run declared in §1.
+start a fresh Codex process. The MCP bridge emits a closed `registration_drift` hook
+diagnostic under the `mcp_serve` event when the route it starts on disagrees with the applied
+record, so read `hook_diagnostics.reasons` there too — a drift that appears mid-session
+invalidates the profile the run declared in §1. The hook events themselves emit nothing here:
+they have no serving route to compare, and probing the host from a hook costs more than the
+hook budget allows.
 
 `mcp_route.observed: false` is disqualifying for **both** profiles. An unread route is not a policy
 route, and it is not a strict route either — it is no route at all until it is read.

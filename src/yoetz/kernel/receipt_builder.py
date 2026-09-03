@@ -945,13 +945,16 @@ def _sections(
                 f"Coverage is limited by: {', '.join(gap_codes)}."
             )
         elif OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP in gap_codes:
-            # The strict ceiling blocked this process while the last applied route was
-            # policy: the serving process is stale, not the privacy posture (issue #537).
-            # A genuinely applied strict route keeps the generic wording below.
+            # The strict ceiling blocked this process while the last install applied the
+            # policy route (issue #537). The disagreement is what is proven: whether this
+            # strict route was intended is the owner's to say, and a route reached outside
+            # the install ceremony is a legitimate owner action, so the recovery is offered
+            # conditionally rather than asserted as a stale process. A ceiling with no
+            # applied-policy record keeps the generic wording below.
             gap_body = (
                 "Semantic review was blocked by the strict route ceiling, but the last "
-                "applied route was policy: the serving strict process is stale. Re-run "
-                "`yoetz integrate codex mcp preview` and "
+                "install applied the policy route. If this strict route was not intended, "
+                "re-run `yoetz integrate codex mcp preview` and "
                 "`yoetz integrate codex mcp install --route-profile policy`, then start a "
                 "fresh Codex process. "
                 f"Coverage is limited by: {', '.join(gap_codes)}."

@@ -292,9 +292,10 @@ registration state alone cannot tell them apart. The report therefore names the 
   `configured_profile` compares the registration against what setup would produce now
   (preflight drift — fix with the re-registration ceremony), while `drift_since_install`
   compares the live registration against what the last install applied (post-install drift —
-  the serving process is stale, so re-run the ceremony with the policy route and start a fresh
-  session). A strict check served while the applied record says `policy` additionally names this
-  in its receipt and tells you exactly that recovery.
+  something changed the route after the install, so if that was not you, re-run the ceremony
+  with the policy route and start a fresh session). A strict check served while the last
+  install applied the policy route additionally names this in its receipt, with the same
+  recovery offered as a conditional.
 - `observed: false` — the route could not be read. That is *unknown*, not *absent*, and it is never
   reported as a blocker.
 - `repository_grant_state` / `repository_migration_state` — the exact trusted-session repository

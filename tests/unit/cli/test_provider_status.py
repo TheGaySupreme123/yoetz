@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -856,9 +856,12 @@ async def test_unknown_grant_never_reports_admission_drift(
 
 
 def _stub_live_route(
-    monkeypatch: pytest.MonkeyPatch, *, registered: str | None, observed: bool = True
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    registered: Literal["policy", "strict"] | None,
+    observed: bool = True,
 ) -> None:
-    """Stub the live host resolution for drift-join tests (issue #537 slice B)."""
+    """Stub the live host resolution for drift-join tests (issue #537)."""
 
     from yoetz.ports.harness_mcp import (
         HarnessBinary,
@@ -887,9 +890,7 @@ def _stub_live_route(
     async def _fake_observe(self: object, _binary: object) -> McpRegistrationObservation:
         return observation
 
-    monkeypatch.setattr(
-        "yoetz.application.harness_mcp.HarnessMcpService.observe", _fake_observe
-    )
+    monkeypatch.setattr("yoetz.application.harness_mcp.HarnessMcpService.observe", _fake_observe)
     monkeypatch.setattr(cli_setup, "configured_mcp_route_profile", lambda: "policy")
 
 
@@ -1020,9 +1021,13 @@ async def test_applied_route_dual_never_reports_drift(
     monkeypatch.setattr(module, "mcp_route_observation", _REAL_ROUTE_OBSERVATION)
     # External YOETZ_OWNED strict + plugin PLUGIN policy joins to DUAL.
     _stub_live_route(monkeypatch, registered="strict")
+
+    def _plugin_policy(_root: object) -> PluginManagedMcpObservation:
+        return PluginManagedMcpObservation(McpOwnershipState.PLUGIN, "policy", True)
+
     monkeypatch.setattr(
         "yoetz.adapters.integrations.portable_plugin.observe_plugin_managed_mcp",
-        lambda _root: PluginManagedMcpObservation(McpOwnershipState.PLUGIN, "policy", True),
+        _plugin_policy,
     )
     record_applied_route(
         "policy",

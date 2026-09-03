@@ -130,9 +130,10 @@ SEMANTIC_REVIEW_NOT_REQUESTED_GAP: Final = "semantic_review_not_requested"
 SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP: Final = "semantic_case_content_over_item_limit"
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
 # The strict route ceiling blocked this process, but the durable applied-route record says the
-# last install applied the policy route: the serving process is stale, not the privacy posture
-# (issue #537). Carried alongside the ceiling gap above — never instead of it — so the terminal
-# status/reason/provenance binding is unchanged and the gap names the recovery.
+# last install applied the policy route (issue #537). The disagreement is the whole claim: a
+# route reached outside the install ceremony is a legitimate owner action, so the gap offers
+# the recovery rather than asserting a stale process. Carried alongside the ceiling gap above —
+# never instead of it — so the terminal status/reason/provenance binding is unchanged.
 OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP: Final = (
     "optional_semantic_review_registration_drift"
 )
@@ -1199,8 +1200,8 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
     if OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP in gap_codes:
         return (
             prefix + "coverage is insufficient because optional semantic review was blocked by "
-            "the strict route ceiling while the last applied route was policy: the serving "
-            "process is stale. Re-run `yoetz integrate codex mcp preview` and "
+            "the strict route ceiling while the last install applied the policy route. If this "
+            "strict route was not intended, re-run `yoetz integrate codex mcp preview` and "
             "`yoetz integrate codex mcp install --route-profile policy`, then start a fresh "
             "Codex process. No provider attempt or semantic finding was recorded."
         )

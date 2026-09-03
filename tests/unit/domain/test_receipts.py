@@ -444,7 +444,13 @@ def test_registration_drift_compact_names_policy_recovery() -> None:
         {"code": OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP, "subject_refs": []},
     ]
     rendered = render_receipt_compact(receipt_document_from_json(wire))
-    assert "blocked by the strict route ceiling while the last applied route was policy" in rendered
+    assert (
+        "blocked by the strict route ceiling while the last install applied the policy route"
+        in rendered
+    )
+    # The disagreement is the claim; whether the strict route was intended is the owner's
+    # to say, so the recovery is offered as a conditional rather than asserted.
+    assert "If this strict route was not intended" in rendered
     assert "yoetz integrate codex mcp install --route-profile policy" in rendered
     assert "start a fresh Codex process" in rendered
     assert "No provider attempt or semantic finding was recorded." in rendered

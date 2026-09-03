@@ -1525,6 +1525,10 @@ async def _codex_integration_step(
         )
     )
     mcp_state = mcp_preview.state_before
+    if already_registered and mcp_state is McpRegistrationState.YOETZ_OWNED:
+        # Nothing to write, but the host is on the route this step just accepted: keep the
+        # applied record in agreement with it so no earlier entry reads as drift (#537).
+        mcp_service.reconcile_applied_route(binary, mcp_preview, _state=_state)
     if not already_registered:
         try:
             result = await mcp_service.register(
@@ -2912,13 +2916,11 @@ async def integrate_mcp(
                 _applied_record = read_applied_route(_state=_state)
             except Exception:
                 _applied_record = None
-            _applied_profile = (
-                _applied_record.get("applied_profile")
-                if isinstance(_applied_record, dict)
-                else None
-            )
-            if _applied_profile not in {"policy", "strict"}:
-                _applied_profile = None
+            _applied_profile: str | None = None
+            if isinstance(_applied_record, dict):
+                _candidate = _applied_record.get("applied_profile")
+                if isinstance(_candidate, str) and _candidate in {"policy", "strict"}:
+                    _applied_profile = _candidate
             _registered_profile = observation.route_profile
             # Strict both-in-set rule (issue #537 review B1): drift is True
             # iff a record exists AND both profiles name a Yoetz route AND
@@ -3062,6 +3064,11 @@ async def integrate_mcp(
         if not accepted:
             return _mcp_error_exit("confirmation_required")
         if preview.action is McpRegistrationAction.NOOP:
+            # The ceremony was accepted and the host is already on the previewed route, so
+            # the applied record has to agree with it: an earlier entry left here would
+            # report drift against a route the owner just re-accepted (issue #537).
+            if preview.state_before is McpRegistrationState.YOETZ_OWNED:
+                service.reconcile_applied_route(chosen, preview, _state=_state)
             _emit(
                 {
                     "action": "noop",

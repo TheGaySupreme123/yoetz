@@ -1,17 +1,17 @@
-"""Slice B registration-drift tests (issue #537).
+"""Registration-drift tests (issue #537).
 
-Covers the closed diagnostic token, ``mcp status --json`` drift fields, and
-the fail-soft SessionStart drift probe. Diagnostic assertions poll the bounded
-file with a timeout rather than sleeping a fixed interval.
+Covers the closed diagnostic token, ``mcp status --json`` drift fields, the bridge-startup
+drift comparison that is the sole emitter, and the hook path's deliberate silence. Every
+writer here is synchronous, so assertions read the bounded file directly rather than
+waiting or sleeping.
 """
 
 from __future__ import annotations
 
 import io
 import json
-import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -19,15 +19,14 @@ from yoetz.adapters.integrations.observation_local import LocalObservationStore
 from yoetz.application.applied_mcp_route import read_applied_route, record_applied_route
 from yoetz.cli import setup as setup_cli
 from yoetz.cli.hook_diagnostics import record_hook_diagnostic
+from yoetz.mcp.server import record_startup_route_drift
 from yoetz.ports.harness_mcp import (
     MCP_SERVE_COMMAND,
     MCP_STRICT_SERVE_COMMAND,
     HarnessBinary,
     McpRegistrationAction,
-    McpRegistrationError,
     McpRegistrationObservation,
     McpRegistrationPreview,
-    McpRegistrationReason,
     McpRegistrationState,
 )
 from yoetz.ports.integrations import HarnessId
@@ -47,32 +46,9 @@ def _diagnostic_path(state: Path) -> Path:
     return state / "observation" / "hook-diagnostics.jsonl"
 
 
-def _wait_for_reason(state: Path, reason: str, *, timeout_s: float = 5.0) -> bool:
-    """Poll the diagnostics file until a row names ``reason`` or time runs out."""
-
-    path = _diagnostic_path(state)
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        try:
-            text = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            time.sleep(0.01)
-            continue
-        for line in text.splitlines():
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(row, dict) and row.get("reason") == reason:
-                return True
-        # The writer is synchronous; a missing row after the call returned
-        # means no row will arrive, but keep polling to the deadline so the
-        # assertion waits on content rather than a fixed sleep.
-        time.sleep(0.01)
-    return False
-
-
 def _reasons_in(state: Path) -> list[str]:
+    """Return every recorded reason. The writer is synchronous, so no waiting is needed."""
+
     path = _diagnostic_path(state)
     try:
         text = path.read_text(encoding="utf-8")
@@ -81,29 +57,24 @@ def _reasons_in(state: Path) -> list[str]:
     reasons: list[str] = []
     for line in text.splitlines():
         try:
-            row = json.loads(line)
+            row: object = json.loads(line)
         except ValueError:
             continue
-        if isinstance(row, dict) and type(row.get("reason")) is str:
-            reasons.append(row["reason"])
+        if isinstance(row, dict):
+            reason: object = cast(dict[str, object], row).get("reason")
+            if isinstance(reason, str):
+                reasons.append(reason)
     return reasons
 
 
 def test_registration_drift_is_a_closed_diagnostic_token(tmp_path: Path) -> None:
-    record_hook_diagnostic("registration_drift", "SessionStart", _state=tmp_path)
-    assert _wait_for_reason(tmp_path, "registration_drift")
+    record_hook_diagnostic("registration_drift", "mcp_serve", _state=tmp_path)
+    assert _reasons_in(tmp_path) == ["registration_drift"]
     row = json.loads(_diagnostic_path(tmp_path).read_text(encoding="utf-8").splitlines()[-1])
     assert set(row) == {"event", "reason", "ts"}
-    assert row["event"] == "SessionStart"
+    # `mcp_serve` is a closed token: an unknown event would be recorded as `unknown_event`.
+    assert row["event"] == "mcp_serve"
     assert row["reason"] == "registration_drift"
-
-
-def _observation(profile: str | None) -> McpRegistrationObservation:
-    return McpRegistrationObservation(
-        HarnessId.CODEX,
-        McpRegistrationState.YOETZ_OWNED,
-        profile,  # type: ignore[arg-type]
-    )
 
 
 def _observation_with_state(
@@ -132,15 +103,13 @@ async def _status_json(
     async def _fake_observe(self: object, _binary: object) -> McpRegistrationObservation:
         return _observation_with_state(state, registered)
 
-    monkeypatch.setattr(
-        "yoetz.application.harness_mcp.HarnessMcpService.observe", _fake_observe
-    )
+    monkeypatch.setattr("yoetz.application.harness_mcp.HarnessMcpService.observe", _fake_observe)
     captured: dict[str, Any] = {}
 
     def _capture(value: object, *, json_output: bool) -> None:
         del json_output
         assert isinstance(value, dict)
-        captured.update(value)
+        captured.update(cast(dict[str, Any], value))
 
     monkeypatch.setattr(setup_cli, "_emit", _capture)
     code = await setup_cli.integrate_mcp(
@@ -254,9 +223,7 @@ async def test_mcp_remove_noop_absent_clears_stale_record(
         "policy",
     )
 
-    async def _fake_preview_unregistration(
-        self: object, _binary: object
-    ) -> McpRegistrationPreview:
+    async def _fake_preview_unregistration(self: object, _binary: object) -> McpRegistrationPreview:
         return preview
 
     monkeypatch.setattr(
@@ -268,7 +235,7 @@ async def test_mcp_remove_noop_absent_clears_stale_record(
     def _capture(value: object, *, json_output: bool) -> None:
         del json_output
         assert isinstance(value, dict)
-        captured.update(value)
+        captured.update(cast(dict[str, Any], value))
 
     monkeypatch.setattr(setup_cli, "_emit", _capture)
     code = await setup_cli.integrate_mcp(
@@ -286,28 +253,71 @@ async def test_mcp_remove_noop_absent_clears_stale_record(
     assert read_applied_route(_state=tmp_path) is None
 
 
-def _stub_hook_observation(
-    monkeypatch: pytest.MonkeyPatch, *, registered: str | None, fail: bool = False
+async def test_mcp_install_noop_refreshes_a_stale_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(
-        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries",
-        lambda: (_BINARY,),
+    """A deliberate strict re-registration the host already satisfies must clear the drift.
+
+    The record said `policy`; something reverted the host to strict; the owner accepted a
+    strict install, which had nothing to write. Without refreshing the record here the
+    stale `policy` entry reports drift against the route the owner just re-accepted.
+    """
+
+    record_applied_route(
+        "policy",
+        list(MCP_SERVE_COMMAND),
+        list(MCP_SERVE_COMMAND),
+        _DIGEST,
+        _state=tmp_path,
     )
+    monkeypatch.setattr(setup_cli, "discover_codex_binaries", lambda: (_BINARY,))
+
+    preview = McpRegistrationPreview(
+        HarnessId.CODEX,
+        McpRegistrationAction.NOOP,
+        McpRegistrationState.YOETZ_OWNED,
+        (),
+        _DIGEST,
+        MCP_STRICT_SERVE_COMMAND,
+        "strict",
+    )
+
+    async def _fake_preview(self: object, _binary: object) -> McpRegistrationPreview:
+        return preview
 
     async def _fake_observe(self: object, _binary: object) -> McpRegistrationObservation:
-        if fail:
-            raise McpRegistrationError(McpRegistrationReason.HARNESS_UNAVAILABLE, {})
-        return _observation(registered)
+        return _observation_with_state(McpRegistrationState.YOETZ_OWNED, "strict")
 
+    monkeypatch.setattr("yoetz.application.harness_mcp.HarnessMcpService.preview", _fake_preview)
+    monkeypatch.setattr("yoetz.application.harness_mcp.HarnessMcpService.observe", _fake_observe)
     monkeypatch.setattr(
-        "yoetz.application.harness_mcp.HarnessMcpService.observe", _fake_observe
+        "yoetz.adapters.integrations.codex_mcp.CodexMcpAdapter.observe_registration",
+        _fake_observe,
     )
 
+    def _discard(value: object, *, json_output: bool) -> None:
+        del value, json_output
 
-def test_session_start_helper_emits_on_mismatch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    from yoetz.cli.hooks import _maybe_record_registration_drift
+    monkeypatch.setattr(setup_cli, "_emit", _discard)
+
+    code = await setup_cli.integrate_mcp(
+        "install",
+        "codex",
+        codex_path=None,
+        accept=True,
+        preview_digest=_DIGEST,
+        json_output=True,
+        route_profile="strict",
+        _state=tmp_path,
+    )
+    assert code == 0
+    record = read_applied_route(_state=tmp_path)
+    assert record is not None
+    assert record["applied_profile"] == "strict"
+
+
+def test_bridge_startup_emits_drift_on_mismatch(tmp_path: Path) -> None:
+    """The MCP bridge is the sole emitter: it compares its own serving argv."""
 
     record_applied_route(
         "policy",
@@ -316,19 +326,30 @@ def test_session_start_helper_emits_on_mismatch(
         _DIGEST,
         _state=tmp_path,
     )
-    _stub_hook_observation(monkeypatch, registered="strict")
-
-    import anyio
-
-    _maybe_record_registration_drift(_state=tmp_path, runner=anyio.run)
-    assert _wait_for_reason(tmp_path, "registration_drift")
+    record_startup_route_drift("strict", _state=tmp_path)
+    assert _reasons_in(tmp_path) == ["registration_drift"]
+    row = json.loads(_diagnostic_path(tmp_path).read_text(encoding="utf-8").splitlines()[-1])
+    assert row["event"] == "mcp_serve"
 
 
-def test_session_start_helper_emits_nothing_when_matching(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    from yoetz.cli.hooks import _maybe_record_registration_drift
+def test_bridge_startup_emits_nothing_when_matching(tmp_path: Path) -> None:
+    record_applied_route(
+        "strict",
+        list(MCP_STRICT_SERVE_COMMAND),
+        list(MCP_STRICT_SERVE_COMMAND),
+        _DIGEST,
+        _state=tmp_path,
+    )
+    record_startup_route_drift("strict", _state=tmp_path)
+    assert _reasons_in(tmp_path) == []
 
+
+def test_bridge_startup_emits_nothing_without_record(tmp_path: Path) -> None:
+    record_startup_route_drift("strict", _state=tmp_path)
+    assert _reasons_in(tmp_path) == []
+
+
+def test_bridge_startup_emits_nothing_for_an_unknown_serving_route(tmp_path: Path) -> None:
     record_applied_route(
         "policy",
         list(MCP_SERVE_COMMAND),
@@ -336,58 +357,20 @@ def test_session_start_helper_emits_nothing_when_matching(
         _DIGEST,
         _state=tmp_path,
     )
-    _stub_hook_observation(monkeypatch, registered="policy")
-
-    import anyio
-
-    _maybe_record_registration_drift(_state=tmp_path, runner=anyio.run)
+    record_startup_route_drift("unknown", _state=tmp_path)
     assert _reasons_in(tmp_path) == []
 
 
-def test_session_start_helper_emits_nothing_without_record(
+def test_observe_session_start_runs_no_host_probe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from yoetz.cli.hooks import _maybe_record_registration_drift
+    """The SessionStart hook path emits no drift and shells out to no host binary.
 
-    # No applied record: the probe must return before touching discovery, so
-    # even a broken discovery must not produce a diagnostic or raise.
-    def _explode() -> tuple[object, ...]:
-        raise AssertionError("must not discover without a record")
-
-    monkeypatch.setattr(
-        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries", _explode
-    )
-
-    import anyio
-
-    _maybe_record_registration_drift(_state=tmp_path, runner=anyio.run)
-    assert _reasons_in(tmp_path) == []
-
-
-def test_session_start_helper_emits_nothing_on_observation_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    from yoetz.cli.hooks import _maybe_record_registration_drift
-
-    record_applied_route(
-        "policy",
-        list(MCP_SERVE_COMMAND),
-        list(MCP_SERVE_COMMAND),
-        _DIGEST,
-        _state=tmp_path,
-    )
-    _stub_hook_observation(monkeypatch, registered="strict", fail=True)
-
-    import anyio
-
-    _maybe_record_registration_drift(_state=tmp_path, runner=anyio.run)
-    assert _reasons_in(tmp_path) == []
-
-
-def test_observe_session_start_emits_drift_and_keeps_return_shape(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The auto-attach SessionStart path emits drift without changing output."""
+    A hook process has no serving route of its own, so the only comparison available
+    there is a `codex mcp get` subprocess plus the PATH version probes needed to find
+    the binary — more than the end-to-end hook budget can carry, and the #209-#213
+    latency loop again. Discovery raising here is the guard: nothing may call it.
+    """
 
     from yoetz.cli.observe_hooks import handle_observe
 
@@ -401,7 +384,13 @@ def test_observe_session_start_emits_drift_and_keeps_return_shape(
         _DIGEST,
         _state=tmp_path,
     )
-    _stub_hook_observation(monkeypatch, registered="strict")
+
+    def _explode() -> tuple[object, ...]:
+        raise AssertionError("a hook must not probe the host for the applied route")
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries", _explode
+    )
 
     stdout = io.BytesIO()
     code = handle_observe(
@@ -417,4 +406,4 @@ def test_observe_session_start_emits_drift_and_keeps_return_shape(
     assert code == 0
     # Output shape is unchanged: exactly one JSON object on stdout.
     json.loads(stdout.getvalue().decode("utf-8"))
-    assert _wait_for_reason(tmp_path, "registration_drift")
+    assert _reasons_in(tmp_path) == []
