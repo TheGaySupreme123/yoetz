@@ -8,7 +8,7 @@ import pytest
 
 from builders.tui_runtime import RECOMMEND_PRIVATE, FakeRuntime
 from yoetz.tui.app import YoetzTui
-from yoetz.tui.models import CheckMode, PrivacyPosture, ProviderPosture
+from yoetz.tui.models import CheckMode, PrivacyPosture, ProviderOption, ProviderPosture
 
 pytestmark = pytest.mark.anyio
 
@@ -512,6 +512,49 @@ async def test_provider_can_switch_the_codex_account(make_app: MakeApp) -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert runtime.subscription_actions == ["switch"]
+
+
+async def test_provider_discloses_and_reports_a_reused_codex_login(make_app: MakeApp) -> None:
+    """Setup on a home Codex already reports signed in reuses it and says so (#534)."""
+
+    runtime = FakeRuntime()
+    runtime.subscription_login_reused = True
+    base_options = runtime.provider_options()
+    codex_option = ProviderOption(
+        choice="codex_subscription",
+        label="Codex with ChatGPT subscription",
+        provider_id="openai-codex",
+        host="openai.com",
+        base_path_prefix=" through Codex-managed login",
+        default_model="gpt-5.6-sol",
+        api_style="Codex app-server v2 (stdio)",
+        endpoint_profile_id="codex-chatgpt-subscription",
+        endpoint_profile_version="1.0.0",
+    )
+    runtime.provider_options = lambda: (*base_options, codex_option)  # type: ignore[method-assign]
+    app = make_app(runtime=runtime)
+    async with app.run_test(size=WIDE) as pilot:
+        await pilot.pause()
+        await run_command(pilot, app, "/provider")
+        view = app.open_view
+        assert view is not None
+        view.filter("Codex with ChatGPT subscription")  # type: ignore[attr-defined]
+        await pilot.press("enter")
+        await pilot.pause()
+        for _ in range(4):
+            await pilot.press("enter")
+            await pilot.pause()
+        view = app.open_view
+        assert view is not None
+        body = " ".join(getattr(view, "body", ()) or getattr(view, "_body", ()))
+        assert "reused without a new sign-in" in body.casefold()
+        assert "log out the dedicated home first" not in body.casefold()
+        await pilot.press("up")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert runtime.subscription_actions == ["setup"]
+        assert "reused the existing Codex login" in transcript(app)
 
 
 # ---------------------------------------------------------------------------

@@ -187,8 +187,10 @@ review on.
 API-provider keys are entered through the secure prompt described under *Secrets* below. For a
 subscription, `/provider` asks for the exact Codex executable, dedicated evaluator home, model, and
 reasoning effort; validates the supported digest-bound cell; shows destination, plan/terms notice,
-privacy boundary, disconnect, rollback, and optional account switch; then suspends the UI for
-Codex's browser flow. OAuth credentials never pass through a widget or Yoetz vault. After setup,
+privacy boundary, disconnect, rollback, and optional account switch; then suspends the UI while
+Codex proves the existing sign-in or, when the home is not signed in, runs its browser flow. The
+result says which of the two happened. OAuth credentials never pass through a widget or Yoetz
+vault. After setup,
 disconnect, or rollback, the local service is recomposed so a running daemon cannot keep the old
 cell.
 
