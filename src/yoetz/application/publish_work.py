@@ -9,7 +9,12 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Final, Literal, Protocol, cast
 
-from yoetz.application.unit_of_work import PreparedMutation, run_prepared_append
+from yoetz.application.unit_of_work import (
+    PreparedMutation,
+    PreSubmissionCancelled,
+    abandon_preappend_objects,
+    run_prepared_append,
+)
 from yoetz.domain.events import (
     PAYLOAD_TYPES,
     AcceptedEvent,
@@ -86,7 +91,7 @@ from yoetz.ports.ledger import (
     OperationRecord,
     OperationState,
 )
-from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource
+from yoetz.ports.objects import ObjectKind, ObjectMetadata, ObjectRef, ObjectSource, StagedObject
 from yoetz.ports.runtime import (
     BundleRuntimePort,
     RouteAccess,
@@ -1472,59 +1477,83 @@ async def execute_publish_work(
         commitments, digest = await _commitments_and_digest(runtime, request, prepared)
         refs: list[ObjectRef] = []
         entries: list[AppendEntry] = []
-        for item, commitment in zip(prepared.drafts, commitments, strict=True):
-            metadata = ObjectMetadata(
-                ObjectKind.EVENT_PAYLOAD,
-                media_type_for(item.draft.schema.name),
+        staged_objects: list[StagedObject] = []
+        try:
+            for item, commitment in zip(prepared.drafts, commitments, strict=True):
+                metadata = ObjectMetadata(
+                    ObjectKind.EVENT_PAYLOAD,
+                    media_type_for(item.draft.schema.name),
+                    runtime.task_id,
+                    app.clock.now_utc(),
+                )
+                staged = await runtime.objects.stage(
+                    ObjectSource(data=item.payload_bytes, declared_size=len(item.payload_bytes)),
+                    metadata,
+                )
+                staged_objects.append(staged)
+                if staged.commitment != commitment:
+                    raise _error(
+                        PublicErrorCode.STORAGE_CORRUPT,
+                        "The staged object commitment is inconsistent.",
+                    )
+                ref = await runtime.objects.finalize(staged)
+                refs.append(ref)
+                entries.append(
+                    AppendEntry(
+                        item.draft,
+                        prepared.author,
+                        ref,
+                        commitment,
+                        metadata.media_type,
+                        ref.plaintext_size,
+                        prepared.channel,
+                        prepared.coverage,
+                        item.projection_status,
+                    )
+                )
+            expected_frontier = (
+                None
+                if request.expected_frontier is None
+                else int(request.expected_frontier.sequence)
+            )
+            command = AppendCommand(
                 runtime.task_id,
-                app.clock.now_utc(),
+                runtime.session_id,
+                cast(str, runtime.writer_id),
+                request.request_id,
+                OperationKind.PUBLISH_WORK,
+                digest,
+                expected_frontier,
+                tuple(entries),
             )
-            staged = await runtime.objects.stage(
-                ObjectSource(data=item.payload_bytes, declared_size=len(item.payload_bytes)),
-                metadata,
+            mutation = PreparedMutation(
+                command.writer_id,
+                command.operation_id,
+                command.request_digest,
+                command.expected_frontier,
+                tuple(refs),
+                command,
             )
-            if staged.commitment != commitment:
-                raise _error(
-                    PublicErrorCode.STORAGE_CORRUPT,
-                    "The staged object commitment is inconsistent.",
-                )
-            ref = await runtime.objects.finalize(staged)
-            refs.append(ref)
-            entries.append(
-                AppendEntry(
-                    item.draft,
-                    prepared.author,
-                    ref,
-                    commitment,
-                    metadata.media_type,
-                    ref.plaintext_size,
-                    prepared.channel,
-                    prepared.coverage,
-                    item.projection_status,
-                )
+        except BaseException:
+            await abandon_preappend_objects(
+                runtime.objects,
+                tuple(staged_objects),
+                component="application.publish_work",
+                operation="publish_work_object_abandon_failed",
+                request_id=request.request_id,
             )
-        expected_frontier = (
-            None if request.expected_frontier is None else int(request.expected_frontier.sequence)
-        )
-        command = AppendCommand(
-            runtime.task_id,
-            runtime.session_id,
-            cast(str, runtime.writer_id),
-            request.request_id,
-            OperationKind.PUBLISH_WORK,
-            digest,
-            expected_frontier,
-            tuple(entries),
-        )
-        mutation = PreparedMutation(
-            command.writer_id,
-            command.operation_id,
-            command.request_digest,
-            command.expected_frontier,
-            tuple(refs),
-            command,
-        )
-        append_result = await run_prepared_append(runtime.ledger, mutation)
+            raise
+        try:
+            append_result = await run_prepared_append(runtime.ledger, mutation)
+        except PreSubmissionCancelled:
+            await abandon_preappend_objects(
+                runtime.objects,
+                tuple(staged_objects),
+                component="application.publish_work",
+                operation="publish_work_object_abandon_failed",
+                request_id=request.request_id,
+            )
+            raise
         # The batch is durable from here on. Bounded PublicOperationError values (STORAGE_CORRUPT
         # and friends) stay exactly as raised because they already describe the stored state
         # truthfully. Only an unexpected failure falls back to the reduced total-acceptance
