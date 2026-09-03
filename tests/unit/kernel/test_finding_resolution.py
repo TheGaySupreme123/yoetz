@@ -320,6 +320,22 @@ def test_each_host_observation_gap_preserves_clean_deterministic_proof(
     assert _resolves(_finding(), _check(coverage=coverage)) is True
 
 
+@pytest.mark.parametrize(
+    "freshness",
+    (LedgerFreshness.STALE_AFTER_MATERIAL_CHANGE, LedgerFreshness.UNKNOWN),
+)
+def test_host_observation_gaps_do_not_admit_stale_or_unknown_freshness(
+    freshness: LedgerFreshness,
+) -> None:
+    """Only ``redacted_gap`` is admitted; the other unproven freshnesses stay fail-closed (#538)."""
+
+    coverage = _coverage(
+        gaps=("captured_object_unavailable", "unpaired_event"),
+        freshness=freshness,
+    )
+    assert _resolves(_finding(), _check(coverage=coverage)) is False
+
+
 def test_host_observation_gaps_do_not_veto_clean_deterministic_proof() -> None:
     """Combined host limits remain on the check without making repair unprovable (#538)."""
 

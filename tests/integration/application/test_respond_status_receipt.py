@@ -3042,6 +3042,35 @@ async def test_host_observation_gaps_do_not_keep_repaired_action_finding_current
         for section in cast(list[JsonValue], document["sections"])
     }
     assert action_finding.finding_id in cast(list[str], sections["summary"]["items"])
+    projected_frontier = receipt.result_frontier
+    for index, projected in enumerate(("markdown", "text")):
+        rendered = await app.receipt(
+            ReceiptRequest.model_validate(
+                {
+                    **_request_base(protocol_id("req_", 5021 + index)),
+                    "task_id": started.task_id,
+                    "session_id": started.session_id,
+                    "writer_id": started.writer_id,
+                    "expected_frontier": _frontier(projected_frontier),
+                    "format": projected,
+                    "include": "standard",
+                    "redaction_profile": "full_local",
+                }
+            )
+        )
+        projected_frontier = rendered.result_frontier
+        assert rendered.document is None
+        human_text = rendered.human_text
+        assert human_text is not None
+        # The admitted host gaps stay visible as receipt limitations in every rendering (#538).
+        for gap in (
+            "captured_object_unavailable",
+            "content_unselected",
+            "host_outcome_unavailable",
+            "unpaired_event",
+        ):
+            assert gap in human_text
+        assert rendered.conclusion == receipt.conclusion
 
 
 @pytest.mark.parametrize("ledger_backend", ("memory", "sqlite"))
