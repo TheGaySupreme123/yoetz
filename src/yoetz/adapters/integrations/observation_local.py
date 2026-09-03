@@ -119,6 +119,7 @@ _MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 # as belonging to a different boot epoch (and therefore fenced off).
 _EPOCH_TOLERANCE_SECONDS: Final = 2.0
 _OUTBOX_REASON_RE: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$", re.ASCII)
+_OBSERVATION_GAP_CODES: Final = frozenset(item.value for item in ObservationGapCode)
 _RUNTIME_GATE_SCHEMA: Final = "yoetz.observation-runtime-gate/1"
 _RUNTIME_GATE_NAME: Final = "runtime-gate.json"
 _MAX_RUNTIME_GATE_BYTES: Final = 256
@@ -441,6 +442,7 @@ class ObservationOutboxRow:
     attempts: int = 0
     last_reason: str | None = None
     last_attempt_at: Timestamp | None = None
+    consecutive_reason_attempts: int = 0
 
     @property
     def row_identity(self) -> str:
@@ -471,6 +473,12 @@ class ObservationOutboxRow:
             raise ProtocolValueError("invalid_event_value_type")
         if self.last_attempt_at is not None and type(self.last_attempt_at) is not Timestamp:
             raise ProtocolValueError("invalid_timestamp")
+        if (
+            type(self.consecutive_reason_attempts) is not int
+            or isinstance(self.consecutive_reason_attempts, bool)
+            or not 0 <= self.consecutive_reason_attempts <= self.attempts
+        ):
+            raise ProtocolValueError("invalid_event_value_type")
 
 
 @dataclass
@@ -2035,6 +2043,11 @@ class LocalObservationStore:
                         attempts=min(row.attempts + 1, _MAX_SAFE_INTEGER),
                         last_reason=reason,
                         last_attempt_at=stamp,
+                        consecutive_reason_attempts=(
+                            min(row.consecutive_reason_attempts + 1, _MAX_SAFE_INTEGER)
+                            if reason is not None and reason == row.last_reason
+                            else (1 if reason is not None else 0)
+                        ),
                     )
                     state.pending_outbox[index] = updated
                     self._save(workspace, state)
@@ -2228,6 +2241,8 @@ class LocalObservationStore:
                 while len(state.quarantine) > _MAX_QUARANTINE:
                     evicted = state.quarantine.pop(0)
                     self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
+            if reason in _OBSERVATION_GAP_CODES:
+                self._note_gap_state(state, reason)
             self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
             self._save(workspace, state)
             return True
@@ -2263,6 +2278,8 @@ class LocalObservationStore:
                 while len(state.quarantine) > _MAX_QUARANTINE:
                     evicted = state.quarantine.pop(0)
                     self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
+            if reason in _OBSERVATION_GAP_CODES:
+                self._note_gap_state(state, reason)
             self._note_gap_state(state, ObservationGapCode.OUTBOX_QUARANTINED.value)
             self._save(workspace, state)
             return True
@@ -2309,7 +2326,7 @@ class LocalObservationStore:
             while len(state.quarantine) > _MAX_QUARANTINE:
                 evicted = state.quarantine.pop(0)
                 self._record_quarantine_eviction(state, evicted[0], evicted[1], evicted[2])
-            if reason in {gap.value for gap in ObservationGapCode}:
+            if reason in _OBSERVATION_GAP_CODES:
                 self._note_gap_state(state, reason)
             if reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value:
                 state.storage_corrupt_sessions.add(codex_session_id)
@@ -3139,6 +3156,16 @@ class LocalObservationStore:
             current.add(ObservationGapCode.SOURCE_LAG.value)
         if state.quarantine:
             current.add(ObservationGapCode.OUTBOX_QUARANTINED.value)
+            assert state.storage_corrupt_sessions is not None
+            current.update(
+                reason
+                for _session_id, _envelope, reason, _quarantined_at in state.quarantine
+                if reason in _OBSERVATION_GAP_CODES
+                and not (
+                    reason == ObservationGapCode.OBSERVATION_STORAGE_CORRUPT.value
+                    and not state.storage_corrupt_sessions
+                )
+            )
         overflow_gap = state.gaps.get(_LOCAL_OUTBOX_OVERFLOW_GAP)
         if len(state.pending_outbox) >= _MAX_OUTBOX or (
             overflow_gap is not None and overflow_gap.active
@@ -3315,6 +3342,7 @@ class LocalObservationStore:
                         "last_attempt_at": (
                             None if row.last_attempt_at is None else row.last_attempt_at.wire
                         ),
+                        "consecutive_reason_attempts": row.consecutive_reason_attempts,
                     }
                 )
                 for row in (state.pending_outbox or ())
@@ -3670,6 +3698,19 @@ class LocalObservationStore:
                 )
             except ProtocolValueError, TypeError, ValueError:
                 last_attempt_at = None
+            consecutive_raw = row.get("consecutive_reason_attempts")
+            if (
+                type(consecutive_raw) is int
+                and not isinstance(consecutive_raw, bool)
+                and 0 <= consecutive_raw <= attempts
+            ):
+                consecutive_reason_attempts = consecutive_raw
+            else:
+                # A legacy omission or malformed counter cannot prove that all
+                # historical attempts used last_reason. Start the reason-local
+                # streak at zero; the next attempt persists the bounded counter,
+                # so compatibility grants at most one fresh retry budget.
+                consecutive_reason_attempts = 0
             try:
                 pending_outbox.append(
                     ObservationOutboxRow(
@@ -3680,6 +3721,7 @@ class LocalObservationStore:
                         attempts=attempts,
                         last_reason=last_reason,
                         last_attempt_at=last_attempt_at,
+                        consecutive_reason_attempts=consecutive_reason_attempts,
                     )
                 )
             except ProtocolValueError, TypeError, ValueError:

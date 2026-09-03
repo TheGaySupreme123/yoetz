@@ -22,6 +22,7 @@ from yoetz.application.observation_drain import (
     route_observation_ingest,
 )
 from yoetz.domain.observation import (
+    OBSERVATION_BACKPRESSURE_REASON,
     ObservationCursor,
     ObservationEnvelope,
     ObservationGapCode,
@@ -124,6 +125,55 @@ def test_route_unknown_rejection_reason_to_safe_retry_fallback() -> None:
 
     assert decision.action is ObservationDrainAction.RETRY
     assert decision.reason == ObservationGapCode.SERVICE_UNAVAILABLE.value
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        OBSERVATION_BACKPRESSURE_REASON,
+        ObservationGapCode.VAULT_LOCKED.value,
+        "paused",
+        "observation_disabled",
+    ],
+)
+def test_retry_ceiling_does_not_terminalize_designed_or_global_gates(reason: str) -> None:
+    envelope = _envelope(f"hmac-sha256:{'cd' * 32}", "hook:barrier", 1)
+    row = ObservationOutboxRow(
+        "barrier",
+        envelope,
+        attempts=127,
+        last_reason=reason,
+        consecutive_reason_attempts=127,
+    )
+
+    decision = route_observation_ingest(
+        ObservationIngestResult(
+            ObservationIngestDisposition.REJECTED,
+            reason,
+            None,
+        ),
+        row=row,
+    )
+
+    assert decision.action is ObservationDrainAction.RETRY
+
+
+def test_retry_ceiling_terminalizes_repeated_session_scoped_reason() -> None:
+    reason = ObservationGapCode.MAPPING_MISSING.value
+    row = ObservationOutboxRow(
+        "mapping",
+        _envelope(f"hmac-sha256:{'ce' * 32}", "hook:mapping", 1),
+        attempts=127,
+        last_reason=reason,
+        consecutive_reason_attempts=127,
+    )
+
+    decision = route_observation_ingest(
+        ObservationIngestResult(ObservationIngestDisposition.REJECTED, reason, None),
+        row=row,
+    )
+
+    assert decision.action is ObservationDrainAction.QUARANTINE
 
 
 @pytest.mark.anyio
@@ -875,3 +925,57 @@ async def test_sweep_quarantines_single_row_on_dedup_conflict_and_lane_continues
     assert summary.acknowledged == 1
     assert store.quarantined_count(workspace) == 1
     assert store.list_pending_outbox_rows(workspace) == ()
+
+
+@pytest.mark.anyio
+async def test_sweep_quarantines_repeated_retry_reason_and_unblocks_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#540: a future retry misclassification cannot make a FIFO head immortal."""
+
+    import yoetz.application.observation_drain as drain_module
+
+    monkeypatch.setattr(drain_module, "MAX_CONSECUTIVE_OBSERVATION_REJECTIONS", 2)
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session_id = "bounded-retry"
+    session = store.bind_codex_session(workspace, session_id)
+    poisoned = _envelope(session, "hook:poisoned", 1)
+    healthy = _envelope(session, "hook:healthy", 2)
+    store.enqueue_outbox(workspace, session_id, poisoned)
+    store.enqueue_outbox(workspace, session_id, healthy)
+    first = store.list_pending_outbox_rows(workspace)[0]
+    assert (
+        store.bump_outbox_row_attempt(
+            workspace,
+            first,
+            reason=ObservationGapCode.SERVICE_UNAVAILABLE.value,
+        )
+        is not None
+    )
+
+    coordinator = _Coordinator(
+        {
+            poisoned.source_identity: ObservationIngestResult(
+                ObservationIngestDisposition.REJECTED,
+                ObservationGapCode.SERVICE_UNAVAILABLE.value,
+                None,
+            ),
+            healthy.source_identity: ObservationIngestResult(
+                ObservationIngestDisposition.ACCEPTED,
+                None,
+                healthy.cursor,
+            ),
+        }
+    )
+    summary = await ObservationOutboxSweeper(store, coordinator).sweep()
+
+    assert summary.attempted == 2
+    assert summary.quarantined == 1
+    assert summary.acknowledged == 1
+    assert summary.retry_pending == 0
+    assert store.list_pending_outbox_rows(workspace) == ()
+    quarantined = store.list_quarantine(workspace)
+    assert quarantined[0][1].source_identity == poisoned.source_identity
+    assert quarantined[0][2] == ObservationGapCode.SERVICE_UNAVAILABLE.value

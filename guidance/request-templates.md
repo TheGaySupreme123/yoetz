@@ -505,8 +505,13 @@ Read `status.closure_readiness` before requesting a receipt. Respond while
 `findings_unanswered` is present. A remaining `receipt_findings_unresolved` condition means an
 actionable finding is still current: repair the record and recheck if you can, because only a later
 qualifying check resolves it, never another response. If the repaired record was rechecked and the
-issue still fires, request the receipt and keep the final claim no stronger than its conclusion,
-coverage, freshness, receipt-blocking findings, and limitations.
+issue still fires, or it did not re-fire but `status view=findings` still reports `resolved=false`,
+do not recheck unchanged state again. Request the receipt and keep the final claim no stronger than
+its conclusion, coverage, freshness, receipt-blocking findings, and limitations. A deterministic
+recheck can still qualify when only `captured_object_unavailable`, `content_unselected`,
+`host_outcome_unavailable`, or `unpaired_event` limits its case-wide host-observation coverage and
+the original finding coverage was readable; those gaps remain receipt limitations and the exception
+never applies to semantic findings.
 
 ```json
 {

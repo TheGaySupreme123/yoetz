@@ -2723,7 +2723,11 @@ def provider_codex_subscription_setup(
         bool, typer.Option("--open-browser/--no-open-browser", help="Open Codex's returned URL.")
     ] = True,
     switch_account: Annotated[
-        bool, typer.Option("--switch-account", help="Log out the dedicated home before login.")
+        bool,
+        typer.Option(
+            "--switch-account",
+            help="Log out the dedicated home and sign in again, even if it is already signed in.",
+        ),
     ] = False,
     accept: Annotated[
         bool,
@@ -2731,7 +2735,7 @@ def provider_codex_subscription_setup(
     ] = False,
     json_output: _JSON = False,
 ) -> None:
-    """Login via Codex app-server and bind the exact subscription runtime after readiness."""
+    """Prove an existing Codex login (or obtain one) via app-server, then bind the exact runtime."""
 
     from yoetz.cli.codex_subscription import (
         CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,
@@ -2757,6 +2761,13 @@ def provider_codex_subscription_setup(
         typer.echo("  Yoetz sends only a privacy-approved case; Codex owns the upstream body.")
         typer.echo("  disconnect: yoetz provider codex-subscription disconnect")
         typer.echo("  rollback only: yoetz provider codex-subscription rollback")
+        if switch_account:
+            typer.echo("  existing sign-in: logged out first, then a new Codex sign-in")
+        else:
+            typer.echo(
+                "  existing sign-in: reused when Codex reports the home already signed in;"
+                " pass --switch-account to sign in again"
+            )
         if not accept:
             if not (sys.stdin.isatty() and sys.stdout.isatty()) or not typer.confirm(
                 "Continue to Codex sign-in?", default=False
