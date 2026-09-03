@@ -137,8 +137,9 @@ finding's subject — with the owning policy pack run to completion, nothing sup
 proof inputs readable. Case-wide host-observation limitations (`captured_object_unavailable`,
 `content_unselected`, `host_outcome_unavailable`, and `unpaired_event`) do not veto a deterministic
 finding's otherwise clean structured-ledger proof; they remain receipt coverage limitations. This
-exception requires the finding's own recorded coverage to have been readable and never applies to
-a semantic finding. Redacted or unavailable event payloads, redacted objects, missing references,
+exception requires the finding's own recorded coverage to have been readable; host-observation
+gaps on a hook-derived finding remain tolerated, and the exception never applies to a semantic
+finding. Redacted or unavailable event payloads, redacted objects, missing references,
 unknown events, weak original finding coverage, suppression, stale state, scoped-away work, or a
 failed pack still change nothing, and a check that reports the same issue again keeps it current.
 
