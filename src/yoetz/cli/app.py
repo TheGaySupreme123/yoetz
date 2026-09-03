@@ -2735,7 +2735,7 @@ def provider_codex_subscription_setup(
     ] = False,
     json_output: _JSON = False,
 ) -> None:
-    """Login via Codex app-server and bind the exact subscription runtime after readiness."""
+    """Prove an existing Codex login (or obtain one) via app-server, then bind the exact runtime."""
 
     from yoetz.cli.codex_subscription import (
         CODEX_EVALUATOR_CAPABILITY_CELL_SHA256,

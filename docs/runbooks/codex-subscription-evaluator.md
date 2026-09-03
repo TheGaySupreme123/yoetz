@@ -51,8 +51,8 @@ ChatGPT account with the exact model/reasoning cell available, writes the bindin
 `login_reused: true` without issuing `account/login/start`. A logged-out home, a missing model, or
 an unproven cleanup still takes the ordinary login path or fails with its existing token; a
 dedicated home whose `config.toml` differs still fails `codex_runtime_config_conflict` before any
-process starts. `--switch-account` (the prompt-loop and `/provider` "switch account" choice) is
-the explicit override: it logs the home out through Codex and signs in again. Yoetz never reads,
+process starts. `--switch-account` (the prompt-loop "switch ChatGPT account" confirmation and the
+`/provider` "Switch Codex ChatGPT account" choice) is the explicit override: it logs the home out through Codex and signs in again. Yoetz never reads,
 copies, or moves `auth.json`; readiness is only what Codex answers.
 
 The dedicated evaluator home may be reused across runs, including isolated dogfood runs, by

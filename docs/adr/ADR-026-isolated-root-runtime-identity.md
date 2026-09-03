@@ -79,7 +79,7 @@ cannot touch unrelated user state. One explicit exemption (issue #534): a dedica
 evaluator home that the operator passes by path to `yoetz provider codex-subscription setup
 --codex-home` may live outside the root and be reused across runs. It holds Codex-owned OAuth
 state and no Yoetz identity, state, endpoint, or storage, so deleting the root still removes every
-Yoetz artifact; that home is reverse-stated by `yoetz provider codex-subscription disconnect`, and
+Yoetz artifact; that home's reverse state is `yoetz provider codex-subscription disconnect`, and
 the parity gate still fails on any shared Yoetz identity. The default evaluator home (no explicit
 path) stays beneath the root. The packaged regression
 (`tests/packaging/test_isolated_root_boundary.py`) locks this: an isolated service run leaves the
