@@ -8,6 +8,21 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- A Codex MCP route that reverts to `strict` between install and session start no longer reports a
+  bare `route_semantic_ceiling`. `yoetz integrate codex mcp install` now records the applied route
+  in an owner-only state-directory record (no repository or prompt content); `mcp status`, provider
+  status, and the terminal surface report `applied_profile` and `drift_since_install`, and the MCP
+  bridge emits a structural `registration_drift` diagnostic at startup. A strict check served while
+  that record says `policy` keeps the same `blocked_by_policy` / `route_semantic_ceiling` status,
+  reason, and null provenance, and carries an additional
+  `optional_semantic_review_registration_drift` coverage gap whose receipt names the recovery
+  (`mcp preview`, `mcp install --route-profile policy`, a fresh Codex process) as a conditional,
+  because a strict route reached outside the install ceremony is a legitimate owner action. A
+  ceiling with no applied-policy record keeps its previous terminal wording byte-identical.
+  `mcp remove` clears the record and every later accepted install overwrites it, so no stale drift
+  claim survives. The host's own registration read stays the authority: an unread or unsafe record
+  reports no drift. Claude Code and Cursor record this as not supported (issue #537).
+
 - `yoetz provider codex-subscription setup` no longer forces a fresh Codex sign-in on a dedicated
   evaluator home that Codex already reports signed in with the exact model available. Unless
   `--switch-account` is passed, setup first runs the same structural app-server probe as `status`

@@ -444,6 +444,15 @@ async def _read_status(
                 pass
 
 
+# Issue #537: the SessionStart hook deliberately runs no applied-vs-serving drift probe.
+# A hook process has no serving route of its own, so the only comparison available here is a
+# `codex mcp get` subprocess (plus PATH version probes to find the binary), which costs a
+# large fraction of the 2.2s end-to-end hook budget in `observe_hooks` and reintroduces the
+# #209-#213 hook-latency loop. The MCP bridge (`yoetz mcp serve`) starts for the same Codex
+# session, knows its own serving route from its argv, and emits the `registration_drift`
+# diagnostic for free; that is the single emitter. See docs/runbooks/codex-integration.md.
+
+
 def handle_session_start(
     *,
     stdin_bytes: bytes | None = None,

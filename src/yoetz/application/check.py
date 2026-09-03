@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
 from yoetz.domain.findings import (
@@ -22,6 +23,7 @@ from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+    OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
@@ -413,6 +415,10 @@ class FinalSemanticEvaluation:
 # Gaps that record a semantic review the task actually attempted and did not get. They are the
 # environment's account of the missing review, never the caller's; `semantic_review_not_requested`
 # is deliberately absent because it is the one this set exists to disambiguate.
+# `optional_semantic_review_registration_drift` is deliberately absent too: it is re-added
+# fresh on the strict-ceiling path only after reading the live applied-route record, so
+# carrying it would let a stale drift claim survive a `mcp remove` (which clears the
+# record) or a strict reinstall on a later deterministic-only successor (issue #537).
 _SEMANTIC_ATTEMPT_GAPS: Final = frozenset(
     {
         OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
@@ -420,6 +426,25 @@ _SEMANTIC_ATTEMPT_GAPS: Final = frozenset(
         SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     }
 )
+
+
+def _strict_ceiling_route_drift(*, _state: Path | None) -> bool:
+    """Fail-soft applied-policy probe for the strict route ceiling (issue #537).
+
+    True only when the durable applied-route record says the last install applied the
+    policy route while this check serves the strict ceiling: the serving process is
+    stale, not the privacy posture. Any missing, corrupt, unsafe, or non-policy record
+    reads as no drift. Never raises, never logs content, never changes the terminal
+    status/reason/provenance — the caller only adds a structural coverage gap.
+    """
+
+    try:
+        from yoetz.application.applied_mcp_route import read_applied_route
+
+        record = read_applied_route(_state=_state)
+    except Exception:
+        return False
+    return isinstance(record, dict) and record.get("applied_profile") == "policy"
 
 
 def carried_semantic_attempt_gaps(case: DeterministicCase, status: SemanticStatus) -> set[str]:
@@ -1298,11 +1323,16 @@ async def execute_check_commit(
     request: CheckRequest,
     *,
     route_profile: Literal["policy", "strict"] = "policy",
+    _state: Path | None = None,
 ) -> CheckCommitResult | CheckAwaitingHuman:
     """Freeze, evaluate, rank, and atomically commit one check operation.
 
     Returns ``CheckAwaitingHuman`` instead when the semantic phase is suspended on a local
     disclosure decision: nothing is committed and the operation stays resumable.
+
+    ``_state`` isolates the applied-route drift probe (issue #537 slice C): production
+    callers leave it unset so the probe reads the live state directory, while tests pass
+    an isolated root.
     """
 
     if route_profile not in {"policy", "strict"}:
@@ -1497,6 +1527,17 @@ async def execute_check_commit(
         }
         semantic_gap = semantic_coverage_gap_code(semantic_result.status, semantic_result.reason)
         declared_gaps: set[str] = set() if semantic_gap is None else {semantic_gap}
+        if (
+            route_profile == "strict"
+            and semantic_result.status is SemanticStatus.BLOCKED_BY_POLICY
+            and semantic_result.reason is SemanticReason.ROUTE_SEMANTIC_CEILING
+            and _strict_ceiling_route_drift(_state=_state)
+        ):
+            # The ceiling still blocks this process with the same status, reason, and null
+            # provenance. The extra gap is the structural route_drift detail — applied policy
+            # serving strict — and the receipt names the recovery; a genuinely applied
+            # strict route keeps today's terminal wording exactly.
+            declared_gaps.add(OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP)
         declared_gaps |= carried_semantic_attempt_gaps(frozen.case, semantic_result.status)
         # A review that ran without material its own profile selected is not full coverage, even
         # though it reports succeeded. Saying so here is what stops a hollow review from reading
@@ -1623,10 +1664,11 @@ async def execute_check(
     request: CheckRequest,
     *,
     route_profile: Literal["policy", "strict"] = "policy",
+    _state: Path | None = None,
 ) -> CheckCommitResult | CheckAwaitingHuman:
     """Return the closed sink-independent result for the facade's sole projection step."""
 
     # Omitted mode resolves via policy so recorded check events always carry a concrete mode.
     if request.mode is None:
         request = request.model_copy(update={"mode": app.verification_policy.default_check_mode})
-    return await execute_check_commit(app, request, route_profile=route_profile)
+    return await execute_check_commit(app, request, route_profile=route_profile, _state=_state)

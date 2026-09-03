@@ -43,6 +43,7 @@ from yoetz.domain.receipts import (
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+    OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
@@ -472,6 +473,30 @@ def test_a_prior_check_that_also_did_not_request_review_carries_nothing() -> Non
         )
         == set()
     )
+
+
+def test_registration_drift_never_carries_forward() -> None:
+    """Issue #537: drift is re-read live on the strict-ceiling path, never inherited.
+
+    After a ``mcp remove`` clears the applied-route record (or a strict reinstall
+    overwrites it), a later deterministic-only successor must not inherit the stale
+    drift claim — while the ceiling gap beside it still carries.
+    """
+
+    assert (
+        carried_semantic_attempt_gaps(
+            _case_after_check(OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP),
+            SemanticStatus.NOT_REQUESTED,
+        )
+        == set()
+    )
+    assert carried_semantic_attempt_gaps(
+        _case_after_check(
+            OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+            OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
+        ),
+        SemanticStatus.NOT_REQUESTED,
+    ) == {OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP}
 
 
 @pytest.mark.parametrize(

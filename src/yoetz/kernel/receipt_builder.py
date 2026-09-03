@@ -27,6 +27,7 @@ from yoetz.domain.receipts import (
     CHECK_CURRENT_AS_OF_EARLIER_FRONTIER_GAP,
     COMPLETION_SCOPE_DECLARED_NONE_GAP,
     COMPLETION_SCOPE_UNDECLARED_GAP,
+    OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
@@ -941,6 +942,21 @@ def _sections(
         elif not_run:
             gap_body = (
                 "Semantic relevance review was not run. "
+                f"Coverage is limited by: {', '.join(gap_codes)}."
+            )
+        elif OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP in gap_codes:
+            # The strict ceiling blocked this process while the last install applied the
+            # policy route (issue #537). The disagreement is what is proven: whether this
+            # strict route was intended is the owner's to say, and a route reached outside
+            # the install ceremony is a legitimate owner action, so the recovery is offered
+            # conditionally rather than asserted as a stale process. A ceiling with no
+            # applied-policy record keeps the generic wording below.
+            gap_body = (
+                "Semantic review was blocked by the strict route ceiling, but the last "
+                "install applied the policy route. If this strict route was not intended, "
+                "re-run `yoetz integrate codex mcp preview` and "
+                "`yoetz integrate codex mcp install --route-profile policy`, then start a "
+                "fresh Codex process. "
                 f"Coverage is limited by: {', '.join(gap_codes)}."
             )
         else:

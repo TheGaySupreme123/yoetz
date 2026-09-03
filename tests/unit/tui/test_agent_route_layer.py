@@ -108,3 +108,27 @@ def test_host_admission_is_its_own_layer_and_names_each_host() -> None:
     state, detail = _admission_layer(drifted)
     assert state is LayerState.NOT_CONFIGURED
     assert "revoke" in detail
+
+
+def test_applied_policy_drift_names_reregistration_on_strict_route() -> None:
+    """Issue #537 slice C: a stale strict process names re-registration, not just the route."""
+
+    provider = _provider(
+        agent_route_semantic_ready=False,
+        registered_route_profile="strict",
+        route_drift_since_install=True,
+    )
+    assert _layer(provider) is LayerState.NOT_CONFIGURED
+    detail = _detail(provider)
+    assert "registered on the strict route" in detail
+    assert "applied route differs since install" in detail
+    assert "fresh Codex process" in detail
+
+
+def test_genuine_strict_route_keeps_terminal_detail() -> None:
+    """Without drift the strict detail keeps today's terminal wording exactly."""
+
+    provider = _provider(agent_route_semantic_ready=False, registered_route_profile="strict")
+    assert _detail(provider) == (
+        "registered on the strict route; 'yoetz integrate codex mcp preview' to change it"
+    )

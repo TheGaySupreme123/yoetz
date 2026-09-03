@@ -287,9 +287,16 @@ def wizard_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, obj
         "connect_service_on_demand",
         unreachable_on_demand,
     )
+    # The applied-route record lives under the ambient state directory by default; keep
+    # CLI-invoked flows (``setup run``, ``integrate mcp``) inside the test tree.
+    import yoetz.application.applied_mcp_route as applied_route_module
+
+    isolated_state = tmp_path / "isolated-state"
+    monkeypatch.setattr(applied_route_module, "state_dir", lambda: isolated_state)
     state["marker"] = marker
     state["codex_home"] = codex_home
     state["activation_digest"] = activation_digest
+    state["isolated_state"] = isolated_state
     return state
 
 
@@ -634,6 +641,7 @@ async def test_tui_apply_refuses_a_skill_preview_digest_not_shown_to_the_user(
         approved_skill_preview_digest="sha256:" + "0" * 64,
         approved_activation_digest=cast(str, wizard_env["activation_digest"]),
         codex_home=cast(Path, wizard_env["codex_home"]),
+        _state=cast(Path, wizard_env["isolated_state"]),
     )
 
     assert report["outcome"] == "failed"
@@ -676,6 +684,7 @@ async def test_a_preview_and_apply_that_disagree_on_the_route_refuse_as_stale(
         approved_skill_preview_digest=skill_preview.preview_digest,
         approved_activation_digest=cast(str, wizard_env["activation_digest"]),
         codex_home=cast(Path, wizard_env["codex_home"]),
+        _state=cast(Path, wizard_env["isolated_state"]),
     )
 
     assert report["outcome"] == "failed"
@@ -709,6 +718,7 @@ async def test_a_preview_and_apply_on_the_same_route_register(
         *_absent_mcp(),  # adapter install re-preview: confirmed absent
         CommandOutput(0, b""),  # add
         _yoetz_entry("strict"),  # verify get
+        _yoetz_entry("strict"),  # applied-route record observation
     ]
     report = await setup_module.apply_codex_integration(
         _binary(),
@@ -717,10 +727,25 @@ async def test_a_preview_and_apply_on_the_same_route_register(
         approved_skill_preview_digest=skill_preview.preview_digest,
         approved_activation_digest=cast(str, wizard_env["activation_digest"]),
         codex_home=cast(Path, wizard_env["codex_home"]),
+        _state=cast(Path, wizard_env["isolated_state"]),
     )
 
     assert report["reason"] is None
     assert report["outcome"] == "registered"
+    # The successful apply durably records the strict route it verified post-write.
+    from yoetz.application.applied_mcp_route import read_applied_route
+
+    record = read_applied_route(_state=cast(Path, wizard_env["isolated_state"]))
+    assert record is not None
+    assert record["applied_profile"] == "strict"
+    assert record["applied_serve_command"] == ["yoetz", "mcp", "serve", "--semantic", "off"]
+    assert record["observed_serve_command_post_write"] == [
+        "yoetz",
+        "mcp",
+        "serve",
+        "--semantic",
+        "off",
+    ]
 
 
 def test_multiple_candidates_fail_closed_non_interactively(

@@ -580,13 +580,16 @@ async def test_semantic_required_unavailable_preserves_deterministic_truth() -> 
 
 
 @pytest.mark.anyio
-async def test_strict_route_ceiling_never_requests_or_dispatches_semantic_capability() -> None:
+async def test_strict_route_ceiling_never_requests_or_dispatches_semantic_capability(
+    tmp_path: Path,
+) -> None:
     app = _App(semantic=True)
 
     result = await execute_check_commit(
         app,
         _request("semantic_required"),
         route_profile="strict",
+        _state=tmp_path,
     )
 
     assert result.verdict.value == "incomplete_check"
@@ -597,6 +600,165 @@ async def test_strict_route_ceiling_never_requests_or_dispatches_semantic_capabi
     runtime = cast(_Runtime, app.runtime)
     assert runtime.last_command is not None
     assert RuntimeCapability.SEMANTIC not in runtime.last_command.required_capabilities
+
+
+@pytest.mark.anyio
+async def test_strict_ceiling_with_applied_policy_carries_drift_gap(tmp_path: Path) -> None:
+    """Issue #537 slice C: strict serving + applied policy names the drift structurally."""
+
+    from yoetz.application.applied_mcp_route import record_applied_route
+    from yoetz.domain.receipts import (
+        OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+        OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
+    )
+    from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND
+
+    record_applied_route(
+        "policy",
+        list(MCP_SERVE_COMMAND),
+        None,
+        "sha256:" + "a" * 64,
+        _state=tmp_path,
+    )
+    app = _App(semantic=True)
+
+    result = await execute_check_commit(
+        app,
+        _request("semantic_required"),
+        route_profile="strict",
+        _state=tmp_path,
+    )
+
+    # The terminal outcome is unchanged: same status, reason, and null provenance.
+    assert result.verdict.value == "incomplete_check"
+    assert result.semantic_status is SemanticStatus.BLOCKED_BY_POLICY
+    assert result.semantic_reason is SemanticReason.ROUTE_SEMANTIC_CEILING
+    assert result.semantic_provenance is None
+    assert app.semantic_calls == 0
+    # The drift is a structural coverage detail alongside the ceiling gap, never instead.
+    assert OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP in result.coverage.known_gaps
+    assert OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP in result.coverage.known_gaps
+
+
+@pytest.mark.anyio
+async def test_strict_ceiling_with_applied_strict_keeps_terminal_wording(
+    tmp_path: Path,
+) -> None:
+    """A genuinely applied strict route carries no drift gap and today's wording exactly."""
+
+    from yoetz.application.applied_mcp_route import record_applied_route
+    from yoetz.ports.harness_mcp import MCP_STRICT_SERVE_COMMAND
+
+    record_applied_route(
+        "strict",
+        list(MCP_STRICT_SERVE_COMMAND),
+        None,
+        "sha256:" + "b" * 64,
+        _state=tmp_path,
+    )
+    app = _App(semantic=True)
+
+    result = await execute_check_commit(
+        app,
+        _request("semantic_required"),
+        route_profile="strict",
+        _state=tmp_path,
+    )
+
+    assert result.semantic_status is SemanticStatus.BLOCKED_BY_POLICY
+    assert result.semantic_reason is SemanticReason.ROUTE_SEMANTIC_CEILING
+    assert result.semantic_provenance is None
+    assert result.coverage.known_gaps == ("optional_semantic_review_blocked_by_policy",)
+
+
+@pytest.mark.anyio
+async def test_strict_ceiling_without_applied_record_keeps_terminal_wording(
+    tmp_path: Path,
+) -> None:
+    """No applied record reads as no drift: fail-soft, terminal wording unchanged."""
+
+    app = _App(semantic=True)
+
+    result = await execute_check_commit(
+        app,
+        _request("semantic_required"),
+        route_profile="strict",
+        _state=tmp_path,
+    )
+
+    assert result.semantic_status is SemanticStatus.BLOCKED_BY_POLICY
+    assert result.semantic_reason is SemanticReason.ROUTE_SEMANTIC_CEILING
+    assert result.semantic_provenance is None
+    assert result.coverage.known_gaps == ("optional_semantic_review_blocked_by_policy",)
+
+
+@pytest.mark.anyio
+async def test_drift_gap_is_reread_live_never_carried_after_remove(tmp_path: Path) -> None:
+    """Issue #537: remove clears the record, so no successor inherits stale drift.
+
+    A strict check with an applied-policy record carries both gaps; after
+    ``clear_applied_route`` (what ``mcp remove`` runs on UNREGISTER→ABSENT) a fresh
+    strict check re-reads live state and carries only the ceiling gap, and a
+    deterministic-only successor of the drift check carries only the ceiling gap.
+    """
+
+    from yoetz.application.applied_mcp_route import clear_applied_route, record_applied_route
+    from yoetz.application.check import carried_semantic_attempt_gaps
+    from yoetz.domain.receipts import (
+        OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+        OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
+    )
+    from yoetz.domain.values import EventId
+    from yoetz.kernel.projections import LatestTestedState
+    from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND
+
+    record_applied_route(
+        "policy",
+        list(MCP_SERVE_COMMAND),
+        None,
+        "sha256:" + "a" * 64,
+        _state=tmp_path,
+    )
+
+    drifted = await execute_check_commit(
+        _App(semantic=True),
+        _request("semantic_required"),
+        route_profile="strict",
+        _state=tmp_path,
+    )
+    assert OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP in drifted.coverage.known_gaps
+    assert OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP in drifted.coverage.known_gaps
+
+    # `mcp remove` clears the record; absence with no record reads as no drift.
+    clear_applied_route(_state=tmp_path)
+
+    reread = await execute_check_commit(
+        _App(semantic=True),
+        _request("semantic_required"),
+        route_profile="strict",
+        _state=tmp_path,
+    )
+    assert reread.coverage.known_gaps == ("optional_semantic_review_blocked_by_policy",)
+
+    # A deterministic-only successor of the drift check carries the ceiling gap only.
+    frozen = _case()
+    successor = replace(
+        frozen.case,
+        projection=replace(
+            frozen.case.projection,
+            latest_tested_state=LatestTestedState(
+                source_check_event_id=EventId("evt_30000000-0000-4000-8000-000000000001"),
+                subject_frontier=frozen.case.frontier,
+                verdict=drifted.verdict,
+                returned_finding_ids=(),
+                suppressed_count=0,
+                coverage=drifted.coverage,
+            ),
+        ),
+    )
+    assert carried_semantic_attempt_gaps(successor, SemanticStatus.NOT_REQUESTED) == {
+        OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP
+    }
 
 
 @pytest.mark.anyio

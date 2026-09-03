@@ -266,6 +266,39 @@ allowed to make, and refuses to score semantic quality when no provider attempt 
 whether feedback **changed the work product** (not merely whether Yoetz was healthy or authorable),
 use the [influence dogfood runbook](influence-dogfood.md).
 
+### Applied-route record and registration drift (issue #537)
+
+Decision for Codex: this host gets the state-root applied-route record. Every accepted
+`mcp install` writes the applied route profile, the exact serve command, the post-write
+observation, and structural digests to the owner-only state-root record
+(`integrations/applied-mcp-routes.json`); later installs overwrite it, and `mcp remove`
+clears it — removal ends the install it recorded, so absence with no record reads as no
+drift and a later install writes a fresh record. `yoetz integrate codex mcp status --json` and `yoetz provider status --json`
+(`mcp_route.applied_profile`, `mcp_route.drift_since_install`) join that record against the
+live host resolution, fail-soft: an unreadable record reads as no applied route and never
+reports drift. `yoetz setup status --json` stays discovery-only by design: it reports
+discovered binaries and live registration state without the applied-route drift join, which
+lives in `mcp status` and `provider status`. An accepted install that had nothing to write
+(`action: noop`) still refreshes the record, so a deliberate re-registration of the route the
+host already serves never leaves an earlier entry behind to report as drift.
+
+The MCP bridge (`yoetz mcp serve`) is the sole emitter of the closed `registration_drift`
+hook diagnostic: at startup it compares its own serving argv against the applied record and
+records the mismatch under the `mcp_serve` event. The hook paths deliberately emit nothing.
+A hook process has no serving route of its own, so the only comparison available there is a
+`codex mcp get` subprocess plus the PATH version probes needed to find the binary, which
+costs a large fraction of the end-to-end hook budget and is bounded only by the adapter's own
+10s command timeout — the failure mode of #209-#213. The bridge starts for the same Codex
+session and answers the same question for free, against stronger evidence (what this process
+actually serves, not what the host would resolve for the next one).
+
+A strict-ceiling check served while the applied record says `policy` carries the
+`optional_semantic_review_registration_drift` coverage gap so its receipt names the recovery
+(re-register the policy route, start a fresh Codex process). A genuinely applied strict route
+keeps the terminal ceiling wording. The drift gap is never carried onto a later
+deterministic-only check: it is re-added fresh on the strict-ceiling path only, after reading
+the live record.
+
 If the host is configured with Yoetz as an optional server and it is unavailable, Codex work
 continues and the skill discloses no live ledger/check/receipt data. If configured as required,
 server failure blocks only the Codex surfaces that the tested capability profile proves are

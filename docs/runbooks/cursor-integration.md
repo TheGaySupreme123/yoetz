@@ -129,6 +129,17 @@ compares live Cursor-helper children with the installed launcher: `executable_mi
 `state: modified` with `mcp_binding: ambient_path`; perform one exact previewed replace, then
 fully quit Cursor.
 
+### Applied-route drift decision (issue #537)
+
+Decision for Cursor: not supported here — no additional state-root applied-route record
+at this time. The plugin-managed `mcp.json` entry already binds the route profile (the exact
+serve arguments, including `--semantic off` for strict) and the `/2` marker records the same
+launcher the native hooks use; the live binding and launcher read-backs above remain the
+authority for which route this host serves. A stale serving process shows as
+`executable_mismatch` / `full_restart_required`, not as applied-vs-serving drift. If a
+ceiling check ever needs that distinction on this host, that is a separate design-gated
+change.
+
 ## Auto-review and host admission
 
 Cursor's Auto-review run mode sends non-allowlisted MCP calls to a classifier that may allow,

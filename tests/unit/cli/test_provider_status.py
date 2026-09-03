@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -139,7 +139,9 @@ def _install(
     # "could not read" answer, which is what a host without Codex actually produces.
     observation = _UNREAD_ROUTE if mcp_route is None else mcp_route
 
-    async def _observe(_workspace_locator: Path | None = None) -> dict[str, object]:
+    async def _observe(
+        _workspace_locator: Path | None = None, *, _state: Path | None = None
+    ) -> dict[str, object]:
         return dict(observation)
 
     monkeypatch.setattr(module, "mcp_route_observation", _observe)
@@ -155,6 +157,9 @@ _UNREAD_ROUTE: dict[str, object] = {
     "ownership_state": "ambiguous",
     "external_registration_state": None,
     "plugin_managed_state": "absent",
+    # Issue #537 slice B: unread observations never report drift.
+    "applied_profile": None,
+    "drift_since_install": False,
 }
 
 
@@ -163,6 +168,8 @@ def _route(
     *,
     configured: str | None = None,
     state: str = "yoetz_owned",
+    applied_profile: str | None = None,
+    drift_since_install: bool = False,
 ) -> dict[str, object]:
     return {
         "registration_state": state,
@@ -173,10 +180,18 @@ def _route(
         "ownership_state": "external",
         "external_registration_state": state,
         "plugin_managed_state": "absent",
+        "applied_profile": applied_profile,
+        "drift_since_install": drift_since_install,
     }
 
 
-def _plugin_route(registered: str, *, ownership_state: str = "plugin") -> dict[str, object]:
+def _plugin_route(
+    registered: str,
+    *,
+    ownership_state: str = "plugin",
+    applied_profile: str | None = None,
+    drift_since_install: bool = False,
+) -> dict[str, object]:
     return {
         "registration_state": "absent",
         "registered_profile": registered,
@@ -186,6 +201,8 @@ def _plugin_route(registered: str, *, ownership_state: str = "plugin") -> dict[s
         "ownership_state": ownership_state,
         "external_registration_state": "absent",
         "plugin_managed_state": ownership_state,
+        "applied_profile": applied_profile,
+        "drift_since_install": drift_since_install,
     }
 
 
@@ -585,7 +602,7 @@ async def test_route_probe_failure_degrades_instead_of_raising(
     )
     monkeypatch.setattr(cli_setup, "_configured_mcp_route_profile", lambda: "policy")
 
-    report = await module.provider_status_report()
+    report = await module.provider_status_report(_state=tmp_path)
 
     assert report["mcp_route"] == {
         "registration_state": None,
@@ -597,6 +614,10 @@ async def test_route_probe_failure_degrades_instead_of_raising(
         "ownership_state": "ambiguous",
         "external_registration_state": None,
         "plugin_managed_state": "absent",
+        # Issue #537 slice B: unread observations never report drift, and an
+        # isolated _state keeps the ambient applied record out of the probe.
+        "applied_profile": None,
+        "drift_since_install": False,
     }
     assert report["agent_route_semantic_ready"] is False
 
@@ -832,3 +853,249 @@ async def test_unknown_grant_never_reports_admission_drift(
     report = await module.provider_status_report(workspace_locator=project)
     blockers = cast(tuple[dict[str, object], ...], report["blockers"])
     assert [item for item in blockers if item.get("condition") == "host_admission_drift"] == []
+
+
+def _stub_live_route(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    registered: Literal["policy", "strict"] | None,
+    observed: bool = True,
+) -> None:
+    """Stub the live host resolution for drift-join tests (issue #537)."""
+
+    from yoetz.ports.harness_mcp import (
+        HarnessBinary,
+        McpRegistrationObservation,
+        McpRegistrationState,
+    )
+    from yoetz.ports.integrations import HarnessId
+
+    binary = HarnessBinary(
+        harness_id=HarnessId.CODEX,
+        executable_path="/opt/harness/bin/codex",
+        reported_version=None,
+        compatibility="untested",
+    )
+    observation = McpRegistrationObservation(
+        HarnessId.CODEX,
+        McpRegistrationState.YOETZ_OWNED if observed else McpRegistrationState.ABSENT,
+        registered if observed else None,
+    )
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries",
+        lambda: (binary,),
+    )
+
+    async def _fake_observe(self: object, _binary: object) -> McpRegistrationObservation:
+        return observation
+
+    monkeypatch.setattr("yoetz.application.harness_mcp.HarnessMcpService.observe", _fake_observe)
+    monkeypatch.setattr(cli_setup, "configured_mcp_route_profile", lambda: "policy")
+
+
+async def test_applied_route_drift_true_when_serving_differs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Applied policy but serving strict is drift (issue #537 slice B)."""
+
+    from yoetz.application.applied_mcp_route import record_applied_route
+    from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+    monkeypatch.setattr(module, "mcp_route_observation", _REAL_ROUTE_OBSERVATION)
+    _stub_live_route(monkeypatch, registered="strict")
+    record_applied_route(
+        "policy",
+        list(MCP_SERVE_COMMAND),
+        list(MCP_SERVE_COMMAND),
+        "sha256:" + "a" * 64,
+        _state=tmp_path,
+    )
+
+    route = await module.mcp_route_observation(tmp_path, _state=tmp_path)
+
+    assert route["registered_profile"] == "strict"
+    assert route["applied_profile"] == "policy"
+    assert route["drift_since_install"] is True
+    assert route["observed"] is True
+
+
+async def test_applied_route_no_drift_when_profiles_match(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from yoetz.application.applied_mcp_route import record_applied_route
+    from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+    monkeypatch.setattr(module, "mcp_route_observation", _REAL_ROUTE_OBSERVATION)
+    _stub_live_route(monkeypatch, registered="policy")
+    record_applied_route(
+        "policy",
+        list(MCP_SERVE_COMMAND),
+        list(MCP_SERVE_COMMAND),
+        "sha256:" + "a" * 64,
+        _state=tmp_path,
+    )
+
+    route = await module.mcp_route_observation(tmp_path, _state=tmp_path)
+
+    assert route["registered_profile"] == "policy"
+    assert route["applied_profile"] == "policy"
+    assert route["drift_since_install"] is False
+
+
+async def test_applied_route_unread_never_reports_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unread observation degrades to drift False even with a record (slice B)."""
+
+    from yoetz.application.applied_mcp_route import record_applied_route
+    from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+    monkeypatch.setattr(module, "mcp_route_observation", _REAL_ROUTE_OBSERVATION)
+
+    def _explode() -> tuple[object, ...]:
+        raise McpRegistrationError(McpRegistrationReason.HARNESS_UNAVAILABLE, {})
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries", _explode
+    )
+    monkeypatch.setattr(cli_setup, "configured_mcp_route_profile", lambda: "policy")
+    record_applied_route(
+        "policy",
+        list(MCP_SERVE_COMMAND),
+        list(MCP_SERVE_COMMAND),
+        "sha256:" + "a" * 64,
+        _state=tmp_path,
+    )
+
+    route = await module.mcp_route_observation(tmp_path, _state=tmp_path)
+
+    assert route["observed"] is False
+    assert route["applied_profile"] == "policy"
+    assert route["drift_since_install"] is False
+
+
+async def test_applied_route_absent_never_reports_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ABSENT (registered None, observed True) with a policy record is not drift (B1)."""
+
+    from yoetz.application.applied_mcp_route import record_applied_route
+    from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+    monkeypatch.setattr(module, "mcp_route_observation", _REAL_ROUTE_OBSERVATION)
+    # External ABSENT + plugin ABSENT (empty dir) joins to ABSENT.
+    _stub_live_route(monkeypatch, registered=None, observed=False)
+    record_applied_route(
+        "policy",
+        list(MCP_SERVE_COMMAND),
+        list(MCP_SERVE_COMMAND),
+        "sha256:" + "a" * 64,
+        _state=tmp_path,
+    )
+
+    route = await module.mcp_route_observation(tmp_path, _state=tmp_path)
+
+    assert route["registered_profile"] is None
+    assert route["ownership_state"] == "absent"
+    assert route["observed"] is True
+    assert route["applied_profile"] == "policy"
+    assert route["drift_since_install"] is False
+
+
+async def test_applied_route_dual_never_reports_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DUAL (registered None, observed True) with a policy record is not drift (B1)."""
+
+    from yoetz.adapters.integrations.portable_plugin import PluginManagedMcpObservation
+    from yoetz.application.applied_mcp_route import record_applied_route
+    from yoetz.ports.harness_mcp import MCP_SERVE_COMMAND
+    from yoetz.ports.plugin_artifacts import McpOwnershipState
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+    monkeypatch.setattr(module, "mcp_route_observation", _REAL_ROUTE_OBSERVATION)
+    # External YOETZ_OWNED strict + plugin PLUGIN policy joins to DUAL.
+    _stub_live_route(monkeypatch, registered="strict")
+
+    def _plugin_policy(_root: object) -> PluginManagedMcpObservation:
+        return PluginManagedMcpObservation(McpOwnershipState.PLUGIN, "policy", True)
+
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.portable_plugin.observe_plugin_managed_mcp",
+        _plugin_policy,
+    )
+    record_applied_route(
+        "policy",
+        list(MCP_SERVE_COMMAND),
+        list(MCP_SERVE_COMMAND),
+        "sha256:" + "a" * 64,
+        _state=tmp_path,
+    )
+
+    route = await module.mcp_route_observation(tmp_path, _state=tmp_path)
+
+    assert route["ownership_state"] == "dual"
+    assert route["registered_profile"] is None
+    assert route["observed"] is True
+    assert route["applied_profile"] == "policy"
+    assert route["drift_since_install"] is False
+
+
+async def test_applied_route_foreign_never_reports_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FOREIGN (registered None, observed True) with a policy record is not drift (B1)."""
+
+    from yoetz.application.applied_mcp_route import record_applied_route
+    from yoetz.ports.harness_mcp import (
+        MCP_SERVE_COMMAND,
+        HarnessBinary,
+        McpRegistrationObservation,
+        McpRegistrationState,
+    )
+    from yoetz.ports.integrations import HarnessId
+
+    _install(monkeypatch, tmp_path, provider=_provider())
+    monkeypatch.setattr(module, "mcp_route_observation", _REAL_ROUTE_OBSERVATION)
+
+    binary = HarnessBinary(
+        harness_id=HarnessId.CODEX,
+        executable_path="/opt/harness/bin/codex",
+        reported_version=None,
+        compatibility="untested",
+    )
+    foreign = McpRegistrationObservation(
+        HarnessId.CODEX, McpRegistrationState.FOREIGN_PRESENT, None
+    )
+    monkeypatch.setattr(
+        "yoetz.adapters.integrations.codex_discovery.discover_codex_binaries",
+        lambda: (binary,),
+    )
+
+    async def _fake_foreign_observe(self: object, _binary: object) -> McpRegistrationObservation:
+        return foreign
+
+    monkeypatch.setattr(
+        "yoetz.application.harness_mcp.HarnessMcpService.observe", _fake_foreign_observe
+    )
+    monkeypatch.setattr(cli_setup, "configured_mcp_route_profile", lambda: "policy")
+    record_applied_route(
+        "policy",
+        list(MCP_SERVE_COMMAND),
+        list(MCP_SERVE_COMMAND),
+        "sha256:" + "a" * 64,
+        _state=tmp_path,
+    )
+
+    route = await module.mcp_route_observation(tmp_path, _state=tmp_path)
+
+    assert route["ownership_state"] == "foreign"
+    assert route["registered_profile"] is None
+    assert route["observed"] is True
+    assert route["applied_profile"] == "policy"
+    assert route["drift_since_install"] is False

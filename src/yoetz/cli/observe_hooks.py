@@ -2040,6 +2040,14 @@ def handle_observe(
                             with contextlib.suppress(Exception):
                                 _resolve_runner()(_drain)
 
+        # Issue #537: no applied-vs-serving drift probe runs on this path. A hook process
+        # has no serving route of its own, so the only comparison available here is a
+        # `codex mcp get` subprocess plus the PATH version probes needed to find the
+        # binary — routinely a large fraction of `_HOOK_TOTAL_BUDGET_SECONDS` and bounded
+        # only by the adapter's own 10s command timeout, which is the #209-#213 hook
+        # latency loop again. The MCP bridge starts for the same Codex session, knows its
+        # serving route from its own argv, and emits `registration_drift` for free.
+
         if (
             not skip_service
             and not skip_advice_loop

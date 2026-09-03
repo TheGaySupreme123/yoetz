@@ -23,6 +23,7 @@ from yoetz.domain.events import CheckRecordedPayload
 from yoetz.domain.findings import Finding, FindingOrigin, ResponseDisposition
 from yoetz.domain.receipts import (
     OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+    OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
     SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,
     SEMANTIC_CHALLENGES_REJECTED_GAP,
     SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
@@ -50,13 +51,16 @@ IssueKey = tuple[object, ...]
 # Coverage gaps that describe only the semantic review's own absence or weakness. A
 # deterministic finding is proven absent by the deterministic pack that owns it, so these gaps
 # do not weaken that proof; for a semantic finding they do, because the semantic review is the
-# proof.
+# proof. The registration-drift gap is one of these: it rides alongside the ceiling gap on a
+# strict check served while the applied record says policy, so a drift check still resolves
+# deterministic findings exactly like a plain ceiling check does (issue #537).
 _SEMANTIC_ONLY_GAPS: Final = frozenset(
     {
         SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
         SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
         SEMANTIC_RELEVANCE_REVIEW_NOT_RUN_GAP,
         OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+        OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
         SEMANTIC_REVIEW_CONTEXT_WITHHELD_GAP,
         SEMANTIC_CHALLENGES_REJECTED_GAP,
         SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP,

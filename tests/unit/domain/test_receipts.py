@@ -423,3 +423,46 @@ def test_render_receipt_human_marks_bounded_truncation() -> None:
 
     assert len(rendered) == 32_768
     assert rendered.endswith("remaining canonical section content is omitted.]")
+
+
+def test_registration_drift_compact_names_policy_recovery() -> None:
+    """Issue #537 slice C: applied-policy-serving-strict names the recovery compactly."""
+
+    # The drift variant is built in memory on the ceiling-only fixture rather than
+    # stored as a second golden vector: the coverage schema's `known_gaps` pattern
+    # (`^[a-z][a-z0-9_]{0,127}$`) is open, so the new gap code needs no schema bump,
+    # and the ceiling-only fixture plus this augmentation cover both wordings.
+    from yoetz.domain.receipts import OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP
+
+    wire = _variant("semantic-advisory.case.json", "predispatch_policy_block")
+    coverage = cast(dict[str, Any], wire["coverage"])
+    coverage["known_gaps"] = sorted(
+        [*coverage["known_gaps"], OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP]
+    )
+    wire["gaps"] = [
+        *wire["gaps"],
+        {"code": OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP, "subject_refs": []},
+    ]
+    rendered = render_receipt_compact(receipt_document_from_json(wire))
+    assert (
+        "blocked by the strict route ceiling while the last install applied the policy route"
+        in rendered
+    )
+    # The disagreement is the claim; whether the strict route was intended is the owner's
+    # to say, so the recovery is offered as a conditional rather than asserted.
+    assert "If this strict route was not intended" in rendered
+    assert "yoetz integrate codex mcp install --route-profile policy" in rendered
+    assert "start a fresh Codex process" in rendered
+    assert "No provider attempt or semantic finding was recorded." in rendered
+
+
+def test_genuine_strict_ceiling_compact_keeps_terminal_wording() -> None:
+    """Without the drift gap the blocked compact sentence keeps today's wording exactly."""
+
+    wire = _variant("semantic-advisory.case.json", "predispatch_policy_block")
+    rendered = render_receipt_compact(receipt_document_from_json(wire))
+    assert rendered == (
+        "Yoetz receipt at frontier 22: coverage is insufficient because optional semantic "
+        "review was blocked before dispatch by network-egress policy. No provider attempt "
+        "or semantic finding was recorded."
+    )

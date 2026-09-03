@@ -826,14 +826,23 @@ top-level known-gap set, and the fold must equal that top-level coverage.
 Shared structural gap codes for optional semantic relevance review (distinct families):
 
 - `optional_semantic_review_blocked_by_policy` — blocked before dispatch by network-egress policy;
+- `optional_semantic_review_registration_drift` — the strict route ceiling blocked this process
+  while the durable applied-route record says the last install applied the policy route. The
+  disagreement is the whole claim: a strict route reached outside the install ceremony is a
+  legitimate owner action, so the gap offers the recovery rather than asserting a stale
+  process. Carried alongside the ceiling gap above, never instead of it, so the terminal
+  status/reason/provenance binding is unchanged;
 - `semantic_review_not_configured` — evaluator/provider not configured;
 - `semantic_relevance_review_not_run` — evaluation failed/timed out/unavailable without a clean pass;
 - `semantic_review_not_requested` — deterministic-only check; semantic review was never requested.
 
-A `deterministic_only` check that follows one of the first three carries that earlier code forward
-alongside `semantic_review_not_requested`. The stop-rules make a blocked review a coverage gap
-rather than a retry, so the fallback check is the expected next step; without the carry-forward the
-receipt's only surviving account would read as the agent never having asked.
+A `deterministic_only` check that follows a blocked or unavailable review carries that earlier
+code forward alongside `semantic_review_not_requested`. The stop-rules make a blocked review a
+coverage gap rather than a retry, so the fallback check is the expected next step; without the
+carry-forward the receipt's only surviving account would read as the agent never having asked.
+The drift code never carries: it is re-added fresh on the strict-ceiling path only after reading
+the live applied-route record, so a `mcp remove` (which clears the record) or a strict reinstall
+cannot leave a stale drift claim on a later check.
 
 Completion-scope gaps are a separate deterministic case family. When a completion claim exists and
 the readable effective current plan declares zero obligations, exactly one applies:
@@ -1424,6 +1433,7 @@ limits from making a structured-ledger repair permanently unprovable. For determ
 tolerated set is the semantic-review absence/weakness codes
 (`semantic_review_not_requested|semantic_review_not_configured|
 semantic_relevance_review_not_run|optional_semantic_review_blocked_by_policy|
+optional_semantic_review_registration_drift|
 semantic_review_context_withheld|semantic_challenges_rejected|
 semantic_case_content_over_item_limit`) plus the evidence-strength codes
 (`evidence_content_digest_only|evidence_content_withheld|evidence_digest_subject_legacy_unknown`)
@@ -3595,6 +3605,24 @@ with `scope: "agent_route"` and never moves `semantic_ready` or the exit code, b
 decision 2 makes the route ceiling process-local — CLI and terminal checks still dispatch. Route
 observation is fail-soft by contract: no discovery failure, registration error, or unreadable entry
 may raise or change the exit code.
+The `mcp_route` object also carries `applied_profile` (the route the last accepted Codex MCP
+install applied, from the owner-only state-root applied-route record; `null` when the record is
+missing, corrupt, or unsafe) and `drift_since_install` (`true` only when the live observed
+registration disagrees with that record; unread observations never report drift). Later installs
+overwrite the record — including an accepted install that had nothing to write — and `mcp remove`
+clears it, so absence with no record reads as no drift. A strict ceiling check served while the
+applied record says `policy` keeps the same
+`blocked_by_policy` / `route_semantic_ceiling` status, reason, and null provenance, and carries
+the `optional_semantic_review_registration_drift` coverage gap alongside the ceiling gap; its
+receipt names the recovery (re-run `mcp preview` / `mcp install --route-profile policy`, start
+a fresh Codex process) as a conditional, because a strict route reached outside the ceremony is
+a legitimate owner action. A ceiling with no applied-policy record keeps the terminal wording.
+MCP `status view=versions` and the `mcp serve` descriptor intentionally stay serving-only: they
+name the live route of the serving process, and the applied-vs-serving drift join lives in the
+CLI status surfaces — so the omission there reads as decided, not missing. The closed
+`registration_drift` hook diagnostic has exactly one emitter, the MCP bridge at startup, under
+the `mcp_serve` event: it is the only process that can compare its serving route against the
+record without a host subprocess the hook budget cannot afford.
 The report also carries `host_admission` (issue #467): one object per host (`claude|codex|cursor`)
 with `state` exactly `absent|present|partial|foreign|unknown`, `observed`, and per-surface
 `entries` (`surface`, `state`, `entry`, closed `detail` token, `file_digest`), read from the hosts'

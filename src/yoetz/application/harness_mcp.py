@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Protocol
 
+from yoetz.application.applied_mcp_route import clear_applied_route, record_applied_route
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.harness_mcp import (
+    MCP_SERVE_COMMAND,
+    MCP_STRICT_SERVE_COMMAND,
     HarnessBinary,
     HarnessMcpPort,
+    McpRegistrationAction,
     McpRegistrationCommand,
     McpRegistrationError,
     McpRegistrationObservation,
@@ -183,6 +188,8 @@ class HarnessMcpService:
         self,
         binary: HarnessBinary,
         confirmation: McpRegistrationConfirmation,
+        *,
+        _state: Path | None = None,
     ) -> McpRegistrationResult:
         if type(binary) is not HarnessBinary:
             raise _invalid("integration_request_invalid")
@@ -213,6 +220,11 @@ class HarnessMcpService:
                 None,
             )
         )
+        # A NOOP register is included on purpose: it still leaves the host on the route the
+        # owner accepted, so the record has to agree with it rather than keep an earlier
+        # entry that would then read as drift (issue #537).
+        if result.state_after is McpRegistrationState.YOETZ_OWNED:
+            await self._remember_applied_route(binary, result.preview_digest, _state)
         return result
 
     async def preview_unregistration(self, binary: HarnessBinary) -> McpRegistrationPreview:
@@ -244,6 +256,8 @@ class HarnessMcpService:
         self,
         binary: HarnessBinary,
         confirmation: McpRegistrationConfirmation,
+        *,
+        _state: Path | None = None,
     ) -> McpRegistrationResult:
         if type(binary) is not HarnessBinary:
             raise _invalid("integration_request_invalid")
@@ -274,4 +288,106 @@ class HarnessMcpService:
                 None,
             )
         )
+        if (
+            result.action is McpRegistrationAction.UNREGISTER
+            and result.state_after is McpRegistrationState.ABSENT
+        ):
+            try:
+                clear_applied_route(_state=_state)
+            except Exception:
+                pass
         return result
+
+    def reconcile_applied_route(
+        self,
+        binary: HarnessBinary,
+        preview: McpRegistrationPreview,
+        *,
+        _state: Path | None = None,
+    ) -> None:
+        """Refresh the applied-route record for an accepted install that changed nothing.
+
+        A ``NOOP`` registration preview is only reached when the host's own entry already
+        equals the command the ceremony would have written, so the host is on
+        ``preview.route_profile`` and no second host read is needed to say so. Recording it
+        is what keeps a deliberate re-registration from leaving an earlier entry behind for
+        every later status to report as drift (issue #537). Callers must first check that
+        ``preview.state_before`` is ``YOETZ_OWNED``: every other state reaches ``NOOP``
+        through the fall-through branch and proves nothing about the route. Fail-soft like
+        every other write on this path.
+        """
+
+        try:
+            if binary.harness_id is not HarnessId.CODEX:
+                return
+            profile = preview.route_profile
+            if profile != "policy" and profile != "strict":
+                return
+            serve_command = MCP_STRICT_SERVE_COMMAND if profile == "strict" else MCP_SERVE_COMMAND
+            record_applied_route(
+                profile,
+                list(serve_command),
+                list(serve_command),
+                preview.preview_digest,
+                _state=_state,
+            )
+        except Exception:
+            # An unrecordable route must read as no applied route, never as stale drift.
+            try:
+                clear_applied_route(_state=_state)
+            except Exception:
+                pass
+
+    async def _remember_applied_route(
+        self,
+        binary: HarnessBinary,
+        preview_digest: str,
+        _state: Path | None,
+    ) -> None:
+        """Persist the verified post-write route; persistence never fails the install.
+
+        Both command fields carry the same verified post-write command, because the
+        record describes what the host serves after the ceremony, not what the caller
+        asked for. A failed post-write verification clears any stale record fail-soft
+        so a prior policy entry never survives a strict install it cannot describe.
+        """
+
+        def _clear_stale() -> None:
+            try:
+                clear_applied_route(_state=_state)
+            except Exception:
+                pass
+
+        try:
+            if binary.harness_id is not HarnessId.CODEX:
+                return
+            try:
+                observation = await self._port.observe_registration(binary)
+            except Exception:
+                _clear_stale()
+                return
+            if observation.state is not McpRegistrationState.YOETZ_OWNED:
+                _clear_stale()
+                return
+            profile = observation.route_profile
+            if profile is None:
+                _clear_stale()
+                return
+            if profile != "policy" and profile != "strict":
+                _clear_stale()
+                return
+            serve_command = MCP_STRICT_SERVE_COMMAND if profile == "strict" else MCP_SERVE_COMMAND
+            try:
+                record_applied_route(
+                    profile,
+                    list(serve_command),
+                    list(serve_command),
+                    preview_digest,
+                    _state=_state,
+                )
+            except Exception:
+                _clear_stale()
+                return
+        except Exception:
+            _clear_stale()
+            return

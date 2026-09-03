@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -1968,6 +1969,38 @@ def _bridge_logging_config() -> LoggingConfig:
         return LoggingConfig()
 
 
+def record_startup_route_drift(serving_profile: str, *, _state: Path | None = None) -> None:
+    """Record `registration_drift` when this bridge's route disagrees with the applied one.
+
+    Issue #537. This is the sole emitter of the diagnostic: the bridge is the one process
+    that knows its serving route from its own argv, so the comparison costs no host
+    subprocess, while a hook process would have to shell out to `codex mcp get` for a
+    weaker answer at a cost the hook budget cannot carry. Recorded under the `mcp_serve`
+    event because this is bridge startup, not a host hook event. Fail-soft by contract:
+    never raises, never blocks serving, never records content.
+    """
+
+    try:
+        from yoetz.application.applied_mcp_route import read_applied_route
+        from yoetz.cli.hook_diagnostics import record_hook_diagnostic
+
+        try:
+            record = read_applied_route(_state=_state)
+        except Exception:
+            return
+        if not isinstance(record, dict):
+            return
+        applied = record.get("applied_profile")
+        if applied not in {"policy", "strict"} or serving_profile not in {"policy", "strict"}:
+            return
+        if applied == serving_profile:
+            return
+        with contextlib.suppress(Exception):
+            record_hook_diagnostic("registration_drift", "mcp_serve", _state=_state)
+    except Exception:
+        return
+
+
 def main(
     *,
     semantic: Literal["on", "off"] = "on",
@@ -1982,10 +2015,12 @@ def main(
     if types.LATEST_PROTOCOL_VERSION not in SUPPORTED_PROTOCOL_VERSIONS:
         raise RuntimeError("mcp_sdk_protocol_registry_invalid")
     configure_logging(_bridge_logging_config(), LogMode.MCP_STDIO)
+    runtime = build_bridge_runtime(
+        "strict" if semantic == "off" else "policy",
+        host_profile=host,
+    )
+    record_startup_route_drift(runtime.route_profile)
     anyio.run(
         run_stdio,
-        build_bridge_runtime(
-            "strict" if semantic == "off" else "policy",
-            host_profile=host,
-        ),
+        runtime,
     )
