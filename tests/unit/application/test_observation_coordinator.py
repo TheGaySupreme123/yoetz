@@ -21,10 +21,15 @@ from yoetz.adapters.sqlite.migrations import initialize_bundle
 from yoetz.adapters.sqlite.observation import SqliteObservationStore
 from yoetz.application.observation_control import build_observation_support_handlers
 from yoetz.application.observation_coordinator import ObservationCoordinator
-from yoetz.application.observation_drain import ObservationOutboxSweeper
+from yoetz.application.observation_drain import (
+    ObservationDrainAction,
+    ObservationOutboxSweeper,
+    route_observation_ingest,
+)
 from yoetz.application.observation_materialize import (
     MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
     MATERIALIZATION_MAPPING_VERSION,
+    MaterializedObservationBatch,
     canonical_logical_identity,
     materialize_observation_envelope,
     materialize_observation_outcome_correction,
@@ -210,7 +215,6 @@ def test_materialize_post_consumes_host_outcome_semantics() -> None:
 
     from yoetz.application.observation_materialize import (
         HOST_OUTCOME_UNAVAILABLE_GAP,
-        MaterializedObservationBatch,
     )
     from yoetz.domain.events import ResultOutcome, ResultRecordedPayload
 
@@ -428,6 +432,8 @@ async def test_live_upgrade_finds_legacy_mapping_under_legacy_writer(tmp_path: P
     harness_writer_id = observation_writer_id(task_id, session_id)
     envelope = _envelope(session=f"hmac-sha256:{'ae' * 32}", identity="hook:upgrade-hazard")
     batch = materialize_observation_envelope(envelope, task_id=task_id)
+    current_roles = tuple(item.role for item in batch.drafts)
+    replay_roles = (*current_roles, "captured_tool_output_0_sha256:" + "a" * 64)
     lookups: list[tuple[str, str]] = []
     legacy_mapping_version = MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0]
     legacy_digest = observation_operation_digest(
@@ -435,7 +441,7 @@ async def test_live_upgrade_finds_legacy_mapping_under_legacy_writer(tmp_path: P
         session_id=session_id,
         writer_id=legacy_writer_id,
         logical_identity=canonical_logical_identity(envelope),
-        draft_roles=tuple(item.role for item in batch.drafts),
+        draft_roles=replay_roles,
         mapping_version=legacy_mapping_version,
     )
     expected_operation_id = ""
@@ -479,17 +485,23 @@ async def test_live_upgrade_finds_legacy_mapping_under_legacy_writer(tmp_path: P
         envelope,
         batch,
         legacy_writer_id=legacy_writer_id,
+        replay_draft_role_sets=(replay_roles,),
     )
 
     assert recovered is not None
-    operation_id, digest, _append_result, mapping_version = recovered
+    operation_id, digest, _append_result, mapping_version, roles = recovered
     assert operation_id == expected_operation_id
     assert digest == legacy_digest
     assert mapping_version == legacy_mapping_version
+    assert roles == replay_roles
     assert [writer for writer, _operation in lookups] == [
         harness_writer_id,
+        harness_writer_id,
+        legacy_writer_id,
         legacy_writer_id,
         harness_writer_id,
+        harness_writer_id,
+        legacy_writer_id,
         legacy_writer_id,
     ]
 
@@ -572,8 +584,9 @@ async def test_existing_operation_reconstructs_frontier_motion_metadata(tmp_path
     )
 
     assert recovered is not None
-    _operation_id, _digest, append_result, mapping_version = recovered
+    _operation_id, _digest, append_result, mapping_version, roles = recovered
     assert mapping_version == MATERIALIZATION_MAPPING_VERSION
+    assert roles == tuple(item.role for item in batch.drafts)
     assert append_result is not None
     assert append_result.outcome == "replayed"
     assert append_result.subject_frontier.sequence == 3
@@ -1393,6 +1406,7 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
         row.pop("attempts")
         row.pop("last_reason")
         row.pop("last_attempt_at")
+        row.pop("consecutive_reason_attempts")
     state_path.write_text(json.dumps(raw), encoding="utf-8")
 
     reopened = LocalObservationStore(_state=tmp_path, _wall=lambda: 1_767_225_600.0)
@@ -1415,9 +1429,68 @@ def test_local_outbox_v1_compatibility_and_v2_attempt_round_trip(tmp_path: Path)
     assert durable.attempts == 1
     assert durable.last_reason == ObservationGapCode.MAPPING_MISSING.value
     assert durable.last_attempt_at == attempted_at
+    assert durable.consecutive_reason_attempts == 1
     assert json.loads(state_path.read_text(encoding="utf-8"))["schema"] == (
         "yoetz.observation-local/9"
     )
+
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    raw["pending_outbox"][0]["attempts"] = 127
+    raw["pending_outbox"][0].pop("consecutive_reason_attempts")
+    state_path.write_text(json.dumps(raw), encoding="utf-8")
+    upgraded = LocalObservationStore(_state=tmp_path).list_pending_outbox_rows(workspace)[0]
+    assert upgraded.attempts == 127
+    assert upgraded.consecutive_reason_attempts == 0
+    assert (
+        route_observation_ingest(
+            ObservationIngestResult(
+                ObservationIngestDisposition.REJECTED,
+                ObservationGapCode.MAPPING_MISSING.value,
+                None,
+            ),
+            row=upgraded,
+        ).action
+        is ObservationDrainAction.RETRY
+    )
+    upgraded_attempt = LocalObservationStore(_state=tmp_path).bump_outbox_row_attempt(
+        workspace,
+        upgraded,
+        reason=ObservationGapCode.MAPPING_MISSING.value,
+        attempted_at=attempted_at,
+    )
+    assert upgraded_attempt is not None
+    assert upgraded_attempt.attempts == 128
+    assert upgraded_attempt.consecutive_reason_attempts == 1
+
+
+def test_quarantined_retry_reason_survives_later_success(tmp_path: Path) -> None:
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.bind_codex_session(workspace, "quarantine-gap")
+    rejected = _envelope(session=session, identity="hook:rejected", ordinal=1)
+    healthy = _envelope(session=session, identity="hook:healthy", ordinal=2)
+    store.enqueue_outbox(workspace, "quarantine-gap", rejected)
+    store.enqueue_outbox(workspace, "quarantine-gap", healthy)
+    first, second = store.list_pending_outbox_rows(workspace)
+    attempted = store.bump_outbox_row_attempt(
+        workspace,
+        first,
+        reason=ObservationGapCode.SERVICE_UNAVAILABLE.value,
+    )
+    assert attempted is not None
+    assert store.quarantine_outbox_row(
+        workspace,
+        attempted,
+        ObservationGapCode.SERVICE_UNAVAILABLE.value,
+    )
+    acknowledged = store.bump_outbox_row_attempt(workspace, second, reason=None)
+    assert acknowledged is not None
+    assert store.acknowledge_outbox_row(workspace, acknowledged)
+
+    status = store.status(ObservationStatusQuery(workspace))
+    assert ObservationGapCode.SERVICE_UNAVAILABLE.value in status.gaps
+    assert ObservationGapCode.OUTBOX_QUARANTINED.value in status.gaps
 
 
 def test_local_store_lock_serializes_a_separate_process(tmp_path: Path) -> None:
@@ -1846,6 +1919,125 @@ async def test_coordinator_rejects_without_mapping(tmp_path: Path) -> None:
     )
     assert result.disposition is ObservationIngestDisposition.REJECTED
     assert result.reason == ObservationGapCode.MAPPING_MISSING.value
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "code",
+    [code for code in PublicErrorCode if code is not PublicErrorCode.STORAGE_CORRUPT],
+)
+async def test_nonretryable_public_ingest_errors_are_terminal(
+    tmp_path: Path, code: PublicErrorCode
+) -> None:
+    """#540: the error contract, not its spelling, decides retryability."""
+
+    class _RejectedRuntime:
+        async def route(self, command: object) -> object:
+            del command
+            raise PublicOperationError(code, "Observation ingest was rejected.", False)
+
+        async def release(self, runtime: object) -> None:
+            raise AssertionError(f"unrouted runtime released: {runtime!r}")
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, f"terminal-{code.value}")
+    coordinator = ObservationCoordinator(
+        runtime=_RejectedRuntime(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=_envelope(session=session),
+        )
+    )
+
+    assert result.reason == ObservationGapCode.LEDGER_REJECTED.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.QUARANTINE
+
+
+@pytest.mark.anyio
+async def test_ledger_event_invalid_is_terminal_not_service_unavailable(tmp_path: Path) -> None:
+    """#540: a ledger validation refusal quarantines its envelope immediately."""
+
+    from types import SimpleNamespace
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "ledger-event-invalid")
+
+    class _Store:
+        def grant_consent(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def bind_session(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
+            return ObservationIngestResult(
+                ObservationIngestDisposition.ACCEPTED,
+                None,
+                envelope.cursor,
+            )
+
+    runtime = SimpleNamespace(
+        task_id=mapping.yoetz_task_id,
+        session_id=mapping.yoetz_session_id,
+        writer_id=observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id),
+        observation=_Store(),
+    )
+
+    class _RuntimePort:
+        async def route(self, command: object) -> object:
+            del command
+            return runtime
+
+        async def release(self, released: object) -> None:
+            assert released is runtime
+
+    class _Coordinator(ObservationCoordinator):
+        async def _capture_content(  # type: ignore[override]
+            self, runtime: object, store: object, **kwargs: object
+        ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool, bool]:
+            del runtime, store, kwargs
+            return (), (), False, False
+
+        async def _append_materialized(  # type: ignore[override]
+            self, *args: object, **kwargs: object
+        ) -> tuple[str, str, None, str, tuple[str, ...]]:
+            del args, kwargs
+            raise PublicOperationError(
+                PublicErrorCode.EVENT_INVALID,
+                "Observation event was rejected.",
+                retryable=False,
+            )
+
+    coordinator = _Coordinator(
+        runtime=_RuntimePort(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=_envelope(
+                session=session,
+                kind="PostToolUse",
+                identity="hook:event-invalid",
+                exit_status=1,
+            ),
+        )
+    )
+
+    assert result.reason == ObservationGapCode.LEDGER_REJECTED.value
+    assert result.reason != ObservationGapCode.SERVICE_UNAVAILABLE.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.QUARANTINE
 
 
 @pytest.mark.anyio
@@ -2801,6 +2993,9 @@ async def test_duplicate_ingest_reconciles_ledger_instead_of_early_return(tmp_pa
                 ObservationIngestDisposition.DUPLICATE, None, envelope.cursor
             )
 
+        def content_manifests_for_logical_identity(self, **_kwargs: object) -> tuple[object, ...]:
+            return ()
+
     class _Runtime:
         task_id = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
         session_id = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
@@ -2938,13 +3133,13 @@ async def test_check_barrier_deferral_is_designed_backpressure(
     class _Coordinator(ObservationCoordinator):
         async def _capture_content(  # type: ignore[override]
             self, runtime: object, store: object, **kwargs: object
-        ) -> tuple[tuple[str, ...], bool, bool]:
+        ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool, bool]:
             del runtime, store, kwargs
-            return ((), False, False)
+            return ((), (), False, False)
 
         async def _append_materialized(  # type: ignore[override]
             self, *args: object, **kwargs: object
-        ) -> tuple[str, str, None, str]:
+        ) -> tuple[str, str, None, str, tuple[str, ...]]:
             del args, kwargs
             raise PublicOperationError(code, "Deferred behind the check barrier.", True)
 
@@ -3141,6 +3336,7 @@ def test_materialization_phases_claim_distinct_role_scoped_identities() -> None:
     from yoetz.application.observation_materialize import (
         canonical_logical_identity,
         observation_claim_identity,
+        observation_content_identity,
     )
 
     session = f"hmac-sha256:{'67' * 32}"
@@ -3176,6 +3372,11 @@ def test_materialization_phases_claim_distinct_role_scoped_identities() -> None:
     assert _claim(pre) != _claim(post)
     assert _claim(unpaired) != _claim(post)
     assert _claim(post) == _claim(stream)
+    # Captured content recovery is phase scoped. Equivalent hook/stream copies
+    # share the stable role set, while Pre/Post/unpaired siblings remain
+    # isolated so they cannot lend roles across phases (#539).
+    assert observation_content_identity(post) == observation_content_identity(stream)
+    assert len({observation_content_identity(env) for env in (pre, post, unpaired)}) == 3
 
 
 def _mapped_local(
@@ -3303,9 +3504,9 @@ async def test_duplicate_ingest_reconstructed_append_detects_same_task_rewind(
     class _Coordinator(ObservationCoordinator):
         async def _capture_content(  # type: ignore[override]
             self, runtime: object, store: object, **kwargs: object
-        ) -> tuple[tuple[str, ...], bool, bool]:
+        ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool, bool]:
             del runtime, store, kwargs
-            return ((), False, False)
+            return ((), (), False, False)
 
         async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
             del args, kwargs
@@ -3381,25 +3582,27 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
     class _Coordinator(ObservationCoordinator):
         async def _capture_content(  # type: ignore[override]
             self, runtime: object, store: object, **kwargs: object
-        ) -> tuple[tuple[str, ...], bool, bool]:
+        ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool, bool]:
             del runtime, store, kwargs
-            return ((), False, False)
+            return ((), (), False, False)
 
         async def _append_materialized(  # type: ignore[override]
             self,
             runtime: object,
             envelope: ObservationEnvelope,
-            batch: object,
+            batch: MaterializedObservationBatch,
             *,
             legacy_writer_id: str | None = None,
-        ) -> tuple[str, str, None, str]:
-            del legacy_writer_id
+            replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
+        ) -> tuple[str, str, None, str, tuple[str, ...]]:
+            del legacy_writer_id, replay_draft_role_sets
+            roles = tuple(item.role for item in batch.drafts)
             digest = _digest(
                 task_id=runtime.task_id,  # type: ignore[attr-defined]
                 session_id=runtime.session_id,  # type: ignore[attr-defined]
                 writer_id=runtime.writer_id,  # type: ignore[attr-defined]
                 logical_identity=_identity(envelope),
-                draft_roles=tuple(item.role for item in batch.drafts),  # type: ignore[attr-defined]
+                draft_roles=roles,
                 mapping_version=MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0],
             )
             return (
@@ -3407,6 +3610,7 @@ async def test_pre_post_and_stream_copies_claim_without_storage_corrupt(tmp_path
                 digest,
                 None,
                 MATERIALIZATION_LEGACY_MAPPING_VERSIONS[0],
+                roles,
             )
 
         async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
@@ -3481,9 +3685,6 @@ async def test_later_stream_failure_correction_projection_policy(
     import apsw
 
     from yoetz.application import observation_coordinator as coordinator_module
-    from yoetz.application.observation_materialize import (
-        MaterializedObservationBatch,
-    )
     from yoetz.application.observation_materialize import (
         canonical_logical_identity as _identity,
     )
@@ -3596,9 +3797,9 @@ async def test_later_stream_failure_correction_projection_policy(
     class _Coordinator(ObservationCoordinator):
         async def _capture_content(  # type: ignore[override]
             self, runtime: object, store: object, **kwargs: object
-        ) -> tuple[tuple[str, ...], bool, bool]:
+        ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool, bool]:
             del runtime, store, kwargs
-            return ((), False, False)
+            return ((), (), False, False)
 
         async def _append_materialized(  # type: ignore[override]
             self,
@@ -3607,9 +3808,10 @@ async def test_later_stream_failure_correction_projection_policy(
             batch: MaterializedObservationBatch,
             *,
             legacy_writer_id: str | None = None,
-        ) -> tuple[str, str, AppendResult, str]:
+            replay_draft_role_sets: tuple[tuple[str, ...], ...] = (),
+        ) -> tuple[str, str, AppendResult, str, tuple[str, ...]]:
             nonlocal core_unknown
-            del legacy_writer_id
+            del legacy_writer_id, replay_draft_role_sets
             roles = tuple(item.role for item in batch.drafts)
             appended_roles.append(roles)
             appended_batches.append(batch)
@@ -3654,6 +3856,7 @@ async def test_later_stream_failure_correction_projection_policy(
                     (),
                 ),
                 resolved_version,
+                roles,
             )
 
         async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
@@ -3798,19 +4001,20 @@ async def test_identity_claim_conflict_rejects_one_envelope_without_latching(
     class _Coordinator(ObservationCoordinator):
         async def _capture_content(  # type: ignore[override]
             self, runtime: object, store: object, **kwargs: object
-        ) -> tuple[tuple[str, ...], bool, bool]:
+        ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool, bool]:
             del runtime, store, kwargs
-            return ((), False, False)
+            return ((), (), False, False)
 
         async def _append_materialized(  # type: ignore[override]
             self, *args: object, **kwargs: object
-        ) -> tuple[str, str, None, str]:
+        ) -> tuple[str, str, None, str, tuple[str, ...]]:
             del args, kwargs
             return (
                 "op_" + "0" * 32,
                 "sha256:" + "ab" * 32,
                 None,
                 MATERIALIZATION_MAPPING_VERSION,
+                ("action", "result"),
             )
 
         async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]

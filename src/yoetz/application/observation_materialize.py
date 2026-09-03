@@ -81,6 +81,7 @@ __all__ = [
     "materialize_observation_inspection_snapshot",
     "materialize_observation_outcome_correction",
     "observation_claim_identity",
+    "observation_content_identity",
     "observation_writer_id",
     "stable_observation_id",
     "stream_event_is_completed_tool",
@@ -1174,6 +1175,40 @@ def canonical_logical_identity(envelope: ObservationEnvelope) -> str:
         return _logical_identity_digest(("opaque", envelope.source.value, envelope.source_identity))
     family = _action_kind(_tool_name(structural)).value
     return _logical_identity_digest(("action", envelope.session_commitment, host_call, family))
+
+
+def observation_content_identity(envelope: ObservationEnvelope) -> str:
+    """Return the phase-scoped identity used to recover captured manifests.
+
+    Ledger action/result identity intentionally collapses hook/stream copies and
+    several phases of one host call. Captured content follows only the first
+    half of that rule: equivalent same-phase copies share recovery, while
+    Pre/Post/unpaired siblings remain isolated so they cannot change one
+    another's materialized role sets.
+    """
+
+    if type(envelope) is not ObservationEnvelope:
+        return _logical_identity_digest(("content", "opaque", "invalid"))
+    structural = cast(Mapping[str, JsonValue], envelope.structural_payload)
+    kind = envelope.event_kind
+    if (
+        envelope.source is ObservationSource.CODEX_SESSION_STREAM
+        and stream_event_is_completed_tool(kind, structural)
+        and _correlation(structural) is not None
+    ):
+        kind = "PostToolUse"
+    phase = (
+        f"{kind}:unpaired"
+        if kind == "PostToolUse" and ObservationGapCode.UNPAIRED_EVENT.value in envelope.gap_codes
+        else kind
+    )
+    return _logical_identity_digest(
+        (
+            "content",
+            canonical_logical_identity(envelope),
+            phase,
+        )
+    )
 
 
 def observation_claim_identity(

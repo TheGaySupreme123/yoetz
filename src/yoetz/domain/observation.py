@@ -209,6 +209,7 @@ class ObservationGapCode(str, Enum):  # noqa: UP042 - exact durable wire enum
     TRUNCATED_PAYLOAD = "truncated_payload"
     SERVICE_UNAVAILABLE = "service_unavailable"
     VAULT_LOCKED = "vault_locked"
+    LEDGER_REJECTED = "ledger_rejected"
     DEDUP_CONFLICT = "dedup_conflict"
     CURSOR_STALE = "cursor_stale"
     CONSENT_MISSING = "consent_missing"
@@ -563,21 +564,26 @@ class ObservationContentManifest:
     ``content_digest`` and ``content_bytes`` describe the secret-scanned bytes inside the
     encrypted manifest, not the encrypted envelope or its structural wrapper. Historical rows
     created before that binding was stored leave both values ``None`` and cannot earn captured
-    evidence provenance until the service re-observes and backfills them.
+    evidence provenance until the service re-observes and backfills them. ``envelope_digest`` may
+    be ``None`` only for lookup-only recovery of an orphaned manifest whose object inventory row
+    is unavailable; such a descriptor cannot earn captured coverage.
     """
 
     object_id: str
-    envelope_digest: str
+    envelope_digest: str | None
     content_kind: ObservationContentKind
     part_index: int
     part_count: int
     redacted: bool
     content_digest: str | None = None
     content_bytes: int | None = None
+    correlation_identity: str | None = None
+    source_commitment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "object_id", object_id(self.object_id))
-        validate_sha256_digest(self.envelope_digest)
+        if self.envelope_digest is not None:
+            validate_sha256_digest(self.envelope_digest)
         if type(self.content_kind) is not ObservationContentKind:
             raise _invalid("invalid_event_enum")
         object.__setattr__(self, "part_index", _nonnegative(self.part_index, maximum=15))
@@ -593,6 +599,14 @@ class ObservationContentManifest:
                 "content_bytes",
                 _positive(self.content_bytes, maximum=_MAX_CONTENT_CHUNK_BYTES),
             )
+        if self.correlation_identity is not None:
+            object.__setattr__(
+                self,
+                "correlation_identity",
+                _token(self.correlation_identity),
+            )
+        if self.source_commitment is not None:
+            validate_commitment(self.source_commitment)
 
 
 @dataclass(frozen=True, slots=True)

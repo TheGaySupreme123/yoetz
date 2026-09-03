@@ -651,6 +651,8 @@ class SqliteObservationStore:
                 redacted=chunk.redacted,
                 content_digest=content_digest,
                 content_bytes=content_bytes,
+                correlation_identity=chunk.correlation_identity,
+                source_commitment=chunk.source_commitment,
             )
         except Exception as exc:
             raise _error(
@@ -741,11 +743,72 @@ class SqliteObservationStore:
         ).fetchone()
         return cast(str, row[0]) if row is not None and type(row[0]) is str else None
 
+    def content_manifests_for_logical_identity(
+        self,
+        *,
+        workspace: str,
+        logical_identity: str,
+        correlation_identity_prefix: str | None = None,
+    ) -> tuple[ObservationContentManifest, ...]:
+        if correlation_identity_prefix is not None and (
+            type(correlation_identity_prefix) is not str or not correlation_identity_prefix
+        ):
+            raise _error(
+                PublicErrorCode.INVALID_REQUEST,
+                "Observation content lookup is invalid.",
+                retryable=False,
+            )
+        prefix_clause = (
+            " AND substr(manifests.correlation_identity,1,?)=?"
+            if correlation_identity_prefix is not None
+            else ""
+        )
+        parameters: tuple[object, ...] = (workspace, logical_identity)
+        if correlation_identity_prefix is not None:
+            parameters += (len(correlation_identity_prefix), correlation_identity_prefix)
+        rows = self._db.execute(
+            "SELECT manifests.object_id,objects.envelope_digest,manifests.content_kind,"
+            "manifests.part_index,manifests.part_count,manifests.redacted,"
+            "manifests.content_digest,manifests.content_bytes,"
+            "manifests.correlation_identity,manifests.source_commitment "
+            "FROM observation_content_manifests AS manifests "
+            "LEFT JOIN objects ON objects.object_id=manifests.object_id "
+            "WHERE manifests.workspace_commitment=? AND manifests.logical_identity=?"
+            + prefix_clause
+            + " ORDER BY manifests.object_id",
+            parameters,
+        ).fetchall()
+        manifests: list[ObservationContentManifest] = []
+        try:
+            for row in rows:
+                manifests.append(
+                    ObservationContentManifest(
+                        object_id=cast(str, row[0]),
+                        envelope_digest=cast(str | None, row[1]),
+                        content_kind=ObservationContentKind(cast(str, row[2])),
+                        part_index=cast(int, row[3]),
+                        part_count=cast(int, row[4]),
+                        redacted=bool(row[5]),
+                        content_digest=cast(str | None, row[6]),
+                        content_bytes=cast(int | None, row[7]),
+                        correlation_identity=cast(str, row[8]),
+                        source_commitment=cast(str, row[9]),
+                    )
+                )
+        except (TypeError, ValueError) as exc:
+            raise _error(
+                PublicErrorCode.STORAGE_CORRUPT,
+                "Observation content manifest is invalid.",
+                retryable=False,
+            ) from exc
+        return tuple(manifests)
+
     def load_content_manifest(self, object_id: str) -> ObservationContentManifest | None:
         row = self._db.execute(
             "SELECT manifests.object_id,objects.envelope_digest,manifests.content_kind,"
             "manifests.part_index,manifests.part_count,manifests.redacted,"
-            "manifests.content_digest,manifests.content_bytes "
+            "manifests.content_digest,manifests.content_bytes,"
+            "manifests.correlation_identity,manifests.source_commitment "
             "FROM observation_content_manifests AS manifests "
             "JOIN objects ON objects.object_id=manifests.object_id "
             "WHERE manifests.object_id=?",
@@ -763,6 +826,8 @@ class SqliteObservationStore:
                 redacted=bool(row[5]),
                 content_digest=cast(str | None, row[6]),
                 content_bytes=cast(int | None, row[7]),
+                correlation_identity=cast(str, row[8]),
+                source_commitment=cast(str, row[9]),
             )
         except (TypeError, ValueError) as exc:
             raise _error(
