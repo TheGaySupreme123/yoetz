@@ -6,6 +6,9 @@ from typing import Annotated, Final, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from yoetz.domain.privacy import PrivacyPolicyChange, PrivacyPolicyChangeValue, ProviderBinding
+from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
+
 __all__ = [
     "CONSENT_PENDING_TTL_SECONDS",
     "AgentSafePendingModel",
@@ -15,6 +18,9 @@ __all__ = [
     "ConsentReviewResultModel",
     "ConsentStatusModel",
     "ImportPublicationPreviewModel",
+    "PrivacyPolicyChangeModel",
+    "RepositoryPrivacyGrantPreviewModel",
+    "RepositoryPrivacyProviderBindingModel",
     "RepositoryPrivacyRecipe",
 ]
 
@@ -22,6 +28,7 @@ __all__ = [
 # exactly this many seconds after prepare. Shared here so agent-facing surfaces can state the
 # bound without importing the trusted pending store.
 CONSENT_PENDING_TTL_SECONDS: Final = 15 * 60
+REPOSITORY_PRIVACY_PREVIEW_MAX_BYTES: Final = 32_768
 
 type ConsentOperation = Literal[
     "vault_initialize",
@@ -50,7 +57,9 @@ type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type Commitment = Annotated[str, Field(pattern=r"^hmac-sha256:[0-9a-f]{64}$")]
 type PendingId = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 type BoundedText = Annotated[str, Field(min_length=1, max_length=2048)]
-type RepositoryPrivacyRecipe = Literal["assisted_review", "private", "metadata_only"]
+type RepositoryPrivacyRecipe = Literal[
+    "assisted_review", "expanded_review", "private", "metadata_only"
+]
 
 _CLOSED_CONFIG = ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)
 
@@ -98,8 +107,183 @@ class ImportPublicationPreviewModel(_ClosedModel):
     reviewer_egress_changed: Literal[False]
 
 
+class PrivacyPolicyChangeValueModel(_ClosedModel):
+    kind: Literal["none", "flag", "count", "labels"]
+    flag: bool | None
+    count: Annotated[int, Field(ge=0)] | None
+    labels: tuple[Annotated[str, Field(min_length=1, max_length=192)], ...] = Field(max_length=64)
+
+    @field_validator("labels", mode="before")
+    @classmethod
+    def _adapt_labels(cls, value: object) -> object:
+        return tuple(cast(list[object], value)) if type(value) is list else value
+
+    @model_validator(mode="after")
+    def _validate_closed_value(self) -> Self:
+        PrivacyPolicyChangeValue(
+            kind=self.kind,
+            flag=self.flag,
+            count=self.count,
+            labels=self.labels,
+        )
+        return self
+
+    @classmethod
+    def from_domain(cls, value: PrivacyPolicyChangeValue) -> Self:
+        return cls(kind=value.kind, flag=value.flag, count=value.count, labels=value.labels)
+
+    def to_domain(self) -> PrivacyPolicyChangeValue:
+        return PrivacyPolicyChangeValue(
+            kind=self.kind,
+            flag=self.flag,
+            count=self.count,
+            labels=self.labels,
+        )
+
+
+class PrivacyPolicyChangeModel(_ClosedModel):
+    area: Literal["global", "review", "channel", "local_model", "agent_context", "human_control"]
+    field: Annotated[str, Field(min_length=1, max_length=64)]
+    subject: Annotated[str, Field(min_length=1, max_length=192)] | None
+    before: PrivacyPolicyChangeValueModel
+    after: PrivacyPolicyChangeValueModel
+    widens: bool
+
+    @model_validator(mode="after")
+    def _validate_closed_change(self) -> Self:
+        self.to_domain()
+        return self
+
+    @classmethod
+    def from_domain(cls, value: PrivacyPolicyChange) -> Self:
+        return cls(
+            area=value.area,
+            field=value.field,
+            subject=value.subject,
+            before=PrivacyPolicyChangeValueModel.from_domain(value.before),
+            after=PrivacyPolicyChangeValueModel.from_domain(value.after),
+            widens=value.widens,
+        )
+
+    def to_domain(self) -> PrivacyPolicyChange:
+        return PrivacyPolicyChange(
+            area=self.area,
+            field=self.field,
+            subject=self.subject,
+            before=self.before.to_domain(),
+            after=self.after.to_domain(),
+            widens=self.widens,
+        )
+
+
+class RepositoryPrivacyProviderBindingModel(_ClosedModel):
+    provider_id: Annotated[str, Field(min_length=1, max_length=128)]
+    model_id: Annotated[str, Field(min_length=1, max_length=128)]
+    endpoint_profile_id: Annotated[str, Field(min_length=1, max_length=128)]
+    endpoint_profile_version: Annotated[str, Field(min_length=1, max_length=128)]
+    transport: Literal["external"]
+
+    @model_validator(mode="after")
+    def _validate_provider_binding(self) -> Self:
+        self.to_domain()
+        return self
+
+    @classmethod
+    def from_domain(cls, value: ProviderBinding) -> Self:
+        return cls(
+            provider_id=value.provider_id,
+            model_id=value.model_id,
+            endpoint_profile_id=value.endpoint_profile_id,
+            endpoint_profile_version=value.endpoint_profile_version,
+            transport="external",
+        )
+
+    def to_domain(self) -> ProviderBinding:
+        return ProviderBinding(
+            self.provider_id,
+            self.model_id,
+            self.endpoint_profile_id,
+            self.endpoint_profile_version,
+            self.transport,
+        )
+
+
+class RepositoryPrivacyGrantPreviewModel(_ClosedModel):
+    """Agent-safe exact before/after view of one prepared repository grant."""
+
+    schema_: Literal["yoetz.repository-privacy-grant-preview/1"] = Field(alias="schema")
+    recipe: RepositoryPrivacyRecipe
+    repository_privacy_commitment: Commitment
+    authority_digest: Digest
+    current_policy_digest: Digest
+    candidate_policy_digest: Digest
+    diff_digest: Digest
+    candidate_profile: Literal[
+        "local_only", "confirm_every_request", "minimal_external", "trusted_provider"
+    ]
+    candidate_review_context: Literal["structural", "assisted", "expanded"]
+    candidate_provider_binding: RepositoryPrivacyProviderBindingModel | None
+    changes: tuple[PrivacyPolicyChangeModel, ...] = Field(max_length=128)
+
+    @field_validator("changes", mode="before")
+    @classmethod
+    def _adapt_changes(cls, value: object) -> object:
+        return tuple(cast(list[object], value)) if type(value) is list else value
+
+    @model_validator(mode="after")
+    def _bind_diff_digest(self) -> Self:
+        encoded: list[JsonValue] = [
+            cast(JsonValue, change.model_dump(mode="json")) for change in self.changes
+        ]
+        if len(canonical_encode(encoded)) > REPOSITORY_PRIVACY_PREVIEW_MAX_BYTES:
+            raise ValueError("repository_privacy_preview_too_large")
+        if canonical_digest(encoded) != self.diff_digest:
+            raise ValueError("repository_privacy_preview_diff_mismatch")
+        return self
+
+
 class AgentSafePendingModel(_ClosedModel):
-    schema_: Literal["yoetz.consent.pending-agent/5"] = Field(alias="schema")
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        validate_default=True,
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"operation": {"const": "repository_privacy_grant"}},
+                        "required": ["operation"],
+                    },
+                    "then": {
+                        "properties": {
+                            "repository_privacy_recipe": {"not": {"type": "null"}},
+                            "repository_privacy_preview": {"not": {"type": "null"}},
+                            "import_publication_preview": {"type": "null"},
+                        }
+                    },
+                    "else": {
+                        "properties": {
+                            "repository_privacy_recipe": {"type": "null"},
+                            "repository_privacy_preview": {"type": "null"},
+                        }
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {"operation": {"const": "import_publication"}},
+                        "required": ["operation"],
+                    },
+                    "then": {
+                        "properties": {"import_publication_preview": {"not": {"type": "null"}}}
+                    },
+                    "else": {"properties": {"import_publication_preview": {"type": "null"}}},
+                },
+            ]
+        },
+    )
+
+    schema_: Literal["yoetz.consent.pending-agent/6"] = Field(alias="schema")
     operation: ConsentOperation
     risk_class: RiskClass
     pending_id: PendingId
@@ -108,6 +292,7 @@ class AgentSafePendingModel(_ClosedModel):
     expires_at_unix: Annotated[int, Field(gt=0)]
     target_digest: Digest
     repository_privacy_recipe: RepositoryPrivacyRecipe | None
+    repository_privacy_preview: RepositoryPrivacyGrantPreviewModel | None
     import_publication_preview: ImportPublicationPreviewModel | None
     review_command: tuple[Literal["yoetz"], Literal["consent"], Literal["review"]]
     authorize_command: tuple[Literal["yoetz"], Literal["consent"], Literal["authorize"]] | None
@@ -116,6 +301,27 @@ class AgentSafePendingModel(_ClosedModel):
     @classmethod
     def _adapt_commands(cls, value: object) -> object:
         return tuple(cast(list[object], value)) if type(value) is list else value
+
+    @model_validator(mode="after")
+    def _bind_operation_preview(self) -> Self:
+        if self.operation == "repository_privacy_grant":
+            if (
+                self.repository_privacy_recipe is None
+                or self.repository_privacy_preview is None
+                or self.repository_privacy_recipe != self.repository_privacy_preview.recipe
+                or self.import_publication_preview is not None
+            ):
+                raise ValueError("repository_privacy_preview_invalid")
+        elif (
+            self.repository_privacy_recipe is not None
+            or self.repository_privacy_preview is not None
+        ):
+            raise ValueError("repository_privacy_preview_forbidden")
+        if (self.operation == "import_publication") != (
+            self.import_publication_preview is not None
+        ):
+            raise ValueError("import_publication_preview_invalid")
+        return self
 
 
 class ConsentCatalogOperationModel(_ClosedModel):
@@ -149,6 +355,9 @@ class ConsentRulesModel(_ClosedModel):
     agent_attested_current_chat_instruction_permitted: Literal[True]
     agent_attestation_is_independent_proof: Literal[False]
     compromised_agent_can_forge_attestation: Literal[True]
+    explicit_current_user_outcome_controls_supported_choice: Literal[True]
+    recommendations_are_advisory: Literal[True]
+    technical_authority_and_safety_boundaries_remain_enforced: Literal[True]
 
     @field_validator("forbidden_secret_channels", mode="before")
     @classmethod
@@ -157,7 +366,7 @@ class ConsentRulesModel(_ClosedModel):
 
 
 class ConsentCatalogModel(_ClosedModel):
-    schema_: Literal["yoetz.consent.catalog/5"] = Field(alias="schema")
+    schema_: Literal["yoetz.consent.catalog/6"] = Field(alias="schema")
     default_safe: tuple[
         Literal["mcp.start"],
         Literal["mcp.publish_work"],
@@ -177,13 +386,13 @@ class ConsentCatalogModel(_ClosedModel):
 
 
 class ConsentStatusModel(_ClosedModel):
-    schema_: Literal["yoetz.elevated-bootstrap.status/5"] = Field(alias="schema")
+    schema_: Literal["yoetz.elevated-bootstrap.status/6"] = Field(alias="schema")
     pending: AgentSafePendingModel | None
     consent_catalog: ConsentCatalogModel
 
 
 class ConsentPrepareResultModel(_ClosedModel):
-    schema_: Literal["yoetz.elevated-bootstrap.prepare-result/5"] = Field(alias="schema")
+    schema_: Literal["yoetz.elevated-bootstrap.prepare-result/6"] = Field(alias="schema")
     pending: AgentSafePendingModel
 
 
@@ -203,7 +412,7 @@ class ConsentProviderCredentialResultModel(_ClosedModel):
 
 
 class ConsentRepositoryPrivacyGrantResultModel(_ClosedModel):
-    recipe: Literal["assisted_review", "private", "metadata_only"]
+    recipe: RepositoryPrivacyRecipe
     outcome: Literal["granted", "tightened", "denied"]
 
 
@@ -320,7 +529,14 @@ class ConsentReviewResultModel(_ClosedModel):
                         "result": {
                             "type": "object",
                             "properties": {
-                                "recipe": {"enum": ["assisted_review", "private", "metadata_only"]},
+                                "recipe": {
+                                    "enum": [
+                                        "assisted_review",
+                                        "expanded_review",
+                                        "private",
+                                        "metadata_only",
+                                    ]
+                                },
                                 "outcome": {"enum": ["granted", "tightened"]},
                             },
                             "required": ["recipe", "outcome"],
@@ -426,7 +642,7 @@ class ConsentReviewResultModel(_ClosedModel):
         },
     )
 
-    schema_: Literal["yoetz.elevated-bootstrap.result/5"] = Field(alias="schema")
+    schema_: Literal["yoetz.elevated-bootstrap.result/6"] = Field(alias="schema")
     pending_id: PendingId
     operation: ConsentOperation
     risk_class: RiskClass

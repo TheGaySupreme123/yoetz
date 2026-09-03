@@ -6,7 +6,6 @@ import os
 import time
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, ExitStack
-from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
 
 from yoetz.cli.trusted_console import TrustedConsoleError, TrustedForegroundConsole
@@ -24,7 +23,6 @@ from yoetz.protocol.chat_user_authority import (
 from yoetz.protocol.consent import (
     ConsentPrepareResultModel,
     ConsentReviewResultModel,
-    RepositoryPrivacyRecipe,
 )
 from yoetz.service.confidential_client import (
     ConfidentialClientError,
@@ -93,7 +91,7 @@ def prepare_elevated(
     operation: ElevatedOperation,
     *,
     provider_binding: Mapping[str, str] | None = None,
-    grant_binding: Mapping[str, str] | None = None,
+    grant_binding: Mapping[str, JsonValue] | None = None,
     target_digest: str | None = None,
 ) -> dict[str, JsonValue]:
     digest = _target_digest(operation, provider_binding, grant_binding, target_digest)
@@ -105,7 +103,7 @@ def prepare_elevated(
     )
     model = ConsentPrepareResultModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.prepare-result/5",
+            "schema": "yoetz.elevated-bootstrap.prepare-result/6",
             "pending": projection_for_status(pending),
         }
     )
@@ -129,6 +127,9 @@ def _render_review(console: TrustedForegroundConsole, pending: PendingElevatedCo
     if pending.import_publication_preview is not None:
         preview = canonical_encode(dict(pending.import_publication_preview)).decode("utf-8")
         detail += f"Import publication preview (structural JSON):\n{preview}\n"
+    if pending.grant_binding is not None:
+        preview = canonical_encode(pending.grant_binding["preview"]).decode("utf-8")
+        detail += f"Repository privacy preview (structural JSON):\n{preview}\n"
     console.write(detail + pending.danger_text + "\n")
 
 
@@ -144,7 +145,7 @@ def _review_result(
     try:
         model = ConsentReviewResultModel.model_validate(
             {
-                "schema": "yoetz.elevated-bootstrap.result/5",
+                "schema": "yoetz.elevated-bootstrap.result/6",
                 "pending_id": pending.pending_id,
                 "operation": pending.operation,
                 "risk_class": pending.risk_class,
@@ -689,16 +690,22 @@ async def _complete_repository_privacy_grant(
 ) -> dict[str, JsonValue]:
     if pending.grant_binding is None:
         raise ElevatedBootstrapError("grant_binding_required")
-    recipe = pending.grant_binding["recipe"]
-    expected_commitment = pending.grant_binding["repository_privacy_commitment"]
-    expected_authority_digest = pending.grant_binding["authority_digest"]
+    from yoetz.adapters.privacy.catalog import decode_privacy_policy_canonical
+
+    preview = cast(Mapping[str, JsonValue], pending.grant_binding["preview"])
+    recipe = cast(str, preview["recipe"])
+    expected_commitment = cast(str, preview["repository_privacy_commitment"])
+    expected_authority_digest = cast(str, preview["authority_digest"])
+    expected_current_digest = cast(str, preview["current_policy_digest"])
+    expected_candidate_digest = cast(str, preview["candidate_policy_digest"])
+    candidate = decode_privacy_policy_canonical(
+        canonical_encode(pending.grant_binding["candidate_policy"])
+    )
     from yoetz.cli.privacy_control import PrivacyDecisionUnconfirmed, decide_policy
     from yoetz.cli.privacy_setup import (
-        build_candidate_policy,
         configured_bindings,
         get_privacy_setup_snapshot,
         propose_privacy_candidate,
-        recipe_answers,
     )
     from yoetz.ports.control import ControlError
 
@@ -709,17 +716,24 @@ async def _complete_repository_privacy_grant(
     observed = snapshot.bound_scope.get("workspace_ref_commitment")
     if type(observed) is not str or observed != expected_commitment:
         raise ElevatedBootstrapError("chat_user_target_mismatch")
-    if snapshot.authority_digest != expected_authority_digest:
+    if (
+        snapshot.authority_digest != expected_authority_digest
+        or snapshot.composed_policy.policy_digest != expected_current_digest
+        or candidate.policy_digest != expected_candidate_digest
+    ):
         raise ElevatedBootstrapError("chat_user_target_mismatch")
     try:
         external, _local = configured_bindings()
-        answers = recipe_answers(
-            cast(RepositoryPrivacyRecipe, recipe),
-            snapshot.composed_policy,
-            external,
+        llm = next(
+            channel
+            for channel in candidate.channel_policies
+            if channel.channel.value == "llm_inference"
         )
-        candidate = build_candidate_policy(snapshot.composed_policy, answers, now=datetime.now(UTC))
+        if llm.provider_binding is not None and llm.provider_binding != external:
+            raise ElevatedBootstrapError("chat_user_target_mismatch")
         proposal_id = await propose_privacy_candidate(candidate, snapshot.authority_digest)
+    except ElevatedBootstrapError:
+        raise
     except (ControlError, OSError, TypeError, ValueError) as exc:
         raise ElevatedBootstrapError("repository_privacy_grant_failed") from exc
     if proposal_id is None:
@@ -756,7 +770,7 @@ async def _complete_repository_privacy_grant(
 def _target_digest(
     operation: ElevatedOperation,
     provider_binding: Mapping[str, str] | None,
-    grant_binding: Mapping[str, str] | None,
+    grant_binding: Mapping[str, JsonValue] | None,
     target_digest: str | None,
 ) -> str:
     spec = operation_spec(operation)

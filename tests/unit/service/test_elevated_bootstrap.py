@@ -5,14 +5,23 @@ from __future__ import annotations
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, get_ident
 from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+from tests.builders.privacy_policies import (
+    INSTALLATION_ID,
+    local_only_policy,
+    minimal_external_policy,
+)
 
 import yoetz.service.elevated_bootstrap as elevated_bootstrap
+from yoetz.cli.privacy_setup import build_candidate_policy, recipe_answers
+from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind, ProviderBinding
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.schemas import validate_schema_instance
 from yoetz.service.elevated_bootstrap import (
@@ -25,6 +34,7 @@ from yoetz.service.elevated_bootstrap import (
     load_pending,
     prepare_pending,
     projection_for_status,
+    repository_grant_binding,
     status_payload,
 )
 
@@ -50,6 +60,39 @@ _AGENT_FORBIDDEN = {
 }
 
 
+def _grant_binding(recipe: str = "assisted_review") -> dict[str, Any]:
+    current = replace(
+        local_only_policy(),
+        effective_scope=AuthorizationScope(
+            AuthorizationScopeKind.WORKSPACE,
+            INSTALLATION_ID,
+            _REPOSITORY_COMMITMENT,
+        ),
+    )
+    external = ProviderBinding(
+        "fireworks",
+        "accounts/fireworks/models/minimax-m3",
+        "fireworks-responses",
+        "1.0.0",
+        "external",
+    )
+    candidate = build_candidate_policy(
+        current,
+        recipe_answers(cast(Any, recipe), current, external),
+        now=datetime(2026, 9, 3, tzinfo=UTC),
+    )
+    return cast(
+        dict[str, Any],
+        repository_grant_binding(
+            recipe=cast(Any, recipe),
+            repository_privacy_commitment=_REPOSITORY_COMMITMENT,
+            authority_digest=_AUTHORITY_DIGEST,
+            current_policy=current,
+            candidate_policy=candidate,
+        ),
+    )
+
+
 def _assert_agent_safe(value: object) -> None:
     rendered = json.dumps(value, sort_keys=True)
     for forbidden in _AGENT_FORBIDDEN:
@@ -58,7 +101,7 @@ def _assert_agent_safe(value: object) -> None:
 
 def test_catalog_is_review_only_and_agent_safe() -> None:
     catalog = cast(dict[str, Any], catalog_payload())
-    assert catalog["schema"] == "yoetz.consent.catalog/5"
+    assert catalog["schema"] == "yoetz.consent.catalog/6"
     assert "mcp.start" in catalog["default_safe"]
     assert catalog["rules"]["no_standing_yolo"] is True
     assert catalog["rules"]["independent_user_presence_required_for_agent_chat"] is False
@@ -67,6 +110,9 @@ def test_catalog_is_review_only_and_agent_safe() -> None:
     assert catalog["rules"]["agent_attested_current_chat_instruction_permitted"] is True
     assert catalog["rules"]["agent_attestation_is_independent_proof"] is False
     assert catalog["rules"]["compromised_agent_can_forge_attestation"] is True
+    assert catalog["rules"]["explicit_current_user_outcome_controls_supported_choice"] is True
+    assert catalog["rules"]["recommendations_are_advisory"] is True
+    assert catalog["rules"]["technical_authority_and_safety_boundaries_remain_enforced"] is True
     by_name = {item["operation"]: item for item in catalog["operations"]}
     assert by_name["vault_initialize"]["implemented"] is True
     assert by_name["vault_initialize"]["agent_chat_authorize_allowed"] is True
@@ -101,22 +147,24 @@ def test_prepare_projection_contains_only_agent_safe_review_fields(tmp_path: Pat
         "operation",
         "pending_id",
         "repository_privacy_recipe",
+        "repository_privacy_preview",
         "authorize_command",
         "review_command",
         "risk_class",
         "schema",
         "target_digest",
     }
-    assert projection["schema"] == "yoetz.consent.pending-agent/5"
+    assert projection["schema"] == "yoetz.consent.pending-agent/6"
     assert projection["review_command"] == ["yoetz", "consent", "review"]
     assert projection["authorize_command"] == ["yoetz", "consent", "authorize"]
     assert projection["repository_privacy_recipe"] is None
+    assert projection["repository_privacy_preview"] is None
     assert projection["import_publication_preview"] is None
     assert pending.expires_at_unix - pending.created_at_unix == 15 * 60
     stored = json.loads(
         (tmp_path / "elevated-bootstrap" / "elevated-bootstrap-pending.json").read_text()
     )
-    assert stored["schema"] == "yoetz.elevated-bootstrap.pending/3"
+    assert stored["schema"] == "yoetz.elevated-bootstrap.pending/4"
     _assert_agent_safe(projection)
     _assert_agent_safe(stored)
 
@@ -317,14 +365,15 @@ def test_interrupted_review_marker_blocks_reuse_and_new_prepare(tmp_path: Path) 
     complete_review(claimed, outcome="failed", _state=tmp_path)
 
 
-def test_legacy_v1_record_is_invalidated_not_migrated(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", ["1", "2", "3"])
+def test_legacy_pending_record_is_invalidated_not_migrated(tmp_path: Path, version: str) -> None:
     root = tmp_path / "elevated-bootstrap"
     root.mkdir(mode=0o700)
     path = root / "elevated-bootstrap-pending.json"
     path.write_text(
         json.dumps(
             {
-                "schema": "yoetz.elevated-bootstrap.pending/1",
+                "schema": f"yoetz.elevated-bootstrap.pending/{version}",
                 "confirmation_phrase": "reusable value",
             }
         )
@@ -337,6 +386,32 @@ def test_legacy_v1_record_is_invalidated_not_migrated(tmp_path: Path) -> None:
     audit = (root / "elevated-bootstrap-audit.jsonl").read_text()
     assert "legacy_pending_invalidated" in audit
     assert "reusable value" not in audit
+
+
+@pytest.mark.parametrize("version", ["1", "2", "3"])
+def test_legacy_claim_marker_remains_owned_and_blocks_replacement(
+    tmp_path: Path, version: str
+) -> None:
+    """Upgrade never steals a possibly live pre-upgrade review claim."""
+
+    root = tmp_path / "elevated-bootstrap"
+    root.mkdir(mode=0o700)
+    marker = root / "elevated-bootstrap-reviewing.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "schema": f"yoetz.elevated-bootstrap.pending/{version}",
+                "pending_id": "possibly-live-owner",
+            }
+        )
+    )
+
+    assert load_pending(_state=tmp_path) is None
+    with pytest.raises(ElevatedBootstrapError) as replacement:
+        prepare_pending("vault_initialize", target_digest=_TARGET, _state=tmp_path)
+    assert replacement.value.reason == "review_in_progress"
+    assert marker.is_file()
+    assert not (root / "elevated-bootstrap-audit.jsonl").exists()
 
 
 def test_expiry_consumes_before_review(tmp_path: Path) -> None:
@@ -389,11 +464,7 @@ def test_prepare_provider_binding_rules(tmp_path: Path) -> None:
 
 
 def test_prepare_grant_binding_rules(tmp_path: Path) -> None:
-    grant = {
-        "recipe": "assisted_review",
-        "repository_privacy_commitment": _REPOSITORY_COMMITMENT,
-        "authority_digest": _AUTHORITY_DIGEST,
-    }
+    grant = _grant_binding()
     with pytest.raises(ElevatedBootstrapError) as missing:
         prepare_pending(
             "repository_privacy_grant",
@@ -410,11 +481,10 @@ def test_prepare_grant_binding_rules(tmp_path: Path) -> None:
         )
     assert forbidden.value.reason == "grant_binding_forbidden"
     for invalid in (
-        {**grant, "recipe": "expanded_review"},
-        {**grant, "recipe": "custom"},
-        {**grant, "recipe": "unknown"},
-        {**grant, "repository_privacy_commitment": "not-a-commitment"},
-        {**grant, "authority_digest": "sha256:not-hex"},
+        {**grant, "schema": "wrong"},
+        {**grant, "preview": {**grant["preview"], "recipe": "custom"}},
+        {**grant, "preview": {**grant["preview"], "diff_digest": "sha256:" + "0" * 64}},
+        {**grant, "candidate_policy": grant["current_policy"]},
     ):
         with pytest.raises(ElevatedBootstrapError) as malformed:
             prepare_pending(
@@ -427,11 +497,7 @@ def test_prepare_grant_binding_rules(tmp_path: Path) -> None:
 
 
 def test_repository_grant_is_repository_bound(tmp_path: Path) -> None:
-    grant = {
-        "recipe": "assisted_review",
-        "repository_privacy_commitment": _REPOSITORY_COMMITMENT,
-        "authority_digest": _AUTHORITY_DIGEST,
-    }
+    grant = _grant_binding("expanded_review")
     pending = prepare_pending(
         "repository_privacy_grant",
         target_digest=grant_target_digest(grant),
@@ -440,13 +506,99 @@ def test_repository_grant_is_repository_bound(tmp_path: Path) -> None:
     )
     assert pending.grant_binding == grant
     grant_projection = cast(dict[str, Any], projection_for_status(pending))
-    assert grant_projection["repository_privacy_recipe"] == "assisted_review"
+    assert grant_projection["repository_privacy_recipe"] == "expanded_review"
+    assert grant_projection["repository_privacy_preview"]["recipe"] == "expanded_review"
+    assert grant_projection["repository_privacy_preview"]["changes"]
     assert grant_projection["authorize_command"] == ["yoetz", "consent", "authorize"]
     assert load_pending(_state=tmp_path) == pending
     assert (
-        grant_target_digest({**grant, "authority_digest": "sha256:" + ("e" * 64)})
+        grant_target_digest(
+            {
+                **grant,
+                "preview": {
+                    **grant["preview"],
+                    "authority_digest": "sha256:" + ("e" * 64),
+                },
+            }
+        )
         != pending.target_digest
     )
+
+
+@pytest.mark.parametrize(
+    "recipe", ["expanded_review", "assisted_review", "metadata_only", "private"]
+)
+def test_every_named_recipe_has_one_exact_previewed_grant_binding(recipe: str) -> None:
+    grant = _grant_binding(recipe)
+    preview = grant["preview"]
+    assert isinstance(preview, dict)
+    assert preview["recipe"] == recipe
+    assert preview["repository_privacy_commitment"] == _REPOSITORY_COMMITMENT
+    assert preview["authority_digest"] == _AUTHORITY_DIGEST
+    assert grant_target_digest(grant).startswith("sha256:")
+
+
+def test_preview_names_provider_binding_even_when_the_route_does_not_change() -> None:
+    current = replace(
+        minimal_external_policy(),
+        effective_scope=AuthorizationScope(
+            AuthorizationScopeKind.WORKSPACE,
+            INSTALLATION_ID,
+            _REPOSITORY_COMMITMENT,
+        ),
+    )
+    external = next(
+        channel.provider_binding
+        for channel in current.channel_policies
+        if channel.provider_binding is not None
+    )
+    assert external is not None
+    candidate = build_candidate_policy(
+        current,
+        recipe_answers("expanded_review", current, external),
+        now=datetime(2026, 9, 3, tzinfo=UTC),
+    )
+    grant = repository_grant_binding(
+        recipe="expanded_review",
+        repository_privacy_commitment=_REPOSITORY_COMMITMENT,
+        authority_digest=_AUTHORITY_DIGEST,
+        current_policy=current,
+        candidate_policy=candidate,
+    )
+    preview = cast(dict[str, Any], grant["preview"])
+    assert preview["candidate_provider_binding"]["model_id"] == external.model_id
+    assert not any(
+        change["area"] == "channel" and change["field"] == "provider"
+        for change in preview["changes"]
+    )
+
+
+def test_first_repository_grant_binds_machine_baseline_to_repository_target() -> None:
+    current = local_only_policy()
+    external = ProviderBinding(
+        "fireworks",
+        "accounts/fireworks/models/minimax-m3",
+        "fireworks-responses",
+        "1.0.0",
+        "external",
+    )
+    candidate = build_candidate_policy(
+        current,
+        recipe_answers("expanded_review", current, external),
+        now=datetime(2026, 9, 3, tzinfo=UTC),
+    )
+    grant = repository_grant_binding(
+        recipe="expanded_review",
+        repository_privacy_commitment=_REPOSITORY_COMMITMENT,
+        authority_digest=_AUTHORITY_DIGEST,
+        current_policy=current,
+        candidate_policy=candidate,
+    )
+    preview = cast(dict[str, Any], grant["preview"])
+    assert current.effective_scope.kind is AuthorizationScopeKind.MACHINE
+    assert candidate.effective_scope.kind is AuthorizationScopeKind.MACHINE
+    assert preview["repository_privacy_commitment"] == _REPOSITORY_COMMITMENT
+    assert grant_target_digest(grant).startswith("sha256:")
 
 
 def test_provider_binding_preserves_repository_commitment(tmp_path: Path) -> None:
@@ -475,9 +627,9 @@ def test_target_digest_and_unimplemented_operations_are_rejected(tmp_path: Path)
 
 def test_status_contains_nullable_pending_and_catalog(tmp_path: Path) -> None:
     empty = cast(dict[str, Any], status_payload(_state=tmp_path))
-    assert empty["schema"] == "yoetz.elevated-bootstrap.status/5"
+    assert empty["schema"] == "yoetz.elevated-bootstrap.status/6"
     assert empty["pending"] is None
-    assert empty["consent_catalog"]["schema"] == "yoetz.consent.catalog/5"
+    assert empty["consent_catalog"]["schema"] == "yoetz.consent.catalog/6"
     _assert_agent_safe(empty)
 
     prepare_pending(
@@ -487,6 +639,6 @@ def test_status_contains_nullable_pending_and_catalog(tmp_path: Path) -> None:
     assert prepared["pending"]["operation"] == "provider_credential_set"
     assert prepared["pending"]["authorize_command"] == ["yoetz", "consent", "authorize"]
     _assert_agent_safe(prepared)
-    validate_schema_instance("catalog", "5.0.0", prepared["consent_catalog"])
-    validate_schema_instance("pending-agent", "5.0.0", prepared["pending"])
-    validate_schema_instance("status", "5.0.0", prepared)
+    validate_schema_instance("catalog", "6.0.0", prepared["consent_catalog"])
+    validate_schema_instance("pending-agent", "6.0.0", prepared["pending"])
+    validate_schema_instance("status", "6.0.0", prepared)

@@ -12,6 +12,7 @@ mocking only the OS keyring backend and the configured provider binding.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -27,11 +28,16 @@ from integration.service.test_consent_vault_initialize_composition import (
     runtime_directory,  # noqa: F401 - imported pytest fixture  # pyright: ignore[reportUnusedImport]
 )
 from yoetz.cli import elevated
-from yoetz.cli.privacy_setup import PrivacySetupSnapshot, get_privacy_setup_snapshot
+from yoetz.cli.privacy_setup import (
+    PrivacySetupSnapshot,
+    build_candidate_policy,
+    get_privacy_setup_snapshot,
+    recipe_answers,
+)
 from yoetz.domain.privacy import ProviderBinding
 from yoetz.service.confidential_protocol import ServerCloseEnvelope
 from yoetz.service.daemon import ServiceDaemon
-from yoetz.service.elevated_bootstrap import load_pending
+from yoetz.service.elevated_bootstrap import load_pending, repository_grant_binding
 
 
 @pytest.fixture
@@ -70,13 +76,20 @@ async def _prepared_grant_snapshot(consent_state: Path) -> PrivacySetupSnapshot:
     commitment = snapshot.bound_scope.get("workspace_ref_commitment")
     assert type(commitment) is str
     assert snapshot.grant_state == "missing"
+    candidate = build_candidate_policy(
+        snapshot.composed_policy,
+        recipe_answers("expanded_review", snapshot.composed_policy, _EXTERNAL_BINDING),
+        now=datetime.now(UTC),
+    )
     elevated.prepare_elevated(
         "repository_privacy_grant",
-        grant_binding={
-            "recipe": "assisted_review",
-            "repository_privacy_commitment": commitment,
-            "authority_digest": snapshot.authority_digest,
-        },
+        grant_binding=repository_grant_binding(
+            recipe="expanded_review",
+            repository_privacy_commitment=commitment,
+            authority_digest=snapshot.authority_digest,
+            current_policy=snapshot.composed_policy,
+            candidate_policy=candidate,
+        ),
     )
     return snapshot
 
@@ -136,7 +149,7 @@ async def _run_grant_flow(
 
             assert result["outcome"] == "completed"
             assert result["authority_channel"] == "agent_attested_chat_instruction"
-            assert result["result"] == {"recipe": "assisted_review", "outcome": "granted"}
+            assert result["result"] == {"recipe": "expanded_review", "outcome": "granted"}
             snapshot_after = await get_privacy_setup_snapshot()
             _assert_granted_once(consent_state, snapshot_after)
     finally:

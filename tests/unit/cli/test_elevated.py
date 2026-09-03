@@ -7,6 +7,8 @@ import io
 import json
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -15,11 +17,15 @@ from unittest.mock import patch
 import anyio
 import pytest
 from pydantic import ValidationError
+from tests.builders.privacy_policies import INSTALLATION_ID, local_only_policy
 from typer.testing import CliRunner
 
 from yoetz.cli import elevated
 from yoetz.cli.app import app
+from yoetz.cli.privacy_setup import build_candidate_policy, recipe_answers
 from yoetz.cli.trusted_console import TrustedForegroundConsole
+from yoetz.config.models import ConfigError
+from yoetz.domain.privacy import AuthorizationScope, AuthorizationScopeKind, ProviderBinding
 from yoetz.protocol.canonical import canonical_digest
 from yoetz.protocol.chat_user_authority import ChatUserAttestationModel
 from yoetz.protocol.consent import ConsentReviewResultModel
@@ -40,6 +46,7 @@ from yoetz.service.elevated_bootstrap import (
     load_import_publication_authorization,
     load_pending,
     prepare_pending,
+    repository_grant_binding,
 )
 
 
@@ -204,6 +211,131 @@ def test_prepare_repository_grant_maps_privacy_snapshot_failure() -> None:
     assert "private internal detail" not in result.stderr
 
 
+def test_prepare_expanded_review_returns_exact_agent_safe_policy_diff(tmp_path: Path) -> None:
+    async def snapshot() -> SimpleNamespace:
+        return SimpleNamespace(
+            bound_scope={"workspace_ref_commitment": _GRANT_REPOSITORY_COMMITMENT},
+            authority_digest=_GRANT_AUTHORITY_DIGEST,
+            composed_policy=_GRANT_CURRENT,
+        )
+
+    with (
+        _patch_state(tmp_path),
+        patch("yoetz.cli.privacy_setup.get_privacy_setup_snapshot", side_effect=snapshot),
+        patch(
+            "yoetz.cli.privacy_setup.configured_bindings",
+            return_value=(_GRANT_EXTERNAL, None),
+        ),
+    ):
+        result = CliRunner().invoke(
+            app,
+            [
+                "consent",
+                "prepare",
+                "repository_privacy_grant",
+                "--recipe",
+                "expanded_review",
+            ],
+        )
+
+    assert result.exit_code == 0, result.stderr
+    prepared = json.loads(result.stdout)
+    preview = prepared["pending"]["repository_privacy_preview"]
+    assert preview["recipe"] == "expanded_review"
+    assert preview["current_policy_digest"] == _GRANT_CURRENT.policy_digest
+    assert preview["candidate_policy_digest"].startswith("sha256:")
+    assert preview["candidate_policy_digest"] != preview["current_policy_digest"]
+    assert preview["candidate_provider_binding"] == {
+        "provider_id": "fireworks",
+        "model_id": "accounts/fireworks/models/minimax-m3",
+        "endpoint_profile_id": "fireworks-responses",
+        "endpoint_profile_version": "1.0.0",
+        "transport": "external",
+    }
+    binding_change = next(
+        change
+        for change in preview["changes"]
+        if change["area"] == "channel"
+        and change["subject"] == "llm_inference"
+        and change["field"] == "provider"
+    )
+    assert set(binding_change["after"]["labels"]) == {
+        "provider:fireworks",
+        "model:accounts/fireworks/models/minimax-m3",
+        "endpoint:fireworks-responses",
+        "endpoint_version:1.0.0",
+        "transport:external",
+    }
+    assert prepared["pending"]["authorize_command"] == ["yoetz", "consent", "authorize"]
+    validate_schema_instance("prepare-result", "6.0.0", prepared)
+
+
+def test_prepare_unknown_repository_recipe_is_a_bounded_failure(tmp_path: Path) -> None:
+    async def snapshot() -> SimpleNamespace:
+        return SimpleNamespace(
+            bound_scope={"workspace_ref_commitment": _GRANT_REPOSITORY_COMMITMENT},
+            authority_digest=_GRANT_AUTHORITY_DIGEST,
+            composed_policy=_GRANT_CURRENT,
+        )
+
+    with (
+        _patch_state(tmp_path),
+        patch("yoetz.cli.privacy_setup.get_privacy_setup_snapshot", side_effect=snapshot),
+        patch(
+            "yoetz.cli.privacy_setup.configured_bindings",
+            return_value=(_GRANT_EXTERNAL, None),
+        ),
+    ):
+        result = CliRunner().invoke(
+            app,
+            [
+                "consent",
+                "prepare",
+                "repository_privacy_grant",
+                "--recipe",
+                "unknown",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert "elevated_bootstrap: grant_binding_invalid" in result.stderr
+    assert "internal_error" not in result.stderr
+    assert load_pending(_state=tmp_path) is None
+
+
+def test_prepare_repository_grant_config_error_is_a_bounded_failure(tmp_path: Path) -> None:
+    async def snapshot() -> SimpleNamespace:
+        return SimpleNamespace(
+            bound_scope={"workspace_ref_commitment": _GRANT_REPOSITORY_COMMITMENT},
+            authority_digest=_GRANT_AUTHORITY_DIGEST,
+            composed_policy=_GRANT_CURRENT,
+        )
+
+    with (
+        _patch_state(tmp_path),
+        patch("yoetz.cli.privacy_setup.get_privacy_setup_snapshot", side_effect=snapshot),
+        patch(
+            "yoetz.cli.privacy_setup.configured_bindings",
+            side_effect=ConfigError("unknown_config_key"),
+        ),
+    ):
+        result = CliRunner().invoke(
+            app,
+            [
+                "consent",
+                "prepare",
+                "repository_privacy_grant",
+                "--recipe",
+                "expanded_review",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert "elevated_bootstrap: grant_binding_invalid" in result.stderr
+    assert "internal_error" not in result.stderr
+    assert load_pending(_state=tmp_path) is None
+
+
 def test_catalog_prepare_hint_names_only_the_caller_supplied_provider_flags() -> None:
     catalog = cast(dict[str, Any], elevated.catalog_elevated())
     hints = {
@@ -265,7 +397,7 @@ def test_chat_user_authorize_consumes_exact_provider_request_and_wipes_input(
     assert observed == [b"chat-secret"]
     assert result["authority_channel"] == "agent_attested_chat_instruction"
     assert result["outcome"] == "completed"
-    validate_schema_instance("review-result", "5.0.0", result)
+    validate_schema_instance("review-result", "6.0.0", result)
     assert load_pending(_state=tmp_path) is None
     assert "chat-secret" not in json.dumps(result)
 
@@ -365,13 +497,8 @@ def test_agent_chat_authorize_fails_closed_without_local_reauthentication(
 
 def test_chat_user_authorize_denial_is_single_shot_for_repository_grant(tmp_path: Path) -> None:
     async def run() -> dict[str, Any]:
-        grant = {
-            "recipe": "assisted_review",
-            "repository_privacy_commitment": "hmac-sha256:" + ("d" * 64),
-            "authority_digest": "sha256:" + ("e" * 64),
-        }
         with _patch_state(tmp_path):
-            elevated.prepare_elevated("repository_privacy_grant", grant_binding=grant)
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=_GRANT_BINDING)
             pending = load_pending(_state=tmp_path)
             assert pending is not None
             with patch("yoetz.cli.elevated._complete_repository_privacy_grant") as complete:
@@ -390,38 +517,66 @@ def test_chat_user_authorize_denial_is_single_shot_for_repository_grant(tmp_path
     assert load_pending(_state=tmp_path) is None
 
 
-_GRANT_BINDING = {
-    "recipe": "assisted_review",
-    "repository_privacy_commitment": "hmac-sha256:" + ("d" * 64),
-    "authority_digest": "sha256:" + ("e" * 64),
-}
+_GRANT_REPOSITORY_COMMITMENT = "hmac-sha256:" + ("d" * 64)
+_GRANT_AUTHORITY_DIGEST = "sha256:" + ("e" * 64)
+_GRANT_CURRENT = replace(
+    local_only_policy(),
+    effective_scope=AuthorizationScope(
+        AuthorizationScopeKind.WORKSPACE,
+        INSTALLATION_ID,
+        _GRANT_REPOSITORY_COMMITMENT,
+    ),
+)
+_GRANT_EXTERNAL = ProviderBinding(
+    "fireworks",
+    "accounts/fireworks/models/minimax-m3",
+    "fireworks-responses",
+    "1.0.0",
+    "external",
+)
+_GRANT_CANDIDATE = build_candidate_policy(
+    _GRANT_CURRENT,
+    recipe_answers("expanded_review", _GRANT_CURRENT, _GRANT_EXTERNAL),
+    now=datetime(2026, 9, 3, tzinfo=UTC),
+)
+_GRANT_BINDING = repository_grant_binding(
+    recipe="expanded_review",
+    repository_privacy_commitment=_GRANT_REPOSITORY_COMMITMENT,
+    authority_digest=_GRANT_AUTHORITY_DIGEST,
+    current_policy=_GRANT_CURRENT,
+    candidate_policy=_GRANT_CANDIDATE,
+)
 
 
 @contextmanager
 def _repository_grant_patches(
     decide: Callable[..., object],
     propose: Callable[..., object] | None = None,
+    *,
+    external: ProviderBinding | None = _GRANT_EXTERNAL,
+    authority_digest: str = _GRANT_AUTHORITY_DIGEST,
+    repository_commitment: str = _GRANT_REPOSITORY_COMMITMENT,
 ) -> Generator[Any]:
     """Patch everything around the decide ceremony so its outcome handling is under test."""
 
     async def snapshot() -> SimpleNamespace:
         return SimpleNamespace(
-            bound_scope={
-                "workspace_ref_commitment": _GRANT_BINDING["repository_privacy_commitment"]
-            },
-            authority_digest=_GRANT_BINDING["authority_digest"],
-            composed_policy=object(),
+            bound_scope={"workspace_ref_commitment": repository_commitment},
+            authority_digest=authority_digest,
+            composed_policy=_GRANT_CURRENT,
         )
 
     async def default_propose(candidate: object, authority_digest: str) -> str:
-        del candidate, authority_digest
+        assert candidate == _GRANT_CANDIDATE
+        assert authority_digest == _GRANT_AUTHORITY_DIGEST
         return "ppr_00000000-0000-4000-8000-000000000519"
 
     with (
         patch("yoetz.cli.privacy_setup.get_privacy_setup_snapshot", side_effect=snapshot),
-        patch("yoetz.cli.privacy_setup.configured_bindings", return_value=(None, None)),
-        patch("yoetz.cli.privacy_setup.recipe_answers", return_value=object()),
-        patch("yoetz.cli.privacy_setup.build_candidate_policy", return_value=object()),
+        patch(
+            "yoetz.cli.privacy_setup.configured_bindings",
+            return_value=(external, None),
+        ),
         patch(
             "yoetz.cli.privacy_setup.propose_privacy_candidate",
             side_effect=default_propose if propose is None else propose,
@@ -470,8 +625,8 @@ def test_repository_grant_recovers_committed_result_when_close_confirmation_lost
 
     result = anyio.run(run)
     assert result["outcome"] == "completed"
-    assert result["result"] == {"recipe": "assisted_review", "outcome": "granted"}
-    validate_schema_instance("review-result", "5.0.0", result)
+    assert result["result"] == {"recipe": "expanded_review", "outcome": "granted"}
+    validate_schema_instance("review-result", "6.0.0", result)
     assert load_pending(_state=tmp_path) is None
     audit = _audit_lines(tmp_path)
     assert any('"outcome":"approved"' in line for line in audit)
@@ -587,6 +742,46 @@ def test_repository_grant_pre_commit_failures_stay_bounded_with_no_grant(tmp_pat
     anyio.run(run)
 
 
+@pytest.mark.parametrize("drift", ["provider", "policy", "repository"])
+def test_repository_grant_rejects_prepared_target_drift_before_proposal(
+    tmp_path: Path, drift: str
+) -> None:
+    async def decide(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a drifted grant must not reach decision")
+
+    async def run() -> None:
+        with _patch_state(tmp_path):
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=_GRANT_BINDING)
+            pending = load_pending(_state=tmp_path)
+            assert pending is not None
+            changed_provider = ProviderBinding(
+                "fireworks",
+                "different-model",
+                "fireworks-responses",
+                "1.0.0",
+                "external",
+            )
+            with _repository_grant_patches(
+                decide,
+                external=changed_provider if drift == "provider" else _GRANT_EXTERNAL,
+                authority_digest=(
+                    "sha256:" + ("9" * 64) if drift == "policy" else _GRANT_AUTHORITY_DIGEST
+                ),
+                repository_commitment=(
+                    "hmac-sha256:" + ("9" * 64)
+                    if drift == "repository"
+                    else _GRANT_REPOSITORY_COMMITMENT
+                ),
+            ) as decide_mock:
+                with pytest.raises(ElevatedBootstrapError) as caught:
+                    await elevated.authorize_elevated(_chat_attestation(pending))
+                assert caught.value.reason == "chat_user_target_mismatch"
+                decide_mock.assert_not_awaited()
+        assert load_pending(_state=tmp_path) is None
+
+    anyio.run(run)
+
+
 def test_chat_user_authorize_requires_advertised_capability_before_claim(tmp_path: Path) -> None:
     async def run() -> None:
         with _patch_state(tmp_path):
@@ -685,7 +880,7 @@ def test_agent_chat_authorize_initializes_vault_and_rejects_missing_or_forbidden
             initialize.assert_awaited_once_with()
             assert vault_result["authority_channel"] == "agent_attested_chat_instruction"
             assert vault_result["result"] == {"state": "ready", "reason": "succeeded"}
-            validate_schema_instance("review-result", "5.0.0", vault_result)
+            validate_schema_instance("review-result", "6.0.0", vault_result)
             assert load_pending(_state=vault_state) is None
 
         credential_state = tmp_path / "credential"
@@ -701,13 +896,8 @@ def test_agent_chat_authorize_initializes_vault_and_rejects_missing_or_forbidden
             assert load_pending(_state=credential_state) == credential_pending
 
         grant_state = tmp_path / "grant"
-        grant = {
-            "recipe": "assisted_review",
-            "repository_privacy_commitment": "hmac-sha256:" + ("d" * 64),
-            "authority_digest": "sha256:" + ("e" * 64),
-        }
         with _patch_state(grant_state):
-            elevated.prepare_elevated("repository_privacy_grant", grant_binding=grant)
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=_GRANT_BINDING)
             grant_pending = load_pending(_state=grant_state)
             assert grant_pending is not None
             secret = bytearray(b"forbidden-secret")
@@ -724,13 +914,8 @@ def test_agent_chat_authorize_initializes_vault_and_rejects_missing_or_forbidden
 
 def test_repository_grant_requires_warning_without_consuming_pending(tmp_path: Path) -> None:
     async def run() -> None:
-        grant = {
-            "recipe": "assisted_review",
-            "repository_privacy_commitment": "hmac-sha256:" + ("d" * 64),
-            "authority_digest": "sha256:" + ("e" * 64),
-        }
         with _patch_state(tmp_path):
-            elevated.prepare_elevated("repository_privacy_grant", grant_binding=grant)
+            elevated.prepare_elevated("repository_privacy_grant", grant_binding=_GRANT_BINDING)
             pending = load_pending(_state=tmp_path)
             assert pending is not None
             with pytest.raises(ElevatedBootstrapError) as exc:
@@ -745,10 +930,10 @@ def test_catalog_and_prepare_are_agent_safe(tmp_path: Path) -> None:
     with _patch_state(tmp_path):
         catalog = cast(dict[str, Any], elevated.catalog_elevated())
         prepared = cast(dict[str, Any], elevated.prepare_elevated("vault_initialize"))
-    assert catalog["schema"] == "yoetz.consent.catalog/5"
-    assert prepared["schema"] == "yoetz.elevated-bootstrap.prepare-result/5"
+    assert catalog["schema"] == "yoetz.consent.catalog/6"
+    assert prepared["schema"] == "yoetz.elevated-bootstrap.prepare-result/6"
     assert prepared["pending"]["review_command"] == ["yoetz", "consent", "review"]
-    validate_schema_instance("prepare-result", "5.0.0", prepared)
+    validate_schema_instance("prepare-result", "6.0.0", prepared)
     rendered = json.dumps({"catalog": catalog, "prepared": prepared})
     for forbidden in (
         "approve_command",
@@ -797,7 +982,7 @@ def test_import_publication_authorization_is_exact_internal_and_one_use(tmp_path
         "authorization_target_digest": target,
         "outcome": "authorized",
     }
-    validate_schema_instance("review-result", "5.0.0", result)
+    validate_schema_instance("review-result", "6.0.0", result)
 
 
 def test_import_publication_denial_creates_no_authorization(tmp_path: Path) -> None:
@@ -894,7 +1079,7 @@ def test_review_result_binds_operation_outcome_and_result_in_model_and_schema(
     result: dict[str, object],
 ) -> None:
     payload = {
-        "schema": "yoetz.elevated-bootstrap.result/5",
+        "schema": "yoetz.elevated-bootstrap.result/6",
         "pending_id": "a" * 64,
         "operation": operation,
         "risk_class": risk_class,
@@ -906,7 +1091,7 @@ def test_review_result_binds_operation_outcome_and_result_in_model_and_schema(
     with pytest.raises(ValidationError):
         ConsentReviewResultModel.model_validate(payload)
     with pytest.raises(SchemaInstanceInvalid):
-        validate_schema_instance("review-result", "5.0.0", cast(Any, payload))
+        validate_schema_instance("review-result", "6.0.0", cast(Any, payload))
 
 
 def test_review_approval_consumes_pending_and_returns_no_secret(tmp_path: Path) -> None:
@@ -926,9 +1111,9 @@ def test_review_approval_consumes_pending_and_returns_no_secret(tmp_path: Path) 
                 return cast(dict[str, Any], await elevated.review_elevated())
 
     result = anyio.run(run)
-    assert result["schema"] == "yoetz.elevated-bootstrap.result/5"
+    assert result["schema"] == "yoetz.elevated-bootstrap.result/6"
     assert result["outcome"] == "completed"
-    validate_schema_instance("review-result", "5.0.0", result)
+    validate_schema_instance("review-result", "6.0.0", result)
     assert load_pending(_state=tmp_path) is None
     assert "human-entered-secret" not in json.dumps(result)
 

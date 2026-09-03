@@ -389,6 +389,12 @@ discovery, activation, MCP sources, stale process/cache behavior, and regular-pr
 Cursor is not an allowlisted `yoetz consent authorize` attestation client in v0.1. It may show the
 agent-safe pending status and direct the user to a supported Codex attestation or local trusted
 command, but it must not emulate `vault_initialize` or `vault_passphrase_rotate` authorization.
+It still guides setup, installation, and settings choices in normal conversation and leaves each
+supported product choice with the user. When semantic review is the stated goal, it recommends
+Expanded first and explains Assisted as the lower-disclosure semantic option. It may show the full
+v6 repository privacy preview, but its missing chat-authority capability is a technical boundary:
+give the shortest exact trusted-local continuation and never silently downgrade the chosen recipe,
+provider, or model.
 
 First-run start continuation (issue #512): on a never-initialized install, the agent's first MCP
 `start` returns non-retryable `VAULT_LOCKED` carrying

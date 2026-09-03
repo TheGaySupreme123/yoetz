@@ -80,10 +80,16 @@ bytes; otherwise it requires a new schema version. A new event family requires a
 registry, schema, reducer, unknown-gap handling, fixture, skill, and documentation update — it never
 ships as a silent addition.
 
-The agent-chat consent change publishes `catalog`, `pending-agent`, `prepare-result`,
-`review-result`, and `status` as request/result schema version `3.0.0`. Their frozen `2.0.0` files
-remain byte-identical and present in the registry and package; current runtime projections emit v3.
-The new `chat-user-attestation` family is version `1.0.0` because it had no earlier public shape.
+Consent publishes `catalog`, `pending-agent`, `prepare-result`, `review-result`, and `status` as one
+versioned family. Frozen v2-v5 files remain byte-identical and packaged; current runtime projections
+emit v6. V6 adds the exact repository privacy before/after preview and admits
+`expanded_review`, so older readers never reinterpret that wider enum or silently omit the decision
+surface. The durable owner-only pending record similarly moves from v3 to v4 and invalidates a
+short-lived older pending action rather than upgrading its authority target. The
+`chat-user-attestation` family remains version `1.0.0`; its exact one-use envelope did not change.
+A pre-upgrade private review marker is not an unclaimed pending action: it may still have a live
+owner, so the new runtime preserves it and blocks replacement instead of deleting it during
+upgrade. This is the existing interrupted-review fail-closed boundary, not successful recovery.
 
 The declared-completion-scope change is an explicit pre-release 0.1 correction under that optional
 field rule. `plan_published` and `plan_revised` remain event schema `1.0.0`, and status remains

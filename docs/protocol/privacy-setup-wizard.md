@@ -137,6 +137,23 @@ access and safety, legal, support, and abuse-monitoring exceptions remain promin
 facts. Unknown or stale posture removes the badge; a user can still pick Assisted or configure the
 route through `custom`, but the UI must not carry the recommendation's claim into that policy.
 
+### Agent-guided semantic intent
+
+The general first-run recommendation above optimizes for disclosure minimization. A conversational
+agent has an additional explicit signal: when the current user says the desired outcome is semantic
+review depth, it recommends `expanded_review` first and explains `assisted_review` as the
+lower-disclosure semantic option. That recommendation is advisory and does not prepare or approve a
+grant. The agent explains all named recipes, records the user's selection, prepares one exact
+combined candidate, renders the complete substantive before/after diff, and asks for one final
+approve/deny decision bound to that candidate.
+
+An authority-capable agent may relay that exact current-chat decision. Preparation freezes the
+current and candidate policy bytes and binds the repository commitment, authority generation,
+provider/model/endpoint, recipe, policy and diff digests, target, and expiry. A different repository,
+policy generation, configured route, target, expired action, replay, or unsupported host cannot
+reuse it. A host without the declared chat-authority capability gives the shortest trusted-local
+continuation without substituting another recipe or provider.
+
 Existing approved machine-policy bytes are never rewritten by this recommendation or by package
 upgrade. An existing
 `confirm_every_request` user receives an explicit Assisted offer and keeps the current policy until
@@ -207,10 +224,14 @@ inserting the first exact repository row. One preview shows both and one authori
 commits both or neither. Older setup/propose decoders remain readable, but cannot create or migrate a
 repository grant and fail closed with upgrade guidance under repository-grant mode.
 
-**That trusted-terminal ceremony is the single authorization for a widening.** No other surface may
-take its own approval for one first. A selecting surface may show a proposal or hand one over, but a
-second "do you approve?" outside the trusted terminal is not a second gate — it only teaches users
-that consenting in an untrusted surface is what changes privacy.
+**That trusted-terminal ceremony is the default authorization for a widening, and the allowlisted
+`yoetz consent` lane described above is its only exception.** No other surface may take its own
+approval for one first. A selecting surface may show a proposal or hand one over, but a second "do
+you approve?" outside the trusted terminal is not a second gate — it only teaches users that
+consenting in an untrusted surface is what changes privacy. The consent lane is not that second
+gate: it is one exact prepared, expiring, single-use target whose complete substantive diff is
+rendered before the one decision, and the catalog states that Yoetz cannot independently
+authenticate the relayed chat provenance.
 
 What the ceremony renders is the **complete substantive diff**, as `before → after` steps derived
 from the same comparison that classified the proposal as a widening, so a recognized widening cannot

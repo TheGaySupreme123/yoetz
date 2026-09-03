@@ -153,6 +153,47 @@
       "release_status": "evidenced"
     },
     {
+      "claim_id": "privacy.agent_guided_user_controlled_setup",
+      "statement": "A capable Yoetz agent guides supported installation, setup, and settings changes in ordinary conversation, explains and recommends consequential options, and treats the explicit current user's supported product choice as final. When semantic review is the stated goal it recommends expanded_review first and explains assisted_review as the lower-disclosure semantic alternative. An exact expanded_review repository grant exposes and binds the complete substantive before/after policy diff, repository authority, provider/model/endpoint, policy digests, target, and expiry; repository, policy-generation, route, target, expiry, replay, denial, and unsupported-client failures make no policy or provider mutation.",
+      "scope": {
+        "authority_clients": [
+          "codex"
+        ],
+        "recipes": [
+          "assisted_review",
+          "expanded_review",
+          "metadata_only",
+          "private"
+        ]
+      },
+      "limitations": [
+        "agent_attestation_is_not_independent_chat_proof",
+        "unsupported_hosts_require_trusted_local_continuation"
+      ],
+      "surfaces": [
+        "docs/usage/privacy-and-semantic-review.md",
+        "guidance/agent-instructions.md",
+        "skills/codex/yoetz/SKILL.md"
+      ],
+      "requirements": [
+        "ADR-009",
+        "ADR-015",
+        "ADR-016"
+      ],
+      "tests": [
+        "tests/conformance/surfaces/test_user_controlled_agent_setup.py",
+        "tests/integration/service/test_repository_grant_authorize_composition.py",
+        "tests/unit/cli/test_elevated.py",
+        "tests/unit/service/test_elevated_bootstrap.py"
+      ],
+      "evidence_kinds": [
+        "conformance_test",
+        "integration_test",
+        "unit_test"
+      ],
+      "release_status": "evidenced"
+    },
+    {
       "claim_id": "privacy.assisted_review_user_controlled",
       "statement": "Every installation seeds zero-egress local_only for external LLM and task-content channels with no human prompt required. The machine policy is an installation ceiling, and ordinary in-policy checks and retries run without a repeated human prompt only after the exact repository has a granted row for the inspectable assisted_review recipe and an exact endpoint with a current data-use record stating training prohibited and retention none or bounded to at most 30 days. Repository identity is derived from the trusted session's canonical Git common root, never public workspace_ref; branches and linked worktrees share it while independent clones do not. Upgrade migration preserves accepted machine-policy bytes and may only narrow them onto bounded pre-upgrade route or one first-repository entitlement without reapproval. Provider human-access and exception facts remain visible, and the data-use record is recommendation evidence, never a technical proof of provider conduct.",
       "scope": {

@@ -25,7 +25,19 @@ try:
 except ImportError:  # pragma: no cover - POSIX uses fcntl above
     msvcrt = None  # type: ignore[assignment]
 
+from yoetz.adapters.privacy.catalog import (
+    decode_privacy_policy_canonical,
+    encode_privacy_policy_json,
+)
+from yoetz.application.privacy_policy import privacy_policy_changes
 from yoetz.config.paths import ensure_owner_only_dir, state_dir
+from yoetz.domain.privacy import (
+    AuthorizationScopeKind,
+    EgressChannel,
+    PrivacyPolicy,
+    PrivacyProfile,
+    ReviewContextProfile,
+)
 from yoetz.domain.values import ProtocolValueError, validate_commitment, validate_sha256_digest
 from yoetz.protocol.canonical import JsonValue, canonical_digest, canonical_encode
 from yoetz.protocol.consent import (
@@ -34,6 +46,9 @@ from yoetz.protocol.consent import (
     ConsentCatalogModel,
     ConsentStatusModel,
     ImportPublicationPreviewModel,
+    PrivacyPolicyChangeModel,
+    RepositoryPrivacyGrantPreviewModel,
+    RepositoryPrivacyProviderBindingModel,
     RepositoryPrivacyRecipe,
 )
 from yoetz.service.confidential_protocol import ProviderCredentialTarget
@@ -51,6 +66,7 @@ __all__ = [
     "clear_pending",
     "complete_review",
     "grant_target_digest",
+    "repository_grant_binding",
     "consume_import_publication_authorization",
     "load_import_publication_authorization",
     "load_pending",
@@ -86,9 +102,13 @@ ElevatedOperation = Literal[
     "harness_mcp_register",
 ]
 
-_SCHEMA: Final = "yoetz.elevated-bootstrap.pending/3"
+_SCHEMA: Final = "yoetz.elevated-bootstrap.pending/4"
 _LEGACY_SCHEMAS: Final = frozenset(
-    {"yoetz.elevated-bootstrap.pending/1", "yoetz.elevated-bootstrap.pending/2"}
+    {
+        "yoetz.elevated-bootstrap.pending/1",
+        "yoetz.elevated-bootstrap.pending/2",
+        "yoetz.elevated-bootstrap.pending/3",
+    }
 )
 _TTL_SECONDS: Final = CONSENT_PENDING_TTL_SECONDS
 _PENDING_NAME: Final = "elevated-bootstrap-pending.json"
@@ -108,13 +128,9 @@ _PROVIDER_BINDING_KEYS: Final = (
 )
 _PROVIDER_REPOSITORY_KEY: Final = "repository_privacy_commitment"
 _PROVIDER_BINDING_OPTIONAL_KEYS: Final = frozenset({_PROVIDER_REPOSITORY_KEY})
-_GRANT_BINDING_KEYS: Final = (
-    "recipe",
-    "repository_privacy_commitment",
-    "authority_digest",
-)
+_GRANT_BINDING_KEYS: Final = ("schema", "preview", "current_policy", "candidate_policy")
 _GRANT_RECIPES: Final[frozenset[RepositoryPrivacyRecipe]] = frozenset(
-    {"assisted_review", "private", "metadata_only"}
+    {"assisted_review", "expanded_review", "private", "metadata_only"}
 )
 
 
@@ -208,13 +224,13 @@ CONSENT_OPERATIONS: Final[tuple[ConsentOperationSpec, ...]] = (
     ConsentOperationSpec(
         operation="repository_privacy_grant",
         risk_class="privacy_widen",
-        summary="Grant exact repository privacy recipe (e.g. assisted_review).",
+        summary="Grant one exact previewed repository privacy recipe.",
         danger_text=(
             "DANGER — repository privacy grant. Widens or sets external-review permission for one "
-            "exact repository recipe. After one warning, an agent attesting an explicit "
-            "current-chat instruction may complete this exact prepared grant. Yoetz cannot "
-            "independently authenticate that provenance; the stronger local path remains "
-            "`yoetz --privacy`."
+            "exact repository recipe and the complete before/after policy diff shown in the "
+            "prepared preview. After one warning, an agent attesting an explicit current-chat "
+            "instruction may complete only that expiring target. Yoetz cannot independently "
+            "authenticate that provenance; the stronger local path remains `yoetz --privacy`."
         ),
         requires_provider_binding=False,
         requires_grant_binding=True,
@@ -381,7 +397,7 @@ class PendingElevatedConsent:
     expires_at_unix: int
     target_digest: str
     provider_binding: Mapping[str, str] | None
-    grant_binding: Mapping[str, str] | None = None
+    grant_binding: Mapping[str, JsonValue] | None = None
     import_publication_preview: Mapping[str, JsonValue] | None = None
 
     def as_json(self) -> dict[str, JsonValue]:
@@ -542,7 +558,7 @@ def _danger_digest(
     pending_id: str,
     expires_at_unix: int,
     provider_binding: Mapping[str, str] | None,
-    grant_binding: Mapping[str, str] | None = None,
+    grant_binding: Mapping[str, JsonValue] | None = None,
     import_publication_preview: Mapping[str, JsonValue] | None = None,
 ) -> str:
     body: dict[str, JsonValue] = {
@@ -568,7 +584,7 @@ def prepare_pending(
     *,
     target_digest: str,
     provider_binding: Mapping[str, str] | None = None,
-    grant_binding: Mapping[str, str] | None = None,
+    grant_binding: Mapping[str, JsonValue] | None = None,
     import_publication_preview: Mapping[str, JsonValue] | None = None,
     _state: Path | None = None,
 ) -> PendingElevatedConsent:
@@ -705,40 +721,164 @@ def _validated_provider_binding(binding: Mapping[str, str]) -> dict[str, str]:
     return normalized
 
 
-def _validated_grant_binding(binding: Mapping[str, str]) -> dict[str, str]:
+def repository_grant_binding(
+    *,
+    recipe: RepositoryPrivacyRecipe,
+    repository_privacy_commitment: str,
+    authority_digest: str,
+    current_policy: PrivacyPolicy,
+    candidate_policy: PrivacyPolicy,
+) -> dict[str, JsonValue]:
+    """Build the exact, agent-reviewable binding for one named repository recipe."""
+
+    if recipe not in _GRANT_RECIPES or not _candidate_matches_grant_recipe(
+        recipe, candidate_policy
+    ):
+        raise ElevatedBootstrapError("grant_binding_invalid")
+    changes = tuple(
+        PrivacyPolicyChangeModel.from_domain(change)
+        for change in privacy_policy_changes(current_policy, candidate_policy)
+    )
+    change_payload: list[JsonValue] = [
+        cast(JsonValue, change.model_dump(mode="json")) for change in changes
+    ]
+    llm = next(
+        channel
+        for channel in candidate_policy.channel_policies
+        if channel.channel is EgressChannel.LLM_INFERENCE
+    )
+    preview = RepositoryPrivacyGrantPreviewModel(
+        schema="yoetz.repository-privacy-grant-preview/1",
+        recipe=recipe,
+        repository_privacy_commitment=repository_privacy_commitment,
+        authority_digest=authority_digest,
+        current_policy_digest=current_policy.policy_digest,
+        candidate_policy_digest=candidate_policy.policy_digest,
+        diff_digest=canonical_digest(change_payload),
+        candidate_profile=candidate_policy.profile.value,
+        candidate_review_context=cast(
+            Literal["structural", "assisted", "expanded"],
+            candidate_policy.review_context_profile.value,
+        ),
+        candidate_provider_binding=(
+            None
+            if llm.provider_binding is None
+            else RepositoryPrivacyProviderBindingModel.from_domain(llm.provider_binding)
+        ),
+        changes=changes,
+    )
+    return _validated_grant_binding(
+        {
+            "schema": "yoetz.repository-privacy-grant-binding/2",
+            "preview": cast(JsonValue, preview.model_dump(mode="json", by_alias=True)),
+            "current_policy": cast(JsonValue, encode_privacy_policy_json(current_policy)),
+            "candidate_policy": cast(JsonValue, encode_privacy_policy_json(candidate_policy)),
+        }
+    )
+
+
+def _candidate_matches_grant_recipe(
+    recipe: RepositoryPrivacyRecipe, candidate: PrivacyPolicy
+) -> bool:
+    llm = next(
+        channel
+        for channel in candidate.channel_policies
+        if channel.channel is EgressChannel.LLM_INFERENCE
+    )
+    if recipe == "private":
+        return (
+            candidate.profile is PrivacyProfile.LOCAL_ONLY
+            and candidate.review_context_profile is ReviewContextProfile.STRUCTURAL
+            and not llm.enabled
+        )
+    if recipe == "metadata_only":
+        return (
+            candidate.profile is PrivacyProfile.CONFIRM_EVERY_REQUEST
+            and candidate.review_context_profile is ReviewContextProfile.STRUCTURAL
+            and llm.enabled
+            and llm.preview_required
+        )
+    if recipe == "assisted_review":
+        return (
+            candidate.profile in {PrivacyProfile.MINIMAL_EXTERNAL, PrivacyProfile.TRUSTED_PROVIDER}
+            and candidate.review_context_profile is ReviewContextProfile.ASSISTED
+            and llm.enabled
+            and not llm.preview_required
+        )
+    return (
+        candidate.profile is PrivacyProfile.TRUSTED_PROVIDER
+        and candidate.review_context_profile is ReviewContextProfile.EXPANDED
+        and llm.enabled
+        and not llm.preview_required
+    )
+
+
+def _validated_grant_binding(binding: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     if set(binding) != set(_GRANT_BINDING_KEYS):
         raise ElevatedBootstrapError("grant_binding_invalid")
-    recipe = binding["recipe"]
-    commitment = binding["repository_privacy_commitment"]
-    authority_digest = binding["authority_digest"]
-    if type(recipe) is not str or recipe not in _GRANT_RECIPES:
+    if binding["schema"] != "yoetz.repository-privacy-grant-binding/2":
         raise ElevatedBootstrapError("grant_binding_invalid")
-    if type(authority_digest) is not str:
+    preview_raw = binding["preview"]
+    current_raw = binding["current_policy"]
+    candidate_raw = binding["candidate_policy"]
+    if not isinstance(preview_raw, Mapping):
         raise ElevatedBootstrapError("grant_binding_invalid")
     try:
-        validated_commitment = validate_commitment(commitment)
-        validated_authority_digest = validate_sha256_digest(authority_digest)
-    except ProtocolValueError as exc:
+        preview = RepositoryPrivacyGrantPreviewModel.model_validate(dict(preview_raw))
+        if preview.recipe not in _GRANT_RECIPES:
+            raise ValueError("grant_recipe_invalid")
+        current = decode_privacy_policy_canonical(canonical_encode(current_raw))
+        candidate = decode_privacy_policy_canonical(canonical_encode(candidate_raw))
+        llm = next(
+            channel
+            for channel in candidate.channel_policies
+            if channel.channel is EgressChannel.LLM_INFERENCE
+        )
+        if (
+            not _candidate_matches_grant_recipe(preview.recipe, candidate)
+            or current.policy_digest != preview.current_policy_digest
+            or candidate.policy_digest != preview.candidate_policy_digest
+            or candidate.profile.value != preview.candidate_profile
+            or candidate.review_context_profile.value != preview.candidate_review_context
+            or llm.provider_binding
+            != (
+                None
+                if preview.candidate_provider_binding is None
+                else preview.candidate_provider_binding.to_domain()
+            )
+            or candidate.policy_id != current.policy_id
+            or candidate.version != current.version + 1
+            or candidate.supersedes_policy_digest != current.policy_digest
+        ):
+            raise ValueError("grant_policy_binding_invalid")
+        expected_changes = privacy_policy_changes(current, candidate)
+        if tuple(change.to_domain() for change in preview.changes) != expected_changes:
+            raise ValueError("grant_diff_invalid")
+        if current.effective_scope != candidate.effective_scope:
+            raise ValueError("grant_scope_invalid")
+        for policy in (current, candidate):
+            scope = policy.effective_scope
+            if scope.kind is AuthorizationScopeKind.MACHINE:
+                continue
+            if scope.kind is not AuthorizationScopeKind.WORKSPACE:
+                raise ValueError("grant_scope_invalid")
+            if scope.workspace_ref_commitment != preview.repository_privacy_commitment:
+                raise ValueError("grant_scope_invalid")
+    except (TypeError, ValueError, ProtocolValueError) as exc:
         raise ElevatedBootstrapError("grant_binding_invalid") from exc
     return {
-        "recipe": recipe,
-        "repository_privacy_commitment": validated_commitment,
-        "authority_digest": validated_authority_digest,
+        "schema": "yoetz.repository-privacy-grant-binding/2",
+        "preview": cast(JsonValue, preview.model_dump(mode="json", by_alias=True)),
+        "current_policy": cast(JsonValue, encode_privacy_policy_json(current)),
+        "candidate_policy": cast(JsonValue, encode_privacy_policy_json(candidate)),
     }
 
 
-def grant_target_digest(grant_binding: Mapping[str, str]) -> str:
+def grant_target_digest(grant_binding: Mapping[str, JsonValue]) -> str:
     """Canonical target digest for one exact repository privacy grant."""
 
     binding = _validated_grant_binding(grant_binding)
-    return canonical_digest(
-        {
-            "kind": "repository_privacy_grant",
-            "recipe": binding["recipe"],
-            "repository_privacy_commitment": binding["repository_privacy_commitment"],
-            "authority_digest": binding["authority_digest"],
-        }
-    )
+    return canonical_digest({"kind": "repository_privacy_grant", "binding": binding})
 
 
 def _require_int(value: object) -> int:
@@ -832,17 +972,14 @@ def _load_pending_path(
         else:
             raise ElevatedBootstrapError("pending_corrupt")
         grant_raw = source.get("grant_binding")
-        grant: dict[str, str] | None
+        grant: dict[str, JsonValue] | None
         if grant_raw is None:
             grant = None
         elif isinstance(grant_raw, dict) and all(
-            isinstance(k, str) and isinstance(v, str)
-            for k, v in cast(dict[object, object], grant_raw).items()
+            isinstance(key, str) for key in cast(dict[object, object], grant_raw)
         ):
             try:
-                grant = _validated_grant_binding(
-                    {str(k): str(v) for k, v in cast(dict[object, object], grant_raw).items()}
-                )
+                grant = _validated_grant_binding(cast(dict[str, JsonValue], grant_raw))
             except ElevatedBootstrapError as exc:
                 raise ElevatedBootstrapError("pending_corrupt") from exc
         else:
@@ -1221,8 +1358,15 @@ def projection_for_status(
 
     if pending is None:
         return None
+    grant_preview = (
+        None
+        if pending.grant_binding is None
+        else RepositoryPrivacyGrantPreviewModel.model_validate(
+            cast(Mapping[str, JsonValue], pending.grant_binding["preview"])
+        )
+    )
     model = AgentSafePendingModel(
-        schema="yoetz.consent.pending-agent/5",
+        schema="yoetz.consent.pending-agent/6",
         operation=pending.operation,
         risk_class=pending.risk_class,
         pending_id=pending.pending_id,
@@ -1230,14 +1374,8 @@ def projection_for_status(
         danger_text=pending.danger_text,
         expires_at_unix=pending.expires_at_unix,
         target_digest=pending.target_digest,
-        repository_privacy_recipe=(
-            None
-            if pending.grant_binding is None
-            else cast(
-                RepositoryPrivacyRecipe,
-                pending.grant_binding["recipe"],
-            )
-        ),
+        repository_privacy_recipe=None if grant_preview is None else grant_preview.recipe,
+        repository_privacy_preview=grant_preview,
         import_publication_preview=(
             None
             if pending.import_publication_preview is None
@@ -1268,7 +1406,7 @@ def catalog_payload() -> dict[str, JsonValue]:
         if spec.requires_target_digest_arg:
             hint += " --target-digest <sha256:...>"
         if spec.requires_grant_binding:
-            hint += " --recipe <assisted_review|private|metadata_only>"
+            hint += " --recipe <expanded_review|assisted_review|private|metadata_only>"
         # Only the profile identity is caller input; the purpose, its digests, and the repository
         # privacy commitment are derived by prepare. Naming them here sent agents hunting for
         # internals they cannot know.
@@ -1292,7 +1430,7 @@ def catalog_payload() -> dict[str, JsonValue]:
         )
     model = ConsentCatalogModel.model_validate(
         {
-            "schema": "yoetz.consent.catalog/5",
+            "schema": "yoetz.consent.catalog/6",
             "default_safe": [
                 "mcp.start",
                 "mcp.publish_work",
@@ -1317,6 +1455,9 @@ def catalog_payload() -> dict[str, JsonValue]:
                 "agent_attested_current_chat_instruction_permitted": True,
                 "agent_attestation_is_independent_proof": False,
                 "compromised_agent_can_forge_attestation": True,
+                "explicit_current_user_outcome_controls_supported_choice": True,
+                "recommendations_are_advisory": True,
+                "technical_authority_and_safety_boundaries_remain_enforced": True,
             },
             "operations": operations,
         }
@@ -1327,7 +1468,7 @@ def catalog_payload() -> dict[str, JsonValue]:
 def status_payload(*, _state: Path | None = None) -> dict[str, JsonValue]:
     model = ConsentStatusModel.model_validate(
         {
-            "schema": "yoetz.elevated-bootstrap.status/5",
+            "schema": "yoetz.elevated-bootstrap.status/6",
             "pending": projection_for_status(load_pending(_state=_state)),
             "consent_catalog": catalog_payload(),
         }

@@ -2181,12 +2181,16 @@ authorization signals.
 
 Elevated consent (`service/elevated_bootstrap.py`, CLI `yoetz consent` /
 `yoetz elevated-bootstrap`) is a separate owner-only pending-file lane outside
-`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/5`) and creates
-digest-bound pending records (`yoetz.elevated-bootstrap.pending/3`). The agent-safe projection
+`ControlClientPort`. It catalogues non-default operations (`yoetz.consent.catalog/6`) and creates
+digest-bound pending records (`yoetz.elevated-bootstrap.pending/4`). The agent-safe projection
 contains only operation, risk class, bounded danger text, exact digests, expiry, pending ID, an
 exact bounded repository recipe when applicable, the fixed `["yoetz","consent","review"]`
 command, and an authorize command only for operations that permit agent-chat authorization. A
-legacy v1 durable record is invalidated. Catalog rules explicitly state that agent attestation is
+repository grant additionally exposes `yoetz.repository-privacy-grant-preview/1`: exact recipe,
+keyed repository commitment, authority/current/candidate/diff digests, and the complete bounded
+substantive before/after policy diff. The owner-only pending record freezes both policy byte sets;
+the readable diff is the decision surface and its digest is only integrity evidence. Legacy v1-v3
+durable records are invalidated. Catalog rules explicitly state that agent attestation is
 not independent proof and that a compromised agent can forge it.
 
 `yoetz consent review` remains the OS-presence console path. It requires an independently
@@ -2208,6 +2212,17 @@ presence-only and never echo secret bytes. Vault initialization accepts no calle
 helper generates and scoped-credential-store-verifies it before confidential submission. This lane does not
 unlock an already-locked vault. The six MCP tools (ADR-011) are unchanged; authorize is local
 CLI control.
+
+`expanded_review` is an admitted exact repository recipe on this lane. Prepare binds the frozen
+candidate and diff to the repository commitment, authority generation, provider/model/endpoint,
+recipe, policy digests, target, and expiry. Authorize rechecks repository identity, authority
+snapshot, and the configured provider route, then proposes only the frozen candidate. Drift,
+denial, expiry, replay, malformed preview, or unsupported client yields no policy/provider mutation.
+Agents guide setup, installation, and settings changes in normal conversation, recommend with
+trade-offs, and treat explicit current user intent as final for supported product choices. When the
+user explicitly asks for semantic-review depth, Expanded is recommended first and Assisted is
+explained as the lower-disclosure semantic option. Recommendations never override technical
+authority, policy, never-send, credential, destructive-action, or evidence boundaries.
 
 A consent action is recorded approved only after its operation result is validated as the exact
 success the review-result schema admits (issue #510). A ceremony that ends in any other state —
@@ -2240,8 +2255,8 @@ state. A genuine pre-commit proposal or decision failure still reports
 `repository_privacy_grant_failed` with no grant.
 
 The current public JSON Schema contracts are `catalog`, `pending-agent`, `prepare-result`,
-`review-result`, and `status`, each at version `5.0.0` under `schemas/consent/`; frozen versions
-`2.0.0` through `4.0.0` remain shipped for compatibility. The current version report is
+`review-result`, and `status`, each at version `6.0.0` under `schemas/consent/`; frozen versions
+`2.0.0` through `5.0.0` remain shipped for compatibility. The current version report is
 `version/version-manifest-2.0.0.schema.json`; its released `1.0.0` predecessor remains byte-frozen.
 `yoetz.chat-user-attestation/1` is version 1.0.0.
 `review_only` irreversible

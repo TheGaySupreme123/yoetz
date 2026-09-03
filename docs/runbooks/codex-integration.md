@@ -490,6 +490,20 @@ reviewer egress.
 ## 11. Security, privacy, and prohibited actions
 
 Codex is the v0.1 allowlisted first-party client for exact current-chat consent attestation.
+It should guide Yoetz setup, installation, and settings changes in normal conversation: explain
+each consequential choice, recommend one outcome with its trade-off, and preserve the user's
+explicit selection. When the user explicitly wants semantic review, recommend Expanded first for
+review depth and explain Assisted as the lower-disclosure semantic option. Do not silently
+downgrade either choice.
+
+For `repository_privacy_grant`, run the catalog-advertised prepare command only after the recipe is
+chosen. Show the v6 `repository_privacy_preview` in full: repository commitment; authority,
+current-policy, candidate-policy, and diff digests; and every before/after row including the exact
+provider/model/endpoint. The user's final approve/deny applies only to that expiring one-use target.
+Any repository, authority, configured-route, recipe, target, expiry, or replay drift is a
+no-mutation failure; never prepare a replacement silently. Strict MCP routing, host admission,
+provider readiness, physical dispatch, and receipts remain separate facts.
+
 For `vault_initialize` and `vault_passphrase_rotate`, it relays only the prepared pending ID,
 operation, danger digest, target digest, decision, and warning acknowledgement. Yoetz generates,
 loads, stages, and submits vault secrets inside the local helper; Codex must never request or

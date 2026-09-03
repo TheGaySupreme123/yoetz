@@ -20,6 +20,16 @@ reverse-chronological released versions.
 
 ### Added
 
+- Agents can now set up or change semantic review through normal conversation. When a user
+  explicitly wants semantic review, the agent recommends Expanded review first, explains the
+  lower-disclosure Assisted, Metadata-only, and Private alternatives, shows one complete frozen
+  before/after repository privacy preview, and asks for one exact final approval; the user keeps the
+  choice. Consent schemas move to 6.0.0 so the pending target binds the selected recipe, the full
+  policy diff and lineage, the repository and authority, the review profile, and the provider,
+  model, and endpoint, and authorization is refused when any of them drifts. Codex may authorize
+  through current-chat attestation; Claude Code and Cursor carry the selected outcome into the
+  shortest trusted-local continuation instead of silently downgrading it (issues #532, #533).
+
 - One supported exact-target isolation contract for test and dogfood runtimes (ADR-026): setting
   `YOETZ_ISOLATED_ROOT` to a pre-provisioned owner-only private directory derives every identity
   root from it — config, storage bundle, state directory (service singleton lock and generation),
