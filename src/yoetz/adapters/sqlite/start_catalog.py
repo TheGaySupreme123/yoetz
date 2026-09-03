@@ -782,15 +782,6 @@ class SqliteStartCatalog:
                     actual is None or not hmac.compare_digest(expected, actual)
                 ):
                     raise _error(PublicErrorCode.SESSION_CONFLICT)
-                pending = self._rows(
-                    "SELECT 1 FROM start_operations WHERE task_id = ? AND state = 'pending' LIMIT 1",
-                    (route.task_id,),
-                )
-                if pending:
-                    # One route rotation at a time. The existing operation owns
-                    # recovery through its request id and lease; a second start
-                    # must not reserve against the same predecessor session.
-                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
                 if expected is None and actual is not None:
                     route = self._bind_repository_privacy_in_transaction(
                         route,
@@ -1189,6 +1180,17 @@ class SqliteStartCatalog:
                 or _route_from_row(workspace_rows[0]).task_id != by_session.task_id
             ):
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
+            pending = self._rows(
+                "SELECT 1 FROM start_operations WHERE task_id = ? AND state = 'pending' LIMIT 1",
+                (by_session.task_id,),
+            )
+            if pending:
+                # One route rotation at a time. The pending operation owns recovery
+                # through its own request id and lease; a second rotation must not
+                # reserve against the same predecessor session. Scoped to this
+                # recovery admission so an abandoned pending operation never wedges
+                # the ordinary same-pair attach that still self-heals the route.
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
             return by_session
         if request.session_id is not None and (by_session is None and by_commitment is not None):
             raise _error(PublicErrorCode.SESSION_CONFLICT)

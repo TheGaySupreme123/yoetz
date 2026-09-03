@@ -506,12 +506,6 @@ class MemoryStartCatalogAdapter:
                     actual is None or not hmac.compare_digest(expected, actual)
                 ):
                     raise _error(PublicErrorCode.SESSION_CONFLICT)
-                if any(
-                    operation.task_id == route.task_id
-                    and operation.state is _OperationState.PENDING
-                    for operation in self._state.operations.values()
-                ):
-                    raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
                 if expected is None and actual is not None:
                     route = replace(
                         route,
@@ -773,6 +767,17 @@ class MemoryStartCatalogAdapter:
                 or workspace_routes[0].task_id != by_session.task_id
             ):
                 raise _error(PublicErrorCode.SESSION_CONFLICT)
+            if any(
+                operation.task_id == by_session.task_id
+                and operation.state is _OperationState.PENDING
+                for operation in self._state.operations.values()
+            ):
+                # One route rotation at a time. The pending operation owns recovery
+                # through its own request id and lease; a second rotation must not
+                # reserve against the same predecessor session. Scoped to this
+                # recovery admission so an abandoned pending operation never wedges
+                # the ordinary same-pair attach that still self-heals the route.
+                raise _error(PublicErrorCode.OPERATION_PENDING, retryable=True)
             return by_session
         if request.session_id is not None and (by_session is None and by_commitment is not None):
             raise _error(PublicErrorCode.SESSION_CONFLICT)

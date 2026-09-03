@@ -1414,10 +1414,10 @@ def _ended_workspace_recovery_mapping(
 
     def _same_harness(session_id: str) -> bool:
         if harness_id == "claude":
-            return session_id.startswith("claude:")
+            return session_id.startswith(_CLAUDE_SESSION_PREFIX)
         if harness_id == "cursor":
-            return session_id.startswith("cursor:")
-        return not session_id.startswith(("claude:", "cursor:"))
+            return session_id.startswith(_CURSOR_SESSION_PREFIX)
+        return not session_id.startswith((_CLAUDE_SESSION_PREFIX, _CURSOR_SESSION_PREFIX))
 
     ended = tuple(
         session_id

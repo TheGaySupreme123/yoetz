@@ -375,6 +375,49 @@ async def test_active_session_can_recover_one_exact_workspace_under_a_new_pair()
 
 
 @pytest.mark.anyio
+async def test_abandoned_pending_start_never_wedges_the_ordinary_same_pair_attach() -> None:
+    """#535: the rotation gate is scoped; an orphaned reservation stays self-healing."""
+
+    installation_id = _id(IdKind.INSTALLATION, 751)
+    now = datetime(2026, 7, 19, 9, 20, tzinfo=UTC)
+    memory, _ = _memory_catalog(installation_id, _Clock(now))
+    sqlite = _sqlite_catalog(installation_id, _Clock(now))
+
+    for catalog in (memory, sqlite):
+        created = await catalog.reserve_or_resume(
+            await _command(catalog, operation_id=_id(IdKind.REQUEST, 752))
+        )
+        await _finish(catalog, created)
+
+        # A start that reserved and then lost its process: never completed, never
+        # quarantined, and unreachable by any later request id.
+        await catalog.reserve_or_resume(
+            await _command(catalog, operation_id=_id(IdKind.REQUEST, 753))
+        )
+
+        # The ordinary create_or_attach on the very same pair still resolves.
+        again = await catalog.reserve_or_resume(
+            await _command(catalog, operation_id=_id(IdKind.REQUEST, 754))
+        )
+        assert again.route_action == "attached"
+        assert again.task_id == created.task_id
+
+        # Only the workspace-recovery rotation is serialized against it.
+        with pytest.raises(PublicOperationError) as rotation:
+            await catalog.reserve_or_resume(
+                await _command(
+                    catalog,
+                    operation_id=_id(IdKind.REQUEST, 755),
+                    mode=StartMode.ATTACH,
+                    session_id=created.session_id,
+                    external_ref="external-B",
+                )
+            )
+        assert rotation.value.code is PublicErrorCode.OPERATION_PENDING
+        assert rotation.value.retryable is True
+
+
+@pytest.mark.anyio
 async def test_workspace_rotation_rejects_wrong_workspace_and_sibling_ambiguity() -> None:
     """A held selector never discovers another workspace or chooses among siblings."""
 
