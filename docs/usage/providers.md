@@ -266,6 +266,8 @@ registration state alone cannot tell them apart. The report therefore names the 
   "registration_state": "yoetz_owned",
   "registered_profile": "strict",
   "configured_profile": "policy",
+  "applied_profile": "policy",
+  "drift_since_install": true,
   "observed": true
 },
 "repository_grant_state": "granted",
@@ -282,6 +284,17 @@ registration state alone cannot tell them apart. The report therefore names the 
   takes both steps of the digest-bound ceremony: `yoetz integrate codex mcp preview` produces the
   digest, then `yoetz integrate codex mcp install --accept --preview-digest <digest>` applies it.
   Preview alone changes nothing.
+- `applied_profile` — the route the last install applied, from the install record. `null` means
+  there is no record: nothing was installed through the ceremony, the record was cleared by
+  `mcp remove`, or it could not be read. An unreadable record is never reported as drift.
+- `drift_since_install` — `true` only when the live registration disagrees with that install
+  record. This is a second, independent drift from the one above: `registered_profile` versus
+  `configured_profile` compares the registration against what setup would produce now
+  (preflight drift — fix with the re-registration ceremony), while `drift_since_install`
+  compares the live registration against what the last install applied (post-install drift —
+  the serving process is stale, so re-run the ceremony with the policy route and start a fresh
+  session). A strict check served while the applied record says `policy` additionally names this
+  in its receipt and tells you exactly that recovery.
 - `observed: false` — the route could not be read. That is *unknown*, not *absent*, and it is never
   reported as a blocker.
 - `repository_grant_state` / `repository_migration_state` — the exact trusted-session repository

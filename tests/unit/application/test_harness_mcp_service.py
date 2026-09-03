@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 import anyio
 import pytest
 
+from yoetz.application.applied_mcp_route import read_applied_route
 from yoetz.application.harness_mcp import (
     HarnessMcpService,
     McpRegistrationConfirmation,
@@ -186,7 +188,7 @@ def test_register_requires_explicit_acceptance() -> None:
     assert sink.records[-1].reason is McpRegistrationReason.CONFIRMATION_REQUIRED
 
 
-def test_register_passes_exact_digest_and_records_result() -> None:
+def test_register_passes_exact_digest_and_records_result(tmp_path: Path) -> None:
     sink = _Sink()
     port = _Port()
     service = HarnessMcpService(port, sink)
@@ -194,6 +196,7 @@ def test_register_passes_exact_digest_and_records_result() -> None:
         lambda: service.register(
             _BINARY,
             McpRegistrationConfirmation(_DIGEST, True, "noninteractive_flag"),
+            _state=tmp_path,
         )
     )
     assert result.state_after is McpRegistrationState.YOETZ_OWNED
@@ -201,6 +204,9 @@ def test_register_passes_exact_digest_and_records_result() -> None:
     assert sink.records[-1].phase == "execute"
     assert sink.records[-1].outcome == "success"
     assert sink.records[-1].preview_digest == _DIGEST
+    # The static fake still observes absence after the write, so the unverified
+    # route is never persisted.
+    assert read_applied_route(_state=tmp_path) is None
 
 
 def test_port_failure_is_recorded_and_reraised() -> None:
@@ -243,7 +249,7 @@ def test_unregister_requires_explicit_acceptance() -> None:
     assert port.applied == []
 
 
-def test_unregister_passes_exact_digest_and_records_result() -> None:
+def test_unregister_passes_exact_digest_and_records_result(tmp_path: Path) -> None:
     sink = _Sink()
     port = _Port(McpRegistrationState.YOETZ_OWNED)
     service = HarnessMcpService(port, sink)
@@ -251,8 +257,10 @@ def test_unregister_passes_exact_digest_and_records_result() -> None:
         lambda: service.unregister(
             _BINARY,
             McpRegistrationConfirmation(_DIGEST, True, "noninteractive_flag"),
+            _state=tmp_path,
         )
     )
     assert result.state_after is McpRegistrationState.ABSENT
     assert port.applied == [McpRegistrationCommand(_DIGEST, True)]
     assert sink.records[-1].phase == "execute"
+    assert read_applied_route(_state=tmp_path) is None

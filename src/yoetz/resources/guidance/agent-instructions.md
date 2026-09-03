@@ -131,6 +131,8 @@ On `OPERATION_PENDING`, read `status` with `view=operation` once and replay the 
 
 `blocked_by_policy` / `route_semantic_ceiling` describes this MCP process, not installed plugin bytes. Compare initialize `Route profile` and `status` `view=versions` with installed plugin status (`mcp.route_profile` and `mcp.runtime`). If installed `policy` disagrees with a live strict process, or `mcp.runtime.activation` is `full_restart_required`, that is an activation mismatch: report the contradiction, request a full application quit (Reload Window is not enough), and do not mint a fresh semantic check against the stale process. After the live runtime matches the installed policy route, a later session may check again. A genuinely installed-and-live strict route stays the current terminal guidance. Recovery never authorizes egress or changes privacy settings.
 
+A ceiling check whose coverage also carries `optional_semantic_review_registration_drift` is that mismatch made structural: the last applied install route was `policy` and this serving strict process is stale. Recover with `yoetz integrate codex mcp preview` then `yoetz integrate codex mcp install --route-profile policy`, and start a fresh Codex process before any semantic check. A ceiling without the drift gap stays terminal: do not re-run preview/install to work around an intentionally applied strict route.
+
 # Canonical request values
 
 Fields backed by canonical integers stay JSON strings on the wire. In particular, send frontier `sequence` and pagination `limit` as strings such as `"10"`, never JSON numbers.

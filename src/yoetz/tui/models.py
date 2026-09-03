@@ -382,6 +382,9 @@ class ProviderPosture:
     # dispatch. ``None`` means the registration could not be read, never that it is absent.
     agent_route_semantic_ready: bool | None = None
     registered_route_profile: str | None = None
+    # True when the durable applied-route record disagrees with the live Codex registration
+    # (issue #537): the serving process may be stale rather than intentionally strict.
+    route_drift_since_install: bool = False
     # Each host's own project-scoped rule admitting the semantic check past its automatic
     # reviewer (issue #467): ``absent|present|partial|foreign|unknown`` per host. Host tool-call
     # authorization only; never a claim that a check dispatched.

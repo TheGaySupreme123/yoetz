@@ -947,3 +947,55 @@ def test_redacted_share_does_not_leak_omitted_resolved_finding_ids() -> None:
     assert summary.items == ()
     assert "resolved by a later qualifying check" not in summary.body
     assert resolved_finding_ids_for_render(receipt) == frozenset()
+
+
+def test_registration_drift_gap_names_policy_recovery_in_limitations() -> None:
+    """Issue #537 slice C: applied-policy-serving-strict names the recovery in Limitations."""
+
+    from yoetz.domain.receipts import (
+        OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+        OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
+    )
+
+    gaps = (
+        OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+        OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
+    )
+    coverage = _coverage(gaps=gaps)
+    case_gaps = tuple(CaseGap(code, code, ()) for code in gaps)
+    receipt = _build(
+        _context(
+            coverage=coverage,
+            gaps=case_gaps,
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        )
+    )
+    section = next(
+        item for item in receipt.sections if item.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+    )
+    assert "the serving strict process is stale" in section.body
+    assert "yoetz integrate codex mcp install --route-profile policy" in section.body
+    assert "start a fresh Codex process" in section.body
+    assert section.items == gaps
+
+
+def test_genuine_strict_ceiling_keeps_generic_limitations_wording() -> None:
+    """A genuinely applied strict route keeps today's terminal Limitations wording exactly."""
+
+    from yoetz.domain.receipts import OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP
+
+    coverage = _coverage(gaps=(OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,))
+    receipt = _build(
+        _context(
+            coverage=coverage,
+            gaps=(CaseGap(OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP, OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP, ()),),
+            check=_check(CheckVerdict.NO_ISSUE_DETECTED, coverage),
+        )
+    )
+    section = next(
+        item for item in receipt.sections if item.key is ReceiptSectionKey.LIMITATIONS_AND_COVERAGE
+    )
+    assert section.body == (
+        f"Coverage is limited by: {OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP}."
+    )
+    assert section.items == (OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,)

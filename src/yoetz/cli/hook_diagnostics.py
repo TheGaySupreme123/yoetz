@@ -96,6 +96,10 @@ _REASONS: Final = frozenset(
         # not a Yoetz semantic result: no semantic status can be inferred.
         "host_auto_review_denied",
         "host_permission_rule_denied",
+        # The durable applied route and the live host registration disagree:
+        # policy was applied but the host now serves strict (or vice versa),
+        # so a fresh Codex process is still on the old route (issue #537).
+        "registration_drift",
     }
 )
 _STAGES: Final = frozenset(

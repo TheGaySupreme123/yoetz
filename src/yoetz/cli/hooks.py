@@ -444,6 +444,59 @@ async def _read_status(
                 pass
 
 
+def _maybe_record_registration_drift(
+    *, _state: Path | None, runner: AsyncRunner
+) -> None:
+    """Fail-soft applied-vs-serving drift probe for SessionStart (issue #537).
+
+    Reads the durable applied route first so the common no-record case never
+    shells out; then reads the host's own live resolution (``codex mcp get``)
+    via the bounded adapter (10s). Emits one closed-token diagnostic on
+    mismatch. Never raises, never logs content, never changes hook output.
+    """
+
+    try:
+        from yoetz.application.applied_mcp_route import read_applied_route
+
+        try:
+            record = read_applied_route(_state=_state)
+        except Exception:
+            return
+        if not isinstance(record, dict):
+            return
+        applied = record.get("applied_profile")
+        if applied not in {"policy", "strict"}:
+            return
+        from yoetz.adapters.integrations.codex_discovery import discover_codex_binaries
+        from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter
+        from yoetz.application.harness_mcp import HarnessMcpService
+
+        try:
+            binaries = discover_codex_binaries()
+        except Exception:
+            return
+        if not binaries:
+            return
+
+        async def _observe() -> object:
+            return await HarnessMcpService(CodexMcpAdapter()).observe(binaries[0])
+
+        try:
+            observation = runner(_observe)
+        except Exception:
+            return
+        registered = getattr(observation, "route_profile", None)
+        if registered not in {"policy", "strict"}:
+            return
+        if registered != applied:
+            from yoetz.cli.hook_diagnostics import record_hook_diagnostic
+
+            with contextlib.suppress(Exception):
+                record_hook_diagnostic("registration_drift", "SessionStart", _state=_state)
+    except Exception:
+        return
+
+
 def handle_session_start(
     *,
     stdin_bytes: bytes | None = None,
@@ -555,6 +608,10 @@ def handle_session_start(
                 connect=connect,
                 run_async=run_async,
             )
+            # Issue #537 slice B (review M2): the delegated observe above already
+            # ran the SessionStart drift probe, so this direct resume/compact path
+            # must not run a second bounded `codex mcp get` here. The delegated
+            # probe is the single authority; the return shape below is unchanged.
             if kind == "active" and updated is not None:
                 store_mapping(updated, _state=_state)
                 _stdout_json(

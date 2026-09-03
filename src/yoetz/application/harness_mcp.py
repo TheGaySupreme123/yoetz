@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Protocol
 
+from yoetz.application.applied_mcp_route import clear_applied_route, record_applied_route
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.harness_mcp import (
+    MCP_SERVE_COMMAND,
+    MCP_STRICT_SERVE_COMMAND,
     HarnessBinary,
     HarnessMcpPort,
+    McpRegistrationAction,
     McpRegistrationCommand,
     McpRegistrationError,
     McpRegistrationObservation,
@@ -183,6 +188,8 @@ class HarnessMcpService:
         self,
         binary: HarnessBinary,
         confirmation: McpRegistrationConfirmation,
+        *,
+        _state: Path | None = None,
     ) -> McpRegistrationResult:
         if type(binary) is not HarnessBinary:
             raise _invalid("integration_request_invalid")
@@ -213,6 +220,11 @@ class HarnessMcpService:
                 None,
             )
         )
+        if (
+            result.action is not McpRegistrationAction.NOOP
+            and result.state_after is McpRegistrationState.YOETZ_OWNED
+        ):
+            await self._remember_applied_route(binary, result, _state)
         return result
 
     async def preview_unregistration(self, binary: HarnessBinary) -> McpRegistrationPreview:
@@ -244,6 +256,8 @@ class HarnessMcpService:
         self,
         binary: HarnessBinary,
         confirmation: McpRegistrationConfirmation,
+        *,
+        _state: Path | None = None,
     ) -> McpRegistrationResult:
         if type(binary) is not HarnessBinary:
             raise _invalid("integration_request_invalid")
@@ -274,4 +288,66 @@ class HarnessMcpService:
                 None,
             )
         )
+        if (
+            result.action is McpRegistrationAction.UNREGISTER
+            and result.state_after is McpRegistrationState.ABSENT
+        ):
+            try:
+                clear_applied_route(_state=_state)
+            except Exception:
+                pass
         return result
+
+    async def _remember_applied_route(
+        self,
+        binary: HarnessBinary,
+        result: McpRegistrationResult,
+        _state: Path | None,
+    ) -> None:
+        """Persist the verified post-write route; persistence never fails the install.
+
+        Both fields carry the verified post-write command; install-time mismatch
+        vs later drift is distinguished by preview_digest vs observation_digest.
+        A failed post-write verification clears any stale record fail-soft so a
+        prior policy entry never survives a strict install it cannot describe.
+        """
+
+        def _clear_stale() -> None:
+            try:
+                clear_applied_route(_state=_state)
+            except Exception:
+                pass
+
+        try:
+            if binary.harness_id is not HarnessId.CODEX:
+                return
+            try:
+                observation = await self._port.observe_registration(binary)
+            except Exception:
+                _clear_stale()
+                return
+            if observation.state is not McpRegistrationState.YOETZ_OWNED:
+                _clear_stale()
+                return
+            profile = observation.route_profile
+            if profile is None:
+                _clear_stale()
+                return
+            if profile != "policy" and profile != "strict":
+                _clear_stale()
+                return
+            serve_command = MCP_STRICT_SERVE_COMMAND if profile == "strict" else MCP_SERVE_COMMAND
+            try:
+                record_applied_route(
+                    profile,
+                    list(serve_command),
+                    list(serve_command),
+                    result.preview_digest,
+                    _state=_state,
+                )
+            except Exception:
+                _clear_stale()
+                return
+        except Exception:
+            _clear_stale()
+            return

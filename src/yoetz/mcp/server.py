@@ -1982,10 +1982,38 @@ def main(
     if types.LATEST_PROTOCOL_VERSION not in SUPPORTED_PROTOCOL_VERSIONS:
         raise RuntimeError("mcp_sdk_protocol_registry_invalid")
     configure_logging(_bridge_logging_config(), LogMode.MCP_STDIO)
+    runtime = build_bridge_runtime(
+        "strict" if semantic == "off" else "policy",
+        host_profile=host,
+    )
+    # Issue #537 slice B: structural applied-vs-serving comparison at bridge
+    # startup. Uses SessionStart (not observe) for consistency with the hook
+    # drift probe; fail-soft and never blocks serving, with no content logged.
+    # The bridge compares applied-vs-self (own argv), while hooks/status compare
+    # applied-vs-host (`codex mcp get`).
+    try:
+        import contextlib as _contextlib
+
+        from yoetz.application.applied_mcp_route import read_applied_route as _read_route
+        from yoetz.cli.hook_diagnostics import record_hook_diagnostic as _record_diagnostic
+
+        try:
+            _record = _read_route()
+        except Exception:
+            _record = None
+        if isinstance(_record, dict):
+            _applied = _record.get("applied_profile")
+            _serving = runtime.route_profile
+            if (
+                _applied in {"policy", "strict"}
+                and _serving in {"policy", "strict"}
+                and _serving != _applied
+            ):
+                with _contextlib.suppress(Exception):
+                    _record_diagnostic("registration_drift", "SessionStart")
+    except Exception:
+        pass
     anyio.run(
         run_stdio,
-        build_bridge_runtime(
-            "strict" if semantic == "off" else "policy",
-            host_profile=host,
-        ),
+        runtime,
     )

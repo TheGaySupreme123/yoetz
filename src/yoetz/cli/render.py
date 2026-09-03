@@ -84,6 +84,15 @@ def render_human_check(result: CheckSuccessModel) -> str:
         lines.append(f"Suppressed findings: {suppressed}")
     if result.coverage.known_gaps:
         lines.append("Coverage gaps: " + ", ".join(result.coverage.known_gaps))
+        # The strict ceiling blocked this process while the last applied route was policy:
+        # the serving process is stale, not the privacy posture (issue #537). A genuinely
+        # applied strict route keeps today's terminal wording with no recovery line.
+        if "optional_semantic_review_registration_drift" in tuple(result.coverage.known_gaps):
+            lines.append(
+                "Recovery: re-run `yoetz integrate codex mcp preview` and "
+                "`yoetz integrate codex mcp install --route-profile policy`, then start "
+                "a fresh Codex process."
+            )
     return "\n".join(lines)
 
 

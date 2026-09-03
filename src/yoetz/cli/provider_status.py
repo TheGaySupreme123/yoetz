@@ -88,6 +88,18 @@ def _emit(value: Mapping[str, JsonValue], *, json_output: bool) -> None:
             f"configured={route.get('configured_profile')} "
             f"observed={route.get('observed')}"
         )
+        # Issue #537 slice B: surface applied-vs-serving drift in the human
+        # rendering using only closed profile tokens, never paths or config.
+        try:
+            _drift = route.get("drift_since_install") is True
+            _applied = route.get("applied_profile")
+            _serving = route.get("registered_profile")
+            if _drift and _applied in {"policy", "strict"} and _serving in {"policy", "strict"}:
+                print(f"registration drift: applied {_applied}, serving {_serving}")
+            elif _drift:
+                print("registration drift: applied route differs from serving route")
+        except Exception:
+            pass
     print(f"agent_route_semantic_ready: {value.get('agent_route_semantic_ready')}")
     admission = value.get("host_admission")
     if isinstance(admission, Mapping):
@@ -173,6 +185,8 @@ def _mcp_local_composition(service_state: str | None, *, service_observed: bool)
 
 async def mcp_route_observation(
     workspace_locator: Path | None = None,
+    *,
+    _state: Path | None = None,
 ) -> dict[str, JsonValue]:
     """Report exclusive external/plugin MCP ownership without inferring runtime success.
 
@@ -252,6 +266,31 @@ async def mcp_route_observation(
         route_profile = None
         observed = True
 
+    # Issue #537 slice B: join the durable applied route against the live
+    # host resolution above (never a cached preview). Fail-soft: an unreadable
+    # record reads as no applied route and no drift; unread observations never
+    # report drift. Strict both-in-set rule (review B1): drift is True iff a
+    # record exists AND both profiles name a Yoetz route AND they differ, so
+    # ABSENT/DUAL/FOREIGN (registered None) never report drift.
+    try:
+        from yoetz.application.applied_mcp_route import read_applied_route
+
+        _applied_record = read_applied_route(_state=_state)
+    except Exception:
+        _applied_record = None
+    _applied_profile: JsonValue = None
+    if isinstance(_applied_record, dict):
+        _candidate = _applied_record.get("applied_profile")
+        if _candidate in {"policy", "strict"}:
+            _applied_profile = _candidate
+    _drift_since_install = (
+        _applied_record is not None
+        and _applied_profile in {"policy", "strict"}
+        and observed is True
+        and route_profile in {"policy", "strict"}
+        and route_profile != _applied_profile
+    )
+
     return {
         "registration_state": external_state,
         "registered_profile": route_profile,
@@ -261,6 +300,8 @@ async def mcp_route_observation(
         "ownership_state": ownership.value,
         "external_registration_state": external_state,
         "plugin_managed_state": plugin.ownership_state.value,
+        "applied_profile": _applied_profile,
+        "drift_since_install": _drift_since_install,
     }
 
 
@@ -437,7 +478,9 @@ def machine_scope_request() -> JsonObject:
     return JsonObject(body)
 
 
-async def provider_status_report(*, workspace_locator: Path | None = None) -> dict[str, JsonValue]:
+async def provider_status_report(
+    *, workspace_locator: Path | None = None, _state: Path | None = None
+) -> dict[str, JsonValue]:
     """Compose a nonsecret readiness snapshot from config, service, and policy."""
 
     config = load_config({}, os.environ, None)
@@ -531,7 +574,7 @@ async def provider_status_report(*, workspace_locator: Path | None = None) -> di
         credential_connected = None
         llm_inference_enabled = None
 
-    mcp_route = await mcp_route_observation(workspace_locator)
+    mcp_route = await mcp_route_observation(workspace_locator, _state=_state)
     registered_profile = mcp_route.get("registered_profile")
     ownership_state = mcp_route.get("ownership_state")
     if ownership_state is None and mcp_route.get("registration_state") == "yoetz_owned":

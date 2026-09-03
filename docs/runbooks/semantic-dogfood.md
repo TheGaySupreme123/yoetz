@@ -95,11 +95,25 @@ starting, through a fresh digest-bound re-registration — `yoetz integrate code
 `yoetz integrate codex mcp install --accept --preview-digest <digest>` (ADR-018 decision 7). Do not
 assume the configured value is what the agent will get.
 
+A second, independent drift signal compares the live registration against the last applied
+install rather than current configuration (issue #537). `yoetz provider status --json`
+`mcp_route` carries `applied_profile` (the route the installer last applied, from the
+state-root record) and `drift_since_install` (true when the live observed registration
+disagrees with it). Record both at preflight alongside the table above. A ceiling check
+served while the applied record says `policy` additionally carries the
+`optional_semantic_review_registration_drift` coverage gap next to the ceiling gap, and its
+receipt names the recovery: re-run `mcp preview` / `mcp install --route-profile policy` and
+start a fresh Codex process. At session start the `SessionStart` hook (and the MCP bridge at
+startup) emit a closed `registration_drift` hook diagnostic on the same mismatch, so read
+`hook_diagnostics.reasons` there too — a drift that appears mid-session invalidates the
+profile the run declared in §1.
+
 `mcp_route.observed: false` is disqualifying for **both** profiles. An unread route is not a policy
 route, and it is not a strict route either — it is no route at all until it is read.
 
-`yoetz integrate codex mcp status --json` reports `route_profile` for the same reason, and is the
-narrower check when you only need the route.
+`yoetz integrate codex mcp status --json` reports `route_profile` alongside `registered_profile`,
+`applied_profile`, and `drift_since_install` for the same reason, and is the narrower check when
+you only need the route and its post-install drift.
 
 ## 3. The provenance gate
 

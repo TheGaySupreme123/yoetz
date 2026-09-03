@@ -40,6 +40,7 @@ from yoetz.adapters.integrations.codex_skill import (
     inspect_destination,
     load_packaged_skill_source,
 )
+from yoetz.application.applied_mcp_route import clear_applied_route, read_applied_route
 from yoetz.application.codex_plugin import CodexPluginService
 from yoetz.application.harness_mcp import HarnessMcpService, McpRegistrationConfirmation
 from yoetz.application.observation_check_policy import load_observation_check_policy
@@ -1124,6 +1125,7 @@ async def _codex_integration_step(
     approved_activation_digest: str | None = None,
     approved_policy_digest: str | None = None,
     codex_home: Path | None = None,
+    _state: Path | None = None,
 ) -> dict[str, JsonValue]:
     """Preview and apply one Codex integration: skill + plugin sources + MCP + consent.
 
@@ -1532,6 +1534,7 @@ async def _codex_integration_step(
                     True,
                     "interactive" if interactive else "noninteractive_flag",
                 ),
+                _state=_state,
             )
         except McpRegistrationError as error:
             return {
@@ -1604,6 +1607,7 @@ async def _register_step(
     accept: bool,
     route_profile: Literal["policy", "strict"] | None = None,
     codex_home: Path | None = None,
+    _state: Path | None = None,
 ) -> dict[str, JsonValue]:
     """Backward-compatible name for the complete Codex integration step."""
 
@@ -1613,6 +1617,7 @@ async def _register_step(
         accept=accept,
         route_profile=route_profile,
         codex_home=codex_home,
+        _state=_state,
     )
 
 
@@ -1626,6 +1631,7 @@ async def apply_codex_integration(
     approved_activation_digest: str,
     approved_policy_digest: str | None = None,
     codex_home: Path,
+    _state: Path | None = None,
 ) -> dict[str, JsonValue]:
     """Apply the exact integration a caller already previewed and got approved.
 
@@ -1653,6 +1659,7 @@ async def apply_codex_integration(
         approved_activation_digest=approved_activation_digest,
         approved_policy_digest=approved_policy_digest,
         codex_home=codex_home,
+        _state=_state,
     )
 
 
@@ -2863,6 +2870,7 @@ async def integrate_mcp(
     json_output: bool,
     route_profile: Literal["policy", "strict"] | None = None,
     project_root: Path | None = None,
+    _state: Path | None = None,
 ) -> int:
     """Client-local MCP status, registration, and unregistration commands.
 
@@ -2897,11 +2905,39 @@ async def integrate_mcp(
     try:
         if action == "status":
             observation = await service.observe(chosen)
+            # Issue #537 slice B: join the durable applied route against the
+            # host's own live resolution (never a cached preview). Fail-soft:
+            # an unreadable record reads as no applied route and no drift.
+            try:
+                _applied_record = read_applied_route(_state=_state)
+            except Exception:
+                _applied_record = None
+            _applied_profile = (
+                _applied_record.get("applied_profile")
+                if isinstance(_applied_record, dict)
+                else None
+            )
+            if _applied_profile not in {"policy", "strict"}:
+                _applied_profile = None
+            _registered_profile = observation.route_profile
+            # Strict both-in-set rule (issue #537 review B1): drift is True
+            # iff a record exists AND both profiles name a Yoetz route AND
+            # they differ. Unread/None/DUAL/FOREIGN/ABSENT (registered None)
+            # never report drift; host observe stays the authority.
+            _drift = (
+                _applied_record is not None
+                and _applied_profile in {"policy", "strict"}
+                and _registered_profile in {"policy", "strict"}
+                and _registered_profile != _applied_profile
+            )
             _emit(
                 {
                     "harness": harness,
                     "route_profile": observation.route_profile,
                     "state": observation.state.value,
+                    "registered_profile": _registered_profile,
+                    "applied_profile": _applied_profile,
+                    "drift_since_install": _drift,
                 },
                 json_output=json_output,
             )
@@ -2936,6 +2972,14 @@ async def integrate_mcp(
             if not accepted:
                 return _mcp_error_exit("confirmation_required")
             if preview.action is McpRegistrationAction.NOOP:
+                # A NOOP remove against ABSENT means the host entry is already
+                # gone (e.g. manually deleted): drop any stale applied record
+                # fail-soft so later drift reads False, then emit the noop.
+                if preview.state_before is McpRegistrationState.ABSENT:
+                    try:
+                        clear_applied_route(_state=_state)
+                    except Exception:
+                        pass
                 _emit(
                     {
                         "action": "noop",
@@ -2954,6 +2998,7 @@ async def integrate_mcp(
                     True,
                     "interactive" if interactive else "noninteractive_flag",
                 ),
+                _state=_state,
             )
             _emit(
                 {
@@ -3039,6 +3084,7 @@ async def integrate_mcp(
                 True,
                 "interactive" if interactive else "noninteractive_flag",
             ),
+            _state=_state,
         )
     except McpRegistrationError as error:
         return _mcp_error_exit(error.reason.value)

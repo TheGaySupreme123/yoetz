@@ -132,6 +132,15 @@ The validator covers the default manifest/hooks/skill paths. Yoetz separately va
 `.mcp.json` structure and cache bytes; neither static validator proves MCP connection or model use.
 `plugin details` should report one skill, five hooks, and one MCP server in plugin-managed mode.
 
+## Applied-route drift decision (issue #537)
+
+Decision for Claude Code: not supported here — no additional state-root applied-route record
+at this time. The plugin-managed `.mcp.json` already binds the route profile and the artifact
+digest in its in-tree marker, and the live file reads remain the authority for which route
+this host serves; a stale serving process is detected through the existing activation and
+ownership read-backs, not through a second record. If a ceiling check ever needs an
+applied-vs-serving distinction on this host, that is a separate design-gated change.
+
 ## Enable, trust, reload, and activation
 
 Preview `--action enable`, consume a new exact review, then run `plugin enable` with the same

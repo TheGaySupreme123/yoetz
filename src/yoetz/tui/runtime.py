@@ -64,7 +64,15 @@ def _agent_route_detail(provider: ProviderPosture) -> str:
     if provider.agent_route_semantic_ready:
         return ""
     if provider.registered_route_profile == "strict":
-        return "registered on the strict route; 'yoetz integrate codex mcp preview' to change it"
+        strict = "registered on the strict route; 'yoetz integrate codex mcp preview' to change it"
+        # The last applied route was policy, so this strict process is stale rather than
+        # an owner privacy decision (issue #537): re-register and start a fresh process.
+        if provider.route_drift_since_install:
+            return (
+                f"{strict}; applied route differs since install — re-run the previewed "
+                "policy install, then start a fresh Codex process"
+            )
+        return strict
     return "external review is off for this installation"
 
 
@@ -921,6 +929,7 @@ class YoetzRuntime:
                 raw_agent_ready if isinstance(raw_agent_ready, bool) else None
             ),
             registered_route_profile=cast(str | None, route_map.get("registered_profile")),
+            route_drift_since_install=route_map.get("drift_since_install") is True,
             endpoint_bound=report.get("endpoint_bound") is True,
             provider_id=cast(str | None, endpoint_map.get("provider_id")),
             model=cast(str | None, endpoint_map.get("model")),

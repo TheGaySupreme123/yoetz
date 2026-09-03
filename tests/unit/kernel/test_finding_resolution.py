@@ -283,6 +283,28 @@ def test_semantic_absence_does_not_weaken_a_deterministic_proof(gap: str) -> Non
     assert _resolves(_finding(), _check(coverage=_coverage(gaps=(gap,)))) is True
 
 
+def test_registration_drift_check_resolves_deterministic_never_semantic() -> None:
+    """Issue #537: a drift check resolves like a plain ceiling check.
+
+    The drift gap rides alongside the ceiling gap, so the pair still tolerates
+    deterministic proof — and still proves nothing about a semantic finding.
+    """
+
+    from yoetz.domain.receipts import (
+        OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+        OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
+    )
+
+    drift_check_gaps = (
+        OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP,
+        OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP,
+    )
+    assert _resolves(_finding(), _check(coverage=_coverage(gaps=drift_check_gaps))) is True
+    semantic = _finding(origin=FindingOrigin.SEMANTIC_MODEL_DERIVED)
+    weakened = _coverage(gaps=drift_check_gaps, semantic=True)
+    assert _resolves(semantic, _check(semantic=_SEMANTIC_OK, coverage=weakened)) is False
+
+
 @pytest.mark.parametrize(
     "gap",
     (

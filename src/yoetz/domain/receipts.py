@@ -63,6 +63,7 @@ __all__ = [
     "COMPLETION_SCOPE_DECLARED_NONE_GAP",
     "COMPLETION_SCOPE_UNDECLARED_GAP",
     "OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP",
+    "OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP",
     "PolicyVersionEntry",
     "ReceiptConclusion",
     "ReceiptDocument",
@@ -128,6 +129,13 @@ SEMANTIC_REVIEW_NOT_REQUESTED_GAP: Final = "semantic_review_not_requested"
 # and read as a selection-policy choice the author had already made.
 SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP: Final = "semantic_case_content_over_item_limit"
 OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP: Final = "optional_semantic_review_blocked_by_policy"
+# The strict route ceiling blocked this process, but the durable applied-route record says the
+# last install applied the policy route: the serving process is stale, not the privacy posture
+# (issue #537). Carried alongside the ceiling gap above — never instead of it — so the terminal
+# status/reason/provenance binding is unchanged and the gap names the recovery.
+OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP: Final = (
+    "optional_semantic_review_registration_drift"
+)
 _SEMANTIC_REVIEW_NOT_RUN_GAPS: Final = frozenset(
     {
         SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
@@ -1187,6 +1195,14 @@ def render_receipt_compact(document: ReceiptDocument) -> str:
             )
         return (
             prefix + f"coverage is insufficient because the plan declared none, reason: {reason}."
+        )
+    if OPTIONAL_SEMANTIC_REVIEW_REGISTRATION_DRIFT_GAP in gap_codes:
+        return (
+            prefix + "coverage is insufficient because optional semantic review was blocked by "
+            "the strict route ceiling while the last applied route was policy: the serving "
+            "process is stale. Re-run `yoetz integrate codex mcp preview` and "
+            "`yoetz integrate codex mcp install --route-profile policy`, then start a fresh "
+            "Codex process. No provider attempt or semantic finding was recorded."
         )
     if OPTIONAL_SEMANTIC_REVIEW_BLOCKED_BY_POLICY_GAP in gap_codes:
         return (
