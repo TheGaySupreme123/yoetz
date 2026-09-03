@@ -5,7 +5,8 @@
 2026-08-25 to name Codex marketplace/MCP removal as outside this OS-presence lane (issue #419);
 amended 2026-08-30 for exact bounded Codex JSONL import publication (issue #301);
 amended 2026-08-31 for helper-generated agent-authorized vault initialization and masked terminal
-input (issues #490 and #491).
+input (issues #490 and #491); amended 2026-09-03 for exact expanded-review chat grants and
+user-controlled conversational setup (issues #532 and #533).
 Superseded in scope by ADR-016 for the general non-default consent catalog. Console `yoetz consent
 review` remains fail-closed until a verified OS-presence adapter is installed; allowlisted
 first-party agents may use `yoetz consent authorize` for exact prepared operations that advertise
@@ -42,16 +43,24 @@ generate and store one locally without any secret-bearing agent channel.
    is not extended to either removal command.
 
 2. **Agent-safe preparation.** `yoetz consent prepare` creates one owner-only
-   `yoetz.elevated-bootstrap.pending/3` record. Its agent projection is
-   `yoetz.consent.pending-agent/5` and contains only operation, risk class, bounded danger text,
+   `yoetz.elevated-bootstrap.pending/4` record. Its agent projection is
+   `yoetz.consent.pending-agent/6` and contains only operation, risk class, bounded danger text,
    exact danger and target digests, expiry, pending ID, an exact bounded repository recipe when
    applicable, the fixed `["yoetz","consent","review"]` command, and an authorize command only
    for operations that permit agent-chat authorization. For `import_publication` it also carries
    a closed structural preview: exact source/manifest/plan/target digests, task/session/writer and
    profile identity, counts and caps, plus explicit false facts for complete-transcript inclusion,
    reasoning inclusion, and reviewer-egress widening. It contains no source line or excerpt.
-   Frozen public v2-v4 schemas remain shipped. Version-1 and version-2 durable pending records are
-   invalidated rather than reinterpreted.
+   For a repository grant, it carries the exact recipe and bounded substantive before/after policy
+   diff plus repository, authority, current-policy, candidate-policy, and diff digests. The
+   owner-only record also freezes the complete current and candidate policy bytes so authorization
+   cannot rebuild a different target from changed configuration. Frozen public v2-v5 schemas
+   remain shipped. Version-1 through version-3 public pending records are invalidated rather than
+   reinterpreted; these actions expire after fifteen minutes and must be prepared again. A legacy
+   private review marker is different: it may still have a live pre-upgrade claimant, so upgrade
+   never deletes or reinterprets it and continues to return `review_in_progress`. This preserves
+   the existing fail-closed interrupted-review boundary until a separately designed recovery path
+   can prove the claimant is gone.
 
 3. **Two approval surfaces.** `yoetz consent review` takes no authority-bearing arguments. Before
    opening a console or claiming pending state, it requires an independently authenticated,
@@ -86,6 +95,16 @@ generate and store one locally without any secret-bearing agent channel.
    the helper locally loads the active scoped secret, stages a generated replacement, completes
    reauthentication and rewrap, and then promotes the replacement. Trusted CLI/TUI remains the
    stronger recommended path.
+
+   **Expanded-review amendment (2026-09-03, issues #532/#533).** A capable agent guides supported
+   setup, installation, and settings choices in normal conversation. Recommendations remain
+   advisory and explicit current user intent controls the supported outcome. When semantic review
+   is the stated goal, the agent recommends Expanded first and explains Assisted as the
+   lower-disclosure alternative. `repository_privacy_grant` admits `expanded_review` only through
+   the same exact one-use envelope: preparation freezes the complete candidate and readable diff;
+   authorization re-checks repository, authority generation, and provider/model/endpoint binding
+   before proposing those frozen bytes. Any drift or unsupported authority channel is a
+   no-mutation failure with the shortest user-controlled continuation.
 
 4. **Single-shot state.** Atomically creating the no-clobber hard-link review marker is the
    linearization point that transfers ownership from pending state to one reviewer. The winner

@@ -98,13 +98,16 @@ available, and returns none once it is not — in which case run the check again
 Do not request a receipt and do not tell the user the task is done until that same request reaches a
 terminal result.
 
-# A missing repository grant needs the trusted privacy surface
+# A missing repository grant needs an exact privacy decision
 
 Act only when Yoetz explicitly reports that the current repository grant is missing; do not infer
-that fact from a generic policy refusal. Tell the user to run the exact trusted CLI/TUI entrypoint
-`yoetz --privacy`, complete the repository review there, and then tell you when it is done. A “yes”
-or “done” in agent chat is notification only and never grants authority. Do not attempt approval
-through MCP, arguments, environment, stdin, or terminal automation.
+that fact from a generic policy refusal. If the installed client advertises chat authorization for
+`repository_privacy_grant`, guide the recipe choice, prepare the exact grant, render its complete
+`repository_privacy_preview`, and obtain the final current-chat decision under the consent rules
+below. Otherwise tell the user to run the exact trusted CLI/TUI entrypoint `yoetz --privacy`,
+complete the repository review there, and then tell you when it is done. A “yes” or “done” in agent
+chat is notification only when no supported exact chat-authority pending exists; never forge a
+missing authority channel through MCP, arguments, environment, stdin, or terminal automation.
 
 The repository grant is standing authority for that exact repository until it is revoked or
 changed. It is distinct from the one-use `confirm_every_request` disclosure decision above. Keep
@@ -158,6 +161,22 @@ Never fabricate a session ID, publication, finding, verdict, or receipt. If a ca
 Only operations explicitly listed in `catalog.default_safe` are default-safe. For anything else, run
 `yoetz consent catalog` / `status`. Only operations with `implemented=true` may be prepared.
 
+Normal conversation is the primary agent-guided setup, install, and settings-change experience.
+Explain each consequential choice in plain language, recommend one option with its trade-off, and
+let the user's explicit current choice control the product-policy outcome whenever the operation and
+advertised authority channel support it. A recommendation is advisory: never silently substitute a
+different recipe, provider, model, privacy level, install target, or ceremony because the agent
+prefers it. Technical impossibility, an unavailable authority channel, a policy ceiling, exact-target
+drift, never-send rules, credential handling, destructive-action controls, and honest evidence
+boundaries remain real blockers; name the exact blocker and give the shortest user-controlled
+continuation.
+
+When the user explicitly asks for semantic review, recommend `expanded_review` first for the richest
+in-scope review and explain that it permits broader problem-relevant context. Also explain
+`assisted_review` as the lower-disclosure semantic option, `metadata_only` as structural-only review
+with confirmation per request, and `private` as no external semantic review. Ask for the user's
+choice; intent to get semantic review is not itself approval of a prepared privacy change.
+
 The stronger local path is the fixed `yoetz consent review` / `yoetz --privacy` command. Console
 review requires independently verified action-bound OS user presence; a foreground console or
 pseudo-terminal alone is never approval. The current runtime has no production presence adapter,
@@ -165,10 +184,16 @@ so console review fails closed with `human_authority_unavailable` and leaves pen
 untouched.
 
 An operation whose pending projection has a non-null `authorize_command` also supports delegated
-current-chat authorization. For that exact pending action:
+current-chat authorization. Guide the user through the choices first, prepare the combined exact
+action only after those choices are fixed, and use one final approve/deny decision for that prepared
+target. For that exact pending action:
 
 1. Show the bounded danger text, operation, danger digest, target digest, and exact repository
-   recipe when present. Recommend the stronger trusted local path. For credential ingress, warn
+   recipe when present. A `repository_privacy_preview` is the decision surface: show its current
+   and candidate policy digests, authority and diff digests, repository commitment, and every
+   before/after change row. The digest is integrity evidence, not a substitute for the readable
+   diff. Offer the stronger trusted-local route where useful, but do not relabel it as required when
+   this pending advertises chat authorization. For credential ingress, warn
    once that ordinary chat may retain or expose the value and recommend a limited/rotatable
    credential.
 2. Proceed only after the user explicitly instructs you in the current chat to perform that exact
@@ -197,6 +222,11 @@ checks above are therefore load-bearing skill behavior. Target binding, expiry, 
 repository commitment, machine-policy ceilings, vault reauthentication, and no-echo result rules
 remain runtime-enforced. For Codex JSONL import, follow its skill; never put source or excerpts in
 chat.
+
+For `repository_privacy_grant`, preparation freezes the exact current and candidate policy bytes.
+Authorization must use that frozen candidate and fail with no policy/provider mutation if the
+repository, authority generation, provider, model, endpoint profile, recipe, target, expiry, or
+one-use state changed. Never re-prepare behind the user's back to make a stale approval succeed.
 
 `vault_initialize` and `vault_passphrase_rotate` use that same path; never handle or ask for a
 passphrase. Interrupted rotation: leave the staged entry and restart. Locked vaults keep the

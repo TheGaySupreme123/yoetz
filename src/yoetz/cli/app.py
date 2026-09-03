@@ -3502,7 +3502,7 @@ def elevated_prepare(
     elevated_error = cast(type[Exception], getattr(errors, "ElevatedBootstrapError"))
     prepare = cast(Callable[..., object], getattr(module, "prepare_elevated"))
     binding: dict[str, str] | None = None
-    grant: dict[str, str] | None = None
+    grant: dict[str, JsonValue] | None = None
     if operation in {"provider_credential_set", "provider_credential_rotate"}:
         required = {
             "provider_id": provider_id,
@@ -3568,6 +3568,10 @@ def elevated_prepare(
 
         async def _grant_binding() -> int:
             nonlocal grant
+            from datetime import UTC, datetime
+
+            from yoetz.config.models import ConfigError
+
             privacy = importlib.import_module("yoetz.cli.privacy_setup")
             try:
                 snapshot = await cast(
@@ -3580,11 +3584,33 @@ def elevated_prepare(
                 raise elevated_error("repository_privacy_scope_unavailable") from exc
             if type(commitment) is not str or type(authority_digest) is not str:
                 raise elevated_error("repository_privacy_scope_unavailable")
-            grant = {
-                "recipe": cast(str, recipe),
-                "repository_privacy_commitment": commitment,
-                "authority_digest": authority_digest,
-            }
+            try:
+                external, _local = cast(
+                    Callable[[], tuple[object | None, object | None]],
+                    getattr(privacy, "configured_bindings"),
+                )()
+                current = getattr(snapshot, "composed_policy")
+                answers = cast(Callable[..., object], getattr(privacy, "recipe_answers"))(
+                    cast(str, recipe), current, external
+                )
+                candidate = cast(Callable[..., object], getattr(privacy, "build_candidate_policy"))(
+                    current, answers, now=datetime.now(UTC)
+                )
+                binding_builder = cast(
+                    Callable[..., dict[str, JsonValue]],
+                    getattr(errors, "repository_grant_binding"),
+                )
+                grant = binding_builder(
+                    recipe=cast(str, recipe),
+                    repository_privacy_commitment=commitment,
+                    authority_digest=authority_digest,
+                    current_policy=current,
+                    candidate_policy=candidate,
+                )
+            except elevated_error:
+                raise
+            except (ConfigError, KeyError, TypeError, ValueError) as exc:
+                raise elevated_error("grant_binding_invalid") from exc
             return 0
 
         try:

@@ -63,6 +63,23 @@ yoetz privacy pending           # list disclosure decisions waiting for you
 yoetz privacy receipts          # inspect bounded structural egress receipts
 ```
 
+You can also ask a capable Yoetz agent to install, configure, or change Yoetz in ordinary
+conversation. The agent should explain each consequential choice, recommend an option and its
+trade-off, perform the mechanical steps, and leave the decision with you. If you explicitly ask
+for semantic review, it recommends **Expanded review** first for the deepest useful in-scope
+review and explains that it permits broader problem-relevant context; **Assisted review** is the
+lower-disclosure semantic alternative. Metadata only and Private remain available. Choosing a
+recipe is not yet approval: the agent prepares one exact combined change and shows it before asking
+you to approve or deny it.
+
+On an authority-capable Codex route, that prepared view includes every substantive `before ->
+after` policy row, the provider/model/endpoint binding, repository commitment, current and
+candidate policy digests, diff and authority digests, expiry, and one-use target. Your explicit
+current-chat decision can complete exactly that action. Any repository, policy-generation, route,
+recipe, target, expiry, or replay drift stops with no policy or provider mutation. A host without
+the required chat-authority capability gives the shortest trusted-local continuation instead of
+silently choosing a different policy.
+
 `privacy pending` exists for one situation: `privacy decide-disclosure` needs an exact pending id,
 which normally arrives in the check result that is waiting on it, and that id can be lost — a
 closed terminal, an agent that did not relay it. The listing names the decisions you can still
@@ -117,6 +134,10 @@ change rather than half of it. The service sends structured field/value records 
 explanatory prose, and the wording is fixed locally by Yoetz. The diff digest is printed underneath
 and labelled for what it is: integrity evidence binding the decision to exact bytes, not a
 description of the change.
+
+The agent-chat decision surface renders the same structured substantive diff. It is not allowed to
+show only a digest and call that informed approval; the digest binds the bytes while the readable
+rows explain what changes.
 
 ## What semantic review actually sends
 
