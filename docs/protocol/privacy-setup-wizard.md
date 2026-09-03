@@ -224,10 +224,14 @@ inserting the first exact repository row. One preview shows both and one authori
 commits both or neither. Older setup/propose decoders remain readable, but cannot create or migrate a
 repository grant and fail closed with upgrade guidance under repository-grant mode.
 
-**That trusted-terminal ceremony is the single authorization for a widening.** No other surface may
-take its own approval for one first. A selecting surface may show a proposal or hand one over, but a
-second "do you approve?" outside the trusted terminal is not a second gate — it only teaches users
-that consenting in an untrusted surface is what changes privacy.
+**That trusted-terminal ceremony is the default authorization for a widening, and the allowlisted
+`yoetz consent` lane described above is its only exception.** No other surface may take its own
+approval for one first. A selecting surface may show a proposal or hand one over, but a second "do
+you approve?" outside the trusted terminal is not a second gate — it only teaches users that
+consenting in an untrusted surface is what changes privacy. The consent lane is not that second
+gate: it is one exact prepared, expiring, single-use target whose complete substantive diff is
+rendered before the one decision, and the catalog states that Yoetz cannot independently
+authenticate the relayed chat provenance.
 
 What the ceremony renders is the **complete substantive diff**, as `before → after` steps derived
 from the same comparison that classified the proposal as a widening, so a recognized widening cannot

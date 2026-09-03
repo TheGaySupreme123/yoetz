@@ -48,6 +48,18 @@ def test_every_host_runbook_preserves_the_choice_and_names_its_authority_boundar
         assert not agent_chat_attestation_supported(host, "explicit_current_chat_user")
 
 
+def test_authorization_docs_do_not_contradict_the_implemented_consent_lane() -> None:
+    """A doc that still calls the terminal the only widening authority would be false."""
+
+    usage = " ".join(_text("docs/usage/agent-start.md").split())
+    protocol = " ".join(_text("docs/protocol/privacy-setup-wizard.md").split())
+
+    assert "only a reauthenticated local human at the trusted terminal" not in usage
+    assert "authorize_command" in usage
+    assert "trusted-terminal ceremony is the single authorization" not in protocol
+    assert "`yoetz consent` lane described above is its only exception" in protocol
+
+
 def test_catalog_exposes_user_control_rules_and_all_named_recipes() -> None:
     catalog = catalog_payload()
     rules = catalog["rules"]
