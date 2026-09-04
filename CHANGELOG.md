@@ -15,8 +15,9 @@ reverse-chronological released versions.
   A deterministic task-ledger rejection inside the observation store (a CHECK or STRICT type
   failure) is now raised as non-retryable and quarantined once as `ledger_rejected`, instead of
   escaping the coordinator's catch-all as retryable `service_unavailable` and retrying the same
-  row every sweep while `service status` reported `ready`. Rows already pending for a Claude or
-  Cursor session deliver unchanged once their bundle is at schema 9 (issue #576).
+  row every sweep while `service status` reported `ready`. Valid pending Claude or Cursor envelopes can store unchanged at schema 9; delivery also
+  requires a usable session mapping. Existing bundles require explicit migration; upgrading the
+  binary alone does not migrate task bundles (issue #576).
 - A Codex MCP route that reverts to `strict` between install and session start no longer reports a
   bare `route_semantic_ceiling`. `yoetz integrate codex mcp install` now records the applied route
   in an owner-only state-directory record (no repository or prompt content); `mcp status`, provider
