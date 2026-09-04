@@ -1402,3 +1402,59 @@ def test_status_reports_the_oldest_pending_receipt_for_convergence(
     text = capsys.readouterr().out  # type: ignore[attr-defined]
     assert f"oldest: {oldest.wire}" in text
     assert "last successful drain: never" in text
+
+
+def test_explicit_recovery_persists_profile_and_rotation_frontier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from builders.codex_rollout import encode_lines, function_call, session_meta
+
+    state = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "other-home"))
+    store = LocalObservationStore(_state=state)
+    commitment = store.workspace_commitment(str(workspace))
+    store.grant_consent(commitment)
+    path = tmp_path / "recovery.jsonl"
+    session = store.session_commitment("recovery")
+    path.write_bytes(encode_lines(session_meta(), function_call(name="shell", call_id="first")))
+
+    # A regression to separately saving any generation-coupled component must fail: recovery
+    # must commit the same complete transaction as automatic reconciliation.
+    def separate_save(*args: object, **kwargs: object) -> None:
+        raise AssertionError("non-atomic stream state write")
+
+    monkeypatch.setattr(LocalObservationStore, "set_stream_cursor", separate_save)
+    monkeypatch.setattr(LocalObservationStore, "set_stream_partial", separate_save)
+    monkeypatch.setattr(LocalObservationStore, "set_stream_profile", separate_save)
+    for version in ("0.148.0", "0.150.1"):
+        if version == "0.150.1":
+            replacement = tmp_path / "replacement.jsonl"
+            replacement.write_bytes(
+                encode_lines(
+                    session_meta(cli_version=version, history_mode="paginated"),
+                    function_call(name="shell", call_id="second"),
+                    function_call(name="shell", call_id="third"),
+                )
+            )
+            replacement.replace(path)
+        assert (
+            observe_cli.reconcile_session_stream(
+                session_file=str(path), workspace=str(workspace), json_output=True, _state=state
+            )
+            == 0
+        )
+        reopened = LocalObservationStore(_state=state)
+        cursor = reopened.get_stream_cursor(commitment, session)
+        assert cursor is not None
+        assert cursor.byte_position == path.stat().st_size
+        assert cursor.source_generation == (1 if version == "0.148.0" else 2)
+        assert reopened.stream_profile_for_session(commitment, session) == (
+            f"codex-rollout-jsonl/{version}/v1"
+        )
+        assert reopened.stream_source_identity_for_session(commitment, session) is not None
+        tools = reopened.stream_call_tools_for_session(
+            commitment, session, source_generation=cursor.source_generation
+        )
+        assert set(tools) == ({"first"} if version == "0.148.0" else {"second", "third"})

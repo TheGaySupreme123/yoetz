@@ -28,15 +28,40 @@ def session_meta(
     session_id: str = "019f8b27-b98e-7061-bbb5-d0b897594de6",
     ordinal: int | None = None,
     cwd: str = "/tmp/yoetz-rollout",
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return _row(
-        "session_meta",
+    payload: dict[str, Any] = {
+        "cli_version": cli_version,
+        "cwd": cwd,
+        "history_mode": history_mode,
+        "id": session_id,
+        "originator": "user",
+    }
+    if extra:
+        payload.update(extra)
+    return _row("session_meta", payload, ordinal=ordinal)
+
+
+def event_msg(payload: dict[str, Any], *, ordinal: int | None = None) -> dict[str, Any]:
+    return _row("event_msg", payload, ordinal=ordinal)
+
+
+def item_completed(
+    item: dict[str, Any],
+    *,
+    ordinal: int | None = None,
+    turn_id: str = "turn_1",
+) -> dict[str, Any]:
+    """Current-mode (0.150.1) ``event_msg.item_completed`` row wrapping one PascalCase item."""
+
+    return event_msg(
         {
-            "cli_version": cli_version,
-            "cwd": cwd,
-            "history_mode": history_mode,
-            "id": session_id,
-            "originator": "user",
+            "completed_at_ms": 1_800_000_001_000,
+            "item": item,
+            "started_at_ms": 1_800_000_000_000,
+            "thread_id": "019f8b27-b98e-7061-bbb5-d0b897594de6",
+            "turn_id": turn_id,
+            "type": "item_completed",
         },
         ordinal=ordinal,
     )

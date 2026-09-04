@@ -81,7 +81,9 @@ __all__ = [
 ]
 
 HOOK_MAPPING_VERSION: Final = "codex-obs-hook/1.0.0"
-STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.2.0"
+# 1.3.0: a stream cursor is paired with the exact rollout profile its generation's header
+# admitted; cursors persisted under 1.2.0 carry no profile and replay from the header (#568).
+STREAM_MAPPING_VERSION: Final = "codex-obs-stream/1.3.0"
 _KEY_BYTES: Final = 32
 _MAX_STATE_BYTES: Final = 1_048_576
 _MAX_LEGACY_STATE_BYTES: Final = 36 * 1_048_576
@@ -592,6 +594,10 @@ class _WorkspaceState:
     stream_call_tools: dict[str, dict[str, str]] | None = None
     stream_call_tool_generations: dict[str, int] | None = None
     stream_source_identities: dict[str, str] | None = None
+    # Exact rollout profile id the current source generation's header admitted, per session.
+    # Absent while a generation is unadmitted; a cursor with admitted events and no profile is
+    # replayed from its header rather than parsed under a guessed vocabulary.
+    stream_profiles: dict[str, str] | None = None
     stream_partial_dropped_sessions: set[str] | None = None
     hook_sequences: dict[str, int] | None = None
     last_stream_reconcile_mono_ms: int | None = None
@@ -644,6 +650,8 @@ class _WorkspaceState:
             self.stream_call_tool_generations = {}
         if self.stream_source_identities is None:
             self.stream_source_identities = {}
+        if self.stream_profiles is None:
+            self.stream_profiles = {}
         if self.stream_partial_dropped_sessions is None:
             self.stream_partial_dropped_sessions = set()
         if self.hook_sequences is None:
@@ -892,6 +900,7 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         },
         stream_call_tool_generations=dict(state.stream_call_tool_generations or {}),
         stream_source_identities=dict(state.stream_source_identities or {}),
+        stream_profiles=dict(state.stream_profiles or {}),
         stream_partial_dropped_sessions=set(state.stream_partial_dropped_sessions or ()),
         hook_sequences=dict(state.hook_sequences or {}),
         pending_outbox=list(state.pending_outbox or ()),
@@ -901,6 +910,20 @@ def _copy_state(state: _WorkspaceState) -> _WorkspaceState:
         ended_sessions=set(state.ended_sessions or ()),
         session_generations=dict(state.session_generations or {}),
         ended_session_generations=dict(state.ended_session_generations or {}),
+    )
+
+
+def _stream_profile_id_valid(profile_id: object) -> bool:
+    """Accept ``None`` or one bounded ASCII profile-id token such as ``codex-rollout-jsonl/x/v1``."""
+
+    if profile_id is None:
+        return True
+    return (
+        type(profile_id) is str
+        and 0 < len(profile_id) <= 128
+        and profile_id.isascii()
+        and profile_id[0].isalnum()
+        and all(char.isalnum() or char in "._+/-" for char in profile_id)
     )
 
 
@@ -1910,6 +1933,31 @@ class LocalObservationStore:
                 state.stream_source_identities[session_commitment] = source_identity
             self._save(workspace, state)
 
+    def stream_profile_for_session(self, workspace: str, session_commitment: str) -> str | None:
+        """Return the exact rollout profile id the session's current generation admitted."""
+
+        with self._lock:
+            state = self._load(workspace)
+            assert state.stream_profiles is not None
+            return state.stream_profiles.get(session_commitment)
+
+    def set_stream_profile(
+        self,
+        workspace: str,
+        session_commitment: str,
+        profile_id: str | None,
+    ) -> None:
+        if not _stream_profile_id_valid(profile_id):
+            raise ProtocolValueError("invalid_event_value_type")
+        with self._lock:
+            state = self._load(workspace)
+            assert state.stream_profiles is not None
+            if profile_id is None:
+                state.stream_profiles.pop(session_commitment, None)
+            else:
+                state.stream_profiles[session_commitment] = profile_id
+            self._save(workspace, state)
+
     def set_stream_reconcile_state(
         self,
         workspace: str,
@@ -1919,6 +1967,7 @@ class LocalObservationStore:
         partial: bytes,
         call_tools: Mapping[str, str],
         source_identity: str | None,
+        profile_id: str | None = None,
     ) -> None:
         """Atomically persist one replay-safe session-stream progress frontier."""
 
@@ -1930,6 +1979,8 @@ class LocalObservationStore:
             or len(source_identity) != 76
             or any(char not in "0123456789abcdef" for char in source_identity[12:])
         ):
+            raise ProtocolValueError("invalid_event_value_type")
+        if not _stream_profile_id_valid(profile_id):
             raise ProtocolValueError("invalid_event_value_type")
         clean: dict[str, str] = {}
         for call_id, tool_name in call_tools.items():
@@ -1953,6 +2004,7 @@ class LocalObservationStore:
             assert state.stream_call_tools is not None
             assert state.stream_call_tool_generations is not None
             assert state.stream_source_identities is not None
+            assert state.stream_profiles is not None
             state.stream_cursors[session_commitment] = cursor
             if len(partial) > _MAX_STREAM_PARTIAL_BYTES:
                 state.stream_partials.pop(session_commitment, None)
@@ -1984,6 +2036,10 @@ class LocalObservationStore:
                 state.stream_source_identities.pop(session_commitment, None)
             else:
                 state.stream_source_identities[session_commitment] = source_identity
+            if profile_id is None:
+                state.stream_profiles.pop(session_commitment, None)
+            else:
+                state.stream_profiles[session_commitment] = profile_id
             self._save(workspace, state)
 
     def get_stream_partial(self, workspace: str, session_commitment: str) -> bytes:
@@ -3557,6 +3613,15 @@ class LocalObservationStore:
                     )
                 }
             )
+        if state.stream_profiles:
+            payload["stream_profiles"] = JsonObject(
+                {
+                    session: profile_id
+                    for session, profile_id in sorted(
+                        state.stream_profiles.items(), key=lambda item: item[0].encode()
+                    )
+                }
+            )
         return payload
 
     def _state_from_json(self, raw: Mapping[str, JsonValue]) -> _WorkspaceState:
@@ -3684,6 +3749,15 @@ class LocalObservationStore:
             and type(identity) is str
             and identity.startswith("hmac-sha256:")
             and len(identity) == 76
+        }
+        stream_profiles = {
+            str(session): profile_id
+            for session, profile_id in cast(
+                Mapping[str, JsonValue], raw.get("stream_profiles") or {}
+            ).items()
+            if type(session) is str
+            and type(profile_id) is str
+            and _stream_profile_id_valid(profile_id)
         }
         dropped_sessions_raw = raw.get("stream_partial_dropped_sessions")
         stream_partial_dropped_sessions: set[str]
@@ -3925,6 +3999,7 @@ class LocalObservationStore:
             stream_call_tools=stream_call_tools,
             stream_call_tool_generations=stream_call_tool_generations,
             stream_source_identities=stream_source_identities,
+            stream_profiles=stream_profiles,
             stream_partial_dropped_sessions=stream_partial_dropped_sessions,
             hook_sequences=hook_sequences,
             last_stream_reconcile_mono_ms=last_reconcile,

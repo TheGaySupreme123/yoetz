@@ -378,3 +378,79 @@ def test_store_stage_timings_attribute_hydrate_encode_write(tmp_path: Path) -> N
     assert store.stage_timings_ms["write"] > 0.0
     # Uncontended acquisition still registers as time spent on the lock (#310).
     assert store.stage_timings_ms["lock_wait"] > 0.0
+
+
+def test_stream_profile_round_trips_and_clears(tmp_path: Path) -> None:
+    store, workspace, session = _consented_store(tmp_path)
+    assert store.stream_profile_for_session(workspace, session) is None
+    store.set_stream_profile(workspace, session, "codex-rollout-jsonl/0.150.1/v1")
+    assert store.stream_profile_for_session(workspace, session) == "codex-rollout-jsonl/0.150.1/v1"
+    assert _state_json(tmp_path)["stream_profiles"] == {
+        session: "codex-rollout-jsonl/0.150.1/v1",
+    }
+
+    reloaded = LocalObservationStore(_state=tmp_path)
+    assert reloaded.stream_profile_for_session(workspace, session) == (
+        "codex-rollout-jsonl/0.150.1/v1"
+    )
+    reloaded.set_stream_profile(workspace, session, None)
+    assert reloaded.stream_profile_for_session(workspace, session) is None
+    assert "stream_profiles" not in _state_json(tmp_path)
+
+
+@pytest.mark.parametrize("bad", ["", "/leading", "has space", "x" * 129, "tab\tid"])
+def test_stream_profile_rejects_non_token_ids(tmp_path: Path, bad: str) -> None:
+    store, workspace, session = _consented_store(tmp_path)
+    with pytest.raises(ProtocolValueError, match="invalid_event_value_type"):
+        store.set_stream_profile(workspace, session, bad)
+    with pytest.raises(ProtocolValueError, match="invalid_event_value_type"):
+        store.set_stream_reconcile_state(
+            workspace,
+            session,
+            cursor=ObservationCursor(1, 0, 0, f"hmac-sha256:{'ab' * 32}", "codex-obs-stream/1.3.0"),
+            partial=b"",
+            call_tools={},
+            source_identity=None,
+            profile_id=bad,
+        )
+    assert store.stream_profile_for_session(workspace, session) is None
+
+
+def test_reconcile_state_persists_profile_atomically_with_cursor(tmp_path: Path) -> None:
+    store, workspace, session = _consented_store(tmp_path)
+    cursor = ObservationCursor(2, 10, 3, f"hmac-sha256:{'ab' * 32}", "codex-obs-stream/1.3.0")
+    store.set_stream_reconcile_state(
+        workspace,
+        session,
+        cursor=cursor,
+        partial=b"",
+        call_tools={},
+        source_identity=None,
+        profile_id="codex-rollout-jsonl/0.148.0/v1",
+    )
+    assert store.stream_profile_for_session(workspace, session) == "codex-rollout-jsonl/0.148.0/v1"
+    store.set_stream_reconcile_state(
+        workspace,
+        session,
+        cursor=cursor,
+        partial=b"",
+        call_tools={},
+        source_identity=None,
+        profile_id=None,
+    )
+    assert store.stream_profile_for_session(workspace, session) is None
+
+
+def test_invalid_persisted_profile_is_dropped_on_load(tmp_path: Path) -> None:
+    store, workspace, session = _consented_store(tmp_path)
+    store.set_stream_profile(workspace, session, "codex-rollout-jsonl/0.150.1/v1")
+    path = next((tmp_path / "observation" / "workspaces").glob("*.json"))
+    body = cast(dict[str, object], json.loads(path.read_text(encoding="utf-8")))
+    body["stream_profiles"] = {session: "not a token", "other": "codex-rollout-jsonl/0.150.1/v1"}
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+    reloaded = LocalObservationStore(_state=tmp_path)
+    assert reloaded.stream_profile_for_session(workspace, session) is None
+    assert reloaded.stream_profile_for_session(workspace, "other") == (
+        "codex-rollout-jsonl/0.150.1/v1"
+    )

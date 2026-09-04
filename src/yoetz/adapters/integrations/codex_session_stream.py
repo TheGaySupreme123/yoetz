@@ -17,8 +17,10 @@ from yoetz.adapters.importers.codex_jsonl import (
     CodexParsedRecord,
 )
 from yoetz.adapters.importers.codex_rollout_jsonl import (
+    ROLLOUT_MAX_LINE_BYTES,
     SUPPORTED_ROLLOUT_PROFILES,
     parse_codex_rollout_jsonl_from_offset,
+    profile_for_rollout_id,
     profile_for_rollout_version,
 )
 from yoetz.adapters.integrations.observation_local import (
@@ -48,6 +50,7 @@ __all__ = [
     "reconcile_session_stream",
     "resolve_codex_home",
     "should_trigger_stream_reconcile",
+    "stream_profile_from_id",
     "structural_from_stream_record",
 ]
 
@@ -72,7 +75,14 @@ _MATERIAL_HOOK_EVENTS: Final = frozenset(
 
 
 _JSONL_SUFFIXES: Final = (".jsonl", ".jsonl.zst")
-_ROLLOUT_ITEM_TYPES: Final = frozenset(SUPPORTED_ROLLOUT_PROFILES["0.148.0"].item_types)
+# Union vocabularies are only a fallback for callers that map a record without naming the
+# profile that admitted it; the reader always passes the exact admitted profile.
+_ROLLOUT_ITEM_TYPES: Final = frozenset(
+    item for profile in SUPPORTED_ROLLOUT_PROFILES.values() for item in profile.item_types
+)
+_ROLLOUT_WRAPPER_TYPES: Final = frozenset(
+    wrapper for profile in SUPPORTED_ROLLOUT_PROFILES.values() for wrapper in profile.wrapper_types
+)
 _OVERSIZED_PARTIAL_PREFIX: Final = b"\x00yoetz-oversized-line/v1\x00"
 _OVERSIZED_PARTIAL_DOMAIN: Final = b"yoetz/observation-stream-oversized-state/v1\x00"
 _OVERSIZED_LINE_DOMAIN: Final = b"yoetz/observation-stream-oversized-line/v1\x00"
@@ -180,12 +190,29 @@ def _oversized_line_commitment(
 
 
 def default_stream_profile() -> CodexCapabilityProfile:
-    """Return the pinned rollout profile used by session-stream reconciliation."""
+    """Return the baseline rollout profile.
+
+    Session-stream reconciliation does not parse under this profile by default: the exact
+    ``cli_version`` in each stream's session header selects the admitted profile, and the reader
+    remembers that selection per source generation. The baseline exists for callers and tests
+    that need one concrete supported profile.
+    """
 
     try:
         return profile_for_rollout_version("0.148.0")
     except ValueError:
         return next(iter(SUPPORTED_ROLLOUT_PROFILES.values()))
+
+
+def stream_profile_from_id(profile_id: str | None) -> CodexCapabilityProfile | None:
+    """Resolve a persisted profile id to its exact profile; unknown ids resolve to ``None``."""
+
+    if profile_id is None:
+        return None
+    try:
+        return profile_for_rollout_id(profile_id)
+    except ValueError:
+        return None
 
 
 def _now() -> Timestamp:
@@ -412,9 +439,19 @@ def _structural_body(record: CodexParsedRecord) -> JsonObject | None:
     return None
 
 
-def structural_from_stream_record(record: CodexParsedRecord) -> tuple[JsonObject, tuple[str, ...]]:
-    """Map a parsed stream record to allowlisted structural fields + opaque gaps."""
+def structural_from_stream_record(
+    record: CodexParsedRecord,
+    *,
+    profile: CodexCapabilityProfile | None = None,
+) -> tuple[JsonObject, tuple[str, ...]]:
+    """Map a parsed stream record to allowlisted structural fields + opaque gaps.
 
+    ``profile`` is the exact profile that admitted the record; without it the union of every
+    supported vocabulary decides which ``type`` tokens are semantic rather than tool names.
+    """
+
+    item_types = _ROLLOUT_ITEM_TYPES if profile is None else frozenset(profile.item_types)
+    known_wrappers = _ROLLOUT_WRAPPER_TYPES if profile is None else frozenset(profile.wrapper_types)
     gaps: set[str] = set()
     fields: dict[str, JsonValue] = {"stream_kind": record.wrapper_type}
     item_type = record.item_type
@@ -428,7 +465,7 @@ def structural_from_stream_record(record: CodexParsedRecord) -> tuple[JsonObject
     if body is not None:
         tool = _normalize_tool_name(body.get("tool")) or _normalize_tool_name(body.get("name"))
         type_token = _token(body.get("type"))
-        if tool is None and type_token is not None and type_token not in _ROLLOUT_ITEM_TYPES:
+        if tool is None and type_token is not None and type_token not in item_types:
             tool = _normalize_tool_name(type_token)
         if tool is not None:
             fields["tool_name"] = tool
@@ -444,7 +481,6 @@ def structural_from_stream_record(record: CodexParsedRecord) -> tuple[JsonObject
         call_id = _token(body.get("id")) or _token(body.get("call_id"))
         if call_id is not None:
             fields["tool_call_id"] = call_id
-    known_wrappers = frozenset(SUPPORTED_ROLLOUT_PROFILES["0.148.0"].wrapper_types)
     if record.wrapper_type not in known_wrappers:
         gaps.add(ObservationGapCode.UNSUPPORTED_EVENT.value)
     return JsonObject(fields), tuple(sorted(gaps, key=str.encode))
@@ -455,8 +491,9 @@ def envelope_from_stream_record(
     *,
     session_commitment: str,
     cursor: ObservationCursor,
+    profile: CodexCapabilityProfile | None = None,
 ) -> ObservationEnvelope:
-    structural, gaps = structural_from_stream_record(record)
+    structural, gaps = structural_from_stream_record(record, profile=profile)
     host_ids: dict[str, JsonValue] = {}
     body = _structural_body(record)
     if body is not None:
@@ -546,7 +583,9 @@ class SessionStreamReader:
     """Incremental JSONL reader with generation-fenced cursor and partial-line hold."""
 
     session_commitment: str
-    profile: CodexCapabilityProfile
+    # The exact profile the current source generation's header admitted, or ``None`` until the
+    # header is read. Never a default: every generation re-selects from its own header.
+    profile: CodexCapabilityProfile | None
     cursor: ObservationCursor
     key_material: bytes
     partial_line: bytes = b""
@@ -596,11 +635,24 @@ class SessionStreamReader:
             byte_position = 0
             event_position = 0
             self.partial_line = b""
+            self.profile = None
             last_commitment = _EMPTY_COMMITMENT
             gaps.add(ObservationGapCode.CURSOR_STALE.value)
         elif size < byte_position:
             # Truncation / rewrite in place.
             truncated = True
+            generation += 1
+            byte_position = 0
+            event_position = 0
+            self.partial_line = b""
+            self.profile = None
+            last_commitment = _EMPTY_COMMITMENT
+            gaps.add(ObservationGapCode.CURSOR_STALE.value)
+        elif event_position > 0 and self.profile is None:
+            # An admitted generation whose exact profile is not recorded cannot be parsed
+            # under any vocabulary without inferring one. Replay it from the header under a
+            # fresh generation instead; earlier bytes are re-read, never skipped.
+            restarted = True
             generation += 1
             byte_position = 0
             event_position = 0
@@ -623,7 +675,7 @@ class SessionStreamReader:
                 if (
                     oversized_state is None
                     or oversized_state.line_start > byte_position
-                    or byte_position - oversized_state.line_start <= self.profile.max_line_bytes
+                    or byte_position - oversized_state.line_start <= ROLLOUT_MAX_LINE_BYTES
                 ):
                     raise ValueError("session_stream_partial_invalid")
             except ValueError:
@@ -636,6 +688,7 @@ class SessionStreamReader:
                 event_position = 0
                 last_commitment = _EMPTY_COMMITMENT
                 self.partial_line = b""
+                self.profile = None
                 oversized_state = None
                 gaps.add(ObservationGapCode.CURSOR_STALE.value)
                 gaps.add(ObservationGapCode.TRUNCATED_PAYLOAD.value)
@@ -694,7 +747,7 @@ class SessionStreamReader:
                     unread = max(0, size - (byte_position + len(data)))
                     read_ahead = min(
                         unread,
-                        max(0, self.profile.max_line_bytes + 1 - len(data)),
+                        max(0, ROLLOUT_MAX_LINE_BYTES + 1 - len(data)),
                     )
                     if read_ahead:
                         data += handle.read(read_ahead)
@@ -786,7 +839,7 @@ class SessionStreamReader:
                 rotated,
             )
 
-        if b"\n" not in data and len(data) > self.profile.max_line_bytes:
+        if b"\n" not in data and len(data) > ROLLOUT_MAX_LINE_BYTES:
             prefix_commitment = stream_line_commitment(self.key_material, data)
             self.partial_line = _encode_oversized_partial(
                 line_start=byte_position,
@@ -829,9 +882,11 @@ class SessionStreamReader:
             )
 
         try:
+            # Admission always re-selects from the header: the profile is the one the exact
+            # ``cli_version`` names, never a caller default or the previous generation's choice.
             parsed = parse_codex_rollout_jsonl_from_offset(
                 data,
-                self.profile,
+                None if require_admission else self.profile,
                 start_ordinal=1,
                 require_admission=require_admission,
             )
@@ -849,6 +904,8 @@ class SessionStreamReader:
                 (), cursor, self.partial_line, tuple(sorted(gaps)), restarted, truncated, rotated
             )
 
+        if parsed.profile is not None:
+            self.profile = parsed.profile
         consumed = 0
         envelopes: list[ObservationEnvelope] = []
         hold = b""
@@ -916,6 +973,7 @@ class SessionStreamReader:
                     positioned,
                     session_commitment=self.session_commitment,
                     cursor=abs_cursor,
+                    profile=self.profile,
                 )
             )
 
@@ -1038,6 +1096,25 @@ def reconcile_session_stream(
             "gaps": (ObservationGapCode.SOURCE_LAG.value,),
             "resolved": False,
         }
+    return reconcile_session_stream_path(
+        store,
+        workspace_commitment=workspace_commitment,
+        session_commitment=session_commitment,
+        codex_session_id=codex_session_id,
+        path=path,
+    )
+
+
+def reconcile_session_stream_path(
+    store: LocalObservationStore,
+    *,
+    workspace_commitment: str,
+    session_commitment: str,
+    codex_session_id: str,
+    path: Path,
+) -> dict[str, JsonValue]:
+    """Reconcile a locally selected path with the same durable frontier on every entry point."""
+
     if path.name.lower().endswith(".jsonl.zst"):
         store.note_coverage_gap(workspace_commitment, ObservationGapCode.UNSUPPORTED_FORMAT.value)
         store.note_stream_reconcile(workspace_commitment)
@@ -1080,9 +1157,17 @@ def reconcile_session_stream(
         if mapping_reset
         else store.stream_source_identity_for_session(workspace_commitment, session_commitment)
     )
+    # The profile persisted with the cursor is the one this generation's header admitted. A
+    # missing or no-longer-supported id makes the reader replay from the header (CURSOR_STALE)
+    # rather than parse admitted lines under a guessed vocabulary.
+    prior_profile_id = (
+        None
+        if mapping_reset
+        else store.stream_profile_for_session(workspace_commitment, session_commitment)
+    )
     reader = SessionStreamReader(
         session_commitment=session_commitment,
-        profile=default_stream_profile(),
+        profile=stream_profile_from_id(prior_profile_id),
         cursor=existing,
         key_material=store.key_material(),
         partial_line=partial,
@@ -1139,10 +1224,12 @@ def reconcile_session_stream(
             )
         )
         persisted_call_tools = call_tools
-        persisted_identity = (
-            reader.source_identity
-            if committed_cursor.source_generation == advance.cursor.source_generation
-            else source_identity
+        same_generation = committed_cursor.source_generation == advance.cursor.source_generation
+        persisted_identity = reader.source_identity if same_generation else source_identity
+        persisted_profile_id = (
+            (None if reader.profile is None else reader.profile.profile_id)
+            if same_generation
+            else prior_profile_id
         )
     else:
         # No cursor progress means no new source identity or pairing state may
@@ -1150,6 +1237,7 @@ def reconcile_session_stream(
         persisted_partial = partial
         persisted_call_tools = prior_call_tools
         persisted_identity = source_identity
+        persisted_profile_id = prior_profile_id
     store.set_stream_reconcile_state(
         workspace_commitment,
         session_commitment,
@@ -1157,6 +1245,7 @@ def reconcile_session_stream(
         partial=persisted_partial,
         call_tools=persisted_call_tools,
         source_identity=persisted_identity,
+        profile_id=persisted_profile_id,
     )
     store.note_stream_reconcile(workspace_commitment)
     gaps = advance.gaps
@@ -1175,6 +1264,7 @@ def reconcile_session_stream(
         "byte_position": committed_cursor.byte_position,
         "event_position": committed_cursor.event_position,
         "generation": committed_cursor.source_generation,
+        "profile_id": persisted_profile_id,
         "rotated": advance.rotated,
         "truncated": advance.truncated,
         "resolved": True,
