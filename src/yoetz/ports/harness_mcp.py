@@ -22,6 +22,7 @@ __all__ = [
     "McpRegistrationAction",
     "McpRegistrationCommand",
     "McpRegistrationError",
+    "McpIsolationBinding",
     "McpRegistrationObservation",
     "McpRegistrationPreview",
     "McpRegistrationReason",
@@ -39,6 +40,7 @@ _MAX_WARNINGS: Final = 16
 _TOKEN_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$", re.ASCII)
 
 type Compatibility = Literal["supported", "untested"]
+type McpIsolationBinding = Literal["ambient", "isolated_exact", "missing", "different"]
 
 
 def _port_error(reason: str) -> ProtocolValueError:
@@ -68,6 +70,7 @@ class McpRegistrationReason(str, Enum):  # noqa: UP042 - exact wire-valued Enum 
     TIMEOUT = "timeout"
     REGISTRATION_FAILED = "registration_failed"
     FOREIGN_ENTRY_PRESENT = "foreign_entry_present"
+    ISOLATION_INVALID = "isolation_invalid"
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -118,6 +121,7 @@ class McpRegistrationPreview:
     preview_digest: str
     serve_command: tuple[str, ...] = MCP_SERVE_COMMAND
     route_profile: Literal["policy", "strict"] = "policy"
+    isolated_root: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.harness_id) is not HarnessId:
@@ -141,6 +145,13 @@ class McpRegistrationPreview:
         )
         if self.route_profile not in {"policy", "strict"} or self.serve_command != expected_command:
             raise _port_error("integration_value_invalid")
+        if self.isolated_root is not None and (
+            type(self.isolated_root) is not str
+            or not 1 <= len(self.isolated_root) <= _MAX_PATH_CHARS
+            or not self.isolated_root.startswith("/")
+            or any(ord(char) < 32 or ord(char) == 127 for char in self.isolated_root)
+        ):
+            raise _port_error("integration_target_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +167,7 @@ class McpRegistrationObservation:
     harness_id: HarnessId
     state: McpRegistrationState
     route_profile: Literal["policy", "strict"] | None
+    isolation_binding: McpIsolationBinding | None = None
 
     def __post_init__(self) -> None:
         if type(self.harness_id) is not HarnessId:
@@ -163,10 +175,13 @@ class McpRegistrationObservation:
         if type(self.state) is not McpRegistrationState:
             raise _port_error("integration_state_invalid")
         if self.route_profile is None:
+            if self.isolation_binding is not None:
+                raise _port_error("integration_value_invalid")
             return
         if (
             self.route_profile not in {"policy", "strict"}
             or self.state is not McpRegistrationState.YOETZ_OWNED
+            or self.isolation_binding not in {"ambient", "isolated_exact", "missing", "different"}
         ):
             raise _port_error("integration_value_invalid")
 

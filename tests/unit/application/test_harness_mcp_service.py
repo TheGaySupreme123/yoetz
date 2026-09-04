@@ -66,7 +66,12 @@ class _Port:
         route_profile: Literal["policy", "strict"] | None = (
             "strict" if self.state is McpRegistrationState.YOETZ_OWNED else None
         )
-        return McpRegistrationObservation(binary.harness_id, self.state, route_profile)
+        return McpRegistrationObservation(
+            binary.harness_id,
+            self.state,
+            route_profile,
+            "ambient" if route_profile is not None else None,
+        )
 
     async def preview_registration(self, binary: HarnessBinary) -> McpRegistrationPreview:
         if self.fail_with is not None:
@@ -165,9 +170,13 @@ def test_a_route_profile_is_only_meaningful_for_a_yoetz_owned_entry() -> None:
     """A foreign or absent entry has no Yoetz route, so claiming one is a construction error."""
 
     with pytest.raises(ValueError):
-        McpRegistrationObservation(HarnessId.CODEX, McpRegistrationState.ABSENT, "policy")
+        McpRegistrationObservation(
+            HarnessId.CODEX, McpRegistrationState.ABSENT, "policy", "ambient"
+        )
     with pytest.raises(ValueError):
-        McpRegistrationObservation(HarnessId.CODEX, McpRegistrationState.FOREIGN_PRESENT, "strict")
+        McpRegistrationObservation(
+            HarnessId.CODEX, McpRegistrationState.FOREIGN_PRESENT, "strict", "ambient"
+        )
 
 
 def test_register_requires_explicit_acceptance() -> None:

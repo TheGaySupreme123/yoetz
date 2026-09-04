@@ -82,6 +82,7 @@ YOETZ_ISOLATED_ROOT=<exact-root> <candidate-yoetz> service isolation --json
 yoetz recommend list --codex-path <exact-executable> --codex-home <exact-home> --json
 yoetz integrate codex plugin status --project-root <exact-worktree> --codex-path <exact-executable> --codex-home <exact-home> --json
 CODEX_HOME=<exact-home> CODEX_TESTING_HOME=<exact-home> yoetz integrate codex mcp status --codex-path <exact-executable> --json
+python scripts/capture_codex_mcp_surface.py --codex-binary <exact-executable> --codex-testing-home <exact-home> --output <capture-outside-worktree.json>
 yoetz observe status --workspace <exact-worktree> --codex-path <exact-executable> --codex-home <exact-home> --json
 ```
 
@@ -94,6 +95,7 @@ bounded reason token, an optional evidence digest, and a closed next action.
 | `source_identity` | Worktree HEAD equals `source_ref`. |
 | `package_identity` | Installed candidate is the recorded package digest. |
 | `service_isolation` | The exact normal report has mode `ambient`, the exact launch report has mode `isolated`, and every state/endpoint/storage/config/executable digest differs. Shared, relocated, ambient, or unknown identity cannot pass. |
+| `mcp_child_isolation` | MCP status is `yoetz_owned` with `isolation_binding=isolated_exact`, and the pre-model app-server capture starts the registered server successfully. This combines the exact reviewed binding, ADR-026 root derivation, and the installed Codex propagation regression; a bare, missing, different, foreign, failed, or unverifiable child cannot pass. |
 | `workspace_binding` | Codex and every Yoetz control use the same exact worktree. |
 | `observation_consent` | Consent is `active` for that worktree commitment. |
 | `plugin_source` | Exact managed source is present in that worktree. |
@@ -111,6 +113,19 @@ its normal-target counterpart — record the non-pass `service_isolation` row wi
 `provision_isolated_yoetz_root` continuation, provision a fresh isolation root, re-export
 `YOETZ_ISOLATED_ROOT`, and rebuild the report from fresh status. Never launch over shared,
 ambient, or unknown Yoetz identity.
+
+If the MCP registration is not `yoetz_owned` or its binding is not `isolated_exact`, record the
+non-pass `mcp_child_isolation` row with the `reregister_isolated_mcp` continuation. Re-run the
+isolated registration preview, review the exact `isolated_root`, apply that same preview digest,
+confirm status reports `isolation_binding=isolated_exact`, and recapture the app-server inventory
+before rebuilding the report.
+
+If the registration is already owned and exact but the child state is `failed` or `unknown`,
+re-registering changes nothing; record the row with the `recapture_isolated_mcp_child`
+continuation instead. Inspect the capture output for the child launch error, repair the candidate
+executable or its environment outside the registration, and re-run the capture until the child
+starts. The capture starts the registered child without a model task; inventory is child-start
+evidence, not proof that a model received or used a tool.
 
 If consent is missing, record `blocked / observation_consent_missing /
 yoetz_observe_grant_exact_worktree`, show the trusted local command, and stop. If activation is
@@ -195,13 +210,16 @@ an out-of-scope pass, failure, or block is inconsistent evidence and invalidates
 ## 7. Report shape and statuses
 
 The top-level keys are exactly `schema`, `identity`, `scope`, `observed`, and `facets`; the current
-schema is `yoetz.codex-dogfood-parity/2` (version 1 reports, which carried no Yoetz isolation
-identity, are no longer accepted). `observed` retains only closed states/counts:
-activation state, Yoetz isolation state (`isolated|shared|ambient|unknown`), exact/primary consent
-states, workspace-match boolean, mapping presence, accepted envelope count, undelivered count,
-drain success, hook coverage, and stream coverage. The validator rejects a passing
+schema is `yoetz.codex-dogfood-parity/3` (version 1 lacked Yoetz isolation identity; version 2
+lacked host-child binding proof; neither is accepted). `observed` retains only closed states/counts:
+activation state, Yoetz isolation state (`isolated|shared|ambient|unknown`), MCP registration state,
+MCP isolation binding, MCP child state (`ready|failed|unknown`), exact/primary consent states,
+workspace-match boolean, mapping presence, accepted envelope count, undelivered count, drain
+success, hook coverage, and stream coverage. The validator rejects a passing
 `service_isolation` row whose observed state is not `isolated`, whose identity mode is not
-`isolated`, or whose digests show any shared identity root.
+`isolated`, or whose digests show any shared identity root; it rejects a passing
+`mcp_child_isolation` row unless the registration is owned, the binding is exact, and the child is
+ready.
 
 Every facet is reported even when unsupported or not run. The validator rejects extra top-level,
 identity, scope, observed, or facet-row fields; this is the privacy boundary that keeps paths and
