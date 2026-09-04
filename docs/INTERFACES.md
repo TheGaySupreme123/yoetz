@@ -149,6 +149,14 @@ admitted-key answer. The same fact is repeated as one bounded sentence in the au
 as a `Repair:` clause on the compatible text summary channel, because MCP hosts are not required
 to surface `structuredContent`.
 
+The same text channel also carries a bounded `Reason:` clause when `safe_details` holds a frozen
+protocol `reason_code` and/or a JSON-pointer `field` (issue #579). Both tokens are already
+allowlisted structural content; the projector re-gates them and never copies caller prose. Claude
+Code's generic MCP profile delivers only the text `content` for `isError` results, so without this
+clause an `EVENT_INVALID` set-order rejection arrives as a bare code. The native Cursor profile
+repeats the exact canonical JSON wire body in text `content`, which already includes those
+`safe_details`; tests lock both projections.
+
 Every MCP result also carries a bounded ASCII text projection (at most 512 bytes) for hosts that
 drop `structuredContent`. A successful projection includes the first valid returned frontier's
 `sequence` and canonical `head_digest` when both are present. Generic successful operations also

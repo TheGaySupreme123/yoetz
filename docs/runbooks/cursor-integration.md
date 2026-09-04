@@ -110,7 +110,11 @@ an older ambient runtime (control schema 2.1.0) behind a marker-valid then-curre
 bound entry removes PATH from the runtime choice (issue #468). That profile retains
 `structuredContent` and also repeats the exact canonical JSON body in text `content`, because
 pinned Cursor `3.17.x` can otherwise hide structured results from the model. It adds no
-environment or secret field and does not widen the service route. Route recognition accepts a
+environment or secret field and does not widen the service route. Decision for Cursor (issue
+#579): supported here — the `--host cursor` text channel is the exact canonical JSON wire body,
+so `safe_details.reason_code` and `safe_details.field` are already model-visible for
+`EVENT_INVALID`. The generic bounded `Reason:` summary is the Claude Code path; Cursor tests lock
+that the JSON copy still carries those tokens and is not reduced to the weaker summary. Route recognition accepts a
 hand-written bare `yoetz` (external registrations) or a known launcher (this runtime's or the
 installed marker's) with the exact serve arguments; anything else is `foreign`. Raw initialize and
 tools/list prove only runtime registration. Require a correlated model-controlled `start` or

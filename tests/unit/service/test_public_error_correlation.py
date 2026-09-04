@@ -92,6 +92,30 @@ def test_unbound_workflow_failure_mints_and_records_one_id(diagnostic_root: Path
     assert found[0]["request_id"] == _REQUEST_ID
 
 
+def test_unbound_event_invalid_records_protocol_reason_code(diagnostic_root: Path) -> None:
+    """Issue #579: diagnostics --correlation-id must name unsorted_set_field, not only event_invalid."""
+
+    wire = _frame(
+        PublicOperationError(
+            PublicErrorCode.EVENT_INVALID,
+            "The event batch is invalid. Correct the event payload before retrying.",
+            False,
+            safe_details={
+                "reason_code": "unsorted_set_field",
+                "field": "/event_drafts/4/payload/obligation_refs",
+            },
+        )
+    )
+
+    error = cast(dict[str, object], wire["error"])
+    correlation_id = cast(str, error["correlation_id"])
+    found = lookup_diagnostic_records(correlation_id, root=diagnostic_root)
+    assert len(found) == 1
+    assert found[0]["operation"] == "check_public_error"
+    assert found[0]["reason"] == "event_invalid"
+    assert found[0]["reason_code"] == "unsorted_set_field"
+
+
 def test_already_bound_workflow_failure_is_not_re_recorded(diagnostic_root: Path) -> None:
     """An error that already carries a recorded id keeps it; a second mint would split it."""
 

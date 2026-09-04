@@ -245,6 +245,36 @@ def test_unsorted_payload_set_field_is_located_by_name() -> None:
         "reason_code": "unsorted_set_field",
         "field": "/event_drafts/0/payload/supporting_refs",
     }
+    assert "ascending ASCII" in caught.value.message
+
+
+def test_unsorted_obligation_ids_name_the_field_and_the_ascii_rule() -> None:
+    """Issue #579: assignment obligation_ids in authoring order is the live dogfood shape."""
+
+    base = _request_for_record("assignment_recorded")
+    draft = dict(cast(dict[str, object], base.event_drafts[0]))
+    payload = dict(cast(dict[str, object], draft["payload"]))
+    payload["obligation_ids"] = (
+        "obl_00000000-0000-4000-8000-000000000002",
+        "obl_00000000-0000-4000-8000-000000000001",
+    )
+    draft["payload"] = payload
+    request = base.model_copy(update={"event_drafts": (draft,)})
+
+    with pytest.raises(PublicOperationError) as caught:
+        prepare_publication(
+            request,
+            channel=PublicationChannel.LOCAL_CLI,
+            app=cast(Application, _App()),
+        )
+
+    assert caught.value.code is PublicErrorCode.EVENT_INVALID
+    assert caught.value.safe_details == {
+        "reason_code": "unsorted_set_field",
+        "field": "/event_drafts/0/payload/obligation_ids",
+    }
+    assert "ascending ASCII" in caught.value.message
+    assert "uniqueItems" in caught.value.message
 
 
 def test_payload_pointer_admits_only_registered_field_names() -> None:

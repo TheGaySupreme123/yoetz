@@ -107,6 +107,11 @@ codex mcp get yoetz --json
 codex mcp add yoetz -- yoetz mcp serve
 ```
 
+Codex uses the generic MCP host profile (not `--host cursor`). Decision for Codex (issue #579):
+supported here — the same bounded text `Reason:` clause as Claude Code names frozen `reason_code`
+and `field` on `EVENT_INVALID`, because this host also relies on the privacy-minimized summary
+rather than a full JSON text copy.
+
 Run `codex mcp get yoetz --json` first. A nonzero result does not prove absence: Yoetz follows it
 with `codex mcp list --json` and continues only when that command succeeds with no `yoetz` entry.
 A failed/malformed list or duplicate matching names fails closed; a single matching entry is

@@ -692,6 +692,56 @@ async def test_dry_run_rejects_missing_causal_parent_like_real_publish() -> None
     assert real.value.code is PublicErrorCode.EVENT_INVALID
 
 
+async def test_unsorted_obligation_ids_match_on_dry_run_and_publish() -> None:
+    """A two-member unsorted assignment list is EVENT_INVALID on both dry_run and commit.
+
+    Issue #579: one-element dry_run subsets are trivially sorted, so bisection cannot find the
+    set-order rule. Both the preview and the real append must reject the same pointer.
+    """
+
+    app, _objects = _composition()
+    draft: dict[str, object] = {
+        "event_id": "evt_00000000-0000-4000-8000-000000000701",
+        "schema": {"name": "assignment_recorded", "version": "1.0.0"},
+        "occurred_at": "2026-07-19T12:00:00.000Z",
+        "causal_parents": (),
+        "payload": {
+            "assignee_actor_id": "harness:test",
+            "obligation_ids": (
+                "obl_00000000-0000-4000-8000-000000000002",
+                "obl_00000000-0000-4000-8000-000000000001",
+            ),
+            "scope_description": "One independently reviewable work package.",
+        },
+        "artifact_refs": (),
+        "evidence_refs": (),
+    }
+    request = _request(
+        request_tail=700,
+        event_drafts=(draft,),
+        expected_frontier={"sequence": "0", "head_digest": "genesis"},
+    )
+    preview_payload = request.model_dump(mode="json", by_alias=True, exclude_none=True)
+    preview_payload["dry_run"] = True
+    with pytest.raises(PublicOperationError) as preview:
+        await execute_publish_work(
+            cast(Application, app), PublishWorkRequestModel.model_validate(preview_payload)
+        )
+    with pytest.raises(PublicOperationError) as real:
+        await execute_publish_work(cast(Application, app), request)
+
+    assert preview.value.code is PublicErrorCode.EVENT_INVALID
+    assert real.value.code is PublicErrorCode.EVENT_INVALID
+    expected = {
+        "reason_code": "unsorted_set_field",
+        "field": "/event_drafts/0/payload/obligation_ids",
+    }
+    assert dict(preview.value.safe_details) == expected
+    assert dict(real.value.safe_details) == expected
+    assert "ascending ASCII" in preview.value.message
+    assert preview.value.message == real.value.message
+
+
 async def test_dry_run_frontier_gate_matches_sequence_only_publish_predicate() -> None:
     """Mismatched head_digest with matching sequence is accepted by both dry_run and publish."""
 
