@@ -13,16 +13,30 @@ skill files under `skills/codex/`, and `tests/capability/`.
 
 1. **Supported Codex range:** exact cells only, never a continuous range. The `codex exec --json`
    importer remains pinned at `0.139.0` (`codex-exec-jsonl/0.139.0/v1`). The session-stream
-   reconciler is a different surface and has a parser-only rollout grammar profile for `0.148.0`
-   (`codex-rollout-jsonl/0.148.0/v1`) covering constructed `legacy` and `paginated` fixtures.
-   Admission requires the exact session metadata `cli_version` and one of those two
-   `history_mode` values; future or malformed modes fail as unsupported format rather than being
-   interpreted under the pinned grammar.
+   reconciler is a different surface with one parser-only rollout grammar profile per exact
+   release, each proven by its own constructed fixtures: `0.148.0`
+   (`codex-rollout-jsonl/0.148.0/v1`, `legacy` and `paginated`, IMP-006..IMP-009) and `0.150.1`
+   (`codex-rollout-jsonl/0.150.1/v1`, `paginated`, IMP-011..IMP-012). The profiles are keyed by
+   exact `cli_version` in `SUPPORTED_ROLLOUT_PROFILES` and recorded as
+   `CODEX_ROLLOUT_PARSER_PROOFS`; the session header selects the profile by exact key lookup, so
+   no release is ever aliased to a neighbour by semver inference, and each profile's wrapper/item
+   vocabulary is exactly what its fixture exercises (the two vocabularies are not supersets of
+   each other). A header naming any other release, or a `history_mode` outside `legacy` /
+   `paginated`, is refused as `unsupported_codex_profile` (IMP-013 proves `0.152.1`): the reader
+   consumes the bytes, admits no event, and holds that refusal for the whole source generation
+   without losing the cursor. An admitted profile with an unrecognized wrapper or item stays a
+   bounded `unsupported_event` gap. Adding the next release is a fixture-plus-profile change: one
+   new exact profile, one new parser-proof row, and its fixtures.
+   The reader records the admitted profile per source generation (`stream_profiles` in the local
+   observation store, cursor mapping `codex-obs-stream/1.3.0`); a pre-`1.3.0` cursor replays from
+   its header instead of inheriting a default profile.
    Those fixtures are not an isolated installed-artifact capture and therefore do not populate
    `CODEX_HARNESS_PROFILE`, the skill manifest's tested/supported bounds, or `yoetz version`
-   capability profiles. Neighbors including `0.149.1` stay untested. The full skill/MCP/hook
-   matrix in `runtime-support.json` and issue #413 remain unfrozen until those facets have
-   independent installed-artifact evidence.
+   capability profiles; parser proof and host support are distinct facts. The dogfood parity gate
+   may advertise `session_stream` only for a parser-proven exact version and still records it
+   `pass` only on actual reconciliation evidence. Neighbors including `0.149.1` stay untested. The
+   full skill/MCP/hook matrix in `runtime-support.json` and issue #413 remain unfrozen until those
+   facets have independent installed-artifact evidence.
 2. **Integration posture:** Codex is the MCP client; Yoetz is a local stdio server registered via
    `codex mcp add yoetz -- yoetz mcp serve`, default `required = false`. Yoetz first runs `codex mcp
    get yoetz --json`; because a nonzero named lookup is ambiguous, only a successful strict parse

@@ -28,9 +28,11 @@ from yoetz.protocol.errors import ProtocolValueError
 
 __all__ = [
     "CODEX_ROLLOUT_MAPPING_VERSION",
+    "ROLLOUT_MAX_LINE_BYTES",
     "SUPPORTED_ROLLOUT_PROFILES",
     "parse_codex_rollout_jsonl",
     "parse_codex_rollout_jsonl_from_offset",
+    "profile_for_rollout_id",
     "profile_for_rollout_version",
     "split_codex_rollout_jsonl_chunk",
 ]
@@ -40,8 +42,14 @@ _MAX_SOURCE_BYTES: Final = 4_194_304
 _MAX_LINE_BYTES: Final = 1_048_576
 _MAX_LINES: Final = 20_000
 _MAX_JSON_DEPTH: Final = 64
+# Every exact profile shares the same byte/line bounds (``CodexCapabilityProfile`` pins them), so
+# chunking a stream whose header has not admitted a profile yet is still bounded.
+ROLLOUT_MAX_LINE_BYTES: Final = _MAX_LINE_BYTES
 
-_WRAPPER_TYPES: Final = (
+# One vocabulary per exact Codex release, each locked by its own constructed fixtures
+# (``fixtures/imports/codex/rollout-*-<cli_version>.case.json``). Adding a release means adding
+# a fixture set and a profile below; no release is ever admitted by version proximity.
+_WRAPPER_TYPES_0_148_0: Final = (
     "compacted",
     "event_msg",
     "inter_agent_communication",
@@ -53,7 +61,7 @@ _WRAPPER_TYPES: Final = (
     "turn_context",
     "world_state",
 )
-_ITEM_TYPES: Final = (
+_ITEM_TYPES_0_148_0: Final = (
     "agent_message",
     "agent_reasoning",
     "compaction",
@@ -69,32 +77,89 @@ _ITEM_TYPES: Final = (
     "user_message",
     "web_search_call",
 )
+_WRAPPER_TYPES_0_150_1: Final = (
+    "compacted",
+    "event_msg",
+    "inter_agent_communication_metadata",
+    "response_item",
+    "session_meta",
+    "turn_context",
+    "world_state",
+)
+# ``event_msg`` payload types, ``response_item`` payload types, and the PascalCase
+# ``event_msg.item_completed.item.type`` family are one closed set: a nested item type must be
+# admitted here before the wrapper line maps, so an unknown inner item is never masked.
+_ITEM_TYPES_0_150_1: Final = (
+    "AgentMessage",
+    "CollabAgentToolCall",
+    "CommandExecution",
+    "ContextCompaction",
+    "FileChange",
+    "McpToolCall",
+    "Reasoning",
+    "SubAgentActivity",
+    "UserMessage",
+    "agent_message",
+    "custom_tool_call",
+    "custom_tool_call_output",
+    "function_call",
+    "function_call_output",
+    "item_completed",
+    "message",
+    "reasoning",
+    "task_complete",
+    "task_started",
+    "thread_settings_applied",
+    "token_count",
+    "turn_aborted",
+)
 
 
-def _profile_digest() -> str:
+def _profile_digest(
+    cli_version: str,
+    profile_id: str,
+    wrapper_types: tuple[str, ...],
+    item_types: tuple[str, ...],
+) -> str:
     return canonical_digest(
         {
-            "cli_version": "0.148.0",
-            "item_types": _ITEM_TYPES,
+            "cli_version": cli_version,
+            "item_types": item_types,
             "history_modes": CODEX_ROLLOUT_HISTORY_MODES,
             "max_line_bytes": _MAX_LINE_BYTES,
             "max_lines": _MAX_LINES,
             "max_source_bytes": _MAX_SOURCE_BYTES,
-            "profile_id": "codex-rollout-jsonl/0.148.0/v1",
-            "wrapper_types": _WRAPPER_TYPES,
+            "profile_id": profile_id,
+            "wrapper_types": wrapper_types,
         }
     )
 
 
-_BASELINE_PROFILE = CodexCapabilityProfile(
-    "0.148.0",
-    "codex-rollout-jsonl/0.148.0/v1",
-    _profile_digest(),
-    _WRAPPER_TYPES,
-    _ITEM_TYPES,
-)
+def _exact_profile(
+    cli_version: str,
+    wrapper_types: tuple[str, ...],
+    item_types: tuple[str, ...],
+) -> CodexCapabilityProfile:
+    profile_id = f"codex-rollout-jsonl/{cli_version}/v1"
+    return CodexCapabilityProfile(
+        cli_version,
+        profile_id,
+        _profile_digest(cli_version, profile_id, wrapper_types, item_types),
+        wrapper_types,
+        item_types,
+    )
+
+
+_BASELINE_PROFILE = _exact_profile("0.148.0", _WRAPPER_TYPES_0_148_0, _ITEM_TYPES_0_148_0)
+_PROFILE_0_150_1 = _exact_profile("0.150.1", _WRAPPER_TYPES_0_150_1, _ITEM_TYPES_0_150_1)
 SUPPORTED_ROLLOUT_PROFILES: Final[Mapping[str, CodexCapabilityProfile]] = MappingProxyType(
-    {_BASELINE_PROFILE.cli_version: _BASELINE_PROFILE}
+    {
+        _BASELINE_PROFILE.cli_version: _BASELINE_PROFILE,
+        _PROFILE_0_150_1.cli_version: _PROFILE_0_150_1,
+    }
+)
+_PROFILES_BY_ID: Final[Mapping[str, CodexCapabilityProfile]] = MappingProxyType(
+    {profile.profile_id: profile for profile in SUPPORTED_ROLLOUT_PROFILES.values()}
 )
 
 
@@ -109,24 +174,46 @@ def profile_for_rollout_version(version: str) -> CodexCapabilityProfile:
         raise ValueError("unsupported_codex_profile") from exc
 
 
-def split_codex_rollout_jsonl_chunk(
-    source: bytes,
-    profile: CodexCapabilityProfile,
-    *,
-    start_ordinal: int = 1,
-) -> tuple[CodexSourceLine, ...]:
-    """Split a byte chunk into source lines with chunk-relative byte offsets."""
+def profile_for_rollout_id(profile_id: str) -> CodexCapabilityProfile:
+    """Return the exact profile a persisted ``profile_id`` names, or fail closed."""
 
-    if type(start_ordinal) is not int or start_ordinal < 1:
-        raise ValueError("codex_source_invalid")
+    if type(profile_id) is not str or not profile_id.isascii():
+        raise ValueError("unsupported_codex_profile")
+    try:
+        return _PROFILES_BY_ID[profile_id]
+    except KeyError as exc:
+        raise ValueError("unsupported_codex_profile") from exc
+
+
+def _check_profile(profile: CodexCapabilityProfile | None) -> None:
+    if profile is None:
+        return
     if (
         type(profile) is not CodexCapabilityProfile
         or SUPPORTED_ROLLOUT_PROFILES.get(profile.cli_version) != profile
     ):
         raise ValueError("unsupported_codex_profile")
+
+
+def split_codex_rollout_jsonl_chunk(
+    source: bytes,
+    profile: CodexCapabilityProfile | None,
+    *,
+    start_ordinal: int = 1,
+) -> tuple[CodexSourceLine, ...]:
+    """Split a byte chunk into source lines with chunk-relative byte offsets.
+
+    ``profile`` may be ``None`` before the session header has admitted one; every exact profile
+    shares the same bounds, so splitting is identical either way.
+    """
+
+    if type(start_ordinal) is not int or start_ordinal < 1:
+        raise ValueError("codex_source_invalid")
+    _check_profile(profile)
+    bounds = _BASELINE_PROFILE if profile is None else profile
     if type(source) is not bytes:
         raise ValueError("codex_source_invalid")
-    if len(source) > profile.max_source_bytes:
+    if len(source) > bounds.max_source_bytes:
         raise ValueError("import_source_limit_exceeded")
     if not source:
         return ()
@@ -137,7 +224,7 @@ def split_codex_rollout_jsonl_chunk(
         newline = source.find(b"\n", start)
         terminated = newline >= 0
         end = newline + 1 if terminated else len(source)
-        if ordinal > profile.max_lines:
+        if ordinal > bounds.max_lines:
             raise ValueError("import_line_limit_exceeded")
         content_end = end - 1 if terminated else end
         content = bytes(source[start:content_end])
@@ -151,7 +238,7 @@ def split_codex_rollout_jsonl_chunk(
 
 def parse_codex_rollout_jsonl(
     source: bytes,
-    profile: CodexCapabilityProfile,
+    profile: CodexCapabilityProfile | None,
     *,
     require_admission: bool = True,
 ) -> CodexParseResult:
@@ -164,20 +251,24 @@ def parse_codex_rollout_jsonl(
 
 def parse_codex_rollout_jsonl_from_offset(
     source: bytes,
-    profile: CodexCapabilityProfile,
+    profile: CodexCapabilityProfile | None,
     *,
     start_ordinal: int = 1,
     require_admission: bool = False,
 ) -> CodexParseResult:
-    """Parse a rollout JSONL chunk. Unterminated tails are retained by callers."""
+    """Parse a rollout JSONL chunk. Unterminated tails are retained by callers.
 
-    if (
-        type(profile) is not CodexCapabilityProfile
-        or SUPPORTED_ROLLOUT_PROFILES.get(profile.cli_version) != profile
-    ):
-        raise ValueError("unsupported_codex_profile")
+    With an explicit ``profile`` the session header must name exactly that release. With
+    ``profile=None`` (only valid when admission is required) the header's exact ``cli_version``
+    selects one supported profile by key lookup; the result's ``profile`` is the admitted one and
+    stays ``None`` when the chunk admitted nothing.
+    """
+
+    _check_profile(profile)
     if type(require_admission) is not bool:
         raise ValueError("codex_source_invalid")
+    if profile is None and not require_admission:
+        raise ValueError("unsupported_codex_profile")
     lines = split_codex_rollout_jsonl_chunk(source, profile, start_ordinal=start_ordinal)
     records: list[CodexParsedRecord] = []
     statuses: list[ImportLineStatus] = []
@@ -190,7 +281,7 @@ def parse_codex_rollout_jsonl_from_offset(
             statuses.append(ImportLineStatus.UNSUPPORTED)
             reasons.append("unsupported_codex_profile")
             continue
-        if len(line.content) > profile.max_line_bytes:
+        if len(line.content) > _MAX_LINE_BYTES:
             statuses.append(ImportLineStatus.OVERSIZED)
             reasons.append("line_oversized")
             if not admitted:
@@ -211,14 +302,17 @@ def parse_codex_rollout_jsonl_from_offset(
                 stream_gaps.add("unsupported_codex_profile")
             continue
         if not admitted:
-            admitted, admission_reason = _admit_session_meta(value, profile)
-            if not admitted:
+            selected, admission_reason = _admit_session_meta(value, profile)
+            if selected is None:
                 refused = True
                 stream_gaps.add("unsupported_codex_profile")
                 statuses.append(ImportLineStatus.UNSUPPORTED)
                 reasons.append(admission_reason)
                 continue
-        status, item_type, reason = _validate_wrapper(value)
+            admitted = True
+            profile = selected
+        assert profile is not None
+        status, item_type, reason = _validate_wrapper(value, profile)
         statuses.append(status)
         reasons.append(reason)
         wrapper_type = value.get("type")
@@ -246,7 +340,7 @@ def parse_codex_rollout_jsonl_from_offset(
     if lines and not lines[-1].terminated:
         stream_gaps.add("final_newline_absent")
     return CodexParseResult(
-        profile,
+        profile if admitted else None,
         lines,
         tuple(records),
         tuple(statuses),
@@ -337,23 +431,29 @@ def _redact_json_tree(value: dict[str, object]) -> dict[str, object]:
 
 
 def _admit_session_meta(
-    value: dict[str, object], profile: CodexCapabilityProfile
-) -> tuple[bool, str]:
+    value: dict[str, object], profile: CodexCapabilityProfile | None
+) -> tuple[CodexCapabilityProfile | None, str]:
+    """Select the exact profile the header names, or refuse.
+
+    The lookup is an exact ``cli_version`` key match: a release one patch away from a supported
+    one is refused, and an explicit ``profile`` refuses every header that names another release.
+    """
+
     if value.get("type") != "session_meta":
-        return False, "unsupported_codex_profile"
+        return None, "unsupported_codex_profile"
     payload = value.get("payload")
     if type(payload) is not dict:
-        return False, "unsupported_codex_profile"
+        return None, "unsupported_codex_profile"
     cli_version = cast(dict[str, object], payload).get("cli_version")
-    if type(cli_version) is not str:
-        return False, "unsupported_codex_profile"
+    if type(cli_version) is not str or not cli_version.isascii():
+        return None, "unsupported_codex_profile"
     admitted = SUPPORTED_ROLLOUT_PROFILES.get(cli_version)
-    if admitted != profile:
-        return False, "unsupported_codex_profile"
+    if admitted is None or (profile is not None and admitted != profile):
+        return None, "unsupported_codex_profile"
     history_mode = cast(dict[str, object], payload).get("history_mode")
     if type(history_mode) is not str or history_mode not in CODEX_ROLLOUT_HISTORY_MODES:
-        return False, "unsupported_codex_profile"
-    return True, "session_meta"
+        return None, "unsupported_codex_profile"
+    return admitted, "session_meta"
 
 
 def _item_types_of(value: dict[str, object]) -> tuple[str | None, tuple[str, ...]]:
@@ -373,11 +473,13 @@ def _item_types_of(value: dict[str, object]) -> tuple[str | None, tuple[str, ...
     return (selected if type(selected) is str else None), candidates
 
 
-def _validate_wrapper(value: dict[str, object]) -> tuple[ImportLineStatus, str | None, str | None]:
+def _validate_wrapper(
+    value: dict[str, object], profile: CodexCapabilityProfile
+) -> tuple[ImportLineStatus, str | None, str | None]:
     wrapper_type = value.get("type")
     if type(wrapper_type) is not str:
         return ImportLineStatus.UNSUPPORTED, None, "wrapper_shape_unsupported"
-    if wrapper_type not in _WRAPPER_TYPES:
+    if wrapper_type not in profile.wrapper_types:
         return ImportLineStatus.UNKNOWN, None, "unknown_wrapper_type"
     payload = value.get("payload")
     if type(payload) is not dict:
@@ -388,6 +490,6 @@ def _validate_wrapper(value: dict[str, object]) -> tuple[ImportLineStatus, str |
         return ImportLineStatus.UNSUPPORTED, None, "wrapper_shape_unsupported"
     item_type, semantic_types = _item_types_of(value)
     for semantic_type in semantic_types:
-        if semantic_type not in _ITEM_TYPES:
+        if semantic_type not in profile.item_types:
             return ImportLineStatus.UNKNOWN, semantic_type, "unknown_item_type"
     return ImportLineStatus.MAPPED, item_type, None

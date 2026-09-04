@@ -223,7 +223,9 @@ class CodexParsedRecord:
 
 @dataclass(frozen=True, slots=True)
 class CodexParseResult:
-    profile: CodexCapabilityProfile
+    # The exact profile that admitted this source, or ``None`` when a header-selected parse
+    # admitted nothing (the rollout stream reader refuses such a chunk durably).
+    profile: CodexCapabilityProfile | None
     lines: tuple[CodexSourceLine, ...]
     records: tuple[CodexParsedRecord, ...]
     statuses: tuple[ImportLineStatus, ...]
@@ -232,7 +234,7 @@ class CodexParseResult:
 
     def __post_init__(self) -> None:
         if (
-            type(self.profile) is not CodexCapabilityProfile
+            (self.profile is not None and type(self.profile) is not CodexCapabilityProfile)
             or type(self.lines) is not tuple
             or type(self.records) is not tuple
             or type(self.statuses) is not tuple
