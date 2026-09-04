@@ -1,4 +1,4 @@
-"""Validate the retained exact-worktree Codex dogfood parity gate (issues #463/#464/#518).
+"""Validate the retained exact-worktree Codex dogfood parity gate (issues #463/#464/#518/#561).
 
 The input is a bounded structural report assembled from the runbook's named commands. It carries
 digests and closed states only: no paths, prompts, transcripts, credentials, or provider payloads.
@@ -18,7 +18,7 @@ from typing import Final, Literal, TypedDict, cast
 
 GateStatus = Literal["pass", "fail", "unsupported", "blocked", "not_run"]
 
-_SCHEMA: Final = "yoetz.codex-dogfood-parity/2"
+_SCHEMA: Final = "yoetz.codex-dogfood-parity/3"
 _MAX_REPORT_BYTES: Final = 131_072
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$", re.ASCII)
 _SOURCE_REF = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$", re.ASCII)
@@ -34,6 +34,7 @@ PREFLIGHT_FACETS: Final = (
     "source_identity",
     "package_identity",
     "service_isolation",
+    "mcp_child_isolation",
     "workspace_binding",
     "observation_consent",
     "plugin_source",
@@ -74,6 +75,8 @@ _NEXT_ACTIONS: Final = frozenset(
         "none",
         "do_not_launch",
         "provision_isolated_yoetz_root",
+        "reregister_isolated_mcp",
+        "recapture_isolated_mcp_child",
         "yoetz_observe_grant_exact_worktree",
         "yoetz_recommend_list_exact_target",
         "manual_activation_review",
@@ -130,6 +133,9 @@ class DogfoodIdentity(TypedDict):
 class DogfoodObserved(TypedDict):
     activation_state: str
     yoetz_isolation_state: str
+    mcp_registration_state: str
+    mcp_isolation_binding: str
+    mcp_child_state: str
     exact_worktree_consent: str
     primary_checkout_consent: str
     controls_workspace_match: bool
@@ -282,6 +288,9 @@ def _parse_observed(value: object) -> DogfoodObserved:
     expected = {
         "activation_state",
         "yoetz_isolation_state",
+        "mcp_registration_state",
+        "mcp_isolation_binding",
+        "mcp_child_state",
         "exact_worktree_consent",
         "primary_checkout_consent",
         "controls_workspace_match",
@@ -296,6 +305,9 @@ def _parse_observed(value: object) -> DogfoodObserved:
         raise _error("observed_fields_invalid")
     activation = row["activation_state"]
     isolation_state = row["yoetz_isolation_state"]
+    mcp_registration_state = row["mcp_registration_state"]
+    mcp_isolation_binding = row["mcp_isolation_binding"]
+    mcp_child_state = row["mcp_child_state"]
     exact_consent = row["exact_worktree_consent"]
     primary_consent = row["primary_checkout_consent"]
     if activation not in {
@@ -308,6 +320,18 @@ def _parse_observed(value: object) -> DogfoodObserved:
         raise _error("activation_state_invalid")
     if isolation_state not in {"isolated", "shared", "ambient", "unknown"}:
         raise _error("yoetz_isolation_state_invalid")
+    if mcp_registration_state not in {"yoetz_owned", "absent", "foreign_present", "unknown"}:
+        raise _error("mcp_registration_state_invalid")
+    if mcp_isolation_binding not in {
+        "ambient",
+        "isolated_exact",
+        "missing",
+        "different",
+        "unknown",
+    }:
+        raise _error("mcp_isolation_binding_invalid")
+    if mcp_child_state not in {"ready", "failed", "unknown"}:
+        raise _error("mcp_child_state_invalid")
     consent_states = {"active", "missing", "paused", "revoked", "unknown"}
     if exact_consent not in consent_states or primary_consent not in consent_states:
         raise _error("consent_state_invalid")
@@ -320,6 +344,9 @@ def _parse_observed(value: object) -> DogfoodObserved:
     return DogfoodObserved(
         activation_state=cast(str, activation),
         yoetz_isolation_state=cast(str, isolation_state),
+        mcp_registration_state=cast(str, mcp_registration_state),
+        mcp_isolation_binding=cast(str, mcp_isolation_binding),
+        mcp_child_state=cast(str, mcp_child_state),
         exact_worktree_consent=cast(str, exact_consent),
         primary_checkout_consent=cast(str, primary_consent),
         controls_workspace_match=_require_bool(
@@ -467,6 +494,13 @@ def classify_codex_dogfood_report(document: object) -> DogfoodGateResult:
         )
         if any(resolved == normal for resolved, normal in shared_identity_pairs):
             raise _error("service_isolation_identity_shared")
+    mcp_child_exact = (
+        observed["mcp_registration_state"] == "yoetz_owned"
+        and observed["mcp_isolation_binding"] == "isolated_exact"
+        and observed["mcp_child_state"] == "ready"
+    )
+    if (facets["mcp_child_isolation"]["status"] == "pass") != mcp_child_exact:
+        raise _error("mcp_child_isolation_state_mismatch")
     if facets["mapping"]["status"] == "pass" and not observed["mapping_present"]:
         raise _error("mapping_observation_missing")
     if (
@@ -493,6 +527,20 @@ def classify_codex_dogfood_report(document: object) -> DogfoodGateResult:
         "provision_isolated_yoetz_root"
     ):
         raise _error("service_isolation_continuation_missing")
+    mcp_child = facets["mcp_child_isolation"]
+    if mcp_child["status"] != "pass":
+        # An exact owned binding cannot be repaired by re-registering it; only the child
+        # start or its capture is unproven there. Every other non-pass shape needs the
+        # reviewed registration redone before the child is worth capturing again.
+        mcp_binding_exact = (
+            observed["mcp_registration_state"] == "yoetz_owned"
+            and observed["mcp_isolation_binding"] == "isolated_exact"
+        )
+        expected_action = (
+            "recapture_isolated_mcp_child" if mcp_binding_exact else "reregister_isolated_mcp"
+        )
+        if mcp_child["next_action"] != expected_action:
+            raise _error("mcp_child_isolation_continuation_missing")
     activation = facets["plugin_activation"]
     if activation["reason"] == "installed_not_activated" and activation["next_action"] != (
         "yoetz_recommend_list_exact_target"

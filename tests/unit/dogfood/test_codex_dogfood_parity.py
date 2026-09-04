@@ -43,7 +43,7 @@ def _gate(status: str = "pass") -> dict[str, object]:
 
 def _report() -> dict[str, object]:
     return {
-        "schema": "yoetz.codex-dogfood-parity/2",
+        "schema": "yoetz.codex-dogfood-parity/3",
         "identity": {
             "source_ref": "a" * 40,
             "package_digest": _DIGEST,
@@ -77,6 +77,9 @@ def _report() -> dict[str, object]:
         "observed": {
             "activation_state": "active",
             "yoetz_isolation_state": "isolated",
+            "mcp_registration_state": "yoetz_owned",
+            "mcp_isolation_binding": "isolated_exact",
+            "mcp_child_state": "ready",
             "exact_worktree_consent": "active",
             "primary_checkout_consent": "active",
             "controls_workspace_match": True,
@@ -277,6 +280,61 @@ def test_failed_isolation_without_the_provisioning_continuation_is_invalid() -> 
     }
 
     with pytest.raises(DogfoodGateError, match="service_isolation_continuation_missing"):
+        classify_codex_dogfood_report(report)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "next_action"),
+    [
+        ("mcp_registration_state", "absent", "reregister_isolated_mcp"),
+        ("mcp_isolation_binding", "missing", "reregister_isolated_mcp"),
+        ("mcp_isolation_binding", "different", "reregister_isolated_mcp"),
+        ("mcp_child_state", "failed", "recapture_isolated_mcp_child"),
+        ("mcp_child_state", "unknown", "recapture_isolated_mcp_child"),
+    ],
+)
+def test_mcp_child_isolation_fails_closed_before_launch(
+    field: str, value: str, next_action: str
+) -> None:
+    report = _report()
+    _observed(report)[field] = value
+    _facets(report)["mcp_child_isolation"] = {
+        "status": "fail" if value != "unknown" else "blocked",
+        "reason": "mcp_child_isolation_unproven",
+        "evidence_digest": _DIGEST if value != "unknown" else None,
+        "next_action": next_action,
+    }
+
+    result = classify_codex_dogfood_report(report)
+
+    assert result["preflight_outcome"] in {"fail", "blocked"}
+    assert result["launch_allowed"] is False
+    assert result["failed_facets"] == (["mcp_child_isolation"] if value != "unknown" else [])
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "rejected_action"),
+    [
+        ("mcp_isolation_binding", "missing", "do_not_launch"),
+        # An exact owned binding is not repaired by re-registering it.
+        ("mcp_child_state", "failed", "reregister_isolated_mcp"),
+        # A wrong binding is not repaired by recapturing the child.
+        ("mcp_isolation_binding", "different", "recapture_isolated_mcp_child"),
+    ],
+)
+def test_mcp_child_isolation_requires_the_matching_continuation(
+    field: str, value: str, rejected_action: str
+) -> None:
+    report = _report()
+    _observed(report)[field] = value
+    _facets(report)["mcp_child_isolation"] = {
+        "status": "fail",
+        "reason": "mcp_child_isolation_unproven",
+        "evidence_digest": _DIGEST,
+        "next_action": rejected_action,
+    }
+
+    with pytest.raises(DogfoodGateError, match="mcp_child_isolation_continuation_missing"):
         classify_codex_dogfood_report(report)
 
 

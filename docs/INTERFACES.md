@@ -3519,12 +3519,14 @@ optional reported version, `supported|untested` compatibility). Shared names are
 `("yoetz", "mcp", "serve", "--semantic", "off")`),
 `McpRegistrationState` (`absent|yoetz_owned|foreign_present`), `McpRegistrationAction`
 (`register|reregister|unregister|noop`), `McpRegistrationReason` (`confirmation_required|preview_stale|
-harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_present`),
-`McpRegistrationPreview`, `McpRegistrationObservation`, `McpRegistrationCommand`,
+harness_unavailable|parse_failed|timeout|registration_failed|foreign_entry_present|isolation_invalid`),
+`McpRegistrationPreview` (including the exact proposed `isolated_root` or null),
+`McpRegistrationObservation`, `McpRegistrationCommand`,
 `McpRegistrationResult`, and
-`McpRegistrationError`. `McpRegistrationObservation` carries `harness_id`, `state`, and
-`route_profile` (`policy|strict|null`); `route_profile` is non-null only when the state is
-`yoetz_owned`, because a foreign or absent entry has no Yoetz route to describe.
+`McpRegistrationError`. `McpRegistrationObservation` carries `harness_id`, `state`,
+`route_profile` (`policy|strict|null`), and `isolation_binding`
+(`ambient|isolated_exact|missing|different|null`); route and binding are non-null only when the
+state is `yoetz_owned`, because a foreign or absent entry has no Yoetz route to describe.
 `observe_registration` reads exactly what `status_registration` reads, mutates nothing, and shares
 its `status` diagnostic phase. Each observation starts with `codex mcp get yoetz --json`; because a
 nonzero named lookup is not positive absence, it falls back to bounded `codex mcp list --json`.
@@ -3548,8 +3550,13 @@ serve command, refuse an observed foreign replacement, and treat an already-abse
 `host_remove_not_compare_and_swap`; callers must quiesce concurrent host configuration writers,
 and the port does not claim atomic exclusion inside the final host subprocess window. The same
 positive-absence fallback is required after removal, so a generic failed named lookup never proves
-success. The interactive approval surface prints the exact command, route, warnings, and preview
-digest. The preview binds the exact command and `policy|strict` route profile. The route profile is
+success. The interactive approval surface prints the exact command, route, isolated root, warnings,
+and preview digest. The preview binds the exact command, `policy|strict` route profile, and exact
+ADR-026 isolated root when present. Ambient external registrations carry no environment. Isolated
+external Codex registrations carry exactly one native `--env` pair,
+`YOETZ_ISOLATED_ROOT=<validated-root>`; a missing or different known root is re-registration drift,
+while any arbitrary key, inherited-variable declaration, or malformed root makes the same-name
+entry foreign and preserves it. The route profile is
 explicit input:
 `yoetz setup run` and `yoetz integrate <harness> mcp preview|install` accept
 `--route-profile strict|policy`. Without that input, an existing yoetz-owned registration keeps
@@ -3561,8 +3568,9 @@ is surfaced before mutation: the wizard preview and report carry `route_profile_
 ordinary digest-bound re-registration.
 The setup-wizard
 schema tokens are `yoetz.setup-wizard-marker/1`, `yoetz.setup-wizard-report/1`,
-`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1`, and
-`yoetz.mcp-unregistration-preview/1`; the marker lives at `state_dir()/setup-wizard.json` via
+`yoetz.setup-status/1`, `yoetz.mcp-registration-preview/1` (ambient) / `2` (isolated), and
+`yoetz.mcp-unregistration-preview/1` (ambient) / `2` (isolated); the marker lives at
+`state_dir()/setup-wizard.json` via
 `config.paths.setup_marker_path`. The CLI surfaces are
 `yoetz setup run|status` and
 `yoetz integrate <harness> mcp status|preview|preview-remove|install|remove` (ADR-012).
