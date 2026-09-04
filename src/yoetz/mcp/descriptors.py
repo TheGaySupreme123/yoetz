@@ -1436,9 +1436,11 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "(1) session_id for the session you hold, or "
         "(2) workspace_ref + external_ref as a pair with no session_id — mode=create_or_attach "
         "creates on first use and attaches on later conversations. task_id is not an accepted "
-        "field. workspace_ref is the stable project identity (remote URL or absolute repository "
-        "root); external_ref is the stable task identity within that project (branch, issue, or "
-        "plan slug). Both refs are redacted one-shot values; only HMAC commitments are persisted, "
+        "field. workspace_ref is the canonical absolute repository root (never a remote URL; "
+        "the value hook observation auto-attaches with); external_ref is the stable task "
+        "identity within that project (branch, issue, or plan slug). When the session-start "
+        "context names a mapped task, use mode=attach with its session_id. Both refs are "
+        "redacted one-shot values; only HMAC commitments are persisted, "
         "so do not self-censor into unstable refs. After resume or compaction, use status "
         "view=obligations to recover exact requested_items and unattempted_items rather than "
         "searching transcripts or source. Author the request from this input schema plus "
@@ -1662,7 +1664,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
     {
         "policy": MappingProxyType(
             {
-                "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
+                "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
                 "publish_work": "sha256:dd9725bbf8cadd9582c7be95f3314e74d642d56dd34d4f30a6c1ed6d9a32f367",
                 "check": "sha256:db57da2058052843ebb583f2ac141ebf7925dcf920583b0cdad6533c3f7fa29a",
                 "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
@@ -1673,7 +1675,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         ),
         "strict": MappingProxyType(
             {
-                "start": "sha256:86aebf6d6d5f5d2ef3858f4cf0af38c5320bf0e0e47bd09e1f556366e62434e6",
+                "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
                 "publish_work": "sha256:dd9725bbf8cadd9582c7be95f3314e74d642d56dd34d4f30a6c1ed6d9a32f367",
                 "check": "sha256:89899d93b76ea85c90d79d3df150f076f6b64a28cdb8f410c263ce3c1aa89b91",
                 "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
@@ -1686,8 +1688,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:b9fec096df2db95564da08e3f4ff7eb679197f9aebd62c924120ae6f140497fa",
-        "strict": "sha256:fe175db65c5830356526a87908b298f14c22ee2d8aa047bac775f6c555d92ddf",
+        "policy": "sha256:e5283f3497e3c259b9641e69e32612b1a82bd595369a9265072cb73eaf890ead",
+        "strict": "sha256:ada5633f12538a746c0e25355ccd4a62083441ddb7e1ba1956582d32be3d323b",
     }
 )
 

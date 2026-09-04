@@ -309,6 +309,16 @@ explicit `start` maps it. For `vault_locked` on a never-initialized install, tha
 `start` returns the typed `vault_initialization_required` continuation (see Troubleshooting)
 rather than a dead end.
 
+The `sessionStart` status probe for an already-mapped session connects with the resolved workspace
+root as its repository locator, so a live mapping answers `active` and the `additional_context`
+names the task, frontier, mapped `session_id` and `writer_id`, and the `start mode=attach`
+continuation by that session id (issues #578, #580). A daemon fence refusal records
+`status_workspace_unbound` / `status_workspace_mismatch` and keeps the mapping; only a replaced
+session records `mapping_stale`. Cursor does not re-bind the mapping from the agent's own scoped
+`start`: `afterMCPExecution` is normalized to structural fields and its result is not inspected,
+so an agent that starts a separate task keeps hook rows routed to the auto-attached task. Continue
+the auto-attached task by its named `session_id` instead of a new ref pair.
+
 Cursor's hooks reference (re-read 2026-09-03) calls local `sessionStart` fire-and-forget: the hook
 process can complete this mapping and drain, but the agent loop does not wait for it. Therefore a
 rendered hook or passing local handler test does not prove the mapping existed before Cursor's first

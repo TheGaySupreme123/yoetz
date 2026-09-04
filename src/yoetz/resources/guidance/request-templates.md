@@ -23,8 +23,9 @@ available. Before a material publication, send the completed `publish_work` requ
 ## `start`
 
 Use `create_or_attach` with a stable workspace/work-item pair when first opening or resuming the
-same work. Alternatively, attach with a returned `session_id`; never use a bare `task_id` as an
-attach selector. A later identical-pair attach mints a new session: prefer the returned ids, and
+same work; `workspace_ref` is the canonical absolute repository root (never a remote URL), the
+same value hook observation auto-attaches with. Alternatively, attach with a returned or
+host-context `session_id`; never use a bare `task_id` as an attach selector. A later identical-pair attach mints a new session: prefer the returned ids, and
 recover a prior `request_id` with `status view=operation` from the successor session. Intentional
 siblings use `mode=create` with a different `external_ref`.
 
@@ -35,7 +36,7 @@ siblings use `mode=create` with a different `external_ref`.
   "request_id": "req_00000000-0000-4000-8000-000000000001",
   "mode": "create_or_attach",
   "task_title": "Replace with the bounded task title",
-  "workspace_ref": "https://github.com/example/project",
+  "workspace_ref": "/workspace/project",
   "external_ref": "issue-128",
   "requested_view": "compact",
   "actor": {

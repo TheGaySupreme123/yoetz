@@ -1951,9 +1951,13 @@ def handle_observe(
                     _STORAGE_CORRUPT_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _STORAGE_UNSAFE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
                     _UNAVAILABLE_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _WORKSPACE_MISMATCH_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    _WORKSPACE_UNBOUND_CONTEXT,  # pyright: ignore[reportPrivateUsage]
+                    StatusOutcome,
                     _active_context,  # pyright: ignore[reportPrivateUsage]
                     _read_status,  # pyright: ignore[reportPrivateUsage]
                     _stale_mapping_context,  # pyright: ignore[reportPrivateUsage]
+                    bound_connector,
                 )
 
                 with acquire_session_lock(codex_session_id, _state=_state) as owned:
@@ -1991,11 +1995,20 @@ def handle_observe(
                                 additional = _active_context(mapping, mapping.last_frontier)
                         elif mapping is not None and not skip_service:
                             active_mapping = mapping
+                            status_locator = workspace_locator
 
-                            async def _status() -> object:
-                                connector = cast(
-                                    "hooks_cli.ServiceConnector",
-                                    connect if connect is not None else _connect_service(),
+                            async def _status() -> StatusOutcome:
+                                # The read carries the consented locator exactly as the
+                                # auto-attach `start` does, so the daemon's repository
+                                # fence admits a live mapping (issue #578). The
+                                # module-level connector override stays honoured.
+                                connector = (
+                                    connect
+                                    if connect is not None
+                                    else bound_connector(
+                                        cast(Callable[..., Awaitable[object]], _connect_service()),
+                                        status_locator,
+                                    )
                                 )
                                 return await _read_status(
                                     active_mapping,
@@ -2003,9 +2016,8 @@ def handle_observe(
                                     actor_id=f"yoetz:{harness_id}-hooks",
                                 )
 
-                            kind, updated = cast(
-                                tuple[str, LifecycleMapping | None], _resolve_runner()(_status)
-                            )
+                            outcome = cast(StatusOutcome, _resolve_runner()(_status))
+                            kind, updated = outcome.kind, outcome.mapping
                             if kind == "active" and updated is not None:
                                 store_mapping(updated, _state=_state)
                                 mapping = updated
@@ -2015,11 +2027,25 @@ def handle_observe(
                                 # (re-started elsewhere). Repair flows through the agent's
                                 # own start via handle_post_tool_use; meanwhile the static
                                 # advisory must not starve pending advice (issue #308).
-                                additional = _stale_mapping_context(mapping)
+                                additional = _stale_mapping_context(mapping, outcome.replacement)
                                 attach_advisory_only = True
                                 with contextlib.suppress(Exception):
                                     record_hook_diagnostic(
                                         "mapping_stale", resolved_event, _state=_state
+                                    )
+                            elif kind in {"workspace_unbound", "workspace_mismatch"}:
+                                # The daemon refused to bind the read to a repository. The
+                                # mapping is live and kept; this is never `mapping_stale`
+                                # and never a re-attach instruction (issue #578).
+                                additional = (
+                                    _WORKSPACE_UNBOUND_CONTEXT
+                                    if kind == "workspace_unbound"
+                                    else _WORKSPACE_MISMATCH_CONTEXT
+                                )
+                                attach_advisory_only = True
+                                with contextlib.suppress(Exception):
+                                    record_hook_diagnostic(
+                                        f"status_{kind}", resolved_event, _state=_state
                                     )
                             elif kind == "locked":
                                 additional = _LOCKED_CONTEXT
@@ -2416,18 +2442,29 @@ def handle_claude_observe(
                 # successful start result is the sole authority that can bind
                 # this host session to the cooperative Yoetz task. Inspect the
                 # raw response transiently and persist only validated ids.
-                from yoetz.cli.hooks import bind_start_mapping_from_hook
+                from yoetz.cli.hooks import (
+                    bind_start_mapping_outcome,
+                    record_start_bind_diagnostic,
+                )
 
+                # A scoped successful start that binds nothing is recorded as a
+                # typed, payload-free diagnostic instead of failing silently
+                # (issue #581): `observe status` can then say why observation
+                # kept routing to the previous task.
                 with contextlib.suppress(Exception):
-                    bind_start_mapping_from_hook(
-                        cast(
-                            Mapping[str, JsonValue],
-                            {
-                                "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
-                                "tool_name": tool_name,
-                                "tool_response": payload.get("tool_response"),
-                            },
+                    record_start_bind_diagnostic(
+                        bind_start_mapping_outcome(
+                            cast(
+                                Mapping[str, JsonValue],
+                                {
+                                    "session_id": f"{_CLAUDE_SESSION_PREFIX}{session}",
+                                    "tool_name": tool_name,
+                                    "tool_response": payload.get("tool_response"),
+                                },
+                            ),
+                            _state=_state,
                         ),
+                        "PostToolUse",
                         _state=_state,
                     )
         return handle_observe(

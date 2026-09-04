@@ -1134,6 +1134,209 @@ def test_session_start_stale_mapping_advisory_keeps_advice_delivery(
     assert '"reason":"mapping_stale"' in diagnostics
 
 
+def _status_active_client(task_id: str, session_id: str, writer_id: str) -> object:
+    class _Head:
+        sequence = "3"
+        head_digest = "sha256:" + "c" * 64
+
+    class _Success:
+        pass
+
+    success = _Success()
+    success.task_id = task_id  # type: ignore[attr-defined]
+    success.session_id = session_id  # type: ignore[attr-defined]
+    success.writer_id = writer_id  # type: ignore[attr-defined]
+    success.head_frontier = _Head()  # type: ignore[attr-defined]
+
+    class _Result:
+        root = success
+
+    class _Client:
+        async def status(self, request: object, *, deadline_ms: int | None = None) -> object:
+            del request, deadline_ms
+            return _Result()
+
+        async def observation_ingest(self, body: object, *, deadline_ms: int) -> object:
+            del body, deadline_ms
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    return _Client()
+
+
+def test_session_start_status_read_carries_the_consented_locator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resume/compact status probe is repository-bound like the auto-attach start (#578).
+
+    Before, the shared observe path connected bare, the daemon's repository fence answered
+    `SESSION_CONFLICT`, and every compaction reported a live mapping as `mapping_stale`.
+    """
+
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        load_mapping,
+        mapping_from_start_ids,
+        store_mapping,
+    )
+    from yoetz.ports.control import WorkspaceLocator
+    from yoetz.protocol.ids import IdKind, new_id
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    task_id, session_id, writer_id = (
+        new_id(IdKind.TASK),
+        new_id(IdKind.SESSION),
+        new_id(IdKind.WRITER),
+    )
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id="claude:compact-1",
+            yoetz_task_id=task_id,
+            yoetz_session_id=session_id,
+            yoetz_writer_id=writer_id,
+            last_frontier="0:genesis",
+        ),
+        _state=tmp_path,
+    )
+    captured: list[WorkspaceLocator | None] = []
+    client = _status_active_client(task_id, session_id, writer_id)
+
+    async def connect(_kind: object, *, workspace_locator: WorkspaceLocator | None = None):
+        captured.append(workspace_locator)
+        return client
+
+    monkeypatch.setattr(observe_hooks_module, "connect_service", connect, raising=False)
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {
+                "session_id": "claude:compact-1",
+                "hook_event_name": "SessionStart",
+                "source": "compact",
+            }
+        ).encode(),
+        stdout=out,
+        workspace=locator,
+        _state=tmp_path,
+    )
+    assert code == 0
+    assert captured[0] == WorkspaceLocator(locator)
+    context = json.loads(out.getvalue().decode())["hookSpecificOutput"]["additionalContext"]
+    assert task_id in context
+    assert f"session_id {session_id} and writer_id {writer_id}" in context
+    assert "3:sha256:" in context
+    refreshed = load_mapping("claude:compact-1", _state=tmp_path)
+    assert refreshed is not None
+    assert refreshed.last_frontier == "3:sha256:" + "c" * 64
+    diagnostics_path = tmp_path / "observation" / "hook-diagnostics.jsonl"
+    assert not diagnostics_path.exists() or "mapping_stale" not in diagnostics_path.read_text()
+
+
+@pytest.mark.parametrize(
+    ("reason_code", "kind"),
+    [
+        ("repository_identity_required", "workspace_unbound"),
+        ("repository_identity_mismatch", "workspace_mismatch"),
+    ],
+)
+def test_session_start_repository_fence_refusal_is_a_distinct_diagnostic(
+    tmp_path: Path, reason_code: str, kind: str
+) -> None:
+    """A fence refusal keeps the live mapping and never advises a re-attach (#578)."""
+
+    import uuid
+
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        load_mapping,
+        mapping_from_start_ids,
+        store_mapping,
+    )
+    from yoetz.cli import hooks as hooks_module
+    from yoetz.protocol.ids import IdKind, new_id
+    from yoetz.protocol.models import OperationFailureModel
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=f"fence-{kind}",
+            yoetz_task_id=new_id(IdKind.TASK),
+            yoetz_session_id=new_id(IdKind.SESSION),
+            yoetz_writer_id=new_id(IdKind.WRITER),
+            last_frontier="0:genesis",
+        ),
+        _state=tmp_path,
+    )
+    failure = OperationFailureModel.model_validate(
+        {
+            "protocol_version": "0.1",
+            "schema_version": "1.0.0",
+            "ok": False,
+            "error": {
+                "code": "SESSION_CONFLICT",
+                "message": "The requested task attachment conflicts.",
+                "retryable": False,
+                "correlation_id": f"err_{uuid.uuid4()}",
+                "safe_details": {"reason_code": reason_code},
+            },
+        }
+    )
+
+    class _Result:
+        root = failure
+
+    class _Client:
+        async def status(self, request: object, *, deadline_ms: int | None = None) -> object:
+            del request, deadline_ms
+            return _Result()
+
+        async def observation_ingest(self, body: object, *, deadline_ms: int) -> object:
+            del body, deadline_ms
+            return observation_ingest_result_to_json(
+                ObservationIngestResult(ObservationIngestDisposition.DUPLICATE, None, None)
+            )
+
+        async def close(self) -> None:
+            return None
+
+    async def connect(_kind: object) -> _Client:
+        return _Client()
+
+    out = io.BytesIO()
+    code = handle_observe(
+        event_name="SessionStart",
+        stdin_bytes=json.dumps(
+            {"session_id": f"fence-{kind}", "hook_event_name": "SessionStart", "source": "resume"}
+        ).encode(),
+        stdout=out,
+        workspace=str(tmp_path),
+        _state=tmp_path,
+        connect=connect,  # type: ignore[arg-type]
+    )
+    assert code == 0
+    context = json.loads(out.getvalue().decode())["hookSpecificOutput"]["additionalContext"]
+    expected = (
+        hooks_module._WORKSPACE_UNBOUND_CONTEXT  # pyright: ignore[reportPrivateUsage]
+        if kind == "workspace_unbound"
+        else hooks_module._WORKSPACE_MISMATCH_CONTEXT  # pyright: ignore[reportPrivateUsage]
+    )
+    assert context.startswith(expected)
+    assert "mode=attach" not in context
+    assert load_mapping(f"fence-{kind}", _state=tmp_path) is not None
+    diagnostics = (tmp_path / "observation" / "hook-diagnostics.jsonl").read_text()
+    assert f'"reason":"status_{kind}"' in diagnostics
+    assert "mapping_stale" not in diagnostics
+
+
 def test_malformed_stdin_exits_zero(tmp_path: Path) -> None:
     code = handle_observe(
         event_name="Stop",

@@ -512,6 +512,51 @@ async def test_create_or_attach_drifted_pair_conflicts_until_explicit_create() -
     assert sibling.task_id != created.task_id
 
 
+async def test_hook_pair_then_guidance_pair_lands_on_the_auto_attached_task() -> None:
+    """Issue #580: the hook and the agent must name the workspace by one value.
+
+    The observation hook auto-attaches with the canonical project root as ``workspace_ref``
+    and ``<host>-session:<id>`` as ``external_ref``. An agent following the guidance uses
+    the same root with its own work-item ``external_ref``: that pair is a typed
+    ``workspace_task_exists`` conflict, and the session selector the SessionStart context
+    now carries attaches to the same task. A ``workspace_ref`` in another vocabulary (the
+    remote URL) is a different workspace commitment and silently creates a sibling, which is
+    why the guidance no longer offers it.
+    """
+
+    app, _, _, _ = start_composition()
+    root = "/workspace/project"
+    hook_wire = start_request(780, refs=True, title="Claude observation auto-attach").model_dump(
+        mode="json", exclude_none=True
+    )
+    hook_wire["workspace_ref"] = root
+    hook_wire["external_ref"] = "claude-session:ad24aa95-0000-4000-8000-000000000000"
+    hook_task = await execute_start(app, StartRequest.model_validate(hook_wire))
+    assert hook_task.outcome == "created"
+
+    agent_wire = start_request(781, refs=True).model_dump(mode="json", exclude_none=True)
+    agent_wire["workspace_ref"] = root
+    agent_wire["external_ref"] = "claude/dogfood-issue-568"
+    with pytest.raises(PublicOperationError) as caught:
+        await execute_start(app, StartRequest.model_validate(agent_wire))
+    assert caught.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert caught.value.safe_details == {"reason_code": "workspace_task_exists"}
+
+    attached = await execute_start(
+        app, start_request(782, mode="attach", session_id=hook_task.session_id)
+    )
+    assert attached.outcome == "attached"
+    assert attached.task_id == hook_task.task_id
+    assert attached.session_id != hook_task.session_id
+
+    url_wire = start_request(783, refs=True).model_dump(mode="json", exclude_none=True)
+    url_wire["workspace_ref"] = "https://github.com/example/project.git"
+    url_wire["external_ref"] = "claude/dogfood-issue-568"
+    sibling = await execute_start(app, StartRequest.model_validate(url_wire))
+    assert sibling.outcome == "created"
+    assert sibling.task_id != hook_task.task_id
+
+
 async def test_result_published_crash_resumes_pinned_object_and_releases_each_runtime() -> None:
     app, runtime, clock, catalog = start_composition()
     request = start_request(720)
