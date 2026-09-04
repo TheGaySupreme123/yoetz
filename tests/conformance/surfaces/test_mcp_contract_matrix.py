@@ -310,8 +310,13 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
         "unique and already in ascending ASCII order" in descriptor_for("publish_work").description
     )
     assert "unsorted_set_field" in descriptor_for("publish_work").description
-    event_drafts = descriptor_for("publish_work").input_schema["properties"]["event_drafts"]
-    assert "unsorted_set_field" in cast(dict[str, object], event_drafts)["description"]
+    properties = descriptor_for("publish_work").input_schema["properties"]
+    assert isinstance(properties, dict)
+    event_drafts = properties["event_drafts"]
+    assert isinstance(event_drafts, dict)
+    description = event_drafts["description"]
+    assert isinstance(description, str)
+    assert "unsorted_set_field" in description
     publish_descriptor = descriptor_for("publish_work")
     assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.1.0.schema.json")
     assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.0.0.schema.json")

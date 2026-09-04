@@ -150,7 +150,7 @@ as a `Repair:` clause on the compatible text summary channel, because MCP hosts 
 to surface `structuredContent`.
 
 The same text channel also carries a bounded `Reason:` clause when `safe_details` holds a frozen
-protocol `reason_code` and/or a JSON-pointer `field` (issue #579). Both tokens are already
+protocol `reason_code`, optionally followed by a JSON-pointer `field` (issue #579). Both tokens are already
 allowlisted structural content; the projector re-gates them and never copies caller prose. Claude
 Code's generic MCP profile delivers only the text `content` for `isError` results, so without this
 clause an `EVENT_INVALID` set-order rejection arrives as a bare code. The native Cursor profile
