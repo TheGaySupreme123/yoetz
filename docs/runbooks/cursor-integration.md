@@ -330,7 +330,9 @@ one envelope non-retryably, so that row is retained in quarantine and later rows
 idempotent repeat of a committed envelope (lost acknowledgement, service restart, or a workflow
 reattach that rotates the mapped Yoetz session) is resolved task-wide and acknowledged, never
 quarantined. A pending row from an ended host session whose task was recovered by a successor
-session is delivered on the successor route (`session_superseded`); it is not `ledger_rejected`.
+session is delivered on the successor route (`session_superseded` is followed). A successor
+binding that cannot be followed quarantines that row as `session_superseded`, not
+`ledger_rejected` or `mapping_missing`.
 A row
 also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
 designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible

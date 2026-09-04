@@ -956,11 +956,12 @@ class ObservationCoordinator:
                     exc.code is PublicErrorCode.SESSION_NOT_FOUND
                     and exc.safe_details.get("reason_code") == "session_superseded"
                 ):
-                    # The route was retired by a successor attach. Delivery
-                    # follows the binding when `_route_observation_mapping` can
-                    # parse it; a malformed or task-mismatched payload is a
-                    # stale mapping, not a ledger content refusal (#577).
-                    return _reject(ObservationGapCode.MAPPING_MISSING.value)
+                    # Followable retirement is consumed in
+                    # `_route_observation_mapping`. A payload that cannot be
+                    # followed, a hop cycle, or a rotation after the route
+                    # opened is route retirement, not a missing mapping file
+                    # and not a ledger content refusal (#577).
+                    return _reject(ObservationGapCode.SESSION_SUPERSEDED.value)
                 if not exc.retryable:
                     # Validation and identity rejections are terminal by their
                     # public contract. Calling them service_unavailable made a
@@ -1116,9 +1117,8 @@ class ObservationCoordinator:
                     yoetz_session_id=session_id,
                     yoetz_writer_id=writer_id,
                 )
-                continue
-            if current is not mapping:
                 self._persist_successor_mapping(current)
+                continue
             return runtime, current
         if last_error is not None:
             raise last_error

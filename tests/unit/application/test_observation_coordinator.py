@@ -4549,7 +4549,7 @@ async def test_session_superseded_reroutes_ingest_and_persists_mapping(tmp_path:
 async def test_session_superseded_without_followable_binding_is_not_ledger_rejected(
     tmp_path: Path,
 ) -> None:
-    """#577: a retired route that cannot be followed is mapping_missing, not content refusal."""
+    """#577: a retired route that cannot be followed names session_superseded, not content refusal."""
 
     local, _workspace, session, mapping = _mapped_local(tmp_path, "superseded-mismatch-577")
     other_task = _task_id()
@@ -4586,6 +4586,7 @@ async def test_session_superseded_without_followable_binding_is_not_ledger_rejec
             envelope=_envelope(session=session),
         )
     )
-    assert result.reason == ObservationGapCode.MAPPING_MISSING.value
+    assert result.reason == ObservationGapCode.SESSION_SUPERSEDED.value
     assert result.reason != ObservationGapCode.LEDGER_REJECTED.value
-    assert route_observation_ingest(result).action is ObservationDrainAction.RETRY
+    assert result.reason != ObservationGapCode.MAPPING_MISSING.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.QUARANTINE

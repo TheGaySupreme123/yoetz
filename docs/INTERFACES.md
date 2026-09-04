@@ -2936,7 +2936,9 @@ Shared closed types:
   rather than selecting a different action family. Rollout privacy filtering parses the valid JSON
   tree first and then redacts decoded string keys and values, preserving structural punctuation;
   any redaction-created duplicate key is rejected instead of silently merging fields.
-- `ObservationGapCode` — closed coverage tokens. `unsupported_event` is an admitted profile with
+- `ObservationGapCode` — closed coverage tokens. `session_superseded` is a mapped host session
+  whose Yoetz route was retired and whose successor binding could not be followed; it is never
+  `ledger_rejected` and never `mapping_missing` (issue #577). `unsupported_event` is an admitted profile with
   an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, unknown
   `cli_version`, an absent/unknown `history_mode`, or compressed `rollout-*.jsonl.zst` that the
   hook pass does not decompress). When exact-session `.jsonl` and `.jsonl.zst` siblings both
@@ -3260,9 +3262,12 @@ failure that is not already a narrower terminal class (`dedup_conflict` or
 record the reason once, and continue its lane. `SESSION_NOT_FOUND` with
 `reason_code: session_superseded` is not that class: ingest follows the current binding carried in
 `safe_details` (same task, successor session, observation writer derived for it), persists the
-updated lifecycle mapping, and delivers the row. A superseded payload that cannot be followed
-(missing or mismatched task/session/writer ids) is `mapping_missing` and stays retryable; it is
-never `ledger_rejected`. Retryable failures keep their current reason and
+updated lifecycle mapping on each hop, and delivers the row. A superseded payload that cannot be
+followed (missing or mismatched task/session/writer ids, a hop cycle, or a rotation after the
+route already opened) quarantines that one row as `session_superseded`. It is never
+`ledger_rejected` and never `mapping_missing`: `mapping_missing` would retire an ended host
+session as unmapped and would disappear from current gaps while the mapping file remains.
+Retryable failures keep their current reason and
 scope. A row that reaches 128 consecutive rejections with the same retryable reason is quarantined
 with that reason, so an accidental future catch-all classification cannot create an immortal FIFO
 head. Designed `operation_pending` back-pressure and workspace-global pause/vault/disabled gates

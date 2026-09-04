@@ -313,11 +313,14 @@ unsupported claims and unbounded duplicate findings.
     observation rows of the predecessor (issue #577). `SESSION_NOT_FOUND` with
     `reason_code: session_superseded` already carries the current task binding; ingest follows that
     binding, routes with the observation writer derived for the successor session, and persists the
-    updated lifecycle mapping. The shared hook recovery path also rewrites every ended same-host
-    predecessor mapping for that task in the same pass it stores the successor mapping. A row
-    refused only because its route was retired is never `ledger_rejected`; a superseded payload that
-    cannot be followed stays `mapping_missing` and retryable. `ledger_rejected` remains the terminal
-    class for content and identity refusals.
+    updated lifecycle mapping on each hop. The shared hook recovery path also rewrites every ended
+    same-host predecessor mapping for that task in the same pass it stores the successor mapping. A
+    row refused only because its route was retired is never `ledger_rejected`; a superseded payload
+    that cannot be followed (missing or mismatched task/session/writer ids, a hop cycle, or a
+    rotation after the route already opened) quarantines that row as `session_superseded`. That
+    reason is not `mapping_missing`, so ended-unmapped drain terminalization and the status rule
+    that hides `mapping_missing` while a mapping file exists cannot mislabel a mapped retirement.
+    `ledger_rejected` remains the terminal class for content and identity refusals.
 
 ## Security and privacy consequences
 

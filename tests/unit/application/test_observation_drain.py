@@ -75,6 +75,14 @@ def _envelope(session: str, identity: str, ordinal: int) -> ObservationEnvelope:
         (
             ObservationIngestResult(
                 ObservationIngestDisposition.REJECTED,
+                ObservationGapCode.SESSION_SUPERSEDED.value,
+                None,
+            ),
+            ObservationDrainAction.QUARANTINE,
+        ),
+        (
+            ObservationIngestResult(
+                ObservationIngestDisposition.REJECTED,
                 "observation_disabled",
                 None,
             ),
