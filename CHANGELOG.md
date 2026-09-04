@@ -8,6 +8,16 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Claude Code and Cursor hook observation rows now store in the task ledger. Bundle migration
+  `0009` rebuilds the observation cursor and envelope tables so their source CHECK admits
+  `claude_hook` and `cursor_hook` beside the Codex sources, preserving existing rows; a fresh bundle
+  and a migrated one accept every `ObservationSource` member, and a test locks the enum to the DDL.
+  A deterministic task-ledger rejection inside the observation store (a CHECK or STRICT type
+  failure) is now raised as non-retryable and quarantined once as `ledger_rejected`, instead of
+  escaping the coordinator's catch-all as retryable `service_unavailable` and retrying the same
+  row every sweep while `service status` reported `ready`. Valid pending Claude or Cursor envelopes
+  can store unchanged at schema 9; delivery also requires a usable session mapping. Existing bundles require explicit migration; upgrading the
+  binary alone does not migrate task bundles (issue #576).
 - Yoetz-owned external Codex MCP registration now preserves ADR-026 isolation across the host
   process boundary. In isolated mode, preview and apply bind only the exact validated
   `YOETZ_ISOLATED_ROOT` through Codex's native `--env`; status reports whether the stored binding
