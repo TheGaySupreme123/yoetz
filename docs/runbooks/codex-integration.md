@@ -590,6 +590,16 @@ and any service they spawn resolve the normal singleton, state directory, and st
 mode with `yoetz service isolation --json` before launch; the parity gate's `service_isolation`
 facet fails closed on shared, ambient, or unknown identity.
 
+For the Yoetz-owned external registration, issue #561 makes this propagation a supported product
+contract: an isolated preview displays and digest-binds the exact root, apply uses Codex's native
+`--env YOETZ_ISOLATED_ROOT=<exact-root>`, and status must report
+`isolation_binding=isolated_exact`. Ambient registration stores no environment. A missing or
+different known root requires re-registration; arbitrary environment keys, inherited-variable
+declarations, and malformed roots classify the same-name entry as foreign and are never replaced.
+Before a dogfood model task, use the app-server capture in the parity runbook to launch the real
+registered child and satisfy `mcp_child_isolation`; registration status alone is not child-start
+evidence.
+
 ## Subscription evaluator is a separate Codex role
 
 Codex may be both the host carrying Yoetz and the selected external semantic evaluator, but those

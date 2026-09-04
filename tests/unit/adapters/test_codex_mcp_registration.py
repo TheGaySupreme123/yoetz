@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import anyio
 import pytest
 
 from yoetz.adapters.integrations.codex_mcp import CodexMcpAdapter, CommandOutput
+from yoetz.config.paths import PathSafetyError
 from yoetz.ports.harness_mcp import (
     HarnessBinary,
     McpRegistrationAction,
@@ -17,6 +19,7 @@ from yoetz.ports.harness_mcp import (
     McpRegistrationState,
 )
 from yoetz.ports.integrations import HarnessId
+from yoetz.protocol.canonical import canonical_digest
 
 _BINARY = HarnessBinary(
     harness_id=HarnessId.CODEX,
@@ -26,11 +29,14 @@ _BINARY = HarnessBinary(
 )
 
 
-def _yoetz_entry(*, strict: bool = False) -> bytes:
+def _yoetz_entry(*, strict: bool = False, isolated_root: str | None = None) -> bytes:
     args = ["mcp", "serve"]
     if strict:
         args.extend(["--semantic", "off"])
-    return json.dumps({"command": "yoetz", "args": args}).encode("utf-8")
+    transport: dict[str, object] = {"command": "yoetz", "args": args}
+    if isolated_root is not None:
+        transport["env"] = {"YOETZ_ISOLATED_ROOT": isolated_root}
+    return json.dumps(transport).encode("utf-8")
 
 
 def _absent_outputs() -> list[CommandOutput]:
@@ -136,6 +142,30 @@ def test_status_foreign_on_different_or_unreadable_command() -> None:
             "name": "yoetz",
             "transport": {"type": "stdio", "command": "other", "args": ["mcp", "serve"]},
         },
+        {
+            "name": "yoetz",
+            "transport": {
+                "type": "stdio",
+                "command": "yoetz",
+                "args": ["mcp", "serve"],
+                "env": {"ARBITRARY_KEY": "value"},
+            },
+        },
+        {
+            "name": "yoetz",
+            "transport": {
+                "type": "stdio",
+                "command": "yoetz",
+                "args": ["mcp", "serve"],
+                "env_vars": ["YOETZ_ISOLATED_ROOT"],
+            },
+        },
+        {
+            "command": "yoetz",
+            "args": ["mcp", "serve"],
+            "env": {"ARBITRARY_KEY": "value"},
+            "transport": {"type": "stdio"},
+        },
     ):
         runner = _Runner([CommandOutput(0, json.dumps(payload).encode("utf-8"))])
         state = anyio.run(lambda: CodexMcpAdapter(runner).status_registration(_BINARY))
@@ -154,7 +184,36 @@ def test_observe_reports_which_route_is_registered() -> None:
         observation = anyio.run(lambda: CodexMcpAdapter(runner).observe_registration(_BINARY))
         assert observation.state is McpRegistrationState.YOETZ_OWNED
         assert observation.route_profile == expected
+        assert observation.isolation_binding == "ambient"
         assert observation.harness_id is HarnessId.CODEX
+
+
+def test_observe_reports_exact_missing_and_different_isolation_bindings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = str(tmp_path)
+    monkeypatch.setenv("YOETZ_ISOLATED_ROOT", root)
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: tmp_path)
+
+    exact = anyio.run(
+        lambda: CodexMcpAdapter(
+            _Runner([CommandOutput(0, _yoetz_entry(isolated_root=root))])
+        ).observe_registration(_BINARY)
+    )
+    missing = anyio.run(
+        lambda: CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())])).observe_registration(
+            _BINARY
+        )
+    )
+    different = anyio.run(
+        lambda: CodexMcpAdapter(
+            _Runner([CommandOutput(0, _yoetz_entry(isolated_root="/different/root"))])
+        ).observe_registration(_BINARY)
+    )
+
+    assert exact.isolation_binding == "isolated_exact"
+    assert missing.isolation_binding == "missing"
+    assert different.isolation_binding == "different"
 
 
 def test_observe_reports_no_route_when_the_entry_is_not_ours() -> None:
@@ -187,6 +246,23 @@ def test_observe_parse_failure_is_a_typed_error() -> None:
     with pytest.raises(McpRegistrationError) as caught:
         anyio.run(lambda: CodexMcpAdapter(runner).observe_registration(_BINARY))
     assert caught.value.reason is McpRegistrationReason.PARSE_FAILED
+
+
+def test_invalid_isolated_root_fails_before_the_host_is_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def invalid_root() -> Path:
+        raise PathSafetyError("isolation_root_invalid")
+
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", invalid_root)
+    runner = _Runner([])
+
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(lambda: CodexMcpAdapter(runner).observe_registration(_BINARY))
+
+    assert caught.value.reason is McpRegistrationReason.ISOLATION_INVALID
+    assert caught.value.safe_details == {"reason": "isolation_root_invalid"}
+    assert runner.calls == []
 
 
 def test_observe_rejects_a_non_codex_binary() -> None:
@@ -251,9 +327,42 @@ def test_strict_preview_binds_exact_command_and_changes_digest() -> None:
 
     assert policy.serve_command == ("yoetz", "mcp", "serve")
     assert policy.route_profile == "policy"
+    assert policy.preview_digest == canonical_digest(
+        {
+            "action": "register",
+            "executable_path": _BINARY.executable_path,
+            "harness": "codex",
+            "schema": "yoetz.mcp-registration-preview/1",
+            "serve_command": ["yoetz", "mcp", "serve"],
+            "server_name": "yoetz",
+            "state_before": "absent",
+        }
+    )
     assert strict.serve_command == ("yoetz", "mcp", "serve", "--semantic", "off")
     assert strict.route_profile == "strict"
     assert strict.preview_digest != policy.preview_digest
+
+
+def test_isolated_preview_binds_exact_root_and_requires_reregistration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = str(tmp_path)
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: tmp_path)
+    ambient = anyio.run(
+        lambda: CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())])).preview_registration(
+            _BINARY
+        )
+    )
+    exact = anyio.run(
+        lambda: CodexMcpAdapter(
+            _Runner([CommandOutput(0, _yoetz_entry(isolated_root=root))])
+        ).preview_registration(_BINARY)
+    )
+
+    assert ambient.action is McpRegistrationAction.REREGISTER
+    assert ambient.isolated_root == root
+    assert exact.action is McpRegistrationAction.NOOP
+    assert exact.isolated_root == root
 
 
 def test_explicit_preview_allows_reregistering_an_owned_route_profile() -> None:
@@ -337,6 +446,76 @@ def test_apply_registers_then_verifies_by_rereading_state() -> None:
         "yoetz",
         "mcp",
         "serve",
+    )
+
+
+def test_apply_isolated_registration_passes_only_the_reviewed_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = str(tmp_path)
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: tmp_path)
+    preview = anyio.run(
+        lambda: CodexMcpAdapter(_Runner(_absent_outputs())).preview_registration(_BINARY)
+    )
+    runner = _Runner(
+        [
+            *_absent_outputs(),
+            CommandOutput(0, b""),
+            CommandOutput(0, _yoetz_entry(isolated_root=root)),
+        ]
+    )
+
+    result = anyio.run(
+        lambda: CodexMcpAdapter(runner).apply_registration(
+            _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+        )
+    )
+
+    assert result.state_after is McpRegistrationState.YOETZ_OWNED
+    assert runner.calls[2] == (
+        "/opt/harness/bin/codex",
+        "mcp",
+        "add",
+        "yoetz",
+        "--env",
+        f"YOETZ_ISOLATED_ROOT={root}",
+        "--",
+        "yoetz",
+        "mcp",
+        "serve",
+    )
+
+
+def test_apply_reregisters_a_legacy_bare_entry_with_the_isolated_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = str(tmp_path)
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: tmp_path)
+    preview = anyio.run(
+        lambda: CodexMcpAdapter(_Runner([CommandOutput(0, _yoetz_entry())])).preview_registration(
+            _BINARY
+        )
+    )
+    assert preview.action is McpRegistrationAction.REREGISTER
+    runner = _Runner(
+        [
+            CommandOutput(0, _yoetz_entry()),
+            CommandOutput(0, b""),
+            CommandOutput(0, _yoetz_entry(isolated_root=root)),
+        ]
+    )
+
+    result = anyio.run(
+        lambda: CodexMcpAdapter(runner).apply_registration(
+            _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+        )
+    )
+
+    assert result.action is McpRegistrationAction.REREGISTER
+    assert runner.calls[1][4:7] == (
+        "--env",
+        f"YOETZ_ISOLATED_ROOT={root}",
+        "--",
     )
 
 
@@ -478,6 +657,34 @@ def test_apply_unregistration_refuses_replacement_before_name_based_remove() -> 
 
     assert caught.value.reason is McpRegistrationReason.FOREIGN_ENTRY_PRESENT
     assert all(call[1:3] == ("mcp", "get") for call in runner.calls)
+
+
+def test_apply_unregistration_refuses_an_isolated_root_replacement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = str(tmp_path)
+    monkeypatch.setattr("yoetz.adapters.integrations.codex_mcp.isolated_root", lambda: tmp_path)
+    preview = anyio.run(
+        lambda: CodexMcpAdapter(
+            _Runner([CommandOutput(0, _yoetz_entry(isolated_root=root))])
+        ).preview_unregistration(_BINARY)
+    )
+    runner = _Runner(
+        [
+            CommandOutput(0, _yoetz_entry(isolated_root=root)),
+            CommandOutput(0, _yoetz_entry(isolated_root="/replacement/root")),
+        ]
+    )
+
+    with pytest.raises(McpRegistrationError) as caught:
+        anyio.run(
+            lambda: CodexMcpAdapter(runner).apply_unregistration(
+                _BINARY, McpRegistrationCommand(preview.preview_digest, True)
+            )
+        )
+
+    assert caught.value.reason is McpRegistrationReason.PREVIEW_STALE
+    assert all(call[1:3] != ("mcp", "remove") for call in runner.calls)
 
 
 def test_apply_unregistration_does_not_remove_after_unreadable_ownership_recheck() -> None:
