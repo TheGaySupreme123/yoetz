@@ -114,11 +114,17 @@ its normal-target counterpart — record the non-pass `service_isolation` row wi
 `YOETZ_ISOLATED_ROOT`, and rebuild the report from fresh status. Never launch over shared,
 ambient, or unknown Yoetz identity.
 
-If the MCP binding or child launch is not proven, record the non-pass `mcp_child_isolation` row with
-the `reregister_isolated_mcp` continuation. Re-run the isolated registration preview, review the
-exact `isolated_root`, apply that same preview digest, confirm status reports
-`isolation_binding=isolated_exact`, and recapture the app-server inventory before rebuilding the
-report. The capture starts the registered child without a model task; inventory is child-start
+If the MCP registration is not `yoetz_owned` or its binding is not `isolated_exact`, record the
+non-pass `mcp_child_isolation` row with the `reregister_isolated_mcp` continuation. Re-run the
+isolated registration preview, review the exact `isolated_root`, apply that same preview digest,
+confirm status reports `isolation_binding=isolated_exact`, and recapture the app-server inventory
+before rebuilding the report.
+
+If the registration is already owned and exact but the child state is `failed` or `unknown`,
+re-registering changes nothing; record the row with the `recapture_isolated_mcp_child`
+continuation instead. Inspect the capture output for the child launch error, repair the candidate
+executable or its environment outside the registration, and re-run the capture until the child
+starts. The capture starts the registered child without a model task; inventory is child-start
 evidence, not proof that a model received or used a tool.
 
 If consent is missing, record `blocked / observation_consent_missing /

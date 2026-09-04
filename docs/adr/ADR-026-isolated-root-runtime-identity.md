@@ -88,7 +88,9 @@ identity along with it, and nothing validates or proves it.
    `provision_isolated_yoetz_root` continuation. It adds `mcp_child_isolation`, which can pass only
    when registration status is `yoetz_owned`, its binding is `isolated_exact`, and a pre-model
    Codex app-server inventory starts the registered child successfully. A non-pass row carries
-   `reregister_isolated_mcp`. Version 1 and 2 reports are no longer accepted.
+   `reregister_isolated_mcp` when the registration or its binding is not exact, and
+   `recapture_isolated_mcp_child` when the binding is already exact and only the child start is
+   unproven. Version 1 and 2 reports are no longer accepted.
 
 ## Reverse states and rollback
 

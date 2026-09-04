@@ -71,6 +71,7 @@ _NEXT_ACTIONS: Final = frozenset(
         "do_not_launch",
         "provision_isolated_yoetz_root",
         "reregister_isolated_mcp",
+        "recapture_isolated_mcp_child",
         "yoetz_observe_grant_exact_worktree",
         "yoetz_recommend_list_exact_target",
         "manual_activation_review",
@@ -522,8 +523,19 @@ def classify_codex_dogfood_report(document: object) -> DogfoodGateResult:
     ):
         raise _error("service_isolation_continuation_missing")
     mcp_child = facets["mcp_child_isolation"]
-    if mcp_child["status"] != "pass" and mcp_child["next_action"] != ("reregister_isolated_mcp"):
-        raise _error("mcp_child_isolation_continuation_missing")
+    if mcp_child["status"] != "pass":
+        # An exact owned binding cannot be repaired by re-registering it; only the child
+        # start or its capture is unproven there. Every other non-pass shape needs the
+        # reviewed registration redone before the child is worth capturing again.
+        mcp_binding_exact = (
+            observed["mcp_registration_state"] == "yoetz_owned"
+            and observed["mcp_isolation_binding"] == "isolated_exact"
+        )
+        expected_action = (
+            "recapture_isolated_mcp_child" if mcp_binding_exact else "reregister_isolated_mcp"
+        )
+        if mcp_child["next_action"] != expected_action:
+            raise _error("mcp_child_isolation_continuation_missing")
     activation = facets["plugin_activation"]
     if activation["reason"] == "installed_not_activated" and activation["next_action"] != (
         "yoetz_recommend_list_exact_target"

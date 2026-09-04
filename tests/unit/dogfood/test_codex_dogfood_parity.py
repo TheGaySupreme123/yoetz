@@ -284,23 +284,25 @@ def test_failed_isolation_without_the_provisioning_continuation_is_invalid() -> 
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
+    ("field", "value", "next_action"),
     [
-        ("mcp_registration_state", "absent"),
-        ("mcp_isolation_binding", "missing"),
-        ("mcp_isolation_binding", "different"),
-        ("mcp_child_state", "failed"),
-        ("mcp_child_state", "unknown"),
+        ("mcp_registration_state", "absent", "reregister_isolated_mcp"),
+        ("mcp_isolation_binding", "missing", "reregister_isolated_mcp"),
+        ("mcp_isolation_binding", "different", "reregister_isolated_mcp"),
+        ("mcp_child_state", "failed", "recapture_isolated_mcp_child"),
+        ("mcp_child_state", "unknown", "recapture_isolated_mcp_child"),
     ],
 )
-def test_mcp_child_isolation_fails_closed_before_launch(field: str, value: str) -> None:
+def test_mcp_child_isolation_fails_closed_before_launch(
+    field: str, value: str, next_action: str
+) -> None:
     report = _report()
     _observed(report)[field] = value
     _facets(report)["mcp_child_isolation"] = {
         "status": "fail" if value != "unknown" else "blocked",
         "reason": "mcp_child_isolation_unproven",
         "evidence_digest": _DIGEST if value != "unknown" else None,
-        "next_action": "reregister_isolated_mcp",
+        "next_action": next_action,
     }
 
     result = classify_codex_dogfood_report(report)
@@ -310,14 +312,26 @@ def test_mcp_child_isolation_fails_closed_before_launch(field: str, value: str) 
     assert result["failed_facets"] == (["mcp_child_isolation"] if value != "unknown" else [])
 
 
-def test_mcp_child_isolation_requires_the_reregistration_continuation() -> None:
+@pytest.mark.parametrize(
+    ("field", "value", "rejected_action"),
+    [
+        ("mcp_isolation_binding", "missing", "do_not_launch"),
+        # An exact owned binding is not repaired by re-registering it.
+        ("mcp_child_state", "failed", "reregister_isolated_mcp"),
+        # A wrong binding is not repaired by recapturing the child.
+        ("mcp_isolation_binding", "different", "recapture_isolated_mcp_child"),
+    ],
+)
+def test_mcp_child_isolation_requires_the_matching_continuation(
+    field: str, value: str, rejected_action: str
+) -> None:
     report = _report()
-    _observed(report)["mcp_isolation_binding"] = "missing"
+    _observed(report)[field] = value
     _facets(report)["mcp_child_isolation"] = {
         "status": "fail",
         "reason": "mcp_child_isolation_unproven",
         "evidence_digest": _DIGEST,
-        "next_action": "do_not_launch",
+        "next_action": rejected_action,
     }
 
     with pytest.raises(DogfoodGateError, match="mcp_child_isolation_continuation_missing"):
