@@ -80,8 +80,8 @@ def test_schema_seven_upgrade_keeps_old_rows_weak_and_accepts_exact_bindings(
 ) -> None:
     db = _schema_seven(tmp_path / "bundle.sqlite3")
     report = run_migrations(db, BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
-    assert report.applied_versions == ("0008",)
-    assert db.execute("PRAGMA user_version").fetchone() == (8,)
+    assert report.applied_versions == ("0008", "0009")
+    assert db.execute("PRAGMA user_version").fetchone() == (9,)
     assert db.execute(
         "SELECT content_digest,content_bytes FROM observation_content_manifests"
     ).fetchone() == (None, None)

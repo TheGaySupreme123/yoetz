@@ -185,7 +185,10 @@ Primary-checkout consent cannot satisfy this cell; the permanent regression fixt
 
 For a profile advertising session-stream reconciliation, reconcile the real rollout through the
 supported local command, then require accepted mapped records, cursor advancement, and no
-unsupported/unmapped gap. A profile that does not advertise the capability records
+unsupported/unmapped gap. The facet may be advertised only when the report's exact
+`codex_version` has a fixture-proven rollout profile (`0.148.0` or `0.150.1`; the gate refuses
+`session_stream_scope_unproven_codex_version` otherwise), and it still records `pass` only on that
+run's own reconciliation evidence. A profile that does not advertise the capability records
 `unsupported / capability_not_advertised`; it never records pass.
 
 ## 6. Rollback and full gate

@@ -2907,8 +2907,12 @@ upgrade candidates from the session that committed them.
 
 Shared closed types:
 
-- `ObservationSource` — exactly `codex_hook | codex_session_stream | cursor_hook`. Hooks are the primary
-  low-latency source; session-stream reconciliation is selective and secondary.
+- `ObservationSource` — exactly `claude_hook | codex_hook | codex_session_stream | cursor_hook`. Hooks
+  are the primary low-latency source; session-stream reconciliation is selective and secondary.
+  Bundle migration `0009` rebuilds the `observation_cursors` and `observation_events` tables so
+  their source CHECK admits that same closed set; a bundle still at schema 8 refuses every
+  non-Codex source at the store, which is why the enum and the DDL are locked together by a test
+  over every member (issue #576).
 - `ObservationEnvelope` — Codex session identity (commitment, never raw path), event kind (exact
   closed identifier from the capability cell, or an opaque unsupported token), stable source
   identity, `ObservationCursor`, receipt time, bounded allowlisted structural payload, content-
@@ -2925,8 +2929,10 @@ Shared closed types:
   digest and byte count. Durable redaction/truncation flags preserve weakening without reopening
   the object.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
-  mapping version. Codex session-stream cursors use `codex-obs-stream/1.2.0` (rollout JSONL
-  grammar). Cursors are crash-stable and generation-fenced. A private HMAC of the source
+  mapping version. Codex session-stream cursors use `codex-obs-stream/1.3.0` (rollout JSONL
+  grammar, paired with the exact profile id the generation's header admitted; a `1.2.0` or older
+  cursor is mapping-reset and replays from its header rather than inheriting a default profile).
+  Cursors are crash-stable and generation-fenced. A private HMAC of the source
   device/inode detects same-or-larger file replacement across reconcile processes; ordinary safe
   integers retain their numeric encoding and larger filesystem values use a bounded hexadecimal
   representation before canonical encoding. Call-id/tool
@@ -2939,9 +2945,11 @@ Shared closed types:
 - `ObservationGapCode` — closed coverage tokens. `session_superseded` is a mapped host session
   whose Yoetz route was retired and whose successor binding could not be followed; it is never
   `ledger_rejected` and never `mapping_missing` (issue #577). `unsupported_event` is an admitted profile with
-  an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, unknown
-  `cli_version`, an absent/unknown `history_mode`, or compressed `rollout-*.jsonl.zst` that the
-  hook pass does not decompress). When exact-session `.jsonl` and `.jsonl.zst` siblings both
+  an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, a
+  `cli_version` without an exact profile in `SUPPORTED_ROLLOUT_PROFILES` — currently `0.148.0`
+  and `0.150.1`, never a semver neighbour — an absent/unknown `history_mode`, or compressed
+  `rollout-*.jsonl.zst` that the hook pass does not decompress). A refused header holds for the
+  whole source generation: bytes are consumed, no event is admitted, and the cursor is kept. When exact-session `.jsonl` and `.jsonl.zst` siblings both
   exist, the admitted uncompressed file wins; compressed-only remains explicitly unsupported.
   Every string semantic type present at `payload.type` and nested `payload.item.type` must belong
   to the admitted profile before a nested item is selected; one known field cannot mask an unknown
@@ -3269,7 +3277,10 @@ followed (missing or mismatched task/session/writer ids, a hop cycle, or a rotat
 route already opened) quarantines that one row as `session_superseded`. It is never
 `ledger_rejected` and never `mapping_missing`: `mapping_missing` would retire an ended host
 session as unmapped and would disappear from current gaps while the mapping file remains.
-Retryable failures keep their current reason and
+A deterministic write rejection inside the SQLite observation store (a CHECK or STRICT type failure, which repeats identically on every retry of the
+same envelope) is raised as non-retryable `invalid_request` and takes the `ledger_rejected` path, instead of
+escaping as a bare driver exception that the catch-all projected as retryable
+`service_unavailable` while the service was ready (issue #576). Retryable failures keep their current reason and
 scope. A row that reaches 128 consecutive rejections with the same retryable reason is quarantined
 with that reason, so an accidental future catch-all classification cannot create an immortal FIFO
 head. Designed `operation_pending` back-pressure and workspace-global pause/vault/disabled gates

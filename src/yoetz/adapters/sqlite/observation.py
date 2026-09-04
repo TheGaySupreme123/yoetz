@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Mapping
+from collections.abc import Generator, Iterable, Mapping
+from contextlib import contextmanager
 from typing import Final, cast
 
 import apsw
@@ -45,6 +46,28 @@ _MAX_DEDUP: Final = 4_096
 
 def _error(code: PublicErrorCode, message: str, *, retryable: bool) -> PublicOperationError:
     return PublicOperationError(code, message, retryable)
+
+
+@contextmanager
+def _ledger_write_boundary() -> Generator[None]:
+    """Surface a deterministic SQLite rejection under the non-retryable public contract.
+
+    A CHECK, NOT NULL, or STRICT type failure repeats identically on every retry of the same
+    envelope. Letting the bare driver exception escape made the coordinator's catch-all project it
+    as retryable ``service_unavailable`` and retry the row without bound while the service was
+    ready (issue #576). Raising the typed non-retryable error instead routes it through the #540
+    terminal classification, so the one envelope is quarantined as ``ledger_rejected`` and its
+    session lane keeps draining.
+    """
+
+    try:
+        yield
+    except (apsw.ConstraintError, apsw.MismatchError) as exc:
+        raise _error(
+            PublicErrorCode.INVALID_REQUEST,
+            "Observation envelope was rejected by the task ledger schema.",
+            retryable=False,
+        ) from exc
 
 
 def _dedup_key(workspace: str, envelope: ObservationEnvelope) -> str:
@@ -147,7 +170,8 @@ class SqliteObservationStore:
                 )
             existing = self._load_cursor(workspace, envelope.source, envelope.session_commitment)
             if existing is not None and envelope.cursor.is_stale_relative_to(existing):
-                self._note_gap_event(workspace, envelope, ObservationGapCode.CURSOR_STALE.value)
+                with _ledger_write_boundary():
+                    self._note_gap_event(workspace, envelope, ObservationGapCode.CURSOR_STALE.value)
                 return ObservationIngestResult(
                     ObservationIngestDisposition.REJECTED,
                     ObservationGapCode.CURSOR_STALE.value,
@@ -157,13 +181,14 @@ class SqliteObservationStore:
                 existing is not None
                 and envelope.cursor.source_generation < existing.source_generation
             ):
-                self._note_gap_event(workspace, envelope, ObservationGapCode.CURSOR_STALE.value)
+                with _ledger_write_boundary():
+                    self._note_gap_event(workspace, envelope, ObservationGapCode.CURSOR_STALE.value)
                 return ObservationIngestResult(
                     ObservationIngestDisposition.REJECTED,
                     ObservationGapCode.CURSOR_STALE.value,
                     existing,
                 )
-            with self._db:
+            with _ledger_write_boundary(), self._db:
                 self._db.execute(
                     "INSERT INTO observation_dedup(dedup_key, workspace_commitment, ingested_at) "
                     "VALUES (?, ?, ?)",

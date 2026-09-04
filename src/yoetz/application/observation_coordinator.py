@@ -108,6 +108,7 @@ from yoetz.domain.observation import (
     ObservationIngestResult,
     ObservationInspectionSnapshot,
     ObservationRevokeCommand,
+    ObservationSource,
     ObservationStatus,
     ObservationStatusQuery,
     observation_envelope_to_json,
@@ -713,7 +714,9 @@ class ObservationCoordinator:
                         # call (pre action, paired result, permission, subagent)
                         # never contend, and the recorded mapping version is the
                         # source-independent materialization one so hook/stream
-                        # copies of a phase can union their source masks.
+                        # copies of a phase can union their source masks. Every
+                        # hook source (Codex, Claude Code, Cursor) is the hook
+                        # bit; only the Codex session stream is the stream bit.
                         stage = "identity_claim"
                         store.record_logical_identity_claim(
                             workspace=workspace,
@@ -724,7 +727,11 @@ class ObservationCoordinator:
                             ),
                             materialization_digest=materialization_digest,
                             operation_id=operation_id,
-                            source_mask=1 if envelope.source.value == "codex_hook" else 2,
+                            source_mask=(
+                                2
+                                if envelope.source is ObservationSource.CODEX_SESSION_STREAM
+                                else 1
+                            ),
                             mapping_version=resolved_mapping_version,
                             materialized_at=timestamp_from_datetime(self.clock.now_utc()),
                         )
