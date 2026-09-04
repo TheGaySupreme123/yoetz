@@ -1103,25 +1103,55 @@ class ObservationCoordinator:
         writer_ids = [writer_id]
         if legacy_writer_id is not None and legacy_writer_id != writer_id:
             writer_ids.append(legacy_writer_id)
-        mapping_versions = (
-            MATERIALIZATION_MAPPING_VERSION,
-            *MATERIALIZATION_LEGACY_MAPPING_VERSIONS,
-        )
         # Check the stable operation identity before staging payloads. A replay
         # after "ledger committed, local outbox not acknowledged" must not
-        # create orphan encrypted objects on every retry. Search both admitted
-        # writers for each supported mapping version before staging so an
-        # in-flight pre-upgrade outbox row reuses its committed operation.
-        for mapping_version in mapping_versions:
+        # create orphan encrypted objects on every retry.
+        #
+        # The current mapping's operation digest is task-scoped, matching the
+        # stable event ids it commits, so the committed operation is resolved
+        # task-wide: a workflow reattach in the same host session rotates the
+        # routed Yoetz session and observation writer, and the repeat must
+        # still find the operation the predecessor session committed instead
+        # of reminting its event ids into a ledger that already holds them
+        # (#560). A hit whose request digest differs is a genuine conflicting
+        # reuse of the operation identity and fails closed.
+        for candidate_roles in candidate_role_sets:
+            candidate_digest = observation_operation_digest(
+                task_id=runtime.task_id,
+                logical_identity=logical_identity,
+                draft_roles=candidate_roles,
+                mapping_version=MATERIALIZATION_MAPPING_VERSION,
+            )
+            candidate_operation_id = self._stable_operation_id(candidate_digest)
+            existing = await runtime.ledger.lookup_task_operation(writer_id, candidate_operation_id)
+            if existing is None:
+                continue
+            if existing.request_digest != candidate_digest:
+                raise PublicOperationError(
+                    PublicErrorCode.IDEMPOTENCY_CONFLICT,
+                    "Observation operation identity is already committed with other content.",
+                    retryable=False,
+                )
+            return (
+                candidate_operation_id,
+                candidate_digest,
+                _append_result_from_committed(existing),
+                MATERIALIZATION_MAPPING_VERSION,
+                candidate_roles,
+            )
+        # Legacy mapping versions bound the digest to the routed session and
+        # writer. Search both admitted writers for each of them before staging
+        # so an in-flight pre-upgrade outbox row reuses its committed operation.
+        for mapping_version in MATERIALIZATION_LEGACY_MAPPING_VERSIONS:
             for candidate_writer_id in writer_ids:
                 for candidate_roles in candidate_role_sets:
                     candidate_digest = observation_operation_digest(
                         task_id=runtime.task_id,
-                        session_id=runtime.session_id,
-                        writer_id=candidate_writer_id,
                         logical_identity=logical_identity,
                         draft_roles=candidate_roles,
                         mapping_version=mapping_version,
+                        session_id=runtime.session_id,
+                        writer_id=candidate_writer_id,
                     )
                     candidate_operation_id = self._stable_operation_id(candidate_digest)
                     existing = await runtime.ledger.lookup_operation(
@@ -1138,8 +1168,6 @@ class ObservationCoordinator:
 
         digest = observation_operation_digest(
             task_id=runtime.task_id,
-            session_id=runtime.session_id,
-            writer_id=writer_id,
             logical_identity=logical_identity,
             draft_roles=draft_roles,
             mapping_version=MATERIALIZATION_MAPPING_VERSION,
@@ -2762,7 +2790,11 @@ class ObservationCoordinator:
             )
         )
         operation_id = self._stable_operation_id(request_digest_value)
-        existing = await runtime.ledger.lookup_operation(runtime.writer_id, operation_id)
+        # The finding event ids and this digest are task-scoped, so the
+        # committed operation is resolved task-wide: after a workflow reattach
+        # the routed writer is new, but the predecessor session's finding
+        # events are already in the ledger (#560).
+        existing = await runtime.ledger.lookup_task_operation(runtime.writer_id, operation_id)
         if existing is not None:
             return
         if legacy_writer_id is not None and legacy_writer_id != runtime.writer_id:

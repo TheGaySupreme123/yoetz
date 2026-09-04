@@ -73,6 +73,7 @@ __all__ = [
     "approved_check_author",
     "MATERIALIZATION_LEGACY_MAPPING_VERSIONS",
     "MATERIALIZATION_MAPPING_VERSION",
+    "SESSION_BOUND_MAPPING_VERSIONS",
     "MaterializedObservationBatch",
     "MaterializedObservationDraft",
     "STREAM_COMPLETED_EVENT_KINDS",
@@ -87,11 +88,19 @@ __all__ = [
     "stream_event_is_completed_tool",
 ]
 
-MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.4.0"
+MATERIALIZATION_MAPPING_VERSION: Final = "obs-ledger/1.5.0"
 MATERIALIZATION_LEGACY_MAPPING_VERSIONS: Final = (
+    "obs-ledger/1.4.0",
     "obs-ledger/1.3.0",
     "obs-ledger/1.2.0",
 )
+# Mapping versions whose operation digest was bound to the routed Yoetz session
+# and its observation writer. A workflow reattach in the same host session
+# rotates both, so their committed operations can only be found from the
+# session that committed them (#560). ``obs-ledger/1.5.0`` keys the digest on
+# the task, the canonical logical identity, and the role tuple only — exactly
+# the facts the stable event ids are derived from — and is resolved task-wide.
+SESSION_BOUND_MAPPING_VERSIONS: Final = frozenset(MATERIALIZATION_LEGACY_MAPPING_VERSIONS)
 # One bounded coverage condition for "the host emitted a paired tool result with
 # no outcome semantics at all" (#350). It rides the entry coverage of the
 # affected action/result records, so any number of outcome-less observed calls
@@ -1255,33 +1264,42 @@ def _logical_identity_digest(components: tuple[str, ...]) -> str:
 def observation_operation_digest(
     *,
     task_id: str,
-    session_id: str,
-    writer_id: str,
     logical_identity: str,
     draft_roles: tuple[str, ...],
     mapping_version: str = MATERIALIZATION_MAPPING_VERSION,
+    session_id: str | None = None,
+    writer_id: str | None = None,
 ) -> str:
     """Stable request digest for idempotent observation appends.
 
     Keyed on the canonical *logical* identity rather than the source-specific
     identity so matching hook/stream copies produce one ledger operation.
+
+    Under the current mapping the digest is task-scoped: the stable event ids it
+    commits depend on the task and the source identity only, so the operation
+    that owns them must be findable from any later Yoetz session of the same
+    task (a workflow reattach rotates the session and writer, #560). The legacy
+    session-bound versions still require ``session_id`` and ``writer_id`` so a
+    pre-upgrade committed operation keeps its exact replay identity.
     """
 
     _validate_materialization_mapping_version(mapping_version)
-    return request_digest(
-        JsonObject(
-            {
-                "protocol": "yoetz",
-                "kind": "observation_materialize",
-                "task_id": task_id,
-                "session_id": session_id,
-                "writer_id": writer_id,
-                "logical_identity": logical_identity,
-                "roles": draft_roles,
-                "mapping_version": mapping_version,
-            }
-        )
-    )
+    material: dict[str, JsonValue] = {
+        "protocol": "yoetz",
+        "kind": "observation_materialize",
+        "task_id": task_id,
+        "logical_identity": logical_identity,
+        "roles": draft_roles,
+        "mapping_version": mapping_version,
+    }
+    if mapping_version in SESSION_BOUND_MAPPING_VERSIONS:
+        if type(session_id) is not str or type(writer_id) is not str:
+            raise ValueError("session-bound observation mapping requires session and writer")
+        material["session_id"] = session_id
+        material["writer_id"] = writer_id
+    elif session_id is not None or writer_id is not None:
+        raise ValueError("task-scoped observation mapping digest takes no session or writer")
+    return request_digest(JsonObject(material))
 
 
 def _validate_materialization_mapping_version(mapping_version: str) -> None:

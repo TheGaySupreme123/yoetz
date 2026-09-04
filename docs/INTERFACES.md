@@ -2897,8 +2897,13 @@ Ledger materialization uses ADR-022's derived harness writer identity:
 start operation. Observation-derived lifecycle records are evidence under that writer, not claims
 on the cooperative agent's behalf. Materialization emits `evidence_recorded` unless the structural
 payload itself carries an explicitly admitted `claim_kind`. Mapping `obs-ledger/1.4.0` additionally
-materializes trusted eligible capture manifests as `evidence_recorded/1.2.0`; legacy 1.3/1.2
-operation identities remain replay-only upgrade candidates.
+materializes trusted eligible capture manifests as `evidence_recorded/1.2.0`. Mapping
+`obs-ledger/1.5.0` makes the idempotent operation digest task-scoped (task, canonical logical
+identity, draft-role tuple, mapping version; no session or writer), matching the stable event ids
+it commits, and the coordinator resolves it task-wide through `lookup_task_operation` so a
+workflow reattach that rotates the session and writer still replays the committed operation
+(issue #560). Legacy 1.4/1.3/1.2 operation identities stay session-bound and remain replay-only
+upgrade candidates from the session that committed them.
 
 Shared closed types:
 
@@ -3123,9 +3128,13 @@ materialization mapping version and exact draft-role tuple, so phases of one hos
 different materializations (for example pre-action versus paired action/result) cannot collide,
 while hook/stream copies of the same phase still share a claim and merge its two-bit source mask.
 The claim stores the source-independent materialization version, never the hook/stream cursor
-version (issue #309). Before staging under `obs-ledger/1.4.0`, upgrade replay checks the current and
-legacy observation writers for committed `1.4.0`, `1.3.0`, and `1.2.0` operations; a legacy hit repairs its
-claim with the original mapping version. Because a replayed `1.2.0` operation may be a pre-upgrade
+version (issue #309). Before staging under `obs-ledger/1.5.0`, replay first resolves the task-scoped
+current identity task-wide, so a reattached Yoetz session finds the operation its predecessor
+session committed (issue #560), and then checks the current and legacy observation writers for
+committed session-bound `1.4.0`, `1.3.0`, and `1.2.0` operations; a legacy hit repairs its claim
+with the original mapping version. A task-wide hit whose stored request digest differs is a
+conflicting reuse of the operation identity and fails closed as non-retryable
+`IDEMPOTENCY_CONFLICT`. Because a replayed `1.2.0` operation may be a pre-upgrade
 hook operation whose result is `UNKNOWN`, it still enters the correction path: the committed result
 is consulted through the replayed operation's accepted event ids (its `1.2.0` record identities
 cannot be re-derived), and a still-needed correction binds to that exact committed action. A later

@@ -3530,3 +3530,55 @@ def test_codex_explicit_locator_drops_record_typed_workspace_diagnostics(tmp_pat
     )
     assert len(reasons()) == 3
     assert str(repository).encode() not in diagnostics_path.read_bytes()
+
+
+def test_mapping_rotation_keeps_hook_ordinals_and_generation_monotonic(tmp_path: Path) -> None:
+    """#560: a reattach rotates the mapped Yoetz session, never the host-session counters.
+
+    Hook ordinals, the session generation, and the host session commitment are
+    keyed on the Codex session, so a second ``start`` in the same session (which
+    stores a new mapping) cannot restart them and re-mint an earlier source
+    identity.
+    """
+
+    import uuid
+
+    from yoetz.adapters.integrations.codex_lifecycle import load_mapping, store_mapping
+    from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
+
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    codex_id = "codex-reattach-560"
+    session = store.bind_codex_session(workspace, codex_id)
+    generation = store.begin_session_generation(workspace, session)
+    task_id = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
+
+    def _mapping() -> LifecycleMapping:
+        return LifecycleMapping(
+            mapping_version=1,
+            codex_session_id=codex_id,
+            yoetz_task_id=task_id,
+            yoetz_session_id=PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+            yoetz_writer_id=PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+            last_frontier=None,
+        )
+
+    first = _mapping()
+    store_mapping(first, _state=tmp_path)
+    ordinals = [store.allocate_hook_ordinal(workspace, session) for _ in range(2)]
+
+    second = _mapping()
+    store_mapping(second, _state=tmp_path)
+    third = _mapping()
+    store_mapping(third, _state=tmp_path)
+    ordinals.append(store.allocate_hook_ordinal(workspace, session))
+
+    stored = load_mapping(codex_id, _state=tmp_path)
+    assert stored is not None
+    assert stored.yoetz_session_id == third.yoetz_session_id
+    assert stored.yoetz_task_id == task_id
+    assert len({first.yoetz_session_id, second.yoetz_session_id, third.yoetz_session_id}) == 3
+    assert ordinals == [1, 2, 3]
+    assert store.bind_codex_session(workspace, codex_id) == session
+    assert store.current_session_generation(workspace, session) == generation
