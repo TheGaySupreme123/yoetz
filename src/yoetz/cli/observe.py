@@ -21,8 +21,8 @@ from yoetz.adapters.integrations.codex_marketplace import inspect_activation
 from yoetz.adapters.integrations.codex_session_stream import (
     CodexSessionStreamLocator,
     SessionStreamReader,
-    default_stream_profile,
     resolve_codex_home,
+    stream_profile_from_id,
 )
 from yoetz.adapters.integrations.codex_session_stream import (
     reconcile_session_stream as advance_session_stream,
@@ -951,9 +951,10 @@ def reconcile_session_stream(
             last_source_commitment=_EMPTY_COMMITMENT,
             mapping_version=STREAM_MAPPING_VERSION,
         )
+    prior_profile_id = store.stream_profile_for_session(workspace_commitment, session_commitment)
     reader = SessionStreamReader(
         session_commitment=session_commitment,
-        profile=default_stream_profile(),
+        profile=stream_profile_from_id(prior_profile_id),
         cursor=existing,
         key_material=store.key_material(),
         partial_line=store.get_stream_partial(workspace_commitment, session_commitment),
@@ -986,6 +987,12 @@ def reconcile_session_stream(
         session_commitment,
         advance.partial_line if not overflow else b"",
     )
+    persisted_profile_id = (
+        (None if reader.profile is None else reader.profile.profile_id)
+        if committed_cursor.source_generation == advance.cursor.source_generation
+        else prior_profile_id
+    )
+    store.set_stream_profile(workspace_commitment, session_commitment, persisted_profile_id)
     gaps = advance.gaps
     if overflow and ObservationGapCode.OUTBOX_OVERFLOW.value not in gaps:
         gaps = (*gaps, ObservationGapCode.OUTBOX_OVERFLOW.value)
@@ -996,6 +1003,7 @@ def reconcile_session_stream(
         "byte_position": committed_cursor.byte_position,
         "event_position": committed_cursor.event_position,
         "generation": committed_cursor.source_generation,
+        "profile_id": persisted_profile_id,
         "rotated": advance.rotated,
         "truncated": advance.truncated,
         "resolved": True,

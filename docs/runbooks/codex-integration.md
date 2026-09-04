@@ -46,6 +46,14 @@ expected Codex version. Codex support is the exact tested set in the packaged ma
 set means no Codex release currently carries automatic-activation support evidence. A version
 string or successful file install never promotes an unprofiled release to supported.
 
+Session-stream (rollout) parsing is a separate, narrower fact. `0.148.0` and `0.150.1` each have
+an exact fixture-proven rollout grammar profile (`codex-rollout-jsonl/<version>/v1`, ADR-005).
+That parser proof is what lets an isolated dogfood run advertise the `session_stream` facet for
+that exact release; it is not host support, and it says nothing about skills, MCP, hooks, or
+activation. Any other release — including a patch neighbour — is refused at the session header as
+`unsupported_format`, keeps its cursor, and reads no further lines; it earns a profile only through
+its own fixtures.
+
 ## 3. Status and preview
 
 Always run status first:

@@ -16,6 +16,7 @@ from builders.codex_rollout import (
     failed_shell_rollout,
     function_call,
     function_call_output,
+    item_completed,
     response_item,
     session_meta,
 )
@@ -28,6 +29,7 @@ from yoetz.adapters.integrations.codex_session_stream import (
     envelope_from_stream_record,
     reconcile_session_stream,
     should_trigger_stream_reconcile,
+    stream_profile_from_id,
 )
 from yoetz.adapters.integrations.observation_local import (
     STREAM_MAPPING_VERSION,
@@ -1375,3 +1377,326 @@ def test_reconcile_retains_yoetz_self_observation_locally_and_advances_past_it(
     assert again["accepted"] == 0
     assert again["duplicates"] == 0
     assert store.pending_outbox_count(workspace) == 5
+
+
+# --- exact per-version profiles (#568) -------------------------------------------------------
+
+_PAGINATED_0150 = "imports/codex/rollout-paginated-0.150.1.case.json"
+_UNSUPPORTED_0152 = "imports/codex/rollout-unsupported-0.152.1.case.json"
+_CANARY_0150 = "CANARY_0150_"
+
+
+def _fixture_bytes(path: str, variant: str) -> bytes:
+    import base64
+
+    from fixture_loader import build_fixture_loader
+
+    case = cast(dict[str, object], build_fixture_loader().load_json(path))
+    variants = cast(dict[str, object], cast(dict[str, object], case["input"])["variants"])
+    source = cast(dict[str, object], cast(dict[str, object], variants[variant])["source"])
+    return base64.b64decode(cast(str, source["bytes_base64"]).encode("ascii"), validate=True)
+
+
+def _header_selected_reader(session: str, *, generation: int = 1) -> SessionStreamReader:
+    """A reader with no prior profile: the source header must select one."""
+
+    return SessionStreamReader(
+        session_commitment=session,
+        profile=None,
+        cursor=ObservationCursor(
+            source_generation=generation,
+            byte_position=0,
+            event_position=0,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+        key_material=_KEY,
+    )
+
+
+def test_stream_profile_from_id_is_exact_lookup() -> None:
+    assert stream_profile_from_id(None) is None
+    assert stream_profile_from_id("codex-rollout-jsonl/0.152.1/v1") is None
+    for version in ("0.148.0", "0.150.1"):
+        profile = stream_profile_from_id(f"codex-rollout-jsonl/{version}/v1")
+        assert profile is not None
+        assert profile.cli_version == version
+
+
+def test_0_150_1_stream_admits_from_header_and_envelopes_carry_no_content(
+    tmp_path: Path,
+) -> None:
+    raw = _fixture_bytes(_PAGINATED_0150, "paginated")
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(raw)
+    session = "hmac-sha256:" + ("5" * 64)
+    reader = _header_selected_reader(session)
+
+    advance = reader.advance(path)
+
+    assert reader.profile is not None
+    assert reader.profile.profile_id == "codex-rollout-jsonl/0.150.1/v1"
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value not in advance.gaps
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value not in advance.gaps
+    assert advance.cursor.byte_position == len(raw)
+    assert advance.cursor.event_position == raw.count(b"\n")
+    assert len(advance.envelopes) == raw.count(b"\n")
+    kinds = {envelope.structural_payload["stream_kind"] for envelope in advance.envelopes}
+    assert kinds == set(reader.profile.wrapper_types)
+    actions = {
+        envelope.structural_payload.get("action")
+        for envelope in advance.envelopes
+        if "action" in envelope.structural_payload
+    }
+    assert {"function_call", "custom_tool_call", "McpToolCall", "CommandExecution"} <= actions
+    dumped = json.dumps(
+        [
+            {
+                "event_kind": envelope.event_kind,
+                "structural_payload": dict(envelope.structural_payload),
+                "content_object_refs": list(envelope.content_object_refs),
+                "gap_codes": list(envelope.gap_codes),
+            }
+            for envelope in advance.envelopes
+        ],
+        default=str,
+    )
+    # Hidden reasoning, base instructions, developer/user/assistant text, tool output,
+    # compaction summaries, world state, and the secret canary all stay out of every envelope.
+    assert _CANARY_0150 not in dumped
+    assert "sk-proj-" not in dumped
+    assert "[REDACTED]" not in dumped
+    assert all(envelope.content_object_refs == () for envelope in advance.envelopes)
+    allowed = {
+        "stream_kind",
+        "action",
+        "tool_name",
+        "result_status",
+        "exit_status",
+        "tool_call_id",
+    }
+    for envelope in advance.envelopes:
+        assert set(envelope.structural_payload) <= allowed, envelope.structural_payload
+
+
+def test_unsupported_release_is_refused_durably_without_cursor_loss(tmp_path: Path) -> None:
+    raw = _fixture_bytes(_UNSUPPORTED_0152, "future")
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(raw)
+    session = "hmac-sha256:" + ("6" * 64)
+    reader = _header_selected_reader(session)
+
+    advance = reader.advance(path)
+
+    assert reader.profile is None
+    assert advance.envelopes == ()
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value in advance.gaps
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value not in advance.gaps
+    # The bytes are consumed (no re-read storm) and no event is counted as admitted.
+    assert advance.cursor.byte_position == len(raw)
+    assert advance.cursor.event_position == 0
+
+    path.write_bytes(raw + encode_lines(function_call(name="shell", call_id="later", ordinal=4)))
+    appended = reader.advance(path)
+    assert appended.envelopes == ()
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value in appended.gaps
+    assert appended.cursor.event_position == 0
+    # The refusal point is held for the whole generation: the appended tail is never read, so
+    # nothing of an unproven grammar is interpreted, and the cursor is neither lost nor rewound.
+    assert appended.cursor.byte_position == len(raw)
+    assert appended.cursor.source_generation == advance.cursor.source_generation
+
+
+def test_prior_profile_refuses_a_rotated_source_of_another_release(tmp_path: Path) -> None:
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(
+        encode_lines(
+            session_meta(),
+            function_call(name="shell", call_id="a", arguments='{"command":"echo one"}'),
+            function_call_output(call_id="a"),
+            function_call(name="shell", call_id="b", arguments='{"command":"echo two"}'),
+            function_call_output(call_id="b"),
+        )
+    )
+    session = "hmac-sha256:" + ("7" * 64)
+    reader = _header_selected_reader(session)
+    first = reader.advance(path)
+    assert reader.profile is not None and reader.profile.cli_version == "0.148.0"
+    assert len(first.envelopes) == 5
+
+    # Truncation starts a new generation whose header re-selects the profile from scratch.
+    path.write_bytes(
+        encode_lines(
+            session_meta(cli_version="0.150.1", history_mode="paginated", ordinal=1),
+            function_call(name="shell", call_id="b", ordinal=2),
+        )
+    )
+    second = reader.advance(path)
+    assert second.truncated is True
+    assert second.cursor.source_generation == first.cursor.source_generation + 1
+    assert reader.profile is not None and reader.profile.cli_version == "0.150.1"
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value not in second.gaps
+    assert len(second.envelopes) == 2
+
+
+def test_unknown_inner_item_under_0_150_1_is_opaque_unsupported_event(tmp_path: Path) -> None:
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(
+        encode_lines(
+            session_meta(cli_version="0.150.1", history_mode="paginated", ordinal=1),
+            item_completed({"id": "item_x", "type": "FutureItem", "text": "secret-ish"}, ordinal=2),
+            {
+                "ordinal": 3,
+                "payload": {"tokens": 1},
+                "timestamp": "t",
+                "type": "token_usage_record",
+            },
+            function_call(name="shell", call_id="after", ordinal=4),
+        )
+    )
+    session = "hmac-sha256:" + ("8" * 64)
+    reader = _header_selected_reader(session)
+
+    advance = reader.advance(path)
+
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value not in advance.gaps
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value in advance.gaps
+    assert advance.cursor.event_position == 4
+    opaque = [
+        envelope
+        for envelope in advance.envelopes
+        if ObservationGapCode.UNSUPPORTED_EVENT.value in envelope.gap_codes
+    ]
+    assert len(opaque) == 2
+    assert all("secret-ish" not in json.dumps(dict(e.structural_payload)) for e in opaque)
+    assert all("FutureItem" not in json.dumps(dict(e.structural_payload)) for e in opaque)
+    assert advance.envelopes[-1].structural_payload["tool_name"] == "shell"
+
+
+def test_admitted_generation_without_recorded_profile_replays_from_header(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "session.jsonl"
+    body = encode_lines(
+        session_meta(cli_version="0.150.1", history_mode="paginated", ordinal=1),
+        function_call(name="shell", call_id="a", ordinal=2),
+    )
+    path.write_bytes(body)
+    session = "hmac-sha256:" + ("9" * 64)
+    reader = SessionStreamReader(
+        session_commitment=session,
+        profile=None,
+        cursor=ObservationCursor(
+            source_generation=3,
+            byte_position=len(body),
+            event_position=2,
+            last_source_commitment=_EMPTY,
+            mapping_version=STREAM_MAPPING_VERSION,
+        ),
+        key_material=_KEY,
+    )
+
+    advance = reader.advance(path)
+
+    assert advance.restarted is True
+    assert ObservationGapCode.CURSOR_STALE.value in advance.gaps
+    assert advance.cursor.source_generation == 4
+    assert advance.cursor.event_position == 2
+    assert reader.profile is not None and reader.profile.cli_version == "0.150.1"
+    assert len(advance.envelopes) == 2
+
+
+def test_reconcile_persists_admitted_profile_and_resets_1_2_0_cursors(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions" / "2026" / "07" / "23"
+    sessions.mkdir(parents=True)
+    session_id = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+    target = sessions / f"rollout-2026-07-23T12-00-00-{session_id}.jsonl"
+    target.write_bytes(_fixture_bytes(_PAGINATED_0150, "paginated"))
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+    # A pre-#568 cursor never recorded which profile admitted its generation; it must replay
+    # under the new mapping rather than inherit the 0.148.0 default.
+    store.set_stream_cursor(
+        workspace,
+        session,
+        ObservationCursor(
+            source_generation=2,
+            byte_position=target.stat().st_size,
+            event_position=30,
+            last_source_commitment=_EMPTY,
+            mapping_version="codex-obs-stream/1.2.0",
+        ),
+    )
+
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+
+    assert result["resolved"] is True
+    assert result["profile_id"] == "codex-rollout-jsonl/0.150.1/v1"
+    assert store.stream_profile_for_session(workspace, session) == (
+        "codex-rollout-jsonl/0.150.1/v1"
+    )
+    cursor = store.get_stream_cursor(workspace, session)
+    assert cursor is not None
+    assert cursor.mapping_version == STREAM_MAPPING_VERSION
+    assert cursor.source_generation == 3
+    accepted = result["accepted"]
+    assert isinstance(accepted, int) and accepted >= 1
+    gaps = result["gaps"]
+    assert isinstance(gaps, tuple)
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value not in gaps
+    assert ObservationGapCode.UNSUPPORTED_EVENT.value not in gaps
+
+    # A second pass reuses the persisted profile and makes no progress without new bytes.
+    again = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+    assert again["accepted"] == 0
+    assert again["profile_id"] == "codex-rollout-jsonl/0.150.1/v1"
+
+
+def test_reconcile_of_unsupported_release_records_no_profile(tmp_path: Path) -> None:
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions" / "2026" / "07" / "23"
+    sessions.mkdir(parents=True)
+    session_id = "019f8b27-b98e-7061-bbb5-d0b897594de6"
+    target = sessions / f"rollout-2026-07-23T12-00-00-{session_id}.jsonl"
+    target.write_bytes(_fixture_bytes(_UNSUPPORTED_0152, "future"))
+    store = LocalObservationStore(_state=tmp_path)
+    workspace = store.workspace_commitment(str(tmp_path.resolve()))
+    store.grant_consent(workspace)
+    session = store.session_commitment(session_id)
+    store.bind_session(workspace, session)
+
+    result = reconcile_session_stream(
+        store,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+
+    assert result["resolved"] is True
+    assert result["accepted"] == 0
+    assert result["profile_id"] is None
+    gaps = result["gaps"]
+    assert isinstance(gaps, tuple)
+    assert ObservationGapCode.UNSUPPORTED_FORMAT.value in gaps
+    assert store.stream_profile_for_session(workspace, session) is None
+    cursor = store.get_stream_cursor(workspace, session)
+    assert cursor is not None
+    assert cursor.byte_position == target.stat().st_size
+    assert cursor.event_position == 0

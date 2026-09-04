@@ -2925,8 +2925,10 @@ Shared closed types:
   digest and byte count. Durable redaction/truncation flags preserve weakening without reopening
   the object.
 - `ObservationCursor` — source generation, byte/event position, last source commitment, and
-  mapping version. Codex session-stream cursors use `codex-obs-stream/1.2.0` (rollout JSONL
-  grammar). Cursors are crash-stable and generation-fenced. A private HMAC of the source
+  mapping version. Codex session-stream cursors use `codex-obs-stream/1.3.0` (rollout JSONL
+  grammar, paired with the exact profile id the generation's header admitted; a `1.2.0` or older
+  cursor is mapping-reset and replays from its header rather than inheriting a default profile).
+  Cursors are crash-stable and generation-fenced. A private HMAC of the source
   device/inode detects same-or-larger file replacement across reconcile processes; ordinary safe
   integers retain their numeric encoding and larger filesystem values use a bounded hexadecimal
   representation before canonical encoding. Call-id/tool
@@ -2937,9 +2939,11 @@ Shared closed types:
   tree first and then redacts decoded string keys and values, preserving structural punctuation;
   any redaction-created duplicate key is rejected instead of silently merging fields.
 - `ObservationGapCode` — closed coverage tokens. `unsupported_event` is an admitted profile with
-  an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, unknown
-  `cli_version`, an absent/unknown `history_mode`, or compressed `rollout-*.jsonl.zst` that the
-  hook pass does not decompress). When exact-session `.jsonl` and `.jsonl.zst` siblings both
+  an unrecognized wrapper or item; `unsupported_format` is a wrong surface (exec JSONL, a
+  `cli_version` without an exact profile in `SUPPORTED_ROLLOUT_PROFILES` — currently `0.148.0`
+  and `0.150.1`, never a semver neighbour — an absent/unknown `history_mode`, or compressed
+  `rollout-*.jsonl.zst` that the hook pass does not decompress). A refused header holds for the
+  whole source generation: bytes are consumed, no event is admitted, and the cursor is kept. When exact-session `.jsonl` and `.jsonl.zst` siblings both
   exist, the admitted uncompressed file wins; compressed-only remains explicitly unsupported.
   Every string semantic type present at `payload.type` and nested `payload.item.type` must belong
   to the admitted profile before a nested item is selected; one known field cannot mask an unknown
