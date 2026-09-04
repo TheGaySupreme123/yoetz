@@ -4522,6 +4522,12 @@ async def test_session_superseded_reroutes_ingest_and_persists_mapping(tmp_path:
         async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
             del args, kwargs
 
+    def _store_superseded_mapping(
+        mapping: LifecycleMapping, *, _state: Path | None = None
+    ) -> None:
+        del _state
+        stored["mapping"] = mapping
+
     cell.coordinator = _Coordinator(
         runtime=cell.runtime_port,  # type: ignore[arg-type]
         local=cell.local,
@@ -4529,7 +4535,7 @@ async def test_session_superseded_reroutes_ingest_and_persists_mapping(tmp_path:
         ids=cell.ids,  # type: ignore[arg-type]
         state_root=cell.local_root,
         mapping_loader=lambda *_args, **_kwargs: stored["mapping"],  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
-        mapping_storer=lambda mapping, **_kwargs: stored.__setitem__("mapping", mapping),
+        mapping_storer=_store_superseded_mapping,
     )
 
     result = await cell.ingest(_envelope(session=cell.session, identity="hook:577"))

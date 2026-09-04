@@ -1575,7 +1575,7 @@ async def _try_workspace_auto_start(
                 harness_id=harness_id,
                 _state=_state,
             )
-            if refreshed == recovery:
+            if refreshed is not None and refreshed == recovery:
                 outcome = await _try_auto_start(
                     codex_session_id,
                     _state=_state,
