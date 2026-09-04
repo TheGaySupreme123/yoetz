@@ -313,7 +313,9 @@ unsupported claims and unbounded duplicate findings.
     observation rows of the predecessor (issue #577). `SESSION_NOT_FOUND` with
     `reason_code: session_superseded` already carries the current task binding; ingest follows that
     binding, routes with the observation writer derived for the successor session, and persists the
-    updated lifecycle mapping on each hop. The shared hook recovery path also rewrites every ended
+    updated lifecycle mapping on each hop under its lifecycle lock only if the stored mapping still
+    equals the predecessor. Busy locks, changed or cleared mappings, and persistence failures skip
+    the cache update without blocking successor delivery. The shared hook recovery path also rewrites every ended
     same-host predecessor mapping for that task in the same pass it stores the successor mapping. A
     row refused only because its route was retired is never `ledger_rejected`; a superseded payload
     that cannot be followed (missing or mismatched task/session/writer ids, a hop cycle, or a

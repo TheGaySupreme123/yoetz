@@ -4594,3 +4594,76 @@ async def test_session_superseded_without_followable_binding_is_not_ledger_rejec
     assert result.reason != ObservationGapCode.LEDGER_REJECTED.value
     assert result.reason != ObservationGapCode.MAPPING_MISSING.value
     assert route_observation_ingest(result).action is ObservationDrainAction.QUARANTINE
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("concurrent_change", ["locked", "rebound", "frontier", "cleared", "none"])
+async def test_successor_route_cache_preserves_concurrent_lifecycle_changes(
+    tmp_path: Path, concurrent_change: str
+) -> None:
+    """Routing can continue without overwriting a lifecycle update made during the await."""
+
+    from contextlib import ExitStack
+
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        acquire_session_lock,
+        clear_mapping,
+        load_mapping,
+        store_mapping,
+    )
+
+    local, _workspace, _session, predecessor = _mapped_local(tmp_path, "route-cache-race")
+    store_mapping(predecessor, _state=tmp_path)
+    successor = replace(
+        predecessor,
+        yoetz_session_id=PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+        yoetz_writer_id=PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+    )
+    expected = predecessor
+    routed_runtime = cast(TaskRuntime, object())
+    with ExitStack() as locks:
+
+        class _Runtime:
+            async def route(self, command: object) -> TaskRuntime:
+                nonlocal expected
+                if getattr(command, "session_id") == successor.yoetz_session_id:
+                    return routed_runtime
+                if concurrent_change == "locked":
+                    assert locks.enter_context(
+                        acquire_session_lock(predecessor.codex_session_id, _state=tmp_path)
+                    )
+                elif concurrent_change == "rebound":
+                    expected = replace(predecessor, yoetz_task_id=_task_id())
+                    store_mapping(expected, _state=tmp_path)
+                elif concurrent_change == "frontier":
+                    expected = replace(predecessor, last_frontier="99:sha256:" + "a" * 64)
+                    store_mapping(expected, _state=tmp_path)
+                elif concurrent_change == "cleared":
+                    clear_mapping(predecessor.codex_session_id, _state=tmp_path)
+                raise PublicOperationError(
+                    PublicErrorCode.SESSION_NOT_FOUND,
+                    "The requested session was replaced.",
+                    retryable=False,
+                    safe_details={
+                        "reason_code": "session_superseded",
+                        "task_id": predecessor.yoetz_task_id,
+                        "session_id": successor.yoetz_session_id,
+                        "writer_id": successor.yoetz_writer_id,
+                    },
+                )
+
+        coordinator = ObservationCoordinator(
+            runtime=_Runtime(),  # type: ignore[arg-type]
+            local=local,
+            clock=object(),  # type: ignore[arg-type]
+            ids=object(),  # type: ignore[arg-type]
+            state_root=tmp_path,
+        )
+        runtime, mapping = await coordinator._route_observation_mapping(predecessor)  # pyright: ignore[reportPrivateUsage]
+        assert runtime is routed_runtime
+        assert mapping == successor
+        persisted = load_mapping(predecessor.codex_session_id, _state=tmp_path)
+        if concurrent_change == "cleared":
+            assert persisted is None
+        else:
+            assert persisted == (successor if concurrent_change == "none" else expected)

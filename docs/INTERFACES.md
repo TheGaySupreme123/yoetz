@@ -3262,7 +3262,9 @@ failure that is not already a narrower terminal class (`dedup_conflict` or
 record the reason once, and continue its lane. `SESSION_NOT_FOUND` with
 `reason_code: session_superseded` is not that class: ingest follows the current binding carried in
 `safe_details` (same task, successor session, observation writer derived for it), persists the
-updated lifecycle mapping on each hop, and delivers the row. A superseded payload that cannot be
+updated lifecycle mapping on each hop only while holding the lifecycle lock and the stored
+mapping still equals the predecessor, and delivers the row. A busy lock, changed or cleared
+mapping, or persistence failure skips this cache update without blocking successor delivery. A superseded payload that cannot be
 followed (missing or mismatched task/session/writer ids, a hop cycle, or a rotation after the
 route already opened) quarantines that one row as `session_superseded`. It is never
 `ledger_rejected` and never `mapping_missing`: `mapping_missing` would retire an ended host

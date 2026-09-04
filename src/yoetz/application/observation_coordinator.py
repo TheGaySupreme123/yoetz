@@ -22,6 +22,7 @@ from yoetz.adapters.git_subject_state import (
 )
 from yoetz.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
+    acquire_session_lock,
     load_mapping,
     store_mapping,
     validate_codex_session_id,
@@ -1077,9 +1078,21 @@ class ObservationCoordinator:
             )
         )
 
-    def _persist_successor_mapping(self, mapping: LifecycleMapping) -> None:
+    def _persist_successor_mapping(
+        self, predecessor: LifecycleMapping, successor: LifecycleMapping
+    ) -> None:
+        """Cache a route only while its original lifecycle mapping is still current."""
+
         try:
-            self.mapping_storer(mapping, _state=self.state_root)
+            with acquire_session_lock(
+                predecessor.codex_session_id, _state=self.state_root
+            ) as owned:
+                if not owned:
+                    return
+                latest = self.mapping_loader(predecessor.codex_session_id, _state=self.state_root)
+                if latest != predecessor:
+                    return
+                self.mapping_storer(successor, _state=self.state_root)
         except Exception:
             return
 
@@ -1112,12 +1125,13 @@ class ObservationCoordinator:
                 if session_id in seen:
                     raise
                 seen.add(session_id)
+                predecessor = current
                 current = replace(
                     current,
                     yoetz_session_id=session_id,
                     yoetz_writer_id=writer_id,
                 )
-                self._persist_successor_mapping(current)
+                self._persist_successor_mapping(predecessor, current)
                 continue
             return runtime, current
         if last_error is not None:
