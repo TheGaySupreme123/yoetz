@@ -1096,6 +1096,25 @@ def reconcile_session_stream(
             "gaps": (ObservationGapCode.SOURCE_LAG.value,),
             "resolved": False,
         }
+    return reconcile_session_stream_path(
+        store,
+        workspace_commitment=workspace_commitment,
+        session_commitment=session_commitment,
+        codex_session_id=codex_session_id,
+        path=path,
+    )
+
+
+def reconcile_session_stream_path(
+    store: LocalObservationStore,
+    *,
+    workspace_commitment: str,
+    session_commitment: str,
+    codex_session_id: str,
+    path: Path,
+) -> dict[str, JsonValue]:
+    """Reconcile a locally selected path with the same durable frontier on every entry point."""
+
     if path.name.lower().endswith(".jsonl.zst"):
         store.note_coverage_gap(workspace_commitment, ObservationGapCode.UNSUPPORTED_FORMAT.value)
         store.note_stream_reconcile(workspace_commitment)

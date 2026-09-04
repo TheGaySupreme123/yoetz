@@ -52,7 +52,9 @@ That parser proof is what lets an isolated dogfood run advertise the `session_st
 that exact release; it is not host support, and it says nothing about skills, MCP, hooks, or
 activation. Any other release — including a patch neighbour — is refused at the session header as
 `unsupported_format`, keeps its cursor, and reads no further lines; it earns a profile only through
-its own fixtures.
+its own fixtures. Explicit-path recovery uses the same atomic cursor, profile, source identity,
+and tool-pairing frontier as automatic reconciliation, including mapping upgrades and delivery
+backpressure.
 
 ## 3. Status and preview
 
