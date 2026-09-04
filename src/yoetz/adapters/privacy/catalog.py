@@ -312,6 +312,7 @@ def _channel_from_json(value: JsonValue) -> ChannelPolicy:
         _uint_from_json(source["max_bytes"]),
         _uint_from_json(source["max_tokens"]),
         _uint_from_json(source["authorization_ttl_seconds"]),
+        _binding_from_json(source.get("fallback_provider_binding")),
     )
 
 
@@ -347,6 +348,9 @@ def _channel_to_wire(channel: ChannelPolicy) -> dict[str, JsonValue]:
     }
     if channel.provider_binding is not None:
         body["provider_binding"] = _json(channel.provider_binding)
+    # Absent, not null: every committed single-endpoint policy keeps its exact digest.
+    if channel.fallback_provider_binding is not None:
+        body["fallback_provider_binding"] = _json(channel.fallback_provider_binding)
     return body
 
 

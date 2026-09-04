@@ -88,6 +88,8 @@ Fields to record from `yoetz provider status --json`:
 | `mcp_route.configured_profile` | Which route setup would register now. |
 | `mcp_route.observed` | `false` means the route could not be read — **not** that none is registered. |
 | `agent_route_semantic_ready` | Whether the **registered Codex route** can dispatch semantic review. This is the field that selects the profile. |
+| `endpoint.role`, `fallback_endpoint` | Which bound endpoint is the primary and whether a fallback is declared (issue #582). `fallback_endpoint` absent means a single-endpoint install; when present, record both identities (provider, model, endpoint profile) — a later `fallback_from` in provenance must match. |
+| `fallback_credential_connected` | Presence-only credential state of the fallback (`true` / `false` / `null` when unknown), mirrored by the `fallback_provider_credential` blocker. It never moves `semantic_ready`: a primary can be ready while its fallback is not, and vice versa. |
 
 `registered_profile != configured_profile` is registration drift: the registered entry no longer
 matches what this installation's configuration would produce. Record it and resolve it before
@@ -117,6 +119,72 @@ route, and it is not a strict route either — it is no route at all until it is
 `applied_profile`, and `drift_since_install` for the same reason, and is the narrower check when
 you only need the route and its post-install drift.
 
+### Pairing a fallback endpoint
+
+Since issue #582 the two external authorities — an API provider and the Codex ChatGPT
+subscription evaluator — may be bound together as one primary plus exactly one fallback. The
+commands below mutate configuration and policy; run them before the five read-only checks, never
+mid-run, and treat the policy step as the human ceremony it is.
+
+Subscription primary, API provider as fallback:
+
+```text
+yoetz provider codex-subscription setup --executable /absolute/path/to/codex   # if not bound yet
+yoetz provider endpoint --provider <preset> --model <model-id> --as-fallback
+yoetz provider credential set                                                 # fallback's API key
+yoetz privacy setup                                                           # approve both destinations
+```
+
+API provider primary, subscription as fallback:
+
+```text
+yoetz provider endpoint --provider <preset> --model <model-id>                # if not bound yet
+yoetz provider credential set
+yoetz provider codex-subscription setup --executable /absolute/path/to/codex --as-fallback
+yoetz privacy setup                                                           # approve both destinations
+```
+
+`--as-fallback` refuses (`semantic_fallback_endpoint_missing`) unless the other authority is
+already bound; without the flag the ordinary single-endpoint rule replaces the existing binding.
+The result reports `endpoint_role`, and `config.toml` gains a nonsecret `[semantic_fallback]`
+table whose `primary` is `codex_subscription` or `api_provider`. Two API providers cannot pair.
+
+Binding the fallback does not authorize it. `yoetz privacy setup` reads both endpoints and prints
+the second as `Fallback destination (after the primary cannot serve)`; committing it is a
+widening of exactly one more destination, shown in the trusted `before -> after` view as
+`Fallback provider and model` right after the primary row, and goes through the ordinary
+propose → decide ceremony. Until that decision, egress admits the primary only. Record the
+committed `yoetz privacy show` output at preflight so a fallback-served attempt can be matched
+against the approved set.
+
+Reverse and swap:
+
+```text
+yoetz provider fallback remove                       # primary keeps serving alone
+yoetz provider fallback primary api_provider          # or codex_subscription: swap roles, both kept
+yoetz provider codex-subscription disconnect --accept # inside a pairing: API provider becomes sole endpoint
+```
+
+`fallback remove` restores the exact single-endpoint `config.toml`; the policy still names the
+removed destination until `yoetz privacy setup` is re-run, which is a tightening and needs no
+widening ceremony. A swap keeps both bindings and both approvals.
+
+What engages the fallback is closed and service-side, identical on every host: the primary is
+abandoned only after two `provider_timeout` / `transport_unavailable` / `provider_rate_limited`
+failures, one `provider_quota_exhausted`, an exhausted primary retry budget, or a primary that
+could not be resolved before dispatch (`credential_unavailable`). Content-shaped outcomes
+(`response_content_invalid`, `response_schema_invalid`, `refused`,
+`semantic_judgment_rejected`), policy or human outcomes, and `outcome_unknown` stay with the
+primary. Each endpoint keeps its own retry budget and timeout, and each fallback attempt is a
+fresh physical attempt with its own authorization and privacy receipt — under
+`confirm_every_request` that means its own foreground decision.
+
+**Caveat (issue #584).** A Codex subscription quota exhaustion is currently mis-parsed as
+`invalid/response_schema_invalid`, which is content-shaped and never licenses the fallback. Until
+#584 is fixed, a subscription primary that runs out of quota does **not** hand the case to its
+API-provider fallback; record such a run as a primary failure with no fallback attempt, not as a
+fallback defect.
+
 ## 3. The provenance gate
 
 Whether a run may score semantic usefulness is derived from the check result, never asserted from
@@ -135,9 +203,19 @@ proves an attempt happened, not that it was useful.
 | `succeeded`, `refused`, `timeout`, `invalid`, `late`, `stale`; or `unavailable` with `transport_unavailable` / `provider_rate_limited` / `provider_quota_exhausted` / `outcome_unknown` | present (enforced) | Yes; `outcome_unknown` proves an acknowledged attempt, not its outcome or usefulness |
 | `unavailable` with `credential_unavailable`, `endpoint_profile_unavailable`, `retry_budget_exhausted`, `audit_reservation_unavailable`, `receipt_persistence_unknown` | `null` (enforced) | **No** — not attempted |
 | `failed` / `coordinator_failure` | either — unconstrained | **No** — attempt indeterminate |
+| any row above whose attempt the **declared fallback** served | present, with `fallback_from` naming the primary's provider/endpoint/model, its `attempted_count` before engagement, and its closed `reason`; the top-level provider/model/endpoint name the fallback | Same as the row it lands in, scored **against the endpoint that served**. Record the primary's `fallback_from.reason` as a separate primary-failure cell, never as the fallback's outcome |
 
 `failed` is the one status where provenance presence proves nothing in either direction. Record it
 as **attempt indeterminate**, never as "not attempted".
+
+With a declared fallback (issue #582), `fallback_from` on the provenance is what says the
+fallback served; its absence on a present provenance means the primary served, whatever the
+pairing. Match the top-level identity against the `fallback_endpoint` recorded at preflight and
+the approved policy before scoring, and report the run as two cells — the primary's closed
+failure and the fallback's outcome. A fallback-served `succeeded` proves an attempt at the
+fallback, not that the primary's failure reason was correctly classified (see the #584 caveat in
+§2). The JSON receipt carries the same `fallback_from`; the markdown and text receipts name the
+endpoint that served and the primary's closed failure reason.
 
 Read the gate off the result, not off preflight. Passing preflight makes an attempt *possible*; only
 the result says whether one *happened*.

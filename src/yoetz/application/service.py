@@ -604,6 +604,8 @@ class Application:
     verification_supervisor: ObservationVerificationSupervisor | None = None
     connected_provider_ids: tuple[str, ...] = ()
     provider_credential_connected: bool = False
+    # Structural presence of the declared fallback endpoint's credential (#582); never readiness.
+    fallback_credential_connected: bool = False
     semantic_ready: bool = False
     observation_sweep: Callable[[], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
@@ -1393,6 +1395,8 @@ class ServiceReadyContext:
     rediscover_pending_verification: Callable[[], Awaitable[None]] | None = None
     connected_provider_ids: tuple[str, ...] = ()
     provider_credential_connected: bool = False
+    # Structural presence of the declared fallback endpoint's credential (#582); never readiness.
+    fallback_credential_connected: bool = False
     semantic_ready: bool = False
     observation_sweep: Callable[[], Awaitable[object]] | None = field(
         default=None, repr=False, compare=False
@@ -1484,6 +1488,7 @@ class ReadyApplicationFactory:
                 context.verification_supervisor,
                 connected_provider_ids=context.connected_provider_ids,
                 provider_credential_connected=context.provider_credential_connected,
+                fallback_credential_connected=context.fallback_credential_connected,
                 semantic_ready=context.semantic_ready,
                 observation_sweep=context.observation_sweep,
                 ready_recommendation_refresh=context.ready_recommendation_refresh,

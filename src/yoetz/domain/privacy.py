@@ -640,6 +640,11 @@ class ChannelPolicy:
     max_bytes: int
     max_tokens: int
     authorization_ttl_seconds: int
+    # Second authorized destination for the same channel (issue #582). It is dispatched only
+    # after the primary records the closed fallback-licensing failures; approving it is a
+    # widening of exactly one more destination, never a wildcard. Trailing default keeps every
+    # existing positional constructor and the single-endpoint wire shape unchanged.
+    fallback_provider_binding: ProviderBinding | None = None
 
     def __post_init__(self) -> None:
         _enum(self.channel, EgressChannel)
@@ -663,6 +668,7 @@ class ChannelPolicy:
                 self.allowed_categories
                 or self.allowed_data_classes
                 or self.provider_binding is not None
+                or self.fallback_provider_binding is not None
                 or self.allowed_purposes
                 or self.preview_required
                 or self.max_bytes
@@ -672,11 +678,33 @@ class ChannelPolicy:
                 raise _invalid()
         if self.provider_binding is not None and type(self.provider_binding) is not ProviderBinding:
             raise _invalid()
+        if self.fallback_provider_binding is not None:
+            # A fallback is meaningful only behind an external primary it differs from: the same
+            # destination twice would be a hidden retry budget, and a local sink cannot stand in
+            # for a network channel.
+            if (
+                type(self.fallback_provider_binding) is not ProviderBinding
+                or self.provider_binding is None
+                or self.provider_binding.transport != "external"
+                or self.fallback_provider_binding.transport != "external"
+                or self.fallback_provider_binding == self.provider_binding
+            ):
+                raise _invalid()
         if self.channel is not EgressChannel.LLM_INFERENCE:
-            if self.provider_binding is not None:
+            if self.provider_binding is not None or self.fallback_provider_binding is not None:
                 raise _invalid()
             if set(self.allowed_data_classes) - {DataClass.PUBLIC_STRUCTURAL}:
                 raise _invalid()
+
+    @property
+    def authorized_provider_bindings(self) -> tuple[ProviderBinding, ...]:
+        """Every destination this row authorizes, primary first; empty when disabled."""
+
+        if self.provider_binding is None:
+            return ()
+        if self.fallback_provider_binding is None:
+            return (self.provider_binding,)
+        return (self.provider_binding, self.fallback_provider_binding)
 
     def meet(self, other: ChannelPolicy) -> ChannelPolicy:
         """Intersect two channel rows (AND enablement, set meet, min ceilings)."""
@@ -717,6 +745,14 @@ class ChannelPolicy:
                 0,
                 0,
             )
+        # The fallback survives only when both scopes name the identical one; disagreement
+        # tightens to the primary alone rather than disabling a channel both scopes allow.
+        fallback = (
+            self.fallback_provider_binding
+            if self.fallback_provider_binding is not None
+            and self.fallback_provider_binding == other.fallback_provider_binding
+            else None
+        )
         # A lower rank is a *broader* ceiling (machine is widest, request narrowest), matching
         # ``_scope_rank`` in ``yoetz.application.privacy_policy``, where task -> machine is
         # classified as a widening. The meet must therefore keep the higher-ranked ceiling.
@@ -737,6 +773,7 @@ class ChannelPolicy:
             min(self.max_bytes, other.max_bytes),
             min(self.max_tokens, other.max_tokens),
             min(self.authorization_ttl_seconds, other.authorization_ttl_seconds),
+            fallback,
         )
 
 
@@ -1141,6 +1178,7 @@ PRIVACY_CHANGE_FIELDS: Final = {
             "data_classes",
             "purposes",
             "provider",
+            "fallback_provider",
             "scope_ceiling",
             "preview_required",
             "max_bytes",
@@ -1276,36 +1314,39 @@ _CHANGE_IMPACT: Final[dict[tuple[str, str], int]] = {
     ("global", "network_egress"): 0,
     ("channel", "enabled"): 1,
     ("channel", "provider"): 2,
-    ("local_model", "enabled"): 3,
-    ("local_model", "binding"): 4,
-    ("channel", "preview_required"): 5,
-    ("global", "provider_data_use_evidence"): 6,
-    ("channel", "data_classes"): 7,
-    ("channel", "categories"): 8,
-    ("channel", "purposes"): 9,
-    ("global", "effective_scope"): 10,
-    ("channel", "scope_ceiling"): 11,
-    ("channel", "authorization_ttl_seconds"): 12,
-    ("channel", "max_bytes"): 13,
-    ("channel", "max_tokens"): 14,
-    ("local_model", "data_classes"): 15,
-    ("local_model", "categories"): 16,
-    ("agent_context", "data_classes"): 17,
-    ("agent_context", "categories"): 18,
-    ("human_control", "data_classes"): 19,
-    ("human_control", "categories"): 20,
-    ("review", "include_exact_command_text"): 21,
-    ("review", "include_finding_prose"): 22,
-    ("review", "relevance"): 23,
-    ("review", "excerpt_kinds"): 24,
-    ("review", "sections"): 25,
-    ("review", "max_excerpt_bytes"): 26,
-    ("review", "max_total_excerpt_bytes"): 27,
-    ("review", "max_excerpts"): 28,
-    ("review", "max_change_observations"): 29,
-    ("review", "max_assessments"): 30,
-    ("review", "max_timeline_items"): 31,
-    ("review", "max_omissions"): 32,
+    # A second destination reads right after the first: it is the same question ("where does
+    # it go") asked once more, and it outranks everything about how much goes.
+    ("channel", "fallback_provider"): 3,
+    ("local_model", "enabled"): 4,
+    ("local_model", "binding"): 5,
+    ("channel", "preview_required"): 6,
+    ("global", "provider_data_use_evidence"): 7,
+    ("channel", "data_classes"): 8,
+    ("channel", "categories"): 9,
+    ("channel", "purposes"): 10,
+    ("global", "effective_scope"): 11,
+    ("channel", "scope_ceiling"): 12,
+    ("channel", "authorization_ttl_seconds"): 13,
+    ("channel", "max_bytes"): 14,
+    ("channel", "max_tokens"): 15,
+    ("local_model", "data_classes"): 16,
+    ("local_model", "categories"): 17,
+    ("agent_context", "data_classes"): 18,
+    ("agent_context", "categories"): 19,
+    ("human_control", "data_classes"): 20,
+    ("human_control", "categories"): 21,
+    ("review", "include_exact_command_text"): 22,
+    ("review", "include_finding_prose"): 23,
+    ("review", "relevance"): 24,
+    ("review", "excerpt_kinds"): 25,
+    ("review", "sections"): 26,
+    ("review", "max_excerpt_bytes"): 27,
+    ("review", "max_total_excerpt_bytes"): 28,
+    ("review", "max_excerpts"): 29,
+    ("review", "max_change_observations"): 30,
+    ("review", "max_assessments"): 31,
+    ("review", "max_timeline_items"): 32,
+    ("review", "max_omissions"): 33,
 }
 
 

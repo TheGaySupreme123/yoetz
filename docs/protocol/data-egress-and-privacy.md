@@ -54,8 +54,10 @@ they are not a bundled consent switch for telemetry, diagnostics, updates, or ca
 - **`confirm_every_request`** — requires an exact durable preview of the already
   minimized/redacted/scanned outbound case and a local-human decision for every external request.
 - **`minimal_external`** — automatically permits only the smallest context its policy allows.
-- **`trusted_provider`** — permits explicitly listed categories only for one bound provider,
-  endpoint profile, workspace/task scope, and purpose; it never means unrestricted access.
+- **`trusted_provider`** — permits explicitly listed categories only for one bound provider plus,
+  when declared, exactly one fallback provider (each an exact binding approved in the same
+  ceremony), endpoint profile, workspace/task scope, and purpose; it never means unrestricted
+  access.
 
 External profiles bind an exact five-field `ProviderBinding`: `provider_id`, `model_id`,
 `endpoint_profile_id`, `endpoint_profile_version`, and `transport`. An unknown profile, unbound
@@ -63,11 +65,17 @@ endpoint, scope mismatch, expired authorization, or policy version mismatch deni
 provider adapter is even constructed. A missing or mismatched exact repository grant additionally
 denies before credential-handle minting, authorization, or dispatch.
 
-The external binding also selects one mutually exclusive credential authority. HTTP profiles use
+The external binding also selects one credential authority. HTTP profiles use
 `yoetz_vault_api_credential`. `codex-chatgpt-subscription@1` uses
 `external_runtime_oauth`: an exact Codex app-server owns ChatGPT OAuth and receives a secret-free
 attempt authority. It has no API-key, OAuth-token, generic-endpoint, proxy, or ambient-home
 fallback. Its content-free account/model readiness checks do not grant privacy authority.
+The two authorities may be paired as one primary plus exactly one fallback (issue #582): the
+`llm_inference` row then carries `fallback_provider_binding`, a second exact external
+`ProviderBinding` that must differ from the primary, approved in the same ceremony as a
+widening of exactly that destination. Egress admits a candidate only when its binding is exactly
+the primary or that fallback, and each fallback attempt is its own authorization, dispatch, and
+receipt.
 
 `credential-probe` is a distinct `llm_inference` purpose, not an implication of enabling semantic
 review. During provider-credential setup, the local human separately decides whether one fixed,

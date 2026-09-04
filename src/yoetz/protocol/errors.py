@@ -135,6 +135,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "invalid_sampling_params",
     "invalid_semantic_dispatch_kind",
     "invalid_semantic_failure_class",
+    "invalid_semantic_fallback_origin",
     "invalid_semantic_outcome_type",
     "invalid_semantic_provenance",
     "invalid_semantic_status_reason_pair",
@@ -219,7 +220,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 166
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 167
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)

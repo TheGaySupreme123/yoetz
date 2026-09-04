@@ -311,6 +311,12 @@ _INVENTORY_ENTRIES: Final[tuple[tuple[str, str, str, bool], ...]] = (
         True,
     ),
     (
+        "schemas/config/yoetz-config-1.2.0.schema.json",
+        "json_schema",
+        "application/schema+json",
+        True,
+    ),
+    (
         "schemas/consent/catalog-2.0.0.schema.json",
         "json_schema",
         "application/schema+json",

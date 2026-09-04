@@ -3359,6 +3359,12 @@ _SEMANTIC_PROVENANCE_LEAVES: Final = (
     "endpoint_profile_id",
     "endpoint_profile_version",
     "failure_class",
+    "fallback_from/attempted_count",
+    "fallback_from/endpoint_profile_id",
+    "fallback_from/endpoint_profile_version",
+    "fallback_from/model",
+    "fallback_from/provider",
+    "fallback_from/reason",
     "latency_ms",
     "local_disclosure_reservation_id",
     "model",
@@ -4166,7 +4172,7 @@ def _build_result_leaf_rules() -> tuple[_ResultLeafRule, ...]:
             and type(rule.classification) is not DataCategory
         ):
             raise RuntimeError("invalid_result_leaf_classification")
-    if len(result) != 899:
+    if len(result) != 923:
         raise RuntimeError("incomplete_result_leaf_registry")
     return result
 

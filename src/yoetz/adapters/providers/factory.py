@@ -166,11 +166,21 @@ def external_factory_builders_from_config(
     external_runtime: ExternalRuntimeProfileConfig | None = None,
     *,
     clock: ClockPort,
+    paired: bool = False,
 ) -> dict[ProviderBinding, object]:
-    """Return the one runtime factory builder for a configured provider, or nothing."""
+    """Return the runtime factory builders for the configured provider binding(s).
+
+    One binding yields one builder. Both authorities together are ambiguous unless the config
+    declares them as a primary/fallback pairing (``paired``, issue #582), in which case each
+    keeps its own builder keyed by its exact binding; the policy row decides which are admitted.
+    """
 
     if provider is not None and external_runtime is not None:
-        raise ValueError("provider_authority_ambiguous")
+        if not paired:
+            raise ValueError("provider_authority_ambiguous")
+        builders = external_factory_builders_from_config(provider, clock=clock)
+        builders.update(codex_factory_builders_from_config(external_runtime, clock=clock))
+        return builders
     if external_runtime is not None:
         return codex_factory_builders_from_config(external_runtime, clock=clock)
     if provider is None:

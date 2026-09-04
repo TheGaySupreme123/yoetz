@@ -863,6 +863,59 @@ def _semantic_provenance_v1_1_schema(entry: _RegistryEntry) -> dict[str, JsonVal
     properties["runtime_evidence"] = {
         "$ref": (f"{SCHEMA_NAMESPACE}findings/runtime-attempt-evidence-1.0.0.schema.json")
     }
+    # Issue #582: present exactly when the declared fallback endpoint served this attempt. The
+    # top-level provider/model/endpoint then name the fallback; this names the primary and the
+    # closed reason it could not serve (a fallback-licensing class, or pre-dispatch
+    # credential_unavailable). Optional and additive: single-endpoint provenance is unchanged.
+    properties["fallback_from"] = {
+        "additionalProperties": False,
+        "properties": {
+            # Decimal string like every other integer leaf on the wire (uint53_decimal shape).
+            "attempted_count": {"maxLength": 1, "pattern": "^[0-8]$", "type": "string"},
+            "endpoint_profile_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]*$",
+                "type": "string",
+            },
+            "endpoint_profile_version": {
+                "maxLength": 128,
+                "minLength": 5,
+                "type": "string",
+            },
+            "model": {
+                "maxLength": 256,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+                "type": "string",
+            },
+            "provider": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z0-9][a-z0-9._-]*$",
+                "type": "string",
+            },
+            "reason": {
+                "enum": [
+                    "credential_unavailable",
+                    "provider_quota_exhausted",
+                    "provider_rate_limited",
+                    "provider_timeout",
+                    "transport_unavailable",
+                ],
+                "type": "string",
+            },
+        },
+        "required": [
+            "attempted_count",
+            "endpoint_profile_id",
+            "endpoint_profile_version",
+            "model",
+            "provider",
+            "reason",
+        ],
+        "type": "object",
+    }
     rules = cast(list[JsonValue], document["allOf"])
     rules[0] = {
         "oneOf": [
@@ -1940,6 +1993,14 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
         "config/yoetz-config-1.1.0.schema.json",
         "yoetz-config",
         "1.1.0",
+        "config",
+        "configuration",
+        lambda: __import__("yoetz.config.models", fromlist=["YoetzConfig"]).YoetzConfig,
+    ),
+    _RegistryEntry(
+        "config/yoetz-config-1.2.0.schema.json",
+        "yoetz-config",
+        "1.2.0",
         "config",
         "configuration",
         lambda: __import__("yoetz.config.models", fromlist=["YoetzConfig"]).YoetzConfig,
@@ -3247,6 +3308,7 @@ def build_schema_documents(
         assert entry.loader is not None  # narrowed by the pending-check above
         if entry.relative_path in {
             "config/yoetz-config-1.0.0.schema.json",
+            "config/yoetz-config-1.1.0.schema.json",
             "events/check-recorded-1.0.0.schema.json",
             "events/finding-recorded-1.0.0.schema.json",
             "findings/finding-1.0.0.schema.json",

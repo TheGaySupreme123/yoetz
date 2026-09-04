@@ -376,3 +376,8 @@ that the evaluator ran. A strict Claude route must produce `route_semantic_ceili
 child launch. Use the [subscription evaluator runbook](codex-subscription-evaluator.md) and record
 Claude host activation, semantic attempt/runtime evidence, privacy receipt, corrective influence,
 and workflow receipt as separate claims.
+
+Fallback endpoint pairing (issue #582) is host-independent: whether the evaluator or a paired
+API provider serves a given attempt is a service-side dispatch decision recorded in provenance
+(`fallback_from`), with no Claude-Code-specific behaviour, plugin, or route input — the route
+ceiling applies to dispatch authority regardless of which endpoint serves.

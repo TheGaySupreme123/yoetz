@@ -48,6 +48,7 @@ from yoetz.protocol.models import (
 )
 
 __all__ = [
+    "FALLBACK_ORIGIN_REASONS",
     "FINDING_KIND_TRAITS",
     "CandidateFinding",
     "CheckVerdict",
@@ -63,6 +64,7 @@ __all__ = [
     "SamplingParams",
     "SemanticDispatchKind",
     "SemanticFailureClass",
+    "SemanticFallbackOrigin",
     "SemanticFinding",
     "SemanticProvenance",
     "TokenUsage",
@@ -70,6 +72,7 @@ __all__ = [
     "finding_from_json",
     "finding_to_json",
     "rank_key",
+    "semantic_fallback_origin_to_json",
     "semantic_provenance_from_json",
     "semantic_provenance_to_json",
 ]
@@ -443,6 +446,52 @@ class CostFields:
             raise ProtocolValueError("invalid_cost_fields")
 
 
+# The only reasons a primary can be given up for (issue #582): the closed fallback-licensing set
+# plus the one pre-dispatch reason, `credential_unavailable`. Pinned by the provenance schema.
+FALLBACK_ORIGIN_REASONS: Final[frozenset[SemanticReason]] = frozenset(
+    {
+        SemanticReason.CREDENTIAL_UNAVAILABLE,
+        SemanticReason.PROVIDER_QUOTA_EXHAUSTED,
+        SemanticReason.PROVIDER_RATE_LIMITED,
+        SemanticReason.PROVIDER_TIMEOUT,
+        SemanticReason.TRANSPORT_UNAVAILABLE,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticFallbackOrigin:
+    """The primary endpoint a fallback attempt stood in for, and why (issue #582).
+
+    Structural identity only. ``attempted_count`` is the primary's physical attempts before the
+    fallback engaged (zero when the primary could not be resolved at all); ``reason`` is the
+    primary's last closed failure reason, always a fallback-licensing or pre-dispatch one.
+    """
+
+    provider: str
+    endpoint_profile_id: str
+    endpoint_profile_version: str
+    model: str
+    attempted_count: int
+    reason: SemanticReason
+
+    def __post_init__(self) -> None:
+        if not _valid_pattern(self.provider, _IDENTITY_PATTERN, 128):
+            raise ProtocolValueError("invalid_semantic_fallback_origin")
+        if not _valid_pattern(self.endpoint_profile_id, _IDENTITY_PATTERN, 128):
+            raise ProtocolValueError("invalid_semantic_fallback_origin")
+        if not _valid_pattern(
+            self.endpoint_profile_version, _SEMANTIC_VERSION_PATTERN, 128, minimum=5
+        ):
+            raise ProtocolValueError("invalid_semantic_fallback_origin")
+        if not _valid_pattern(self.model, _MODEL_IDENTITY_PATTERN, 256):
+            raise ProtocolValueError("invalid_semantic_fallback_origin")
+        if type(self.attempted_count) is not int or not 0 <= self.attempted_count <= 8:
+            raise ProtocolValueError("invalid_semantic_fallback_origin")
+        if type(self.reason) is not SemanticReason or self.reason not in FALLBACK_ORIGIN_REASONS:
+            raise ProtocolValueError("invalid_semantic_fallback_origin")
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticProvenance:
     provider: str
@@ -469,8 +518,16 @@ class SemanticProvenance:
     local_disclosure_reservation_id: str | None = None
     request_commitment: str | None = None
     runtime_evidence: RuntimeAttemptEvidence | None = None
+    # Present exactly when this attempt was served by the declared fallback endpoint; the
+    # provider/model/endpoint fields above then name the fallback and this names the primary.
+    fallback_from: SemanticFallbackOrigin | None = None
 
     def __post_init__(self) -> None:
+        if (
+            self.fallback_from is not None
+            and type(self.fallback_from) is not SemanticFallbackOrigin
+        ):
+            raise ProtocolValueError("invalid_semantic_fallback_origin")
         if not _valid_pattern(self.provider, _IDENTITY_PATTERN, 128):
             raise ProtocolValueError("invalid_semantic_provenance")
         if not _valid_pattern(self.endpoint_profile_id, _IDENTITY_PATTERN, 128):
@@ -911,8 +968,59 @@ _PROVENANCE_OPTIONAL_KEYS: Final = frozenset(
         "local_disclosure_reservation_id",
         "request_commitment",
         "runtime_evidence",
+        "fallback_from",
     }
 )
+_FALLBACK_ORIGIN_KEYS: Final = frozenset(
+    {
+        "provider",
+        "endpoint_profile_id",
+        "endpoint_profile_version",
+        "model",
+        "attempted_count",
+        "reason",
+    }
+)
+
+
+def _fallback_origin_from_json(value: JsonValue | None) -> SemanticFallbackOrigin | None:
+    if value is None:
+        return None
+    source = _require_json_object(
+        value,
+        required=_FALLBACK_ORIGIN_KEYS,
+        allowed=_FALLBACK_ORIGIN_KEYS,
+        reason="semantic_provenance_json_shape_invalid",
+    )
+    try:
+        reason = SemanticReason(source["reason"])
+    except (TypeError, ValueError) as exc:
+        raise ProtocolValueError("invalid_semantic_fallback_origin") from exc
+    return SemanticFallbackOrigin(
+        provider=cast(str, source["provider"]),
+        endpoint_profile_id=cast(str, source["endpoint_profile_id"]),
+        endpoint_profile_version=cast(str, source["endpoint_profile_version"]),
+        model=cast(str, source["model"]),
+        attempted_count=_parse_uint53_wire(
+            source["attempted_count"], "invalid_semantic_fallback_origin"
+        ),
+        reason=reason,
+    )
+
+
+def semantic_fallback_origin_to_json(value: SemanticFallbackOrigin) -> JsonObject:
+    if type(value) is not SemanticFallbackOrigin:
+        raise ProtocolValueError("invalid_semantic_fallback_origin")
+    return JsonObject(
+        {
+            "provider": value.provider,
+            "endpoint_profile_id": value.endpoint_profile_id,
+            "endpoint_profile_version": value.endpoint_profile_version,
+            "model": value.model,
+            "attempted_count": render_wire_sequence(value.attempted_count),
+            "reason": value.reason.value,
+        }
+    )
 
 
 def semantic_provenance_from_json(value: JsonValue) -> SemanticProvenance:
@@ -984,6 +1092,7 @@ def semantic_provenance_from_json(value: JsonValue) -> SemanticProvenance:
         runtime_evidence=_runtime_attempt_evidence_from_json(
             _optional_field(source, "runtime_evidence")
         ),
+        fallback_from=_fallback_origin_from_json(_optional_field(source, "fallback_from")),
     )
 
 
@@ -1083,6 +1192,8 @@ def semantic_provenance_to_json(value: SemanticProvenance) -> JsonObject:
         if runtime.failure_stage is not None:
             runtime_json["failure_stage"] = runtime.failure_stage
         result["runtime_evidence"] = JsonObject(runtime_json)
+    if value.fallback_from is not None:
+        result["fallback_from"] = semantic_fallback_origin_to_json(value.fallback_from)
     return JsonObject(result)
 
 

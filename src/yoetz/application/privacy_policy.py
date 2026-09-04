@@ -728,6 +728,16 @@ _CHANNEL_DIMENSIONS: Final[
         ),
     ),
     (
+        # One more authorized destination is a widening of exactly that destination (#582);
+        # dropping or keeping it is not.
+        "fallback_provider",
+        lambda channel: _binding_labels(channel.fallback_provider_binding),
+        lambda new, old: (
+            new.fallback_provider_binding is not None
+            and new.fallback_provider_binding != old.fallback_provider_binding
+        ),
+    ),
+    (
         "scope_ceiling",
         lambda channel: PrivacyPolicyChangeValue.of_labels((channel.scope_ceiling.value,)),
         lambda new, old: (

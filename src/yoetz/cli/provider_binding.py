@@ -23,7 +23,10 @@ from yoetz.config.write import (
     openrouter_provider,
     owner_declared_openai_provider,
     provider_preset,
+    semantic_fallback_primary_config,
+    semantic_fallback_removed_config,
     vercel_ai_gateway_provider,
+    write_config_toml,
     write_provider_binding,
 )
 
@@ -33,7 +36,26 @@ __all__ = [
     "apply_provider_endpoint_choice",
     "prompt_provider_endpoint_binding",
     "prompt_provider_model",
+    "remove_semantic_fallback",
+    "set_semantic_fallback_primary",
 ]
+
+
+def remove_semantic_fallback(*, path: Path | None = None) -> tuple[Path, YoetzConfig]:
+    """Drop the fallback endpoint and its selector; the primary keeps serving alone (#582)."""
+
+    updated = semantic_fallback_removed_config(_load_base(path))
+    return write_config_toml(updated, path=path), updated
+
+
+def set_semantic_fallback_primary(
+    primary: Literal["api_provider", "codex_subscription"], *, path: Path | None = None
+) -> tuple[Path, YoetzConfig]:
+    """Swap which bound endpoint serves first; both stay bound and approved (#582)."""
+
+    updated = semantic_fallback_primary_config(_load_base(path), primary)
+    return write_config_toml(updated, path=path), updated
+
 
 ProviderEndpointChoice = Literal[
     "official_openai",
@@ -71,8 +93,13 @@ def apply_provider_endpoint_choice(
     model: str,
     https_origin: str | None = None,
     path: Path | None = None,
+    as_fallback: bool = False,
 ) -> tuple[Path, ProviderProfileConfig]:
-    """Validate and write the selected nonsecret provider binding."""
+    """Validate and write the selected nonsecret provider binding.
+
+    ``as_fallback`` declares this API provider as the fallback behind the already-bound Codex
+    subscription (issue #582) instead of replacing it.
+    """
 
     if not model:
         raise ConfigError("config_value_invalid")
@@ -94,7 +121,9 @@ def apply_provider_endpoint_choice(
         if https_origin is None:
             raise ConfigError("https_origin_invalid")
         provider = owner_declared_openai_provider(model=model, https_origin=https_origin)
-    written = write_provider_binding(provider, path=path, base=_load_base(path))
+    written = write_provider_binding(
+        provider, path=path, base=_load_base(path), as_fallback=as_fallback
+    )
     return written, provider
 
 

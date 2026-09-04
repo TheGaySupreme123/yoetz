@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Final, Protocol, cast
+from typing import Final, Literal, Protocol, cast
 
 import apsw
 
@@ -75,6 +75,8 @@ from yoetz.application.privacy_policy import PrivacyPolicyApplication
 from yoetz.application.recommendations import evaluate_recommendation_context, refresh_pending
 from yoetz.application.semantic_attempts import (
     SemanticAttemptAccounting,
+    SemanticEndpointPlan,
+    SemanticFallbackPlan,
     run_durable_semantic_attempts,
 )
 from yoetz.application.semantic_case import (
@@ -88,7 +90,13 @@ from yoetz.application.service import (
     ServiceReadyContext,
     VerificationPolicy,
 )
-from yoetz.config.models import ExternalRuntimeProfileConfig, YoetzConfig
+from yoetz.config.models import (
+    ExternalRuntimeProfileConfig,
+    ProviderProfileConfig,
+    YoetzConfig,
+    fallback_external_endpoint,
+    primary_external_endpoint,
+)
 from yoetz.config.paths import ensure_owner_only_dir, verify_private_local_bundle
 from yoetz.config.privacy import safe_privacy_bootstrap, seed_policy_if_absent
 from yoetz.domain.events import RuntimeProfile
@@ -96,6 +104,7 @@ from yoetz.domain.findings import (
     Finding,
     SemanticDispatchKind,
     SemanticFailureClass,
+    SemanticFallbackOrigin,
     SemanticProvenance,
     semantic_provenance_to_json,
 )
@@ -1298,6 +1307,7 @@ async def build_privacy_coordinator(
         None if config is None else config.provider,
         None if config is None else config.external_runtime,
         clock=clock,
+        paired=config is not None and config.semantic_fallback is not None,
     )
 
     async def repository_authority_is_current(
@@ -1926,8 +1936,27 @@ def _privacy_gated_semantic_evaluator(
     *,
     timeout_seconds: int = 60,
     max_retries: int = 2,
+    resolve_fallback: Callable[[], Awaitable[ProviderBinding | None]] | None = None,
+    fallback_timeout_seconds: int = 60,
+    fallback_max_retries: int = 2,
+    configured_primary: ProviderBinding | None = None,
 ):
     total_timeout = float(max(1, min(int(timeout_seconds), 300)))
+    # The fallback endpoint owns its own deadline share (#582): a primary that spends its whole
+    # timeout failing must not leave the fallback with nothing to run in.
+    fallback_timeout = float(max(1, min(int(fallback_timeout_seconds), 300)))
+
+    def _endpoint_plan(
+        role: Literal["primary", "fallback"], binding: ProviderBinding, retries: int
+    ) -> SemanticEndpointPlan:
+        return SemanticEndpointPlan(
+            role,
+            binding.provider_id,
+            binding.model_id,
+            binding.endpoint_profile_id,
+            binding.endpoint_profile_version,
+            int(retries),
+        )
 
     async def _evaluate(
         frozen: FrozenCase,
@@ -2034,7 +2063,21 @@ def _privacy_gated_semantic_evaluator(
                 return FinalSemanticEvaluation(
                     SemanticStatus.FAILED, SemanticReason.COORDINATOR_FAILURE
                 )
-            if provider is None:
+            fallback_binding: ProviderBinding | None = None
+            if resolve_fallback is not None:
+                try:
+                    fallback_binding = await resolve_fallback()
+                except Exception as exc:
+                    # An unresolvable fallback must not take the primary down with it: the
+                    # single-endpoint path continues exactly as before.
+                    record_unexpected_exception_without_raising(
+                        exc,
+                        component="semantic_composition",
+                        operation="semantic_fallback_resolve_failed",
+                        request_id=frozen.lease.operation_id,
+                    )
+                    fallback_binding = None
+            if provider is None and fallback_binding is None:
                 record_bounded_event_without_raising(
                     component="semantic_composition",
                     operation="semantic_not_dispatched_credential_unavailable",
@@ -2044,6 +2087,25 @@ def _privacy_gated_semantic_evaluator(
                 return FinalSemanticEvaluation(
                     SemanticStatus.UNAVAILABLE, SemanticReason.CREDENTIAL_UNAVAILABLE
                 )
+            fallback_plan: SemanticFallbackPlan | None = None
+            if fallback_binding is not None and configured_primary is not None:
+                # A primary that cannot be resolved at all is a pre-dispatch failure the
+                # fallback is licensed to cover; it is named, with zero attempts, in provenance.
+                fallback_plan = SemanticFallbackPlan(
+                    _endpoint_plan("primary", configured_primary, max_retries),
+                    _endpoint_plan("fallback", fallback_binding, fallback_max_retries),
+                    None if provider is not None else SemanticReason.CREDENTIAL_UNAVAILABLE,
+                )
+                if provider is None:
+                    record_bounded_event_without_raising(
+                        component="semantic_composition",
+                        operation="semantic_primary_unresolved_fallback_engaged",
+                        reason=SemanticReason.CREDENTIAL_UNAVAILABLE.value,
+                        request_id=frozen.lease.operation_id,
+                    )
+            # The binding every single-endpoint path below builds against.
+            provider = provider if provider is not None else fallback_binding
+            assert provider is not None  # one of the two resolved above
             typed_findings = tuple(item for item in findings if type(item) is Finding)
             # Live effective policy owns review selection; never mint a synthetic policy identity.
             policy_app = getattr(privacy, "policy_application", None)
@@ -2091,10 +2153,14 @@ def _privacy_gated_semantic_evaluator(
                 SEMANTIC_CASE_CONTENT_OVER_ITEM_LIMIT_GAP
                 in semantic_case.packet.coverage.known_gaps
             )
-            # Total semantic-operation deadline from configured timeout_seconds (not a hard-coded 60).
+            # Total semantic-operation deadline from configured timeout_seconds (not a hard-coded 60),
+            # plus the fallback's own share when one is licensed to serve this job.
+            operation_timeout = total_timeout + (
+                fallback_timeout if fallback_plan is not None else 0.0
+            )
             deadline = Deadline(
-                clock.now_utc() + timedelta(seconds=total_timeout),
-                clock.monotonic_seconds() + total_timeout,
+                clock.now_utc() + timedelta(seconds=operation_timeout),
+                clock.monotonic_seconds() + operation_timeout,
             )
             # Without a task runtime there is no durable ledger/object store: perform one
             # physical attempt only (tests and pre-dispatch probes). Production check always
@@ -2155,45 +2221,89 @@ def _privacy_gated_semantic_evaluator(
                 case_ref,
             )
 
-            async def _dispatch(
-                handle: object, attempt_deadline: Deadline
-            ) -> FinalSemanticEvaluation:
-                from yoetz.ports.ledger import SemanticAttemptHandle as _Handle
+            def _dispatch_for(
+                binding: ProviderBinding,
+            ) -> Callable[[object, Deadline], Awaitable[FinalSemanticEvaluation]]:
+                async def _dispatch(
+                    handle: object, attempt_deadline: Deadline
+                ) -> FinalSemanticEvaluation:
+                    from yoetz.ports.ledger import SemanticAttemptHandle as _Handle
 
-                assert type(handle) is _Handle
-                # Rebuilt per attempt for a fresh request identity so authorization cannot be
-                # reused. The envelope itself is a pure function of the case, so the bytes are
-                # identical to the ones validated above; only the request id differs.
-                candidate = semantic_case_to_candidate_context(
-                    semantic_case,
-                    request_id=handle.provider_request_id,
-                    scope=scope,
-                    provider_binding=provider,
-                )
-                wait = await runtime.ledger.load_disclosure_wait(
-                    handle.writer_id, handle.operation_id
-                )
-                if (
-                    wait is not None
-                    and wait.job_id == handle.job_id
-                    and wait.attempt_id == handle.attempt_id
-                    and wait.state == "awaiting"
-                ):
-                    # Exact replay after a trusted local decision resumes the already-prepared
-                    # proposal. Starting the semantic pipeline again would mint a replacement
-                    # proposal and could never observe the decision bound to this attempt.
-                    result = await privacy.resume(
-                        handle.provider_request_id,
-                        semantic_case.case_digest,
-                        attempt_deadline,
+                    assert type(handle) is _Handle
+                    # Rebuilt per attempt for a fresh request identity so authorization cannot
+                    # be reused. The envelope itself is a pure function of the case, so the
+                    # bytes are identical to the ones validated above; only the request id — and,
+                    # for a fallback attempt, the exact destination — differs.
+                    candidate = semantic_case_to_candidate_context(
+                        semantic_case,
+                        request_id=handle.provider_request_id,
+                        scope=scope,
+                        provider_binding=binding,
                     )
-                else:
-                    result = await privacy.evaluate_semantic(candidate, attempt_deadline)
-                return _map_egress_to_final(
-                    result,
-                    ids,
-                    attempt_id=handle.attempt_id,
-                    operation_request_id=frozen.lease.operation_id,
+                    wait = await runtime.ledger.load_disclosure_wait(
+                        handle.writer_id, handle.operation_id
+                    )
+                    if (
+                        wait is not None
+                        and wait.job_id == handle.job_id
+                        and wait.attempt_id == handle.attempt_id
+                        and wait.state == "awaiting"
+                    ):
+                        # Exact replay after a trusted local decision resumes the
+                        # already-prepared proposal. Starting the semantic pipeline again would
+                        # mint a replacement proposal and could never observe the decision
+                        # bound to this attempt.
+                        result = await privacy.resume(
+                            handle.provider_request_id,
+                            semantic_case.case_digest,
+                            attempt_deadline,
+                        )
+                    else:
+                        result = await privacy.evaluate_semantic(candidate, attempt_deadline)
+                    return _map_egress_to_final(
+                        result,
+                        ids,
+                        attempt_id=handle.attempt_id,
+                        operation_request_id=frozen.lease.operation_id,
+                    )
+
+                return _dispatch
+
+            def _with_fallback_origin(
+                provenance: SemanticProvenance | None, accounting: SemanticAttemptAccounting
+            ) -> SemanticProvenance | None:
+                """Name the primary on provenance the fallback produced (#582)."""
+
+                if provenance is None or fallback_plan is None:
+                    return provenance
+                primary_slice = accounting.endpoint("primary")
+                fallback_slice = accounting.endpoint("fallback")
+                if (
+                    primary_slice is None
+                    or fallback_slice is None
+                    or fallback_slice.attempted_count == 0
+                    or provenance.provider != fallback_plan.fallback.provider_id
+                    or provenance.endpoint_profile_id != fallback_plan.fallback.endpoint_profile_id
+                    or provenance.model != fallback_plan.fallback.model_id
+                ):
+                    return provenance
+                reason_token = (
+                    primary_slice.predispatch_reason
+                    if primary_slice.predispatch_reason is not None
+                    else primary_slice.last_terminal_reason
+                )
+                if reason_token is None:
+                    return provenance
+                return replace(
+                    provenance,
+                    fallback_from=SemanticFallbackOrigin(
+                        provider=fallback_plan.primary.provider_id,
+                        endpoint_profile_id=fallback_plan.primary.endpoint_profile_id,
+                        endpoint_profile_version=fallback_plan.primary.endpoint_profile_version,
+                        model=fallback_plan.primary.model_id,
+                        attempted_count=primary_slice.attempted_count,
+                        reason=SemanticReason(reason_token),
+                    ),
                 )
 
             async def _publish_success(handle: object, evaluation: object) -> ObjectRef:
@@ -2237,6 +2347,7 @@ def _privacy_gated_semantic_evaluator(
                         provenance = evaluation.provenance
                     if status is SemanticStatus.AWAITING_HUMAN:
                         continuation = evaluation.continuation
+                provenance = _with_fallback_origin(provenance, accounting)
                 # Terminal recovery of a succeeded job without a recoverable response object
                 # must not invent a judgment; surface an honest coordinator failure instead.
                 if status is SemanticStatus.SUCCEEDED and (judgment is None or provenance is None):
@@ -2269,11 +2380,15 @@ def _privacy_gated_semantic_evaluator(
                     deadline=deadline,
                     max_retries=max_retries,
                     now_monotonic=clock.monotonic_seconds,
-                    dispatch=_dispatch,
+                    dispatch=_dispatch_for(provider),
                     publish_success_response=_publish_success,
                     build_final=_build_final,
                     recover_selected=_recover_selected,
                     on_lease_renewed=_on_lease_renewed,
+                    fallback=fallback_plan,
+                    dispatch_fallback=(
+                        None if fallback_binding is None else _dispatch_for(fallback_binding)
+                    ),
                 ),
             )
         except PublicOperationError:
@@ -2375,46 +2490,77 @@ async def provide_service_ready_context(
     provider_endpoint_bound = config.provider is not None or config.external_runtime is not None
     # Preserve the composition-time snapshot for readiness/status, but resolve the configured
     # binding again for every check so a later registry activation can take effect immediately.
-    candidate_binding: ProviderBinding | None = None
-    if config.provider is not None:
-        candidate_binding = provider_binding_from_config(config.provider)
-    elif config.external_runtime is not None:
-        candidate_binding = codex_binding_from_config(config.external_runtime)
+    # With a declared pairing (#582) the primary keeps every existing name below and the
+    # fallback gets its own, so a single-endpoint install reads exactly as before.
+    primary_config = primary_external_endpoint(config)
+    fallback_config = fallback_external_endpoint(config)
+
+    def _binding_of(
+        endpoint: ExternalRuntimeProfileConfig | ProviderProfileConfig | None,
+    ) -> ProviderBinding | None:
+        if endpoint is None:
+            return None
+        if type(endpoint) is ExternalRuntimeProfileConfig:
+            return codex_binding_from_config(endpoint)
+        return provider_binding_from_config(cast(ProviderProfileConfig, endpoint))
+
+    candidate_binding = _binding_of(primary_config)
+    fallback_candidate_binding = _binding_of(fallback_config)
 
     def binding_not_connected(_binding: ProviderBinding) -> bool:
         return False
 
-    async def configured_provider_credential_present() -> bool:
-        if candidate_binding is None:
+    async def _credential_present(
+        endpoint: ExternalRuntimeProfileConfig | ProviderProfileConfig | None,
+        binding: ProviderBinding | None,
+    ) -> bool:
+        if endpoint is None or binding is None:
             return False
-        if config.external_runtime is not None:
-            return subscription_runtime_structurally_ready(config.external_runtime)
+        if type(endpoint) is ExternalRuntimeProfileConfig:
+            return subscription_runtime_structurally_ready(endpoint)
         credential_binding = provider_credential_profile_binding(
-            candidate_binding.provider_id,
-            candidate_binding.model_id,
-            candidate_binding.endpoint_profile_id,
-            candidate_binding.endpoint_profile_version,
+            binding.provider_id,
+            binding.model_id,
+            binding.endpoint_profile_id,
+            binding.endpoint_profile_version,
         )
         return await vault.has_provider_credential(credential_binding)
 
-    async def resolve_provider_binding() -> ProviderBinding | None:
-        if candidate_binding is None:
+    async def configured_provider_credential_present() -> bool:
+        return await _credential_present(primary_config, candidate_binding)
+
+    async def configured_fallback_credential_present() -> bool:
+        return await _credential_present(fallback_config, fallback_candidate_binding)
+
+    async def _resolve_binding(
+        binding: ProviderBinding | None, credential_present: Callable[[], Awaitable[bool]]
+    ) -> ProviderBinding | None:
+        if binding is None:
             return None
         binding_connected = cast(
             Callable[[ProviderBinding], bool],
             getattr(gateway, "has_connected_provider_binding", binding_not_connected),
         )
-        if binding_connected(candidate_binding) is not True:
+        if binding_connected(binding) is not True:
             return None
-        if not await configured_provider_credential_present():
+        if not await credential_present():
             return None
-        return candidate_binding
+        return binding
+
+    async def resolve_provider_binding() -> ProviderBinding | None:
+        return await _resolve_binding(candidate_binding, configured_provider_credential_present)
+
+    async def resolve_fallback_binding() -> ProviderBinding | None:
+        return await _resolve_binding(
+            fallback_candidate_binding, configured_fallback_credential_present
+        )
 
     # Repository authority is session-specific, so ready-time composition cannot activate a
     # provider binding or claim semantic readiness. Exact configured-credential presence is a
     # separate structural vault fact: it neither decrypts the record nor grants dispatch authority.
     provider_binding: ProviderBinding | None = None
     provider_credential_connected = await configured_provider_credential_present()
+    fallback_credential_connected = await configured_fallback_credential_present()
     semantic_ready = False
 
     async def observation_composition_fact() -> ObservationCompositionFact | None:
@@ -2530,7 +2676,7 @@ async def provide_service_ready_context(
     elif not provider_endpoint_bound:
         semantic_evaluator = _semantic_provider_unbound
     else:
-        provider_cfg = config.provider or config.external_runtime
+        provider_cfg = primary_config
         semantic_evaluator = _privacy_gated_semantic_evaluator(
             cast(PrivacyCoordinator, privacy),
             clock,
@@ -2540,6 +2686,12 @@ async def provide_service_ready_context(
             ids,
             timeout_seconds=60 if provider_cfg is None else int(provider_cfg.timeout_seconds),
             max_retries=2 if provider_cfg is None else int(provider_cfg.max_retries),
+            resolve_fallback=None if fallback_config is None else resolve_fallback_binding,
+            fallback_timeout_seconds=(
+                60 if fallback_config is None else int(fallback_config.timeout_seconds)
+            ),
+            fallback_max_retries=2 if fallback_config is None else int(fallback_config.max_retries),
+            configured_primary=candidate_binding,
         )
 
     async def _semantic_review(
@@ -2748,6 +2900,7 @@ async def provide_service_ready_context(
         rediscover_pending_verification=observation_coordinator.rediscover_pending_verification,
         connected_provider_ids=connected_provider_ids,
         provider_credential_connected=provider_credential_connected,
+        fallback_credential_connected=fallback_credential_connected,
         semantic_ready=semantic_ready,
         observation_sweep=sweep_observation,
         observation_sweep_close=close_observation_maintenance,

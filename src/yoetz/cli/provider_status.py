@@ -18,7 +18,13 @@ from pathlib import Path
 from typing import Final, Literal, cast
 
 from yoetz.config.load import load_config
-from yoetz.config.models import ConfigError
+from yoetz.config.models import (
+    ConfigError,
+    ExternalRuntimeProfileConfig,
+    ProviderProfileConfig,
+    fallback_external_endpoint,
+    primary_external_endpoint,
+)
 from yoetz.config.paths import PathSafetyError, bundle_root
 from yoetz.domain.values import JsonObject
 from yoetz.ports.control import ControlClientKind, ControlError, WorkspaceLocator
@@ -147,6 +153,45 @@ def credential_human_display(value: object) -> str:
     if value is False:
         return "not stored"
     return "unknown"
+
+
+def _endpoint_facts(
+    endpoint: ProviderProfileConfig | ExternalRuntimeProfileConfig | None,
+    *,
+    role: str,
+) -> dict[str, JsonValue] | None:
+    """Nonsecret identity of one bound endpoint, or ``None`` when that slot is unbound."""
+
+    if endpoint is None:
+        return None
+    if type(endpoint) is ExternalRuntimeProfileConfig:
+        return {
+            "role": role,
+            "provider_id": endpoint.provider_id,
+            "model": endpoint.model,
+            "endpoint_profile_id": endpoint.endpoint_profile_id,
+            "endpoint_profile_version": endpoint.endpoint_profile_version,
+            "credential_authority": endpoint.credential_authority,
+            "runtime_version": endpoint.runtime_version,
+            "capability_profile": endpoint.capability_profile,
+            "upstream_body_observability": "unavailable",
+        }
+    return {
+        "role": role,
+        "provider_id": endpoint.provider_id,
+        "model": endpoint.model,
+        "endpoint_profile_id": endpoint.endpoint_profile_id,
+        "endpoint_profile_version": endpoint.endpoint_profile_version,
+        "credential_authority": "yoetz_vault_api_credential",
+    }
+
+
+def _credential_command(
+    endpoint: ProviderProfileConfig | ExternalRuntimeProfileConfig | None,
+) -> str:
+    if type(endpoint) is ExternalRuntimeProfileConfig:
+        return "yoetz provider codex-subscription status"
+    return "yoetz provider credential set"
 
 
 def _channel_enabled(policy: Mapping[str, object], channel: str) -> bool | None:
@@ -487,31 +532,17 @@ async def provider_status_report(
     verification_semantic = config.verification.semantic
     semantic_enabled = verification_semantic != "disabled"
     endpoint_bound = config.provider is not None or config.external_runtime is not None
-    endpoint: dict[str, JsonValue] | None = None
-    if config.provider is not None:
-        endpoint = {
-            "provider_id": config.provider.provider_id,
-            "model": config.provider.model,
-            "endpoint_profile_id": config.provider.endpoint_profile_id,
-            "endpoint_profile_version": config.provider.endpoint_profile_version,
-            "credential_authority": "yoetz_vault_api_credential",
-        }
-    elif config.external_runtime is not None:
-        runtime = config.external_runtime
-        endpoint = {
-            "provider_id": runtime.provider_id,
-            "model": runtime.model,
-            "endpoint_profile_id": runtime.endpoint_profile_id,
-            "endpoint_profile_version": runtime.endpoint_profile_version,
-            "credential_authority": runtime.credential_authority,
-            "runtime_version": runtime.runtime_version,
-            "capability_profile": runtime.capability_profile,
-            "upstream_body_observability": "unavailable",
-        }
+    primary_config = primary_external_endpoint(config)
+    fallback_config = fallback_external_endpoint(config)
+    endpoint = _endpoint_facts(primary_config, role="primary")
+    # A declared pairing reports both endpoints; single-endpoint installs read as before with
+    # ``fallback_endpoint`` absent rather than null-shaped (#582).
+    fallback_endpoint = _endpoint_facts(fallback_config, role="fallback")
 
     service_state: str | None = None
     service_state_reason: str | None = None
     credential_connected: bool | None = None
+    fallback_credential_connected: bool | None = None
     llm_inference_enabled: bool | None = None
     policy_profile: str | None = None
     repository_grant_state: str | None = None
@@ -538,6 +569,8 @@ async def provider_status_report(
             service_state_reason = status.state_reason
             if status.state.value == "ready":
                 credential_connected = "external_provider" in status.capabilities
+                if fallback_config is not None:
+                    fallback_credential_connected = "fallback_provider" in status.capabilities
                 try:
                     effective = await client.privacy_get_setup(
                         JsonObject({"schema_version": "2.0.0"})
@@ -639,18 +672,27 @@ async def provider_status_report(
     if credential_connected is None:
         blockers.append({"condition": "provider_credential", "state": "unknown"})
     elif credential_connected is False:
-        credential_command = (
-            "yoetz provider codex-subscription status"
-            if config.external_runtime is not None
-            else "yoetz provider credential set"
-        )
         blockers.append(
             {
                 "condition": "provider_credential",
                 "state": "not_connected",
-                "next_command": credential_command,
+                "next_command": _credential_command(primary_config),
             }
         )
+    # The fallback's credential is a blocker of the fallback only: the primary dispatches
+    # without it, so it is reported under its own condition rather than folded into the
+    # primary's readiness.
+    if fallback_config is not None:
+        if fallback_credential_connected is None:
+            blockers.append({"condition": "fallback_provider_credential", "state": "unknown"})
+        elif fallback_credential_connected is False:
+            blockers.append(
+                {
+                    "condition": "fallback_provider_credential",
+                    "state": "not_connected",
+                    "next_command": _credential_command(fallback_config),
+                }
+            )
     if llm_inference_enabled is None:
         blockers.append({"condition": "llm_inference_channel", "state": "unknown"})
     elif llm_inference_enabled is False:
@@ -738,6 +780,14 @@ async def provider_status_report(
         "endpoint_bound": endpoint_bound,
         "endpoint": endpoint,
         "credential_connected": credential_connected,
+        **(
+            {}
+            if fallback_endpoint is None
+            else {
+                "fallback_endpoint": fallback_endpoint,
+                "fallback_credential_connected": fallback_credential_connected,
+            }
+        ),
         "llm_inference_enabled": llm_inference_enabled,
         "privacy_profile": policy_profile,
         "repository_grant_state": repository_grant_state,
