@@ -749,6 +749,10 @@ def _emit_registration_preview(
     typer.echo("  MCP server name: yoetz")
     serve_command = getattr(mcp_preview, "serve_command", ())
     typer.echo(f"  Command: {' '.join(serve_command)}")
+    isolated_root = getattr(mcp_preview, "isolated_root", None)
+    typer.echo(
+        "  MCP isolation root: " + (str(isolated_root) if isolated_root is not None else "ambient")
+    )
     route_profile = getattr(mcp_preview, "route_profile", None)
     if type(route_profile) is str:
         if route_profile_before is not None and route_profile_before != route_profile:
@@ -835,6 +839,10 @@ def _emit_unregistration_preview(mcp_preview: object) -> None:
     typer.echo(f"  State before: {getattr(mcp_preview, 'state_before').value}")
     serve_command = getattr(mcp_preview, "serve_command", ())
     typer.echo(f"  Command: {' '.join(serve_command)}")
+    isolated_root = getattr(mcp_preview, "isolated_root", None)
+    typer.echo(
+        "  MCP isolation root: " + (str(isolated_root) if isolated_root is not None else "ambient")
+    )
     route_profile = getattr(mcp_preview, "route_profile", None)
     if type(route_profile) is str:
         typer.echo(f"  MCP route profile: {route_profile}")
@@ -1604,6 +1612,7 @@ async def _codex_integration_step(
         "route_profile": mcp_preview.route_profile,
         "route_profile_before": route_profile_before,
         "serve_command": list(mcp_preview.serve_command),
+        "isolated_root": mcp_preview.isolated_root,
         "state": mcp_state.value,
         "plugin": plugin_report,
         "plugin_activation": activation_report,
@@ -2955,6 +2964,7 @@ async def integrate_mcp(
             _emit(
                 {
                     "harness": harness,
+                    "isolation_binding": observation.isolation_binding,
                     "route_profile": observation.route_profile,
                     "state": observation.state.value,
                     "registered_profile": _registered_profile,
@@ -2972,6 +2982,7 @@ async def integrate_mcp(
                         "action": preview.action.value,
                         "admission_cleanup": _admission_cleanup_preview(project_root),
                         "harness": harness,
+                        "isolated_root": preview.isolated_root,
                         "preview_digest": preview.preview_digest,
                         "route_profile": preview.route_profile,
                         "serve_command": list(preview.serve_command),
@@ -3063,6 +3074,7 @@ async def integrate_mcp(
                         else None
                     ),
                     "harness": harness,
+                    "isolated_root": preview.isolated_root,
                     "preview_digest": preview.preview_digest,
                     "route_profile": preview.route_profile,
                     "route_profile_before": route_profile_before,
