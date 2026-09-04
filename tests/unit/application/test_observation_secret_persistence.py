@@ -817,19 +817,14 @@ async def test_contentless_retry_reconstructs_committed_materialization_identity
     first_roles = tuple(item.role for item in first_batch.drafts)
     replay_roles = tuple(item.role for item in replay_batch.drafts)
     assert replay_roles == first_roles
-    writer = observation_writer_id(_TASK, "ses_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
     identity = canonical_logical_identity(envelope)
     first_digest = observation_operation_digest(
         task_id=_TASK,
-        session_id="ses_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        writer_id=writer,
         logical_identity=identity,
         draft_roles=first_roles,
     )
     replay_digest = observation_operation_digest(
         task_id=_TASK,
-        session_id="ses_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        writer_id=writer,
         logical_identity=identity,
         draft_roles=replay_roles,
     )
@@ -939,8 +934,6 @@ async def test_coordinator_replays_content_commit_after_reply_is_lost(
                 raise AssertionError("content-less retry missed the committed role set")
             digest = observation_operation_digest(
                 task_id=runtime.task_id,  # type: ignore[attr-defined]
-                session_id=runtime.session_id,  # type: ignore[attr-defined]
-                writer_id=runtime.writer_id,  # type: ignore[attr-defined]
                 logical_identity=canonical_logical_identity(envelope),
                 draft_roles=self.committed_roles,
             )

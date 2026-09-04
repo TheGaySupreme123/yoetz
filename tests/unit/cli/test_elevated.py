@@ -1205,7 +1205,13 @@ def test_forged_approval_arguments_fail_before_mutation(
 class _StagedInitStore:
     """Fake staged-initialization keyring lifecycle (#511) for elevated-flow tests."""
 
-    def __init__(self, generated: bytearray, *, staged_leftover: bool = False) -> None:
+    def __init__(
+        self,
+        generated: bytearray,
+        *,
+        staged_leftover: bool = False,
+        guard_reason: str | None = None,
+    ) -> None:
         self._generated = generated
         self.active = False
         self.staged = staged_leftover
@@ -1214,10 +1220,15 @@ class _StagedInitStore:
         self.staged_calls = 0
         self.guard_acquisitions = 0
         self.guard_held = False
+        self.guard_reason = guard_reason
 
     @contextmanager
     def staged_initialization_guard(self) -> Generator[None]:
+        from yoetz.adapters.keys.os_keyring import OSKeyringError
+
         assert not self.guard_held, "the guard is exclusive"
+        if self.guard_reason is not None:
+            raise OSKeyringError(self.guard_reason)
         self.guard_held = True
         self.guard_acquisitions += 1
         try:
@@ -1406,6 +1417,60 @@ def test_unprovable_staged_leftover_fails_closed_without_entry_exists() -> None:
     anyio.run(run)
     assert store.discarded == 0
     assert store.staged is True
+
+
+def test_missing_bundle_parent_is_a_distinct_bounded_failure_before_staging() -> None:
+    """#565: a guard filesystem failure surfaces as its own reason, never as unsupported."""
+
+    generated = bytearray(b"m" * 64)
+    store = _StagedInitStore(generated, guard_reason="bundle_parent_missing")
+
+    async def run() -> None:
+        with patch("yoetz.cli.elevated._auto_unlock_store", return_value=store):
+            with pytest.raises(ElevatedBootstrapError) as exc:
+                await elevated._complete_vault_initialize_generated()  # pyright: ignore[reportPrivateUsage]
+        assert exc.value.reason == "auto_unlock_bundle_parent_missing"
+
+    anyio.run(run)
+    assert store.staged_calls == 0
+    assert store.staged is False
+    assert store.discarded == 0
+
+
+def test_trusted_review_never_falls_back_to_manual_passphrase_for_guard_failures() -> None:
+    """#565: only a genuinely unsupported keyring may take the local-human ceremony path."""
+
+    generated = bytearray(b"t" * 64)
+    ceremonies: list[object] = []
+
+    async def ceremony(
+        _console: object,
+        _kind: object,
+        _target: object,
+        **kwargs: object,
+    ) -> VaultStateResult:
+        ceremonies.append(kwargs.get("passphrase"))
+        return VaultStateResult("ready", "succeeded")
+
+    async def run(reason: str) -> str:
+        store = _StagedInitStore(generated, guard_reason=reason)
+        with (
+            patch("yoetz.cli.elevated._auto_unlock_store", return_value=store),
+            patch(
+                "yoetz.cli.elevated.run_human_ceremony_on_terminal",
+                side_effect=ceremony,
+            ),
+        ):
+            with pytest.raises(ElevatedBootstrapError) as exc:
+                await elevated._complete_vault_initialize(  # pyright: ignore[reportPrivateUsage]
+                    cast(TrustedForegroundConsole, _Console())
+                )
+        return exc.value.reason
+
+    assert anyio.run(run, "bundle_parent_missing") == "auto_unlock_bundle_parent_missing"
+    assert anyio.run(run, "bundle_permission_denied") == "auto_unlock_bundle_permission_denied"
+    assert anyio.run(run, "bundle_unsafe") == "auto_unlock_bundle_unsafe"
+    assert ceremonies == []
 
 
 def test_pre_existing_active_entry_is_still_refused() -> None:

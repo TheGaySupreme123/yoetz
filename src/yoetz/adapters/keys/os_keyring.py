@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import hashlib
 import hmac
 import os
@@ -18,6 +19,7 @@ from typing import Final, Protocol, cast
 import keyring
 
 from yoetz.adapters.keys.vault_passphrase import VaultPassphraseError, validate_passphrase_view
+from yoetz.config.paths import PathSafetyError, ensure_owner_only_dir
 from yoetz.domain.values import validate_sha256_digest
 from yoetz.ports.secret_memory import (
     SecretConsumer,
@@ -75,8 +77,30 @@ _ERRORS: Final = frozenset(
         "entry_invalid",
         "correlation_mismatch",
         "migration_not_proven",
+        "bundle_parent_missing",
+        "bundle_permission_denied",
+        "bundle_unsafe",
+        "guard_unavailable",
     }
 )
+_GUARD_UNSAFE_ERRNOS: Final = frozenset({errno.ELOOP, errno.EMLINK, errno.ENOTDIR})
+_GUARD_PERMISSION_ERRNOS: Final = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
+
+
+def _guard_os_reason(exc: OSError) -> str:
+    """Map one guard filesystem failure to its distinct bounded reason (issue #565).
+
+    ``unsupported`` is reserved for a platform that genuinely lacks the mechanism; a missing
+    parent, a permission failure, and a symlink rejection are separate, actionable outcomes.
+    """
+
+    if exc.errno == errno.ENOENT:
+        return "bundle_parent_missing"
+    if exc.errno in _GUARD_UNSAFE_ERRNOS:
+        return "bundle_unsafe"
+    if exc.errno in _GUARD_PERMISSION_ERRNOS:
+        return "bundle_permission_denied"
+    return "guard_unavailable"
 
 
 class OSKeyringState(str, Enum):  # noqa: UP042
@@ -236,10 +260,15 @@ class AutoUnlockPassphraseStore:
             import fcntl
         except ImportError:
             raise OSKeyringError("unsupported") from None
+        self._ensure_bundle_root()
         try:
-            fd = os.open(self._guard_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        except OSError:
-            raise OSKeyringError("unsupported") from None
+            fd = os.open(
+                self._guard_path,
+                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+            )
+        except OSError as exc:
+            raise OSKeyringError(_guard_os_reason(exc)) from None
         try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -248,6 +277,35 @@ class AutoUnlockPassphraseStore:
             yield
         finally:
             os.close(fd)
+
+    def _ensure_bundle_root(self) -> None:
+        """Create and verify exactly the scoped bundle root before the guard opens (#565).
+
+        Trusted initialization may legitimately run before any service start has created the
+        bundle root, and the credential store is keyed by that path rather than its existence.
+        Only the bundle root itself is created, owner-only, and only when its parent already
+        exists; the whole path is then verified symlink-free, owned, and owner-only with the
+        same helper the service uses. Nothing outside the exact selected bundle is ever
+        created, and each failure keeps a distinct reason instead of collapsing to a keyring
+        ``unsupported`` verdict.
+        """
+
+        bundle = self._guard_path.parent
+        try:
+            bundle.lstat()
+        except FileNotFoundError:
+            try:
+                os.mkdir(bundle, 0o700)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise OSKeyringError(_guard_os_reason(exc)) from None
+        except OSError as exc:
+            raise OSKeyringError(_guard_os_reason(exc)) from None
+        try:
+            ensure_owner_only_dir(bundle)
+        except PathSafetyError:
+            raise OSKeyringError("bundle_unsafe") from None
 
     @property
     def entry_identity(self) -> tuple[str, str]:

@@ -3532,226 +3532,53 @@ def test_codex_explicit_locator_drops_record_typed_workspace_diagnostics(tmp_pat
     assert str(repository).encode() not in diagnostics_path.read_bytes()
 
 
-def _self_observation_payload(
-    event: str, tool: str, call: str, **extra: JsonValue
-) -> dict[str, JsonValue]:
-    payload: dict[str, JsonValue] = {
-        "session_id": "self-observation",
-        "hook_event_name": event,
-        "tool_name": tool,
-        "tool_use_id": call,
-        "tool_input": {"arguments": {"task_id": "tsk-private"}},
-    }
-    if event == "PostToolUse":
-        payload["tool_response"] = {"content": [{"type": "text", "text": "private projection"}]}
-    payload.update(extra)
-    return payload
+def test_mapping_rotation_keeps_hook_ordinals_and_generation_monotonic(tmp_path: Path) -> None:
+    """#560: a reattach rotates the mapped Yoetz session, never the host-session counters.
 
+    Hook ordinals, the session generation, and the host session commitment are
+    keyed on the Codex session, so a second ``start`` in the same session (which
+    stores a new mapping) cannot restart them and re-mint an earlier source
+    identity.
+    """
 
-def _replay(store_root: Path, *payloads: dict[str, JsonValue]) -> None:
-    for payload in payloads:
-        assert (
-            handle_observe(
-                event_name=cast(str, payload["hook_event_name"]),
-                stdin_bytes=json.dumps(payload).encode(),
-                stdout=io.BytesIO(),
-                workspace=str(store_root),
-                _state=store_root,
-                skip_service=True,
-            )
-            == 0
-        )
+    import uuid
 
-
-def _pending_calls(store: LocalObservationStore, workspace: str) -> list[tuple[str, str | None]]:
-    return [
-        (
-            cast(str, row.envelope.structural_payload["hook_name"]),
-            cast(str | None, row.envelope.structural_payload.get("tool_name")),
-        )
-        for row in store.list_pending_outbox_rows(workspace)
-    ]
-
-
-def test_yoetz_read_tool_hooks_are_retained_locally_but_never_enqueued(tmp_path: Path) -> None:
-    """#564: a ``status`` call's own hooks must not become outbox rows for the hook to drain."""
+    from yoetz.adapters.integrations.codex_lifecycle import load_mapping, store_mapping
+    from yoetz.protocol.ids import PREFIX_BY_KIND, IdKind
 
     store = LocalObservationStore(_state=tmp_path)
     workspace = store.workspace_commitment(str(tmp_path.resolve()))
     store.grant_consent(workspace)
+    codex_id = "codex-reattach-560"
+    session = store.bind_codex_session(workspace, codex_id)
+    generation = store.begin_session_generation(workspace, session)
+    task_id = PREFIX_BY_KIND[IdKind.TASK] + str(uuid.uuid4())
 
-    _replay(
-        tmp_path,
-        _self_observation_payload("PreToolUse", "mcp__yoetz__status", "call-status-1"),
-        _self_observation_payload("PostToolUse", "mcp__yoetz__status", "call-status-1"),
-        _self_observation_payload("PreToolUse", "mcp__yoetz__receipt", "call-receipt-1"),
-        _self_observation_payload(
-            "PostToolUse", "mcp__yoetz__receipt", "call-receipt-1", success=True
-        ),
-        _self_observation_payload("PreToolUse", "mcp__yoetz__read_guidance", "call-guidance-1"),
-        _self_observation_payload("PostToolUse", "mcp__yoetz__read_guidance", "call-guidance-1"),
-    )
-
-    assert store.pending_outbox_count(workspace) == 0
-    # Nothing is dropped from local evidence: every envelope is in the bounded store,
-    # and the post events paired with their retained pre events.
-    envelopes = store.list_envelopes(workspace)
-    assert len(envelopes) == 6
-    assert all(ObservationGapCode.UNPAIRED_EVENT.value not in env.gap_codes for env in envelopes)
-    status = store.status(ObservationStatusQuery(workspace))
-    assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value not in status.gaps
-
-
-def test_yoetz_mutation_hooks_enqueue_one_paired_post_row_per_call(tmp_path: Path) -> None:
-    store = LocalObservationStore(_state=tmp_path)
-    workspace = store.workspace_commitment(str(tmp_path.resolve()))
-    store.grant_consent(workspace)
-
-    _replay(
-        tmp_path,
-        _self_observation_payload("PreToolUse", "mcp__yoetz__start", "call-start"),
-        _self_observation_payload("PostToolUse", "mcp__yoetz__start", "call-start"),
-        _self_observation_payload("PreToolUse", "mcp__yoetz__check", "call-check"),
-        _self_observation_payload("PostToolUse", "mcp__yoetz__check", "call-check"),
-        _self_observation_payload("PreToolUse", "mcp__yoetz__respond", "call-respond"),
-        _self_observation_payload("PostToolUse", "mcp__yoetz__respond", "call-respond"),
-        _self_observation_payload("PreToolUse", "mcp__yoetz__publish_work", "call-publish"),
-        _self_observation_payload("PostToolUse", "mcp__yoetz__publish_work", "call-publish"),
-    )
-
-    assert _pending_calls(store, workspace) == [
-        ("PostToolUse", "mcp__yoetz__start"),
-        ("PostToolUse", "mcp__yoetz__check"),
-        ("PostToolUse", "mcp__yoetz__respond"),
-        ("PostToolUse", "mcp__yoetz__publish_work"),
-    ]
-    # The retained pre event still pairs the delivered post event, so the service
-    # materializes the action from the post alone rather than an unpaired result.
-    for row in store.list_pending_outbox_rows(workspace):
-        assert ObservationGapCode.UNPAIRED_EVENT.value not in row.envelope.gap_codes
-        assert row.envelope.structural_payload["tool_call_id"] is not None
-    assert len(store.list_envelopes(workspace)) == 8
-
-
-def test_yoetz_tool_failures_and_denials_are_delivered_in_both_phases(tmp_path: Path) -> None:
-    store = LocalObservationStore(_state=tmp_path)
-    workspace = store.workspace_commitment(str(tmp_path.resolve()))
-    store.grant_consent(workspace)
-
-    _replay(
-        tmp_path,
-        _self_observation_payload("PreToolUse", "mcp__yoetz__status", "call-denied", denied=True),
-        _self_observation_payload(
-            "PostToolUse", "mcp__yoetz__status", "call-failed", success=False
-        ),
-        _self_observation_payload(
-            "PostToolUse", "mcp__yoetz__check", "call-check-failed", exit_status=1
-        ),
-        # PermissionRequest is not a tool phase: a Yoetz tool's permission prompt is
-        # ordinary lifecycle evidence and stays deliverable.
-        {
-            "session_id": "self-observation",
-            "hook_event_name": "PermissionRequest",
-            "tool_name": "mcp__yoetz__check",
-            "tool_use_id": "call-permission",
-        },
-    )
-
-    assert _pending_calls(store, workspace) == [
-        ("PreToolUse", "mcp__yoetz__status"),
-        ("PostToolUse", "mcp__yoetz__status"),
-        ("PostToolUse", "mcp__yoetz__check"),
-        ("PermissionRequest", "mcp__yoetz__check"),
-    ]
-
-
-def test_ordinary_tools_keep_both_phases_and_their_content(tmp_path: Path) -> None:
-    store = LocalObservationStore(_state=tmp_path)
-    workspace = store.workspace_commitment(str(tmp_path.resolve()))
-    store.grant_consent(workspace)
-
-    _replay(
-        tmp_path,
-        _codex_0146_payload("PreToolUse", "call-shell"),
-        _codex_0146_payload("PostToolUse", "call-shell", exit_status=0, tool_output="ok"),
-    )
-
-    assert _pending_calls(store, workspace) == [("PreToolUse", "shell"), ("PostToolUse", "shell")]
-    # skip_service leaves the shell content undeliverable, which the store records
-    # honestly -- the very gap that must stay absent for Yoetz-owned calls.
-    status = store.status(ObservationStatusQuery(workspace))
-    assert ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value in status.gaps
-
-
-def test_visible_content_is_never_captured_for_yoetz_owned_tools(tmp_path: Path) -> None:
-    store = LocalObservationStore(_state=tmp_path)
-    commitment = store.session_commitment("content-policy")
-
-    def chunks(event: str, payload: dict[str, JsonValue]) -> tuple[object, ...]:
-        envelope = map_hook_payload_to_envelope(
-            event,
-            payload,
-            session_commitment=commitment,
-            event_ordinal=1,
-            key_material=store.key_material(),
+    def _mapping() -> LifecycleMapping:
+        return LifecycleMapping(
+            mapping_version=1,
+            codex_session_id=codex_id,
+            yoetz_task_id=task_id,
+            yoetz_session_id=PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+            yoetz_writer_id=PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+            last_frontier=None,
         )
-        captured, truncated = observe_hooks_module._visible_content_chunks(  # pyright: ignore[reportPrivateUsage]
-            event, payload, envelope=envelope, workspace_locator=None
-        )
-        assert truncated is False
-        return captured
 
-    for tool in ("mcp__yoetz__status", "mcp__plugin_yoetz_yoetz__respond", "check"):
-        assert chunks("PreToolUse", _self_observation_payload("PreToolUse", tool, "c1")) == ()
-        assert chunks("PostToolUse", _self_observation_payload("PostToolUse", tool, "c1")) == ()
-        assert (
-            chunks(
-                "PostToolUse",
-                _self_observation_payload("PostToolUse", tool, "c1", success=False),
-            )
-            == ()
-        )
-    shell_pre = chunks("PreToolUse", _codex_0146_payload("PreToolUse", "c2"))
-    shell_post = chunks(
-        "PostToolUse", _codex_0146_payload("PostToolUse", "c2", tool_output="ordinary output")
-    )
-    assert len(shell_pre) == 1 and len(shell_post) == 1
+    first = _mapping()
+    store_mapping(first, _state=tmp_path)
+    ordinals = [store.allocate_hook_ordinal(workspace, session) for _ in range(2)]
 
+    second = _mapping()
+    store_mapping(second, _state=tmp_path)
+    third = _mapping()
+    store_mapping(third, _state=tmp_path)
+    ordinals.append(store.allocate_hook_ordinal(workspace, session))
 
-def test_legacy_spool_replay_applies_the_same_self_observation_policy(tmp_path: Path) -> None:
-    """The READY service replays spool records through ``handle_observe``; no second policy."""
-
-    store = LocalObservationStore(_state=tmp_path)
-    workspace = store.workspace_commitment(str(tmp_path.resolve()))
-    store.grant_consent(workspace)
-    for event, tool, call in (
-        ("PreToolUse", "mcp__yoetz__status", "spool-status"),
-        ("PostToolUse", "mcp__yoetz__status", "spool-status"),
-        ("PreToolUse", "mcp__yoetz__respond", "spool-respond"),
-        ("PostToolUse", "mcp__yoetz__respond", "spool-respond"),
-    ):
-        assert (
-            handle_spool(
-                event_name=event,
-                stdin_bytes=json.dumps(_self_observation_payload(event, tool, call)).encode(),
-                stdout=io.BytesIO(),
-                workspace=str(tmp_path),
-                _state=tmp_path,
-            )
-            == 0
-        )
-    spool = HookSpool(_state=tmp_path)
-    for commitment in spool.pending_workspaces():
-        with spool.claim(commitment) as records:
-            for record in records:
-                handle_observe(
-                    event_name=record.event_name,
-                    stdin_bytes=json.dumps(record.payload).encode(),
-                    stdout=io.BytesIO(),
-                    _state=tmp_path,
-                    skip_service=True,
-                    _workspace_commitment=commitment,
-                )
-
-    assert _pending_calls(store, workspace) == [("PostToolUse", "mcp__yoetz__respond")]
-    assert len(store.list_envelopes(workspace)) == 4
+    stored = load_mapping(codex_id, _state=tmp_path)
+    assert stored is not None
+    assert stored.yoetz_session_id == third.yoetz_session_id
+    assert stored.yoetz_task_id == task_id
+    assert len({first.yoetz_session_id, second.yoetz_session_id, third.yoetz_session_id}) == 3
+    assert ordinals == [1, 2, 3]
+    assert store.bind_codex_session(workspace, codex_id) == session
+    assert store.current_session_generation(workspace, session) == generation

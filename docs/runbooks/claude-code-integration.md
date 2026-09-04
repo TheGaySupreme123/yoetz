@@ -229,7 +229,10 @@ fixed remediation never prints the absolute state path. A result obtained from a
 carrier proves only that sandbox cell; unrestricted-terminal behavior needs its own run.
 
 Shared drain terminalization is host-neutral: `ledger_rejected` means the ready service rejected
-one envelope non-retryably, so that row is retained in quarantine and later rows proceed. A row
+one envelope non-retryably, so that row is retained in quarantine and later rows proceed. An
+idempotent repeat of a committed envelope (lost acknowledgement, service restart, or a workflow
+reattach that rotates the mapped Yoetz session) is resolved task-wide and acknowledged, never
+quarantined. A row
 also enters quarantine after 128 consecutive rejections with the same retryable reason, except for
 designed back-pressure and workspace-global pause/vault/disabled gates. Both cases remain visible
 in `quarantine_causes`, aggregate `delivery_causes`, and gaps;

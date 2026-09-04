@@ -193,9 +193,13 @@ _PROVIDER_SETUP_AUTO_UNLOCK_REASONS: Final = frozenset(
     {
         "ambiguous_write",
         "authority_mismatch",
+        "bundle_parent_missing",
+        "bundle_permission_denied",
+        "bundle_unsafe",
         "correlation_mismatch",
         "entry_exists",
         "entry_invalid",
+        "guard_unavailable",
         "human_authority_unavailable",
         "initialization_in_progress",
         "locked",
@@ -206,6 +210,11 @@ _PROVIDER_SETUP_AUTO_UNLOCK_REASONS: Final = frozenset(
         "unsupported",
         "unverified",
     }
+)
+# Filesystem failures of the bundle-scoped initialization guard (issue #565); each is distinct
+# from a genuinely unsupported keyring and never triggers the manual-passphrase fallback.
+_BUNDLE_GUARD_REASONS: Final = frozenset(
+    {"bundle_parent_missing", "bundle_permission_denied", "bundle_unsafe", "guard_unavailable"}
 )
 _PROVIDER_SETUP_CONFIDENTIAL_REASONS: Final = frozenset(
     {
@@ -1863,6 +1872,14 @@ async def _interactive_provider_setup(
                             typer.echo(
                                 "Another Yoetz vault initialization is already in progress. "
                                 "Wait for it to finish, then rerun 'yoetz setup'.",
+                                err=True,
+                            )
+                        elif error.reason in _BUNDLE_GUARD_REASONS:
+                            typer.echo(
+                                "The Yoetz data directory could not be prepared for vault "
+                                f"initialization ({error.reason}). Its parent directory must "
+                                "exist, be owned by you, contain no symlinks, and be "
+                                "writable. Fix that, then rerun 'yoetz setup'.",
                                 err=True,
                             )
                         elif error.reason == "staged_entry_exists":

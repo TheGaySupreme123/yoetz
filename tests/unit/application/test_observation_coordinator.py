@@ -348,8 +348,6 @@ def test_stream_outcome_correction_links_canonical_action_without_rewriting_unkn
 
     common = {
         "task_id": task,
-        "session_id": "ses_test",
-        "writer_id": "wri_test",
         "logical_identity": "sha256:" + "a" * 64,
     }
     assert observation_operation_digest(
@@ -458,7 +456,13 @@ async def test_live_upgrade_finds_legacy_mapping_under_legacy_writer(tmp_path: P
     )
     expected_operation_id = ""
 
+    task_lookups: list[tuple[str, str]] = []
+
     class _Ledger:
+        async def lookup_task_operation(self, writer_id: str, operation_id: str):
+            task_lookups.append((writer_id, operation_id))
+            return None
+
         async def lookup_operation(self, writer_id: str, operation_id: str):
             lookups.append((writer_id, operation_id))
             return (
@@ -506,11 +510,14 @@ async def test_live_upgrade_finds_legacy_mapping_under_legacy_writer(tmp_path: P
     assert digest == legacy_digest
     assert mapping_version == legacy_mapping_version
     assert roles == replay_roles
+    # The current task-scoped identity is probed task-wide once per role set;
+    # the session-bound legacy identities then probe both admitted writers and
+    # stop at the first legacy mapping version that committed the row.
+    assert [writer for writer, _operation in task_lookups] == [
+        harness_writer_id,
+        harness_writer_id,
+    ]
     assert [writer for writer, _operation in lookups] == [
-        harness_writer_id,
-        harness_writer_id,
-        legacy_writer_id,
-        legacy_writer_id,
         harness_writer_id,
         harness_writer_id,
         legacy_writer_id,
@@ -543,11 +550,16 @@ async def test_existing_operation_reconstructs_frontier_motion_metadata(tmp_path
             "warnings": (),
         }
     )
+    committed_digest = observation_operation_digest(
+        task_id=task_id,
+        logical_identity=canonical_logical_identity(envelope),
+        draft_roles=tuple(item.role for item in batch.drafts),
+    )
     existing = OperationRecord(
         writer_id,
         PREFIX_BY_KIND[IdKind.REQUEST] + str(uuid.uuid4()),
         OperationKind.PUBLISH_WORK,
-        "sha256:" + "d" * 64,
+        committed_digest,
         OperationState.COMPLETE,
         CheckPhase.TERMINAL,
         None,
@@ -563,9 +575,13 @@ async def test_existing_operation_reconstructs_frontier_motion_metadata(tmp_path
     )
 
     class _Ledger:
-        async def lookup_operation(self, looked_up_writer: str, operation_id: str):
+        async def lookup_task_operation(self, looked_up_writer: str, operation_id: str):
             del looked_up_writer, operation_id
             return existing
+
+        async def lookup_operation(self, looked_up_writer: str, operation_id: str):
+            del looked_up_writer, operation_id
+            raise AssertionError("the task-scoped hit must resolve before any legacy probe")
 
     class _Clock:
         def now_utc(self) -> Timestamp:
@@ -596,7 +612,8 @@ async def test_existing_operation_reconstructs_frontier_motion_metadata(tmp_path
     )
 
     assert recovered is not None
-    _operation_id, _digest, append_result, mapping_version, roles = recovered
+    _operation_id, digest, append_result, mapping_version, roles = recovered
+    assert digest == committed_digest
     assert mapping_version == MATERIALIZATION_MAPPING_VERSION
     assert roles == tuple(item.role for item in batch.drafts)
     assert append_result is not None
@@ -2205,8 +2222,6 @@ def test_hook_and_stream_copies_share_one_logical_operation() -> None:
     def _digest(env: ObservationEnvelope) -> str:
         return observation_operation_digest(
             task_id="task_x",
-            session_id="ses_x",
-            writer_id="wtr_x",
             logical_identity=canonical_logical_identity(env),
             draft_roles=("action", "result"),
         )
@@ -2383,6 +2398,9 @@ async def test_advice_finding_materialization_uses_canonical_schema_and_envelope
             assert loaded_writer_id == writer_id
             assert operation_id.startswith(PREFIX_BY_KIND[IdKind.REQUEST])
             return None
+
+        async def lookup_task_operation(self, loaded_writer_id: str, operation_id: str):
+            return await self.lookup_operation(loaded_writer_id, operation_id)
 
     class _Objects:
         async def stage(self, source: object, metadata: object):
@@ -2564,6 +2582,9 @@ async def test_advice_finding_subject_refs_never_cite_unappended_drafts(
         async def lookup_operation(self, loaded_writer_id: str, operation_id: str):
             del loaded_writer_id, operation_id
             return None
+
+        async def lookup_task_operation(self, loaded_writer_id: str, operation_id: str):
+            return await self.lookup_operation(loaded_writer_id, operation_id)
 
     class _Objects:
         async def stage(self, source: object, metadata: object):
@@ -3440,6 +3461,11 @@ async def test_duplicate_ingest_reconstructed_append_detects_same_task_rewind(
     assert batch.drafts
     writer_id = observation_writer_id(mapping.yoetz_task_id, mapping.yoetz_session_id)
     rewound_digest = "sha256:" + "d" * 64
+    committed_digest = observation_operation_digest(
+        task_id=mapping.yoetz_task_id,
+        logical_identity=canonical_logical_identity(envelope),
+        draft_roles=tuple(item.role for item in batch.drafts),
+    )
     canonical = canonical_encode(
         {
             "accepted": (
@@ -3463,7 +3489,7 @@ async def test_duplicate_ingest_reconstructed_append_detects_same_task_rewind(
         writer_id,
         PREFIX_BY_KIND[IdKind.REQUEST] + str(uuid.uuid4()),
         OperationKind.PUBLISH_WORK,
-        "sha256:" + "e" * 64,
+        committed_digest,
         OperationState.COMPLETE,
         CheckPhase.TERMINAL,
         None,
@@ -3479,10 +3505,14 @@ async def test_duplicate_ingest_reconstructed_append_detects_same_task_rewind(
     )
 
     class _Ledger:
-        async def lookup_operation(self, looked_up_writer: str, operation_id: str):
+        async def lookup_task_operation(self, looked_up_writer: str, operation_id: str):
             del operation_id
             assert looked_up_writer == writer_id
             return existing
+
+        async def lookup_operation(self, looked_up_writer: str, operation_id: str):
+            del looked_up_writer, operation_id
+            raise AssertionError("the task-scoped hit must resolve before any legacy probe")
 
         async def load_frontier(self) -> Frontier:
             return Frontier(5, rewound_digest)
@@ -3834,11 +3864,17 @@ async def test_later_stream_failure_correction_projection_policy(
             )
             digest = _digest(
                 task_id=runtime.task_id,  # type: ignore[attr-defined]
-                session_id=runtime.session_id,  # type: ignore[attr-defined]
-                writer_id=runtime.writer_id,  # type: ignore[attr-defined]
                 logical_identity=_identity(envelope),
                 draft_roles=roles,
                 mapping_version=resolved_version,
+                **(
+                    {
+                        "session_id": runtime.session_id,  # type: ignore[attr-defined]
+                        "writer_id": runtime.writer_id,  # type: ignore[attr-defined]
+                    }
+                    if projection_mode == "legacy_mapping"
+                    else {}
+                ),
             )
             if roles == ("action", "result") and core_unknown is None:
                 core_unknown = batch
@@ -4067,3 +4103,382 @@ async def test_identity_claim_conflict_rejects_one_envelope_without_latching(
     assert runtime_port.calls == 2
     assert ingested == ["hook:c1", "hook:c2"]
     assert not coordinator._storage_corrupt_sessions  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+
+
+# --- issue #560: reattach replays stable IDs ---------------------------------
+
+
+def _reattach_fixture(tmp_path: Path, codex_id: str) -> _ReattachCell:
+    return _ReattachCell(tmp_path, codex_id)
+
+
+class _ReattachCell:
+    """A consented workspace, one task ledger, and a rotatable lifecycle mapping.
+
+    ``route`` builds the runtime from the routed session/writer pair exactly as
+    the service does, so a mapping rotation after ``start`` (a reattach in the
+    same host session) changes the observation writer while the task ledger and
+    its committed operations stay put.
+    """
+
+    def __init__(self, tmp_path: Path, codex_id: str) -> None:
+        import apsw
+
+        from builders.ledger_adapters import FixedClock, FixedIds, MemoryObjects, ownership_fence
+        from yoetz.adapters.memory.importer import MemoryImportState
+        from yoetz.adapters.memory.ledger import MemoryLedgerAdapter, MemoryLedgerState
+        from yoetz.ports.runtime import RuntimeCapability, TaskRuntime
+
+        self.local, self.workspace, self.session, mapping = _mapped_local(tmp_path, codex_id)
+        self.local_root = tmp_path
+        self.codex_id = codex_id
+        self.task_id = mapping.yoetz_task_id
+        self.mapping = mapping
+        self.ids = FixedIds()
+        self.objects = MemoryObjects(self.ids)
+        self.ledger = MemoryLedgerAdapter(
+            task_id=self.task_id,
+            ownership_fence=ownership_fence(),
+            state=MemoryLedgerState(),
+            import_state=MemoryImportState(),
+            transaction_lock=__import__("asyncio").Lock(),
+            clock=FixedClock(),
+            ids=self.ids,
+            objects=self.objects,
+        )
+        db = apsw.Connection(":memory:")
+        initialize_bundle(db, {"task_id": self.task_id, "owner_generation": "1"})
+        self.store = SqliteObservationStore(db)
+        self.routed: list[tuple[str, str]] = []
+        cell = self
+
+        class _RuntimePort:
+            async def route(self, command: object) -> TaskRuntime:
+                session_id = cast(str, getattr(command, "session_id"))
+                writer_id = cast(str, getattr(command, "writer_id"))
+                cell.routed.append((session_id, writer_id))
+                return TaskRuntime(
+                    cell.task_id,
+                    session_id,
+                    writer_id,
+                    frozenset(
+                        {
+                            RuntimeCapability.STRUCTURAL_READ,
+                            RuntimeCapability.PAYLOAD_READ,
+                            RuntimeCapability.WRITE,
+                        }
+                    ),
+                    cell.ledger,
+                    cell.objects,  # type: ignore[arg-type]
+                    object(),  # type: ignore[arg-type]
+                    "0.1.0",
+                    "0.1.0",
+                    "0.1",
+                    "1.0.0",
+                    ownership_fence(),
+                    observation=cell.store,
+                )
+
+            async def release(self, released: object) -> None:
+                del released
+
+        self.runtime_port = _RuntimePort()
+        self.coordinator = self.build_coordinator()
+
+    def build_coordinator(self) -> ObservationCoordinator:
+        """A fresh coordinator over the same ledger and store (a service restart)."""
+
+        from builders.ledger_adapters import FixedClock
+
+        cell = self
+
+        class _Coordinator(ObservationCoordinator):
+            async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+                del args, kwargs
+
+            async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+                del args, kwargs
+
+        return _Coordinator(
+            runtime=self.runtime_port,  # type: ignore[arg-type]
+            local=self.local,
+            clock=FixedClock(),  # type: ignore[arg-type]
+            ids=self.ids,  # type: ignore[arg-type]
+            state_root=self.local_root,
+            mapping_loader=lambda *_args, **_kwargs: cell.mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+        )
+
+    def reattach(self) -> None:
+        """Rotate the mapping the way a second ``start`` in the same host session does."""
+
+        self.mapping = LifecycleMapping(
+            mapping_version=1,
+            codex_session_id=self.codex_id,
+            yoetz_task_id=self.task_id,
+            yoetz_session_id=PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+            yoetz_writer_id=PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+            last_frontier=None,
+        )
+
+    async def ingest(self, envelope: ObservationEnvelope) -> ObservationIngestResult:
+        return await self.coordinator.ingest_request(
+            ObservationIngestRequest(codex_session_id=self.codex_id, envelope=envelope)
+        )
+
+    def operation_count(self) -> int:
+        return len(self.ledger._state.operations)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+
+    def record_count(self) -> int:
+        return len(self.ledger._state.records)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+
+
+_REATTACH_ENVELOPES: dict[str, dict[str, object]] = {
+    "pre": {"kind": "PreToolUse", "tool": "shell", "corr": "call-560"},
+    "paired_post": {"kind": "PostToolUse", "tool": "shell", "corr": "call-560", "exit_status": 0},
+    "yoetz_mcp_post": {"kind": "PostToolUse", "tool": "mcp__yoetz__status", "corr": "call-560-s"},
+    "unpaired_post": {
+        "kind": "PostToolUse",
+        "tool": "shell",
+        "corr": "call-560-u",
+        "exit_status": 1,
+        "gaps": ("unpaired_event",),
+    },
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("shape", sorted(_REATTACH_ENVELOPES))
+@pytest.mark.parametrize("lifecycle", ["dropped_ack", "restart", "reattach", "reattach_twice"])
+async def test_repeated_observation_replays_committed_operation_across_reattach(
+    tmp_path: Path, shape: str, lifecycle: str
+) -> None:
+    """#560: a repeated logical observation resolves to its committed operation.
+
+    The stable event ids depend on the task and the source identity only, so a
+    replayed envelope after a lost acknowledgement, a service restart, or a
+    workflow reattach (which rotates the Yoetz session and writer) must find
+    the operation that already committed those ids instead of appending a
+    second operation that the ledger rejects as a duplicate event.
+    """
+
+    cell = _reattach_fixture(tmp_path, f"reattach-{shape}-{lifecycle}")
+    spec = dict(_REATTACH_ENVELOPES[shape])
+    envelope = _envelope(
+        session=cell.session,
+        kind=cast(str, spec["kind"]),
+        identity=f"hook:560:{shape}",
+        tool=cast(str, spec["tool"]),
+        corr=cast(str, spec["corr"]),
+        exit_status=cast(int | None, spec.get("exit_status")),
+        gaps=cast(tuple[str, ...], spec.get("gaps", ())),
+    )
+
+    first = await cell.ingest(envelope)
+    assert first.disposition is ObservationIngestDisposition.ACCEPTED, first.reason
+    operations = cell.operation_count()
+    records = cell.record_count()
+    assert operations == 1 and records >= 1
+    first_frontier = await cell.ledger.load_frontier()
+
+    if lifecycle == "restart":
+        cell.coordinator = cell.build_coordinator()
+    elif lifecycle in {"reattach", "reattach_twice"}:
+        cell.reattach()
+        if lifecycle == "reattach_twice":
+            cell.reattach()
+
+    second = await cell.ingest(envelope)
+    assert second.reason != ObservationGapCode.LEDGER_REJECTED.value
+    assert second.disposition is ObservationIngestDisposition.DUPLICATE
+    assert route_observation_ingest(second).action is ObservationDrainAction.ACKNOWLEDGE
+    assert cell.operation_count() == operations, "an idempotent repeat appends no operation"
+    assert cell.record_count() == records
+    assert await cell.ledger.load_frontier() == first_frontier
+    if lifecycle.startswith("reattach"):
+        assert cell.routed[-1] != cell.routed[0], "the reattach rotated the routed writer"
+    assert not cell.local.list_quarantine(cell.workspace)
+    gaps = cell.local.status(ObservationStatusQuery(cell.workspace)).gaps
+    assert ObservationGapCode.LEDGER_REJECTED.value not in gaps
+
+
+@pytest.mark.anyio
+async def test_conflicting_reuse_of_a_stable_event_id_still_fails_closed(tmp_path: Path) -> None:
+    """#560: the same event id under a different structural identity is a conflict."""
+
+    cell = _reattach_fixture(tmp_path, "reattach-conflict")
+    # A PreToolUse mints its action and event ids from the source identity, so
+    # the same identity under another host call reuses committed event ids.
+    committed = _envelope(session=cell.session, kind="PreToolUse", identity="hook:560:conflict")
+    first = await cell.ingest(committed)
+    assert first.disposition is ObservationIngestDisposition.ACCEPTED, first.reason
+    operations = cell.operation_count()
+
+    cell.reattach()
+    # Same source identity (hence the same stable event ids) but a different host
+    # call: a different logical identity that must never be laundered into the
+    # committed operation.
+    conflicting = _envelope(
+        session=cell.session,
+        kind="PreToolUse",
+        identity="hook:560:conflict",
+        corr="call-other",
+    )
+    second = await cell.ingest(conflicting)
+    assert second.disposition is ObservationIngestDisposition.REJECTED
+    assert second.reason == ObservationGapCode.LEDGER_REJECTED.value
+    assert route_observation_ingest(second).action is ObservationDrainAction.QUARANTINE
+    assert cell.operation_count() == operations
+
+
+@pytest.mark.anyio
+async def test_advice_findings_reuse_operation_committed_by_predecessor_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#560: a reattached session finds the task-scoped finding operation task-wide.
+
+    Finding event ids and the finding operation digest are task-scoped, so the
+    operation a predecessor session committed under its own writer must be
+    found by the successor writer instead of re-appended with duplicate ids.
+    """
+
+    from types import SimpleNamespace
+
+    import yoetz.application.observation_coordinator as coordinator_module
+    from yoetz.application.unit_of_work import PreparedMutation
+    from yoetz.domain.observation import AdviceItem, AdviceSnapshot
+    from yoetz.ports.ledger import ProjectionView
+    from yoetz.protocol.coverage import PublicationChannel, coverage_for_channel, weakest
+
+    task_id = _task_id()
+    successor_session = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    predecessor_writer = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
+    successor_writer = observation_writer_id(task_id, successor_session)
+    item_coverage = weakest(
+        coverage_for_channel(PublicationChannel.HOOK_OBSERVED),
+        coverage_for_channel(PublicationChannel.ENGINE_DERIVED),
+    )
+    item = AdviceItem(
+        finding_id=finding_id(PREFIX_BY_KIND[IdKind.FINDING] + str(uuid.uuid4())),
+        rule_code="failed_command_unresolved",
+        priority=10,
+        summary="A failed command remains unresolved.",
+        detail="Resolve the failed command and rerun the check.",
+        recommended_next_action="rerun_check",
+        evidence_refs=("hook:advice-reattach",),
+        coverage=item_coverage,
+        freshness_frontier="frontier-1",
+    )
+    snapshot = AdviceSnapshot(
+        ranked_finding_ids=(item.finding_id,),
+        evidence_basis_digest="sha256:" + "a" * 64,
+        confidence_coverage=item_coverage,
+        recommended_next_action="rerun_check",
+        freshness_frontier="frontier-1",
+        suppression_identity="advice-reattach-1",
+        ranked_items=(item,),
+    )
+    envelope = _envelope(
+        session=f"hmac-sha256:{'d' * 64}",
+        kind="PostToolUse",
+        identity="hook:advice-reattach",
+        exit_status=2,
+    )
+    ledger_events = [
+        SimpleNamespace(event_id=draft.draft.event_id, schema=draft.draft.schema)
+        for draft in materialize_observation_envelope(envelope, task_id=task_id).drafts
+    ]
+    committed_result = canonical_encode(
+        {
+            "accepted": (
+                {
+                    "entry_digest": "sha256:" + "a" * 64,
+                    "event_id": PREFIX_BY_KIND[IdKind.EVENT] + str(uuid.uuid4()),
+                    "ingestion_sequence": "4",
+                    "projection_status": "projected",
+                    "writer_sequence": "1",
+                },
+            ),
+            "result_frontier": {"head_digest": "sha256:" + "c" * 64, "sequence": "4"},
+            "subject_frontier": {"head_digest": "sha256:" + "b" * 64, "sequence": "3"},
+            "warnings": (),
+        }
+    )
+    committed = OperationRecord(
+        predecessor_writer,
+        PREFIX_BY_KIND[IdKind.REQUEST] + str(uuid.uuid4()),
+        OperationKind.PUBLISH_WORK,
+        "sha256:" + "e" * 64,
+        OperationState.COMPLETE,
+        CheckPhase.TERMINAL,
+        None,
+        None,
+        None,
+        None,
+        None,
+        committed_result,
+        "sha256:" + hashlib.sha256(committed_result).hexdigest(),
+        None,
+        None,
+        datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    lookups: list[tuple[str, str, str]] = []
+
+    class _Ledger:
+        async def load_projection(self, loaded_session_id: str, view: ProjectionView):
+            assert loaded_session_id == successor_session
+            del view
+            return None
+
+        async def _events(self):
+            for record in ledger_events:
+                yield record
+
+        def load_events(self, loaded_session_id: str):
+            assert loaded_session_id == successor_session
+            return self._events()
+
+        async def lookup_operation(self, loaded_writer_id: str, operation_id: str):
+            lookups.append(("writer", loaded_writer_id, operation_id))
+            return None
+
+        async def lookup_task_operation(self, loaded_writer_id: str, operation_id: str):
+            lookups.append(("task", loaded_writer_id, operation_id))
+            assert loaded_writer_id == successor_writer
+            return committed
+
+    async def _never_append(ledger: object, prepared: PreparedMutation):
+        del ledger, prepared
+        raise AssertionError("a task-wide committed finding operation must not be re-appended")
+
+    monkeypatch.setattr(coordinator_module, "run_prepared_append", _never_append)
+
+    class _Clock:
+        def now_utc(self) -> datetime:
+            return datetime(2026, 1, 1, tzinfo=UTC)
+
+    class _Ids:
+        def new(self, kind: IdKind) -> str:
+            return PREFIX_BY_KIND[kind] + str(uuid.uuid4())
+
+    runtime = SimpleNamespace(
+        task_id=task_id,
+        session_id=successor_session,
+        writer_id=successor_writer,
+        ledger=_Ledger(),
+        objects=object(),
+    )
+    coordinator = ObservationCoordinator(
+        runtime=object(),  # type: ignore[arg-type]
+        local=LocalObservationStore(_state=tmp_path),
+        clock=_Clock(),  # type: ignore[arg-type]
+        ids=_Ids(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+    )
+
+    await coordinator._materialize_advice_findings(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        cast(TaskRuntime, runtime),
+        (envelope,),
+        snapshot,  # type: ignore[arg-type]
+    )
+
+    assert [kind for kind, _writer, _operation in lookups] == ["task"]
