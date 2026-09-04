@@ -531,6 +531,7 @@ def _install_setup_stubs(
     monkeypatch.setattr(module, "_interactive_terminal", interactive)
     monkeypatch.setattr(module, "get_privacy_setup_snapshot", snapshot)
     monkeypatch.setattr(module, "_configured_bindings", bindings)
+    monkeypatch.setattr(module, "_configured_fallback_binding", lambda: None)
     monkeypatch.setattr(module, "_render_recipe_options", render_options)
     monkeypatch.setattr(module, "_render_review", render_review)
     monkeypatch.setattr(module.typer, "confirm", confirm)

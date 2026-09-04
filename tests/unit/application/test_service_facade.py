@@ -164,6 +164,33 @@ async def test_task_workflows_reject_cross_repository_context_before_execution(
         )
 
     assert failure.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert failure.value.safe_details == {"reason_code": "repository_identity_mismatch"}
+    assert commitment_a not in failure.value.message
+    assert catalog.calls == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("method", ("publish_work", "check", "respond", "status", "receipt"))
+async def test_task_workflows_name_a_missing_repository_context_distinctly(method: str) -> None:
+    """A handshake without a locator is `repository_identity_required`, not a stale route (#578)."""
+
+    catalog = _Catalog(_route(repository_privacy_commitment="hmac-sha256:" + "a" * 64))
+    app = _application(catalog, enforce_repository_identity=True)
+    request_type = {
+        "publish_work": PublishWorkRequest,
+        "check": CheckRequest,
+        "respond": RespondRequest,
+        "status": StatusRequest,
+        "receipt": ReceiptRequest,
+    }[method]
+    request = request_type.model_construct(session_id=_SESSION, task_id=_TASK)
+
+    with pytest.raises(PublicOperationError) as failure:
+        await getattr(app, method)(request, repository_privacy_context=None)
+
+    assert failure.value.code is PublicErrorCode.SESSION_CONFLICT
+    assert failure.value.retryable is False
+    assert failure.value.safe_details == {"reason_code": "repository_identity_required"}
     assert catalog.calls == 1
 
 

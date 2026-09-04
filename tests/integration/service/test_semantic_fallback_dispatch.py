@@ -451,7 +451,16 @@ async def test_primary_full_timeout_preserves_fallback_reservation_without_widen
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "state",
-    ("succeeded", "awaiting", "uncertain", "timeout", "refused", "invalid", "retained_invalid"),
+    (
+        "succeeded",
+        "awaiting",
+        "uncertain",
+        "timeout",
+        "refused",
+        "invalid",
+        "retained_invalid",
+        "earlier_invalid",
+    ),
 )
 async def test_legacy_case_recovers_selected_result_or_retires_wait_without_dispatch(
     state: str,
@@ -460,12 +469,14 @@ async def test_legacy_case_recovers_selected_result_or_retires_wait_without_disp
     adapter = memory_adapter(append_command())
     frozen, runtime = await _durable_semantic_case(adapter)
     privacy = _WaitingFallback(runtime.task_id, _MovingClock())
-    if terminal or state in {"invalid", "retained_invalid"}:
+    if terminal or state in {"invalid", "retained_invalid", "earlier_invalid"}:
         privacy = _PairedPrivacy(task_id=runtime.task_id, primary_content_invalid=not terminal)
     evaluator = _paired_evaluator(
         privacy,
         runtime,
-        primary_binding=_PROVIDER if state in {"invalid", "retained_invalid"} else _FALLBACK,
+        primary_binding=_PROVIDER
+        if state in {"invalid", "retained_invalid", "earlier_invalid"}
+        else _FALLBACK,
         fallback_binding=None,
     )
     original = await evaluator(frozen, (), runtime)
@@ -473,7 +484,7 @@ async def test_legacy_case_recovers_selected_result_or_retires_wait_without_disp
         SemanticStatus.SUCCEEDED
         if terminal
         else SemanticStatus.INVALID
-        if state in {"invalid", "retained_invalid"}
+        if state in {"invalid", "retained_invalid", "earlier_invalid"}
         else SemanticStatus.AWAITING_HUMAN
     )
     assert original.operation_lease is not None
@@ -490,13 +501,23 @@ async def test_legacy_case_recovers_selected_result_or_retires_wait_without_disp
         )
         job = await adapter.load_semantic_job(frozen.lease.writer_id, frozen.lease.operation_id)
         assert job is not None
-    if state == "retained_invalid":
+    if state in {"retained_invalid", "earlier_invalid"}:
         rows = await adapter.list_semantic_attempts(job.job_id)
         response = await ready_composition_module._publish_semantic_response_object(  # pyright: ignore[reportPrivateUsage]
             runtime, attempt_id=rows[-1].attempt_id, evaluation=original, clock=FixedClock()
         )
         prior = adapter._state.attempts[rows[-1].attempt_id]  # pyright: ignore[reportPrivateUsage]
         adapter._state.attempts[rows[-1].attempt_id] = replace(prior, result_object_ref=response)  # pyright: ignore[reportPrivateUsage]
+    if state == "earlier_invalid":
+        adapter._state.jobs[job.job_id] = replace(  # pyright: ignore[reportPrivateUsage]
+            job, state="queued", terminal_code=None, terminal_at=None
+        )
+        handle = await adapter.claim_semantic_job(original.operation_lease, job.job_id)
+        await adapter.record_attempt_outcome(
+            handle, AttemptOutcome.FAILED, terminal_code=original.reason
+        )
+        job = await adapter.load_semantic_job(frozen.lease.writer_id, frozen.lease.operation_id)
+        assert job is not None
     resolved = await runtime.objects.resolve_verified(
         job.case_object_ref.object_id, job.case_object_ref.envelope_digest
     )
@@ -528,7 +549,7 @@ async def test_legacy_case_recovers_selected_result_or_retires_wait_without_disp
         else SemanticStatus.INVALID
         if state == "retained_invalid"
         else SemanticStatus.UNAVAILABLE
-        if state in {"uncertain", "timeout", "refused", "invalid"}
+        if state in {"uncertain", "timeout", "refused", "invalid", "earlier_invalid"}
         else SemanticStatus.FAILED
     )
     assert recovered.status is expected_status
@@ -538,18 +559,25 @@ async def test_legacy_case_recovers_selected_result_or_retires_wait_without_disp
     else:
         assert recovered.reason is (
             SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
-            if state in {"uncertain", "timeout", "refused", "invalid"}
+            if state in {"uncertain", "timeout", "refused", "invalid", "earlier_invalid"}
             else SemanticReason.COORDINATOR_FAILURE
         )
     retired = await adapter.load_semantic_job(frozen.lease.writer_id, frozen.lease.operation_id)
     assert retired is not None and retired.state == ("succeeded" if terminal else "failed")
     if state == "uncertain":
         assert retired.terminal_code is SemanticReason.OUTCOME_UNKNOWN
+    elif terminal_reason is not None:
+        assert retired.terminal_code is terminal_reason
+    elif state in {"invalid", "retained_invalid", "earlier_invalid"}:
+        assert retired.terminal_code is original.reason
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("uncertain", (False, True))
-async def test_expired_resumed_attempt_preserves_dispatch_uncertainty(uncertain: bool) -> None:
+@pytest.mark.parametrize("elapsed", (11.0, 61.0))
+async def test_expired_resumed_attempt_preserves_dispatch_uncertainty(
+    uncertain: bool, elapsed: float
+) -> None:
     clock = _MovingClock()
     adapter = memory_adapter(append_command())
     adapter._clock = clock  # pyright: ignore[reportPrivateUsage]
@@ -562,8 +590,13 @@ async def test_expired_resumed_attempt_preserves_dispatch_uncertainty(uncertain:
     if uncertain:
         adapter._state.disclosure_waits.clear()  # pyright: ignore[reportPrivateUsage]
     calls = cast(int, getattr(privacy, "calls"))
-    clock.elapsed = 11.0
-    result = await evaluator(FrozenCase(frozen.case, waiting.operation_lease), (), runtime)
+    resume_lease = waiting.operation_lease
+    if elapsed > 60.0:
+        # Keep the operation lease live while the separate attempt lease expires.
+        clock.elapsed = 55.0
+        resume_lease = await adapter.renew_leases(resume_lease)
+    clock.elapsed = elapsed
+    result = await evaluator(FrozenCase(frozen.case, resume_lease), (), runtime)
     assert result.reason is SemanticReason.RECEIPT_PERSISTENCE_UNKNOWN
     assert result.provenance is None
     assert getattr(privacy, "calls") == calls

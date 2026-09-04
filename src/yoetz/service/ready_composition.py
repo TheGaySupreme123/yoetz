@@ -1939,10 +1939,9 @@ async def _finish_legacy_semantic_job(
     if reason is SemanticReason.SEMANTIC_COMPLETED:
         reason = SemanticReason.COORDINATOR_FAILURE
     status = status_for_semantic_reason(reason)
-    for attempt in reversed(attempts):
-        if attempt.result_object_ref is None:
-            continue
-        recovered = await _recover_response_evaluation(runtime, attempt.result_object_ref)
+    latest = max(attempts, key=lambda attempt: attempt.attempt_ordinal, default=None)
+    if latest is not None and latest.result_object_ref is not None:
+        recovered = await _recover_response_evaluation(runtime, latest.result_object_ref)
         if recovered is not None and recovered.status is status and recovered.reason is reason:
             return replace(recovered, attempt_accounting=accounting, operation_lease=lease)
     status, reason = _without_provider_provenance(status, reason)

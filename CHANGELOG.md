@@ -8,6 +8,27 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Hook observation no longer reports a live task mapping as stale after every Claude Code
+  compaction or resume. The resume/compact status probe now connects through the same consented
+  workspace locator the auto-attach `start` uses (`yoetz hooks session-start` accepts `--workspace`
+  and defaults to its working directory), so the service's repository fence admits the read and the
+  hook refreshes the frontier. The fence's `SESSION_CONFLICT` now carries
+  `repository_identity_required` or `repository_identity_mismatch`, which the hook records as
+  `status_workspace_unbound` / `status_workspace_mismatch` with a keep-the-mapping advisory;
+  `mapping_stale` is reserved for a session the service actually reports replaced, and that
+  advisory names the replacement task, session, and writer ids (issue #578).
+- The `SessionStart` context for a mapped session now names the mapped `session_id` and
+  `writer_id` and says to continue the task with `start mode=attach` by that session id, and the
+  guidance, Codex skill, request templates, and `start` tool description name the canonical
+  absolute repository root as `workspace_ref` (never a remote URL), the value hook auto-attach
+  commits. An agent following the guidance therefore lands on the auto-attached task instead of
+  silently creating a sibling under a differently spelled workspace (issue #580).
+- The scoped `start` post-hook binder admits the `tool_response` shape Claude Code 2.1.251 actually
+  passes (a bare JSON string of the structured result, captured live), so the agent's own `start`
+  re-binds the host session to its task. A scoped successful start that still binds nothing records
+  `start_bind_unparsed`, `start_bind_invalid_ids`, or `start_bind_write_failed` in
+  `hook_diagnostics` instead of failing silently (issue #581).
+
 - Ended-session recovery attach no longer quarantines the predecessor's still-pending observation
   rows as `ledger_rejected`. Ingest follows `SESSION_NOT_FOUND` / `session_superseded` to the
   current task binding, persists the updated lifecycle mapping on each hop, and the shared

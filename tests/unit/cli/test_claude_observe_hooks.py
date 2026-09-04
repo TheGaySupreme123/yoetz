@@ -66,7 +66,7 @@ def test_claude_hook_ingress_retains_only_closed_structural_mcp_fields(
     assert captured["source"] is ObservationSource.CLAUDE_HOOK
 
 
-@pytest.mark.parametrize("response_shape", ["structured", "content_blocks"])
+@pytest.mark.parametrize("response_shape", ["structured", "content_blocks", "json_string"])
 def test_claude_successful_start_binds_only_structural_mapping(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -86,11 +86,15 @@ def test_claude_successful_start_binds_only_structural_mapping(
         "writer_id": "wri_33333333-3333-4333-8333-333333333333",
         "frontier": {"sequence": "4", "head_digest": "sha256:" + "a" * 64},
     }
-    tool_response: JsonValue = (
-        {"structuredContent": start_result}
-        if response_shape == "structured"
-        else [{"type": "text", "text": canonical_encode(start_result).decode("utf-8")}]
-    )
+    tool_response: JsonValue
+    if response_shape == "structured":
+        tool_response = {"structuredContent": start_result}
+    elif response_shape == "content_blocks":
+        tool_response = [{"type": "text", "text": canonical_encode(start_result).decode("utf-8")}]
+    else:
+        # The live Claude Code 2.1.251 shape: the structured MCP result serialized as one
+        # bare JSON string, key order as the server emitted it (captured 2026-09-04, #581).
+        tool_response = json.dumps(start_result, separators=(",", ":"))
     payload: dict[str, JsonValue] = {
         "hook_event_name": "PostToolUse",
         "session_id": "session-bind",
@@ -162,6 +166,84 @@ def test_claude_failed_or_non_start_result_creates_no_mapping(
             _state=tmp_path,
         )
         assert load_mapping(f"claude:{session}", _state=tmp_path) is None
+
+
+def test_claude_live_2_1_251_start_tool_response_binds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Pin the exact `tool_response` Claude Code 2.1.251 passes for a scoped start (#581).
+
+    Captured on 2026-09-04 from a live PostToolUse hook (probe MCP server returning a
+    non-JSON text block plus structuredContent): the host forwards the structured result
+    as a bare compact JSON string and drops the text block. A binder regression on this
+    shape leaves every Claude session observed under its auto-attached task.
+    """
+
+    from tests.unit.cli.test_hooks import CLAUDE_2_1_251_START_TOOL_RESPONSE
+
+    def fake_handle_observe(**_kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "session-live",
+                    "tool_name": "mcp__plugin_yoetz_yoetz__start",
+                    "tool_response": CLAUDE_2_1_251_START_TOOL_RESPONSE,
+                    "tool_use_id": "toolu_01Axu9wAQ7QBfVTEdkWoorSK",
+                }
+            ),
+            stdout=io.BytesIO(),
+            workspace=".",
+            _state=tmp_path,
+        )
+        == 0
+    )
+    mapping = load_mapping("claude:session-live", _state=tmp_path)
+    assert mapping is not None
+    assert mapping.yoetz_task_id == "tsk_00000000-0000-4000-8000-000000000001"
+    assert mapping.yoetz_session_id == "ses_00000000-0000-4000-8000-000000000002"
+    assert mapping.yoetz_writer_id == "wri_00000000-0000-4000-8000-000000000003"
+    assert mapping.last_frontier == "1:sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize("tool_response", ["RESPONSE_CANARY", "{}", '{"ok":1}'])
+def test_claude_unbound_start_result_records_typed_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tool_response: str
+) -> None:
+    """A scoped start post-hook that cannot bind leaves a visible, payload-free trace (#581)."""
+
+    def fake_handle_observe(**_kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr(observe_hooks, "handle_observe", fake_handle_observe)
+    out = io.BytesIO()
+    assert (
+        observe_hooks.handle_claude_observe(
+            event_name="PostToolUse",
+            stdin_bytes=canonical_encode(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "session-unbound",
+                    "tool_name": "mcp__plugin_yoetz_yoetz__start",
+                    "tool_response": tool_response,
+                    "tool_use_id": "tool-unbound",
+                }
+            ),
+            stdout=out,
+            workspace=".",
+            _state=tmp_path,
+        )
+        == 0
+    )
+    assert load_mapping("claude:session-unbound", _state=tmp_path) is None
+    diagnostics = (tmp_path / "observation" / "hook-diagnostics.jsonl").read_text()
+    assert diagnostics.count('"reason":"start_bind_unparsed"') == 1
+    assert "RESPONSE_CANARY" not in diagnostics
 
 
 def test_claude_capability_profile_requires_exact_evidenced_version(

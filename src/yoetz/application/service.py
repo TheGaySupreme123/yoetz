@@ -773,10 +773,22 @@ class Application:
             None if repository_privacy_context is None else repository_privacy_context.commitment
         )
         if expected is None or actual is None or not hmac.compare_digest(expected, actual):
+            # The closed reason lets a caller tell "this connection carried no
+            # repository locator" from "the locator resolved to a different
+            # repository than the route" without disclosing either commitment
+            # (issue #578): a hook status probe sent without a workspace was
+            # otherwise indistinguishable from a replaced session.
             raise PublicOperationError(
                 PublicErrorCode.SESSION_CONFLICT,
                 "The requested task attachment conflicts.",
                 False,
+                safe_details={
+                    "reason_code": (
+                        "repository_identity_required"
+                        if actual is None
+                        else "repository_identity_mismatch"
+                    )
+                },
             )
 
     async def publish_work(

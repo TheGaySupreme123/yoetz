@@ -90,6 +90,20 @@ _REASONS: Final = frozenset(
         # share one vocabulary (#338).
         "storage_corrupt",
         "storage_unsafe",
+        # A resume/compact status read that the daemon's repository fence
+        # refused (issue #578): the hook connection carried no workspace
+        # locator, or the locator resolved to a different repository than the
+        # mapped task's route. Neither means the mapping is stale, so neither
+        # may be reported as `mapping_stale`.
+        "status_workspace_unbound",
+        "status_workspace_mismatch",
+        # A scoped successful `start` post-hook that produced no mapping
+        # (issue #581): the host result was not in an admitted shape, its ids
+        # failed validation, or the mapping write failed. Before these the
+        # bind failed silently and observation kept routing to the old task.
+        "start_bind_unparsed",
+        "start_bind_invalid_ids",
+        "start_bind_write_failed",
         # Observability only: the end-to-end hook budget is a contract, not an
         # enforcement point. Aborting mid-hook would drop ingest.
         "hook_budget_exceeded",

@@ -176,6 +176,8 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
     "receipt_json_shape_invalid",
     "redaction_target_required",
     "ref_mirror_mismatch",
+    "repository_identity_mismatch",
+    "repository_identity_required",
     "request_identity_conflict",
     "request_timeout",
     "response_fields_invalid",
@@ -220,7 +222,7 @@ _PROTOCOL_REASON_CODE_VALUES: tuple[str, ...] = (
 )
 
 _REASON_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$", re.ASCII)
-assert len(_PROTOCOL_REASON_CODE_VALUES) == 167
+assert len(_PROTOCOL_REASON_CODE_VALUES) == 169
 assert len(_PROTOCOL_REASON_CODE_VALUES) == len(set(_PROTOCOL_REASON_CODE_VALUES))
 assert _PROTOCOL_REASON_CODE_VALUES == tuple(sorted(_PROTOCOL_REASON_CODE_VALUES, key=str.encode))
 assert all(_REASON_CODE_PATTERN.fullmatch(value) for value in _PROTOCOL_REASON_CODE_VALUES)
