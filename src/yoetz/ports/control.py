@@ -442,6 +442,7 @@ _SERVICE_CAPABILITIES = frozenset(
         "maintenance",
         "import_review",
         "external_provider",
+        "fallback_provider",
         "confidential_ingress",
         "session_event_monitor",
     }

@@ -92,6 +92,7 @@ def test_propose_body_without_schema_version_fails_frame_validation() -> None:
     from yoetz.adapters.privacy.catalog import encode_privacy_policy_json
 
     policy = encode_privacy_policy_json(local_only_policy())
+    policy["schema_version"] = "1.0.0"
     body: dict[str, JsonValue] = {
         "expected_policy_digest": "sha256:" + "a" * 64,
         "candidate_policy": cast(JsonValue, policy),
@@ -144,6 +145,22 @@ async def test_privacy_setup_propose_sends_a_body_the_frozen_schema_accepts(
     assert len(sent) == 1
     validate_schema_instance(
         "control-request",
-        "2.0.0",
+        "2.4.0",
         cast(JsonValue, _frame("privacy_propose_policy", sent[0])),
+    )
+
+
+@pytest.mark.parametrize("policy_version", ["1.0.0", "1.1.0"])
+def test_current_control_accepts_saved_and_current_policy_versions(policy_version: str) -> None:
+    from yoetz.adapters.privacy.catalog import encode_privacy_policy_json
+
+    policy = encode_privacy_policy_json(local_only_policy())
+    policy["schema_version"] = policy_version
+    body: dict[str, JsonValue] = {
+        "schema_version": "2.0.0",
+        "authority_digest": "sha256:" + "a" * 64,
+        "candidate_policy": cast(JsonValue, policy),
+    }
+    validate_schema_instance(
+        "control-request", "2.4.0", cast(JsonValue, _frame("privacy_propose_policy", body))
     )

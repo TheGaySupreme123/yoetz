@@ -955,6 +955,10 @@ class ServiceDaemon:
             # operator readiness surfaces read this capability and must not over-report.
             if getattr(self._application, "provider_credential_connected", False) is True:
                 capabilities.add("external_provider")
+            # The declared fallback endpoint's credential, reported separately so `provider
+            # status` can show each endpoint's readiness without conflating the two (#582).
+            if getattr(self._application, "fallback_credential_connected", False) is True:
+                capabilities.add("fallback_provider")
         if self._monitor_state == "active":
             capabilities.add("session_event_monitor")
         return ServiceStatus(

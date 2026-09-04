@@ -75,9 +75,11 @@ and semantic/privacy capability and conformance tests.
    over the exact final application body bytes, excluding authentication metadata and HTTP/TLS
    framing. No long-lived SDK client or default-header object holds the real key. Yoetz owns the retry
    budget: at most two retries, only for approved timeout/connection/429 classes, jittered backoff,
-   all within one total deadline and one durable semantic operation. **Amended 2026-08-29 (issue
-   #348):** inside that same budget and deadline, exactly one repair retry is also admitted after
-   `invalid / response_content_invalid` — the provider was reached and its answer was incomplete
+   all within one total deadline and one durable semantic operation (per endpoint when a
+   fallback endpoint is declared — see the fallback endpoint amendment below). **Amended
+   2026-08-29 (issue #348):** inside that same budget and deadline, exactly one repair retry is
+   also admitted after `invalid / response_content_invalid` — the provider was reached and its
+   answer was incomplete
    or overlong (`failure_class=response_content`, output-token truncation, Chat Completions
    `finish_reason=length`). The repair resubmits the same frozen case under the same authorized
    provider/profile/model/category/retention ceiling with unchanged sampling; it is a new physical
@@ -234,11 +236,15 @@ Rejected output never projects a finding.
 
 ## Codex subscription-runtime amendment (2026-08-30, issue #404)
 
-External semantic authentication has two mutually exclusive authorities. Existing HTTP profiles
+External semantic authentication has two authorities. Existing HTTP profiles
 use `yoetz_vault_api_credential`. The exact `codex-chatgpt-subscription@1` profile uses
 `external_runtime_oauth`: one selected OpenAI Codex app-server owns ChatGPT login, refresh,
 credential storage, model discovery, and the upstream OpenAI request. Yoetz never reads or imports
-that credential and there is no API-key or generic-endpoint fallback.
+that credential. The only fallback behind this profile is the other declared authority — an
+exact API-provider binding paired under the fallback endpoint amendment below (2026-09-04,
+issue #582) — never an API key read from the environment, a generic endpoint, a proxy, or an
+ambient Codex home. Until that amendment the two authorities were mutually exclusive in
+configuration.
 
 The initial closed compatibility cell is Codex npm `0.150.1` on macOS arm64, app-server v2 over
 stdio JSONL, with an exact native executable digest, protocol-schema digest, digest-bound isolated
@@ -261,3 +267,84 @@ receive a fresh one-use authorization and exact retry. After acknowledgement, tr
 or unconfirmed process-group cleanup is terminal `unavailable/outcome_unknown` and is never
 automatically retried. Schema-valid model output remains advisory and follows the unchanged
 post-validation/finding path.
+
+## Fallback endpoint amendment (2026-09-04, issue #582)
+
+Semantic review may bind one primary endpoint plus exactly one fallback endpoint. The pairing is
+exactly the two external authorities above: the API provider (`[provider]`,
+`yoetz_vault_api_credential`) and the Codex ChatGPT subscription evaluator (`[external_runtime]`,
+`external_runtime_oauth`). A nonsecret `[semantic_fallback]` table with
+`primary = "api_provider"` or `primary = "codex_subscription"` names which serves first; the other
+bound table is the fallback. Two API providers cannot pair, a generic or owner-declared endpoint is
+never an implicit fallback, and there is no third slot. `profile` must agree with the primary
+(`local-openai` for the API provider, `codex-subscription` for the subscription); a pairing with a
+table missing fails as `semantic_fallback_endpoint_missing`, a disagreeing profile as
+`semantic_fallback_profile_mismatch`. Removing the fallback restores the exact single-endpoint
+configuration; swapping the primary keeps both bindings and both approvals.
+
+1. **Closed engagement rule.** The primary is given up for the fallback only for the closed
+   fallback-licensing set — `timeout/provider_timeout`, `unavailable/transport_unavailable`,
+   `unavailable/provider_rate_limited`, `unavailable/provider_quota_exhausted` — and only after
+   two such failures (`FALLBACK_PRIMARY_FAILURE_LIMIT = 2`, not owner-configurable), one quota
+   exhaustion, or the primary's own exhausted retry budget. A primary that cannot be resolved
+   before dispatch (`credential_unavailable`) hands every attempt to the fallback with zero
+   primary attempts recorded. Content-shaped outcomes — `response_content_invalid` including its
+   issue #348 repair retry, `response_schema_invalid`, refusal, `semantic_judgment_rejected` —
+   policy and human outcomes, and `outcome_unknown` never engage the fallback: the primary
+   answered, or may have, and a second destination cannot repair a content answer. Once engaged,
+   a job never returns to the primary.
+2. **Per-endpoint budgets.** Each endpoint keeps its own decision-5 retry budget (at most two
+   retries) and its own configured timeout; primary failures never spend the fallback's budget.
+   The overall deadline is the primary timeout plus the fallback timeout; primary dispatches
+   are capped at the frozen primary cutoff, without dividing that timeout among retry slots.
+   After a licensed transition, the fallback's aggregate timeout starts at its first durable
+   attempt claim and is capped by the overall deadline. Retries and disclosure replay do not
+   restart either clock. A single primary timeout that exhausts time but leaves retry slots does
+   not bypass the two-failure/quota/attempt-budget engagement rule; it ends without fallback.
+   A single fallback
+   failure keeps its exact reason rather than reading as an exhausted budget it never had.
+3. **Replay-safe endpoint selection.** Which endpoint an attempt uses is a pure function of the
+   durable attempt rows before it and the immutable execution snapshot in the encrypted
+   `SEMANTIC_CASE` object (`yoetz.semantic-case/2`), never mutable provider readiness. The snapshot
+   binds exact endpoints, initial primary availability, retry budgets, and UTC cutoff times.
+   Crash, restart, and `awaiting_human` replay resume the endpoint the attempt was claimed for;
+   changed configuration cannot reinterpret earlier ordinals. Every attempt still checks current
+   privacy authority for that frozen binding. Legacy terminal cases retain stored-result recovery;
+   pending cases lacking the snapshot terminate without dispatch rather than acquiring a newly
+   configured pairing (`coordinator_failure` before dispatch or during a disclosure wait,
+   an uncertain started attempt retains `outcome_unknown` durably and reports the provenance-free
+   public gap `receipt_persistence_unknown`). The internal attempt projection
+   exposes the existing durable `started_at` timestamp; no storage migration is introduced. An expired
+   resumed attempt without a disclosure wait preserves `outcome_unknown`; a known undispatched
+   expiry records `provider_timeout`. If provider-result provenance is unavailable on recovery,
+   the public result uses `receipt_persistence_unknown` while retaining the original durable reason.
+   Retained provider-result objects are recovered when their status and reason match that row.
+4. **Every fallback attempt is a fresh physical attempt** under ADR-009: its own privacy
+   evaluation against the exact fallback binding, authorization, dispatch identity, credential
+   handle or `ExternalRuntimeAuthority`, and privacy receipt. Under `confirm_every_request` it
+   needs its own foreground preview and decision. Nothing approved for the primary is reused.
+5. **Provenance names both endpoints.** `SemanticProvenance.fallback_from` (provider, endpoint
+   profile id and version, model, `attempted_count`, `reason`) is present exactly when the
+   fallback served; the top-level provider/model/endpoint then name the fallback and
+   `fallback_from` names the primary, its physical attempts before engagement, and its last
+   closed failure reason (`semantic-provenance-1.1.0`, append-only). It appears in check results,
+   check-recorded events, findings, and JSON receipts; markdown and text receipts name the
+   endpoint that served and the primary's closed failure reason. Attempt accounting carries one
+   per-endpoint slice.
+6. **Readiness and capability.** `yoetz provider status` reports `endpoint` (role `primary`) and,
+   with a pairing, `fallback_endpoint` plus `fallback_credential_connected` and a separate
+   `fallback_provider_credential` blocker; the service advertises a `fallback_provider`
+   capability when the fallback's credential is structurally present. The fallback's credential
+   never gates the primary and `semantic_ready` never depends on it. The pairing is a
+   service-side dispatch decision with no host-specific behaviour; ADR-018's route ceiling
+   applies to dispatch authority regardless of which endpoint serves.
+
+Consequences: the Assisted recommendation rule reads the primary endpoint's data-use record, and
+setup asks for `require_current_provider_data_use_evidence` only when every bound endpoint has a
+reviewed record — the requirement is enforced per dispatch, so a fallback with unknown posture
+would otherwise be policy-denied at the one moment the pairing exists for. The subscription cell
+has unknown data-use posture whichever role it holds, so an attempt it serves carries no
+upstream no-training claim. A fallback whose factory cannot be built or whose
+credential is absent is reported unavailable on its own row without fencing the primary. No live
+interoperability of a paired dispatch is claimed until authorized evidence records the exact
+request, response, route, and receipt for the endpoint that served.

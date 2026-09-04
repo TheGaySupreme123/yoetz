@@ -700,7 +700,14 @@ authorization or local-disclosure reservation; durable privacy-receipt ID; exter
 commitment when applicable; and the validated terminal status/reason pair. The exact Python fields
 and wire conversions are frozen in `domain/findings.md` and
 `semantic-provenance-1.0.0.schema.json`; the append-only external-runtime extension is frozen in
-`semantic-provenance-1.1.0.schema.json` and `runtime-attempt-evidence-1.0.0.schema.json`.
+`semantic-provenance-1.1.0.schema.json` and `runtime-attempt-evidence-1.0.0.schema.json`. The
+same append-only `1.1.0` carries the optional `fallback_from` object (issue #582) — `provider`,
+`endpoint_profile_id`, `endpoint_profile_version`, `model`, `attempted_count`, `reason` —
+present exactly when the declared fallback endpoint served the attempt; the top-level
+provider/model/endpoint then name the fallback and `fallback_from` names the primary, its
+physical attempts before engagement (zero when it could not be resolved), and its last closed
+fallback-licensing or pre-dispatch reason. It travels unchanged into check results,
+check-recorded events, findings, and JSON receipts.
 
 `policy_digest` and `privacy_policy_digest` on `ProviderAttemptProvenance` and
 `SemanticProvenance` are bound by the outbound gateway to the effective policy digest that
@@ -2526,7 +2533,17 @@ retry/deadline budget; no branch reuses consumed authority.
 `PrivacyPolicy` contains the explicit `review_context_profile`, its compiled
 `ReviewSelectionPolicy`, editable `require_current_provider_data_use_evidence` boolean,
 `network_egress_permitted` global ceiling, plus all five exact `ChannelPolicy` rows. A false ceiling
-requires every row disabled; a true ceiling grants nothing. `PrivacyProfile` governs the
+requires every row disabled; a true ceiling grants nothing. The `llm_inference` row may carry
+`fallback_provider_binding` (issue #582): a second exact external `ProviderBinding` that must
+differ from `provider_binding` and is valid only behind an external primary;
+`ChannelPolicy.authorized_provider_bindings` is the closed tuple, primary first, at most two.
+Egress admits a candidate only when its binding is exactly a member of that tuple; the registry
+admits each member on its own. The policy diff vocabulary gains
+`("channel", "fallback_provider")`, rendered "Fallback provider and model" and ordered right
+after the primary in the Destination group; adding or changing the fallback is a widening,
+removing it a tightening. Intersection keeps a fallback only when both scopes name the
+identical one. The field is introduced in `privacy-policy-1.1.0` as optional and emitted only when
+present, so single-endpoint policy digests are unchanged. `PrivacyProfile` governs the
 `llm_inference` row/content rules only; `ReviewContextProfile` can only narrow which case items are
 considered and never grants a category, class, destination, scope, or byte. `local_only` disables
 external LLM construction and external task/user-content disclosure but is not a bundled decision
@@ -2582,7 +2599,60 @@ the ready service mints an attempt-bound vault handle for an exact HTTP provider
 `external_runtime_oauth` means an exact vendor runtime owns login, refresh, storage, and upstream
 authentication; the gateway supplies only `ExternalRuntimeAuthority(dispatch_id,
 request_body_digest, request_commitment, service_generation, monotonic_deadline)`. The two
-authorities are mutually exclusive in configuration and no fallback exists between them.
+authorities are bound alone or paired as one primary plus exactly one fallback (issue #582);
+nothing else pairs.
+
+**Fallback endpoint pairing (issue #582).** `[semantic_fallback]` is a nonsecret config table
+(`SemanticFallbackConfig`; `yoetz-config-1.2.0`, with `1.1.0` frozen) with the single field
+`primary = "api_provider" | "codex_subscription"`. `api_provider` is `[provider]`
+(`yoetz_vault_api_credential`); `codex_subscription` is `[external_runtime]`
+(`external_runtime_oauth`); the other bound table is the fallback. Both tables must be bound
+(`semantic_fallback_endpoint_missing`), `[local_model]` stays forbidden
+(`external_runtime_forbids_local_model`), and `profile` must name the primary — `local-openai`
+for `api_provider`, `codex-subscription` for `codex_subscription`
+(`semantic_fallback_profile_mismatch`). `primary_external_endpoint(config)` and
+`fallback_external_endpoint(config)` are the only readers of the roles; without a pairing the
+first returns the single bound table and the second `None`. CLI: `yoetz provider endpoint ...
+--as-fallback` binds an API provider as the fallback behind an already-bound subscription (then
+`yoetz provider credential set` as usual); `yoetz provider codex-subscription setup ...
+--as-fallback` binds the subscription as the fallback behind an already-bound API provider; both
+report `endpoint_role`. `yoetz provider fallback remove` drops the fallback and its selector,
+restoring the exact single-endpoint shape; `yoetz provider fallback primary
+<api_provider|codex_subscription>` swaps roles with both bindings kept; both refuse without a
+pairing (`semantic_fallback_endpoint_missing`, exit 2). `yoetz provider codex-subscription
+disconnect` inside a pairing leaves the API provider as the sole endpoint. Rebinding one slot
+inside a pairing without `--as-fallback` keeps the selector and replaces only that slot. The
+service advertises a `fallback_provider` capability when the fallback's credential is
+structurally present; it is never an input to `semantic_ready`.
+
+Dispatch (`application/semantic_attempts.py`, `service/ready_composition.py`): the primary is
+given up for the fallback only for the closed fallback-licensing set —
+`timeout/provider_timeout`, `unavailable/transport_unavailable`,
+`unavailable/provider_rate_limited`, `unavailable/provider_quota_exhausted` — after
+`FALLBACK_PRIMARY_FAILURE_LIMIT = 2` such failures, one quota exhaustion, or the primary's
+exhausted retry budget; a primary unresolvable before dispatch (`credential_unavailable`) hands
+every attempt to the fallback with zero primary attempts. Content-shaped outcomes
+(`response_content_invalid` including the #348 repair retry, `response_schema_invalid`,
+`refused`, `semantic_judgment_rejected`), policy/human outcomes, and `outcome_unknown` never
+engage it, and an engaged job never returns to the primary. Each endpoint keeps its own ADR-006
+retry budget (at most two retries) and its own configured timeout; the operation deadline is
+the primary timeout plus the fallback timeout. Primary dispatch uses its own frozen cutoff;
+fallback dispatch uses the first fallback attempt's durable `started_at` plus its frozen timeout,
+capped by the overall cutoff. Neither retries nor replay reset these clocks. Time exhaustion alone
+does not bypass the closed engagement rule. The encrypted `yoetz.semantic-case/2` object freezes
+endpoint bindings, initial readiness, retry budgets, and cutoffs. `endpoint_role_for_ordinal` derives
+the endpoint from this frozen plan and durable prior rows, so changed configuration cannot relabel
+an attempt on replay. Legacy terminal cases recover their stored result; a legacy pending case
+without frozen execution authority terminates without dispatch: `coordinator_failure` before
+dispatch or during a disclosure wait. An uncertain started attempt retains `outcome_unknown`
+in its durable row; without reconstructable provider provenance its public gap is
+`receipt_persistence_unknown`. Each
+fallback attempt is a fresh physical attempt with its own authorization, dispatch id, credential
+handle or runtime authority, and privacy receipt; under `confirm_every_request` it needs its own
+foreground decision. `SemanticAttemptAccounting.endpoint_attempts` carries one per-endpoint
+slice (`role`, identity, `attempted_count`, `terminal_reason_counts`, `last_terminal_reason`,
+`predispatch_reason`), empty for a single-endpoint job. Provenance carries `fallback_from`
+(below) exactly when the fallback served.
 
 `codex-chatgpt-subscription@1` is the only v1 external-runtime profile. Its configuration is the
 closed `ExternalRuntimeProfileConfig`: exact absolute executable and dedicated-home paths;
@@ -3696,7 +3766,12 @@ boundary.
 non-substitutable verdicts. `semantic_ready` is repository-bound structural readiness:
 service ready and unlocked, `verification.semantic` not `disabled`, an endpoint bound, the bound
 provider's credential connected, the effective `llm_inference` channel enabled, and the trusted
-current-session repository binding's `repository_grant_state == "granted"`.
+current-session repository binding's `repository_grant_state == "granted"`. `endpoint` carries
+`role: "primary"`; with a declared fallback (issue #582) the report adds `fallback_endpoint`
+(`role: "fallback"`), `fallback_credential_connected` (`true|false|null`, read from the
+service's `fallback_provider` capability), and a separate `fallback_provider_credential`
+blocker (`not_connected` with its own next command, or `unknown`); the fallback is never an
+input to `semantic_ready`, and a single-endpoint install omits the fallback fields entirely.
 `repository_grant_state` and `repository_migration_state` expose the separate repository-authority
 inputs without inventing another readiness verdict. `agent_route_semantic_ready` is
 `semantic_ready` **and** one exclusive observed owner (`external|plugin`) with
@@ -4405,6 +4480,7 @@ facade and are never MCP tools.
   by config or environment. Ordinary clients never load this object. `release-probe` is available
   only to the service-start release harness and cannot loosen user policy. Shared config values are
   `YoetzConfig`, `MinimalConfig`, `ConfigError`, `PathSafetyError`, `OwnerDeclaredEndpointConfig`,
+  `SemanticFallbackConfig`, `primary_external_endpoint`, `fallback_external_endpoint`,
   `parse_https_origin`, and the exact endpoint profile ids `openai-responses`,
   `owner-declared-openai-responses` (ADR-014), `anthropic-openai-chat-completions`,
   `google-gemini-openai-chat-completions`, `openrouter-openai-chat-completions`,
@@ -4442,7 +4518,7 @@ facade and are never MCP tools.
 ## 14. Version identities
 
 `version.py` exposes `VersionManifest`: package, protocol (`0.1`), local control protocol (`1.0`),
-privacy-policy schema (`1.0.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
+privacy-policy schema (`1.1.0`), egress-receipt schema (`1.0.0`), engine (`0.1.0`), policy pack
 versions, projection (`yoetz/0.1.0`), object format (`yoetz-object/1`), storage schema
 (`user_version` bundle 2, catalog 3), Python, APSW/SQLite source ID, MCP SDK, provider adapter
 versions.

@@ -625,3 +625,8 @@ The registered host route still decides whether this Codex process may request s
 `strict` proves zero evaluator launch, while `policy` only permits ADR-009 to decide. Read the
 [subscription evaluator runbook](codex-subscription-evaluator.md) before claiming live model use,
 runtime isolation, privacy receipt, or cleanup.
+
+Fallback endpoint pairing (issue #582) is host-independent: whether the evaluator or a paired
+API provider serves a given attempt is a service-side dispatch decision recorded in provenance
+(`fallback_from`), with no Codex-host-specific behaviour, registration, or route input — the
+strict/policy route ceiling applies to dispatch authority regardless of which endpoint serves.

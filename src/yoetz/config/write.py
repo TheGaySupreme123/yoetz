@@ -21,6 +21,7 @@ from yoetz.config.models import (
     ExternalRuntimeProfileConfig,
     OwnerDeclaredEndpointConfig,
     ProviderProfileConfig,
+    SemanticFallbackConfig,
     YoetzConfig,
 )
 from yoetz.config.paths import PathSafetyError, config_file_path, ensure_owner_only_dir
@@ -50,6 +51,9 @@ __all__ = [
     "clear_external_runtime_binding",
     "external_runtime_binding_config",
     "preflight_config_write",
+    "provider_binding_config",
+    "semantic_fallback_primary_config",
+    "semantic_fallback_removed_config",
     "write_provider_binding",
     "write_external_runtime_binding",
 ]
@@ -563,6 +567,9 @@ def render_config_toml(config: YoetzConfig) -> str:
             },
         )
 
+    if config.semantic_fallback is not None:
+        _emit_table(lines, "semantic_fallback", {"primary": config.semantic_fallback.primary})
+
     if config.local_model is not None:
         local = config.local_model
         _emit_table(
@@ -734,17 +741,38 @@ def preflight_config_write(
     return target
 
 
-def write_provider_binding(
+def provider_binding_config(
     provider: ProviderProfileConfig,
     *,
     profile: str = "local-openai",
-    path: Path | None = None,
     base: YoetzConfig | None = None,
-) -> Path:
-    """Merge a provider binding into service config and write it."""
+    as_fallback: bool = False,
+) -> YoetzConfig:
+    """Return the config binding this API provider, without writing it.
 
+    ``as_fallback`` keeps the already-bound Codex subscription as the primary and declares this
+    provider as its fallback (issue #582); it requires that subscription to be bound. Without the
+    flag, an existing pairing keeps its selector and only the API slot is replaced; with no
+    pairing the single-endpoint rule holds and the subscription binding is removed.
+    """
+
+    if type(provider) is not ProviderProfileConfig:
+        raise TypeError("config_write_wrong_type")
     current = YoetzConfig() if base is None else base
-    updated = current.model_copy(
+    if as_fallback:
+        if current.external_runtime is None:
+            raise ConfigError("semantic_fallback_endpoint_missing")
+        return current.model_copy(
+            update={
+                "profile": "codex-subscription",
+                "provider": provider,
+                "local_model": None,
+                "semantic_fallback": SemanticFallbackConfig(primary="codex_subscription"),
+            }
+        )
+    if current.semantic_fallback is not None:
+        return current.model_copy(update={"provider": provider})
+    return current.model_copy(
         update={
             "profile": profile,
             "provider": provider,
@@ -752,17 +780,54 @@ def write_provider_binding(
             "local_model": None if profile == "local-openai" else current.local_model,
         }
     )
-    return write_config_toml(updated, path=path)
+
+
+def write_provider_binding(
+    provider: ProviderProfileConfig,
+    *,
+    profile: str = "local-openai",
+    path: Path | None = None,
+    base: YoetzConfig | None = None,
+    as_fallback: bool = False,
+) -> Path:
+    """Merge a provider binding into service config and write it."""
+
+    return write_config_toml(
+        provider_binding_config(provider, profile=profile, base=base, as_fallback=as_fallback),
+        path=path,
+    )
 
 
 def external_runtime_binding_config(
-    runtime: ExternalRuntimeProfileConfig, *, base: YoetzConfig | None = None
+    runtime: ExternalRuntimeProfileConfig,
+    *,
+    base: YoetzConfig | None = None,
+    as_fallback: bool = False,
 ) -> YoetzConfig:
-    """Return the exact config selecting this external runtime, without writing it."""
+    """Return the exact config selecting this external runtime, without writing it.
+
+    ``as_fallback`` keeps the already-bound API provider as the primary and declares this
+    runtime as its fallback (issue #582); it requires that provider to be bound. Without the
+    flag, an existing pairing keeps its selector and only the runtime slot is replaced; with no
+    pairing the single-endpoint rule holds and the API binding is removed.
+    """
 
     if type(runtime) is not ExternalRuntimeProfileConfig:
         raise TypeError("config_write_wrong_type")
     source = YoetzConfig() if base is None else base
+    if as_fallback:
+        if source.provider is None:
+            raise ConfigError("semantic_fallback_endpoint_missing")
+        return source.model_copy(
+            update={
+                "profile": "local-openai",
+                "local_model": None,
+                "external_runtime": runtime,
+                "semantic_fallback": SemanticFallbackConfig(primary="api_provider"),
+            }
+        )
+    if source.semantic_fallback is not None:
+        return source.model_copy(update={"external_runtime": runtime})
     return source.model_copy(
         update={
             "profile": "codex-subscription",
@@ -778,22 +843,86 @@ def write_external_runtime_binding(
     *,
     path: Path | None = None,
     base: YoetzConfig | None = None,
+    as_fallback: bool = False,
 ) -> Path:
-    """Atomically select the exact external-runtime route and remove API/local fallbacks."""
+    """Atomically select the exact external-runtime route.
 
-    return write_config_toml(external_runtime_binding_config(runtime, base=base), path=path)
+    Without a declared pairing this removes the API and local bindings; with one it replaces
+    only the runtime slot (see :func:`external_runtime_binding_config`).
+    """
+
+    return write_config_toml(
+        external_runtime_binding_config(runtime, base=base, as_fallback=as_fallback), path=path
+    )
 
 
 def cleared_external_runtime_config(base: YoetzConfig | None = None) -> YoetzConfig:
-    """Return the config with only the Codex evaluator binding removed, without writing it."""
+    """Return the config with only the Codex evaluator binding removed, without writing it.
+
+    Inside a pairing the API provider stays bound as the sole endpoint and the selector is
+    dropped, whichever role the runtime held; single-endpoint behaviour is restored exactly.
+    """
 
     source = YoetzConfig() if base is None else base
     if source.external_runtime is None:
         return source
+    if source.semantic_fallback is not None:
+        return source.model_copy(
+            update={
+                "profile": "local-openai",
+                "external_runtime": None,
+                "semantic_fallback": None,
+            }
+        )
     return source.model_copy(
         update={
             "profile": "strict-local",
             "external_runtime": None,
+        }
+    )
+
+
+def semantic_fallback_removed_config(base: YoetzConfig) -> YoetzConfig:
+    """Return the config with the fallback endpoint and its selector removed.
+
+    The primary keeps serving alone: this is the exact reverse of declaring the pairing, so
+    ``provider status`` and the privacy candidate return to their single-endpoint shape.
+    """
+
+    if type(base) is not YoetzConfig:
+        raise TypeError("config_write_wrong_type")
+    if base.semantic_fallback is None:
+        raise ConfigError("semantic_fallback_endpoint_missing")
+    if base.semantic_fallback.primary == "codex_subscription":
+        return base.model_copy(
+            update={
+                "profile": "codex-subscription",
+                "provider": None,
+                "semantic_fallback": None,
+            }
+        )
+    return base.model_copy(
+        update={
+            "profile": "local-openai",
+            "external_runtime": None,
+            "semantic_fallback": None,
+        }
+    )
+
+
+def semantic_fallback_primary_config(
+    base: YoetzConfig, primary: Literal["api_provider", "codex_subscription"]
+) -> YoetzConfig:
+    """Return the config with the pairing's primary swapped, both endpoints kept."""
+
+    if type(base) is not YoetzConfig:
+        raise TypeError("config_write_wrong_type")
+    if base.semantic_fallback is None:
+        raise ConfigError("semantic_fallback_endpoint_missing")
+    return base.model_copy(
+        update={
+            "profile": "codex-subscription" if primary == "codex_subscription" else "local-openai",
+            "semantic_fallback": SemanticFallbackConfig(primary=primary),
         }
     )
 

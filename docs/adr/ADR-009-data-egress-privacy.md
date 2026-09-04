@@ -46,8 +46,10 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    of the already minimized/redacted/scanned outbound case and a local-human decision for each
    external request. `minimal_external` automatically permits
    only the smallest context allowed by its policy. `trusted_provider` permits explicitly listed
-   categories only for one bound provider, endpoint profile, workspace/task scope, and purpose; it
-   never means unrestricted access.
+   categories only for one bound provider plus, when declared, exactly one fallback provider —
+   each an exact binding approved in the same ceremony (ADR-006 fallback endpoint amendment,
+   2026-09-04) — endpoint profile, workspace/task scope, and purpose; it never means
+   unrestricted access.
 2. **Global ceiling plus independent network channels:** `network_egress_permitted` is an explicit
    global boolean ceiling. `false` requires every network channel disabled; `true` authorizes
    nothing by itself. Beneath that ceiling, policy and consent are separate for exactly
@@ -190,7 +192,11 @@ case → single-use authorization → bounded gateway → bound sink/provider �
    individual privacy-audit-content deletion operation; ordinary ledger redaction/GC cannot clear
    the root.
    Approval binds exact request/case digest, excerpts/categories, provider/model/endpoint,
-   purpose, scope, policy version, byte/token ceilings, expiry, and one dispatch. Denial and expiry
+   purpose, scope, policy version, byte/token ceilings, expiry, and one dispatch. A declared
+   fallback endpoint does not stretch one approval across two destinations: each fallback
+   attempt is its own physical attempt bound to the exact fallback provider/model/endpoint
+   with its own authorization, dispatch identity, credential handle or runtime authority,
+   and receipt. Denial and expiry
    are terminal, durable outcomes. Restart never converts a pending or expired proposal into
    approval. Under `confirm_every_request`, every physical attempt—including an otherwise eligible
    retry of identical bytes—requires a fresh exact foreground preview and decision; consumed or
@@ -538,3 +544,27 @@ consumed and a fresh attempt is forbidden. Pre-acknowledgement retries are cappe
 each is a separate authorization, dispatch, process, and receipt. Runtime evidence retains no
 credential path or bytes, email, raw account/workspace identity, prompt transcript, reasoning,
 stderr, or event log.
+
+## Fallback endpoint amendment (2026-09-04, issue #582)
+
+The `llm_inference` channel row may carry `fallback_provider_binding`: a second exact five-field
+`ProviderBinding`, external transport, that must differ from the primary and is valid only behind
+an external primary. The row's authorized destinations are exactly the primary plus that one
+fallback. Egress admits a candidate only when its binding is exactly one of the two — never a
+prefix, wildcard, or provider-id match — and the registry admits each authorized binding on its
+own, so a fallback whose factory is absent or fails to build is reported unavailable without
+fencing the primary, and the reverse holds. Adding or changing the fallback is a widening of
+exactly that destination and takes the ordinary propose → decide ceremony; the diff vocabulary
+gains `("channel", "fallback_provider")`, rendered "Fallback provider and model" in the
+Destination group right after the primary. Removing it is a tightening. Effective-policy
+intersection keeps a fallback only when both scopes name the identical one; disagreement tightens
+to the primary alone rather than disabling a channel both scopes allow. Policy JSON emits
+`fallback_provider_binding` only when present, so single-endpoint policy digests are unchanged.
+`yoetz privacy setup` reads both bound endpoints and shows the fallback as "Fallback destination
+(after the primary cannot serve)". Which endpoint an attempt reaches is decided by ADR-006's closed
+engagement rule; this amendment only makes both destinations exact, approved, receipted, and
+independently revocable.
+
+The fallback binding is carried by privacy-policy schema 1.1.0. The released 1.0.0 schema remains
+byte-identical; current policy readers accept existing 1.0.0 documents and current writers emit
+1.1.0. This wire version change does not alter the canonical domain policy digest.

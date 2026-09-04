@@ -139,6 +139,18 @@ The agent-chat decision surface renders the same structured substantive diff. It
 show only a digest and call that informed approval; the digest binds the bytes while the readable
 rows explain what changes.
 
+When a fallback endpoint is paired (see [Providers](providers.md#pairing-a-fallback-endpoint)),
+the destination group carries a second row, `Fallback provider and model`, directly under
+`Provider and model`. Adding or changing it is a widening and is marked `(!)`; removing it is a
+tightening and appears unmarked. The approval covers exactly the two named destinations —
+nothing is sent to the fallback before that decision, and nothing else ever becomes a fallback.
+`yoetz privacy setup` shows the same pair before asking, as `Destination` and
+`Fallback destination (after the primary cannot serve)`.
+
+Custom privacy setup asks separately whether to authorize the configured fallback, naming its
+provider and model. Declining keeps the policy bound to the primary alone. Named review recipes
+include the configured pair in the review screen before approval.
+
 ## What semantic review actually sends
 
 When you accept the CLI's recommended `assisted-review` recipe, it shows and confirms a standing
@@ -177,6 +189,16 @@ unresolved limitation — then recheck. Routine checks and retries need no human
 
 Semantic output is advisory, provenance-labeled, and deterministically fenced. It never silently
 becomes deterministic truth, and it never upgrades a coverage claim.
+
+If a fallback endpoint is approved and the primary could not serve — repeated timeouts,
+connection failures, or rate limits, a quota exhaustion, or a missing credential — the same
+approved packet goes to the fallback as a fresh attempt with its own authorization and privacy
+receipt; under Metadata only that is its own foreground approval. An answer the primary actually
+gave is never re-asked elsewhere. The result and receipt then name the fallback as the provider,
+model, and endpoint that served and carry `fallback_from`: the primary, how many attempts it was
+given, and the exact reason it was abandoned. The markdown and text receipts say which endpoint
+served and why the primary could not, so a review that came from the fallback is never mistaken
+for one from the primary.
 
 ## Auditing it
 

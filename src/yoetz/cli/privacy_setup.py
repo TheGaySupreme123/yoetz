@@ -139,6 +139,9 @@ class PrivacySetupAnswers:
     updates: bool
     capability_testing: bool
     authorization_scope: AuthorizationScopeKind
+    # The declared fallback destination (#582); approved together with the primary so the
+    # policy names the exact set of endpoints semantic review may reach.
+    fallback_provider: ProviderBinding | None = None
     # This request is distinct from semantic review: it carries only a fixed literal and is
     # available solely while a person is deliberately setting a provider credential.
     credential_probe: bool = False
@@ -303,6 +306,7 @@ def build_candidate_policy(
             _CASE_MAX_BYTES,
             _CASE_MAX_TOKENS,
             300,
+            answers.fallback_provider,
         )
     else:
         profile = PrivacyProfile.LOCAL_ONLY
@@ -493,9 +497,16 @@ def _agent_defaults(
 
 
 def _recipe_answers(
-    recipe: PrivacyRecipe, current: PrivacyPolicy, external: ProviderBinding | None
+    recipe: PrivacyRecipe,
+    current: PrivacyPolicy,
+    external: ProviderBinding | None,
+    fallback: ProviderBinding | None = None,
 ) -> PrivacySetupAnswers:
-    """Materialize one named recipe into the exact typed answers, asking nothing."""
+    """Materialize one named recipe into the exact typed answers, asking nothing.
+
+    ``fallback`` is the declared fallback destination; callers that already read the config
+    pass it explicitly; recipe construction never reads configuration or the environment.
+    """
 
     if recipe == "custom":
         raise ValueError("privacy_setup_recipe_invalid")
@@ -529,16 +540,27 @@ def _recipe_answers(
     # that cannot dispatch at all. Ask for it only where the bound endpoint can actually satisfy
     # it; elsewhere the review screen states the facts are unknown and the operator turns the
     # requirement on deliberately.
+    # A declared fallback is a second dispatch destination under the same requirement, so it
+    # must satisfy it too: otherwise every fallback dispatch would be policy-denied exactly when
+    # the primary cannot serve, which is the one moment the pairing exists for (#582).
+    fallback = fallback if network else None
     require_data_use = (
         recipe == "assisted_review"
         and network
         and external is not None
         and endpoint_profile_data_use_reviewed(external.endpoint_profile_id, now=datetime.now(UTC))
+        and (
+            fallback is None
+            or endpoint_profile_data_use_reviewed(
+                fallback.endpoint_profile_id, now=datetime.now(UTC)
+            )
+        )
     )
     return PrivacySetupAnswers(
         network_egress=network,
         local_models=False,
         external_provider=external if network else None,
+        fallback_provider=fallback,
         require_current_provider_data_use_evidence=require_data_use,
         local_model_binding=None,
         review_context=context,
@@ -644,9 +666,10 @@ def _data_classes_prompt(label: str, default: tuple[DataClass, ...]) -> tuple[Da
 
 def _configured_bindings() -> tuple[ProviderBinding | None, ProviderBinding | None]:
     from yoetz.config.load import load_config
+    from yoetz.config.models import primary_external_endpoint
 
     config = load_config({}, os.environ, None)
-    external_config = config.provider or config.external_runtime
+    external_config = primary_external_endpoint(config)
     external = (
         None
         if external_config is None
@@ -678,8 +701,33 @@ def configured_bindings() -> tuple[ProviderBinding | None, ProviderBinding | Non
     return _configured_bindings()
 
 
+def _configured_fallback_binding() -> ProviderBinding | None:
+    from yoetz.config.load import load_config
+    from yoetz.config.models import fallback_external_endpoint
+
+    fallback_config = fallback_external_endpoint(load_config({}, os.environ, None))
+    if fallback_config is None:
+        return None
+    return ProviderBinding(
+        fallback_config.provider_id,
+        fallback_config.model,
+        fallback_config.endpoint_profile_id,
+        fallback_config.endpoint_profile_version,
+        "external",
+    )
+
+
+def configured_fallback_binding() -> ProviderBinding | None:
+    """Return the declared fallback external binding, or ``None`` without a pairing (#582)."""
+
+    return _configured_fallback_binding()
+
+
 def _ask_custom_answers(
-    current: PrivacyPolicy, external: ProviderBinding | None, local: ProviderBinding | None
+    current: PrivacyPolicy,
+    external: ProviderBinding | None,
+    local: ProviderBinding | None,
+    fallback: ProviderBinding | None = None,
 ) -> PrivacySetupAnswers:
     """The only field-level path, grouped into five sections a person can hold in mind.
 
@@ -691,6 +739,7 @@ def _ask_custom_answers(
     network = typer.confirm("Permit network egress at all?", default=False)
     use_provider = False
     require_evidence = False
+    use_fallback = False
     if network:
         provider_label = (
             "none configured" if external is None else f"{external.provider_id}/{external.model_id}"
@@ -698,6 +747,11 @@ def _ask_custom_answers(
         use_provider = typer.confirm(
             f"Bind external semantic review to {provider_label}?", default=external is not None
         )
+        if use_provider and fallback is not None:
+            use_fallback = typer.confirm(
+                f"Authorize fallback semantic review to {fallback.provider_id}/{fallback.model_id}?",
+                default=False,
+            )
         if use_provider:
             require_evidence = typer.confirm(
                 "Require a current eligible provider data-use record?", default=True
@@ -776,6 +830,7 @@ def _ask_custom_answers(
         updates,
         False,
         scope,
+        fallback_provider=fallback if use_fallback else None,
     )
 
 
@@ -935,6 +990,13 @@ def _render_review(candidate: PrivacyPolicy) -> None:
             f"{llm.provider_binding.provider_id}/{llm.provider_binding.model_id} "
             f"via {llm.provider_binding.endpoint_profile_id}@"
             f"{llm.provider_binding.endpoint_profile_version}"
+        )
+    if llm.fallback_provider_binding is not None:
+        fallback = llm.fallback_provider_binding
+        typer.echo(
+            "  Fallback destination (after the primary cannot serve): "
+            f"{fallback.provider_id}/{fallback.model_id} "
+            f"via {fallback.endpoint_profile_id}@{fallback.endpoint_profile_version}"
         )
     typer.echo(
         "  Allowed categories: "
@@ -1149,6 +1211,7 @@ def _choose_candidate(
     offer_recommended: bool,
     credential_probe_authorized: bool,
     update_checks_override: bool | None,
+    fallback: ProviderBinding | None = None,
 ) -> PrivacyPolicy | None:
     """Select the exact candidate policy, or ``None`` when the user declined outright.
 
@@ -1166,7 +1229,7 @@ def _choose_candidate(
         typer.echo(f"Why: {why}")
         typer.echo(tradeoff)
         answers = replace(
-            _recipe_answers(recommended, current, external),
+            _recipe_answers(recommended, current, external, fallback),
             credential_probe=credential_probe_authorized,
         )
         if update_checks_override is not None:
@@ -1190,14 +1253,14 @@ def _choose_candidate(
         return _confirmed_candidate(
             current,
             replace(
-                _ask_custom_answers(current, external, local),
+                _ask_custom_answers(current, external, local, fallback),
                 credential_probe=credential_probe_authorized,
             ),
             "Use this exact custom privacy policy?",
             default=False,
         )
     answers = replace(
-        _recipe_answers(recipe, current, external),
+        _recipe_answers(recipe, current, external, fallback),
         credential_probe=credential_probe_authorized,
     )
     if update_checks_override is not None:
@@ -1248,6 +1311,7 @@ async def run_privacy_setup(
             offer_recommended=offer_recommended,
             credential_probe_authorized=credential_probe_authorized,
             update_checks_override=update_checks_override,
+            fallback=_configured_fallback_binding(),
         )
     except ValueError as error:
         return PrivacySetupReport(

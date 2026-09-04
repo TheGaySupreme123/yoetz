@@ -150,6 +150,13 @@ codex_subscription_app = typer.Typer(
 credential_app = typer.Typer(
     help="Provision credentials through a trusted ceremony.", no_args_is_help=True
 )
+fallback_app = typer.Typer(
+    help=(
+        "Manage the primary/fallback pairing of the two bound semantic endpoints "
+        "(Codex subscription and API provider)."
+    ),
+    no_args_is_help=True,
+)
 privacy_app = typer.Typer(help="Inspect and configure local privacy policy.", no_args_is_help=True)
 privacy_receipts_app = typer.Typer(
     help="Inspect bounded structural privacy receipts.", no_args_is_help=True
@@ -195,6 +202,7 @@ service_app.add_typer(recovery_app, name="recovery")
 app.add_typer(provider_app, name="provider")
 provider_app.add_typer(credential_app, name="credential")
 provider_app.add_typer(codex_subscription_app, name="codex-subscription")
+provider_app.add_typer(fallback_app, name="fallback")
 app.add_typer(privacy_app, name="privacy")
 privacy_app.add_typer(privacy_receipts_app, name="receipts")
 app.add_typer(backup_app, name="backup")
@@ -2755,6 +2763,16 @@ def provider_codex_subscription_setup(
         bool,
         typer.Option("--accept", help="Explicitly accept the displayed destination/terms notice."),
     ] = False,
+    as_fallback: Annotated[
+        bool,
+        typer.Option(
+            "--as-fallback",
+            help=(
+                "Keep the bound API provider as the primary and bind this runtime as the "
+                "fallback that serves only after the primary cannot."
+            ),
+        ),
+    ] = False,
     json_output: _JSON = False,
 ) -> None:
     """Prove an existing Codex login (or obtain one) via app-server, then bind the exact runtime."""
@@ -2783,6 +2801,9 @@ def provider_codex_subscription_setup(
         typer.echo("  Yoetz sends only a privacy-approved case; Codex owns the upstream body.")
         typer.echo("  disconnect: yoetz provider codex-subscription disconnect")
         typer.echo("  rollback only: yoetz provider codex-subscription rollback")
+        if as_fallback:
+            typer.echo("  role: fallback behind the bound API provider (primary)")
+            typer.echo("  remove pairing: yoetz provider fallback remove")
         if switch_account:
             typer.echo("  existing sign-in: logged out first, then a new Codex sign-in")
         else:
@@ -2806,6 +2827,7 @@ def provider_codex_subscription_setup(
                     login_mode="device_code" if device_code else "browser",
                     open_browser=open_browser,
                     switch_account=switch_account,
+                    as_fallback=as_fallback,
                 )
             )
         )
@@ -2888,6 +2910,95 @@ def provider_status(json_output: _JSON = False) -> None:
     _finish(run_async(lambda: run_provider_status(json_output=json_output)))
 
 
+def _semantic_fallback_payload(path: Path, config: object) -> dict[str, JsonValue]:
+    from yoetz.config.models import (
+        YoetzConfig,
+        fallback_external_endpoint,
+        primary_external_endpoint,
+    )
+
+    assert type(config) is YoetzConfig
+    primary = primary_external_endpoint(config)
+    fallback = fallback_external_endpoint(config)
+    return {
+        "config_path": str(path),
+        "profile": config.profile,
+        "primary": (None if config.semantic_fallback is None else config.semantic_fallback.primary),
+        "primary_endpoint": (
+            None
+            if primary is None
+            else {
+                "provider_id": primary.provider_id,
+                "model": primary.model,
+                "endpoint_profile_id": primary.endpoint_profile_id,
+                "endpoint_profile_version": primary.endpoint_profile_version,
+            }
+        ),
+        "fallback_endpoint": (
+            None
+            if fallback is None
+            else {
+                "provider_id": fallback.provider_id,
+                "model": fallback.model,
+                "endpoint_profile_id": fallback.endpoint_profile_id,
+                "endpoint_profile_version": fallback.endpoint_profile_version,
+            }
+        ),
+    }
+
+
+@fallback_app.command("remove")
+def provider_fallback_remove(json_output: _JSON = False) -> None:
+    """Drop the fallback endpoint and its selector; the primary keeps serving alone."""
+
+    from yoetz.cli.provider_binding import remove_semantic_fallback
+    from yoetz.config.models import ConfigError
+
+    try:
+        path, config = remove_semantic_fallback()
+    except ConfigError as error:
+        typer.echo(f"invalid_request: {error.reason_code}", err=True)
+        _finish(2)
+        return
+    _human_or_json(_semantic_fallback_payload(path, config), json_output=json_output)
+    typer.echo(
+        "next: the privacy policy still names the removed endpoint until you re-run "
+        "'yoetz privacy setup'; review the resulting policy changes there",
+        err=True,
+    )
+    _finish(0)
+
+
+@fallback_app.command("primary")
+def provider_fallback_primary(
+    primary: Annotated[
+        str,
+        typer.Argument(
+            help="Which bound endpoint serves first: api_provider or codex_subscription."
+        ),
+    ],
+    json_output: _JSON = False,
+) -> None:
+    """Swap which of the two bound endpoints is the primary; both stay bound and approved."""
+
+    from yoetz.cli.provider_binding import set_semantic_fallback_primary
+    from yoetz.config.models import ConfigError
+
+    if primary not in {"api_provider", "codex_subscription"}:
+        _finish(_usage_failure())
+        return
+    try:
+        path, config = set_semantic_fallback_primary(
+            cast(Literal["api_provider", "codex_subscription"], primary)
+        )
+    except ConfigError as error:
+        typer.echo(f"invalid_request: {error.reason_code}", err=True)
+        _finish(2)
+        return
+    _human_or_json(_semantic_fallback_payload(path, config), json_output=json_output)
+    _finish(0)
+
+
 @provider_app.command("catalog")
 def provider_catalog(json_output: _JSON = False) -> None:
     """List the installed reviewed presets and their suggested model IDs without network access."""
@@ -2955,6 +3066,16 @@ def provider_endpoint(
     interactive: Annotated[
         bool, typer.Option("--interactive/--no-interactive", help="Prompt on a TTY.")
     ] = True,
+    as_fallback: Annotated[
+        bool,
+        typer.Option(
+            "--as-fallback",
+            help=(
+                "Keep the bound Codex subscription as the primary and bind this provider as "
+                "the fallback that serves only after the primary cannot."
+            ),
+        ),
+    ] = False,
     json_output: _JSON = False,
 ) -> None:
     """Write a nonsecret reviewed provider or owner-declared binding to config.toml."""
@@ -3026,16 +3147,19 @@ def provider_endpoint(
                 return
         if choice == "owner_declared":
             path, provider = apply_provider_endpoint_choice(
-                "owner_declared", model=model, https_origin=https_origin
+                "owner_declared", model=model, https_origin=https_origin, as_fallback=as_fallback
             )
         else:
-            path, provider = apply_provider_endpoint_choice(choice, model=model)
+            path, provider = apply_provider_endpoint_choice(
+                choice, model=model, as_fallback=as_fallback
+            )
         payload = {
             "config_path": str(path),
             "endpoint_profile_id": provider.endpoint_profile_id,
             "endpoint_profile_version": provider.endpoint_profile_version,
             "model": provider.model,
             "provider_id": provider.provider_id,
+            "endpoint_role": "fallback" if as_fallback else "primary",
         }
         if provider.owner_declared_endpoint is not None:
             payload["https_origin"] = provider.owner_declared_endpoint.https_origin

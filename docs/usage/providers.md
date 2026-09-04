@@ -73,7 +73,9 @@ capability-cell identity digest and evidence expiry, strict configuration digest
 effort, and dedicated owner-private `CODEX_HOME` are bound in nonsecret config and rechecked before
 every attempt. Expired capability evidence fails before a child starts. A shell alias, neighboring
 version, moved binary, modified evaluator config, API key, proxy variable, or ambient Codex home is
-not a fallback. Guided first-run, the prompt-loop provider menu, and `/provider` can log out the
+not a fallback. The only fallback is an API provider you explicitly pair with it (see
+[Pairing a fallback endpoint](#pairing-a-fallback-endpoint)). Guided first-run, the prompt-loop
+provider menu, and `/provider` can log out the
 dedicated home first when you choose to switch ChatGPT accounts.
 
 Read structural state without sending a task case:
@@ -104,6 +106,59 @@ a semantic turn ran. `semantic_ready: true` means the structural provider, machi
 repository conditions are present. Privacy authority is a separate disclosure gate, and live
 semantic dispatch is a separate runtime event evidenced by the check/evaluate result and receipt.
 See the [exact evaluator runbook](../runbooks/codex-subscription-evaluator.md).
+
+## Pairing a fallback endpoint
+
+Semantic review can bind one primary endpoint plus exactly one fallback. The pair is always the
+two authorities above — an API provider and the Codex ChatGPT subscription — in either order;
+two API providers cannot pair, and nothing becomes a fallback implicitly. The fallback serves only
+after the primary could not: two timeouts, connection failures, or rate limits in a row, one quota
+exhaustion, a used-up retry budget, or a primary whose credential is missing before the first
+attempt. An answer the primary actually gave — malformed, refused, rejected, or ambiguous — stays
+with the primary; a second provider is never asked to repair a content answer.
+
+Subscription first, API provider as the fallback:
+
+```text
+yoetz provider codex-subscription setup --executable /absolute/path/to/codex
+yoetz provider endpoint --provider anthropic --model <model-id> --as-fallback
+yoetz provider credential set
+```
+
+API provider first, subscription as the fallback:
+
+```text
+yoetz provider endpoint --provider anthropic --model <model-id>
+yoetz provider credential set
+yoetz provider codex-subscription setup --executable /absolute/path/to/codex --as-fallback
+```
+
+`--as-fallback` requires the other authority to be bound already and reports `endpoint_role:
+fallback`; without the flag, binding one authority replaces the other as before. The fallback
+needs its own credential — the API key ceremony, or the digest-bound Codex login — and its own
+privacy approval: run `yoetz privacy setup` afterwards, which shows the second endpoint as
+`Fallback destination (after the primary cannot serve)` and asks you to approve both
+destinations together. Until you do, nothing is sent to the fallback. See
+[Privacy and semantic review](privacy-and-semantic-review.md#what-the-trusted-approval-screen-shows).
+
+To reverse or rearrange:
+
+```text
+yoetz provider fallback remove                  # the primary keeps serving alone
+yoetz provider fallback primary api_provider     # or codex_subscription: swap roles, keep both
+```
+
+`fallback remove` restores the exact single-endpoint configuration; re-run `yoetz privacy setup`
+so the policy stops naming the removed destination — that is a tightening and asks for no
+widening approval. `fallback primary` keeps both bindings and both approvals. Disconnecting the
+subscription inside a pairing leaves the API provider as the sole endpoint.
+
+Every fallback attempt is a fresh attempt with its own authorization and privacy receipt; under
+Metadata only it needs its own foreground approval. Each endpoint keeps its own retry budget and
+timeout. When the fallback served, the check result and receipt say so: the provider, model, and
+endpoint name the fallback, and `fallback_from` names the primary, how many times it was tried,
+and why it was given up — the markdown and text receipts say which endpoint served and why the
+primary could not.
 
 ## Interactive model choices
 
@@ -206,6 +261,24 @@ credential_authority = "external_runtime_oauth"
 # model, reasoning effort, timeout, and retry cap follow; no OAuth value is valid here
 ```
 
+Primary/fallback pairing (issue #582): both tables above stay bound and a nonsecret selector names
+which serves first — `api_provider` for `[provider]`, `codex_subscription` for
+`[external_runtime]`. `profile` follows the primary.
+
+```toml
+schema_version = "1"
+profile = "codex-subscription"
+
+[semantic_fallback]
+primary = "codex_subscription"   # [external_runtime] serves first; [provider] is the fallback
+
+[provider]
+# ... the API-provider binding as above
+
+[external_runtime]
+# ... the subscription binding as above
+```
+
 You can edit API-provider `config.toml` bindings by hand. `/provider` writes the same API binding
 or drives the digest-checked Codex subscription setup, status, disconnect, rollback, and optional
 account switch; it always shows the destination and privacy posture before asking for an API key or
@@ -244,6 +317,12 @@ Failure stays `credential_unavailable`, never a misleading ready state.
 
 Conditions 4 and 5 are independent. Closing only one moves the failure without making semantic
 review work — the check reason changes, the outcome does not.
+
+With a fallback paired, conditions 3 and 4 are about the primary: `endpoint` reports
+`role: primary`, and the report adds `fallback_endpoint` plus `fallback_credential_connected`
+with its own `fallback_provider_credential` blocker and next command. A missing fallback
+credential never makes the primary not-ready, and `semantic_ready: true` says nothing about the
+fallback — read its row separately. The fallback fields are absent on a single-endpoint install.
 
 When the service is locked, credential and privacy state are `unknown`, not incomplete. Unknown
 conditions have no remediation command. For `vault_mode=uninitialized`, continue with `yoetz setup`;

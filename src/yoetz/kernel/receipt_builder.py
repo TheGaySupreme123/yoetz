@@ -785,6 +785,30 @@ def _check_coverage_sentence(
     return ""
 
 
+def _semantic_endpoint_sentence(check: CheckRecordedPayload | None) -> str:
+    """Name the endpoint that served semantic review when it was not the primary (#582).
+
+    Single-endpoint reviews say nothing here: the provenance already names the one binding the
+    policy allows. A fallback-served review is different — the reader approved two destinations
+    and must be able to see which one received the case and why the primary did not, in every
+    rendering, not only the JSON document. Identifiers are closed structural identity strings,
+    never provider or user text.
+    """
+
+    provenance = None if check is None else check.semantic_provenance
+    if provenance is None or provenance.fallback_from is None:
+        return ""
+    origin = provenance.fallback_from
+    attempts = _count_phrase(origin.attempted_count, "attempt", "attempts")
+    return (
+        f" Semantic review was served by the fallback endpoint {provenance.provider}/"
+        f"{provenance.model} ({provenance.endpoint_profile_id}@"
+        f"{provenance.endpoint_profile_version}) after the primary {origin.provider}/"
+        f"{origin.model} ({origin.endpoint_profile_id}@{origin.endpoint_profile_version}) "
+        f"could not serve: {origin.reason.value} after {attempts}."
+    )
+
+
 def _sections(
     *,
     include: ReceiptInclude,
@@ -802,6 +826,7 @@ def _sections(
     plan_scope: CurrentPlanScope,
     tested_subject_sequence: str | None = None,
     resolved_finding_ids: tuple[FindingId, ...] = (),
+    semantic_endpoint_sentence: str = "",
 ) -> tuple[ReceiptSection, ...]:
     gap_codes = coverage.known_gaps
     bodies: dict[ReceiptSectionKey, str] = {}
@@ -979,6 +1004,7 @@ def _sections(
     )
     bodies[ReceiptSectionKey.VERSION_AND_POLICY_IDENTITY] = (
         f"Engine {versions.engine_version}; protocol {versions.protocol_version}; {policy_rows}."
+        + semantic_endpoint_sentence
     )
     items[ReceiptSectionKey.VERSION_AND_POLICY_IDENTITY] = ()
 
@@ -1078,6 +1104,7 @@ def build_receipt(
             else str(context.projection.latest_tested_state.subject_frontier.sequence)
         ),
         resolved_finding_ids=resolved_finding_ids,
+        semantic_endpoint_sentence=_semantic_endpoint_sentence(context.applicable_check),
     )
     suppressed_count = (
         0 if context.applicable_check is None else context.applicable_check.suppressed_count

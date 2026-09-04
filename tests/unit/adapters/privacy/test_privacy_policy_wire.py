@@ -1,4 +1,4 @@
-"""Domain PrivacyPolicy ↔ wire privacy-policy-1.0.0 codec."""
+"""Domain PrivacyPolicy ↔ wire privacy-policy compatibility codec."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from yoetz.protocol.schemas import validate_schema_instance
 
 def test_encode_local_only_matches_wire_schema() -> None:
     wire = encode_privacy_policy_json(local_only_policy())
-    validate_schema_instance("privacy-policy", "1.0.0", wire)
-    assert wire["schema_version"] == "1.0.0"
+    validate_schema_instance("privacy-policy", "1.1.0", wire)
+    assert wire["schema_version"] == "1.1.0"
     assert "agent_context_categories" not in wire
     ceilings = wire["local_sink_category_ceilings"]
     assert type(ceilings) is dict
@@ -42,7 +42,7 @@ def test_encode_local_only_matches_wire_schema() -> None:
 def test_wire_round_trip_preserves_domain_policy() -> None:
     original = minimal_external_policy()
     wire = encode_privacy_policy_json(original)
-    validate_schema_instance("privacy-policy", "1.0.0", wire)
+    validate_schema_instance("privacy-policy", "1.1.0", wire)
     decoded = decode_privacy_policy_canonical(canonical_encode(wire))
     assert decoded == original
 
@@ -81,3 +81,11 @@ def test_wire_decode_rejects_an_unsupported_schema_version() -> None:
     wire["schema_version"] = "2.0.0"
     with pytest.raises(ValueError, match="privacy_policy_row_corrupt"):
         decode_privacy_policy_canonical(canonical_encode(cast(JsonValue, wire)))
+
+
+def test_released_wire_policy_still_decodes() -> None:
+    original = minimal_external_policy()
+    wire = encode_privacy_policy_json(original)
+    wire["schema_version"] = "1.0.0"
+    validate_schema_instance("privacy-policy", "1.0.0", wire)
+    assert decode_privacy_policy_canonical(canonical_encode(wire)) == original

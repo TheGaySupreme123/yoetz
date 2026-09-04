@@ -374,6 +374,7 @@ _CHANGE_GROUPS: Final[tuple[tuple[str, tuple[tuple[str, str], ...]], ...]] = (
             ("global", "network_egress"),
             ("channel", "enabled"),
             ("channel", "provider"),
+            ("channel", "fallback_provider"),
             ("channel", "purposes"),
         ),
     ),
@@ -434,6 +435,7 @@ _CHANGE_LABELS: Final[dict[tuple[str, str], str]] = {
     ("global", "provider_data_use_evidence"): "Current provider data-use evidence",
     ("channel", "enabled"): "Channel",
     ("channel", "provider"): "Provider and model",
+    ("channel", "fallback_provider"): "Fallback provider and model",
     ("channel", "purposes"): "Purposes",
     ("channel", "categories"): "Information allowed",
     ("channel", "data_classes"): "Sensitivity allowed",
@@ -522,7 +524,7 @@ def _change_value_text(change: PrivacyPolicyChange, value: PrivacyPolicyChangeVa
         return str(value.count)
     if not value.labels:
         return "None"
-    if change.field in {"provider", "binding"}:
+    if change.field in {"provider", "fallback_provider", "binding"}:
         return _binding_text(value.labels)
     if change.field == "effective_scope":
         return _scope_text(value.labels)

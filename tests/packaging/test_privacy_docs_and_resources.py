@@ -39,6 +39,7 @@ _PRIVACY_SCHEMA_NAMES: Final = (
     "outbound-case-1.0.0.schema.json",
     "outbound-case-1.1.0.schema.json",
     "privacy-policy-1.0.0.schema.json",
+    "privacy-policy-1.1.0.schema.json",
     "setup-wizard-contract-1.0.0.schema.json",
 )
 _PRIVACY_FIXTURE_NAMES: Final = (
@@ -284,7 +285,7 @@ def test_privacy_md_and_protocol_docs_are_present_in_the_sdist(built_dist: _Buil
         assert any(member.endswith(path) for member in names), path
 
 
-def test_resource_manifest_declares_the_four_privacy_schemas_once_each() -> None:
+def test_resource_manifest_declares_each_privacy_schema_version_once() -> None:
     manifest = _read_json(_REPO_ROOT / "src" / "yoetz" / "resources" / "manifest.json")
     entries = cast(list[Mapping[str, object]], manifest["entries"])
     privacy_entries = [

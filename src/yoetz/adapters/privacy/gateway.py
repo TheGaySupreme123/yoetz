@@ -212,13 +212,15 @@ class ProviderRegistry:
         return data_use if type(data_use) is ProviderDataUseProfile else None
 
 
-def _llm_binding(policy: PrivacyPolicy) -> ProviderBinding | None:
+def _llm_bindings(policy: PrivacyPolicy) -> tuple[ProviderBinding, ...]:
+    """Every external destination the policy authorizes, primary first (at most two)."""
+
     llm = next(
         item for item in policy.channel_policies if item.channel is EgressChannel.LLM_INFERENCE
     )
     if not policy.network_egress_permitted or not llm.enabled:
-        return None
-    return llm.provider_binding
+        return ()
+    return llm.authorized_provider_bindings
 
 
 def _local_binding(policy: PrivacyPolicy) -> ProviderBinding | None:
@@ -425,7 +427,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
                 return ProviderReconciliation(policy.generation, 0, 0, ())
             previous = self._registry
             allowed_external = (
-                _llm_binding(policy.policy) if repository_privacy_commitment is not None else None
+                _llm_bindings(policy.policy) if repository_privacy_commitment is not None else ()
             )
             allowed_local = _local_binding(policy.policy)
             # Phase 1: install an immediate deny fence for anything the new policy no longer
@@ -436,7 +438,7 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
             stale_local: tuple[ProviderBinding, SemanticEvaluatorPort] | None = None
             if previous is not None:
                 for binding, factory in previous.external.items():
-                    if binding == allowed_external:
+                    if binding in allowed_external:
                         fenced_external[binding] = factory
                     else:
                         stale_external[binding] = factory
@@ -470,39 +472,41 @@ class PolicyEnforcingOutboundGateway(OutboundGatewayPort):
         # request occurs here and no credential handle is minted.
         new_external: dict[ProviderBinding, ExternalProviderFactory] = dict(fenced_external)
         unavailable: list[tuple[str, str]] = []
-        if (
-            allowed_external is not None
-            and allowed_external not in new_external
-            and human_authority.source != "unavailable"
-            and human_authority.external_activation_allowed
-        ):
-            builder = self._external_factory_builders.get(allowed_external)
+        # Each authorized destination is admitted on its own: a fallback whose factory is absent
+        # or fails to build is reported as unavailable without fencing the primary, and the
+        # reverse holds too. Bounded at two bindings by the policy row.
+        for candidate_binding in allowed_external:
+            if (
+                candidate_binding in new_external
+                or human_authority.source == "unavailable"
+                or not human_authority.external_activation_allowed
+            ):
+                continue
+            builder = self._external_factory_builders.get(candidate_binding)
             if builder is None:
-                unavailable.append((_binding_digest(allowed_external), "factory_unavailable"))
-            else:
-                assert authority_scope is not None
-                build_epoch = await self._validated_repository_authority_epoch(
-                    authority_scope, authority_digest
-                )
-                if build_epoch is not None:
-                    async with self._lock:
-                        if (
-                            not self._closed
-                            and self._current_registry() is phase_registry
-                            and build_epoch == self._authority_epoch
-                        ):
-                            try:
-                                # Construction is the capability-admission boundary. Holding the
-                                # same lock as close_revoked makes either revocation or this exact
-                                # construction win, never both in an ambiguous order.
-                                new_external[allowed_external] = builder()
-                            except Exception:  # noqa: BLE001 - bounded foreign failure
-                                unavailable.append(
-                                    (
-                                        _binding_digest(allowed_external),
-                                        "factory_construction_failed",
-                                    )
-                                )
+                unavailable.append((_binding_digest(candidate_binding), "factory_unavailable"))
+                continue
+            assert authority_scope is not None
+            build_epoch = await self._validated_repository_authority_epoch(
+                authority_scope, authority_digest
+            )
+            if build_epoch is None:
+                continue
+            async with self._lock:
+                if (
+                    not self._closed
+                    and self._current_registry() is phase_registry
+                    and build_epoch == self._authority_epoch
+                ):
+                    try:
+                        # Construction is the capability-admission boundary. Holding the same
+                        # lock as close_revoked makes either revocation or this exact
+                        # construction win, never both in an ambiguous order.
+                        new_external[candidate_binding] = builder()
+                    except Exception:  # noqa: BLE001 - bounded foreign failure
+                        unavailable.append(
+                            (_binding_digest(candidate_binding), "factory_construction_failed")
+                        )
 
         new_local = fenced_local
         if (

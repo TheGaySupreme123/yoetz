@@ -34,11 +34,14 @@ __all__ = [
     "ProfileCapabilities",
     "ProviderDataUseProfile",
     "ProviderProfileConfig",
+    "SemanticFallbackConfig",
     "SemanticPolicy",
     "StorageConfig",
     "VerificationConfig",
     "YoetzConfig",
+    "fallback_external_endpoint",
     "parse_https_origin",
+    "primary_external_endpoint",
 ]
 
 OFFICIAL_OPENAI_ENDPOINT_PROFILE_ID: Final = "openai-responses"
@@ -93,6 +96,8 @@ _CONFIG_ERROR_REASONS: Final = frozenset(
         "provider_required_for_semantic",
         "secret_config_override_forbidden",
         "secret_in_config",
+        "semantic_fallback_endpoint_missing",
+        "semantic_fallback_profile_mismatch",
         "strict_local_forbids_provider",
         "test_fake_forbids_local_model",
         "test_fake_forbids_provider",
@@ -483,6 +488,25 @@ class ExternalRuntimeProfileConfig(StrictConfigModel):
         return value
 
 
+class SemanticFallbackConfig(StrictConfigModel):
+    """Pair the two external semantic authorities: one primary, the other its fallback.
+
+    ``primary`` names which bound table serves first: ``api_provider`` is ``[provider]`` (vault
+    API credential), ``codex_subscription`` is ``[external_runtime]`` (Codex-managed OAuth). The
+    other table serves only after the primary records the closed fallback-licensing failures
+    (ADR-006, issue #582). Both tables must be bound; the selector is declarative and nonsecret.
+    """
+
+    primary: Literal["api_provider", "codex_subscription"]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_raw(cls, value: object) -> object:
+        _scan_secret_keys(value)
+        _reject_unknown(value, frozenset({"primary"}))
+        return value
+
+
 class LocalModelProfileConfig(StrictConfigModel):
     profile_id: str
     profile_version: str
@@ -593,6 +617,7 @@ class YoetzConfig(StrictConfigModel):
     provider: ProviderProfileConfig | None = None
     external_runtime: ExternalRuntimeProfileConfig | None = None
     local_model: LocalModelProfileConfig | None = None
+    semantic_fallback: SemanticFallbackConfig | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -609,6 +634,7 @@ class YoetzConfig(StrictConfigModel):
                 "provider",
                 "external_runtime",
                 "local_model",
+                "semantic_fallback",
             }
         )
         _reject_unknown(value, allowed)
@@ -623,6 +649,21 @@ class YoetzConfig(StrictConfigModel):
 
     @model_validator(mode="after")
     def _validate_profile(self) -> YoetzConfig:
+        if self.semantic_fallback is not None:
+            # A declared pairing binds both authorities at once; the profile names the primary.
+            # Every single-endpoint exclusivity rule below is therefore replaced by these three.
+            if self.provider is None or self.external_runtime is None:
+                raise ConfigError("semantic_fallback_endpoint_missing")
+            if self.local_model is not None:
+                raise ConfigError("external_runtime_forbids_local_model")
+            expected = (
+                "codex-subscription"
+                if self.semantic_fallback.primary == "codex_subscription"
+                else "local-openai"
+            )
+            if self.profile != expected:
+                raise ConfigError("semantic_fallback_profile_mismatch")
+            return self
         if self.profile == "strict-local" and (
             self.provider is not None or self.external_runtime is not None
         ):
@@ -652,3 +693,34 @@ class YoetzConfig(StrictConfigModel):
         ):
             raise ConfigError("provider_required_for_semantic")
         return self
+
+
+type ExternalEndpointConfig = ProviderProfileConfig | ExternalRuntimeProfileConfig
+
+
+def primary_external_endpoint(config: YoetzConfig) -> ExternalEndpointConfig | None:
+    """Return the bound external endpoint that serves semantic review first.
+
+    Without a ``[semantic_fallback]`` pairing this is the single bound table (at most one is
+    bound). With a pairing it is the table the selector names as primary.
+    """
+
+    if type(config) is not YoetzConfig:
+        raise TypeError("config_wrong_type")
+    if config.semantic_fallback is None:
+        return config.provider if config.provider is not None else config.external_runtime
+    if config.semantic_fallback.primary == "codex_subscription":
+        return config.external_runtime
+    return config.provider
+
+
+def fallback_external_endpoint(config: YoetzConfig) -> ExternalEndpointConfig | None:
+    """Return the bound endpoint that serves only after the primary fails, or ``None``."""
+
+    if type(config) is not YoetzConfig:
+        raise TypeError("config_wrong_type")
+    if config.semantic_fallback is None:
+        return None
+    if config.semantic_fallback.primary == "codex_subscription":
+        return config.provider
+    return config.external_runtime

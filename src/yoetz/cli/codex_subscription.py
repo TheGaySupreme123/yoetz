@@ -428,8 +428,12 @@ async def codex_subscription_setup(
     open_browser: bool,
     switch_account: bool,
     config_path: Path | None = None,
+    as_fallback: bool = False,
 ) -> dict[str, JsonValue]:
     """Validate the binding and its persistence, prove or obtain Codex login, then persist it.
+
+    ``as_fallback`` keeps the already-bound API provider as the primary and declares this
+    runtime as its fallback (issue #582); it never replaces that binding.
 
     Every deterministic local requirement — the exact runtime cell, the canonical target
     configuration, and a render-validated, lock-probed write of the staged binding — is proven
@@ -455,7 +459,7 @@ async def codex_subscription_setup(
     base, expected_bytes = _config_snapshot(target)
     _bounded_config_operation(
         lambda: preflight_config_write(
-            external_runtime_binding_config(binding, base=base),
+            external_runtime_binding_config(binding, base=base, as_fallback=as_fallback),
             target,
             expected_bytes=expected_bytes,
         )
@@ -498,13 +502,14 @@ async def codex_subscription_setup(
             raise ValueError("codex_subscription_readiness_unproven")
     _bounded_config_operation(
         lambda: write_config_toml_if_unchanged(
-            external_runtime_binding_config(binding, base=base),
+            external_runtime_binding_config(binding, base=base, as_fallback=as_fallback),
             expected_bytes=expected_bytes,
             path=target,
         )
     )
     result = _safe_status(binding, status)
     result["login_reused"] = login_reused
+    result["endpoint_role"] = "fallback" if as_fallback else "primary"
     return result
 
 

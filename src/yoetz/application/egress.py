@@ -866,10 +866,12 @@ class PrivacyCoordinator:
                     PrivacyOutcome.CHANNEL_UNAVAILABLE,
                     PrivacyReason.CHANNEL_UNAVAILABLE,
                 )
+        # Exact membership in the row's authorized destinations: the primary, plus the one
+        # fallback the same approval named (#582). Never a prefix, wildcard, or provider-id match.
         if (
             llm.provider_binding is not None
             and binding.transport == "external"
-            and llm.provider_binding != binding
+            and binding not in llm.authorized_provider_bindings
         ):
             return await self._complete_semantic_predispatch(
                 candidate,

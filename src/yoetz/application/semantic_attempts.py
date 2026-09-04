@@ -10,6 +10,13 @@ every remaining slot. The repair class — a response that reached the provider 
 ``invalid / response_content_invalid`` (incomplete or overlong output) — may use exactly one slot
 per job (issue #348), resubmitting the same frozen case as a fresh physical attempt. Every other
 invalid, refusal, policy, human, stale, quota, and secret class is terminal on first sight.
+
+A declared fallback endpoint (issue #582) adds a second, separately budgeted endpoint behind the
+primary. The primary is given up only for the closed fallback-licensing classes — it could not
+serve at all (timeout, transport, rate limit, quota) — after ``FALLBACK_PRIMARY_FAILURE_LIMIT``
+such failures, one quota exhaustion, or its own exhausted budget. Every content-shaped outcome
+stays with the primary exactly as before. Which endpoint an attempt used is a pure function of
+the durable rows before it, so crash and ``awaiting_human`` replay resume the same endpoint.
 """
 
 from __future__ import annotations
@@ -17,7 +24,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Final, Literal, Protocol
 
 from yoetz.observability.logging import record_unexpected_exception_without_raising
@@ -35,12 +42,19 @@ from yoetz.protocol.errors import PublicOperationError
 from yoetz.protocol.models import VALID_SEMANTIC_REASONS, SemanticReason, SemanticStatus
 
 __all__ = [
+    "FALLBACK_PRIMARY_FAILURE_LIMIT",
+    "EndpointRole",
     "SemanticAttemptAccounting",
     "SemanticAttemptDispatch",
+    "SemanticEndpointAttempts",
+    "SemanticEndpointPlan",
+    "SemanticFallbackPlan",
     "attempt_accounting_from_rows",
     "attempt_accounting_to_json",
     "backoff_seconds",
+    "endpoint_role_for_ordinal",
     "final_status_after_exhaustion",
+    "is_fallback_licensing_outcome",
     "is_repairable_semantic_outcome",
     "is_retriable_semantic_outcome",
     "max_physical_attempts",
@@ -90,6 +104,113 @@ _STATUS_BY_REASON: Final[dict[SemanticReason, SemanticStatus]] = {
     reason: status for status, reasons in VALID_SEMANTIC_REASONS.items() for reason in reasons
 }
 
+# Issue #582: the primary is abandoned for its fallback after this many fallback-licensing
+# failures. Two, not one: a single transient fault is what the ordinary retry budget already
+# absorbs, and switching destinations on the first blip would send the same case to a second
+# provider for nothing. Not owner-configurable — a knob here is a hidden retry budget.
+FALLBACK_PRIMARY_FAILURE_LIMIT: Final = 2
+
+# The closed set of primary outcomes that license a fallback dispatch: the primary could not
+# serve. Everything the provider actually answered (content-invalid, schema-invalid, refused,
+# rejected judgment), every policy or human outcome, and ``outcome_unknown`` — where the primary
+# may in fact have served — stay with the primary. Quota exhaustion is here although the retry
+# matrix refuses to re-ask the same endpoint: the fallback is a different endpoint.
+_FALLBACK_LICENSING_REASONS: Final[frozenset[SemanticReason]] = frozenset(
+    {
+        SemanticReason.PROVIDER_TIMEOUT,
+        SemanticReason.TRANSPORT_UNAVAILABLE,
+        SemanticReason.PROVIDER_RATE_LIMITED,
+        SemanticReason.PROVIDER_QUOTA_EXHAUSTED,
+    }
+)
+
+EndpointRole = Literal["primary", "fallback"]
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticEndpointPlan:
+    """Structural identity and retry budget of one bound endpoint (no URL, no credential)."""
+
+    role: EndpointRole
+    provider_id: str
+    model_id: str
+    endpoint_profile_id: str
+    endpoint_profile_version: str
+    max_retries: int
+
+    def __post_init__(self) -> None:
+        if self.role not in {"primary", "fallback"}:
+            raise ValueError("semantic_endpoint_plan_invalid")
+        for value in (
+            self.provider_id,
+            self.model_id,
+            self.endpoint_profile_id,
+            self.endpoint_profile_version,
+        ):
+            if type(value) is not str or not value:
+                raise ValueError("semantic_endpoint_plan_invalid")
+        physical_attempt_budget(self.max_retries)
+
+    @property
+    def budget(self) -> int:
+        return physical_attempt_budget(self.max_retries)
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticFallbackPlan:
+    """One primary endpoint and the one fallback licensed to serve when it cannot.
+
+    ``primary_predispatch_reason`` is set when the primary could not even be resolved before any
+    attempt (its credential or registry entry is absent); every attempt then goes to the
+    fallback and the accounting names that closed reason against zero primary attempts.
+    """
+
+    primary: SemanticEndpointPlan
+    fallback: SemanticEndpointPlan
+    primary_predispatch_reason: SemanticReason | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.primary) is not SemanticEndpointPlan
+            or type(self.fallback) is not SemanticEndpointPlan
+            or self.primary.role != "primary"
+            or self.fallback.role != "fallback"
+        ):
+            raise ValueError("semantic_fallback_plan_invalid")
+        if self.primary_predispatch_reason is not None and (
+            type(self.primary_predispatch_reason) is not SemanticReason
+        ):
+            raise ValueError("semantic_fallback_plan_invalid")
+
+    def endpoint(self, role: EndpointRole) -> SemanticEndpointPlan:
+        return self.primary if role == "primary" else self.fallback
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticEndpointAttempts:
+    """Per-endpoint slice of the accounting: what one destination was asked and answered."""
+
+    role: EndpointRole
+    provider_id: str
+    model_id: str
+    endpoint_profile_id: str
+    endpoint_profile_version: str
+    attempted_count: int
+    terminal_reason_counts: tuple[tuple[str, int], ...]
+    last_terminal_reason: str | None
+    predispatch_reason: str | None
+
+    def __post_init__(self) -> None:
+        if self.role not in {"primary", "fallback"}:
+            raise ValueError("semantic_attempt_accounting_invalid")
+        if type(self.attempted_count) is not int or self.attempted_count < 0:
+            raise ValueError("semantic_attempt_accounting_invalid")
+        for token, count in self.terminal_reason_counts:
+            if type(token) is not str or type(count) is not int or count < 1:
+                raise ValueError("semantic_attempt_accounting_invalid")
+        if self.predispatch_reason is not None and self.attempted_count != 0:
+            raise ValueError("semantic_attempt_accounting_invalid")
+
 
 @dataclass(frozen=True, slots=True)
 class SemanticAttemptAccounting:
@@ -99,6 +220,8 @@ class SemanticAttemptAccounting:
     selected_attempt_id: str | None
     exhausted: bool
     terminal_reason_counts: tuple[tuple[str, int], ...]
+    # Empty for a single-endpoint job; primary then fallback for a declared pairing (#582).
+    endpoint_attempts: tuple[SemanticEndpointAttempts, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.attempted_count) is not int or self.attempted_count < 0:
@@ -115,6 +238,102 @@ class SemanticAttemptAccounting:
         for token, count in self.terminal_reason_counts:
             if type(token) is not str or type(count) is not int or count < 1:
                 raise ValueError("semantic_attempt_accounting_invalid")
+        if type(self.endpoint_attempts) is not tuple or any(
+            type(item) is not SemanticEndpointAttempts for item in self.endpoint_attempts
+        ):
+            raise ValueError("semantic_attempt_accounting_invalid")
+
+    def endpoint(self, role: EndpointRole) -> SemanticEndpointAttempts | None:
+        return next((item for item in self.endpoint_attempts if item.role == role), None)
+
+
+@dataclass(frozen=True, slots=True)
+class _EndpointWalk:
+    """Where the endpoint state machine stands after a sequence of completed attempts."""
+
+    engaged: bool
+    primary_attempts: int
+    fallback_attempts: int
+    licensing_failures: int
+
+    @property
+    def role(self) -> EndpointRole:
+        return "fallback" if self.engaged else "primary"
+
+
+def is_fallback_licensing_outcome(status: SemanticStatus, reason: SemanticReason) -> bool:
+    """Whether a terminal primary outcome licenses dispatching the fallback endpoint (#582)."""
+
+    return status in _RETRIABLE_STATUSES and reason in _FALLBACK_LICENSING_REASONS
+
+
+def _walk_endpoints(
+    codes: tuple[SemanticReason | None, ...], plan: SemanticFallbackPlan
+) -> _EndpointWalk:
+    """Replay the closed engagement rule over completed attempt codes, in ordinal order.
+
+    ``None`` is an attempt that has no terminal code yet (a ``started`` row on replay); it holds
+    a slot on its endpoint without deciding anything. Once engaged, every later attempt belongs
+    to the fallback: the rule never returns to the primary inside one job.
+    """
+
+    engaged = plan.primary_predispatch_reason is not None
+    primary_attempts = 0
+    fallback_attempts = 0
+    licensing_failures = 0
+    primary_budget = plan.primary.budget
+    for code in codes:
+        if engaged:
+            fallback_attempts += 1
+            continue
+        primary_attempts += 1
+        if code is None or code not in _FALLBACK_LICENSING_REASONS:
+            continue
+        licensing_failures += 1
+        if (
+            code is SemanticReason.PROVIDER_QUOTA_EXHAUSTED
+            or licensing_failures >= FALLBACK_PRIMARY_FAILURE_LIMIT
+            or primary_attempts >= primary_budget
+        ):
+            engaged = True
+    return _EndpointWalk(engaged, primary_attempts, fallback_attempts, licensing_failures)
+
+
+def _ordered_codes(
+    attempts: tuple[SemanticAttemptRecord, ...], *, before_ordinal: int | None = None
+) -> tuple[SemanticReason | None, ...]:
+    ordered = sorted(attempts, key=lambda attempt: attempt.attempt_ordinal)
+    return tuple(
+        attempt.terminal_code
+        for attempt in ordered
+        if before_ordinal is None or attempt.attempt_ordinal < before_ordinal
+    )
+
+
+def endpoint_role_for_ordinal(
+    attempts: tuple[SemanticAttemptRecord, ...],
+    plan: SemanticFallbackPlan | None,
+    ordinal: int,
+) -> EndpointRole:
+    """Which endpoint the attempt at ``ordinal`` uses, from the durable rows before it only.
+
+    Reading it from rows rather than coordinator memory is what makes a resumed ``started``
+    attempt go to the same endpoint it was claimed for, on every replay.
+    """
+
+    if plan is None:
+        return "primary"
+    if type(ordinal) is not int or ordinal < 1:
+        raise ValueError("attempt_ordinal_invalid")
+    return _walk_endpoints(_ordered_codes(attempts, before_ordinal=ordinal), plan).role
+
+
+def _total_budget(walk: _EndpointWalk, plan: SemanticFallbackPlan) -> int:
+    """Physical attempts the whole job may spend, given how far the walk has come."""
+
+    if walk.engaged:
+        return walk.primary_attempts + plan.fallback.budget
+    return plan.primary.budget
 
 
 def physical_attempt_budget(max_retries: int) -> int:
@@ -192,22 +411,73 @@ def should_retry_after(
     return attempts_completed < budget
 
 
+def _reason_counts(
+    codes: tuple[SemanticReason | None, ...],
+) -> tuple[tuple[str, int], ...]:
+    counts: dict[str, int] = {}
+    for code in codes:
+        if code is None:
+            continue
+        counts[code.value] = counts.get(code.value, 0) + 1
+    return tuple(sorted(counts.items(), key=lambda item: item[0].encode("ascii")))
+
+
+def _endpoint_attempts(
+    codes: tuple[SemanticReason | None, ...], plan: SemanticFallbackPlan
+) -> tuple[SemanticEndpointAttempts, ...]:
+    walk = _walk_endpoints(codes, plan)
+    primary_codes = codes[: walk.primary_attempts]
+    fallback_codes = codes[walk.primary_attempts :]
+    primary_last = next((code for code in reversed(primary_codes) if code is not None), None)
+    fallback_last = next((code for code in reversed(fallback_codes) if code is not None), None)
+    predispatch = plan.primary_predispatch_reason
+    return (
+        SemanticEndpointAttempts(
+            "primary",
+            plan.primary.provider_id,
+            plan.primary.model_id,
+            plan.primary.endpoint_profile_id,
+            plan.primary.endpoint_profile_version,
+            walk.primary_attempts,
+            _reason_counts(primary_codes),
+            None if primary_last is None else primary_last.value,
+            None if predispatch is None else predispatch.value,
+        ),
+        SemanticEndpointAttempts(
+            "fallback",
+            plan.fallback.provider_id,
+            plan.fallback.model_id,
+            plan.fallback.endpoint_profile_id,
+            plan.fallback.endpoint_profile_version,
+            walk.fallback_attempts,
+            _reason_counts(fallback_codes),
+            None if fallback_last is None else fallback_last.value,
+            None,
+        ),
+    )
+
+
 def attempt_accounting_from_rows(
     job: SemanticJobRecord | None,
     attempts: tuple[SemanticAttemptRecord, ...],
     *,
     max_retries: int,
+    fallback: SemanticFallbackPlan | None = None,
 ) -> SemanticAttemptAccounting:
-    """Rebuild bounded accounting from durable job/attempt rows."""
+    """Rebuild bounded accounting from durable job/attempt rows.
 
-    budget = physical_attempt_budget(max_retries)
-    counts: dict[str, int] = {}
-    for attempt in attempts:
-        if attempt.terminal_code is None:
-            continue
-        token = attempt.terminal_code.value
-        counts[token] = counts.get(token, 0) + 1
-    ordered = tuple(sorted(counts.items(), key=lambda item: item[0].encode("ascii")))
+    With a fallback plan the budget is the primary's own until the walk engages the fallback,
+    then the primary attempts actually spent plus the fallback's own budget; the per-endpoint
+    slices are derived from the same walk so they always agree with the roles dispatch used.
+    """
+
+    codes = _ordered_codes(attempts)
+    if fallback is None:
+        budget = physical_attempt_budget(max_retries)
+        endpoint_attempts: tuple[SemanticEndpointAttempts, ...] = ()
+    else:
+        budget = _total_budget(_walk_endpoints(codes, fallback), fallback)
+        endpoint_attempts = _endpoint_attempts(codes, fallback)
     attempted = len(attempts)
     selected = None if job is None else job.selected_attempt_id
     exhausted = (
@@ -219,14 +489,15 @@ def attempt_accounting_from_rows(
         attempted_count=attempted,
         selected_attempt_id=selected,
         exhausted=exhausted,
-        terminal_reason_counts=ordered,
+        terminal_reason_counts=_reason_counts(codes),
+        endpoint_attempts=endpoint_attempts,
     )
 
 
 def attempt_accounting_to_json(value: SemanticAttemptAccounting) -> dict[str, JsonValue]:
     """Encode accounting as structural JSON with no user-controlled content."""
 
-    return {
+    body: dict[str, JsonValue] = {
         "attempted_count": value.attempted_count,
         "selected_attempt_id": value.selected_attempt_id,
         "exhausted": value.exhausted,
@@ -234,6 +505,25 @@ def attempt_accounting_to_json(value: SemanticAttemptAccounting) -> dict[str, Js
             {"reason": reason, "count": count} for reason, count in value.terminal_reason_counts
         ),
     }
+    if value.endpoint_attempts:
+        body["endpoint_attempts"] = tuple(
+            {
+                "role": item.role,
+                "provider_id": item.provider_id,
+                "model_id": item.model_id,
+                "endpoint_profile_id": item.endpoint_profile_id,
+                "endpoint_profile_version": item.endpoint_profile_version,
+                "attempted_count": item.attempted_count,
+                "terminal_reason_counts": tuple(
+                    {"reason": reason, "count": count}
+                    for reason, count in item.terminal_reason_counts
+                ),
+                "last_terminal_reason": item.last_terminal_reason,
+                "predispatch_reason": item.predispatch_reason,
+            }
+            for item in value.endpoint_attempts
+        )
+    return body
 
 
 def final_status_after_exhaustion(
@@ -403,10 +693,42 @@ async def _accounting_for(
     job_id: str,
     *,
     max_retries: int,
+    fallback: SemanticFallbackPlan | None = None,
 ) -> SemanticAttemptAccounting:
     rows = await ledger.list_semantic_attempts(job_id)
     job_final = await ledger.load_semantic_job(lease.writer_id, lease.operation_id)
-    return attempt_accounting_from_rows(job_final, rows, max_retries=max_retries)
+    return attempt_accounting_from_rows(job_final, rows, max_retries=max_retries, fallback=fallback)
+
+
+def _role_exhaustion(
+    last_status: SemanticStatus,
+    last_reason: SemanticReason,
+    *,
+    codes: tuple[SemanticReason | None, ...],
+    max_retries: int,
+    fallback: SemanticFallbackPlan | None,
+) -> tuple[SemanticStatus, SemanticReason]:
+    """Exhaustion mapping for the endpoint that produced the last of ``codes``.
+
+    ``codes`` ends with the last attempt's own reason. Without a fallback plan this is exactly
+    :func:`final_status_after_exhaustion` over the whole job; with one, the budget and the
+    attempt count are those of the endpoint the last attempt used, so a single fallback failure
+    keeps its exact reason instead of reading as an exhausted retry budget it never had.
+    """
+
+    if fallback is None:
+        return final_status_after_exhaustion(
+            last_status, last_reason, attempts_completed=len(codes), max_retries=max_retries
+        )
+    role = _walk_endpoints(codes[:-1], fallback).role
+    walk = _walk_endpoints(codes, fallback)
+    attempts = walk.primary_attempts if role == "primary" else walk.fallback_attempts
+    return final_status_after_exhaustion(
+        last_status,
+        last_reason,
+        attempts_completed=attempts,
+        max_retries=fallback.endpoint(role).max_retries,
+    )
 
 
 async def _recover_terminal_job(
@@ -415,6 +737,7 @@ async def _recover_terminal_job(
     lease: OperationLease,
     job: SemanticJobRecord,
     max_retries: int,
+    fallback: SemanticFallbackPlan | None,
     recover_selected: Callable[[SemanticJobRecord], Awaitable[_AttemptEvaluation | None]] | None,
     build_final: Callable[
         [SemanticStatus, SemanticReason, _AttemptEvaluation | None, SemanticAttemptAccounting],
@@ -424,7 +747,9 @@ async def _recover_terminal_job(
     """Rebuild the final evaluation from a durable terminal job without re-claiming."""
 
     await _resolve_disclosure_wait_after_terminal(ledger, lease, job.job_id)
-    accounting = await _accounting_for(ledger, lease, job.job_id, max_retries=max_retries)
+    accounting = await _accounting_for(
+        ledger, lease, job.job_id, max_retries=max_retries, fallback=fallback
+    )
     if job.state == "succeeded":
         evaluation: _AttemptEvaluation | None = None
         if recover_selected is not None:
@@ -457,6 +782,7 @@ async def _terminalize_after_failure(
     job_id: str,
     handle: SemanticAttemptHandle | None,
     max_retries: int,
+    fallback: SemanticFallbackPlan | None = None,
 ) -> SemanticAttemptAccounting:
     """Drive a failed attempt and its job to a terminal state, whatever went wrong.
 
@@ -510,14 +836,16 @@ async def _terminalize_after_failure(
         None if handle is None else handle.attempt_id,
     )
     try:
-        return await _accounting_for(ledger, lease_holder(), job_id, max_retries=max_retries)
+        return await _accounting_for(
+            ledger, lease_holder(), job_id, max_retries=max_retries, fallback=fallback
+        )
     except Exception as exc:
         record_unexpected_exception_without_raising(
             exc,
             component="semantic_attempts",
             operation="semantic_terminalize_accounting_failed",
         )
-        return attempt_accounting_from_rows(None, (), max_retries=max_retries)
+        return attempt_accounting_from_rows(None, (), max_retries=max_retries, fallback=fallback)
 
 
 async def _terminalize_cancellation_safe(
@@ -528,6 +856,7 @@ async def _terminalize_cancellation_safe(
     job_id: str,
     handle: SemanticAttemptHandle | None,
     max_retries: int,
+    fallback: SemanticFallbackPlan | None = None,
 ) -> tuple[SemanticAttemptAccounting, bool]:
     """Finish terminal writes even if cancellation is delivered again during cleanup.
 
@@ -545,6 +874,7 @@ async def _terminalize_cancellation_safe(
             job_id=job_id,
             handle=handle,
             max_retries=max_retries,
+            fallback=fallback,
         )
     )
     cancellation_received = False
@@ -560,7 +890,9 @@ async def _terminalize_cancellation_safe(
                 # A cleanup implementation that cancelled itself cannot be resumed. Preserve
                 # the signal and return bounded fallback accounting to the caller.
                 return (
-                    attempt_accounting_from_rows(None, (), max_retries=max_retries),
+                    attempt_accounting_from_rows(
+                        None, (), max_retries=max_retries, fallback=fallback
+                    ),
                     True,
                 )
 
@@ -586,6 +918,11 @@ async def run_durable_semantic_attempts(
         Callable[[SemanticJobRecord], Awaitable[_AttemptEvaluation | None]] | None
     ) = None,
     on_lease_renewed: Callable[[OperationLease], None] | None = None,
+    fallback: SemanticFallbackPlan | None = None,
+    dispatch_fallback: SemanticAttemptDispatch | None = None,
+    primary_deadline: Deadline | None = None,
+    fallback_timeout_seconds: float | None = None,
+    now_utc: Callable[[], datetime] | None = None,
 ) -> object:
     """Run the physical attempt loop for one durable semantic job.
 
@@ -594,10 +931,21 @@ async def run_durable_semantic_attempts(
     after ``invalid/response_content_invalid``, within the total deadline and ``max_retries``
     budget. Exactly one selected attempt or one terminal failed job results.
 
+    With ``fallback`` (issue #582) the endpoint of every attempt is read from the durable rows
+    before it (:func:`endpoint_role_for_ordinal`); ``dispatch`` serves the primary and
+    ``dispatch_fallback`` the fallback, each inside its own retry budget. ``max_retries`` must
+    equal the primary's budget so the single-endpoint accounting stays the same function.
+
     Crash/replay after a terminal job row already exists recovers from durable state without
     re-claiming. The check operation lease is renewed around each claim/select so a configured
     ``timeout_seconds`` longer than the 60s lease TTL cannot expire mid-operation.
     """
+
+    if fallback is not None:
+        if type(fallback) is not SemanticFallbackPlan or dispatch_fallback is None:
+            raise ValueError("semantic_fallback_dispatch_missing")
+        if fallback.primary.max_retries != max_retries:
+            raise ValueError("semantic_fallback_budget_mismatch")
 
     current_lease = lease
 
@@ -607,6 +955,23 @@ async def run_durable_semantic_attempts(
         if on_lease_renewed is not None:
             on_lease_renewed(current_lease)
         return current_lease
+
+    async def _accounting() -> SemanticAttemptAccounting:
+        return await _accounting_for(
+            ledger, current_lease, job.job_id, max_retries=max_retries, fallback=fallback
+        )
+
+    async def _exhaustion_from_rows(
+        last_status: SemanticStatus, last_reason: SemanticReason
+    ) -> tuple[SemanticStatus, SemanticReason]:
+        # The last attempt's row is already durable here (it was closed ``expired`` when its
+        # retry was admitted), so the rows end with its own reason.
+        codes = _ordered_codes(await ledger.list_semantic_attempts(job.job_id))
+        if not codes or codes[-1] is not last_reason:
+            codes = (*codes, last_reason)
+        return _role_exhaustion(
+            last_status, last_reason, codes=codes, max_retries=max_retries, fallback=fallback
+        )
 
     # Always refresh the check lease before recovery or the first claim so a long semantic
     # deadline is not truncated by the 60-second operation-lease TTL.
@@ -619,17 +984,30 @@ async def run_durable_semantic_attempts(
             lease=current_lease,
             job=job,
             max_retries=max_retries,
+            fallback=fallback,
             recover_selected=recover_selected,
             build_final=build_final,
         )
 
-    budget = physical_attempt_budget(max_retries)
+    if fallback is None:
+        budget = physical_attempt_budget(max_retries)
+    else:
+        # Replay may resume a job that already engaged its fallback; the budget is then the
+        # primary attempts actually spent plus the fallback's own, not the primary's alone.
+        budget = _total_budget(
+            _walk_endpoints(
+                _ordered_codes(await ledger.list_semantic_attempts(job.job_id)), fallback
+            ),
+            fallback,
+        )
     last: _AttemptEvaluation | None = None
     attempts_completed = 0
     pending_claim_error: PublicOperationError | None = None
 
     while attempts_completed < budget:
-        if deadline.expired(now_monotonic()):
+        if deadline.expired(now_monotonic()) and not (
+            job.state == "leased" and last is None and pending_claim_error is None
+        ):
             if last is None and pending_claim_error is not None:
                 # Another live owner still has authority over the job. Do not falsify that
                 # recoverable state as a coordinator failure or mutate its active attempt.
@@ -641,31 +1019,22 @@ async def run_durable_semantic_attempts(
                     SemanticReason.PROVIDER_TIMEOUT,
                 )
                 await _resolve_disclosure_wait_after_terminal(ledger, current_lease, job.job_id)
-                accounting = await _accounting_for(
-                    ledger, current_lease, job.job_id, max_retries=max_retries
-                )
                 return build_final(
                     SemanticStatus.TIMEOUT,
                     SemanticReason.PROVIDER_TIMEOUT,
                     None,
-                    accounting,
+                    await _accounting(),
                 )
-            status, reason = final_status_after_exhaustion(
-                last.status,
-                last.reason,
-                attempts_completed=attempts_completed,
-                max_retries=max_retries,
-            )
+            status, reason = await _exhaustion_from_rows(last.status, last.reason)
             await ledger.fail_semantic_job(current_lease, job.job_id, reason)
             await _resolve_disclosure_wait_after_terminal(ledger, current_lease, job.job_id)
-            accounting = await _accounting_for(
-                ledger, current_lease, job.job_id, max_retries=max_retries
-            )
-            return build_final(status, reason, last, accounting)
+            return build_final(status, reason, last, await _accounting())
 
         # Keep the operation lease alive across provider latency and backoff.
         await _renew()
         handle: SemanticAttemptHandle | None = None
+        role: EndpointRole = "primary"
+        codes_before: tuple[SemanticReason | None, ...] = ()
         try:
             try:
                 handle = await ledger.claim_semantic_job(current_lease, job.job_id)
@@ -680,12 +1049,80 @@ async def run_durable_semantic_attempts(
                     await sleep(min(0.05, remaining))
                 continue
             pending_claim_error = None
-            remaining = deadline.remaining_seconds(now_monotonic())
+            if fallback is not None:
+                # The endpoint is a function of the rows before this ordinal, so a resumed
+                # ``started`` attempt goes back to the endpoint it was claimed for.
+                codes_before = _ordered_codes(
+                    await ledger.list_semantic_attempts(job.job_id),
+                    before_ordinal=handle.attempt_ordinal,
+                )
+                role = _walk_endpoints(codes_before, fallback).role
+            dispatch_deadline = (
+                primary_deadline if role == "primary" and primary_deadline is not None else deadline
+            )
+            if role == "fallback" and fallback_timeout_seconds is not None:
+                if now_utc is None or fallback is None:
+                    raise ValueError("semantic_fallback_clock_missing")
+                rows = await ledger.list_semantic_attempts(job.job_id)
+                first = next(
+                    row
+                    for row in sorted(rows, key=lambda item: item.attempt_ordinal)
+                    if endpoint_role_for_ordinal(rows, fallback, row.attempt_ordinal) == "fallback"
+                )
+                # Claim time is durable across retries, disclosure waits, and service restart.
+                # Missing legacy metadata gets the conservative primary cutoff, never a new
+                # fallback lifetime starting at this replay.
+                cutoff = (
+                    first.started_at + timedelta(seconds=fallback_timeout_seconds)
+                    if first.started_at is not None
+                    else (primary_deadline or deadline).expires_at_utc
+                )
+                cutoff = min(cutoff, deadline.expires_at_utc)
+                remaining = min(
+                    deadline.remaining_seconds(now_monotonic()),
+                    max(0.0, (cutoff - now_utc()).total_seconds()),
+                )
+                dispatch_deadline = Deadline(cutoff, now_monotonic() + remaining)
+            remaining = dispatch_deadline.remaining_seconds(now_monotonic())
             attempt_deadline = Deadline(
-                deadline.expires_at_utc,
+                dispatch_deadline.expires_at_utc,
                 now_monotonic() + remaining,
             )
-            evaluation = await dispatch(handle, attempt_deadline)
+            attempt_dispatch = dispatch
+            if role == "fallback":
+                assert dispatch_fallback is not None  # validated at entry
+                attempt_dispatch = dispatch_fallback
+            if remaining <= 0.0:
+                # A resumed started attempt must not be sent after its frozen endpoint cutoff.
+                # Preserve uncertainty for a prior started attempt unless an exact disclosure
+                # wait proves it had not dispatched. A newly claimed attempt is a known timeout.
+                # Neither outcome licenses a fallback dispatch here.
+                wait = await ledger.load_disclosure_wait(
+                    current_lease.writer_id, current_lease.operation_id
+                )
+                known_undispatched = (
+                    wait is not None
+                    and getattr(wait, "job_id", None) == job.job_id
+                    and getattr(wait, "attempt_id", None) == job.active_attempt_id
+                    and getattr(wait, "state", None) == "awaiting"
+                )
+                uncertain = job.state == "leased" and last is None and not known_undispatched
+                terminal_reason = (
+                    SemanticReason.OUTCOME_UNKNOWN if uncertain else SemanticReason.PROVIDER_TIMEOUT
+                )
+                await ledger.record_attempt_outcome(
+                    handle, AttemptOutcome.FAILED, terminal_code=terminal_reason
+                )
+                await _resolve_disclosure_wait_after_terminal(
+                    ledger, current_lease, job.job_id, handle.attempt_id
+                )
+                return build_final(
+                    SemanticStatus.UNAVAILABLE if uncertain else SemanticStatus.TIMEOUT,
+                    terminal_reason,
+                    None,
+                    await _accounting(),
+                )
+            evaluation = await attempt_dispatch(handle, attempt_deadline)
         except BaseException as exc:
             # A raise between claim and the terminal write used to unwind past every
             # terminalizing call, leaving the attempt "started" and the job "leased" forever —
@@ -699,6 +1136,7 @@ async def run_durable_semantic_attempts(
                 job_id=job.job_id,
                 handle=handle,
                 max_retries=max_retries,
+                fallback=fallback,
             )
             if cancellation_received:
                 raise asyncio.CancelledError
@@ -727,10 +1165,9 @@ async def run_durable_semantic_attempts(
             await _resolve_disclosure_wait_after_terminal(
                 ledger, current_lease, job.job_id, handle.attempt_id
             )
-            accounting = await _accounting_for(
-                ledger, current_lease, job.job_id, max_retries=max_retries
+            return build_final(
+                evaluation.status, evaluation.reason, evaluation, await _accounting()
             )
-            return build_final(evaluation.status, evaluation.reason, evaluation, accounting)
 
         # awaiting_human is the one nonterminal dispatch outcome. It is not a failure and not a
         # retry: no provider was reached, the case was never sent, and the same attempt must be
@@ -749,6 +1186,7 @@ async def run_durable_semantic_attempts(
                     job_id=job.job_id,
                     handle=handle,
                     max_retries=max_retries,
+                    fallback=fallback,
                 )
                 return build_final(
                     SemanticStatus.FAILED,
@@ -761,12 +1199,11 @@ async def run_durable_semantic_attempts(
                 continuation.pending_id,
                 continuation.expires_at.as_datetime(),
             )
-            accounting = await _accounting_for(
-                ledger, current_lease, job.job_id, max_retries=max_retries
-            )
             # The attempt stays `started` and the job stays `leased` on purpose: this is the
             # durable record that the check is open, not finished.
-            return build_final(evaluation.status, evaluation.reason, evaluation, accounting)
+            return build_final(
+                evaluation.status, evaluation.reason, evaluation, await _accounting()
+            )
 
         # The repair cap is read from durable rows, not a local counter: after an
         # ``awaiting_human`` replay this loop starts over with ``attempts_completed`` rebuilt
@@ -774,14 +1211,40 @@ async def run_durable_semantic_attempts(
         repair_retries_used = repair_retries_from_rows(
             await ledger.list_semantic_attempts(job.job_id)
         )
-        can_retry = should_retry_after(
-            status=evaluation.status,
-            reason=evaluation.reason,
-            attempts_completed=attempts_completed,
-            max_retries=max_retries,
-            deadline_expired=deadline.expired(now_monotonic()),
-            repair_retries_used=repair_retries_used,
-        )
+        deadline_expired = deadline.expired(now_monotonic())
+        codes_after = (*codes_before, evaluation.reason)
+        switching = False
+        if fallback is None:
+            can_retry = should_retry_after(
+                status=evaluation.status,
+                reason=evaluation.reason,
+                attempts_completed=attempts_completed,
+                max_retries=max_retries,
+                deadline_expired=deadline_expired,
+                repair_retries_used=repair_retries_used,
+            )
+        else:
+            walk_after = _walk_endpoints(codes_after, fallback)
+            switching = role == "primary" and walk_after.engaged
+            if switching:
+                # The primary just crossed the closed engagement rule. The fallback's own
+                # budget is untouched, so the only thing that can refuse it is the deadline.
+                can_retry = not deadline_expired
+            else:
+                role_attempts = (
+                    walk_after.primary_attempts
+                    if role == "primary"
+                    else walk_after.fallback_attempts
+                )
+                can_retry = should_retry_after(
+                    status=evaluation.status,
+                    reason=evaluation.reason,
+                    attempts_completed=role_attempts,
+                    max_retries=fallback.endpoint(role).max_retries,
+                    deadline_expired=deadline_expired or attempt_deadline.expired(now_monotonic()),
+                    repair_retries_used=repair_retries_used,
+                )
+            budget = _total_budget(walk_after, fallback)
         if can_retry:
             # ``expired`` keeps the job claimable and leaves this attempt's terminal code in the
             # row, so the repaired attempt stays visible in accounting next to its successor.
@@ -793,18 +1256,22 @@ async def run_durable_semantic_attempts(
             await _resolve_disclosure_wait_after_terminal(
                 ledger, current_lease, job.job_id, handle.attempt_id
             )
-            # A repair is not waiting out a transport fault; resubmit without backoff.
+            # A repair is not waiting out a transport fault, and a fallback is a different
+            # endpoint: neither resubmits with backoff.
             repair = is_repairable_semantic_outcome(evaluation.status, evaluation.reason)
-            delay = backoff_seconds(handle.attempt_ordinal, kind="none" if repair else "transient")
+            delay = backoff_seconds(
+                handle.attempt_ordinal, kind="none" if repair or switching else "transient"
+            )
             if delay > 0.0 and not deadline.expired(now_monotonic() + delay):
                 await sleep(delay)
             continue
 
-        terminal_status, terminal_reason = final_status_after_exhaustion(
+        terminal_status, terminal_reason = _role_exhaustion(
             evaluation.status,
             evaluation.reason,
-            attempts_completed=attempts_completed,
+            codes=codes_after if fallback is not None else (None,) * attempts_completed,
             max_retries=max_retries,
+            fallback=fallback,
         )
         await ledger.record_attempt_outcome(
             handle,
@@ -814,10 +1281,7 @@ async def run_durable_semantic_attempts(
         await _resolve_disclosure_wait_after_terminal(
             ledger, current_lease, job.job_id, handle.attempt_id
         )
-        accounting = await _accounting_for(
-            ledger, current_lease, job.job_id, max_retries=max_retries
-        )
-        return build_final(terminal_status, terminal_reason, evaluation, accounting)
+        return build_final(terminal_status, terminal_reason, evaluation, await _accounting())
 
     if last is None:
         await ledger.fail_semantic_job(
@@ -826,22 +1290,13 @@ async def run_durable_semantic_attempts(
             SemanticReason.RETRY_BUDGET_EXHAUSTED,
         )
         await _resolve_disclosure_wait_after_terminal(ledger, current_lease, job.job_id)
-        accounting = await _accounting_for(
-            ledger, current_lease, job.job_id, max_retries=max_retries
-        )
         return build_final(
             SemanticStatus.UNAVAILABLE,
             SemanticReason.RETRY_BUDGET_EXHAUSTED,
             None,
-            accounting,
+            await _accounting(),
         )
-    status, reason = final_status_after_exhaustion(
-        last.status,
-        last.reason,
-        attempts_completed=attempts_completed,
-        max_retries=max_retries,
-    )
+    status, reason = await _exhaustion_from_rows(last.status, last.reason)
     await ledger.fail_semantic_job(current_lease, job.job_id, reason)
     await _resolve_disclosure_wait_after_terminal(ledger, current_lease, job.job_id)
-    accounting = await _accounting_for(ledger, current_lease, job.job_id, max_retries=max_retries)
-    return build_final(status, reason, last, accounting)
+    return build_final(status, reason, last, await _accounting())
