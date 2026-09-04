@@ -185,7 +185,10 @@ async def _harness_summary() -> tuple[str, ...]:
     for binary in binaries:
         version = binary.reported_version or "unknown version"
         try:
-            state = (await service.status(binary)).value
+            observation = await service.observe(binary)
+            state = observation.state.value
+            if observation.isolation_binding is not None:
+                state += f", isolation: {observation.isolation_binding}"
         except McpRegistrationError as error:
             state = f"unknown ({error.reason.value})"
         lines.append(f"codex ({version}) — MCP registration: {state}")

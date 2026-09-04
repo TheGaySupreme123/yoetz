@@ -8,6 +8,14 @@ reverse-chronological released versions.
 
 ### Fixed
 
+- Yoetz-owned external Codex MCP registration now preserves ADR-026 isolation across the host
+  process boundary. In isolated mode, preview and apply bind only the exact validated
+  `YOETZ_ISOLATED_ROOT` through Codex's native `--env`; status reports whether the stored binding
+  is exact, missing, different, or ambient, and arbitrary environment shapes remain foreign and
+  are never overwritten. Dogfood parity schema 3 adds a pre-model child-start facet, and an
+  installed Codex 0.150.1 regression proves the registered child receives the reviewed root even
+  when the host parent does not (issue #561).
+
 - A Codex MCP route that reverts to `strict` between install and session start no longer reports a
   bare `route_semantic_ceiling`. `yoetz integrate codex mcp install` now records the applied route
   in an owner-only state-directory record (no repository or prompt content); `mcp status`, provider

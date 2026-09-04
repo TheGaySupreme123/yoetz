@@ -155,6 +155,7 @@ class IntegrationPlan:
     activation_marketplace_preimage_digest: str
     activation_config_preimage_digest: str
     activation_cache_mutation_planned: bool
+    mcp_isolated_root: str | None = None
 
     @property
     def changes(self) -> tuple[str, ...]:

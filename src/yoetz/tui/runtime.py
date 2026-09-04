@@ -490,6 +490,7 @@ class YoetzRuntime:
             activation_marketplace_preimage_digest=(activation_preview.marketplace_preimage_digest),
             activation_config_preimage_digest=activation_preview.config_preimage_digest,
             activation_cache_mutation_planned=activation_preview.cache_mutation_planned,
+            mcp_isolated_root=mcp_preview.isolated_root,
         )
 
     async def apply_integration(

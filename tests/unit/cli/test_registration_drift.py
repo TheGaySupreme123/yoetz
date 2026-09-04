@@ -84,6 +84,7 @@ def _observation_with_state(
         HarnessId.CODEX,
         state,
         profile,  # type: ignore[arg-type]
+        "ambient" if profile is not None else None,
     )
 
 
