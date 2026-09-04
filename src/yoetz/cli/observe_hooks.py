@@ -289,6 +289,7 @@ class AutoAttachOutcome:
 
     mapping: LifecycleMapping | None
     reason: str | None
+    recovered: bool = False
 
     def __post_init__(self) -> None:
         if (self.mapping is None) == (self.reason is None):
@@ -1416,7 +1417,7 @@ async def _try_auto_start(
                 ),
                 _state=_state,
             )
-    return AutoAttachOutcome(mapping, None)
+    return AutoAttachOutcome(mapping, None, recovered=recovered_task_id is not None)
 
 
 def _ended_workspace_recovery_mapping(
@@ -1466,6 +1467,38 @@ def _ended_workspace_recovery_mapping(
     )
 
 
+def _rewrite_one_ended_predecessor_mapping(
+    store: LocalObservationStore,
+    workspace_commitment: str,
+    session_id: str,
+    successor: LifecycleMapping,
+    *,
+    _state: Path | None,
+) -> None:
+    """Rewrite one ended predecessor if it still maps the recovered task."""
+
+    if not store.codex_session_ended(workspace_commitment, session_id):
+        return
+    predecessor = load_mapping(session_id, _state=_state)
+    if predecessor is None or predecessor.yoetz_task_id != successor.yoetz_task_id:
+        return
+    if (
+        predecessor.yoetz_session_id == successor.yoetz_session_id
+        and predecessor.yoetz_writer_id == successor.yoetz_writer_id
+    ):
+        return
+    store_mapping(
+        mapping_from_start_ids(
+            codex_session_id=predecessor.codex_session_id,
+            yoetz_task_id=successor.yoetz_task_id,
+            yoetz_session_id=successor.yoetz_session_id,
+            yoetz_writer_id=successor.yoetz_writer_id,
+            last_frontier=predecessor.last_frontier,
+        ),
+        _state=_state,
+    )
+
+
 def _rewrite_ended_predecessor_mappings(
     store: LocalObservationStore,
     workspace_commitment: str,
@@ -1473,41 +1506,31 @@ def _rewrite_ended_predecessor_mappings(
     *,
     harness_id: Literal["claude", "codex", "cursor"],
     _state: Path | None,
+    held_codex_session_id: str | None = None,
 ) -> None:
     """Point ended same-host mappings at the rotated successor route (#577)."""
-
-    def _same_harness(session_id: str) -> bool:
-        if harness_id == "claude":
-            return session_id.startswith(_CLAUDE_SESSION_PREFIX)
-        if harness_id == "cursor":
-            return session_id.startswith(_CURSOR_SESSION_PREFIX)
-        return not session_id.startswith((_CLAUDE_SESSION_PREFIX, _CURSOR_SESSION_PREFIX))
 
     for session_id in store.codex_sessions_for_workspace(workspace_commitment):
         if session_id == successor.codex_session_id:
             continue
         if not store.codex_session_ended(workspace_commitment, session_id):
             continue
-        if not _same_harness(session_id):
+        if not _host_session_matches(session_id, harness_id):
             continue
-        predecessor = load_mapping(session_id, _state=_state)
-        if predecessor is None or predecessor.yoetz_task_id != successor.yoetz_task_id:
+        try:
+            if session_id == held_codex_session_id:
+                _rewrite_one_ended_predecessor_mapping(
+                    store, workspace_commitment, session_id, successor, _state=_state
+                )
+                continue
+            with acquire_session_lock(session_id, _state=_state) as owned:
+                if not owned:
+                    continue
+                _rewrite_one_ended_predecessor_mapping(
+                    store, workspace_commitment, session_id, successor, _state=_state
+                )
+        except Exception:
             continue
-        if (
-            predecessor.yoetz_session_id == successor.yoetz_session_id
-            and predecessor.yoetz_writer_id == successor.yoetz_writer_id
-        ):
-            continue
-        store_mapping(
-            mapping_from_start_ids(
-                codex_session_id=predecessor.codex_session_id,
-                yoetz_task_id=successor.yoetz_task_id,
-                yoetz_session_id=successor.yoetz_session_id,
-                yoetz_writer_id=successor.yoetz_writer_id,
-                last_frontier=predecessor.last_frontier,
-            ),
-            _state=_state,
-        )
 
 
 async def _try_workspace_auto_start(
@@ -1556,7 +1579,7 @@ async def _try_workspace_auto_start(
                     recovery_mapping=refreshed,
                     connect=connect,
                 )
-                if outcome.mapping is not None:
+                if outcome.mapping is not None and outcome.recovered:
                     with contextlib.suppress(Exception):
                         _rewrite_ended_predecessor_mappings(
                             store,
@@ -1564,6 +1587,7 @@ async def _try_workspace_auto_start(
                             outcome.mapping,
                             harness_id=harness_id,
                             _state=_state,
+                            held_codex_session_id=refreshed.codex_session_id,
                         )
                 return outcome
 

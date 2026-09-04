@@ -300,7 +300,7 @@ received, every other bound session is ended, and the candidate is bound only to
 workspace. The catalog also requires one mapped task, the selector still active, no sibling task,
 the matching repository-privacy binding, and no start already pending for that route. The conflict
 reveals no selector, and a hard crash without `sessionEnd` remains fail-closed rather than being
-guessed from age. A successful recovery also rewrites the ended predecessor's lifecycle mapping to
+guessed from age. A successful recovery also rewrites every ended same-host predecessor mapping for that task to
 the rotated session and writer so pending predecessor rows drain on the successor route
 (`session_superseded` is followed, not quarantined as `ledger_rejected`). A failed attempt records its typed cause (`auto_attach_workspace_unbound`,
 `auto_attach_request_invalid`, `auto_attach_conflict`, `auto_attach_refused`,

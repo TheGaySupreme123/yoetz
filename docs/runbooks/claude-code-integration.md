@@ -211,8 +211,8 @@ candidate is bound only to this consented workspace. The catalog additionally re
 task, the selector still active, no sibling task, the matching repository-privacy binding, and no
 start already pending for that route. This reuses an already-known session selector; the public
 conflict still discloses no task or session ID, and a hard crash without `SessionEnd` remains
-fail-closed rather than being guessed from age. A successful recovery also rewrites the ended
-predecessor's lifecycle mapping to the rotated session and writer. Pending predecessor rows then
+fail-closed rather than being guessed from age. A successful recovery also rewrites every ended
+same-host predecessor mapping for that task to the rotated session and writer. Pending predecessor rows then
 drain on that successor route (`session_superseded` is followed, not quarantined as
 `ledger_rejected`). A failed attempt records its cause as a
 payload-free `hook_diagnostics` reason

@@ -2604,16 +2604,29 @@ def test_workspace_recovery_does_not_attach_while_predecessor_lock_is_held(
     assert [request.mode for request in client.requests] == ["create_or_attach"]
 
 
-def test_recovery_rewrites_every_ended_same_task_predecessor_mapping(tmp_path: Path) -> None:
-    """#577: older ended host sessions follow the rotated successor ids too."""
+@pytest.mark.parametrize(
+    ("harness_id", "older", "newer", "successor", "foreign"),
+    [
+        ("claude", "claude:ended-a", "claude:ended-b", "claude:next-1", "cursor:ended-x"),
+        ("codex", "codex-ended-a", "codex-ended-b", "codex-next-1", "claude:ended-x"),
+        ("cursor", "cursor:ended-a", "cursor:ended-b", "cursor:next-1", "codex-ended-x"),
+    ],
+)
+def test_recovery_rewrites_every_ended_same_task_predecessor_mapping(
+    tmp_path: Path,
+    harness_id: str,
+    older: str,
+    newer: str,
+    successor: str,
+    foreign: str,
+) -> None:
+    """#577: every ended same-host predecessor follows the rotated ids; other hosts do not."""
 
     store = LocalObservationStore(_state=tmp_path)
     locator = str(tmp_path.resolve())
     workspace = store.workspace_commitment(locator)
     store.grant_consent(workspace)
-    older = "codex-ended-a"
-    newer = "codex-ended-b"
-    for session_id in (older, newer):
+    for session_id in (older, newer, foreign):
         commitment = store.bind_codex_session(workspace, session_id)
         store.note_session_end(workspace, commitment)
         observe_hooks_module.store_mapping(
@@ -2631,11 +2644,11 @@ def test_recovery_rewrites_every_ended_same_task_predecessor_mapping(tmp_path: P
 
     outcome = asyncio.run(
         observe_hooks_module._try_workspace_auto_start(  # pyright: ignore[reportPrivateUsage]
-            "codex-next-1",
+            successor,
             store=store,
             workspace_commitment=workspace,
             workspace_locator=locator,
-            harness_id="codex",
+            harness_id=cast(Literal["claude", "codex", "cursor"], harness_id),
             _state=tmp_path,
             connect=cast(observe_hooks_module.HookStartConnector, _connector(client)),
         )
@@ -2649,6 +2662,157 @@ def test_recovery_rewrites_every_ended_same_task_predecessor_mapping(tmp_path: P
         assert rewritten.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
         assert rewritten.yoetz_writer_id == _SUCCESSOR_IDS["writer_id"]
         assert rewritten.last_frontier == "3:sha256:" + "a" * 64
+    foreign_mapping = observe_hooks_module.load_mapping(foreign, _state=tmp_path)
+    assert foreign_mapping is not None
+    assert foreign_mapping.yoetz_session_id == _START_IDS["session_id"]
+    assert foreign_mapping.yoetz_writer_id == _START_IDS["writer_id"]
+
+
+def test_rewrite_skips_live_and_other_task_mappings(tmp_path: Path) -> None:
+    """The rewrite helper never rotates a live session or a sibling task."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    live = "codex-live-1"
+    other = "codex-ended-other-task"
+    store.bind_codex_session(workspace, live)
+    other_commitment = store.bind_codex_session(workspace, other)
+    store.note_session_end(workspace, other_commitment)
+    other_task = "tsk_4b4e28ba-2fa1-4d3b-8f0a-0c1d2e3f4a5b"
+    for session_id, task_id in ((live, _START_IDS["task_id"]), (other, other_task)):
+        observe_hooks_module.store_mapping(
+            observe_hooks_module.mapping_from_start_ids(
+                codex_session_id=session_id,
+                yoetz_task_id=task_id,
+                yoetz_session_id=_START_IDS["session_id"],
+                yoetz_writer_id=_START_IDS["writer_id"],
+                last_frontier=None,
+            ),
+            _state=tmp_path,
+        )
+    successor = observe_hooks_module.mapping_from_start_ids(
+        codex_session_id="codex-next-1",
+        yoetz_task_id=_START_IDS["task_id"],
+        yoetz_session_id=_SUCCESSOR_IDS["session_id"],
+        yoetz_writer_id=_SUCCESSOR_IDS["writer_id"],
+        last_frontier=None,
+    )
+    observe_hooks_module._rewrite_ended_predecessor_mappings(  # pyright: ignore[reportPrivateUsage]
+        store,
+        workspace,
+        successor,
+        harness_id="codex",
+        _state=tmp_path,
+    )
+    for session_id in (live, other):
+        untouched = observe_hooks_module.load_mapping(session_id, _state=tmp_path)
+        assert untouched is not None
+        assert untouched.yoetz_session_id == _START_IDS["session_id"]
+
+
+def test_create_or_attach_success_does_not_rewrite_predecessors(tmp_path: Path) -> None:
+    """Rewrite runs only after recovery attach of the same task, not a fresh create."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    previous = "codex-ended-1"
+    commitment = store.bind_codex_session(workspace, previous)
+    store.note_session_end(workspace, commitment)
+    observe_hooks_module.store_mapping(
+        observe_hooks_module.mapping_from_start_ids(
+            codex_session_id=previous,
+            yoetz_task_id=_START_IDS["task_id"],
+            yoetz_session_id=_START_IDS["session_id"],
+            yoetz_writer_id=_START_IDS["writer_id"],
+            last_frontier="3:sha256:" + "a" * 64,
+        ),
+        _state=tmp_path,
+    )
+
+    class _CreateSucceedsWithRotatedIds(_InstantAckClient):
+        async def start(self, request: object, *, deadline_ms: int | None = None) -> object:
+            del deadline_ms
+            assert isinstance(request, StartRequest)
+            assert request.mode == "create_or_attach"
+            return SimpleNamespace(
+                ok=True,
+                frontier=SimpleNamespace(sequence="4", head_digest="sha256:" + "b" * 64),
+                **_SUCCESSOR_IDS,
+            )
+
+    outcome = asyncio.run(
+        observe_hooks_module._try_workspace_auto_start(  # pyright: ignore[reportPrivateUsage]
+            "codex-next-1",
+            store=store,
+            workspace_commitment=workspace,
+            workspace_locator=locator,
+            harness_id="codex",
+            _state=tmp_path,
+            connect=cast(
+                observe_hooks_module.HookStartConnector,
+                _connector(_CreateSucceedsWithRotatedIds()),
+            ),
+        )
+    )
+
+    assert outcome.mapping is not None
+    assert outcome.mapping.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
+    predecessor = observe_hooks_module.load_mapping(previous, _state=tmp_path)
+    assert predecessor is not None
+    assert predecessor.yoetz_session_id == _START_IDS["session_id"]
+    assert predecessor.yoetz_writer_id == _START_IDS["writer_id"]
+
+
+def test_locked_older_predecessor_is_left_for_drain_reroute(tmp_path: Path) -> None:
+    """A resumed older predecessor keeps its mapping; drain follows session_superseded."""
+
+    store = LocalObservationStore(_state=tmp_path)
+    locator = str(tmp_path.resolve())
+    workspace = store.workspace_commitment(locator)
+    store.grant_consent(workspace)
+    older = "codex-ended-a"
+    newer = "codex-ended-b"
+    for session_id in (older, newer):
+        commitment = store.bind_codex_session(workspace, session_id)
+        store.note_session_end(workspace, commitment)
+        observe_hooks_module.store_mapping(
+            observe_hooks_module.mapping_from_start_ids(
+                codex_session_id=session_id,
+                yoetz_task_id=_START_IDS["task_id"],
+                yoetz_session_id=_START_IDS["session_id"],
+                yoetz_writer_id=_START_IDS["writer_id"],
+                last_frontier=None,
+            ),
+            _state=tmp_path,
+        )
+    client = _WorkspaceConflictThenAttachClient()
+    client.created = True
+
+    with acquire_session_lock(older, _state=tmp_path) as owned:
+        assert owned is True
+        outcome = asyncio.run(
+            observe_hooks_module._try_workspace_auto_start(  # pyright: ignore[reportPrivateUsage]
+                "codex-next-1",
+                store=store,
+                workspace_commitment=workspace,
+                workspace_locator=locator,
+                harness_id="codex",
+                _state=tmp_path,
+                connect=cast(observe_hooks_module.HookStartConnector, _connector(client)),
+            )
+        )
+
+    assert outcome.mapping is not None
+    rewritten_latest = observe_hooks_module.load_mapping(newer, _state=tmp_path)
+    assert rewritten_latest is not None
+    assert rewritten_latest.yoetz_session_id == _SUCCESSOR_IDS["session_id"]
+    held = observe_hooks_module.load_mapping(older, _state=tmp_path)
+    assert held is not None
+    assert held.yoetz_session_id == _START_IDS["session_id"]
 
 
 def test_session_restart_cannot_clear_ended_state_while_recovery_holds_lock(
