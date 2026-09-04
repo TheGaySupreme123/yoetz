@@ -4,12 +4,15 @@
 [issue #518](https://github.com/TheGaySupreme123/yoetz/issues/518); amended 2026-09-03,
 maintainer-authorized in [issue #534](https://github.com/TheGaySupreme123/yoetz/issues/534), to
 exempt one explicitly passed dedicated Codex evaluator home from the "every artifact lives beneath
-the root" reverse state.
+the root" reverse state; amended 2026-09-04, maintainer-authorized in
+[issue #561](https://github.com/TheGaySupreme123/yoetz/issues/561), to bind the root into
+Yoetz-owned external Codex MCP registrations.
 **Implemented by:** `src/yoetz/config/paths.py` (`isolated_root()`, `runtime_dir()`,
 `ISOLATED_ROOT_ENV`), `src/yoetz/adapters/control/unix_socket.py`, `src/yoetz/config/load.py`,
 `src/yoetz/service/client.py`, `src/yoetz/cli/isolation_status.py`, the
 `yoetz service isolation` CLI command, `scripts/check_codex_dogfood_parity.py`
-(`yoetz.codex-dogfood-parity/2`), and `tests/packaging/test_isolated_root_boundary.py`.
+(`yoetz.codex-dogfood-parity/3`), `tests/packaging/test_isolated_root_boundary.py`, and
+`tests/packaging/test_codex_mcp_isolated_registration.py`.
 **Relates to:** ADR-001 (single service/writer authority), ADR-003 (durable storage), and the
 [Codex dogfood parity runbook](../runbooks/codex-dogfood.md).
 
@@ -64,15 +67,30 @@ identity along with it, and nothing validates or proves it.
    compares those reports; it never substitutes platform defaults for the normal target, because
    its config or storage may be relocated. Each report contains canonical path-identity digests,
    never raw paths. The command is CLI-only; MCP and hooks inherit isolation through environment.
-6. **The dogfood parity gate fails closed on shared identity.** Report schema
-   `yoetz.codex-dogfood-parity/2` adds the `service_isolation` preflight facet, the
+6. **The host-launched external Codex MCP child keeps the same identity.** In ambient mode the
+   Yoetz-owned registration has no environment block. In isolated mode preview and apply bind
+   exactly one allowed entry, `YOETZ_ISOLATED_ROOT=<validated-root>`, into `codex mcp add`; the
+   preview digest covers the exact root, and post-apply observation re-reads both argv and the
+   environment block. Missing or different roots are Yoetz-owned but require re-registration;
+   unknown keys, inherited-variable declarations, malformed roots, or any other environment
+   shape are foreign and never overwritten. Status reports only the closed binding state
+   (`ambient|isolated_exact|missing|different`), while preview shows the exact proposed root for
+   local review. This exception is limited to external Codex registration; plugin-managed routes
+   retain their own host-specific environment contracts.
+7. **The dogfood parity gate fails closed on shared or unlaunched identity.** Report schema
+   `yoetz.codex-dogfood-parity/3` retains the `service_isolation` preflight facet, the
    `identity.yoetz_isolation` digest block, and the `observed.yoetz_isolation_state` closed state
    (`isolated|shared|ambient|unknown`). The facet can pass only when the observed state is
    `isolated`, the candidate mode is `isolated`, the normal mode is `ambient`, and every resolved
    state/endpoint/storage/config/executable digest differs from its exact normal-target counterpart;
    any equality, wrong mode, or unknown
    state is rejected or fails preflight, and a non-pass row must carry the
-   `provision_isolated_yoetz_root` continuation. Version 1 reports are no longer accepted.
+   `provision_isolated_yoetz_root` continuation. It adds `mcp_child_isolation`, which can pass only
+   when registration status is `yoetz_owned`, its binding is `isolated_exact`, and a pre-model
+   Codex app-server inventory starts the registered child successfully. A non-pass row carries
+   `reregister_isolated_mcp` when the registration or its binding is not exact, and
+   `recapture_isolated_mcp_child` when the binding is already exact and only the child start is
+   unproven. Version 1 and 2 reports are no longer accepted.
 
 ## Reverse states and rollback
 
@@ -86,10 +104,12 @@ endpoint, or storage, so deleting the root still removes every Yoetz identity ar
 parity gate still fails on any shared Yoetz identity. That home is reverse-stated by
 `yoetz provider codex-subscription disconnect` — Codex logout plus binding removal — and then by
 the operator deleting the directory they provisioned; root deletion is not its rollback. The
-default evaluator home (no explicit path) stays beneath the root. The packaged regression
-(`tests/packaging/test_isolated_root_boundary.py`) locks this: an isolated service run leaves the
-ambient home tree byte-identical before/after, an ambient client cannot reach the isolated
-singleton, and removing the root removes every trace.
+default evaluator home (no explicit path) stays beneath the root. The packaged regressions lock
+both boundaries: `test_isolated_root_boundary.py` proves an isolated service run leaves the ambient
+home tree byte-identical before/after, an ambient client cannot reach the isolated singleton, and
+removing the root removes every trace; `test_codex_mcp_isolated_registration.py` uses installed
+Codex 0.150.1 to launch a registered child from an ambient parent and proves that only the reviewed
+registration supplied the exact root.
 
 ## Consequences
 

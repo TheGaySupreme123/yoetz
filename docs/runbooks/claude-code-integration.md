@@ -95,6 +95,11 @@ plugin's MCP bridge, hook commands, and any service they spawn derive config, st
 endpoints from the isolated root; prove it beforehand with `yoetz service isolation --json` run
 under the same environment.
 
+Issue #561 does not add an external-registration mutation path for Claude Code. The supported
+Claude development/plugin route continues to inherit the explicitly exported root from the exact
+session environment, and its MCP bridge and hooks must be tested under that same environment. No
+Codex registration status or `--env` behavior is inferred for Claude Code.
+
 ## Upgrading Yoetz under a running service
 
 The local-control handshake pins the exact schema-manifest digest, so after installing a new Yoetz

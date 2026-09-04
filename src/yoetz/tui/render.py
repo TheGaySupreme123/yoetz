@@ -267,6 +267,7 @@ def render_integration_technical_details(plan: IntegrationPlan, width: int) -> t
         ("Project root", plan.project_root),
         ("MCP server name", plan.mcp_server_name),
         ("MCP command", plan.mcp_command),
+        ("MCP isolation root", plan.mcp_isolated_root or "ambient"),
         ("MCP preview digest", plan.preview_digest),
         ("Skill preview digest", plan.skill_preview_digest),
         ("Activation preview digest", plan.activation_preview_digest),

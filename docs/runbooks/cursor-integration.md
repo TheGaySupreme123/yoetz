@@ -35,6 +35,11 @@ replacement); the generic `update`, `enable`, `disable`, and `export` commands l
 group are Claude Code lifecycles and refuse for Cursor with
 `cursor_plugin_command_unsupported:<command> supported=preview,install,status,remove` (exit 2).
 
+Issue #561 changes only Yoetz-owned external Codex registration. Cursor remains supported through
+its native plugin projection: the exact isolated root is rendered into the test cell's `mcp.json`
+and hook commands and is bound by that artifact's preview digest. Cursor does not consume the Codex
+`mcp add --env` path or its `isolation_binding` status field.
+
 ```text
 yoetz integrate cursor plugin preview \
   --cursor-config-root /exact/testing/home/.cursor \

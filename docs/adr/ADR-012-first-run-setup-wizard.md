@@ -101,8 +101,10 @@ exactly those contracts and connects the steps without weakening any existing tr
    not absence by itself: the adapter runs a bounded `codex mcp list --json` fallback and accepts
    absence only when that successful structural listing contains no `yoetz` name. A failed or
    malformed listing fails closed; a single matching entry is classified normally; duplicate
-   matching names are ambiguous and fail closed. It runs the exact `codex mcp add yoetz -- yoetz
-   mcp serve` command only after that positive absence observation; a foreign same-name entry is
+   matching names are ambiguous and fail closed. In ambient mode it runs the exact `codex mcp add
+   yoetz -- yoetz mcp serve` command; under ADR-026 isolation it runs `codex mcp add yoetz --env
+   YOETZ_ISOLATED_ROOT=<validated-root> -- yoetz mcp serve`. It does so only after that positive
+   absence observation; a foreign same-name entry is
    preserved and refused with `foreign_entry_present` — there is no force path. The structural
    JSON parser rejects duplicate keys, nonstandard constants, and truncated output. Codex exposes
    no compare-and-add token, so operators must quiesce non-cooperating MCP configuration writers
@@ -111,6 +113,14 @@ exactly those contracts and connects the steps without weakening any existing tr
    verified by re-reading state, not by trusting the add exit code. Registration remains a fact
    separate from skill installation and from Codex capability support (E-002/E-013 are untouched);
    "registered" never implies "Codex will successfully connect".
+
+   **Amended 2026-09-04 — isolated external registration (issue #561).** The environment shape is
+   closed: ambient has none; isolated has only the exact `YOETZ_ISOLATED_ROOT` pair. Preview binds
+   and displays that root, apply passes it through Codex's native `--env`, and observation verifies
+   the stored value. Missing/different known roots request re-registration; arbitrary keys,
+   inherited-variable names, and malformed environment shapes remain foreign with no force path.
+   Ambient preview digests keep schema token `/1`; isolated registration and unregistration use
+   additive `/2` tokens so the new root field cannot alter the older digest contract silently.
 
    **Founder-authorized Codex activation repair (2026-08-03).** An accepted setup now also installs
    the packaged project skill at `.agents/skills/yoetz` before it installs the structural plugin
