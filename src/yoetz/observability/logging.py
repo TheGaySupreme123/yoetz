@@ -47,6 +47,7 @@ _FIELD_ORDER: Final = (
     "duration_ms",
     "outcome",
     "reason",
+    "reason_code",
     "origin",
     "engine_version",
     "policy_version",
@@ -523,6 +524,7 @@ def record_public_error_without_raising(
     operation: str,
     reason: str,
     request_id: str | None = None,
+    reason_code: str | None = None,
 ) -> str:
     """Mint the correlation id a public error will carry, and make that exact id resolvable.
 
@@ -545,6 +547,7 @@ def record_public_error_without_raising(
         reason=reason,
         outcome="public_error",
         request_id=request_id,
+        reason_code=reason_code,
     )
 
 
@@ -556,6 +559,7 @@ def _record_bounded_without_raising(
     outcome: str,
     request_id: str | None,
     origin: str | None = None,
+    reason_code: str | None = None,
 ) -> str:
     """Mint one correlation id and write it to both sinks. Never raises to callers."""
 
@@ -568,6 +572,7 @@ def _record_bounded_without_raising(
             outcome=outcome,
             reason=reason,
             origin=origin,
+            reason_code=reason_code,
         )
     except BaseException:
         pass
@@ -581,6 +586,7 @@ def _record_bounded_without_raising(
             reason=reason,
             request_id=request_id,
             origin=origin,
+            reason_code=reason_code,
         )
     except BaseException:
         pass

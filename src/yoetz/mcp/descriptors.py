@@ -419,7 +419,10 @@ _INPUT_SCHEMA_EXAMPLES: Final[Mapping[str, tuple[dict[str, JsonValue], ...]]] = 
                         "assignment_recorded",
                         {
                             "assignee_actor_id": "harness:mcp-example",
-                            "obligation_ids": [_example_id("obligation", 1)],
+                            "obligation_ids": [
+                                _example_id("obligation", 1),
+                                _example_id("obligation", 2),
+                            ],
                             "scope_description": "One independently reviewable work package.",
                         },
                     ),
@@ -1009,7 +1012,9 @@ def _describe_presentation_schema(name: str, schema: dict[str, JsonValue]) -> No
             raise RuntimeError("mcp_event_draft_projection_invalid")
         event_drafts["description"] = (
             "Send one bounded batch per material transition. Each schema.name selects the "
-            "payload shape."
+            "payload shape. Every reference list in the envelope and payload must already be "
+            "unique and in ascending ASCII order; a kernel rejection names unsorted_set_field "
+            "at the owning field. A one-element dry_run subset cannot demonstrate that rule."
         )
         items = event_drafts.get("items")
         if not isinstance(items, dict):
@@ -1452,7 +1457,11 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "publish_work",
         "Publish recorded work",
         "Records a bounded batch of agent-published work events and returns the accepted event "
-        "range and coverage. It has no information about work outside that batch. Field ownership "
+        "range and coverage. It has no information about work outside that batch. Every set-valued "
+        "reference list in a draft envelope or payload (obligation_refs, obligation_ids, "
+        "supporting_refs, and the other canonical set fields) is admitted only when its members "
+        "are unique and already in ascending ASCII order; uniqueItems does not express order, and "
+        "a rejection names unsorted_set_field at the owning field. Field ownership "
         "is exact: attempted_items is admitted only by the action_recorded payload — copy each "
         "attempted obligation requested_items value string exactly, and never place the field on "
         "claim_recorded. decision_recorded authority is a structural actor id such as "
@@ -1474,9 +1483,7 @@ _POLICY_TOOL_DESCRIPTORS: Final = (
         "evidential and is not citable as a check, publication, or coverage source. Read exact "
         "unattempted_items in status view=obligations before resolution. After "
         "publishing the material claim and evidence, call check, disposition any findings with "
-        "respond, then call receipt before claiming completion. Every reference list, in a draft "
-        "envelope and in a payload alike, is admitted only when its members are unique and already "
-        "in ascending ASCII order; a rejection names the owning field. Cadence: one batch per "
+        "respond, then call receipt before claiming completion. Cadence: one batch per "
         "material transition, usually one to eight events and never one batch per file, per tool "
         "call, or per message; a batch admits up to 100 drafts, so keep one transition together "
         "rather than splitting it. Reading, searching, formatting, and unchanged state are not "
@@ -1665,7 +1672,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "policy": MappingProxyType(
             {
                 "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
-                "publish_work": "sha256:dd9725bbf8cadd9582c7be95f3314e74d642d56dd34d4f30a6c1ed6d9a32f367",
+                "publish_work": "sha256:676036fa37e435770bb9d96d9ecb4a09121337576437023e3af5a4c4f8bbbad5",
                 "check": "sha256:db57da2058052843ebb583f2ac141ebf7925dcf920583b0cdad6533c3f7fa29a",
                 "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
                 "status": "sha256:c8fa1e75331e46ffe25b141f71fdf06265fd505353d798c902fada5895b588c0",
@@ -1676,7 +1683,7 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
         "strict": MappingProxyType(
             {
                 "start": "sha256:ac5c4ac0bd12f67e08437f3aea4b7bc328c060f08809ef6f20e86b879d683a29",
-                "publish_work": "sha256:dd9725bbf8cadd9582c7be95f3314e74d642d56dd34d4f30a6c1ed6d9a32f367",
+                "publish_work": "sha256:676036fa37e435770bb9d96d9ecb4a09121337576437023e3af5a4c4f8bbbad5",
                 "check": "sha256:89899d93b76ea85c90d79d3df150f076f6b64a28cdb8f410c263ce3c1aa89b91",
                 "respond": "sha256:669697ed16dc7cbb14bab5528a5e06d7782d3ce7b943b2a9036ae1dfd5ca8717",
                 "status": "sha256:c8fa1e75331e46ffe25b141f71fdf06265fd505353d798c902fada5895b588c0",
@@ -1688,8 +1695,8 @@ TOOL_DESCRIPTOR_DIGESTS: Final[Mapping[McpRouteProfile, Mapping[str, str]]] = Ma
 )
 TOOL_DESCRIPTOR_SET_DIGEST: Final[Mapping[McpRouteProfile, str]] = MappingProxyType(
     {
-        "policy": "sha256:e5283f3497e3c259b9641e69e32612b1a82bd595369a9265072cb73eaf890ead",
-        "strict": "sha256:ada5633f12538a746c0e25355ccd4a62083441ddb7e1ba1956582d32be3d323b",
+        "policy": "sha256:f33f5ff45ccd9797daa0996b724e05fa7a0904c4223b062fb3c9bea83b0fccc4",
+        "strict": "sha256:e9633bcb7d0919405f64cd268c6a1c33e8707938a00d0545d967f7be17ac1016",
     }
 )
 

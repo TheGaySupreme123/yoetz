@@ -20,6 +20,13 @@ available. Before a material publication, send the completed `publish_work` requ
 `dry_run: true`; after a successful preview, reuse the same `request_id` without `dry_run` (or with
 `dry_run: false`).
 
+Every set-valued list — `obligation_refs`, `obligation_ids`, `supporting_refs`, `limitation_refs`,
+`supersedes_claim_refs`, `causal_parents`, `evidence_refs`, `artifact_refs`, and the other
+canonical set fields — must already have unique members in ascending ASCII order. JSON Schema
+`uniqueItems` does not express order; the kernel rejects `unsorted_set_field` at the owning field.
+A one-element `dry_run` subset cannot demonstrate this rule. The two-member `obligation_ids`
+example under assignment is already sorted.
+
 ## `start`
 
 Use `create_or_attach` with a stable workspace/work-item pair when first opening or resuming the
@@ -175,7 +182,10 @@ reason beside nonempty `obligation_refs`.
     "occurred_at": "2026-01-01T00:00:00.000Z", "causal_parents": [],
     "payload": {
       "assignee_actor_id": "harness:mcp-template",
-      "obligation_ids": ["obl_00000000-0000-4000-8000-000000000001"],
+      "obligation_ids": [
+        "obl_00000000-0000-4000-8000-000000000001",
+        "obl_00000000-0000-4000-8000-000000000002"
+      ],
       "scope_description": "Replace with one independently reviewable work package"
     },
     "artifact_refs": [], "evidence_refs": []

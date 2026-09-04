@@ -150,6 +150,9 @@ enforces that ([ADR-003](adr/ADR-003-storage-sqlite-durability.md)). Recovery pa
 restore, migrate, quarantine — are documented in [`docs/runbooks/`](runbooks/).
 Observation migration 0008 adds only nullable digest/byte bindings for the secret-scanned inner
 content; it adds no plaintext column and leaves older unbound rows readable at weaker coverage.
+Migration 0009 rebuilds the observation cursor and envelope tables so their source CHECK admits
+every `ObservationSource` member, including the Claude Code and Cursor hook sources, preserving
+existing rows and identities.
 
 Catalog migration preserves accepted machine-policy bytes. It may consume only bounded
 pre-upgrade route or one first-repository entitlement to clone that authority into a narrower child

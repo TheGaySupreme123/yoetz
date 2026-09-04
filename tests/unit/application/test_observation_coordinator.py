@@ -71,6 +71,7 @@ def _envelope(
     tool: str = "shell",
     corr: str = "c1",
     exit_status: int | None = None,
+    source: ObservationSource = ObservationSource.CODEX_HOOK,
 ) -> ObservationEnvelope:
     structural: dict[str, object] = {
         "tool_name": tool,
@@ -83,7 +84,7 @@ def _envelope(
         session_commitment=session,
         event_kind=kind,
         source_identity=identity,
-        source=ObservationSource.CODEX_HOOK,
+        source=source,
         cursor=ObservationCursor(1, 0, ordinal, f"hmac-sha256:{'ab' * 32}", "codex-obs-hook/1.0.0"),
         receipt_time=Timestamp("2026-01-01T00:00:00.000Z"),
         structural_payload=JsonObject(structural),
@@ -4232,6 +4233,70 @@ class _ReattachCell:
         return len(self.ledger._state.records)  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
 
+# --- issue #576: a deterministic ledger schema rejection is terminal, not service_unavailable ---
+
+
+def _schema_eight_store() -> tuple[object, SqliteObservationStore]:
+    """A task ledger from before migration 0009: its DDL refuses every non-Codex source."""
+
+    import apsw
+
+    from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS
+
+    db = apsw.Connection(":memory:")
+    db.execute("PRAGMA foreign_keys = ON")
+    db.execute("PRAGMA trusted_schema = OFF")
+    with db:
+        for migration in BUNDLE_MIGRATIONS[:8]:
+            db.execute(migration.ddl.decode())
+    return db, SqliteObservationStore(db)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("source", [ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK])
+async def test_host_hook_row_refused_by_ledger_schema_quarantines_then_delivers_after_migration(
+    tmp_path: Path, source: ObservationSource
+) -> None:
+    """#576: the store's CHECK failure reaches the drain as ledger_rejected, once.
+
+    Before this fix the bare driver exception took the coordinator's catch-all and was
+    projected as retryable service_unavailable, so the FIFO head was retried forever while
+    the service reported ready. After the bundle migrates, the identical envelope delivers.
+    """
+
+    import apsw
+
+    from yoetz.adapters.sqlite.migrations import BUNDLE_MIGRATIONS, run_migrations
+
+    cell = _reattach_fixture(tmp_path, f"host-{source.value}")
+    db, cell.store = _schema_eight_store()
+    envelope = _envelope(session=cell.session, identity=f"hook:{source.value}:1", source=source)
+
+    rejected = await cell.ingest(envelope)
+
+    assert rejected.disposition is ObservationIngestDisposition.REJECTED
+    assert rejected.reason == ObservationGapCode.LEDGER_REJECTED.value
+    decision = route_observation_ingest(rejected)
+    assert decision.action is ObservationDrainAction.QUARANTINE
+    assert decision.reason == ObservationGapCode.LEDGER_REJECTED.value
+    assert cell.operation_count() == 0
+    assert cell.coordinator._storage_corrupt_sessions == set()  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+
+    run_migrations(cast(apsw.Connection, db), BUNDLE_MIGRATIONS, maintenance=None)  # type: ignore[arg-type]
+    cell.coordinator = cell.build_coordinator()
+    accepted = await cell.ingest(envelope)
+
+    assert accepted.disposition is ObservationIngestDisposition.ACCEPTED
+    assert route_observation_ingest(accepted).action is ObservationDrainAction.ACKNOWLEDGE
+    assert cell.operation_count() == 1
+    status = await cell.store.status(ObservationStatusQuery(cell.workspace))
+    assert status.source_coverage[source] is True
+    # A host hook claim carries the hook bit, not the Codex session-stream bit.
+    assert cast(apsw.Connection, db).execute(
+        "SELECT DISTINCT source_mask FROM observation_logical_identity"
+    ).fetchall() == [(1,)]
+
+
 _REATTACH_ENVELOPES: dict[str, dict[str, object]] = {
     "pre": {"kind": "PreToolUse", "tool": "shell", "corr": "call-560"},
     "paired_post": {"kind": "PostToolUse", "tool": "shell", "corr": "call-560", "exit_status": 0},
@@ -4482,3 +4547,194 @@ async def test_advice_findings_reuse_operation_committed_by_predecessor_session(
     )
 
     assert [kind for kind, _writer, _operation in lookups] == ["task"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "source",
+    [ObservationSource.CODEX_HOOK, ObservationSource.CLAUDE_HOOK, ObservationSource.CURSOR_HOOK],
+)
+async def test_session_superseded_reroutes_ingest_and_persists_mapping(
+    tmp_path: Path, source: ObservationSource
+) -> None:
+    """#577: a pending predecessor row follows the successor binding, not ledger_rejected."""
+
+    from builders.ledger_adapters import FixedClock
+
+    cell = _reattach_fixture(tmp_path, "superseded-577")
+    predecessor_session = cell.mapping.yoetz_session_id
+    successor_session = PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4())
+    successor_writer = PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4())
+    stored = {"mapping": cell.mapping}
+    inner_route = cell.runtime_port.route
+
+    async def route(command: object) -> TaskRuntime:
+        session_id = cast(str, getattr(command, "session_id"))
+        if session_id == predecessor_session:
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_NOT_FOUND,
+                "The requested session was replaced.",
+                retryable=False,
+                safe_details={
+                    "reason_code": "session_superseded",
+                    "task_id": cell.task_id,
+                    "session_id": successor_session,
+                    "writer_id": successor_writer,
+                },
+            )
+        return await inner_route(command)
+
+    cell.runtime_port.route = route  # type: ignore[method-assign]
+
+    class _Coordinator(ObservationCoordinator):
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
+            del args, kwargs
+
+    def _store_superseded_mapping(mapping: LifecycleMapping, *, _state: Path | None = None) -> None:
+        del _state
+        stored["mapping"] = mapping
+
+    cell.coordinator = _Coordinator(
+        runtime=cell.runtime_port,  # type: ignore[arg-type]
+        local=cell.local,
+        clock=FixedClock(),  # type: ignore[arg-type]
+        ids=cell.ids,  # type: ignore[arg-type]
+        state_root=cell.local_root,
+        mapping_loader=lambda *_args, **_kwargs: stored["mapping"],  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+        mapping_storer=_store_superseded_mapping,
+    )
+
+    result = await cell.ingest(_envelope(session=cell.session, identity="hook:577", source=source))
+    assert result.disposition is ObservationIngestDisposition.ACCEPTED, result.reason
+    assert result.reason != ObservationGapCode.LEDGER_REJECTED.value
+    assert stored["mapping"].yoetz_session_id == successor_session
+    assert stored["mapping"].yoetz_writer_id == successor_writer
+    assert cell.routed[-1][0] == successor_session
+    assert cell.routed[-1][1] == observation_writer_id(cell.task_id, successor_session)
+    assert not cell.local.list_quarantine(cell.workspace)
+    gaps = cell.local.status(ObservationStatusQuery(cell.workspace)).gaps
+    assert ObservationGapCode.LEDGER_REJECTED.value not in gaps
+    assert route_observation_ingest(result).action is ObservationDrainAction.ACKNOWLEDGE
+
+
+@pytest.mark.anyio
+async def test_session_superseded_without_followable_binding_is_not_ledger_rejected(
+    tmp_path: Path,
+) -> None:
+    """#577: a retired route that cannot be followed names session_superseded, not content refusal."""
+
+    local, _workspace, session, mapping = _mapped_local(tmp_path, "superseded-mismatch-577")
+    other_task = _task_id()
+
+    class _RejectedRuntime:
+        async def route(self, command: object) -> object:
+            del command
+            raise PublicOperationError(
+                PublicErrorCode.SESSION_NOT_FOUND,
+                "The requested session was replaced.",
+                retryable=False,
+                safe_details={
+                    "reason_code": "session_superseded",
+                    "task_id": other_task,
+                    "session_id": PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+                    "writer_id": PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+                },
+            )
+
+        async def release(self, runtime: object) -> None:
+            raise AssertionError(f"unrouted runtime released: {runtime!r}")
+
+    coordinator = ObservationCoordinator(
+        runtime=_RejectedRuntime(),  # type: ignore[arg-type]
+        local=local,
+        clock=object(),  # type: ignore[arg-type]
+        ids=object(),  # type: ignore[arg-type]
+        state_root=tmp_path,
+        mapping_loader=lambda *_args, **_kwargs: mapping,  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    )
+    result = await coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=_envelope(session=session),
+        )
+    )
+    assert result.reason == ObservationGapCode.SESSION_SUPERSEDED.value
+    assert result.reason != ObservationGapCode.LEDGER_REJECTED.value
+    assert result.reason != ObservationGapCode.MAPPING_MISSING.value
+    assert route_observation_ingest(result).action is ObservationDrainAction.QUARANTINE
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("concurrent_change", ["locked", "rebound", "frontier", "cleared", "none"])
+async def test_successor_route_cache_preserves_concurrent_lifecycle_changes(
+    tmp_path: Path, concurrent_change: str
+) -> None:
+    """Routing can continue without overwriting a lifecycle update made during the await."""
+
+    from contextlib import ExitStack
+
+    from yoetz.adapters.integrations.codex_lifecycle import (
+        acquire_session_lock,
+        clear_mapping,
+        load_mapping,
+        store_mapping,
+    )
+
+    local, _workspace, _session, predecessor = _mapped_local(tmp_path, "route-cache-race")
+    store_mapping(predecessor, _state=tmp_path)
+    successor = replace(
+        predecessor,
+        yoetz_session_id=PREFIX_BY_KIND[IdKind.SESSION] + str(uuid.uuid4()),
+        yoetz_writer_id=PREFIX_BY_KIND[IdKind.WRITER] + str(uuid.uuid4()),
+    )
+    expected = predecessor
+    routed_runtime = cast(TaskRuntime, object())
+    with ExitStack() as locks:
+
+        class _Runtime:
+            async def route(self, command: object) -> TaskRuntime:
+                nonlocal expected
+                if getattr(command, "session_id") == successor.yoetz_session_id:
+                    return routed_runtime
+                if concurrent_change == "locked":
+                    assert locks.enter_context(
+                        acquire_session_lock(predecessor.codex_session_id, _state=tmp_path)
+                    )
+                elif concurrent_change == "rebound":
+                    expected = replace(predecessor, yoetz_task_id=_task_id())
+                    store_mapping(expected, _state=tmp_path)
+                elif concurrent_change == "frontier":
+                    expected = replace(predecessor, last_frontier="99:sha256:" + "a" * 64)
+                    store_mapping(expected, _state=tmp_path)
+                elif concurrent_change == "cleared":
+                    clear_mapping(predecessor.codex_session_id, _state=tmp_path)
+                raise PublicOperationError(
+                    PublicErrorCode.SESSION_NOT_FOUND,
+                    "The requested session was replaced.",
+                    retryable=False,
+                    safe_details={
+                        "reason_code": "session_superseded",
+                        "task_id": predecessor.yoetz_task_id,
+                        "session_id": successor.yoetz_session_id,
+                        "writer_id": successor.yoetz_writer_id,
+                    },
+                )
+
+        coordinator = ObservationCoordinator(
+            runtime=_Runtime(),  # type: ignore[arg-type]
+            local=local,
+            clock=object(),  # type: ignore[arg-type]
+            ids=object(),  # type: ignore[arg-type]
+            state_root=tmp_path,
+        )
+        runtime, mapping = await coordinator._route_observation_mapping(predecessor)  # pyright: ignore[reportPrivateUsage]
+        assert runtime is routed_runtime
+        assert mapping == successor
+        persisted = load_mapping(predecessor.codex_session_id, _state=tmp_path)
+        if concurrent_change == "cleared":
+            assert persisted is None
+        else:
+            assert persisted == (successor if concurrent_change == "none" else expected)

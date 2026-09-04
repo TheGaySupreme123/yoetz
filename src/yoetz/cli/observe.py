@@ -20,15 +20,13 @@ from yoetz.adapters.integrations.codex_lifecycle import load_mapping
 from yoetz.adapters.integrations.codex_marketplace import inspect_activation
 from yoetz.adapters.integrations.codex_session_stream import (
     CodexSessionStreamLocator,
-    SessionStreamReader,
-    default_stream_profile,
+    reconcile_session_stream_path,
     resolve_codex_home,
 )
 from yoetz.adapters.integrations.codex_session_stream import (
     reconcile_session_stream as advance_session_stream,
 )
 from yoetz.adapters.integrations.observation_local import (
-    STREAM_MAPPING_VERSION,
     LocalObservationStore,
     ObservationOutboxRow,
 )
@@ -46,7 +44,6 @@ from yoetz.cli.workspace_binding import canonical_workspace_locator
 from yoetz.config.paths import PathSafetyError
 from yoetz.domain.observation import (
     ObservationControlCommand,
-    ObservationCursor,
     ObservationGapCode,
     ObservationIngestDisposition,
     ObservationIngestRequest,
@@ -82,7 +79,6 @@ __all__ = [
     "revoke_observation",
 ]
 
-_EMPTY_COMMITMENT: Final = "hmac-sha256:" + ("0" * 64)
 _SETUP_PROBE_SESSION: Final = "yoetz-setup-probe-session"
 _DRAIN_DEADLINE_MS: Final = 3_000
 
@@ -941,65 +937,15 @@ def reconcile_session_stream(
         payload = {**payload, "mode": "locator"}
         _emit(payload, json_output=json_output)
         return 0
-    # Recovery mode for explicit paths outside the selected Codex home.
-    existing = store.get_stream_cursor(workspace_commitment, session_commitment)
-    if existing is None:
-        existing = ObservationCursor(
-            source_generation=1,
-            byte_position=0,
-            event_position=0,
-            last_source_commitment=_EMPTY_COMMITMENT,
-            mapping_version=STREAM_MAPPING_VERSION,
-        )
-    reader = SessionStreamReader(
+    # Explicit recovery shares cursor/profile, source identity, and pairing persistence with
+    # locator-driven reconciliation, including blocked delivery and mapping upgrades.
+    payload = reconcile_session_stream_path(
+        store,
+        workspace_commitment=workspace_commitment,
         session_commitment=session_commitment,
-        profile=default_stream_profile(),
-        cursor=existing,
-        key_material=store.key_material(),
-        partial_line=store.get_stream_partial(workspace_commitment, session_commitment),
+        codex_session_id=session_token[:128],
+        path=path,
     )
-    advance = reader.advance(path)
-    accepted = 0
-    duplicates = 0
-    overflow = False
-    committed_cursor = existing
-    for envelope in advance.envelopes:
-        result = store.ingest(envelope)
-        if result.disposition.value not in {"accepted", "duplicate"}:
-            break
-        if (
-            store.enqueue_outbox(workspace_commitment, session_token[:128], envelope)
-            == ObservationGapCode.OUTBOX_OVERFLOW.value
-        ):
-            overflow = True
-            break
-        committed_cursor = envelope.cursor
-        if result.disposition.value == "accepted":
-            accepted += 1
-        else:
-            duplicates += 1
-    if not overflow:
-        committed_cursor = advance.cursor
-    store.set_stream_cursor(workspace_commitment, session_commitment, committed_cursor)
-    store.set_stream_partial(
-        workspace_commitment,
-        session_commitment,
-        advance.partial_line if not overflow else b"",
-    )
-    gaps = advance.gaps
-    if overflow and ObservationGapCode.OUTBOX_OVERFLOW.value not in gaps:
-        gaps = (*gaps, ObservationGapCode.OUTBOX_OVERFLOW.value)
-    payload = {
-        "accepted": accepted,
-        "duplicates": duplicates,
-        "gaps": gaps,
-        "byte_position": committed_cursor.byte_position,
-        "event_position": committed_cursor.event_position,
-        "generation": committed_cursor.source_generation,
-        "rotated": advance.rotated,
-        "truncated": advance.truncated,
-        "resolved": True,
-        "mode": "recovery_explicit_path",
-    }
+    payload = {**payload, "mode": "recovery_explicit_path"}
     _emit(payload, json_output=json_output)
     return 0

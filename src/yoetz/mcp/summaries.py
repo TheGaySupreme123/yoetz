@@ -10,7 +10,7 @@ from typing import Final, cast
 from pydantic import BaseModel
 
 from yoetz.protocol.canonical import JsonValue, ensure_canonical_value
-from yoetz.protocol.errors import PublicErrorCode
+from yoetz.protocol.errors import PublicErrorCode, normalize_safe_details
 from yoetz.protocol.ids import IdKind, is_valid_id
 
 __all__ = [
@@ -232,13 +232,42 @@ def _repair_clause(error: Mapping[str, JsonValue]) -> str:
     return f" Repair: {field} is admitted only by the {owner} payload, not {selected}."
 
 
+def _reason_location_clause(error: Mapping[str, JsonValue]) -> str:
+    """Render frozen reason_code and field pointer tokens, or "" when none travel on the error.
+
+    Hosts that deliver only the text channel for ``isError`` results otherwise lose the draft
+    index and kernel reason (issue #579). Both tokens are already allowlisted structural content
+    on ``safe_details``; this projector re-gates them and never copies caller prose.
+    """
+
+    details = error.get("safe_details")
+    if not isinstance(details, Mapping):
+        return ""
+    typed = cast(Mapping[str, JsonValue], details)
+    candidate: dict[str, object] = {}
+    reason = typed.get("reason_code")
+    field = typed.get("field")
+    if type(reason) is str:
+        candidate["reason_code"] = reason
+    if type(field) is str:
+        candidate["field"] = field
+    gated = normalize_safe_details(candidate)
+    gated_reason = gated.get("reason_code")
+    gated_field = gated.get("field")
+    if type(gated_reason) is not str:
+        return ""
+    if type(gated_field) is str:
+        return f" Reason: {gated_reason} at {gated_field}."
+    return f" Reason: {gated_reason}."
+
+
 def summary_for_public_error(envelope: object) -> str:
     """Render only the stable public error identity, never message or rejected input.
 
-    The single exception is the bounded field-ownership repair fact: its tokens are frozen
-    schema and registry content, never caller input, and a host that drops structured content
-    would otherwise lose the only correction that stops a caller deleting a required record
-    (issue #266).
+    Bounded exceptions are the field-ownership repair fact (issue #266) and the frozen
+    ``reason_code``/``field`` location clause (issue #579). Both are schema or registry tokens,
+    never caller input. A host that drops structured content on ``isError`` would otherwise lose
+    the only correction that names which draft and which kernel rule to fix.
     """
 
     source = _mapping(envelope)
@@ -255,10 +284,12 @@ def summary_for_public_error(envelope: object) -> str:
         if type(correlation) is str and _CORRELATION_ID.fullmatch(correlation) is not None
         else "unavailable"
     )
-    return _bounded(
-        f"Error {code}; retryable: {retry_text}; correlation: {correlation_text}."
-        f"{_repair_clause(error)}"
-    )
+    prefix = f"Error {code}; retryable: {retry_text}; correlation: {correlation_text}."
+    extra = f"{_repair_clause(error)}{_reason_location_clause(error)}"
+    try:
+        return _bounded(prefix + extra)
+    except ValueError:
+        return _bounded(prefix)
 
 
 def summary_for_check(envelope: object) -> str:

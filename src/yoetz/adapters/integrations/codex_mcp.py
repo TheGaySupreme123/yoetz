@@ -13,9 +13,12 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, cast
 
+from yoetz.config.paths import ISOLATED_ROOT_ENV, PathSafetyError, isolated_root
+from yoetz.domain.values import JsonValue
 from yoetz.ports.harness_mcp import (
     MCP_SERVE_COMMAND,
     MCP_SERVER_NAME,
@@ -136,6 +139,45 @@ def _entry_command_tokens(entry: Mapping[str, object]) -> tuple[str, ...] | None
     return None
 
 
+def _entry_isolated_root(entry: Mapping[str, object]) -> tuple[bool, str | None]:
+    """Read the only environment binding this owned registration may carry.
+
+    The command tokens establish Yoetz ownership; this separate parser refuses to bless a
+    same-command entry with any other environment key, inherited variable, or malformed root.
+    A known but different absolute root remains readable so the digest-bound lifecycle can
+    re-register or remove the Yoetz-owned entry without gaining an arbitrary-env force path.
+    """
+
+    transport = entry.get("transport")
+    source: Mapping[str, object] = entry
+    if isinstance(transport, Mapping):
+        nested = cast(Mapping[str, object], transport)
+        if "command" in nested or "args" in nested:
+            source = nested
+    env_vars = source.get("env_vars")
+    if env_vars not in (None, []):
+        return False, None
+    environment = source.get("env")
+    if environment is None:
+        return True, None
+    if not isinstance(environment, Mapping):
+        return False, None
+    values = cast(Mapping[object, object], environment)
+    if not values:
+        return True, None
+    if set(values) != {ISOLATED_ROOT_ENV}:
+        return False, None
+    raw = values.get(ISOLATED_ROOT_ENV)
+    if (
+        type(raw) is not str
+        or not 1 <= len(raw) <= 4_096
+        or not Path(raw).is_absolute()
+        or any(ord(char) < 32 or ord(char) == 127 for char in raw)
+    ):
+        return False, None
+    return True, raw
+
+
 class CodexMcpAdapter:
     """Implements ``HarnessMcpPort`` for the Codex CLI via bounded subprocesses."""
 
@@ -161,19 +203,22 @@ class CodexMcpAdapter:
     @staticmethod
     def _classify_entry(
         entry: Mapping[str, object],
-    ) -> tuple[McpRegistrationState, tuple[str, ...] | None]:
+    ) -> tuple[McpRegistrationState, tuple[str, ...] | None, str | None]:
         tokens = _entry_command_tokens(entry)
         for command in (MCP_STRICT_SERVE_COMMAND, MCP_SERVE_COMMAND):
             if tokens == command:
+                environment_readable, registered_root = _entry_isolated_root(entry)
+                if not environment_readable:
+                    return McpRegistrationState.FOREIGN_PRESENT, None, None
                 # Return the matched constant, not the parsed tokens, so the route mapping below
                 # reads off one source of truth instead of re-comparing the argv.
-                return McpRegistrationState.YOETZ_OWNED, command
+                return McpRegistrationState.YOETZ_OWNED, command, registered_root
         # An unreadable or different command is preserved, never replaced.
-        return McpRegistrationState.FOREIGN_PRESENT, None
+        return McpRegistrationState.FOREIGN_PRESENT, None, None
 
     def _classify_get(
         self, output: CommandOutput
-    ) -> tuple[McpRegistrationState, tuple[str, ...] | None]:
+    ) -> tuple[McpRegistrationState, tuple[str, ...] | None, str | None]:
         if output.exit_code != 0:
             raise McpRegistrationError(McpRegistrationReason.HARNESS_UNAVAILABLE, {})
         try:
@@ -186,7 +231,7 @@ class CodexMcpAdapter:
 
     def _classify_list(
         self, output: CommandOutput
-    ) -> tuple[McpRegistrationState, tuple[str, ...] | None]:
+    ) -> tuple[McpRegistrationState, tuple[str, ...] | None, str | None]:
         if output.exit_code != 0:
             raise McpRegistrationError(McpRegistrationReason.HARNESS_UNAVAILABLE, {})
         try:
@@ -206,7 +251,7 @@ class CodexMcpAdapter:
             if name == MCP_SERVER_NAME:
                 matches.append(entry)
         if not matches:
-            return McpRegistrationState.ABSENT, None
+            return McpRegistrationState.ABSENT, None, None
         if len(matches) != 1:
             # A same-name duplicate is not a trustworthy absence or ownership observation.
             raise McpRegistrationError(McpRegistrationReason.PARSE_FAILED, {})
@@ -214,7 +259,7 @@ class CodexMcpAdapter:
 
     def _observe_registration_state(
         self, binary: HarnessBinary
-    ) -> tuple[McpRegistrationState, tuple[str, ...] | None]:
+    ) -> tuple[McpRegistrationState, tuple[str, ...] | None, str | None]:
         output = self._run((binary.executable_path, "mcp", "get", MCP_SERVER_NAME, "--json"))
         if output.exit_code == 0:
             return self._classify_get(output)
@@ -224,13 +269,41 @@ class CodexMcpAdapter:
 
     async def status_registration(self, binary: HarnessBinary) -> McpRegistrationState:
         self._require_codex(binary)
+        self._expected_isolated_root()
         return self._observe_registration_state(binary)[0]
 
     async def observe_registration(self, binary: HarnessBinary) -> McpRegistrationObservation:
         self._require_codex(binary)
-        state, command = self._observe_registration_state(binary)
+        expected_root = self._expected_isolated_root()
+        state, command, registered_root = self._observe_registration_state(binary)
         route_profile = None if command is None else _ROUTE_PROFILE_BY_COMMAND.get(command)
-        return McpRegistrationObservation(binary.harness_id, state, route_profile)
+        isolation_binding = None
+        if state is McpRegistrationState.YOETZ_OWNED:
+            if expected_root is None and registered_root is None:
+                isolation_binding = "ambient"
+            elif expected_root is not None and registered_root == expected_root:
+                isolation_binding = "isolated_exact"
+            elif expected_root is not None and registered_root is None:
+                isolation_binding = "missing"
+            else:
+                isolation_binding = "different"
+        return McpRegistrationObservation(
+            binary.harness_id,
+            state,
+            route_profile,
+            isolation_binding,
+        )
+
+    @staticmethod
+    def _expected_isolated_root() -> str | None:
+        try:
+            root = isolated_root()
+        except PathSafetyError as exc:
+            raise McpRegistrationError(
+                McpRegistrationReason.ISOLATION_INVALID,
+                {"reason": exc.reason_code},
+            ) from exc
+        return None if root is None else str(root)
 
     @staticmethod
     def _require_codex(binary: HarnessBinary) -> None:
@@ -242,31 +315,35 @@ class CodexMcpAdapter:
         binary: HarnessBinary,
         state: McpRegistrationState,
         current_command: tuple[str, ...] | None,
+        current_root: str | None,
     ) -> McpRegistrationPreview:
+        expected_root = self._expected_isolated_root()
         action = (
             McpRegistrationAction.REGISTER
             if state is McpRegistrationState.ABSENT
             else (
                 McpRegistrationAction.REREGISTER
                 if state is McpRegistrationState.YOETZ_OWNED
-                and current_command != self._serve_command
+                and (current_command != self._serve_command or current_root != expected_root)
                 else McpRegistrationAction.NOOP
             )
         )
         warnings: tuple[str, ...] = ()
         if state is McpRegistrationState.FOREIGN_PRESENT:
             warnings = ("foreign_entry_present",)
-        digest = canonical_digest(
-            {
-                "action": action.value,
-                "executable_path": binary.executable_path,
-                "harness": binary.harness_id.value,
-                "schema": "yoetz.mcp-registration-preview/1",
-                "serve_command": list(self._serve_command),
-                "server_name": MCP_SERVER_NAME,
-                "state_before": state.value,
-            }
-        )
+        digest_input: dict[str, object] = {
+            "action": action.value,
+            "executable_path": binary.executable_path,
+            "harness": binary.harness_id.value,
+            "schema": "yoetz.mcp-registration-preview/1",
+            "serve_command": list(self._serve_command),
+            "server_name": MCP_SERVER_NAME,
+            "state_before": state.value,
+        }
+        if expected_root is not None:
+            digest_input["schema"] = "yoetz.mcp-registration-preview/2"
+            digest_input["isolated_root"] = expected_root
+        digest = canonical_digest(cast(JsonValue, digest_input))
         return McpRegistrationPreview(
             binary.harness_id,
             action,
@@ -275,12 +352,13 @@ class CodexMcpAdapter:
             digest,
             self._serve_command,
             self._route_profile,
+            expected_root,
         )
 
     async def preview_registration(self, binary: HarnessBinary) -> McpRegistrationPreview:
         self._require_codex(binary)
-        state, current_command = self._observe_registration_state(binary)
-        return self._preview_for(binary, state, current_command)
+        state, current_command, current_root = self._observe_registration_state(binary)
+        return self._preview_for(binary, state, current_command, current_root)
 
     async def apply_registration(
         self,
@@ -305,8 +383,21 @@ class CodexMcpAdapter:
                 preview.state_before,
                 preview.preview_digest,
             )
+        environment_args = (
+            ()
+            if preview.isolated_root is None
+            else ("--env", f"{ISOLATED_ROOT_ENV}={preview.isolated_root}")
+        )
         add_output = self._run(
-            (binary.executable_path, "mcp", "add", MCP_SERVER_NAME, "--", *self._serve_command)
+            (
+                binary.executable_path,
+                "mcp",
+                "add",
+                MCP_SERVER_NAME,
+                *environment_args,
+                "--",
+                *self._serve_command,
+            )
         )
         if add_output.exit_code != 0:
             raise McpRegistrationError(
@@ -314,10 +405,11 @@ class CodexMcpAdapter:
                 {"exit_code_class": "nonzero"},
             )
         # Verify by re-reading state rather than trusting the add exit code alone.
-        state_after, command_after = self._observe_registration_state(binary)
+        state_after, command_after, root_after = self._observe_registration_state(binary)
         if (
             state_after is not McpRegistrationState.YOETZ_OWNED
             or command_after != self._serve_command
+            or root_after != preview.isolated_root
         ):
             raise McpRegistrationError(
                 McpRegistrationReason.REGISTRATION_FAILED,
@@ -336,6 +428,7 @@ class CodexMcpAdapter:
         binary: HarnessBinary,
         state: McpRegistrationState,
         current_command: tuple[str, ...] | None,
+        current_root: str | None,
     ) -> McpRegistrationPreview:
         action = (
             McpRegistrationAction.NOOP
@@ -362,17 +455,19 @@ class CodexMcpAdapter:
             # binds ``state_before``, so apply refuses the same-name entry.
             serve_command = self._serve_command
             route_profile = self._route_profile
-        digest = canonical_digest(
-            {
-                "action": action.value,
-                "executable_path": binary.executable_path,
-                "harness": binary.harness_id.value,
-                "schema": "yoetz.mcp-unregistration-preview/1",
-                "serve_command": list(serve_command),
-                "server_name": MCP_SERVER_NAME,
-                "state_before": state.value,
-            }
-        )
+        digest_input: dict[str, object] = {
+            "action": action.value,
+            "executable_path": binary.executable_path,
+            "harness": binary.harness_id.value,
+            "schema": "yoetz.mcp-unregistration-preview/1",
+            "serve_command": list(serve_command),
+            "server_name": MCP_SERVER_NAME,
+            "state_before": state.value,
+        }
+        if current_root is not None:
+            digest_input["schema"] = "yoetz.mcp-unregistration-preview/2"
+            digest_input["isolated_root"] = current_root
+        digest = canonical_digest(cast(JsonValue, digest_input))
         return McpRegistrationPreview(
             binary.harness_id,
             action,
@@ -381,12 +476,14 @@ class CodexMcpAdapter:
             digest,
             serve_command,
             route_profile,
+            current_root,
         )
 
     async def preview_unregistration(self, binary: HarnessBinary) -> McpRegistrationPreview:
         self._require_codex(binary)
-        state, current_command = self._observe_registration_state(binary)
-        return self._unregistration_preview_for(binary, state, current_command)
+        self._expected_isolated_root()
+        state, current_command, current_root = self._observe_registration_state(binary)
+        return self._unregistration_preview_for(binary, state, current_command, current_root)
 
     async def apply_unregistration(
         self,
@@ -411,12 +508,15 @@ class CodexMcpAdapter:
                 preview.state_before,
                 preview.preview_digest,
             )
-        state_before_remove, command_before_remove = self._observe_registration_state(binary)
+        state_before_remove, command_before_remove, root_before_remove = (
+            self._observe_registration_state(binary)
+        )
         if state_before_remove is McpRegistrationState.FOREIGN_PRESENT:
             raise McpRegistrationError(McpRegistrationReason.FOREIGN_ENTRY_PRESENT, {})
         if (
             state_before_remove is not McpRegistrationState.YOETZ_OWNED
             or command_before_remove != preview.serve_command
+            or root_before_remove != preview.isolated_root
         ):
             raise McpRegistrationError(McpRegistrationReason.PREVIEW_STALE, {})
         try:
@@ -432,7 +532,7 @@ class CodexMcpAdapter:
                 {"exit_code_class": "nonzero"},
             )
         try:
-            state_after, _command_after = self._observe_registration_state(binary)
+            state_after, _command_after, _root_after = self._observe_registration_state(binary)
         except McpRegistrationError as exc:
             # The name-based remove command already succeeded. Any unreadable or
             # malformed verification is therefore an outcome-unknown mutation,

@@ -280,8 +280,8 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert tuple(TOOL_DESCRIPTORS) == ("policy", "strict")
     assert tuple(TOOL_DESCRIPTOR_DIGESTS) == ("policy", "strict")
     assert TOOL_DESCRIPTOR_SET_DIGEST == {
-        "policy": "sha256:e5283f3497e3c259b9641e69e32612b1a82bd595369a9265072cb73eaf890ead",
-        "strict": "sha256:ada5633f12538a746c0e25355ccd4a62083441ddb7e1ba1956582d32be3d323b",
+        "policy": "sha256:f33f5ff45ccd9797daa0996b724e05fa7a0904c4223b062fb3c9bea83b0fccc4",
+        "strict": "sha256:e9633bcb7d0919405f64cd268c6a1c33e8707938a00d0545d967f7be17ac1016",
     }
     for profile, descriptors in TOOL_DESCRIPTORS.items():
         assert tuple(item.name for item in descriptors) == _EXPECTED_TOOL_NAMES
@@ -309,6 +309,14 @@ def test_descriptor_text_is_frozen_and_honest() -> None:
     assert (
         "unique and already in ascending ASCII order" in descriptor_for("publish_work").description
     )
+    assert "unsorted_set_field" in descriptor_for("publish_work").description
+    properties = descriptor_for("publish_work").input_schema["properties"]
+    assert isinstance(properties, dict)
+    event_drafts = properties["event_drafts"]
+    assert isinstance(event_drafts, dict)
+    description = event_drafts["description"]
+    assert isinstance(description, str)
+    assert "unsorted_set_field" in description
     publish_descriptor = descriptor_for("publish_work")
     assert publish_descriptor.input_schema_ref.endswith("publish-work-request-1.1.0.schema.json")
     assert publish_descriptor.output_schema_ref.endswith("publish-work-result-1.0.0.schema.json")
