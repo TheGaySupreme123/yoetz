@@ -2006,7 +2006,14 @@ uninitialized vault). CLI-side staging, promotion, and proof-based discard seria
 bundle-scoped advisory lock held by the initializing process for its whole
 stage→ceremony→promote span and re-checked by discard-only callers while held, so a stale status
 read can never delete a credential whose vault commit is in flight, and generated-passphrase
-installations cannot be stranded.
+installations cannot be stranded. Because trusted initialization may run before any service start
+has created the bundle root (issue #565), the guard first creates exactly that root, owner-only and
+only when its parent already exists, then verifies the path symlink-free, owned, and owner-only with
+the same helper the service uses; it never creates anything outside the selected bundle. Guard
+filesystem failures keep distinct bounded reasons — `bundle_parent_missing`,
+`bundle_permission_denied`, `bundle_unsafe`, `guard_unavailable` — and `unsupported` is reserved
+for a platform that genuinely lacks the mechanism, so only that reason may take setup's
+human-chosen-passphrase fallback.
 
 `SecretMemoryPort` exposes `capability`, `capture`, `allocate`, and `close` over opaque one-shot
 `SecretHandle` values. `SecretPurpose` is exactly `vault_initialize`, `vault_unlock`,
